@@ -3,6 +3,53 @@
     {
       "group_index": 0,
       "group_hash": "ed2a0235cc4d9050",
+      "_reviewers": 1,
+      "_theme": "login does not record the lockout rejection",
+      "status": "valid",
+      "reason": "The early return skips record_attempt, so a locked account's later attempts never extend the window.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 0,
+      "group_hash": "a4c2188aaeda1c6e",
+      "_reviewers": 2,
+      "_theme": "login does not record the lockout rejection",
+      "status": "valid",
+      "reason": "The early return skips record_attempt, so a locked account's later attempts never extend the window.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 0,
+      "group_hash": "3d561f121d338bf2",
+      "_reviewers": 3,
+      "_theme": "login does not record the lockout rejection",
+      "status": "valid",
+      "reason": "The early return skips record_attempt, so a locked account's later attempts never extend the window.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 0,
+      "group_hash": "e90ed9189fb8bd92",
+      "_reviewers": 4,
+      "_theme": "login does not record the lockout rejection",
+      "status": "valid",
+      "reason": "The early return skips record_attempt, so a locked account's later attempts never extend the window.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 0,
+      "group_hash": "cc1121315f3cb4c3",
+      "_reviewers": 5,
+      "_theme": "login does not record the lockout rejection",
+      "status": "valid",
+      "reason": "The early return skips record_attempt, so a locked account's later attempts never extend the window.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 0,
+      "group_hash": "3d1ca5a57fedc2b0",
+      "_reviewers": 6,
+      "_theme": "login does not record the lockout rejection",
       "status": "valid",
       "reason": "The early return skips record_attempt, so a locked account's later attempts never extend the window.",
       "confidence": 0.9
@@ -10,6 +57,53 @@
     {
       "group_index": 1,
       "group_hash": "d948c7a933b2e244",
+      "_reviewers": 1,
+      "_theme": "Attempt store grows without bound",
+      "status": "valid",
+      "reason": "The module level dict is only ever appended to, so the store is unbounded as the finding says.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "fd49ff898aeacbcb",
+      "_reviewers": 2,
+      "_theme": "Attempt store grows without bound",
+      "status": "valid",
+      "reason": "The module level dict is only ever appended to, so the store is unbounded as the finding says.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "c131ddf724d509ad",
+      "_reviewers": 3,
+      "_theme": "Attempt store grows without bound",
+      "status": "valid",
+      "reason": "The module level dict is only ever appended to, so the store is unbounded as the finding says.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "b4e237b0ba450193",
+      "_reviewers": 4,
+      "_theme": "Attempt store grows without bound",
+      "status": "valid",
+      "reason": "The module level dict is only ever appended to, so the store is unbounded as the finding says.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "e87dfdd905b455a7",
+      "_reviewers": 5,
+      "_theme": "Attempt store grows without bound",
+      "status": "valid",
+      "reason": "The module level dict is only ever appended to, so the store is unbounded as the finding says.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "17869bfa7b0f1884",
+      "_reviewers": 6,
+      "_theme": "Attempt store grows without bound",
       "status": "valid",
       "reason": "The module level dict is only ever appended to, so the store is unbounded as the finding says.",
       "confidence": 0.9
@@ -17,6 +111,53 @@
     {
       "group_index": 2,
       "group_hash": "93c4a25d0e7f6cf6",
+      "_reviewers": 1,
+      "_theme": "Token comparison is not constant time",
+      "status": "valid",
+      "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "165f73729541e880",
+      "_reviewers": 2,
+      "_theme": "Token comparison is not constant time",
+      "status": "valid",
+      "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "21ea25a7d049d188",
+      "_reviewers": 3,
+      "_theme": "Token comparison is not constant time",
+      "status": "valid",
+      "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "4203679fe421695d",
+      "_reviewers": 4,
+      "_theme": "Token comparison is not constant time",
+      "status": "valid",
+      "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "d5851f920890695c",
+      "_reviewers": 5,
+      "_theme": "Token comparison is not constant time",
+      "status": "valid",
+      "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "12559649644e5605",
+      "_reviewers": 6,
+      "_theme": "Token comparison is not constant time",
       "status": "valid",
       "reason": "Plain equality short-circuits, which is exactly the timing leak the finding describes.",
       "confidence": 0.9
@@ -24,6 +165,53 @@
     {
       "group_index": 3,
       "group_hash": "cf093f90d561613c",
+      "_reviewers": 1,
+      "_theme": "New module has no test coverage",
+      "status": "valid",
+      "reason": "The new module really does ship with no test file beside the existing tests/test_auth.py.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 3,
+      "group_hash": "718f1989a07a66ae",
+      "_reviewers": 2,
+      "_theme": "New module has no test coverage",
+      "status": "valid",
+      "reason": "The new module really does ship with no test file beside the existing tests/test_auth.py.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 3,
+      "group_hash": "966e9e2c75c12930",
+      "_reviewers": 3,
+      "_theme": "New module has no test coverage",
+      "status": "valid",
+      "reason": "The new module really does ship with no test file beside the existing tests/test_auth.py.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 3,
+      "group_hash": "9c068744ba7f2d29",
+      "_reviewers": 4,
+      "_theme": "New module has no test coverage",
+      "status": "valid",
+      "reason": "The new module really does ship with no test file beside the existing tests/test_auth.py.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 3,
+      "group_hash": "4cf1f770a234554a",
+      "_reviewers": 5,
+      "_theme": "New module has no test coverage",
+      "status": "valid",
+      "reason": "The new module really does ship with no test file beside the existing tests/test_auth.py.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 3,
+      "group_hash": "47237d07cfa6af25",
+      "_reviewers": 6,
+      "_theme": "New module has no test coverage",
       "status": "valid",
       "reason": "The new module really does ship with no test file beside the existing tests/test_auth.py.",
       "confidence": 0.9
@@ -31,6 +219,53 @@
     {
       "group_index": 4,
       "group_hash": "5d4efdfb196e11f2",
+      "_reviewers": 1,
+      "_theme": "Lockout threshold is off by one",
+      "status": "valid",
+      "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 4,
+      "group_hash": "07163c4b20380254",
+      "_reviewers": 2,
+      "_theme": "Lockout threshold is off by one",
+      "status": "valid",
+      "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 4,
+      "group_hash": "39af8553db7657e6",
+      "_reviewers": 3,
+      "_theme": "Lockout threshold is off by one",
+      "status": "valid",
+      "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 4,
+      "group_hash": "1c36650f7d6263ea",
+      "_reviewers": 4,
+      "_theme": "Lockout threshold is off by one",
+      "status": "valid",
+      "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 4,
+      "group_hash": "e3c3d429ed57a70f",
+      "_reviewers": 5,
+      "_theme": "Lockout threshold is off by one",
+      "status": "valid",
+      "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 4,
+      "group_hash": "d04b9ff7f1fa665a",
+      "_reviewers": 6,
+      "_theme": "Lockout threshold is off by one",
       "status": "valid",
       "reason": "The comparison uses `>` where the documented limit calls for `>=`, so the off-by-one is real.",
       "confidence": 0.9
@@ -39,6 +274,62 @@
   "metadata": {
     "model": "container-stub",
     "timestamp": "2026-01-01T00:00:00Z",
-    "schema_version": "2.1"
+    "schema_version": "2.1",
+    "phase": "code-review issue validation",
+    "captured_from": "../code_review/container_issues.json",
+    "reviewer_counts": {
+      "1": "every single-spec row: the provider lane's chain rows, the `fan_out: native` rows, and any row whose fan-out left one survivor (the negative-auth rows, measured)",
+      "2": "no declared panel; reachable when a larger panel loses all but two members",
+      "3": "no declared panel; reachable when a larger panel loses all but three members",
+      "4": "the opencode host's fan_out (claude-code, omp, qwen-code, vibe), grok carved out 2026-09-22",
+      "5": "the codex host's fan_out (opencode, gemini, aider, copilot, kimi)",
+      "6": "the claude-code host's fan_out (codex, muse, cline, kilocode, pi, goose) -- the largest declared"
+    },
+    "note": [
+      "A VERDICT SHEET, NOT A SINGLE ANSWER. One row per (group, surviving-reviewer",
+      "count), because `state_manager.generate_group_id` hashes the theme plus the",
+      "NORMALIZED SUGGESTION LIST and a group holds one member per model that raised",
+      "the theme -- so a group's id is a function of HOW MANY REVIEWERS ANSWERED.",
+      "Measured 2026-09-22 on tests/container/runs/20260922T084502Z: the same four",
+      "themes grouped to one set of ids on the codex host's five-model rows and to",
+      "another on the opencode host's four, and to a third (the ids this file used to",
+      "ship alone) on every single-spec row. `merge_batched_validation_results`",
+      "joins BY HASH and discards a foreign one, and",
+      "`subagent_executor._validation_result_errors` requires a group_hash/group_id on",
+      "every entry, so a sheet that names one count joins nothing on a row of any",
+      "other -- every group lands on validation_failed and the apply phases have",
+      "nothing to apply. A sheet naming them all joins the row that belongs to this",
+      "batch and lets the merge discard the rest, which is the same mechanism that",
+      "already discards this file's OTHER GROUPS on every batch (a batch holds a",
+      "subset of the groups); it is one file rather than one per panel because a",
+      "per-panel file re-breaks on the next roster move.",
+      "",
+      "WHAT THE ID DEPENDS ON, MEASURED, AND WHAT IT DOES NOT. Only the member COUNT",
+      "and the suggestion CONTENT. Not which CLIs are in the panel, not their order,",
+      "not the host: a five-member opencode panel would reuse the five-member ids",
+      "below verbatim. So a carve-out, a roster swap or a reviewer that dies mid-run",
+      "(measured: grok on the 2026-09-22 opencode row, leaving four of five) only",
+      "picks a different row from this sheet.",
+      "",
+      "RE-CAPTURE THIS FILE WHEN, AND ONLY WHEN:",
+      "  1. the phase's fan-out fixture changes its suggestions' `type`, `reference`",
+      "     or `desc` (the first 200 chars), or the number/titles of its entries --",
+      "     those are the hash's other inputs, and a re-worded fixture moves EVERY",
+      "     id here;",
+      "  2. a host's `fan_out:` in tests/container/host_matrix.yaml grows past",
+      "     6 members, the largest this sheet covers (a SMALLER panel needs",
+      "     nothing -- every count from 1 up is already here);",
+      "  3. `state_manager.generate_group_id` changes what it hashes.",
+      "A panel that merely changes MEMBERSHIP needs nothing. Re-capture by driving",
+      "`suggestion_processor.group_similar_suggestions` + `state_manager.",
+      "stamp_stable_ids` over N copies of the fan-out fixture and reading",
+      "`generate_group_id` off each group, which is exactly what",
+      "`validation_batcher` writes into a batch's `group_ids`.",
+      "",
+      "THIS SHEET IS NOT A PANEL-SIZE ALARM, deliberately. A reviewer that silently",
+      "stops answering is caught by `harness.fan_out_correlation` and the matrix's",
+      "`fan_out_carve_outs:` cells, which own that question; making the verdicts fail",
+      "to join three phases later would only report it as the wrong defect."
+    ]
   }
 }

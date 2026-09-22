@@ -113,3 +113,8 @@ packaging/opencode/LICENSE
 # The pre-publish gate's stamp. Safe host-agnostically: no packaging route ever
 # commits one, because a stamp attests to the machine that wrote it.
 packaging/*/.package-check.stamp
+
+# aider's repo-map cache, dropped at the root by the chain-aider container row
+# when it runs against this tree. A per-machine index of the repo, not a source
+# of truth about it.
+.aider.tags.cache.v4/

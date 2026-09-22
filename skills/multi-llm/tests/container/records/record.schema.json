@@ -61,7 +61,10 @@
           "stub_requests": {"type": "integer"},
           "unhandled_routes": {"type": "integer"},
           "unmatched_prompts": {"type": "integer"},
-          "write_outcome": {"enum": ["applied", "clean-failure", "partial", "schema-rejected"]},
+          "write_outcome": {
+            "enum": ["applied", "clean-failure", "no-op", "partial", "schema-rejected"],
+            "description": "The worst outcome any of this row's write batches recorded, in the schema's own spelling of the product's D3g vocabulary (the map is `harness.WRITE_OUTCOME_SEVERITY`). Absent means the row dispatched no write batch at all — never that its batches did nothing, which is what `no-op` says: the runner claimed there was nothing to apply and the pre/post byte comparison agreed. `no-op` was added 2026-09-22, after `1633dd4` (2026-09-16) split the classifier's empty-diff branch and made it this rig's MOST COMMON write outcome (65 of 65 batches in `runs/20260921T224840Z`); before that split the same batches were classified `clean-failure`, which is why records older than it spell an honest no-op that way. `policy-violation` has no spelling here on purpose — see `harness.WRITE_OUTCOME_SEVERITY` — and reaches the record through `rows[].reason`."
+          },
           "cost": {
             "type": "object",
             "additionalProperties": false,

@@ -22,7 +22,49 @@ A flag that exists only here is a bug in that split.
 
 ---
 
-## The two lanes
+## The four lanes
+
+**Four, not two.** The table this section used to carry described a world of two,
+and it predates both the chain lane's separation from the single-phase provider
+lane and the credentialed `live_provider` lane. Counted as the modules that
+actually run, 2026-09-21:
+
+| lane | marker | model backend | CLIs exercised | phases per row | write phase |
+| --- | --- | --- | --- | --- | --- |
+| provider, single-phase (`test_container_provider_lane.py`) | `container` | stub, `--network none` | 16 | 1 | none |
+| provider, chain (`test_container_full_chain.py`) | `container` | stub, `--network none` | 16 | 8 | 4, graded as no-op |
+| host (`test_container_host_lane.py`) | `container`, `live` on the credentialed tiers | host = real OpenRouter; **fan-out = real CLIs redirected at the stub** | **16 declared** across three hosts, disjoint — **unmeasured**; 1 (codex) is what has run | 1, or 8 on the two `full` rows | 4 on `full`, 1 on each apply row |
+| live provider (`test_container_live_provider.py`) | `container and live_provider` | real vendor endpoints | 16 | 1 smoke `generate` | none |
+
+**The host lane's `16` is declared, not measured, and that distinction is the
+whole cell.** The fan-out and the write runner are matrix keys as of 2026-09-22:
+`harness.host_fan_out` and `harness.host_runner_cli` read `fan_out:` and
+`runner:` out of `host_matrix.yaml`, and `harness.provider_spec` builds each slug
+from that CLI's own `model_arg` in `redirect.yaml` rather than from a literal.
+The three hosts declare a **disjoint partition of all 16** stub-capable provider
+CLIs — 6 on the claude-code host, 5 on the codex host, 5 on the opencode host —
+and `test_redirect_matrix_claims.py` holds that shape in plain CI: every host
+declares a list, the lists do not overlap, their union is exactly the `lane:
+provider` roster, and no row's effective list may name a CLI outside its own
+host's. (`fan_out: native` rows are declared carve-outs that fan out to nothing,
+and `remove_seed` rows inherit nothing and keep their own host CLI.)
+
+**Every one of those cells is `unmeasured`, and reads as such in the file** —
+`fan_out_provenance: unmeasured` (T3) beside `runner: opencode` /
+`runner_provenance: unmeasured` (T0a). Until 2026-09-22 the slug was the
+hard-coded literal `codex:stub-model` for every row on every host, so no widened
+fan-out has ever executed: 15 of the 16 CLIs are newly *named* in this lane, not
+yet *exercised* by it. T3's one-row two-spec spike — widen one `ask` row, then
+count the distinct provider invocations, stub sessions and result files in that
+row's receipts from the host-start watermark — is what turns the declaration
+into coverage. Read the cell as "16 declared, 1 proven" until it does.
+
+The live-provider lane's 16 is 15 of the provider lane's rows — every one but
+`muse` — plus `cursor-agent`, which joins through an explicit `live_lane` opt-in
+rather than by being moved off `lane: fake` and losing its fake-lane coverage.
+
+The first three lanes divide into **two postures**, and that split is what the
+rest of this file is organized around:
 
 |  | **Provider lane** | **Host lane** |
 | --- | --- | --- |
@@ -32,6 +74,12 @@ A flag that exists only here is a bug in that split.
 | Network | **`--network none`** | bridge (detection, not prevention) — but `--creds none` discovery rows run `--network none` too: no credential, no route |
 | Determinism | total | none |
 | Assertion | normalized golden bundle, zero diff | receipt + artifact presence |
+
+The fourth lane is a third posture and belongs in neither column: real vendor
+endpoints on the user's own key, so it spends credits. It carries `live_provider`
+*in addition to* `container`, which is what keeps it out of a bare `pytest` and
+out of CI; it is a prerequisite of nothing; and `make e2e-live-provider` is the
+only thing that sources the key.
 
 **The provider lane runs green with zero secrets and zero network at *run* time.**
 The build cannot be offline — it pulls a base image and installs CLIs — but every
@@ -50,6 +98,7 @@ make e2e-container-host-discovery  host lane, --creds none tier: no key, no netw
 make e2e-container-host-invocation host lane, --creds none: type the documented /multi-llm string
 make e2e-container-latest          CLIs @latest; provider lane only; credential-free
 make e2e-container-latest-host     CLIs @latest; host lane; guarded, opt-in only
+make e2e-live-provider [CLI=x]     credentialed provider lane; SPENDS CREDITS on openrouter.ai
 make e2e-version-delta             print the pinned → installed versions of the @latest image
 make e2e-lock-update               move the pins the @latest image proves moved, then prove it
 make e2e-verify-record REC=<path>  re-hash a runs/ bundle against a committed record
@@ -190,6 +239,13 @@ turn count, so they are absent here rather than folded into the total):
 | 50 | `claude-code`, `opencode` | both are their *own* write runner, so every one of the 25 execs fires a title call |
 | 89 | `muse` | ~2 background reminder observers per exec |
 
+**That table was measured with `codex` as the shared write runner, and the
+helper is `opencode` now, so every borrowed row's count is stale upward.** The
+`50` row is why: opencode fires a session-title completion per exec, so a row
+whose 21 helper execs go to opencode pays 21 more title calls than the same row
+paid through codex. The re-seed capture pass re-measures them; nothing here is
+adjusted by prediction (see *How long it actually takes*).
+
 Three things about that row are not optional:
 
 - **`--exec-subagents`, and `--yes` does not imply it.** `full` runs every phase
@@ -205,24 +261,130 @@ Three things about that row are not optional:
 - **Both driver keys.** `providers.tmpl.yaml` renders `driver.subagent_runner`
   *and* `driver.subagent_runner_cheap`; an unset cheap key keeps base's
   `claude-code:haiku` and adds a second binary to every row.
-- **Twelve of the fifteen CLIs declare no `agent-write` profile** — only
+- **Thirteen of the sixteen CLIs declare no `agent-write` profile** — only
   `claude-code`, `codex` and `opencode` do — so their chain row's executor is a
-  second binary: `codex`, named per row in `redirect.yaml`'s
+  second binary: `opencode`, named per row in `redirect.yaml`'s
   `chain_write_runner` and carried as that row's one `allowed_helper`. A plain-CI
   test cross-checks the key against the adapters in both directions.
 
-**Every write batch on this lane must record `clean-failure` with zero files
-touched.** The stub emits no tool call, so no redirected CLI here can move a
-byte; the four write phases complete on the documented no-op and the row asserts
-that in both directions — `applied` is a bug in the rig, and a phase resolving to
-the "nothing to apply" skip is a vacuous green.
+  **That shared helper is `opencode`, and it used to be `codex`.** The selection
+  rule is one line — `entry.get("chain_write_runner") or entry["cli"]`,
+  `test_container_full_chain.py:149` — so a CLI that can write writes for itself
+  and every other row borrows the declared helper. Counted from `redirect.yaml`
+  on 2026-09-21, that made **codex the write runner of 14 of the 16 chain
+  rows**: the 13 that declare one (`aider`, `goose`, `cline`, `qwen-code`,
+  `copilot`, `kimi`, `kilocode`, `pi`, `grok`, `muse`, `gemini`, `vibe`, `omp`)
+  plus its own row, which names no helper because it does not need one. Against
+  that, `opencode` drove **1** — its own — and `claude-code` **1**, its own.
+  Repointing the 13 moves that same 14-of-16 share onto opencode and leaves
+  codex writing for `chain-codex` alone.
+
+**Every write batch on this lane must record `no-op` with zero files touched.**
+The stub emits no tool call, so no redirected CLI here can move a byte; the four
+write phases complete on the documented no-op and the row asserts that in both
+directions — `applied` is a bug in the rig, and a phase resolving to the "nothing
+to apply" skip is a vacuous green.
+
+  *Corrected 2026-09-22, from `clean-failure`, and the word moved in the product
+  rather than on this lane.* `1633dd4` (2026-09-16) split
+  `utils/write_batch_scheduler`'s empty-diff branch, which until then gave one
+  verdict to three claims: an `applied`-or-no-status claim over an empty diff is
+  still `clean-failure`, but a **`no-op` claim over an empty diff is now its own
+  outcome**, because calling an honest "already present" batch a failure told the
+  next batch — and the reader — that the work had failed. What this lane's stub
+  claims never changed: all four fixtures under
+  `tests/fixtures/e2e/responses/write_batches/` have read `{"status": "no-op"}`
+  since `f62cc89` (2026-08-15). `runs/20260921T224840Z` records `no-op` on all
+  65 write batches of the sweep (measured 2026-09-22 from that bundle's
+  `write_batch_report.json` files; an earlier draft of this line said 130, which
+  counted `subagent_batch_report.json` alongside them — those hold 114 entries
+  and are the superset covering every dispatched batch, not just the write
+  ones). The guard is not weaker for it — `applied` and
+  `partial-application` are reachable only on a *non-empty* snapshot diff, so
+  refusing them is what disproves a redirect leak, and `no-op` refuses both while
+  additionally requiring the runner's claim and the byte verdict to agree.
+
+### What the write path is actually graded on, and the writer axis
+
+The bullets above say *which* binary writes. This says **how often each write
+path is graded**, which is a different question with a worse answer, and what is
+being added to fix it.
+
+- **Depth.** codex's write path has been graded **14 times** — once on every row
+  that borrowed it, plus its own. `opencode` and `claude-code` have been graded
+  **once each**, on their own rows and nowhere else.
+- **Combination.** "non-write CLI as reviewer + `opencode` as writer" had
+  **never run**, and neither had the same pairing with `claude-code`. Every row
+  that paired a reviewer with a *different* writer paired it with codex.
+
+Repointing the shared helper fixes neither defect by itself — it renames the
+single point of failure. The reviewer axis still grades one writer 14 times and
+the other two once each; it is `opencode` that is now the 14, and codex that is
+down to its own row.
+
+**The fix is a second axis, not more rows on the first one.** The existing 16
+rows stay the **reviewer axis** — one provider CLI per row, one shared write
+runner, so the 16 baselines stay structurally comparable — and three new rows
+vary the writer with the reviewer held still:
+
+```
+chain-writer-codex        reviewer: pi   write runner: codex
+chain-writer-opencode     reviewer: pi   write runner: opencode
+chain-writer-claude-code  reviewer: pi   write runner: claude-code
+```
+
+They are declared in a new **top-level `chain_writer_axis:` block** in
+`redirect.yaml`, sibling to `clis:` and deliberately **not** a row in it, because
+three consumers break at once if they enter the provider lane: `_rows()` builds
+`VERIFIED` / `IDS` / `BY_CLI` from every `lane: provider` row, so a second
+`codex` row is a duplicate pytest id and a clobbered key;
+`test_redirect_matrix_claims`'s first guard forbids naming a
+`chain_write_runner` on a CLI that declares `agent-write`, which all three
+writers do; and `baseline_path(cli)` resolves to `<cli>/bundle.json`, so
+`chain-writer-codex` would silently overwrite `chain-codex`'s baseline. The
+writer baselines therefore live in their own namespace,
+`tests/golden/container/writer-<cli>/bundle.json`. The reviewer pin is `pi` on
+all three rows and is recorded **once**, in the block, so it cannot drift per
+row.
+
+**Two of the three run on this host; the third skips by name, not by silence.**
+`chain-writer-codex` and `chain-codex` carry `sandbox_skip_when:
+userns-unavailable`. Those rows still *run*: their write batches are refused
+with `reason_code: sandbox_unavailable`, `harness.row_outcome` classifies the row
+`sandbox-skip` from those batch records rather than `fail`, and the row lands in
+`matrix-census.json`'s new `sandbox-skip` list — a fourth named list beside
+`failed`, `cap-hit` and `never_started` — carrying **the product's own reason
+string**. Never a bare red, and never a `pytest.skip`: a row that never executes
+can never announce that its blocker has lifted. The licence to forgive does not
+come from the declaration either. It comes from an in-image
+`sandbox_verdict('agent-write')` probe run on that same run, and only an
+`unavailable` verdict grants it — `ok` or `not-required` means the row is graded
+like any other and a `sandbox-skip` outcome is itself a failure, `unknown` is a
+hard failure, because an unreadable verdict must not become the cheap path to a
+green run.
+
+**And "only codex can do writes in Docker" is false.** All three write-capable
+CLIs declare the `agent-write` profile; the asymmetry is one line further down.
+Only codex implements a sandbox *probe* (`utils/providers/codex.py:430`; every
+other adapter inherits base's `None` at `utils/providers/base.py:2465`). Its
+`agent-write` renders `--sandbox workspace-write`, that is bubblewrap, and
+bubblewrap needs an unprivileged user namespace that this host's AppArmor policy
+and Docker's default seccomp profile each independently deny. `opencode`'s
+`agent-write` runs its built-in `build` agent
+(`utils/providers/opencode.py:43`) and `claude-code`'s is
+`--permission-mode acceptEdits` (`utils/providers/claude_code.py:722`) — both
+application-level permission mechanisms, neither spawns bwrap, so neither has
+anything that can fail to start. The chain lane was never blocked because writes
+do not work in a container; it was blocked because most of its rows pinned the
+write phase to the one runner whose containment needs a kernel feature this host
+denies.
 
 ### The golden gate, and how to move it
 
 Those structural assertions all stay green through **output-shape drift**: a CLI
 upgrade that changes what we parse out of its stream — half the suggestions, a
 lost importance, a group that stopped grouping — still completes every phase,
-still records `clean-failure` on every batch, and still moves no bytes. So each
+still records `no-op` on every batch, and still moves no bytes. So each
 chain row is additionally diffed, at a threshold of **zero**, against a normalized
 bundle captured per CLI:
 
@@ -270,13 +432,41 @@ total, but a row is a *chain*, and each phase pays its CLI's cold start again.
 **Measured, one green run per CLI** (`chain_s` in `redirect.yaml`, wall clock
 including container start and the workspace seed): 20 s (`claude-code`) to 119 s
 (`codex`), **17 m 42 s** for the eleven chains that carry a `chain_s`, plus the
-no-`--exec-subagents` control. The matrix is **fifteen** chain rows: `qwen-code`,
+no-`--exec-subagents` control. The matrix is **sixteen** chain rows: `qwen-code`,
 `copilot`, `kimi` and `vibe` each declare a `chain_row_timeout_s` and ship a
-golden bundle but record no `chain_s`, so budget for them and do not read 17 m 42 s
-as the whole lane. The spread is not about the CLI under test — it is about
-**whose binary the executor dispatches**: a row that is its own `agent-write`
-runner (`claude-code` 20 s, `opencode` 51 s) pays one cheap startup per subagent,
-while the twelve rows that borrow `codex` pay codex's `exec` startup 21 times.
+golden bundle but record no `chain_s`, and `omp` records neither a `chain_s` nor
+a bundle, so budget for all five and do not read 17 m 42 s as the whole lane. The
+spread is not about the CLI under test — it is about **whose binary the executor
+dispatches**: a row that is its own `agent-write` runner (`claude-code` 20 s,
+`opencode` 51 s — the two cells the repoint does not touch) pays one cheap
+startup per subagent, while the thirteen rows that borrow the shared helper pay
+that helper's startup 21 times.
+
+> **Every one of those `chain_s` cells was measured with `codex` writing, and the
+> helper is `opencode` now, so each borrowed row's figure is stale.** They are
+> left standing rather than guessed at: the re-seed capture pass re-records every
+> `chain_s` and re-derives each `chain_row_timeout_s` from the recording, in the
+> same diff. No replacement numbers are invented here, and the 17 m 42 s total is
+> a codex-era figure like the cells it sums.
+>
+> **Two things follow from the new helper, and the second of them is a cost.**
+> opencode is *both* a chain row and the borrowed runner — so was codex, so that
+> shape has not changed — but opencode fires a **session-title completion per
+> exec**, which codex does not. The turn table above already prices it: **50**
+> turns on a row opencode writes against codex's **25**. So every reviewer row's
+> recorded turn count roughly doubles and the golden bundles get bigger with it.
+> The scenario needs no new rule for that — it already answers title calls,
+> because five CLIs fire them — but the wall clock and the bundle both go up.
+>
+> **The one measured anchor there is, and what it is not.** On
+> `runs/20260920T105938Z`, `chain-opencode` took **56.9 s** and
+> `chain-claude-code` **17.4 s** — the same two self-writing rows as the 51 s and
+> 20 s cells above, re-timed. They are the only chain rows that complete on a
+> restricted-userns host, and therefore the only end-to-end timings of the two
+> non-codex write paths that exist. On that same run all **14** rows codex
+> wrote for died in **11.0-15.98 s** on `container exit 3` — a *refusal* time,
+> not a chain time, and useless as a per-row estimate. (The fifteenth failure,
+> `chain-noexec-codex` at 6.32 s, is the negative control doing its job.)
 
 Two caps keep that bounded rather than open-ended:
 

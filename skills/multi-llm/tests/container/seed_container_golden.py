@@ -22,6 +22,41 @@ completed is refused by name. A capped CLI has no parseable output and a failed
 row's artifacts are half a run; either one, frozen as "expected", would make every
 later comparison agree with a broken run.
 
+**Two axes, two namespaces, two flags.** `--cli` seeds the *reviewer* axis — one
+provider CLI answering the eight-phase fan-out — into
+`tests/golden/container/<cli>/bundle.json`. `--writer` seeds the *writer* axis
+declared by `redirect.yaml`'s `chain_writer_axis:` block — the reviewer pinned
+(today `pi`) and the write runner varied — into
+`tests/golden/container/writer-<cli>/bundle.json`, from the `chain-writer-<cli>`
+row. Both are repeatable and both default to their whole list. Merely widening
+`--cli` to accept a writer name would NOT have done it: the two axes resolve to
+different baseline paths, read a different run bundle and write a different
+manifest (`axis`, the reviewer pin), so one flag would have had to guess which of
+those a bare `codex` meant — and guessing wrong silently overwrites
+`chain-codex`'s baseline with `chain-writer-codex`'s run.
+
+**FROZEN and NO BASELINE are outcomes, not refusals.** `refusal()` says why a
+bundle must not be frozen; it does not say whether the pass failed. A row that
+declares `sandbox_skip_when` in `redirect.yaml` *and* whose own evidence carries
+the product's `sandbox_unavailable` reason code is a host that cannot run that
+row, which is a recorded fact and not a capture failure — so it joins `skipped`
+and the pass still exits 0. Two words, depending on what is on disk:
+
+* `FROZEN <cli>: <reason>, baseline left at <captured_at>` — a baseline exists
+  and is deliberately left alone. Today `codex`, whose
+  `tests/golden/container/codex/bundle.json` was captured `2026-08-27T14:10:33Z`,
+  three weeks before the D6 sandbox probe landed, and records a green codex write
+  path this host can no longer reproduce.
+* `NO BASELINE <cli>: <blocker>, needs a permissive-userns host` — nothing was
+  ever captured. Today `writer-codex`, which no host has yet produced.
+
+**Every other refusal still fails the pass**, and the gate is the *evidence* —
+the `sandbox_unavailable` reason code in the row's own artifacts — never the
+row's name and never a bare non-zero exit. Without that, a `chain-codex` that
+broke for some unrelated reason would ride out through the same door, and the
+"one reviewed diff" rule this file exists to protect would be resting on an exit
+code nobody trusts.
+
 **The debt that keeps landing on this file, and the three lines it always owes.**
 A product change that moves what a phase *writes* invalidates all 15 baselines at
 once, and this lane is deselected by default (`addopts = -m 'not container'`) — so
@@ -101,16 +136,67 @@ CHAIN_PHASES = (
 )
 
 
-def provider_clis() -> list[str]:
+def _redirect() -> dict:
     import yaml
 
-    data = yaml.safe_load(REDIRECT.read_text(encoding="utf-8"))
-    return [row["cli"] for row in data["clis"] if row.get("lane") == "provider"]
+    return yaml.safe_load(REDIRECT.read_text(encoding="utf-8")) or {}
 
 
-def newest_bundle(cli: str, runs_root: Path) -> Path | None:
-    """The most recent `runs/<utc>/chain-<cli>/` directory, or None."""
-    row_id = container_bundle.row_id_for(cli)
+def provider_clis() -> list[str]:
+    return [row["cli"] for row in _redirect()["clis"]
+            if row.get("lane") == "provider"]
+
+
+def writer_axis() -> list[dict]:
+    """`redirect.yaml`'s `chain_writer_axis:` block, or [] while it is absent.
+
+    Absence is tolerated rather than asserted: the block is a top-level sibling
+    of `clis:` landing in its own change, and a seeder that died on a KeyError
+    would take the reviewer axis's re-seed down with it mid-landing. With no
+    block there are no writer rows, `--writer` has nothing to validate against
+    and says so, and `--cli` behaves exactly as it always did.
+    """
+    return [dict(entry) for entry in (_redirect().get("chain_writer_axis") or [])
+            if isinstance(entry, dict) and entry.get("writer")]
+
+
+def writer_clis() -> list[str]:
+    return [entry["writer"] for entry in writer_axis()]
+
+
+def axis_entry(cli: str, axis: str) -> dict:
+    """The declaration governing one (cli, axis) pair.
+
+    The two axes declare `sandbox_skip_when` in two different places — a
+    `clis:` row for the reviewer axis, a `chain_writer_axis:` entry for the
+    writer one — and this is the single place that difference is resolved, so
+    every caller below asks one question and gets the right table.
+    """
+    if axis == container_bundle.AXIS_WRITER:
+        for entry in writer_axis():
+            if entry["writer"] == cli:
+                return entry
+        return {}
+    for row in _redirect()["clis"]:
+        if row.get("cli") == cli and row.get("lane") == "provider":
+            return dict(row)
+    return {}
+
+
+def label_for(cli: str, axis: str) -> str:
+    """How a row is named on stdout — the same name as its baseline directory.
+
+    `codex` and `writer-codex` are two rows of the same capture pass, and a
+    message naming only `codex` for both would be ambiguous in exactly the pass
+    where one is frozen and the other was never captured.
+    """
+    return container_bundle.baseline_dir_name(cli, axis)
+
+
+def newest_bundle(cli: str, runs_root: Path,
+                  axis: str = container_bundle.AXIS_REVIEWER) -> Path | None:
+    """The most recent `runs/<utc>/<row-id>/` directory, or None."""
+    row_id = container_bundle.row_id_for(cli, axis)
     candidates = sorted(p for p in runs_root.glob(f"*/{row_id}") if p.is_dir())
     return candidates[-1] if candidates else None
 
@@ -152,6 +238,134 @@ def refusal(out_dir: Path) -> str | None:
     return None
 
 
+#: The product's own reason code for "this runner's sandbox cannot start"
+#: (`utils/subagent_executor.py:1814`, D3k rung 1). The gate below is this
+#: string and nothing else: not the row's name, not its exit code.
+SANDBOX_REASON_CODE = "sandbox_unavailable"
+
+#: What the dispatch prints when it refuses on that code
+#: (`utils/subagent_executor.py:1806`). Matched verbatim rather than by keyword
+#: so that a log merely *discussing* the sandbox cannot trip it.
+_SANDBOX_REFUSAL_MARKER = f"(reason: {SANDBOX_REASON_CODE})"
+
+
+def _write_reports(out_dir: Path) -> list[Path]:
+    """The row's `write_batch_report.json` artifacts — `harness.write_outcomes`'
+    own glob, reused rather than re-derived."""
+    return sorted((out_dir / "artifacts").glob("*/*/write_batch_report.json"))
+
+
+def _find_reason_code(value: Any) -> bool:
+    """Whether `sandbox_unavailable` appears as a reason code anywhere inside.
+
+    A recursive walk rather than a fixed pointer because the report's shape
+    puts the code in different places depending on where the refusal landed —
+    a batch record, a task, a nested refusal object — and a pointer written
+    against one of those silently stops matching when the scheduler grows
+    another.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if (key in ("reason_code", "reason", "write_outcome", "status")
+                    and isinstance(item, str)
+                    and SANDBOX_REASON_CODE in item):
+                return True
+            if _find_reason_code(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_find_reason_code(item) for item in value)
+    return False
+
+
+def sandbox_refusal(out_dir: Path) -> str | None:
+    """The product's own words for a sandbox refusal in this row, or None.
+
+    Two sources, in order, and the second exists because of a measurement:
+
+    1. **`write_batch_report.json`.** The declared source (§3.1): the same
+       artifacts `harness.write_outcomes` walks, scanned for the
+       `sandbox_unavailable` reason code. This is where the evidence belongs
+       and where it will be once the batch records carry it.
+    2. **The container's own refusal line.** Measured on
+       `runs/20260920T105458Z/chain-codex`, the report from a real
+       sandbox-refused row reads
+       `{"exit": 3, "batches_dispatched": [], "tasks": []}` — the refusal is
+       raised by `preflight_runner` *before* the first batch record exists, so
+       the reason code never reaches the file and source 1 alone would find
+       nothing. The line the dispatch printed does carry it, verbatim, so it is
+       read as a fallback — anchored on a write report that exists and records
+       a non-zero exit, so a green row that merely mentioned the string cannot
+       ride out on it.
+
+    What is deliberately NOT a source: the row's name, and `exit_code != 0`.
+    Either one would let a row that broke for an unrelated reason take the
+    frozen door, which is the whole thing this gate is for.
+    """
+    reports = _write_reports(out_dir)
+    for report in reports:
+        try:
+            data = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if _find_reason_code(data):
+            return f"{SANDBOX_REASON_CODE} (recorded in {report.name})"
+
+    # Source 2. The anchor: a write phase really ran and really failed.
+    failed_reports = []
+    for report in reports:
+        try:
+            data = json.loads(report.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if isinstance(data, dict) and data.get("exit") not in (0, None):
+            failed_reports.append(report)
+    if not failed_reports:
+        return None
+    for name in ("container-stderr.txt", "container-stdout.txt"):
+        path = out_dir / name
+        if not path.is_file():
+            continue
+        for line in path.read_text(encoding="utf-8",
+                                   errors="replace").splitlines():
+            if _SANDBOX_REFUSAL_MARKER in line:
+                return _condense(line)
+    return None
+
+
+def _condense(line: str, limit: int = 160) -> str:
+    """One refusal line, reduced to the blocker.
+
+    The product's message is several sentences of explanation and repair
+    instructions wrapped around two facts: the reason code, and the probe's
+    own tail (`bwrap: No permissions to create a new namespace…`). Those two
+    are what say *why this host cannot run this row*; the rest is in the log
+    for whoever is going to act on it, and a 700-character line on a capture
+    pass's summary is a line nobody reads.
+    """
+    text = " ".join(line.split())
+    tail = ""
+    marker = "Probe tail:"
+    if marker in text:
+        tail = text.split(marker, 1)[1].strip()
+        # Stop at the next sentence of repair prose, which always follows.
+        tail = tail.split(" Fix:", 1)[0].strip().strip('".')
+    reason = SANDBOX_REASON_CODE + (f" — {tail}" if tail else f" — {text}")
+    return reason if len(reason) <= limit else reason[:limit - 1] + "…"
+
+
+def captured_at(cli: str, axis: str) -> str | None:
+    """When the baseline being left alone was captured, or None if there is none."""
+    path = container_bundle.baseline_path(cli, axis)
+    if not path.is_file():
+        return None
+    try:
+        manifest = json.loads(path.read_text(encoding="utf-8")).get("manifest")
+    except (OSError, ValueError):
+        return None
+    return (manifest or {}).get("captured_at")
+
+
 def image_of(out_dir: Path) -> str | None:
     """The image tag the row ran, recovered from its own run command."""
     path = out_dir / "run-command.txt"
@@ -163,17 +377,31 @@ def image_of(out_dir: Path) -> str | None:
     return None
 
 
-def seed(cli: str, out_dir: Path) -> tuple[Path, dict[str, Any]]:
+def seed(cli: str, out_dir: Path,
+         axis: str = container_bundle.AXIS_REVIEWER) -> tuple[Path, dict[str, Any]]:
     bundle = container_bundle.capture_bundle(out_dir)
+    entry = axis_entry(cli, axis)
     manifest = {
         "bundle_version": container_bundle.CONTAINER_BUNDLE_VERSION,
         "cli": cli,
-        "row_id": container_bundle.row_id_for(cli),
+        "axis": axis,
+        # The reviewer pin, read from the declaration rather than assumed: on
+        # the writer axis it is `chain_writer_axis:`'s own `reviewer` key, and
+        # a bundle captured against a different one is not comparable to its
+        # siblings. On the reviewer axis the CLI is its own reviewer.
+        "reviewer": (entry.get("reviewer") if axis == container_bundle.AXIS_WRITER
+                     else cli),
+        "row_id": container_bundle.row_id_for(cli, axis),
         "run_bundle": out_dir.parent.name,
         "image": image_of(out_dir),
+        # Which machine and kernel produced this capture. Passed here rather
+        # than left to `write_baseline`'s back-fill so the seeder's own record
+        # of the pass names it, and so a frozen sibling's provenance can be
+        # read beside a fresh one's.
+        "host": container_bundle.host_provenance(),
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    path = container_bundle.write_baseline(cli, bundle, manifest)
+    path = container_bundle.write_baseline(cli, bundle, manifest, axis)
     return path, manifest
 
 
@@ -181,8 +409,14 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--cli", action="append", default=[],
-                        help="seed only this CLI (repeatable); default: every "
-                             "provider-lane CLI with a chain bundle on disk")
+                        help="seed only this provider-lane CLI on the REVIEWER "
+                             "axis (repeatable); default: every provider-lane "
+                             "CLI with a chain bundle on disk")
+    parser.add_argument("--writer", action="append", default=[],
+                        help="seed only this CLI on the WRITER axis "
+                             "(repeatable), into writer-<cli>/bundle.json from "
+                             "the chain-writer-<cli> row; default: every entry "
+                             "in redirect.yaml's chain_writer_axis: block")
     parser.add_argument("--runs-root", default=str(RUNS),
                         help=f"where the run bundles live (default: {RUNS})")
     parser.add_argument("--run", default="",
@@ -191,50 +425,137 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(list(argv) if argv is not None else None)
 
     runs_root = Path(args.run).parent if args.run else Path(args.runs_root)
-    wanted = args.cli or provider_clis()
-    unknown = [cli for cli in wanted if cli not in provider_clis()]
+
+    # Selection. A bare invocation sweeps BOTH axes, because a bare invocation
+    # is "re-seed everything this host produced". Naming either flag narrows to
+    # exactly what was named — asking for `--cli aider` and silently getting
+    # three writer captures as well would be a surprise, and the two axes'
+    # captures land in different directories where it would be an unreviewed
+    # one.
+    explicit = bool(args.cli or args.writer)
+    wanted: list[tuple[str, str]] = []
+    if args.cli or not explicit:
+        wanted += [(cli, container_bundle.AXIS_REVIEWER)
+                   for cli in (args.cli or provider_clis())]
+    if args.writer or not explicit:
+        wanted += [(cli, container_bundle.AXIS_WRITER)
+                   for cli in (args.writer or writer_clis())]
+
+    unknown = [cli for cli in args.cli if cli not in provider_clis()]
     if unknown:
         sys.stderr.write(
             f"seed-container-golden: {unknown} is not a provider-lane CLI in "
             f"redirect.yaml\n")
         return 2
+    # Validated against the block, never against `clis:`: every writer is also
+    # a provider-lane row, so the looser check would accept `--writer aider`
+    # and capture a writer baseline for a CLI with no writer row.
+    unknown_writers = [cli for cli in args.writer if cli not in writer_clis()]
+    if unknown_writers:
+        sys.stderr.write(
+            f"seed-container-golden: {unknown_writers} is not a writer in "
+            f"redirect.yaml's chain_writer_axis: block "
+            f"({writer_clis() or 'the block is absent'})\n")
+        return 2
 
     written, skipped, refused = [], [], []
-    for cli in wanted:
+    for cli, axis in wanted:
+        label = label_for(cli, axis)
         if args.run:
-            out_dir = Path(args.run) / container_bundle.row_id_for(cli)
+            out_dir = Path(args.run) / container_bundle.row_id_for(cli, axis)
             out_dir = out_dir if out_dir.is_dir() else None
         else:
-            out_dir = newest_bundle(cli, runs_root)
+            out_dir = newest_bundle(cli, runs_root, axis)
         if out_dir is None:
-            skipped.append(cli)
+            # No run bundle at all, so no evidence. Deliberately NOT upgraded
+            # to NO BASELINE even for a `sandbox_skip_when` row: with nothing
+            # on disk the blocker would have to be inferred from the row's
+            # name, which is precisely what the frozen rule refuses to do.
+            skipped.append((label, None))
             continue
         reason = refusal(out_dir)
         if reason:
-            refused.append((cli, out_dir, reason))
+            frozen = _frozen_disposition(cli, axis, label, out_dir)
+            if frozen is not None:
+                skipped.append(frozen)
+            else:
+                refused.append((label, out_dir, reason))
             continue
-        path, manifest = seed(cli, out_dir)
-        written.append((cli, path, manifest))
+        path, manifest = seed(cli, out_dir, axis)
+        written.append((label, path, manifest))
 
-    for cli, path, manifest in written:
+    for label, path, manifest in written:
         rel = path.relative_to(SKILL_ROOT.parent.parent)
         sys.stderr.write(f"wrote {rel} (from {manifest['run_bundle']}/"
                          f"{manifest['row_id']})\n")
-    if skipped:
+    absent = [label for label, note in skipped if note is None]
+    if absent:
         sys.stderr.write(
-            f"no chain bundle on disk for {skipped} — run "
+            f"no chain bundle on disk for {absent} — run "
             f"`pytest -m container skills/multi-llm/tests/test_container_full_chain.py` "
             f"first\n")
-    for cli, out_dir, reason in refused:
-        sys.stderr.write(f"REFUSED {cli}: {reason}\n  ({out_dir})\n")
+    for _label, note in skipped:
+        if note is not None:
+            sys.stderr.write(note + "\n")
+    for label, out_dir, reason in refused:
+        sys.stderr.write(f"REFUSED {label}: {reason}\n  ({out_dir})\n")
 
     if written:
         sys.stderr.write(
             "\nRead the diff before committing: every line of it is a claim about "
             "what this CLI's chain produces.\n")
     # A refusal is the failure. Nothing on disk for a CLI is not: a contributor
-    # seeding one row deliberately is the normal case.
+    # seeding one row deliberately is the normal case. Neither is a FROZEN or a
+    # NO BASELINE row — a host that cannot run a declared row is a recorded
+    # fact, and failing the pass on it would train the operator to ignore this
+    # script's exit code, which is the one habit the "one reviewed diff" rule
+    # depends on not forming.
     return 1 if refused else 0
+
+
+def _frozen_disposition(cli: str, axis: str, label: str,
+                        out_dir: Path) -> tuple[str, str] | None:
+    """`(label, message)` when this refusal is a frozen row, else None.
+
+    Both conditions are required and neither is the row's name:
+
+    * the row **declares** `sandbox_skip_when` — a reviewed statement in
+      `redirect.yaml` that this row may be unrunnable on some hosts; and
+    * the row's own evidence carries the product's `sandbox_unavailable`
+      reason code — proof that this is the declared blocker and not some other
+      failure wearing the same exit code.
+
+    A row satisfying only the first is an ordinary refusal and fails the pass,
+    which is what stops the declaration becoming a blanket amnesty for
+    everything `chain-codex` might ever do wrong.
+
+    **And the DECLARATION half is what keeps the door narrow, measured.** On
+    `runs/20260920T105458Z` all **16** rows' evidence carries
+    `sandbox_unavailable`, not one — because the 13 helper rows still dispatch
+    their writes through `chain_write_runner: codex` and so all hit codex's
+    bwrap refusal. Gated on the evidence alone, a re-seed pass on this host
+    would have frozen fifteen baselines it should have refused and exited 0.
+    `sandbox_skip_when` is declared on `codex` and on the `writer-codex` axis
+    entry and nowhere else, so those two are the only rows that can take this
+    door — and once §3.2 repoints the 13 helpers off codex, the evidence half
+    narrows to the same two by itself.
+    """
+    entry = axis_entry(cli, axis)
+    if not entry.get("sandbox_skip_when"):
+        return None
+    evidence = sandbox_refusal(out_dir)
+    if not evidence:
+        return None
+    stamp = captured_at(cli, axis)
+    if stamp is None:
+        # Nothing was ever captured for this row — `writer-codex` today. The
+        # blocker is recorded and the gap is named as a gap, rather than being
+        # reported as a baseline that exists.
+        return (label,
+                f"NO BASELINE {label}: {evidence}, needs a permissive-userns "
+                f"host")
+    return (label,
+            f"FROZEN {label}: {evidence}, baseline left at {stamp}")
 
 
 if __name__ == "__main__":

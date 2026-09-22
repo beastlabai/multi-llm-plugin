@@ -3,6 +3,53 @@
     {
       "group_index": 0,
       "group_hash": "6779911c6f8b335b",
+      "_reviewers": 1,
+      "_theme": "No task covers session revocation",
+      "status": "valid",
+      "reason": "Session revocation is in the plan and no generated task covers it, so the coverage gap is real.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "ba5742a48849478d",
+      "_reviewers": 2,
+      "_theme": "No task covers session revocation",
+      "status": "valid",
+      "reason": "Session revocation is in the plan and no generated task covers it, so the coverage gap is real.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "036a547575db874d",
+      "_reviewers": 3,
+      "_theme": "No task covers session revocation",
+      "status": "valid",
+      "reason": "Session revocation is in the plan and no generated task covers it, so the coverage gap is real.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "ebf62aad9047ba57",
+      "_reviewers": 4,
+      "_theme": "No task covers session revocation",
+      "status": "valid",
+      "reason": "Session revocation is in the plan and no generated task covers it, so the coverage gap is real.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "d719aaa2dbcaf0ed",
+      "_reviewers": 5,
+      "_theme": "No task covers session revocation",
+      "status": "valid",
+      "reason": "Session revocation is in the plan and no generated task covers it, so the coverage gap is real.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "698ec2709f87c32a",
+      "_reviewers": 6,
+      "_theme": "No task covers session revocation",
       "status": "valid",
       "reason": "Session revocation is in the plan and no generated task covers it, so the coverage gap is real.",
       "confidence": 0.95
@@ -10,6 +57,53 @@
     {
       "group_index": 1,
       "group_hash": "139bdba80f54ba7d",
+      "_reviewers": 1,
+      "_theme": "T002 acceptance criteria omit the eviction bound",
+      "status": "valid",
+      "reason": "The criterion as written states no post-condition, so it is not verifiable as required.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "6c3db3b686692bea",
+      "_reviewers": 2,
+      "_theme": "T002 acceptance criteria omit the eviction bound",
+      "status": "valid",
+      "reason": "The criterion as written states no post-condition, so it is not verifiable as required.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "e76d4422612b7164",
+      "_reviewers": 3,
+      "_theme": "T002 acceptance criteria omit the eviction bound",
+      "status": "valid",
+      "reason": "The criterion as written states no post-condition, so it is not verifiable as required.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "7262a925c0848238",
+      "_reviewers": 4,
+      "_theme": "T002 acceptance criteria omit the eviction bound",
+      "status": "valid",
+      "reason": "The criterion as written states no post-condition, so it is not verifiable as required.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "42efe3d4b12fe94c",
+      "_reviewers": 5,
+      "_theme": "T002 acceptance criteria omit the eviction bound",
+      "status": "valid",
+      "reason": "The criterion as written states no post-condition, so it is not verifiable as required.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 1,
+      "group_hash": "89c19a667471dbb4",
+      "_reviewers": 6,
+      "_theme": "T002 acceptance criteria omit the eviction bound",
       "status": "valid",
       "reason": "The criterion as written states no post-condition, so it is not verifiable as required.",
       "confidence": 0.9
@@ -17,6 +111,53 @@
     {
       "group_index": 2,
       "group_hash": "ef911087fcf05304",
+      "_reviewers": 1,
+      "_theme": "T003 does not name the lockout threshold under test",
+      "status": "valid",
+      "reason": "The task names no boundary for the regression test, which leaves the acceptance criterion ambiguous.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "661c2ba68630aebd",
+      "_reviewers": 2,
+      "_theme": "T003 does not name the lockout threshold under test",
+      "status": "valid",
+      "reason": "The task names no boundary for the regression test, which leaves the acceptance criterion ambiguous.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "d6310007788ef990",
+      "_reviewers": 3,
+      "_theme": "T003 does not name the lockout threshold under test",
+      "status": "valid",
+      "reason": "The task names no boundary for the regression test, which leaves the acceptance criterion ambiguous.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "da14844fc47e4f8b",
+      "_reviewers": 4,
+      "_theme": "T003 does not name the lockout threshold under test",
+      "status": "valid",
+      "reason": "The task names no boundary for the regression test, which leaves the acceptance criterion ambiguous.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "eebc4ba57c85d80a",
+      "_reviewers": 5,
+      "_theme": "T003 does not name the lockout threshold under test",
+      "status": "valid",
+      "reason": "The task names no boundary for the regression test, which leaves the acceptance criterion ambiguous.",
+      "confidence": 0.9
+    },
+    {
+      "group_index": 2,
+      "group_hash": "8cc0aacf85bbeafd",
+      "_reviewers": 6,
+      "_theme": "T003 does not name the lockout threshold under test",
       "status": "valid",
       "reason": "The task names no boundary for the regression test, which leaves the acceptance criterion ambiguous.",
       "confidence": 0.9
@@ -25,6 +166,62 @@
   "metadata": {
     "model": "container-stub",
     "timestamp": "2026-01-01T00:00:00Z",
-    "schema_version": "2.1"
+    "schema_version": "2.1",
+    "phase": "review-tasks suggestion validation",
+    "captured_from": "../review_tasks/coverage_suggestions.json",
+    "reviewer_counts": {
+      "1": "every single-spec row: the provider lane's chain rows, the `fan_out: native` rows, and any row whose fan-out left one survivor (the negative-auth rows, measured)",
+      "2": "no declared panel; reachable when a larger panel loses all but two members",
+      "3": "no declared panel; reachable when a larger panel loses all but three members",
+      "4": "the opencode host's fan_out (claude-code, omp, qwen-code, vibe), grok carved out 2026-09-22",
+      "5": "the codex host's fan_out (opencode, gemini, aider, copilot, kimi)",
+      "6": "the claude-code host's fan_out (codex, muse, cline, kilocode, pi, goose) -- the largest declared"
+    },
+    "note": [
+      "A VERDICT SHEET, NOT A SINGLE ANSWER. One row per (group, surviving-reviewer",
+      "count), because `state_manager.generate_group_id` hashes the theme plus the",
+      "NORMALIZED SUGGESTION LIST and a group holds one member per model that raised",
+      "the theme -- so a group's id is a function of HOW MANY REVIEWERS ANSWERED.",
+      "Measured 2026-09-22 on tests/container/runs/20260922T084502Z: the same four",
+      "themes grouped to one set of ids on the codex host's five-model rows and to",
+      "another on the opencode host's four, and to a third (the ids this file used to",
+      "ship alone) on every single-spec row. `merge_batched_validation_results`",
+      "joins BY HASH and discards a foreign one, and",
+      "`subagent_executor._validation_result_errors` requires a group_hash/group_id on",
+      "every entry, so a sheet that names one count joins nothing on a row of any",
+      "other -- every group lands on validation_failed and the apply phases have",
+      "nothing to apply. A sheet naming them all joins the row that belongs to this",
+      "batch and lets the merge discard the rest, which is the same mechanism that",
+      "already discards this file's OTHER GROUPS on every batch (a batch holds a",
+      "subset of the groups); it is one file rather than one per panel because a",
+      "per-panel file re-breaks on the next roster move.",
+      "",
+      "WHAT THE ID DEPENDS ON, MEASURED, AND WHAT IT DOES NOT. Only the member COUNT",
+      "and the suggestion CONTENT. Not which CLIs are in the panel, not their order,",
+      "not the host: a five-member opencode panel would reuse the five-member ids",
+      "below verbatim. So a carve-out, a roster swap or a reviewer that dies mid-run",
+      "(measured: grok on the 2026-09-22 opencode row, leaving four of five) only",
+      "picks a different row from this sheet.",
+      "",
+      "RE-CAPTURE THIS FILE WHEN, AND ONLY WHEN:",
+      "  1. the phase's fan-out fixture changes its suggestions' `type`, `reference`",
+      "     or `desc` (the first 200 chars), or the number/titles of its entries --",
+      "     those are the hash's other inputs, and a re-worded fixture moves EVERY",
+      "     id here;",
+      "  2. a host's `fan_out:` in tests/container/host_matrix.yaml grows past",
+      "     6 members, the largest this sheet covers (a SMALLER panel needs",
+      "     nothing -- every count from 1 up is already here);",
+      "  3. `state_manager.generate_group_id` changes what it hashes.",
+      "A panel that merely changes MEMBERSHIP needs nothing. Re-capture by driving",
+      "`suggestion_processor.group_similar_suggestions` + `state_manager.",
+      "stamp_stable_ids` over N copies of the fan-out fixture and reading",
+      "`generate_group_id` off each group, which is exactly what",
+      "`validation_batcher` writes into a batch's `group_ids`.",
+      "",
+      "THIS SHEET IS NOT A PANEL-SIZE ALARM, deliberately. A reviewer that silently",
+      "stops answering is caught by `harness.fan_out_correlation` and the matrix's",
+      "`fan_out_carve_outs:` cells, which own that question; making the verdicts fail",
+      "to join three phases later would only report it as the wrong defect."
+    ]
   }
 }

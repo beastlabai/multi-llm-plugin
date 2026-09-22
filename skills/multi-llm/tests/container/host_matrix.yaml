@@ -249,6 +249,164 @@ worker_receipt_is_null: structural-on-detaching-rows
 worker_receipt_is_null_provenance: verified
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# FOUR KEYS THIS FILE GAINED ON 2026-09-22 — AND NOT ONE CELL UNDER THEM HAS RUN
+#
+# Authored against plans/chain-lane-write-runner-matrix.md §3.3 and §3.4, whose
+# task labels every new cell below cites: T0 (confirm/deny the 1.4 host-lane
+# regression), T0a (point the host lane's write runner off codex), T3 (the
+# fan-out partition), T4 (the phase rows, the two package rows and the grader
+# change), T4a (one isolated claude-code `review-plan` that completes) and T4b
+# (the five new pre-command legs).
+#
+# EVERY CELL THAT EDIT ADDED IS `unmeasured` AND NAMES THE TASK THAT CLEARS IT,
+# per the vocabulary above, in the second of that word's two senses: not "no
+# credential was available" but "the row's host turn never started", because
+# these keys are declarations of what a future run will do. Where a number was
+# needed before anything could be measured it is labelled `derived` and its
+# arithmetic is written out beside it. Nothing already measured was edited to
+# agree with a prediction — and where an OLD measurement stopped supporting its
+# cell, the cell's word moved while the superseded run id stayed in the comment
+# (the four write rows re-dated by T0, below).
+#
+#   fan_out:   WHICH PROVIDER CLIs A ROW'S PHASES FAN OUT TO.
+#              Declared ONCE PER HOST, as a sibling of `rows:`, and inherited by
+#              every fan-out row on that host — the single-phase `ask` and
+#              `review-plan` rows, the `full` row, the executor write row, and
+#              BOTH opencode routes. The package row then grades the same
+#              partition through a different loader, which is what makes it a
+#              route test rather than a second, smaller partition.
+#
+#              **CLI IDS ONLY, NEVER SLUGS.** Each member's spec is built at READ
+#              TIME from `redirect.yaml`'s own `model_arg` —
+#              `f"{cli}:{BY_CLI[cli].get('model_arg', 'stub-model')}"`, the shape
+#              `test_container_full_chain.py:144` already builds a spec with —
+#              because the 16 `lane: provider` rows carry EIGHT DISTINCT
+#              SPELLINGS (counted 2026-09-22): `gpt-5.5` (codex),
+#              `openai/stub-model` (aider, goose, cline), `stub-model`
+#              (qwen-code, copilot, kimi, grok), `stub/stub-model` (kilocode, pi,
+#              opencode, omp), `muse-spark-1.2`, `haiku` (claude-code),
+#              `gemini-2.5-flash`, and vibe's `openai/gpt-5.6-luna`. A
+#              hand-typed slug in this rig has already cost this lane one red
+#              row: an unqualified `opencode:stub-model` parses as provider
+#              `stub-model` with an empty model half and raises
+#              `ProviderModelNotFoundError: Model not found: stub-model/.` before
+#              a single HTTP call leaves the process
+#              (`test_container_host_lane.py:511-524`; it is what exited
+#              `opencode-auth-negative` 3 on `runs/20260820T093838Z`, R3).
+#              Ids-only is also what gives the plain-CI union guard one source of
+#              truth: it compares ids against `redirect.yaml`'s `lane: provider`
+#              rows and never has to parse a slug back into a CLI name.
+#
+#              THE GUARD'S SUBJECT IS THE UNION: the three hosts' lists are
+#              disjoint and together name all 16 provider CLIs, less any CLI
+#              carried by a dated `fan_out_carve_outs` cell — the third carve-out
+#              below, added 2026-09-22 and holding exactly one member. A ROW-LEVEL
+#              `fan_out:` LIST IS AN OVERRIDE FOR A DECLARED EXCEPTION ONLY,
+#              never the normal spelling. It may narrow its host's list and may
+#              never name a CLI outside it — so an override can never silently
+#              widen the partition or move a CLI between hosts — and it must
+#              carry a dated reason cell beside it. THERE ARE NONE TODAY; an
+#              override authored without that reason cell is an error the guard
+#              reports by name.
+#
+#              THREE CARVE-OUTS, DECLARED RATHER THAN IMPLIED:
+#                * a `remove_seed` (negative-auth) row carries NO `fan_out` key
+#                  at all, and the guard asserts the ABSENCE rather than merely
+#                  skipping the row — see each negative row's own cell for why a
+#                  list there would be unreachable as well as undesirable;
+#                * a native-dispatch row declares the LITERAL STRING
+#                  `fan_out: native`, never an omitted key, so the guard can tell
+#                  "deliberately outside the partition" from "somebody forgot".
+#                  A list-valued `fan_out` on a native row is an error, and a
+#                  native row adds NO provider coverage: a native Task dispatch
+#                  never crosses /opt/mllm/bin, so a fan-out list has no
+#                  mechanism to act through;
+#                * a PROVIDER CLI the partition cannot carry AT ALL is named in
+#                  its host's `fan_out_carve_outs:` map — one per-CLI cell in the
+#                  `full_row: not-applicable` shape (`member`, `provenance`,
+#                  `task`, `reason`) — and removed from that host's `fan_out`
+#                  list. ADDED 2026-09-22, TOGETHER WITH ITS READER, and the
+#                  second half is the point: until that day the union guard
+#                  subtracted nothing, so this header, `redirect.yaml`'s grok row
+#                  and the plan all said "the union guard reads those cells"
+#                  while `test_redirect_matrix_claims.py` compared against all 16
+#                  unconditionally and a carve-out was UNEXPRESSIBLE — the
+#                  remedy its own failure message offered could not be taken.
+#                  The guard now subtracts exactly the carved ids, asserts each
+#                  cell is complete and dated, and asserts a carved CLI appears
+#                  in NO host's list, so a cell is a recorded exemption and never
+#                  a bare key that drops a provider. Every cell's `reason` must
+#                  name WHAT RETIRES IT: an exemption that cannot expire is how a
+#                  temporary one becomes permanent. One member today — `grok`, on
+#                  the opencode host, for egress rather than credentials.
+#
+#   runner:    THE ROW'S WRITE RUNNER — the CLI every write-batch dispatch on the
+#              row goes through, including the ones its `pre_commands` leg makes.
+#              Declared once per host, in the same place as `fan_out`, and a CLI
+#              ID for the same reason: the slug is built at read time from
+#              `model_arg`, so `opencode` renders `opencode:stub/stub-model` and
+#              never a bare token. It stays a SINGLE value —
+#              `driver.subagent_runner` is one slug and
+#              `max_concurrent_write_subagents` stays 1 — where `fan_out` is a
+#              list. T0a; each host's `runner_reason` carries why the value is
+#              `opencode` and not `codex`.
+#
+#   editable_artifacts:
+#              WHAT THE PHASE IS SUPPOSED TO CHANGE — the POSITIVE half of a
+#              write row's grade, and a replacement for the predicate
+#              `_source_delta` uses today (`test_container_host_lane.py:1441`:
+#              everything except the `plans/` and `.multi-llm/` prefixes). That
+#              predicate is right for `apply-code-fixes`, whose declared files
+#              ARE source files, and exactly wrong for `apply-suggestions`, whose
+#              entire intended effect IS an edit to a file under `plans/`
+#              (`utils/write_phase_bridge.py:89-92`, "The plan file is THE
+#              artifact") — a row graded by today's predicate could rewrite the
+#              plan, or fail to, and pass either way. Each write row therefore
+#              DECLARES its own set, derived from that phase's own
+#              `declared_files` builder in `utils/write_phase_bridge.py` rather
+#              than from a prefix convention, and the bookkeeping exclusion keeps
+#              only what is really bookkeeping (`state.json`, the run registry,
+#              the `{phase}/` artifact dirs).
+#              IT DOES NOT REPLACE `expect.paths`, which stays what it already
+#              is: the OUTER BOUND nothing may be written outside, graded by
+#              `harness.stray_paths` and pinned offline in both directions by
+#              `tests/test_stray_write_paths.py`. The two cells grade opposite
+#              directions — one says "this must change", the other "nothing else
+#              may" — and are not interchangeable.
+#              UNTIL §3.4's GRADER CHANGE LANDS (T4), A ROW WHOSE
+#              `editable_artifacts` FALL UNDER `plans/` CANNOT BE GRADED AT ALL:
+#              `_source_delta` drops them, so `bytes_must_change: true` is
+#              unsatisfiable there for exactly the reason header finding (3)
+#              records against the original `apply-suggestions` targeting. That
+#              is stated on each such row rather than discovered on its first
+#              paid run. The same change also has to bracket the host's own
+#              execution: `workspace-census-before.json` is written at
+#              `entrypoint.py:2441`, BEFORE `run_pre_commands` (`:2598`), so on a
+#              row whose earlier phases are seeded by a leg every byte the leg
+#              writes lands inside the measured delta.
+#
+#   graded_on: WHICH EVIDENCE A WRITE ROW'S PASS IS ALLOWED TO REST ON, because
+#              the four write phases do not divide alike:
+#                * `apply-suggestions` (`apply_suggestions_orchestrator.py:69`,
+#                  `marks_phase_completed = True`) and `implement`
+#                  (`full_workflow_orchestrator.py:100-112` — recorded the moment
+#                  its document is WRITTEN) record themselves complete before a
+#                  byte moves, so `test_the_phase_recorded_itself_completed`
+#                  passes on them with nothing applied. `graded_on: [bytes]`;
+#                  their recorded completion is a claim about work HANDED OUT.
+#                * `apply-task-suggestions`
+#                  (`apply_task_suggestions_orchestrator.py:66,119`) and
+#                  `apply-code-fixes` (`apply_code_fixes_orchestrator.py:563,627`)
+#                  are the reverse — `marks_phase_completed = False`,
+#                  `include_mark_completed=True` — so their completion is written
+#                  by the host's POST-LOOP `--mark-completed` call and IS
+#                  evidence that the loop finished: `graded_on: [bytes,
+#                  recorded-completion]`.
+#              A row must carry exactly the grade its phase can bear, or it
+#              passes on a claim.
+# ---------------------------------------------------------------------------
+
 hosts:
 
   # ===========================================================================
@@ -606,6 +764,284 @@ hosts:
       only by an agent that re-invokes the printed `next`, which this host has
       measurably failed to do twice. 8-of-8 phase coverage through a real host
       is carried by `codex-full` and `opencode-full` instead.
+      THAT EVIDENCE SENTENCE IS CORRECTED 2026-09-22, and the conclusion is not:
+      "measurably failed to do twice" was true of 2026-08-14's two attempts and
+      is NOT a permanent incapacity — two of the four 2026-09-22 runs DID
+      re-invoke the printed `--reaggregate` and recorded
+      `phases_completed["review-plan"]` (`claude-code-review-plan`'s
+      `re_measured:` block). What the same four runs also measured is that the
+      host turn is FLAKY: 7 pass / 4 fail over eleven turns, in two shapes, one
+      of which is precisely "stopped on return from a backgrounded native Task
+      batch, never continued". A `--full` row needs that continuation up to
+      eight times consecutively, so an intermittent continuation is a weaker
+      basis for one than a reliable one would be, not a stronger one. The
+      per-turn record is `claude-code-apply-native`'s `measured:` block.
+      NOT A BARE ABSENCE, AND UPDATED 2026-09-22 TO SAY SO: 8-of-8 on THIS host
+      is reached one phase at a time instead of in one `full` turn. `phase_rows:`
+      immediately below records the four READ phases — `review-plan`,
+      `generate-tasks`, `review-tasks`, `code-review` — as dated
+      `not-applicable` cells, each with its own reason and each naming **T4a**;
+      three WRITE phases are authored as rows at the end of `rows:`
+      (`claude-code-phase-apply-suggestions`, `claude-code-phase-implement`,
+      `claude-code-phase-apply-task-suggestions`, all **T4**); and the remaining
+      two of the eight already exist under historical names —
+      `apply-code-fixes` IS `claude-code-apply-native` and `review-plan` IS
+      `claude-code-review-plan`. So this host's coverage reads *four write
+      phases authored and unmeasured, four read phases measured-not-applicable*,
+      which is explicitly NOT 8-of-8 and is explicitly not "nobody got to it".
+    # -----------------------------------------------------------------------
+    # THE FOUR READ PHASES, RECORDED RATHER THAN AUTHORED (T4a, 2026-09-22).
+    #
+    # Same triple shape as `full_row:` above — a verdict, a provenance word and
+    # a reason — one entry per phase, because §6.3's rule is that a committed,
+    # measured "not applicable, because …" is an acceptable cell and an untested
+    # one is not. The union guard reads these cells, so a phase dropped from the
+    # eight without one still fails in plain CI.
+    #
+    # §3.4's consequence 2, applied literally. The four read phases share ONE
+    # unsolved step and therefore stand or fall together on T4a — and T4a IS
+    # BLOCKED IN THIS CHANGE: making an isolated `review-plan` record itself
+    # completed needs a keyed `make e2e-container-host` pass, which has not been
+    # run. A `claude-code-phase-review-plan` row would be byte-for-byte the shape
+    # that already failed twice; authoring it plus three siblings before T4a buys
+    # four rows that dispatch and never complete, at ~$0.25-0.60 each. So this
+    # host's stated outcome is **four write phases authored, four read phases
+    # measured-not-applicable** — which is explicitly NOT 8-of-8, and is written
+    # here rather than quietly missed.
+    #
+    # THE WALL IS THE SAME ONE `full_row_reason` NAMES, and it is INTERNAL TO THE
+    # PHASE, which is why no amount of pre-command seeding touches it: with
+    # `--exec-subagents` in `forbidden_flags` each of the four fans out to the
+    # native invoker, prints the `--reaggregate` follow-up as `next`, and exits 0
+    # with the phase DELIBERATELY unrecorded. Three of them print it from the
+    # shared base (`utils/review_orchestrator_base.py:4426,5161`) and
+    # `generate-tasks` carries its own (`generate_tasks_orchestrator.py:137,620`).
+    # A recorded completion for ANY read phase therefore requires the host to
+    # re-invoke `--reaggregate` — the one step `claude-code-review-plan` failed
+    # on BOTH model attempts (see that row's `attempts:` block below, recorded
+    # `partial` twice: the host began running the validation batches through its
+    # own native Task tool and never re-invoked the dispatcher, so `state.json`
+    # records no completion and only `validation_tasks.json` was materialized).
+    phase_rows:
+      review-plan:
+        row: not-applicable        # as a NEW row. The phase is already covered.
+        provenance: derived
+        task: T4a
+        reason: >
+          NOT A NEW ROW — this phase IS `claude-code-review-plan` below, under
+          its historical name, and it is already the isolated-single-phase shape
+          §3.4 would otherwise author. It is recorded `partial` on BOTH model
+          attempts (the `~deepseek/deepseek-v4-flash-latest` attempt leaked DSML
+          tool-call markup as literal text; the `anthropic/claude-haiku-4.5`
+          attempt at $0.2392 dispatched correctly and stopped at
+          [VALIDATION_PENDING]), so adding a second row with the same argv would
+          buy a second copy of the same measured failure. T4a is a RE-RUN of that
+          row with the continuation named in it, not an authoring task: its
+          acceptance check is `state.json` recording the phase completed DURING
+          the host's own execution, with the model pin and the `--reaggregate`
+          follow-up written into the row.
+      generate-tasks:
+        row: not-applicable
+        provenance: derived
+        task: T4a
+        reason: >
+          Blocked on the same [VALIDATION_PENDING]-class continuation wall as
+          `review-plan`, from its own code path rather than the shared one:
+          `generate_tasks_orchestrator.py:137,620` carries `--reaggregate`
+          itself. With `--exec-subagents` forbidden here the phase fans out to
+          the native invoker, prints the follow-up as `next` and exits 0 with the
+          phase unrecorded, and its gradeable evidence — a recorded completion
+          plus the `tasks/` artifact — is exactly what that exit withholds. The
+          failure is INTERNAL TO THE PHASE, so the two-command leg
+          (`review-plan`, `apply-suggestions`) that its
+          `PHASE_PREREQUISITES` closure would need does nothing for it: seeding
+          phases 1..n-1 from the rig cannot supply a continuation step the host
+          declines to take. Authored only if T4a shows an isolated read phase can
+          complete on this host.
+      review-tasks:
+        row: not-applicable
+        provenance: derived
+        task: T4a
+        reason: >
+          Same wall, from the shared base
+          (`utils/review_orchestrator_base.py:4426,5161`): Task batches, then a
+          `--reaggregate` the host has measurably not re-invoked. Its only
+          gradeable evidence is a recorded completion, which is precisely what
+          stopping at the marker withholds. Its leg would be the three-command
+          closure (`review-plan`, `apply-suggestions`, `generate-tasks`) and
+          would not help, for the reason above. Authored only after T4a.
+      code-review:
+        row: not-applicable
+        provenance: derived
+        task: T4a
+        reason: >
+          Same wall, same base, and the one read phase with NO prerequisites at
+          all (`check_workflow_prerequisites.PHASE_PREREQUISITES` gives
+          `code-review` none), so it has no leg to blame: if an isolated read
+          phase could complete on this host, this is the row that would show it
+          most cheaply — and that is T4a's question, asked once on `review-plan`
+          rather than four times. Note the mode word / phase name split: mode
+          `review-code` records phase `code-review`. Its OUTPUT is already
+          exercised here, through `claude-code-apply-native`'s pre-command leg,
+          which runs `review-code … --exec-subagents` from the RIG and whose
+          receipts land in `receipts/<row>-pre/` — that is the rig completing the
+          phase, never the host, and it is not coverage for this cell.
+    # -----------------------------------------------------------------------
+    # THIS HOST'S FAN-OUT SUBSET (T3 — UNMEASURED, authored 2026-09-22; no run
+    # has ever fanned any host out past one provider). Six CLI IDS; see the
+    # header block for why ids and never slugs, and for the three carve-outs.
+    #
+    # WHY THESE SIX, in the four terms §3.3's per-host review is made of:
+    #
+    # (1) THE THREE HOST CLIs ARE CROSS-ASSIGNED AS A 3-CYCLE, ON PURPOSE.
+    #     `codex`-the-provider runs under the claude-code host (here),
+    #     `opencode`-the-provider under the codex host, and
+    #     `claude-code`-the-provider under the opencode host. All three hosts are
+    #     also `lane: provider` rows (`redirect.yaml:90`, `:850`, `:1056`), and
+    #     the SELF-pairing cell is the one today's lane already covers — every
+    #     row on all three hosts fans out to `codex:stub-model` and nothing else.
+    #     The untested cell is a CLI running as a provider UNDER ANOTHER VENDOR'S
+    #     AGENT, with that host's env overlay and $HOME. It is an available
+    #     assignment rather than a conflict to design around: `entrypoint.run_host`
+    #     execs the host binary at its REAL path (`REAL_DIR/<binary>`,
+    #     `entrypoint.py:2014-2027`) while PATH stays wrapper-first for the whole
+    #     process tree, so a provider subprocess with the same name as the host
+    #     still resolves through /opt/mllm/bin and is redirected. If the per-host
+    #     review finds a cross cell infeasible — a host overlay colliding with
+    #     the provider's own home — the self-pairing is the fallback and is
+    #     written here as a dated cell rather than quietly taken.
+    #
+    # (2) A WIRE-SURFACE MIX, NOT AN ALPHABETICAL SLICE. This host carries BOTH
+    #     `responses` CLIs — `codex` and `muse` — plus four `chat`. The codex
+    #     host carries the one `gemini` surface plus four `chat`; the opencode
+    #     host carries the one `anthropic` surface (`claude-code`) plus four
+    #     `chat`. So no host can go green having exercised one wire shape.
+    #
+    # (3) THE PENALTY AND EGRESS-CHATTY CLIs GO TO THE HOST WITH THE FEWEST
+    #     FAN-OUT ROWS, WHICH IS THIS ONE. Counted after this change: claude-code
+    #     has TWO fan-out rows (`claude-code-ask`, `claude-code-review-plan`),
+    #     the codex host four, the opencode host eight (six before §3.4's two new
+    #     package rows). `claude-code-apply-native` and the three phase rows
+    #     below it are `fan_out: native` carve-outs and multiply nothing. So the
+    #     two CLIs whose cost is paid PER INVOCATION are placed where the
+    #     multiplier is smallest:
+    #       * `cline` pays ~7.5 s of blocked-egress wait every invocation —
+    #         `redirect.yaml` records `turn_s: 1.448` against
+    #         `turn_s_egress_blocked: 8.97`, and sizes its own `row_timeout_s:
+    #         600` for the penalty rather than the fast path. On a fan-out row
+    #         that multiplies by phases x batches, straight into `wall_clock_s`
+    #         and through it into `row_timeout_s` (`wall_clock_s + 500`,
+    #         `test_container_host_lane.py:531-532`).
+    #       * `kilocode`'s measured call-home set is models.dev, api.kilo.ai and
+    #         the registry.npmjs.org + github.com update-check pair 6 ms apart
+    #         (`redirect.yaml:614-641`) — and that pair SURVIVES
+    #         KILO_DISABLE_AUTOUPDATE, so it is per-invocation latency this lane
+    #         cannot switch off.
+    #
+    # (4) EGRESS RECONCILED WITH THIS LANE'S POSTURE BEFORE PLACEMENT, NOT AFTER.
+    #     The host lane runs on `bridge` with `egress: open`
+    #     (`posture.yaml:56-68`: the credentialed host modes must reach
+    #     openrouter.ai, so their guarantee downgrades from impossibility to
+    #     DETECTION), which means `TestTheFanOutNeverWentLive`
+    #     (`test_container_host_lane.py:992-1013`) catches a CLI reaching past
+    #     the stub only because something grades it. The declared
+    #     `egress_beyond_stub` CLIs were read against that before assignment:
+    #     `goose` (empty host list), `cline` and `kilocode` here; `aider`
+    #     (raw.githubusercontent.com) and `gemini` (play.googleapis.com) on the
+    #     codex host. Every one of them is `fatal_when_blocked: false`, so none
+    #     converts a detection lane into a blocked row — the reconciliation is
+    #     about what must be GRADED, not about what would break.
+    #
+    # THE ASSIGNMENT IS `unmeasured`, AND IT IS RE-DERIVED RATHER THAN DEFENDED.
+    # T3's one-row two-spec spike — widen exactly one `ask` row to two specs, run
+    # it, and count the distinct provider invocations, stub sessions and result
+    # files in that row's receipts — is what turns this list from a declaration
+    # into coverage; the partition is coverage only when that count equals the
+    # fan-out length. A provider the scenario cannot answer CONCURRENTLY under
+    # `on_unmatched: fail` is reassigned to another host's subset, or recorded as
+    # a dated carve-out cell in the `full_row: not-applicable` shape above —
+    # never silently dropped, because the union guard reads those cells and a
+    # drop nobody wrote down still fails in plain CI.
+    fan_out:
+      - codex        # 3-cycle leg 1: another vendor's agent CLI, run here as a
+                     # provider. `responses` surface, `model_arg: gpt-5.5`.
+      - muse         # the second `responses` CLI, and the reason this host cannot
+                     # go green on `chat` alone. `model_arg: muse-spark-1.2`; its
+                     # four background reminder observers are already in the
+                     # scenario's negative-lookahead set (§5's scenario row).
+      - cline        # per-invocation penalty CLI — see (3). `openai/stub-model`.
+      - kilocode     # egress-chatty CLI — see (3). `stub/stub-model`.
+      - pi           # `chat`, `stub/stub-model`. Also §3.1's chain-lane reviewer
+                     # pin, so its wire shape is the best-answered in the scenario.
+      - goose        # `chat`, `openai/stub-model`. Declares `egress_beyond_stub`
+                     # with an EMPTY host list, and brings the session-TITLE
+                     # request that fires even under --no-session — the trap the
+                     # scenario's negative lookahead already carries a rule for.
+    fan_out_provenance: unmeasured
+    fan_out_reason: >
+      T3. Authored 2026-09-22 from the per-host egress/timeout/env review above
+      and never executed: today every row on this host fans out to exactly one
+      provider (`codex:stub-model`, hard-coded at
+      `test_container_host_lane.py:530`), so no measurement of a widened fan-out
+      exists on any host. Re-derived from T3's one-row two-spec spike; the
+      per-provider runtime correlation (an invocation in `calls.jsonl`, a
+      `stub.jsonl` session, and that provider's own result file, all counted from
+      the host-start watermark) is what makes it evidence rather than a
+      declaration. Each inheriting row's `measured:` block and its `wall_clock_s`
+      are RE-MEASURED on the first fan-out pass, never edited to a prediction.
+    runner: opencode
+    runner_provenance: unmeasured
+    runner_reason: >
+      T0a, and this is the key's first appearance in the file — read it here and
+      the other two hosts' cells reference it.
+      WHAT IT REPLACES: `test_container_host_lane.py:530` hard-codes
+      `runner="codex:stub-model"` for every non-negative row on all three hosts,
+      so the whole lane dispatches its write batches through codex — precisely
+      the slug §1.4 predicts can no longer start. WHY NOT CODEX: codex's
+      `agent-write` renders `--sandbox workspace-write`, which is bubblewrap,
+      which needs an unprivileged user namespace that Docker's default seccomp
+      profile denies. The D6 pre-dispatch sandbox probe landed 2026-09-17 — a
+      month AFTER `runs/20260820T093838Z`, the run the four write rows below and
+      on the other two hosts last passed on — so inside this image that probe now
+      returns `unavailable` and `agent-write` raises `sandbox_unavailable` before
+      a child ever starts. 3.1/3.2's change to `redirect.yaml`'s
+      `chain_write_runner` does not reach this fixture: that key drives the chain
+      lane only, which is why the host lane needs a key of its own.
+      WHY OPENCODE: it is the same write-capable helper §3.2 picks for the chain
+      lane, for the same three reasons — it declares `agent-write`, its profile
+      is the application-level `--agent build` so it spawns NO sandbox, and it is
+      itself a `lane: provider` row here, which keeps
+      `test_redirect_matrix_claims.py`'s named-runner-is-itself-a-redirected-row
+      guard true with no carve-out (`redirect.yaml:84-95`).
+      A CLI ID, NOT A SLUG: the spec is built at read time from `model_arg`, so
+      this renders `opencode:stub/stub-model`. The bare form is the exact defect
+      R3 diagnoses — `ProviderModelNotFoundError: Model not found: stub-model/.`,
+      raised before one HTTP call left the process.
+      THE `remove_seed` ROWS ARE EXEMPT and keep `f"{host}:{negative_model}"`:
+      their subject is the host preflighting ITS OWN configured runner against a
+      deleted credential, so a shared runner would sail straight past the file
+      the row removes and the row would assert nothing at all. They carry no
+      `runner` key, and the guard asserts the absence rather than skipping them.
+      THE RUNNER NEEDS A SEEDED HOME, AND `helpers` IS WHERE IT COMES FROM —
+      which is why the disjoint partition does not starve two of the three hosts.
+      The fixture turns a row's `helpers` into its seeded identities
+      (`entrypoint.py:2375`, `seed_homes(identities)`) and `helpers` becomes the
+      row's fan-out; `opencode` is in exactly ONE host's `fan_out` (the codex
+      host's, by the 3-cycle) and must nonetheless have a home on all three.
+      `helpers` is about SEEDED HOMES, `fan_out` is about GRADED PROVIDER
+      COVERAGE, and the two sets are UNIONED at read time: the disjointness rule
+      governs the second only. A runner with no seeded home fails preflight for a
+      reason that has nothing to do with the phase under test.
+      UNMEASURED: no row on this lane has ever dispatched a write batch through
+      this runner. T0a is the task, and its acceptance check is the row's
+      `subagent_audit.jsonl` naming a non-codex write runner with the write phase
+      completing.
+      WHAT IT REACHES ON THIS HOST, which has no executor rows at all: every
+      `pre_commands` leg. `claude-code-apply-native`'s `review-code … --yes
+      --quick --exec-subagents` and the three phase rows' legs below are the RIG
+      dispatching with subagent execution on, so their batches route through this
+      runner — which is why §3.4's phase rows sit behind T0a even though the host
+      turn itself is `fan_out: native` and never crosses /opt/mllm/bin.
     # -----------------------------------------------------------------------
     rows:
       - id: claude-code-ask
@@ -621,6 +1057,29 @@ hosts:
           host_exit: 0
           turns: 12
           receipts: ["util instructions ask", "ask … --host claude-code --yes --quick"]
+          re_measured:
+            on: "2026-09-22"
+            runs: ["20260922T084502Z", "20260922T124956Z", "20260922T154654Z"]
+            also_ran: "20260922T172155Z"
+            verdict: >
+              3 pass / 1 fail. THIS ROW FLAKES TOO, WHICH IS WHY IT IS RECORDED
+              HERE RATHER THAN LEFT READING `pass`: `20260922T154654Z` produced
+              ZERO dispatcher receipts, exit 0, `result: ""`, 165 output tokens and
+              a $0.000000 key delta — Shape A, the same never-started turn that hit
+              `claude-code-review-plan` on `20260922T143440Z`. It is the cheapest
+              possible red and the census calls it a pass, so nothing but the
+              receipt count catches it. The three passes: $0.012110 / 4 receipts
+              (`…T084502Z`), $0.024932 / 4 (`…T124956Z`) and $0.017045 / 4 on the
+              isolated single-row re-run `20260922T172155Z`, which was taken to
+              check that running this row ALONE clears it — it does not follow that
+              it does; one isolated pass is one sample.
+              THE FULL RECORD for all three claude-code rows — the eleven-turn
+              table, both failure shapes, the idle-gap discriminator and the
+              identity checks — is in `claude-code-apply-native`'s `measured:`
+              block below. This row spawns no subagents at all
+              (`subagent_stats.spawned: 0`, `origin: null` on every turn, green and
+              red alike), so the Shape-B analysis does not apply to it; only
+              Shape A has ever been measured here.
         note: >
           The only claude-code row with no batch at all, hence the only cheap one.
           MEASURED: the host read the shim, ran `util instructions ask`, ran the
@@ -651,6 +1110,15 @@ hosts:
             - model: "~deepseek/deepseek-v4-flash-latest"
               usd: 0.0036
               verdict: "MODEL failure, not a shim failure"
+              # NARROWED 2026-09-22, AND KEPT: the diagnosis stands for what it
+              # diagnosed — the DSML tool-call markup is a deepseek artefact and
+              # nothing in the shim was implicated — but NOT for the remedy it
+              # implied. The fallback this verdict sent the row to became
+              # `claude-code-apply-native`'s row pin, and four runs on
+              # 2026-09-22 put that pin 1-of-4 RED; this row failed twice more on
+              # 2026-09-22 at the host pin, in two shapes that are NOT the DSML
+              # leak. `re_measured:` below carries this row's four attempts and
+              # points at the full eleven-turn record.
               detail: >
                 The agent read the shim and ran `util instructions review-plan`,
                 then the model emitted its own tool-call markup as literal text —
@@ -686,6 +1154,87 @@ hosts:
             spent $0.2392. It prices tokens as first-party Anthropic
             ("provider": "firstParty") regardless of ANTHROPIC_BASE_URL. Only the
             dedicated key's own `usage` delta is a spend figure on this lane.
+          re_measured:
+            on: "2026-09-22"
+            runs: ["20260922T084502Z", "20260922T124956Z",
+                   "20260922T143440Z", "20260922T154654Z"]
+            verdict: >
+              FLAKY AT THE HOST PIN — 2 pass / 2 fail on this row over four runs
+              whose `workspace-census-before.json` and host argv are
+              byte-identical. TWO THINGS THIS CORRECTS ABOVE. (1) `verdict:
+              partial — dispatched and stopped at the marker, never continued`
+              was a statement about 2026-08-14's two attempts and is NOT a
+              property of the host: two of these four runs DID re-invoke the
+              printed `--reaggregate` and recorded
+              `phases_completed["review-plan"]`. (2) The `attempts:` block above
+              diagnosed the deepseek failure and took the Anthropic fallback as
+              the answer; that fallback is this file's only row pin, on
+              `claude-code-apply-native`, and it is 1-of-4 red on the same four
+              runs — so the pin is NOT DEMONSTRATED TO FIX the flakiness, though
+              neither is it demonstrated to do nothing.
+              THE FULL RECORD — the eleven-turn table, the two failure shapes,
+              the idle-gap discriminator, the identity checks and the corrected
+              costs — IS WRITTEN ONCE, in `claude-code-apply-native`'s
+              `measured:` block below. This key carries only this row's own four
+              attempts so the two cannot drift apart.
+            attempts:
+              - run: "20260922T084502Z"
+                on: "2026-09-22"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.045408
+                dispatcher_receipts: 8
+                host_wall_s: 359.95
+                verdict: pass
+                detail: >
+                  THE CONTINUATION THE 2026-08-14 ATTEMPTS NEVER MADE. Ran
+                  `review-plan --plan-file plans/auth-feature.md --quick`,
+                  stopped at the marker, dispatched the validation batches
+                  through its own Task tool and then re-invoked `review-plan …
+                  --reaggregate` (8th dispatcher receipt, exit 0). `state.json`
+                  records `phases_completed["review-plan"]`. Idle gap 17.1 s.
+              - run: "20260922T124956Z"
+                on: "2026-09-22"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.096642
+                dispatcher_receipts: 6
+                host_wall_s: 684.84
+                verdict: "FAIL-B — stopped on the task notification"
+                detail: >
+                  Six dispatcher receipts, three Task subagents spawned and
+                  completed, and the turn ended on
+                  `origin: {kind: "task-notification"}` with the whole final
+                  `result` being `Batch 1 result written (valid). Waiting on
+                  batch 0.` — 250 output tokens. No `--reaggregate`, no
+                  `state.json` in the bundle at all. Idle gap 190.2 s, the
+                  longest measured. This is Shape B; see apply-native's
+                  `shapes:`.
+              - run: "20260922T143440Z"
+                on: "2026-09-22"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.000711
+                dispatcher_receipts: 0
+                host_wall_s: 43.9
+                verdict: "FAIL-A — the host turn never started"
+                detail: >
+                  ZERO dispatcher receipts: the bundle holds the entrypoint's own
+                  `install-host --check` and nothing else. Host exit 0,
+                  `subtype: success`, `result: ""`, `origin: null`,
+                  `subagent_stats.spawned: 0`, 95 output tokens, an EMPTY census
+                  delta and no `state.json`. This is Shape A.
+              - run: "20260922T154654Z"
+                on: "2026-09-22"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.102181
+                dispatcher_receipts: 7
+                host_wall_s: 395.4
+                verdict: pass
+                detail: >
+                  Dispatched, stopped at the marker, ran the batches natively and
+                  re-invoked `review-plan --plan-file plans/auth-feature.md
+                  --host claude-code --quick --reaggregate` (7th dispatcher
+                  receipt, exit 0); `phases_completed["review-plan"]` recorded.
+                  The one turn in the set that spawned FOUR subagents, and the
+                  only one carrying `requested.foreground: 1`. Idle gap 15.7 s.
         note: "carries a validation batch and a consolidation batch of its own — both real spend"
       - id: claude-code-apply-native
         # RETARGETED 2026-08-20 from `apply-suggestions` to `apply-code-fixes`.
@@ -698,6 +1247,56 @@ hosts:
         # said "nothing else about the row moved"; that run corrected it.
         args: '--apply-code-fixes "plans/auth-feature.md" --yes'
         command: "apply-code-fixes plans/auth-feature.md --yes"
+        # THIS ROW **IS** THE `apply-code-fixes` PHASE ROW, under its historical
+        # name — recorded here 2026-09-22 because §3.4 reaches this host's eight
+        # phases through `claude-code-phase-<name>` rows and a reader counting
+        # them would otherwise see seven and call this an eighth, unrelated row.
+        # It is one of only two of the eight that already existed (the other is
+        # `claude-code-review-plan`, which is the `review-plan` phase row), and
+        # it is the shape all three NEW write rows below are modelled on: a
+        # pre-command leg, then native Task batches, graded on the SHA census.
+        # It is not renamed: the id is written into
+        # `tests/test_stray_write_paths.py:78-88`, into `CREDENTIALED_ROWS`, and
+        # into five run bundles' receipt directories, and a rename would orphan
+        # every one of them to gain a naming convention.
+        #
+        # A NATIVE-DISPATCH ROW, DECLARED RATHER THAN OMITTED. The host's own
+        # Task tool never crosses /opt/mllm/bin, so a fan-out list has no
+        # mechanism to act through: this row adds NO provider coverage toward G2
+        # and the union guard excludes it BY DECLARATION. The literal string is
+        # what lets the guard tell "deliberately outside the partition" from
+        # "somebody forgot"; a list-valued `fan_out` here is an error.
+        fan_out: native
+        # WHAT THIS PHASE IS SUPPOSED TO CHANGE — the positive half of the grade,
+        # and on this row it is exactly what `_source_delta` already grades
+        # (`test_container_host_lane.py:1441`), which is why the key changes
+        # nothing here and changes everything on the two rows whose artifacts
+        # live under `plans/`. Derived from the phase's own task builder:
+        # `utils/write_phase_bridge.py:132-153` keys an apply-code-fixes batch by
+        # `file_key` and declares that file, and the five issues in
+        # `code_review/container_issues.json` name `src/security.py` and
+        # `src/auth.py` — with the fifth asking for a NEW test module whose
+        # filename the model chooses, which is why the second entry is a shape.
+        # Identical to `expect.paths` below on this row; the two cells still mean
+        # opposite things (what MUST change, versus what nothing may be written
+        # outside) and are not interchangeable.
+        editable_artifacts:
+          - "src/**"
+          - "tests/test_*.py"
+        graded_on: [bytes, recorded-completion]
+        graded_on_reason: >
+          BOTH, and this row is the reason the second is available at all.
+          `apply_code_fixes_orchestrator.py:563` sets
+          `marks_phase_completed = False` and `:627` passes
+          `include_mark_completed=True`, so the completion record is written by
+          the host's POST-LOOP `apply-code-fixes --plan-file "$PLAN_PATH"
+          --mark-completed` (`instructions/apply-code-fixes.md:501`, added by R1)
+          — a command a loop that stopped early never reaches. Four of this
+          row's five measured attempts did not reach it; the fifth did, at
+          receipt 16, and `artifacts/auth-feature/state.json` then recorded
+          `phases_completed["apply-code-fixes"]`. That is evidence, where the
+          same assertion on `apply-suggestions` or `implement` would pass with
+          nothing applied.
         # THE PRE-COMMAND LEG (header finding (1), landed 2026-08-19). Ordered
         # dispatcher invocations the ENTRYPOINT runs in this row's workspace
         # before the host process starts, so the row's mode has the prerequisite
@@ -811,6 +1410,24 @@ hosts:
         # by attempt 3, which drove all three batches and the verification step
         # through this exact shim and stopped only at a turn cap.
         #
+        # THAT DIAGNOSIS IS HALF RIGHT, AND THE OTHER HALF IS CORRECTED HERE,
+        # 2026-09-22 — corrected in place rather than deleted, because the
+        # paragraph above is exactly what five runs supported on the day it was
+        # written. WHAT STANDS: the DSML markup is a deepseek artefact, and
+        # nothing in the shim, the instruction or the dispatcher has ever been
+        # implicated on this row. WHAT DOES NOT: the remedy the sentence implies
+        # and the `model:` block below installs — that pinning this row to
+        # `anthropic/claude-haiku-4.5` removes the failure. FOUR FRESH RUNS ON
+        # 2026-09-22 executed this row AT THAT PIN, on byte-identical inputs, and
+        # ONE OF THE FOUR IS RED. THE PIN IS THEREFORE NOT DEMONSTRATED TO FIX
+        # THIS ROW. It is equally not demonstrated to do nothing: one red in four
+        # is a small sample, the host pin it replaced was four reds in four, and
+        # no 2026-09-22 run reproduced the DSML markup at all. The same four runs
+        # put the OTHER two claude-code rows — which no model pin touches — red
+        # 3 times in 7, in the same two shapes. The record, with the eleven-turn
+        # table, both shapes, the discriminator and the corrected costs, is the
+        # `measured:` block below.
+        #
         # THE COST, STATED RATHER THAN BURIED, AND THE PREDICTION WAS LOW.
         # Measured on this row at the host pin: $0.0025-$0.0595 per attempt
         # (four samples above; ~$0.022 mean). This block first predicted "~$0.24
@@ -824,6 +1441,27 @@ hosts:
         # That is what the matrix's only applied-byte assertion through a real
         # host now costs to grade. A row that cannot exercise the thing it
         # exists to test costs more than $0.60.
+        #
+        # AND THE SECOND SAMPLE THIS PARAGRAPH ASKED FOR ARRIVED AS FOUR,
+        # 2026-09-22, SO ~$0.60 IS LOW BY ABOUT 2x. Key-usage deltas on this row
+        # at this pin: $0.479441 (`runs/20260922T124956Z`), $1.079751
+        # (`…T084502Z`), $1.274321 (`…T154654Z`), $1.700198 (`…T143440Z`) —
+        # mean $1.13, max $1.70. The CHEAPEST of the four is the RED one, which
+        # is the shape of this row's spend: a turn that stops early is cheap, so
+        # a mean taken over passes and failures understates a passing run (the
+        # three passes mean $1.35). Budget ~$1.20 per run of this row and ~$1.70
+        # for the worst case measured; the $0.586302 single sample above is now
+        # the cheapest pass on record rather than the anchor.
+        # WHAT `cost_budget_usd` IS, SINCE THE THREE `claude-code-phase-*` ROWS
+        # BELOW DERIVE THEIRS FROM THAT ANCHOR: documentation. The key appears in
+        # NO `.py` in this repository — grepped 2026-09-22, this file is the only
+        # place the string occurs — so nothing reads it and nothing enforces it.
+        # The only live ceiling on this lane is the dedicated key's own `limit`,
+        # recorded per row in `credential-census.json` (`limit=30` on all four
+        # runs). Those three rows' $0.60 cells are not re-derived here: they are
+        # unmeasured rows whose first pass (T4b) is what replaces the number, and
+        # inventing a second estimate from this row's four samples would put two
+        # predictions in the file where there is one measurement.
         #
         # MEASURED, `runs/20260821T082250Z`, FIRST PASS THIS ROW HAS EVER HAD.
         # Host exit 0, `subtype: success`, num_turns 28 against --max-turns 60,
@@ -849,7 +1487,7 @@ hosts:
           # terms: the argv is rendered by substituting `<model>` in the host's
           # `invoke_argv`, never read from here.
           arg: ["--model", "anthropic/claude-haiku-4.5"]
-          provenance: verified     # runs/20260821T082250Z — the row passed on it
+          provenance: verified     # runs/20260821T082250Z — the row passed on it; 3 of 4 again on 2026-09-22 (see `measured:` below)
           resolved_on: "2026-08-21"
           scope: row
           why: >
@@ -865,6 +1503,19 @@ hosts:
             this word: that the row is now reliable. One agreeing run is one
             sample of a model's behaviour, and the four reds above are what
             variance on this row looks like at the other pin.
+            THAT SENTENCE WAS MEASURED ON 2026-09-22 AND IT HELD. Four further
+            runs of this row on this slug, on byte-identical inputs, came back
+            3 pass / 1 red: `runs/20260922T124956Z` is the red — two dispatcher
+            receipts, no `--mark-completed`, and `state.json` recording no
+            `apply-code-fixes` completion, although its three native batches had
+            applied the bytes. SO THE PIN IS NOT DEMONSTRATED TO FIX THIS ROW,
+            and the comment block above is corrected to say so. The slug
+            nevertheless STAYS, and `verified` stays with it: this cell's claim
+            is that the row runs on this slug and has passed on it, which four
+            runs support better than one did, not that the row is reliable on it.
+            Nor is the pin shown to be useless — one red in four is a small
+            sample, and no 2026-09-22 run reproduced the DSML tool-call markup
+            the pin was taken for. The full record is the `measured:` block below.
         expect:
           run: none
           exit: 0
@@ -884,6 +1535,217 @@ hosts:
           # `tests/conftest.py`, `tests/fixtures/**`, `tests/unit/deep/test_x.py`,
           # `README.md` and everything outside the two trees.
           paths: ["src/**", "tests/test_*.py"]
+        # -------------------------------------------------------------------
+        # THE 2026-09-22 RE-MEASUREMENT, AS DATA RATHER THAN AS PROSE — and
+        # deliberately the record for ALL THREE claude-code rows, because what it
+        # measures is a property of THE HOST TURN and not of this row. The other
+        # two rows carry a dated pointer to this block instead of a partial copy
+        # of it, so the table cannot drift into three disagreeing versions.
+        measured:
+          on: "2026-09-22"
+          runs: ["20260922T084502Z", "20260922T124956Z",
+                 "20260922T143440Z", "20260922T154654Z"]
+          also_ran: "20260922T172155Z"   # isolated re-run; claude-code-ask only
+          verdict: >
+            FLAKY — 7 pass / 4 fail over the ELEVEN claude-code host turns those
+            four runs hold, i.e. 36%. THE HEADLINE FOR THIS ROW: the model pin
+            declared above as the remedy for four 2026-08-21 reds is itself
+            1-of-4 RED here, so IT IS NOT DEMONSTRATED TO FIX THIS ROW. What is
+            equally not claimed is that it does nothing — one red in four is a
+            small sample, the host pin it replaced was four reds in four, and no
+            2026-09-22 run reproduced the DSML tool-call markup it was taken for.
+            The two rows still on the host pin are 3-of-7 red over the same runs,
+            in the same two shapes, which is what says the phenomenon is the
+            host turn rather than the slug.
+          table: |
+            run       row           pin       verdict  key $     receipts  final `result`
+            084502Z   ask           deepseek  pass     0.012110  4         full report
+            084502Z   review-plan   deepseek  pass     0.045408  8         full report
+            084502Z   apply-native  haiku     pass     1.079751  16        full report
+            124956Z   ask           deepseek  pass     0.024932  4         full report
+            124956Z   review-plan   deepseek  FAIL-B   0.096642  6         "Batch 1 result written (`valid`). Waiting on batch 0."
+            124956Z   apply-native  haiku     FAIL-B   0.479441  2         a bolded "All code fixes successfully applied!" summary
+            143440Z   review-plan   deepseek  FAIL-A   0.000711  0         "" (the empty string)
+            143440Z   apply-native  haiku     pass     1.700198  17        full report
+            154654Z   ask           deepseek  FAIL-A   0.000000  0         "" (the empty string)
+            154654Z   review-plan   deepseek  pass     0.102181  7         full report
+            154654Z   apply-native  haiku     pass     1.274321  16        full report
+            --
+            `receipts` counts DISPATCHER receipts, which is what the lane grades:
+            `test_container_host_lane._dispatcher_receipts` drops the
+            entrypoint's own `install-host --check`, so every row above holds one
+            more receipt FILE than the number printed (and the apply rows hold a
+            `<row>-pre/` receipt for the leg besides). `key $` is the row's
+            `usage.json` delta, the only spend figure on this lane: this host's
+            own `total_cost_usd` prices OpenRouter tokens as first-party
+            Anthropic and reported $7.02 / $3.46 / $9.73 / $7.54 for the four
+            apply-native turns whose real deltas are in the column.
+          shapes: >
+            TWO DISTINCT FAILURES, NOT ONE, and the envelope tells them apart.
+            SHAPE A — NEVER STARTED. Zero dispatcher receipts. The host turn
+            still exits 0 with `subtype: success`, and carries `result: ""` (the
+            empty string), `origin: null`, `subagent_stats.spawned: 0` and 95-165
+            output tokens for the whole turn ($0.000711 on
+            `143440Z/claude-code-review-plan`, $0.000000 on
+            `154654Z/claude-code-ask`). The only receipt in the bundle is the
+            entrypoint's own `install-host --check`; nothing in the workspace
+            moved (`143440Z/claude-code-review-plan`'s census delta is EMPTY) and
+            no `state.json` was ever written. The host read its prompt, produced
+            a few dozen thinking tokens and said nothing.
+            SHAPE B — STOPPED ON RETURN FROM A BACKGROUNDED NATIVE `Task` BATCH.
+            The dispatcher ran, the host dispatched the phase's batches through
+            its own Task tool, and the turn ENDED at the notification that they
+            had come back — mid-loop, with the continuation this host's
+            `continuation:` cell requires never made. Envelope:
+            `origin: {kind: "task-notification"}`, `subagent_stats` `{spawned: 3,
+            completed: 3, failed: 0, requested: {background: 0, foreground: 0,
+            unset: 3}, started_in_background: 3}`.
+            `124956Z/claude-code-review-plan` stopped after 6 receipts on
+            `Batch 1 result written (valid). Waiting on batch 0.` and never
+            re-invoked the `--reaggregate` its own `next` named.
+            `124956Z/claude-code-apply-native` stopped after 2 — and its native
+            batches HAD applied: the census delta is the same three entries a
+            green run produces (`src/auth.py`, `src/security.py`,
+            `tests/test_security.py`), inside `paths`, and the final `result`
+            claims them correctly, fix by fix. What is missing is not the bytes
+            but every receipt that RECORDS them — the three `util prior-changes
+            append`, the `util metrics record|finish|report` and, decisively, the
+            `--mark-completed` finalization — so `state.json` holds only the
+            leg's `code-review` and R1's assertion has nothing to read. It is the
+            exact failure `continuation.note` on the host block predicts:
+            dispatched, never continued.
+          discriminator: >
+            A GREEN TURN AND A SHAPE-B RED CARRY THE SAME `origin` AND THE SAME
+            `subagent_stats`, so neither key discriminates on its own — FIVE of
+            the seven greens are `task-notification` turns carrying
+            `started_in_background: 3` exactly as the two reds do (one of those
+            five, `154654Z/claude-code-review-plan`, spawned FOUR in all and is
+            the only turn anywhere in the set with `requested.foreground: 1`);
+            the remaining two greens are the `ask` turns, which spawn nothing.
+            WHAT DISCRIMINATES IS THE IDLE GAP AT THE END OF THE TURN:
+            the interval between the last dispatcher receipt's `ended_at` and the
+            end of the host turn, taken as the last pre-host receipt plus
+            `host-run.json`'s `wall_clock_s` (it agrees with the bundle's own
+            file mtimes to 0.2 s). Over the seven turns that backgrounded a Task
+            batch at all, the five that finished sat 6.5 / 7.0 / 15.7 / 17.1 /
+            20.0 s there — the time it takes to write a final report — and the
+            two Shape-B reds sat 136.3 s and 190.2 s, an order of magnitude
+            longer, with nothing at the end of it. READ IT AS A SIGNATURE, NOT AS
+            A THRESHOLD TO ASSERT ON: the `ask` row, which backgrounds nothing,
+            sat 26.0 and 27.6 s green and 81.7 s green on the isolated
+            `20260922T172155Z`, so the gap separates greens from reds only within
+            the rows that background a batch, and the sample is five against two.
+          inputs_identical: >
+            NOT A WORKSPACE OR AN ARGV DIFFERENCE, CHECKED RATHER THAN ASSUMED.
+            Per row, `workspace-census-before.json` is BYTE-IDENTICAL across all
+            four runs — one sha256 per row over the same nine entries — and so is
+            the host's own argv in `host-run.json` (one sha256 per row, `bound_s`
+            600 on ask and 900 on the other two). Every turn ran claude-code
+            `1.18.31`, as each bundle's own `install-host --check` line records.
+            The image moved between runs and does not explain it either:
+            `084502Z` ran on `sha256:9cc9458…`, `124956Z` AND `143440Z` both on
+            `sha256:6bca0fc…` — one red apply-native and one green apply-native
+            on the same image — and `154654Z` on `sha256:86541c1…`, which carried
+            a green review-plan and a green apply-native beside a Shape-A red
+            ask. Greens and reds occur inside a single run and on a single image.
+          cost: >
+            THIS ROW AT THIS PIN, FOUR SAMPLES: $0.479441, $1.079751, $1.274321,
+            $1.700198 — mean $1.13, max $1.70, and the cheapest is the RED one,
+            so a mean over passes and failures understates a passing run (the
+            three passes mean $1.35). The ~$0.60 the comment block above budgets
+            from a single $0.586302 sample is low by about 2x; ~$1.20 typical and
+            ~$1.70 worst case is what four samples say. `cost_budget_usd` is
+            DOCUMENTATION, not a cap — the key appears in no `.py` in this
+            repository (grepped 2026-09-22; this file is the only place the
+            string occurs), so nothing reads it and nothing enforces it. The one
+            live ceiling is the dedicated key's own `limit`, recorded per row in
+            `credential-census.json` as `limit=30` on all four runs.
+          not_graded_by_the_census: >
+            `matrix-census.json` records `outcome: pass` for EVERY claude-code
+            row in all four runs, and that word is not the lane's verdict: it is
+            the driver's per-row outcome (the container terminated within its
+            bound), which every one of these turns did — Shape A included, in
+            15.9 s. The verdicts in the table are the row's own graded claims,
+            read back from the bundles: `test_a_receipt_exists_for_the_row` and
+            `test_enough_receipts_for_the_rows_shape` for Shape A, and
+            `test_the_phase_recorded_itself_completed` — `state.json`'s
+            `phases_completed` — for Shape B. Anyone re-deriving this table from
+            the census alone will read eleven passes.
+          attempts:
+            - run: "20260922T084502Z"
+              on: "2026-09-22"
+              model: "anthropic/claude-haiku-4.5"
+              usd: 1.079751
+              dispatcher_receipts: 16
+              host_wall_s: 248.6
+              verdict: pass
+              detail: >
+                The 2026-08-21 pass reproduced. Receipt 17 (16th dispatcher
+                receipt) is `apply-code-fixes plans/auth-feature.md
+                --mark-completed`, exit 0, and
+                `artifacts/auth-feature/state.json` records
+                `phases_completed["apply-code-fixes"]`. Census delta inside
+                `paths`: `src/auth.py`, `src/security.py`,
+                `tests/test_security.py`. Idle gap after the last receipt 20.0 s.
+            - run: "20260922T124956Z"
+              on: "2026-09-22"
+              model: "anthropic/claude-haiku-4.5"
+              usd: 0.479441
+              dispatcher_receipts: 2
+              host_wall_s: 149.37
+              verdict: "FAIL-B — dispatched, applied, never recorded"
+              detail: >
+                THE RED THAT CONTRADICTS THE PIN. Two dispatcher receipts (`util
+                instructions apply-code-fixes`, then `apply-code-fixes
+                plans/auth-feature.md --host claude-code --yes`), three native
+                Task batches spawned and completed, the three files' bytes moved
+                exactly as the row declares — and then the turn ended on the task
+                notification with a confident "All code fixes successfully
+                applied!" summary. No `prior-changes append`, no `metrics`, no
+                `--mark-completed`; `state.json` records only the leg's
+                `code-review`, so `test_the_phase_recorded_itself_completed` is
+                the assertion that fails. Idle gap 136.3 s. `receipts_min: 2` is
+                satisfied by this run, which is worth knowing about that cell:
+                the receipt count alone does not catch this shape.
+            - run: "20260922T143440Z"
+              on: "2026-09-22"
+              model: "anthropic/claude-haiku-4.5"
+              usd: 1.700198
+              dispatcher_receipts: 17
+              host_wall_s: 288.58
+              verdict: pass
+              detail: >
+                The most expensive turn on record for this row, and a clean one:
+                17 dispatcher receipts ending on `apply-code-fixes --plan-file
+                plans/auth-feature.md --mark-completed`, the phase recorded
+                completed, the same three-entry census delta. Idle gap 6.5 s.
+                Ran on the SAME image as the red above (`sha256:6bca0fc…`), 50
+                minutes later.
+            - run: "20260922T154654Z"
+              on: "2026-09-22"
+              model: "anthropic/claude-haiku-4.5"
+              usd: 1.274321
+              dispatcher_receipts: 16
+              host_wall_s: 257.33
+              verdict: pass
+              detail: >
+                Third pass of four: 16 dispatcher receipts ending on
+                `apply-code-fixes --plan-file … --mark-completed`, phase
+                recorded, same three-entry delta, idle gap 7.0 s. Its sibling
+                `claude-code-ask` in the same run and on the same image was
+                Shape-A red, which is the clearest statement in the table that
+                this is not a per-row property.
+          what_this_does_not_settle: >
+            WHY. Nothing in these four bundles says what the host was waiting on
+            for those 136 and 190 seconds, and the two Shape-A turns leave no
+            trace at all beyond a 95-165-token envelope — the lane captures the
+            final result envelope only (`result_line_in_stream: absent` on the
+            host block), so there is no per-turn stream to read. A cause needs
+            `--output-format stream-json` on a reproduction, which is a different
+            pinned cell and its own spend. WHAT WOULD RETIRE THE `measured-red`
+            WORD BELOW IS UNCHANGED: B2's thirteen-row lane run. What this block
+            changes is only what the file CLAIMS in the meantime — that a pin
+            fixed a row it has now failed once in four.
         # STILL `measured-red`, AND DELIBERATELY SO — the word is B2's to change,
         # not this row's. `runs/20260821T082250Z` re-measured the row ALONE
         # (`-k claude-code-apply-native`) after R1's per-row model pin below and
@@ -991,6 +1853,846 @@ hosts:
           the command) and `test_no_write_landed_outside_the_declared_paths`
           (**R2** — the `paths` widening above). A failed assertion is a
           measurement; B2's re-run is what promotes this cell to `verified`.
+
+      # ======================================================================
+      # THE THREE NEW WRITE-PHASE ROWS (§3.4, T4 — AUTHORED 2026-09-22, NOTHING
+      # BELOW HAS RUN).
+      #
+      # §3.4 reaches this host's eight phases one at a time, through per-phase
+      # rows that use the EXISTING pre-command leg to seed each phase's
+      # prerequisites from the rig, so the host turn does exactly one phase
+      # natively. Two of the eight already exist: `apply-code-fixes` IS
+      # `claude-code-apply-native` above, under its historical name, and
+      # `review-plan` IS `claude-code-review-plan`. Four are the read phases,
+      # recorded as dated `not-applicable` cells in `phase_rows:` on the host
+      # block rather than authored, because T4a is blocked. THREE ARE NEW, and
+      # they are these — the write phases, which do not wait on T4a because
+      # their legs run `review-plan` through the RIG with `--exec-subagents`,
+      # which does complete.
+      #
+      # ALL THREE ARE MODELLED ON `claude-code-apply-native`: the only row in the
+      # repository where applied bytes on a real host are a pass, and the only
+      # one of this host's three measured shapes that has ever completed a phase.
+      # They copy its shape — a leg, then native batches, graded on the SHA
+      # census — and its row-level model pin, and they diverge only where the
+      # phase does.
+      #
+      # WHY THEY ARE FEASIBLE IN THE NATIVE-BYTES SHAPE AND NO OTHER.
+      # `[WRITE_PHASE_NOT_EXECUTED]` is `full` counting emitted-but-unexecuted
+      # batches inside ONE process; a single-phase row with a native invoker
+      # OUTSIDE it is the apply-native shape, where the host runs the batches
+      # through its own Task tool and the bytes on disk are the grade. An
+      # executor-recorded shape is unavailable here for the reason the host block
+      # already states: `--exec-subagents` is in `forbidden_flags`, and
+      # `apply_orchestrator_base.run_write_executor` returns None without it, so
+      # `write_batch_report.json` structurally does not exist on this host.
+      # `TestTheWriteRowsAreGradedOnBytes` grades these rows on its ABSENCE, the
+      # same way it grades apply-native.
+      #
+      # EVERY LEG RUNS WRITE PHASES WITH `--exec-subagents`, SO ALL THREE ARE
+      # BEHIND T0a. Seeding `apply-suggestions` from the rig is the rig
+      # dispatching write batches through this lane's write runner — until T0a
+      # that is the hard-coded `codex:stub-model` §1.4 predicts can no longer
+      # start, and copying a blocked row yields a blocked row. The host block's
+      # `runner: opencode` is what unblocks them; T4b is what authors and
+      # observes the legs themselves.
+      #
+      # COST, BUDGETED AGAINST THE ONE MEASUREMENT THAT FITS. The anchor is
+      # `claude-code-apply-native`'s **$0.586302** key-usage delta on
+      # `runs/20260821T082250Z` — its FIRST AND ONLY PASS, after four failed
+      # attempts and a row-level model pin — not `claude-code-ask`'s $0.0204 (no
+      # batch at all) and not `claude-code-review-plan`'s $0.2392 (a partial that
+      # dispatched and stopped). So ~$0.60 per write row, and the BRING-UP is
+      # budgeted separately from the pass: apply-native needed five runs of one
+      # row before its first green, and there is no reason to price three new
+      # rows as if they will each land first time. AND THE HOST'S OWN NUMBER IS
+      # NOT A SPEND FIGURE: `total_cost_usd` is wrong by ~7x here (it prices as
+      # first-party Anthropic regardless of ANTHROPIC_BASE_URL — $1.6159 reported
+      # against $0.2392 really spent on the review-plan row), so only the
+      # dedicated key's own `usage` delta is money.
+      #
+      # `wall_clock_s` ON ALL THREE IS A DERIVED ESTIMATE, NOT A MEASUREMENT, and
+      # is labelled as such at each cell. The arithmetic, written once: 900 s is
+      # apply-native's bound, measured ADEQUATE on `runs/20260821T082250Z`
+      # (249.33 s host wall + its one leg inside it; the apply-native-shaped rows
+      # this rig has measured ran 254.84 s and 376.03 s end to end). Each
+      # ADDITIONAL leg is budgeted +150 s, doubled for headroom from
+      # `opencode-apply-executor`'s 82.23 s WHOLE-ROW wall on
+      # `runs/20260820T093838Z` — leg included. T4b re-records every one of these
+      # from the first pass; `row_timeout_s` is `wall_clock_s + 500`
+      # (`test_container_host_lane.py:531-532`), and the lane cap
+      # (`MLLM_E2E_MATRIX_TIMEOUT_S`, 3600 s) is re-checked against the new
+      # per-row sum and raised on a RECORDED OVERRUN, never pre-emptively.
+      # ======================================================================
+      - id: claude-code-phase-apply-suggestions
+        # PHASE 2 of the chain, and the first of the four write phases. `args` is
+        # the OPERATOR form per the header's derivation rule: the mode word as a
+        # `--` flag, the same quoted positional, and only the flags this host
+        # does NOT bake — which here means `--yes` explicitly
+        # (`must_type_explicitly`), since this shim bakes none of them, and
+        # never `--detach` or `--exec-subagents`, which it forbids.
+        args: '--apply-suggestions "plans/auth-feature.md" --yes'
+        command: "apply-suggestions plans/auth-feature.md --yes"
+        # A native Task dispatch never crosses /opt/mllm/bin, so a fan-out list
+        # has no mechanism to act through: this row adds NO provider coverage
+        # toward G2 and is excluded from §3.3's partition BY DECLARATION rather
+        # than by omission. The literal string, never an absent key — that is
+        # what lets the union guard tell "deliberately outside the partition"
+        # from "somebody forgot".
+        fan_out: native
+        # THE LEG: the transitive prerequisite closure, derived from
+        # `check_workflow_prerequisites.PHASE_PREREQUISITES` (:64-71) rather than
+        # guessed. `apply-suggestions: ["review-plan"]`, and `review-plan` has no
+        # entry at all, so the closure is ONE command — the same leg
+        # `claude-code-apply-native` and the four executor/negative rows already
+        # run, which is why this is the cheapest of the three new rows to bring
+        # up. `--quick` is carried because `review-plan` accepts it
+        # (`review_plan_orchestrator.py:383`); `--exec-subagents` because the
+        # leg must actually COMPLETE the phase rather than stop at
+        # [VALIDATION_PENDING], and that is what puts this row behind T0a.
+        # No `--host`: this is the rig dispatching, not an agent following a
+        # shim. The leg's receipts land in `receipts/<row>-pre/`, one directory
+        # across from every "the agent really ran our dispatcher" assertion.
+        pre_commands:
+          - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
+        # The leg fans out, so it needs the scenario for the same measured reason
+        # every other leg on this lane does: a scenario-less stub answers a bare
+        # "OK", which is not a suggestions document, and the leg would fail with
+        # "JSON parsing failed from both file and stdout" before the host ever
+        # launched.
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        # DERIVED ESTIMATE, NOT A MEASUREMENT — see the block above. One leg, so
+        # this is apply-native's bound unchanged.
+        wall_clock_s: 900
+        model:
+          # COPIED FROM `claude-code-apply-native`'s ROW PIN, which is the one
+          # slug measured to land real bytes through claude-code anywhere in this
+          # rig (`runs/20260821T082250Z`: 16 receipts, the finalization run, a
+          # three-entry census delta). The host block's
+          # `~deepseek/deepseek-v4-flash-latest` is NOT used on a write row here:
+          # four measured-red attempts on it produced two empty-string results
+          # and one verbatim DSML tool-call leak, none of which reached a
+          # finalization.
+          slug: "anthropic/claude-haiku-4.5"
+          arg: ["--model", "anthropic/claude-haiku-4.5"]
+          # MEASURED ON THIS ROW 2026-09-22 (`runs/20260922T191142Z`) AND IT
+          # LOST: the pin drove a turn that reached the dispatcher and then
+          # applied nothing. NOT A VERDICT ON THE SLUG — its two siblings in the
+          # SAME bundle, on the SAME pin and the same image, both drove their
+          # native loops to the end, so what this measured is a per-turn
+          # behaviour and not a property of the model. `measured.attempts` below
+          # carries what the turn actually did; T4 owns the re-measurement.
+          provenance: measured-red
+          resolved_on: "2026-09-22"
+          scope: row
+          why: >
+            Inherited from `claude-code-apply-native`, whose four failures and
+            one pass are the only evidence this rig has about which model can
+            drive a native write loop to its end on this host. Re-derived per row
+            on T4: a phase with a different instruction core may not behave like
+            `apply-code-fixes`, and this cell is where that would be recorded.
+        # WHAT THIS PHASE IS SUPPOSED TO CHANGE — the positive half of the grade.
+        # DERIVED from the phase's own task builder, not from a prefix
+        # convention: `utils/write_phase_bridge.py:89-92` sets
+        # `declared_files=[context["plan_file"]]` with the comment "The plan file
+        # is THE artifact: it is what gets snapshotted and what the byte
+        # comparison decides on", and `apply_suggestions_orchestrator.py:75`
+        # (`edits_the_plan = True`) says the same thing from the other side.
+        # One file, and it is the whole intended effect of the phase.
+        editable_artifacts:
+          - "plans/auth-feature.md"
+        # THIS ROW IS WHY `editable_artifacts` EXISTS. The grader it was
+        # authored against (`_source_delta`) dropped every path under `plans/`
+        # as workflow bookkeeping, so under it this row's delta was EMPTY
+        # whatever the host did: `bytes_must_change: true` could not be
+        # satisfied and `paths` could not be violated. The row would rewrite the
+        # plan, or fail to, and read the same either way — which is header
+        # finding (3) recurring on a different row.
+        #
+        # §3.4's GRADER CHANGE HAS LANDED AND IS MEASURED, 2026-09-22 on
+        # `runs/20260922T191142Z`, and this row is the one that measured it. The
+        # failure it took names its own terms — "Graded against this row's
+        # declared editable artifacts ['plans/auth-feature.md'] over the
+        # host-bracketed census" — so BOTH halves ran: the declared set in place
+        # of the prefix predicate, and the host bracket
+        # (`workspace-census-host-before.json` / `-after.json`) in place of a
+        # delta that would have counted the leg's own output. The positive
+        # direction is measured in the same bundle: the sibling
+        # `claude-code-phase-apply-task-suggestions` PASSED its byte grading on
+        # an editable artifact that is itself under `plans/`. So this row is now
+        # gradeable, was graded, and lost for an unrelated reason — see
+        # `measured.attempts` below.
+        graded_on: [bytes]
+        graded_on_reason: >
+          BYTES ONLY. `apply_suggestions_orchestrator.py:69` sets
+          `marks_phase_completed = True`, so this phase records itself complete
+          the moment it EMITS its batch document — before a single edit exists.
+          A `test_the_phase_recorded_itself_completed` assertion therefore passes
+          on this row with nothing applied, and would be a grade on a claim about
+          work handed out. The row must carry exactly the grade its phase can
+          bear.
+        expect:
+          run: none
+          exit: 0
+          phases: [apply-suggestions]
+          # `util instructions apply-suggestions`, then the dispatcher. A floor,
+          # not a count — the same reading every other row's cell has. Provider
+          # work is not counted here and `receipts_min` does not move with a
+          # fan-out width (this row has none anyway).
+          receipts_min: 2
+          write_outcome: applied
+          # NO LONGER UNSATISFIABLE — the grader change landed and this row
+          # exercised it (`runs/20260922T191142Z`); see `editable_artifacts`
+          # above. Keeping the cell at its intended value rather than weakening
+          # it is what made that run's red a real measurement: the host applied
+          # nothing, and the row is what said so.
+          bytes_must_change: true
+          # The outer bound: nothing may be written outside this set. Identical
+          # to `editable_artifacts` here because the phase declares exactly one
+          # file; on the two rows below they differ.
+          paths: ["plans/auth-feature.md"]
+        continuation:
+          who: host
+          mechanism: native Task batches, then the phase's own verification step
+          # NO `--mark-completed` STEP EXISTS FOR THIS PHASE: grep of
+          # `instructions/apply-suggestions.md` finds none, because the
+          # orchestrator marks itself. That absence is the same fact
+          # `graded_on: [bytes]` records, stated where a reader looks for the
+          # host's required follow-up.
+          finalization: none
+        measured:
+          on: "20260922T191142Z"
+          provenance: measured-red
+          blocked_on: [T4]
+          detail: >
+            FIRST EXECUTION, 2026-09-22, AND IT LOST ON THE ONE CELL IT IS
+            GRADED BY. Twenty-three of this row's twenty-four assertions AGREED
+            with it — `exit: 0`, `run: none`, `phases: [apply-suggestions]`,
+            `receipts_min`, the artifacts, the phase record, `paths` — and
+            `test_the_bytes_moved_exactly_as_the_row_declares` CONTRADICTED it:
+            `plans/auth-feature.md` is byte-identical across the host bracket.
+
+            T0a AND T4b ARE RETIRED FROM THIS CELL rather than re-dated, because
+            both were observed doing their job. The leg ran and completed —
+            `receipts/<row>-pre/001.receipt.json`, `review-plan
+            plans/auth-feature.md --yes --quick --exec-subagents`, exit 0, four
+            artifacts, `high_priority_groups: 2` — and the write runner carried
+            its fan-out: 8 non-health stub requests, every one of them at or
+            below the watermark, and ZERO after it, which is also the first
+            measurement that `fan_out: native` is true of this row's host turn.
+            T4 stays: T4 is the pass, and this is not one.
+          attempts:
+            - run: "20260922T191142Z"
+              on: "2026-09-22"
+              model: "anthropic/claude-haiku-4.5"
+              usd: 0.0
+              usd_note: "reads zero for a measurement reason — see `key_delta_reads_zero`"
+              dispatcher_receipts: 2
+              turns: 6
+              subagents_spawned: 0
+              stub_requests_after_watermark: 0
+              host_wall_s: 19.17
+              verdict: "FAIL-C — dispatched, emitted its batches, applied nothing"
+              detail: >
+                A THIRD SHAPE, and it needs its own name: apply-native's Shape A
+                is "never started" and its Shape B is "applied but never
+                recorded"; this one started, ran the dispatcher, and NEVER
+                ENTERED THE BATCH LOOP. `host-session-digest.jsonl` holds the
+                whole turn in 44 records: `Skill(multi-llm)` → `command -v uv` →
+                `util instructions apply-suggestions` → `apply-suggestions
+                plans/auth-feature.md --host claude-code --yes` → `end_turn`.
+                Not one `Task`, `Read`, `Edit` or `Write` in it
+                (`subagent_stats.spawned: 0`, `totalLinesAdded: 0`,
+                `totalLinesRemoved: 0`), `terminal_reason: completed`, and then a
+                confident summary naming all four suggestions as applied. Idle
+                gap after the last receipt 5.7 s — this turn did not hang, it
+                finished early.
+
+                THE PHASE HAD WORK, WHICH IS WHAT MAKES THIS A RED RATHER THAN A
+                ROW DEFECT. The orchestrator did its half correctly:
+                `artifacts/auth-feature/apply-suggestions/orchestrator_output.json`
+                carries FOUR batches with fully rendered prompts, `to_apply` of
+                four, `needs_human_review: []`, `skipped_count: 0`,
+                `valid_count: 4`. Census delta inside the host bracket:
+                `apply-suggestions/backup.md`,
+                `apply-suggestions/orchestrator_output.json` and `state.json` —
+                the orchestrator's own three bookkeeping files and nothing else.
+                That is the exact signature `graded_on: [bytes]` was written to
+                catch, and it caught it on its first run: this phase marks itself
+                completed when it EMITS, so a phase-record grade would have
+                passed this turn.
+              proximate_cause: >
+                THE INSTRUCTION BODY NEVER REACHED THE AGENT, and the sibling
+                that passed is the control for it. `util instructions
+                apply-suggestions` prints 41,569 chars to stdout (measured
+                2026-09-22, this repo). This host spills a Bash result that large
+                to `~/.claude/projects/<slug>/tool-results/<id>.txt` and leaves a
+                ~2.2 KB stub carrying the pointer — 2,211 chars here, 2,217 on
+                `claude-code-phase-apply-task-suggestions`, the same mechanism on
+                both. THE SIBLING FOLLOWED THE POINTER: its very next tool use is
+                `Read` of that file, 44,994 chars, and it then ran the whole loop
+                — three `Task` batches, `prior-changes append`, `metrics
+                record`, `metrics finish`, `--mark-completed`, 18 dispatcher
+                receipts. THIS ROW NEVER READ IT, so the per-batch `Task` loop
+                was never in its context and the dispatcher's `exit 0` was the
+                only thing it had to reason from.
+
+                NOTHING IN THE ROW IS AT FAULT: `args`, `command`, the leg, the
+                scenario, `editable_artifacts` and every cell of `expect` are
+                what this run says they should be, and a second row could not
+                have been declared to expect less without expecting a write row
+                to write nothing. The address for a fix is the shim's step 4 or
+                what `util instructions` emits — neither of which this file owns
+                — and the risk it names is general: EVERY mode's instruction body
+                is 40 KB+, so every `util instructions` call on this host is
+                spilled, and whether the agent reads the spill is at present
+                unguarded.
+              key_delta_reads_zero: >
+                `usage.json` reports `delta_usd: 0.0` with `usage_before ==
+                usage_after == 39.681074122`, AND THE ROW DID SPEND. The
+                endpoint lags the turn: `usage_before` is read before the leg and
+                `usage_after` immediately after a 19.17 s host turn
+                (`entrypoint.py:3213` and `:3286`), and the NEXT row of the same
+                tier opened at `usage_before: 39.731353322` — $0.050279 above
+                this row's close, in a window where nothing else could have used
+                the key. The same lag shows again between rows two and three
+                ($0.234400). So this row's real spend is ~$0.05, DERIVED from
+                that gap rather than read from its own cell, and $0.000000 is an
+                artifact of a row shorter than the endpoint's settling time, not
+                a turn that billed nothing. Its self-reported
+                `total_cost_usd: 0.342597` is the ~7x-inflated first-party price
+                this file already warns about. WHAT THIS CORRECTS FOR EVERY
+                OTHER `usd` CELL HERE: a delta bracketed around a sub-minute turn
+                understates it and can read exactly zero, so $0 on a short row is
+                not evidence that no model call was made — the receipts and the
+                session digest are.
+        cost_budget_usd: 0.60
+        cost_note: >
+          DERIVED, against `claude-code-apply-native`'s $0.586302 key-usage delta
+          on `runs/20260821T082250Z` — its first and only pass. Not derived from
+          `claude-code-ask` ($0.0204, no batch at all) or from the ~$0.022 mean
+          of apply-native's four FAILING attempts, which is the wrong way round:
+          a failing native row is cheap and a passing one is not. Budget the
+          bring-up separately. The host's self-reported `total_cost_usd` is wrong
+          by ~7x on this lane; only the dedicated key's own `usage` delta is a
+          spend figure.
+        provenance: measured-red   # runs/20260922T191142Z — authored and first executed 2026-09-22; the host turn emitted its batches and applied nothing; T4 owns the promotion
+        note: >
+          THE CHEAPEST OF THE THREE NEW ROWS TO BRING UP, and the one that
+          decides whether the grader change works: its editable artifact is a
+          file under `plans/`, which is exactly the prefix today's predicate
+          throws away. §3.4's offline half pins both directions in
+          `tests/test_stray_write_paths.py` — one regression case where the only
+          change is a plan edit and the row must PASS, one where the only change
+          was made by the pre-command leg and the row must still FAIL as a no-op
+          — and that second case is not hypothetical here:
+          `workspace-census-before.json` is written at `entrypoint.py:2441`,
+          BEFORE `run_pre_commands` (`:2598`), so this row's leg writes
+          `review-plan`'s whole output inside the measured delta unless the
+          host's own execution is bracketed. BOTH HALVES LANDED AND BOTH WERE
+          EXERCISED HERE on `runs/20260922T191142Z`: the row was graded on its
+          declared artifact over the host bracket, and the no-op it actually
+          produced is what the grader reported — the second regression case,
+          reproduced live.
+          NOT SCHEDULED ON THE DEFAULT HOST TARGET: this row and its two siblings
+          carry `pytest.mark.live_native_phase` in `CREDENTIALED_ROWS`, so
+          `make e2e-container-host` deselects them and
+          `make e2e-container-host-phases` is where they run — a ~$3-5 tier that
+          crosses the default `MLLM_E2E_BUDGET_USD` of $2.00 around its fourth
+          row.
+      - id: claude-code-phase-implement
+        # PHASE 6, and the one write phase whose declared files are SOURCE files
+        # chosen by the task decomposition rather than a fixed document.
+        args: '--implement "plans/auth-feature.md" --yes'
+        command: "implement plans/auth-feature.md --yes"
+        fan_out: native
+        # THE LEG: the transitive closure of
+        # `check_workflow_prerequisites.PHASE_PREREQUISITES:64-71`.
+        # `implement: ["apply-suggestions", "generate-tasks"]`;
+        # `apply-suggestions: ["review-plan"]`; `generate-tasks:
+        # ["apply-suggestions"]`; `review-plan` has no entry. Closure, in
+        # dependency order: review-plan -> apply-suggestions -> generate-tasks.
+        # THREE COMMANDS, which is what the matrix comment beside
+        # `claude-code-apply-native` already predicted when it chose
+        # `apply-code-fixes` over `implement` for the one-command leg.
+        # FLAG DERIVATION, not copy-paste: `--quick` is carried ONLY by
+        # `review-plan`, because `generate_tasks_orchestrator.py` defines no
+        # `--quick` at all (grep: zero occurrences) and `full` itself forwards
+        # `model_flags()` to only three phases — review-plan, review-tasks and
+        # review-code (`full_workflow_orchestrator.py:456,571,612`). A leg that
+        # typed `--quick` at `generate-tasks` would die in argument parsing
+        # before the phase ran. `--exec-subagents` is on every leg command, which
+        # is what puts this row behind T0a twice over: `apply-suggestions` in the
+        # leg dispatches write batches through the runner.
+        pre_commands:
+          - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
+          - "apply-suggestions plans/auth-feature.md --yes --exec-subagents"
+          - "generate-tasks plans/auth-feature.md --yes --exec-subagents"
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        # MEASURED ADEQUATE 2026-09-22 (`runs/20260922T191142Z`): host wall
+        # 238.32 s inside this 1200 s bound, whole row 279.34 s inside
+        # `row_timeout_s` 1700, `timed_out: false`, `cap_reason: null`. The
+        # DERIVATION that produced the number is kept for the record — 900
+        # (apply-native's measured-adequate bound) + 2 x 150 s for the two extra
+        # legs — and THE NUMBER IS DELIBERATELY NOT LOWERED to the measurement:
+        # one sample is evidence that the bound is big enough, never that a
+        # tighter one is safe, and a bound cut to fit a fast turn converts a slow
+        # passing turn into a cap hit.
+        wall_clock_s: 1200
+        model:
+          # Copied from `claude-code-apply-native`'s row pin, for the reason
+          # written out on `claude-code-phase-apply-suggestions` above.
+          slug: "anthropic/claude-haiku-4.5"
+          arg: ["--model", "anthropic/claude-haiku-4.5"]
+          # VERIFIED ON THIS ROW 2026-09-22 (`runs/20260922T191142Z`): the pin
+          # drove this phase's native loop end to end on its first execution —
+          # 9 dispatcher receipts, 3 Task batches spawned and all 3 completed,
+          # both declared trees moved. The prediction in `why` below is ANSWERED
+          # AND WRONG: this row did NOT need a pin of its own.
+          provenance: verified
+          resolved_on: "2026-09-22"
+          scope: row
+          why: >
+            Inherited from `claude-code-apply-native` — the only slug measured to
+            drive a native write loop to its finalization on this host. This row
+            has the longest instruction core of the three and the deepest batch
+            fan-out, so it is also the one most likely to need its own pin; T4
+            records what it actually took. IT TOOK THE INHERITED PIN UNCHANGED
+            (`runs/20260922T191142Z`), and one caveat travels with that word:
+            `verified` says this run AGREED, not that the host is reliable — the
+            same pin, image and tier produced the FAIL-C turn recorded on
+            `claude-code-phase-apply-suggestions`. Reliability lives in
+            `measured.attempts`, not here.
+        # DERIVED from `utils/write_phase_bridge.py:168-186`, where the implement
+        # task builder sets `declared_files` to the task's own
+        # `files_to_modify` + `files_to_create` — i.e. whatever the decomposition
+        # named, which in this workspace is the seeded source tree
+        # (`seed_workspace.py` writes src/ and tests/, and `tests/test_auth.py`
+        # among them). Not a prefix convention: it is the union of the two task
+        # fields, expressed as the two trees they can name.
+        editable_artifacts:
+          - "src/**"
+          - "tests/**"
+        graded_on: [bytes]
+        graded_on_reason: >
+          BYTES ONLY. `implement` records itself completed when its document is
+          written (`full_workflow_orchestrator.py:100-112`: the write phases
+          whose "real work is a batch loop an invoker runs" record a claim about
+          work HANDED OUT, not work done), so
+          `test_the_phase_recorded_itself_completed` passes here with nothing
+          applied and proves nothing. The SHA census is the whole grade.
+        expect:
+          run: none
+          exit: 0
+          phases: [implement]
+          receipts_min: 2
+          write_outcome: applied
+          bytes_must_change: true
+          # MEASURED AND UNCHANGED. Deliberately a SHAPE rather than a
+          # filename, on the same argument `claude-code-apply-native`'s note
+          # makes: which files the decomposition names is chosen by a live model
+          # turn, and pinning one run's filenames would turn a red row into a
+          # flaky one. The matcher is `fnmatch`, whose `*` crosses `/`, so
+          # `src/**` is `src/*` and `tests/**` is `tests/*` — still refusing
+          # `README.md`, `pyproject.toml`, `plans/**` and everything outside the
+          # two trees. T4's FIRST PASS (`runs/20260922T191142Z`) named
+          # `src/security.py` and `tests/test_security.py` and nothing else, both
+          # inside the shape, so — unlike `runs/20260820T093838Z`, which had to
+          # widen apply-native's — this cell needed no correction. The shape
+          # stays a shape: a second run may decompose to different filenames, and
+          # that is the case it was written for.
+          paths: ["src/**", "tests/**"]
+        continuation:
+          who: host
+          mechanism: native Task batches per decomposed task, honouring depends_on
+          finalization: none
+        measured:
+          on: "20260922T191142Z"
+          provenance: verified
+          blocked_on: []
+          detail: >
+            FIRST EXECUTION, 2026-09-22, AND EVERY CELL THE RUN EXERCISED AGREED
+            WITH IT — `verified` in the header's exact sense. `exit: 0`,
+            `run: none`, `phases: [implement]`, `receipts_min: 2` (NINE
+            dispatcher receipts), `write_outcome: applied`,
+            `bytes_must_change: true` and `paths` all held.
+
+            THE THREE-COMMAND LEG RAN AND COMPLETED, which was T4b's whole
+            question. `pre-commands.json` records `review-plan`,
+            `apply-suggestions` and `generate-tasks` at exit 0 each, one receipt
+            apiece under `receipts/<row>-pre/` naming its own phase, and
+            `state.json` closes with `phases_completed` = review-plan,
+            apply-suggestions, generate-tasks, implement. The under-seeding this
+            cell predicted — the host's mode exiting 1 in `_setup` — did not
+            happen. T0a is answered with it: the leg's TWO WRITE COMMANDS
+            dispatched through the configured runner, 18 non-health stub
+            requests, every one at or below the watermark.
+
+            `fan_out: native` IS NOW MEASURED RATHER THAN DECLARED: ZERO stub
+            requests after the watermark, so no part of the host turn crossed
+            /opt/mllm/bin.
+
+            THE GRADED DELTA, HOST-BRACKETED: seven changed paths, of which
+            `harness.graded_delta` keeps exactly TWO — `src/security.py` and
+            `tests/test_security.py`, both inside the declared trees. The other
+            five are bookkeeping under the rules that function states:
+            `.multi-llm/tmp/.gitignore` and
+            `.multi-llm/tmp/implementation_tasks_auth-feature_16ebd289.json`
+            (`.multi-llm/**`), `plans/auth-feature/implement/summary.md` and
+            `plans/auth-feature/state.json` (the plan's own output directory),
+            and `plans/auth-feature.md` — THE PLAN FILE, which this phase really
+            does write and which counts as bookkeeping here only because this row
+            does not declare it (`finalize_tracking`'s back-reference, receipt
+            10). Worth naming rather than leaving implicit: the exclusion is a
+            consequence of the declaration, not of the phase being quiet.
+
+            `continuation.finalization: none` HELD IN THE SENSE IT MEANS — no
+            `--mark-completed` receipt exists and none is owed, because the
+            orchestrator marks this phase itself. The host did run two
+            `util finalize-tracking` calls (receipts 9 and 10: the touched-file
+            record, then the plan back-reference and summary link), which are
+            tracking steps and not a phase-completion step.
+
+            TWO CELLS NOT PROMOTED, both on purpose: `wall_clock_s` is recorded
+            measured-ADEQUATE and left at 1200 rather than cut to the 238.32 s
+            measurement, and `cost_budget_usd` is replaced by a DERIVED figure
+            whose derivation is written out in `cost_note` — the raw in-bracket
+            delta is not this row's spend.
+          attempts:
+            - run: "20260922T191142Z"
+              on: "2026-09-22"
+              model: "anthropic/claude-haiku-4.5"
+              usd: 0.913213
+              usd_basis: "derived: 0.678812 read inside the row's own bracket + 0.234400 that settled before the next row opened — see `cost_note`"
+              dispatcher_receipts: 9
+              turns: 10
+              subagents_spawned: 3
+              subagents_completed: 3
+              stub_requests_after_watermark: 0
+              host_wall_s: 238.32
+              row_wall_s: 279.34
+              verdict: pass
+              detail: >
+                THE FIRST TIME ANY ROW IN THIS REPOSITORY HAS ASKED WHETHER
+                `implement` MOVED BYTES, and it did. Receipts 2-10 are the whole
+                loop: `util instructions implement`, the dispatcher
+                (`implement --plan-file plans/auth-feature.md --yes`),
+                `util metrics start --total-batches 3`, three
+                `util metrics record` calls naming T001 (constant-time token
+                comparison), T002 (bound the login-attempt store) and T003
+                (regression tests for lockout), `util metrics finish`, then the
+                two `util finalize-tracking` calls. Three `Task` subagents
+                spawned, three completed, none failed or killed. The host's
+                self-reported `total_cost_usd` was $4.853469 — inflated ~5x
+                against the derived $0.913213, consistent with the ~7x this file
+                already records for this lane.
+              instruction_body_reached_the_agent: >
+                THE CONTROL FOR THE FAIL-C SHAPE recorded on
+                `claude-code-phase-apply-suggestions`. `util instructions
+                implement` came back as a 2,205-char truncation stub — this host
+                spills a Bash result that large to
+                `~/.claude/projects/<slug>/tool-results/<id>.txt` — and THIS
+                ROW'S NEXT TOOL USE WAS A `Read` OF THAT FILE
+                (`tool-results/bc2yu2gvj.txt`), after which it ran the full loop.
+                All three rows of the tier got a stub of the same size (2,205 /
+                2,211 / 2,217), on the same model, the same image and the same
+                `--allowedTools` list — `Read` was permitted on the row that did
+                not use it. So the divergence is not permissions and not
+                configuration, which rules out the cheapest fix and says the
+                remedy has to make the full body unmissable rather than merely
+                reachable.
+        cost_budget_usd: 0.92
+        cost_note: >
+          MEASURED 2026-09-22 ON `runs/20260922T191142Z`, and the number above is
+          that measurement replacing the $0.586302 anchor exactly as this cell
+          said the first pass would. IT IS NOT THE RAW DELTA. `usage.json`
+          reports $0.678812 across this row's own bracket, and the OpenRouter
+          credits endpoint settles after the bracket closes: the next row of the
+          tier opened at `usage_before: 40.644566172`, $0.234400 above this row's
+          `usage_after: 40.410165722`, in a window where nothing else could have
+          used the key. $0.678812 + $0.234400 = $0.913213, rounded to $0.92 here.
+          The same lag is what made
+          `claude-code-phase-apply-suggestions` read $0.000000; its cell carries
+          the general correction. The prediction that this would be the most
+          expensive of the three was WRONG — `claude-code-phase-apply-task-suggestions`
+          cost at least $1.508263 — and the reason is visible in the receipts:
+          both rows dispatched three batches, and this one's were cheaper. Only
+          the key's own `usage` delta is a spend figure on this lane;
+          `total_cost_usd` read $4.853469 for this turn.
+        provenance: verified   # runs/20260922T191142Z — authored and first executed 2026-09-22; every graded cell agreed; one sample, and the attempts block is where reliability lives
+        note: >
+          THE SECOND PHASE THAT MOVES `src/**`, and the one
+          `claude-code-apply-native` was NOT pointed at. That row's note records
+          the choice and the reason it survived measurement: `apply-code-fixes`
+          needs a ONE-command leg where this needs three. Nothing else about the
+          comparison favoured it — this phase writes the same two trees — so the
+          leg was the whole argument, and T4b is where that cost is finally paid
+          rather than avoided.
+          WHAT THIS ROW ADDS THAT apply-native DOES NOT: `implement` is the phase
+          the two `--full` rows on the other hosts really exercise and NEITHER
+          grades — `codex-full` and `opencode-full` declare no `write_outcome`,
+          so `TestTheWriteRowsAreGradedOnBytes` skips them by name. This is the
+          first row anywhere in the repository that asks whether `implement`
+          moved bytes. IT ASKED ON 2026-09-22 AND THE ANSWER WAS YES:
+          `src/security.py` and `tests/test_security.py`, through three native
+          Task batches — see `measured.attempts`.
+      - id: claude-code-phase-apply-task-suggestions
+        # PHASE 5, and the DEEPEST leg in the set: four dispatcher commands.
+        args: '--apply-task-suggestions "plans/auth-feature.md" --yes'
+        command: "apply-task-suggestions plans/auth-feature.md --yes"
+        fan_out: native
+        # THE LEG: the transitive closure of
+        # `check_workflow_prerequisites.PHASE_PREREQUISITES:64-71`.
+        # `apply-task-suggestions: ["review-tasks"]`; `review-tasks:
+        # ["generate-tasks"]`; `generate-tasks: ["apply-suggestions"]`;
+        # `apply-suggestions: ["review-plan"]`; `review-plan` has no entry.
+        # Closure, in dependency order: review-plan -> apply-suggestions ->
+        # generate-tasks -> review-tasks. FOUR COMMANDS — the deepest leg in the
+        # set, and still four rather than the seven a naive "seed phases 1..n-1"
+        # reading would give, because the closure is what the checker actually
+        # enforces.
+        # FLAG DERIVATION: `--quick` on `review-plan` and `review-tasks`
+        # (`review_tasks_orchestrator.py:123` defines it; `review-plan` at
+        # `review_plan_orchestrator.py:383`), NOT on `apply-suggestions` or
+        # `generate-tasks`, neither of which defines the flag —
+        # `full_workflow_orchestrator.py:456,571,612` forwards `model_flags()` to
+        # exactly the three fan-out phases and to no write or decomposition
+        # phase. `--exec-subagents` on all four.
+        # NOTE `apply-task-suggestions` IS IN `check_workflow_prerequisites`'s
+        # `OPTIONAL_PHASES` along with `review-tasks`: optional in the CHAIN is
+        # not optional in the LEG — this row's own phase needs `review-tasks`
+        # completed, and a leg that skipped it would leave the host's mode
+        # exiting 1 in `_setup`.
+        pre_commands:
+          - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
+          - "apply-suggestions plans/auth-feature.md --yes --exec-subagents"
+          - "generate-tasks plans/auth-feature.md --yes --exec-subagents"
+          - "review-tasks plans/auth-feature.md --yes --quick --exec-subagents"
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        # MEASURED ADEQUATE 2026-09-22 (`runs/20260922T191142Z`): host wall
+        # 300.13 s inside this 1350 s bound, whole row 342.72 s inside
+        # `row_timeout_s` 1850, `timed_out: false`, `cap_reason: null`. The
+        # derivation is kept — 900 (apply-native's measured-adequate bound) +
+        # 3 x 150 s for the three extra legs — and THE NUMBER IS NOT LOWERED to
+        # the measurement, for the reason written on the row above: one sample
+        # says the bound is big enough, never that a tighter one is safe. The
+        # lane cap re-check it feeds is unchanged by this run: the whole
+        # three-row tier finished in 659.52 s against `cap_s` 7200.
+        wall_clock_s: 1350
+        model:
+          slug: "anthropic/claude-haiku-4.5"
+          arg: ["--model", "anthropic/claude-haiku-4.5"]
+          # VERIFIED ON THIS ROW 2026-09-22 (`runs/20260922T191142Z`), and on
+          # the one thing the `why` below says the pin is for: the host REACHED
+          # THE FINALIZATION. Receipt 18 is `apply-task-suggestions --plan-file
+          # plans/auth-feature.md --mark-completed`, exit 0, and `state.json`
+          # records `phases_completed["apply-task-suggestions"]`.
+          provenance: verified
+          resolved_on: "2026-09-22"
+          scope: row
+          why: >
+            Inherited from `claude-code-apply-native`, and this is the row where
+            that inheritance is best founded: it is apply-native's shape exactly
+            — edit batches, then a `--mark-completed` finalization the host must
+            reach — four legs deep instead of one. The four measured-red attempts
+            at the host pin are what a wrong pin looks like on this shape: two
+            empty-string results, one verbatim DSML tool-call leak, one turn-cap
+            stop ONE command short of the finalization. THE INHERITANCE HELD on
+            its first execution, with the usual caveat on the word: `verified`
+            says this run agreed, not that the host is reliable — the same pin
+            and image produced the FAIL-C turn on
+            `claude-code-phase-apply-suggestions` in this same bundle.
+        # DERIVED from `utils/write_phase_bridge.py:107-119`, where the
+        # apply-task-suggestions builder sets `declared_files=[artifact]` with
+        # `artifact = context.get("tasks_file") or context["plan_file"]` — one
+        # document, the tasks file. Its path is resolved by
+        # `utils/tasks_file.find_tasks_file`, whose default (no `<!-- TASKS_FILE:
+        # … -->` comment in the plan) is
+        # `{plan_dir}/{sanitize_prefix(plan)}/tasks/tasks.md`
+        # (`utils/tasks_file.py:137-138`) — i.e. `plans/auth-feature/tasks/tasks.md`
+        # for this workspace's plan.
+        # `src/**` AND `tests/**` ARE DELIBERATELY NOT DECLARED HERE, and that is
+        # a reading of the orchestrator rather than an omission: this phase
+        # applies validated TASK-REVIEW suggestions to the tasks document
+        # (`apply_task_suggestions_orchestrator.py:519,541,556`, "**Target file
+        # (to edit)**: {self.tasks_file}"), and the source trees move under
+        # `implement` and `apply-code-fixes`, which have rows of their own. If
+        # T4's first pass measures a source path in this row's census delta, that
+        # is a finding to record here the way `runs/20260820T093838Z` widened
+        # apply-native's `paths` — not something to pre-declare.
+        # T4's FIRST PASS MEASURED NO SOURCE PATH (`runs/20260922T191142Z`): the
+        # host-bracketed delta is ten paths and not one of them is under `src/`
+        # or `tests/`. The reading of the orchestrator was right and the cell
+        # needs no widening.
+        editable_artifacts:
+          - "plans/auth-feature/tasks/tasks.md"
+        graded_on: [bytes, recorded-completion]
+        graded_on_reason: >
+          BOTH, and it is one of only two rows in the file that can carry the
+          second. `apply_task_suggestions_orchestrator.py:66` sets
+          `marks_phase_completed = False` and `:119` passes
+          `include_mark_completed=True`, so this phase's completion is written by
+          the host's POST-LOOP call —
+          `apply-task-suggestions --plan-file "$PLAN_PATH" --mark-completed`
+          (`instructions/apply-task-suggestions.md:454`) — which a loop that
+          stopped early never reaches. `test_the_phase_recorded_itself_completed`
+          is therefore real evidence here, exactly as it is on
+          `claude-code-apply-native`, and exactly as it is NOT on the two rows
+          above.
+        expect:
+          run: none
+          exit: 0
+          phases: [apply-task-suggestions]
+          # THREE, not two: `util instructions apply-task-suggestions`, the
+          # dispatcher, and the `--mark-completed` finalization. The floor names
+          # the finalization because on this row the finalization IS the grade —
+          # it is the receipt four of apply-native's five attempts never reached.
+          receipts_min: 3
+          write_outcome: applied
+          # SATISFIED 2026-09-22 (`runs/20260922T191142Z`) — and this row is
+          # where the grader change is proved in the POSITIVE direction. The
+          # tasks document lives under `plans/`, which the old `_source_delta`
+          # dropped wholesale; `harness.graded_delta` now consults the
+          # declaration BEFORE the prefix rules, so
+          # `plans/auth-feature/tasks/tasks.md` is kept and its bytes are the
+          # grade. Declared at its intended value rather than weakened, which is
+          # what let this run measure it instead of agreeing with it.
+          bytes_must_change: true
+          paths: ["plans/auth-feature/tasks/tasks.md"]
+        continuation:
+          who: host
+          mechanism: native Task edit batches, then the post-loop finalization
+          finalization: "apply-task-suggestions --plan-file plans/auth-feature.md --mark-completed"
+          note: >
+            NAMED IN THE ROW because §3.4 requires a row to state the
+            continuation the host must perform rather than leave it to the
+            instruction file. This is the step R1 added to
+            `instructions/apply-code-fixes.md` for the same reason on the sibling
+            phase, and the step whose arrival made apply-native's `turn_bound` of
+            40 one turn too small.
+        measured:
+          on: "20260922T191142Z"
+          provenance: verified
+          blocked_on: []
+          detail: >
+            FIRST EXECUTION, 2026-09-22, AND EVERY CELL THE RUN EXERCISED AGREED
+            WITH IT, INCLUDING BOTH HALVES OF `graded_on`. `exit: 0`,
+            `run: none`, `phases: [apply-task-suggestions]`, `receipts_min: 3`
+            (SEVENTEEN dispatcher receipts), `write_outcome: applied`,
+            `bytes_must_change: true` and `paths` all held.
+
+            THE RECORDED-COMPLETION HALF IS THE ONE WORTH NAMING, because it is
+            the half four of apply-native's five attempts never reached: receipt
+            18 is `apply-task-suggestions --plan-file plans/auth-feature.md
+            --mark-completed`, exit 0, and `state.json` records
+            `phases_completed["apply-task-suggestions"]`. On this row that is
+            evidence rather than a claim, exactly as `graded_on_reason` argues.
+
+            THE FOUR-COMMAND LEG — THE DEEPEST IN THE SET — RAN AND COMPLETED.
+            `pre-commands.json` records `review-plan`, `apply-suggestions`,
+            `generate-tasks` and `review-tasks` at exit 0 each, one receipt
+            apiece under `receipts/<row>-pre/`, and `state.json` closes with all
+            four plus this row's own phase. The cheap failure this cell predicted
+            for it (a mode exiting 1 in `_setup`, naming the phase the leg
+            under-seeded) did not occur, and neither did the scheduling worry
+            behind it: this was the LAST of the three rows to run and it passed.
+            T0a is answered with the leg: 24 non-health stub requests, every one
+            at or below the watermark.
+
+            `fan_out: native` IS MEASURED: ZERO stub requests after the
+            watermark.
+
+            THE GRADED DELTA, HOST-BRACKETED: ten changed paths, of which
+            `harness.graded_delta` keeps exactly ONE —
+            `plans/auth-feature/tasks/tasks.md`, the declared artifact, kept
+            because the declaration outranks the prefix rules. The nine dropped
+            are `.multi-llm/tmp/.gitignore` and
+            `.multi-llm/tmp/batch_snapshot_tasks_auth-feature.md`, the four files
+            of this phase's own artifact dir, `plans/auth-feature/state.json`,
+            and — WORTH RECORDING BECAUSE IT IS NOT OBVIOUS FROM THE ROW —
+            `plans/auth-feature/review-tasks/report.html` and
+            `report_data.json`, which the host rewrote through receipt 17,
+            `util report regenerate-decisions --phase-dir …/review-tasks`. This
+            phase writes into ANOTHER phase's directory, and `paths` holds only
+            because the plan's output directory is bookkeeping — not because
+            nothing else moved. `plans/auth-feature.md` did NOT change here.
+
+            TWO CELLS NOT PROMOTED, on purpose: `wall_clock_s` is recorded
+            measured-ADEQUATE and left at 1350, and `cost_budget_usd` is a
+            measured FLOOR, not a settled figure — see `cost_note`.
+          attempts:
+            - run: "20260922T191142Z"
+              on: "2026-09-22"
+              model: "anthropic/claude-haiku-4.5"
+              usd: 1.508263
+              usd_basis: "a FLOOR: the in-bracket delta only. This was the last row of the tier, so no later snapshot exists to catch what settled after it — see `cost_note`"
+              dispatcher_receipts: 17
+              turns: 10
+              subagents_spawned: 3
+              subagents_completed: 3
+              stub_requests_after_watermark: 0
+              host_wall_s: 300.13
+              row_wall_s: 342.72
+              verdict: pass
+              detail: >
+                THE FULL apply-native SHAPE, four legs deep, on its first
+                execution. Receipts 2-18: `util instructions
+                apply-task-suggestions`, the dispatcher, `util decisions`,
+                `util metrics start --total-batches 3`, then three complete batch
+                cycles (each `prior-changes read` -> `Task` -> `prior-changes
+                append` -> `metrics record`), `metrics finish`, `metrics report`,
+                `util report regenerate-decisions`, and the `--mark-completed`
+                finalization. Three `Task` subagents spawned, three completed.
+                The turn also verified its own work between batches with `diff`
+                against a snapshot it wrote to `.multi-llm/tmp/` — which is what
+                the two `.multi-llm/tmp/` entries in the census delta are. Its
+                self-reported `total_cost_usd` was $8.727823, ~5.8x the measured
+                floor.
+              instruction_body_reached_the_agent: >
+                THE SECOND CONTROL FOR THE FAIL-C SHAPE — see the fuller note on
+                `claude-code-phase-implement`. `util instructions
+                apply-task-suggestions` came back as a 2,217-char truncation stub
+                and this row's NEXT TOOL USE WAS A `Read` of the spill file
+                (`tool-results/b43ktrqpm.txt`, 44,994 chars), after which it ran
+                the loop to the finalization. Two of the tier's three rows
+                followed the pointer; the third did not, with `Read` allowed on
+                all three.
+        cost_budget_usd: 1.51
+        cost_note: >
+          MEASURED 2026-09-22 ON `runs/20260922T191142Z`, replacing the
+          $0.586302 anchor — AND IT IS A FLOOR, not a settled figure. The
+          $1.508263 above is what the key's `usage` delta reported inside this
+          row's own bracket; the OpenRouter credits endpoint settles after the
+          bracket closes (measured twice in this bundle: $0.050279 and $0.234400
+          landing in the gaps after rows one and two), and this row ran LAST, so
+          nothing in the tier observed its tail. The true figure is $1.508263
+          plus an unmeasured remainder, and closing that needs a usage snapshot
+          taken after the tier rather than after the row. The leg itself is
+          stub-backed and costs nothing; the spend is the host turn.
+          THE MOST EXPENSIVE ROW OF THE THREE, against a prediction on
+          `claude-code-phase-implement` that it would be the cheapest of the
+          two. TIER TOTAL, for whoever sizes `MLLM_E2E_BUDGET_USD`: $2.471755
+          reported across all three rows plus the unmeasured tail, so the $2.00
+          default would have tripped inside this row — the last of three, not the
+          fourth of anything. Only the key's own `usage` delta is a spend figure;
+          `total_cost_usd` read $8.727823 here.
+        provenance: verified   # runs/20260922T191142Z — authored and first executed 2026-09-22; both halves of `graded_on` agreed, finalization receipt included; one sample, see `measured.attempts`
+        note: >
+          THE SECOND ROW IN THE REPOSITORY THAT CAN BE GRADED ON A RECORDED
+          COMPLETION THE HOST HAD TO EARN, and the first one that is not
+          `apply-code-fixes`. Between them, the two `[bytes, recorded-completion]`
+          rows are the only places where "the phase finished" is an artifact
+          rather than a claim; the other two write rows are bytes-only by
+          construction and say so.
+          ONE THING IT STILL CANNOT BE GRADED ON, inherited from apply-native and
+          for the same structural reason: `write_batch_report.json` is written
+          only by `utils/write_batch_scheduler.WriteBatchScheduler`, and
+          `apply_orchestrator_base.run_write_executor` returns None unless
+          `--exec-subagents` or `--dry-run-subagents` was passed. This host's shim
+          forbids the first and the row does not use the second, so the
+          executor's per-batch account structurally does not exist here.
+          `TestTheWriteRowsAreGradedOnBytes` grades this row on its ABSENCE — a
+          report appearing means the agent typed the flag its shim forbids.
 
   # ===========================================================================
   codex:
@@ -1219,6 +2921,89 @@ hosts:
       .status.json as artifacts and returns 0, so its receipt reads state: done,
       exit: 0 BEFORE the workflow has run at all. That is the launch succeeding,
       not the phase finishing.
+    # -----------------------------------------------------------------------
+    # THIS HOST'S FAN-OUT SUBSET (T3 — UNMEASURED, authored 2026-09-22). Five
+    # CLI IDS. The partition's rules, the 3-cycle's reasoning and the two
+    # carve-outs are written out once, under the claude-code host above; what is
+    # host-specific is here.
+    #
+    # (1) 3-CYCLE LEG 2: `opencode`-the-provider runs under the CODEX host. That
+    #     is the cross cell — a CLI that is itself a host elsewhere in this
+    #     matrix, running as a provider under another vendor's agent, with this
+    #     host's env overlay and $HOME — and it is the only one of the three that
+    #     is ALSO this lane's write runner, so this is the host where a runner
+    #     and a fan-out member are the same binary. They remain two different
+    #     facts: `runner` is one slug for `driver.subagent_runner`, `fan_out` is
+    #     the graded provider set, and the per-provider correlation counts this
+    #     CLI's invocations for the fan-out claim only.
+    #
+    # (2) WIRE-SURFACE MIX: the one `gemini` surface in the whole partition, plus
+    #     four `chat`. Neither `responses` CLI is here (both are on the
+    #     claude-code host) and neither is the one `anthropic` CLI (opencode
+    #     host), so the three subsets cannot collapse into one shape.
+    #
+    # (3) FOUR FAN-OUT ROWS — `codex-ask`, `codex-review-plan`, `codex-full`,
+    #     `codex-apply-executor`; `codex-auth-negative` is a `remove_seed`
+    #     carve-out and inherits nothing. That is the MIDDLE multiplier of the
+    #     three hosts, which is why neither per-invocation penalty CLI (`cline`,
+    #     `kilocode`) is placed here.
+    #
+    # (4) EGRESS, reconciled against `posture.yaml`'s `bridge` + `egress: open`
+    #     before placement: `aider` declares raw.githubusercontent.com and
+    #     `gemini` declares play.googleapis.com, both `fatal_when_blocked:
+    #     false`. Under this lane's posture `TestTheFanOutNeverWentLive` is
+    #     DETECTION rather than impossibility, so both are assignable — what the
+    #     declaration buys is that a call past the stub is graded by name instead
+    #     of silently tolerated.
+    #
+    # (5) PER-CLI ENV, confirmed to travel the same path a provider-lane row
+    #     takes: `copilot`'s pre-warmed XDG_CACHE_HOME
+    #     (`redirect.yaml:480-489`), `aider`'s COLUMNS=10000 (`:186`) and
+    #     `kimi`'s KIMI_LOOP_MAX_ATTEMPTS_PER_STEP=1 pin (without which one 5xx
+    #     row makes TEN completion POSTs over ~145 s inside a single dispatch)
+    #     are all applied by `wrapper.py`'s child-env builder (`wrapper.py:98`,
+    #     `:246`). The host lane's /opt/mllm/bin shim is the same wrapper by
+    #     construction; confirming it costs one read of an existing host-lane
+    #     run's `child_env_names` in the call log, and T3 owns that read.
+    fan_out:
+      - opencode     # 3-cycle leg 2 — see (1). `chat`, `stub/stub-model`, and
+                     # this lane's write runner on every host.
+      - gemini       # the one `gemini` wire surface in the partition.
+                     # `model_arg: gemini-2.5-flash`; declares play.googleapis.com.
+      - aider        # `chat`, `openai/stub-model`; declares
+                     # raw.githubusercontent.com and needs COLUMNS=10000.
+      - copilot      # `chat`, `stub-model`; needs its pre-warmed XDG_CACHE_HOME.
+      - kimi         # `chat`, `stub-model`; needs the retry pin in (5).
+    fan_out_provenance: unmeasured   # T3 — authored 2026-09-22, never executed
+    fan_out_reason: >
+      T3, and the same words as the claude-code host's cell apply: today every
+      row here fans out to exactly one provider (`codex:stub-model`, hard-coded
+      at `test_container_host_lane.py:530`), so nothing about this list has been
+      measured. Re-derived from T3's one-row two-spec spike and graded by the
+      per-provider correlation (invocation, stub session, result file, all from
+      the host-start watermark). A provider this host's scenario cannot answer
+      concurrently moves to another host's subset or becomes a dated carve-out
+      cell; it is never silently dropped.
+    runner: opencode
+    runner_provenance: unmeasured
+    runner_reason: >
+      T0a — the full derivation is on the claude-code host above. The
+      host-specific point is that THIS host's own CLI is the one being displaced:
+      `codex` is the binary whose `agent-write` renders `--sandbox
+      workspace-write`, and the D6 pre-dispatch probe (2026-09-17) returns
+      `unavailable` for it inside this image, so `codex-full` and
+      `codex-apply-executor` — the two rows below that actually dispatch write
+      batches — are exactly the rows §1.4 predicts can no longer pass on the old
+      hard-coded `codex:stub-model` runner. The value is a CLI ID and renders
+      `opencode:stub/stub-model` at read time.
+      `codex-auth-negative` is exempt and carries no `runner` key: its subject is
+      this host preflighting its OWN configured runner against the removed
+      `.codex/auth.json`, and a shared opencode runner would sail past that file
+      entirely.
+      `opencode` is also in this host's `fan_out`, which is a coincidence of the
+      3-cycle rather than the mechanism: `helpers` (seeded homes) is the union of
+      the fan-out and the runner on every host, and it is what gives the runner a
+      home on the two hosts whose `fan_out` does not name it.
     rows:
       - id: codex-ask
         args: '--ask "plans/auth-feature.md" "What does this plan change?" --quick'
@@ -1330,7 +3115,29 @@ hosts:
         # is the one written for the eight-phase chain, and it is what the
         # provider lane's `container_full_chain` row already drives.
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
-        provenance: verified   # runs/20260820T093838Z — row executed and passed
+        # RE-DATED 2026-09-22, FROM `verified` TO `unmeasured`, AND THE RUN ID
+        # STAYS BESIDE IT AS SUPERSEDED EVIDENCE. `runs/20260820T093838Z`
+        # executed this row and it PASSED — eight phases, `run: done`, exit 0,
+        # 287.87 s of host wall — and that is exactly what the word no longer
+        # supports. The run pre-dates the D6 pre-dispatch sandbox probe (landed
+        # 2026-09-17) by a month, and this row's claim DEPENDS ON THE WRITE
+        # DISPATCH HAVING WORKED: four of its eight phases are write phases whose
+        # batches went through the then-hard-coded `codex:stub-model` runner
+        # (`test_container_host_lane.py:530`), whose `agent-write` renders
+        # `--sandbox workspace-write`, which is bubblewrap, which needs a
+        # `CLONE_NEWUSER` that Docker's default seccomp profile denies. Inside
+        # the image the probe now returns `unavailable` and the batch is refused
+        # with `reason_code: sandbox_unavailable` before a child ever starts, so
+        # the run's evidence no longer reaches the cell.
+        # NOT `measured-red`: nothing has CONTRADICTED this row. The regression is
+        # DERIVED (§1.4) and unconfirmed, and this row was DESELECTED rather than
+        # merely unrun by the 2026-09-19 sweep, whose `-k` reached only read rows
+        # — so it has had no opportunity to go red since the probe landed.
+        # **T0** re-dates this cell: one keyed `make e2e-container-host` pass
+        # scoped to the four write rows, recording each as a pass or as
+        # `sandbox_unavailable`. **T0a** — the host block's `runner: opencode` —
+        # is what makes a pass possible either way.
+        provenance: unmeasured   # T0; SUPERSEDED evidence runs/20260820T093838Z (passed, pre-D6)
         note: >
           THE CHEAPEST PATH TO 8-OF-8 PHASES THROUGH A REAL HOST, and the reason
           it is one row rather than six: `full` runs the whole workflow inside a
@@ -1395,15 +3202,98 @@ hosts:
           run: done
           exit: 0
           phases: [apply-suggestions]
-          write_outcome: clean-failure
+          # CORRECTED 2026-09-22, FROM `clean-failure`, AND THE WORD MOVED IN THE
+          # PRODUCT RATHER THAN IN THE RIG. The full derivation lives here and the
+          # two sibling apply rows point at it, so there is one copy of it.
+          # WHAT CHANGED AND WHEN: `1633dd4` (2026-09-16, "Tell a no-op from a
+          # failure, and track the files the write executor verified") split
+          # `utils/write_batch_scheduler`'s empty-diff branch, which until then
+          # had ONE verdict for three claims. Before it, ANY claim over an empty
+          # diff was `clean-failure`. After it the branch reads the runner's own
+          # claim: a `no-op` claim + empty diff is `WRITE_NO_OP` at `status: ok`;
+          # a `failed` claim or a non-zero exit + empty diff is `clean-failure` at
+          # `STATUS_BATCH_FAILED`; `applied`-or-no-status + empty diff stays
+          # `clean-failure` at `status: ok`. The constant's own docstring
+          # (`utils/subagent_executor.WRITE_NO_OP`) records why: labelling an
+          # honest "already present" batch `(batch failed — …)` told the NEXT
+          # batch, and the reader, that the work had failed.
+          # WHY THIS ROW MOVED WITH IT, AND WHY NOTHING IN THE RIG DID: the claim
+          # this stub makes has never changed. The canned write-batch document —
+          # `fixtures/e2e/responses/write_batches/apply_suggestions.json` — is
+          # `{"status": "no-op", "summary": "No edit tool call was made: …"}` and
+          # has been since `f62cc89` (2026-08-15); `git log --follow` over it
+          # returns that one commit and today's working tree does not touch it.
+          # So `runs/20260820T093838Z` measured the PRE-`1633dd4` verdict of the
+          # very same claim, and this cell was written to that verdict and then
+          # outlived it by six days.
+          # MEASURED 2026-09-22 on `runs/20260922T124956Z`: all four batches
+          # `status: ok`, `write_outcome: no-op`, each reasoned "NO-OP: the batch
+          # reported 'no-op' and the pre-batch snapshot comparison confirms no
+          # byte changes in plans/auth-feature.md."
+          # THE REDIRECT-LEAK CLAIM SURVIVES THE RENAME, which is what makes this
+          # cell safe to move rather than load-bearing to keep. `WRITE_NO_OP` is
+          # assigned ONLY inside the classifier's `if not changed:` branch — the
+          # same branch `WRITE_CLEAN_FAILURE` lives in — and `WRITE_APPLIED` is
+          # reachable only where the pre/post snapshot diff is NON-empty. What
+          # disproves a leak is therefore the row refusing `applied` and
+          # `partial-application`, never which of the two empty-diff words it
+          # names, and `no-op` excludes both exactly as strictly. It is in fact
+          # the STRONGER of the two here: `no-op` requires the runner's claim and
+          # the byte verdict to AGREE, where `clean-failure` at `status: ok` is
+          # success CLAIMED with nothing moved. Keeping `clean-failure` would have
+          # made this row assert a claim/byte MISMATCH that a tool-call-free stub
+          # cannot produce while its document says `no-op` — an assertion about
+          # the fixture, dressed as one about the redirect.
+          write_outcome: no-op
           bytes_must_change: false
-        provenance: measured-red   # runs/20260820T093838Z; R4 owns the correction
+        # STAYS `measured-red`, AND THAT IS THE WHOLE POINT OF THE WORD: this
+        # cell already carries ADVERSE evidence — the row executed on
+        # `runs/20260820T093838Z` and failed
+        # `test_the_declared_run_state_was_reached` because the agent did not
+        # detach — so it is not a cell nobody has looked at, and `unmeasured`
+        # would erase a real measurement.
+        # RE-DATED IN MEANING ON 2026-09-22 ALL THE SAME, because the half of the
+        # row that PASSED no longer has support. Exit 0, `phases:
+        # [apply-suggestions]`, the empty-diff write outcome — `clean-failure` as
+        # the classifier of that day spelled it, `no-op` since `1633dd4`; see the
+        # `write_outcome` cell above — and `bytes_must_change: false` over 6 turns
+        # and 14 stub requests in
+        # 373.81 s all depend on the write batch having been DISPATCHED, and that
+        # run went through the then-hard-coded `codex:stub-model` runner a month
+        # before the D6 pre-dispatch sandbox probe landed (2026-09-17). Inside
+        # this image that probe returns `unavailable` for codex's `agent-write`
+        # (`--sandbox workspace-write` is bubblewrap and needs `CLONE_NEWUSER`),
+        # and a batch refused with `reason_code: sandbox_unavailable` before a
+        # child starts is not the DISPATCHED empty-diff outcome this row asserts,
+        # whichever of the two words the classifier of the day spells it with.
+        # SO THE ROW NOW HAS TWO OWNERS: **R4** for the detach assertion, and
+        # **T0** for re-dating everything else, with **T0a** (the host block's
+        # `runner: opencode`) as what makes a re-run mean anything.
+        # WHAT `runs/20260922T124956Z` THEN SETTLED, AND WHAT IT DID NOT — added
+        # 2026-09-22. It settled the D6 fear written out above: the row ran with
+        # T0a's runner (`opencode:stub/stub-model`, in the write report's own
+        # `runner_versions`), and all four batches DISPATCHED and were classified.
+        # No `sandbox_unavailable` refusal appears anywhere in the bundle. Exit 0,
+        # one run block at `state: done` for `apply-suggestions`, zero bytes moved
+        # outside the workflow's own outputs, 434.24 s of host wall clock and 10
+        # stub requests past the host-start watermark. The detach miss R4 owns did
+        # NOT recur. It did not promote this word, and the word stays where it is
+        # for a reason the header insists on: that run graded this row RED on
+        # `expect.write_outcome`, because the cell still said `clean-failure`. The
+        # correction is the cell above; promoting to `verified` needs one re-grade
+        # against the CORRECTED cell, which is R4's and T0's to spend, not this
+        # edit's to assume.
+        provenance: measured-red   # runs/20260820T093838Z + runs/20260922T124956Z — R4 owns the detach correction; the `write_outcome` word was corrected 2026-09-22; T0 re-dates the rest
         note: >
           C4 option (b), chosen deliberately: a real executor CLI pointed at a
-          tool-call-free stub can only ever produce a clean failure, so the row
-          asserts that outcome instead of hoping for an applied one. An `applied`
-          batch here fails just as loudly — bytes landing from a tool-call-free
-          stub means the redirect leaked.
+          tool-call-free stub can only ever come back with nothing moved, so the
+          row asserts THAT instead of hoping for an applied one. Which word the
+          product spells that outcome with was corrected 2026-09-22 — `no-op`
+          since `1633dd4`, `clean-failure` before it; the whole derivation is at
+          the `write_outcome` cell above. An `applied` batch here fails just as
+          loudly — bytes landing from a tool-call-free stub means the redirect
+          leaked — and `no-op` rules `applied` out on exactly the byte comparison
+          `clean-failure` did.
           `args` WIRED 2026-08-20. Header finding (1) — one host process against a
           workspace with no review-plan output, `apply-suggestions` exiting 1
           before it reaches a batch — is answered by the `pre_commands` leg above,
@@ -1416,9 +3306,11 @@ hosts:
           model-following, not a code defect — the same class as opencode's
           `--detach` miss in `harness-expansion.md` §14.6, on a different host —
           and **R4** owns it, including the recurrence count. Everything else the
-          row asserts held: exit 0, `phases: [apply-suggestions]`, the
-          clean-failure outcome and `bytes_must_change: false`, over 6 turns and
-          14 stub requests in 373.81 s.
+          row asserts held: exit 0, `phases: [apply-suggestions]`, the empty-diff
+          write outcome — spelled `clean-failure` by the classifier of that day
+          and `no-op` since `1633dd4`, which is the same measurement under two
+          names — and `bytes_must_change: false`, over 6 turns and 14 stub
+          requests in 373.81 s.
       - id: codex-auth-negative
         # WIRED 2026-08-20, and it is the SAME string the executor row types —
         # which is the point: the two rows differ only in `remove_seed`, so a
@@ -1436,6 +3328,29 @@ hosts:
           - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
         remove_seed: ".codex/auth.json"
+        # NO `fan_out` KEY AND NO `runner` KEY ON THIS ROW — BOTH ABSENCES ARE
+        # DECLARED AND BOTH ARE ASSERTED, not merely skipped (§3.3's carve-outs).
+        #
+        # WHY NO `fan_out`: this row is graded on the refusal landing BEFORE the
+        # first model call — `expect.stub_requests: 0`, counted from the
+        # watermark `entrypoint` writes at the moment the host process starts —
+        # which is UPSTREAM of any point a fan-out could act. A list here would
+        # be unreachable as well as undesirable: it could not change what the row
+        # measures, and it would hand the row five further ways to go red for
+        # reasons that are not the refusal. The guard therefore excludes
+        # `remove_seed` rows from both the union and the disjointness check, and
+        # asserts the key's ABSENCE rather than ignoring the row.
+        #
+        # WHY NO `runner`: the host block's `runner: opencode` must NOT reach
+        # this row. Its subject is the host preflighting ITS OWN configured
+        # runner against the credential removed below, so the runner has to stay
+        # this row's own CLI — `f"{host}:{negative_model}"`, built in the fixture
+        # (`test_container_host_lane.py:525-530`) because it is the one place the
+        # negative slug is spelled. A shared opencode runner would sail straight
+        # past the `.codex/auth.json` this row deletes and the row would assert
+        # nothing at all: preflight_runner would probe a credential nobody
+        # touched, pass, and the refusal this row exists to observe would never
+        # happen.
         # Stated rather than defaulted: `wall_clock_s + 500` is the row's docker
         # timeout and it now has to cover the pre-command leg too. It is NOT the
         # refusal's bound — `expect.within_s` is, and it is 30 s.
@@ -1645,6 +3560,148 @@ hosts:
         Same shape as codex, one field name different: complete, untruncated, and
         JSON-escaped inside the tool part's `state.output`. No `text` event in
         the run carried it — the agent read the answers file and summarised.
+    # -----------------------------------------------------------------------
+    # THIS HOST'S FAN-OUT SUBSET (T3 — UNMEASURED, authored 2026-09-22). Four
+    # CLI IDS — five as authored, less `grok`, carved out the same day under
+    # `fan_out_carve_outs:` below. The partition's rules, the 3-cycle's reasoning
+    # and the three carve-outs are written out once, under the claude-code host;
+    # what is host-specific is here.
+    #
+    # (1) 3-CYCLE LEG 3: `claude-code`-the-provider runs under the OPENCODE host
+    #     — the reference host's CLI, driven as a redirected provider under
+    #     another vendor's agent, with this host's env overlay and $HOME. It is
+    #     also the one cell in the partition where the provider is a CLI this
+    #     matrix otherwise only ever drives as a host, so a failure here is
+    #     legible in a way the self-pairing never was.
+    #
+    # (2) WIRE-SURFACE MIX: the one `anthropic` surface in the whole partition
+    #     (`claude-code`, `model_arg: haiku`) plus three `chat` — four until
+    #     `grok` was carved out on 2026-09-22. The mix survives that removal
+    #     rather than being rebuilt around it: grok was a `chat` member like the
+    #     three that remain, so this host still carries the one `anthropic`
+    #     surface no other host does. Neither `responses` CLI nor the `gemini`
+    #     one is here.
+    #
+    # (3) EIGHT FAN-OUT ROWS — `opencode-ask`, `opencode-review-plan`,
+    #     `opencode-full`, `opencode-apply-executor` and the four package-route
+    #     rows (`-ask`, `-review-plan`, and the two §3.4 adds below);
+    #     `opencode-auth-negative` is a `remove_seed` carve-out and inherits
+    #     nothing. That is the LARGEST multiplier of the three hosts — six rows
+    #     before §3.4's two new package rows, eight after — which is the whole
+    #     reason `cline`'s ~7.5 s per-invocation egress wait and `kilocode`'s
+    #     four call-home hosts are on the claude-code host instead. Both opencode
+    #     routes inherit this one list on purpose: the package row then grades
+    #     the SAME partition through a different loader, which is what makes it a
+    #     route test rather than a second, smaller partition.
+    #
+    # (4) EGRESS: none of these four declares `egress_beyond_stub`, and the one
+    #     member whose call-home shape was undeclared is no longer in the list.
+    #     REWRITTEN 2026-09-22, and the correction is worth keeping: this cell
+    #     used to name `grok`'s empty-key device flow as the set's one undeclared
+    #     call-home and leave it in the list anyway. The device flow was the
+    #     wrong mechanism — grok CONNECTs to `api.x.ai:443` at startup, BEFORE
+    #     its first stub request and whatever `XAI_API_KEY` holds — and under
+    #     this lane's posture that CONNECT succeeds, which is what carved grok
+    #     out (see `fan_out_carve_outs:` below). What remains true of the four is
+    #     why this host's `TestTheFanOutNeverWentLive` evidence still matters
+    #     most: `posture.yaml`'s `bridge` + `egress: open` grades egress by
+    #     DETECTION, never by impossibility, so nothing here is prevented from
+    #     reaching past the stub — it is only caught.
+    #
+    # (5) PER-CLI ENV: `qwen-code` needs QWEN_HOME (`redirect.yaml:364-366`),
+    #     applied by `wrapper.py`'s child-env builder (`wrapper.py:98`, `:246`) —
+    #     the same path a provider-lane row takes, confirmed by T3's read of an
+    #     existing host-lane run's `child_env_names`.
+    fan_out:
+      - claude-code  # 3-cycle leg 3 — see (1). The one `anthropic` wire surface
+                     # in the partition; `model_arg: haiku`.
+      - omp          # `chat`, `stub/stub-model`. The newest adapter in the rig
+                     # and the one row whose chain-lane figure has never been
+                     # captured, so a host-lane invocation is its first.
+      - qwen-code    # `chat`, `stub-model`; needs QWEN_HOME — see (5).
+      - vibe         # `chat`, `openai/gpt-5.6-luna` — the one spelling in the
+                     # whole partition that no other CLI shares, and therefore
+                     # the strongest argument for building specs from
+                     # `model_arg` rather than typing them here.
+    fan_out_provenance: unmeasured   # T3 — authored 2026-09-22, never executed
+    fan_out_reason: >
+      T3, on the same terms as the other two hosts: today every row here fans out
+      to exactly one provider (`codex:stub-model`, hard-coded at
+      `test_container_host_lane.py:530`), so nothing about this list has been
+      measured. This host's list is inherited by BOTH routes — file and package —
+      and the package rows' `measured:` blocks are where the widened numbers will
+      first appear, because those are the cheapest rows on the lane. Re-derived
+      from T3's one-row two-spec spike; a provider the scenario cannot answer
+      concurrently is reassigned or recorded as a dated carve-out cell, never
+      silently dropped. ONE MEMBER HAS TAKEN THAT SECOND ROUTE — see
+      `fan_out_carve_outs:` immediately below.
+    # -----------------------------------------------------------------------
+    # THE PARTITION'S THIRD CARVE-OUT (header block), AND THE ONLY CELL OF ITS
+    # KIND IN THE FILE. One entry per CLI this host declared and cannot carry,
+    # in the `full_row: not-applicable` shape: a verdict, a provenance word from
+    # this file's own vocabulary, the task that owns it, and a reason that names
+    # what retires it. The union guard reads this map and subtracts exactly its
+    # keys, so a member removed from `fan_out` without a cell here still fails
+    # in plain CI, and a cell here whose CLI is still in some host's list fails
+    # too.
+    fan_out_carve_outs:
+      grok:
+        member: not-applicable
+        provenance: measured-red   # runs/20260922T084502Z, measured 2026-09-22
+        task: T3
+        reason: >
+          EGRESS, NOT CREDENTIALS, and the full measurement is the THIRD
+          PRECONDITION paragraph in `redirect.yaml`'s own `grok` row — read it
+          there rather than here, so there is one copy of it.
+          IN ONE LINE: grok CONNECTs to `api.x.ai:443` at startup, before its
+          first stub request, whatever `XAI_API_KEY` holds. Under `--network
+          none` that CONNECT fails, grok falls through to its documented
+          custom-endpoint path, and the provider and chain lanes are green
+          (`runs/20260920T105458Z/chain-grok`). THIS lane is `bridge` with
+          `egress: open` and `default_route: true` (`posture.yaml`), so the
+          CONNECT SUCCEEDS: grok validates the credential upstream, the
+          wrapper's synthesized `mllm-stub-<exec_id>` is not a session at xAI,
+          and it exits 1 with `Not signed in` after the `GET /v1/models` and
+          before every other route it declares. `runs/20260922T084502Z` is the
+          evidence — six `opencode-*` fan-out rows red on this one member, all
+          of them on `test_every_assigned_provider_really_ran`. Hence
+          `measured-red` rather than `unmeasured`: a named run exercised the
+          assignment authored hours earlier and CONTRADICTED it.
+          A REAL xAI KEY IS NOT THE FIX AND WAS NOT TRIED. This rig's fan-out
+          credential contract is `wrapper.py`'s rule 2 — inject only FAKE stub
+          credentials — so a live key would make grok the one fan-out provider
+          holding spendable vendor credit inside a container with open egress
+          and 16 third-party CLIs. There is no xAI credential on this machine in
+          any form (no `~/.grok/auth.json`, not even OAuth-signed-in), and the
+          operator decided against introducing one on 2026-09-22.
+          WHAT RETIRES THIS CELL, written down so the exemption cannot outlive
+          its cause: a mechanism that denies ONE child egress for the duration
+          of its dispatch without reaching the LIVE provider lane — a bare
+          `env_extra` proxy pin does reach it, since `live_provider.py` strips
+          `base_url_vars`/`credential_vars`/`http_log` and nothing else. With
+          that in place grok returns to this host's `fan_out` and this cell is
+          deleted, not amended. The measurement above is what it must beat: a
+          proxy-blocked run reached all four declared routes and exited 0.
+    # -----------------------------------------------------------------------
+    runner: opencode
+    runner_provenance: unmeasured
+    runner_reason: >
+      T0a — the full derivation is on the claude-code host. Two host-specific
+      notes. FIRST, this host's own CLI is the runner, which is the self-pairing
+      cell for the WRITE axis and is deliberate: `opencode` declares
+      `agent-write`, its profile is the application-level `--agent build` so it
+      spawns no sandbox, and it is a `lane: provider` row, so it is redirected at
+      the stub like any other fan-out member. SECOND, the slug matters more here
+      than anywhere else in the file: a bare `opencode:stub-model` is what exited
+      `opencode-auth-negative` 3 on `runs/20260820T093838Z`
+      (`ProviderModelNotFoundError: Model not found: stub-model/.`, opencode
+      1.18.18), so this ID renders `opencode:stub/stub-model` at read time from
+      `redirect.yaml`'s `model_arg` and is never typed.
+      `opencode-auth-negative` is exempt and carries no `runner` key: it must
+      keep `f"{host}:{negative_model}"` — `opencode:stub/stub-model` built by the
+      fixture's own expression — because its subject is this host preflighting
+      its own configured runner against the removed
+      `.local/share/opencode/auth.json`.
     rows:
       # `args` is what the OPERATOR types; `command` is the dispatcher command
       # the shim is expected to build from it, and what the receipt is graded
@@ -1738,7 +3795,21 @@ hosts:
           receipts_min: 2
         wall_clock_s: 900
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
-        provenance: verified   # runs/20260820T093838Z — row executed and passed
+        # RE-DATED 2026-09-22, FROM `verified` TO `unmeasured`, on exactly the
+        # grounds written out at `codex-full` above and with the run id kept as
+        # superseded evidence: `runs/20260820T093838Z` executed this row and it
+        # passed (eight phases, `run: done`, exit 0, 52.22 s of host wall), a
+        # month before the D6 pre-dispatch sandbox probe landed on 2026-09-17.
+        # Four of the eight phases this row grades are write phases, and their
+        # batches went through the hard-coded `codex:stub-model` runner, so the
+        # cell's claim depends on a dispatch that can no longer start inside this
+        # image. The host's own shim-following behaviour — the risk this row was
+        # written to catch, and which did NOT recur on that run — is untouched by
+        # the re-dating; what is untouched is also no longer evidence for the
+        # eight-phase claim, because the phases in question are the write ones.
+        # **T0** re-dates it, **T0a** (`runner: opencode`) is what makes the
+        # re-run meaningful.
+        provenance: unmeasured   # T0; SUPERSEDED evidence runs/20260820T093838Z (passed, pre-D6)
         note: >
           The second host on the same row shape, and it is not redundant with
           `codex-full`: the two hosts follow the shim differently and this matrix
@@ -1776,9 +3847,60 @@ hosts:
           run: done
           exit: 0
           phases: [apply-suggestions]
-          write_outcome: clean-failure
+          # CORRECTED 2026-09-22, FROM `clean-failure`, on the derivation written
+          # out in full at `codex-apply-executor`'s own `write_outcome` cell —
+          # read it there rather than here, so there is one copy of it.
+          # IN ONE LINE: `1633dd4` (2026-09-16) split the scheduler's empty-diff
+          # branch by the runner's CLAIM; the stub's canned write-batch document
+          # has said `{"status": "no-op"}` since 2026-08-15 and still does; so the
+          # batch that measured `clean-failure` in August measures `no-op` now,
+          # having done the identical thing. The redirect-leak guarantee is
+          # untouched: both words are assigned only inside the classifier's
+          # `if not changed:` branch, and `applied` is reachable only past a
+          # NON-empty pre/post snapshot diff.
+          # MEASURED on `runs/20260922T124956Z`: four batches, all `status: ok`,
+          # all `write_outcome: no-op`, each reasoned against the pre-batch
+          # snapshot of `plans/auth-feature.md`, with zero bytes moved.
+          write_outcome: no-op
           bytes_must_change: false
-        provenance: verified   # runs/20260820T093838Z — row executed and passed
+        # RE-DATED 2026-09-22, FROM `verified` TO `unmeasured`, AND THEN AGAIN TO
+        # `measured-red` LATER THE SAME DAY — both steps are kept, because they
+        # were taken for different reasons and the second answers the first.
+        # FIRST STEP. This row's whole subject is a write batch:
+        # `expect.write_outcome` says a real executor CLI pointed at a
+        # tool-call-free stub produced a batch that moved nothing, which requires
+        # the batch to have been DISPATCHED.
+        # `runs/20260820T093838Z` measured exactly that — `run: done`, exit 0,
+        # `phases: [apply-suggestions]`, no bytes moved, 6 turns and 14 stub
+        # requests in 82.23 s — through the then-hard-coded `codex:stub-model`
+        # runner, a month before the D6 pre-dispatch sandbox probe landed
+        # (2026-09-17). A batch refused with `reason_code: sandbox_unavailable`
+        # before a child starts is NOT a batch that ran and moved nothing; it is
+        # a rig blocker wearing a similar exit code, and a grader that accepted it
+        # would turn
+        # this row into a check that the runner is broken. So the evidence no
+        # longer supports the cell, and the run id stays here as the superseded
+        # measurement rather than being deleted. **T0** re-dates it; **T0a** —
+        # the host block's `runner: opencode` — is what makes a pass possible.
+        # Note the contrast the old cell recorded and which survives the
+        # re-dating: `codex-apply-executor`, the byte-identical row on the other
+        # host, is the one that failed the detach assertion on this same run (R4).
+        # SECOND STEP, `unmeasured` → `measured-red` on `runs/20260922T124956Z`.
+        # T0 and T0a both landed on that run and it answered the D6 fear above:
+        # the write batches went through T0a's `opencode:stub/stub-model` (the
+        # write report's own `runner_versions`), all four DISPATCHED and were
+        # classified, and no `sandbox_unavailable` refusal appears anywhere in
+        # the bundle. `run: done`, exit 0, `phases: [apply-suggestions]`, zero
+        # bytes moved, 143.36 s of host wall clock, 10 stub requests past the
+        # host-start watermark. `unmeasured` — "nothing has ever exercised this
+        # cell" — is therefore no longer true of this row and could not be left
+        # standing. The word is `measured-red` and not `verified` because that
+        # run GRADED THE ROW RED: `expect.write_outcome` still said
+        # `clean-failure`, which the classifier has not returned for this stub
+        # since `1633dd4`. The correction is the cell above and this edit owns
+        # it; `verified` is T0's to write over a re-grade against the corrected
+        # cell, which is one container run this edit did not make.
+        provenance: measured-red   # runs/20260922T124956Z — the `write_outcome` word was corrected 2026-09-22 and this edit owns it; T0 owns the promotion. SUPERSEDED evidence runs/20260820T093838Z (passed, pre-D6)
         note: >
           `args` WIRED 2026-08-20, exactly as codex-apply-executor is: the
           `pre_commands` leg above answers header finding (1), and
@@ -1791,11 +3913,14 @@ hosts:
           workflow one, and that would be the correct verdict, not a bound to
           loosen.
           VERIFIED on that run: it did not recur. The row executed and PASSED —
-          `run: done`, exit 0, `phases: [apply-suggestions]`, the clean-failure
-          outcome and no bytes moved — over 6 turns and 14 stub requests in
-          82.23 s. Note the contrast worth keeping: `codex-apply-executor`, the
+          `run: done`, exit 0, `phases: [apply-suggestions]`, the empty-diff write
+          outcome (`clean-failure` under the classifier of that day, `no-op` since
+          `1633dd4` — the same measurement under two names) and no bytes moved —
+          over 6 turns and 14 stub requests in 82.23 s. It did not recur on
+          `runs/20260922T124956Z` either, which ran the same shape in 143.36 s.
+          Note the contrast worth keeping: `codex-apply-executor`, the
           byte-identical row on the other host, is the one that failed the detach
-          assertion on this same run (R4).
+          assertion on that August run (R4) — and did NOT fail it in September.
       - id: opencode-auth-negative
         # WIRED 2026-08-20, the same string as the three rows above it.
         args: '--apply-suggestions "plans/auth-feature.md"'
@@ -1806,6 +3931,20 @@ hosts:
           - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
         remove_seed: ".local/share/opencode/auth.json"
+        # NO `fan_out` KEY AND NO `runner` KEY ON THIS ROW — see
+        # `codex-auth-negative` for the full carve-out cell; both absences are
+        # declared and both are asserted rather than skipped (§3.3).
+        # The short form, with this host's own twist: the row is graded on what
+        # happens before the first model call, which is upstream of anything a
+        # fan-out could do — and here it is graded on the gate OPENING where
+        # codex's closes (`auth_check.finding` above), which is a product finding
+        # about the probe and not about the fan-out. And the runner must stay
+        # `f"{host}:{negative_model}"` = `opencode:stub/stub-model`: the host
+        # block's `runner: opencode` resolves to the same CLI on this host, but
+        # it must not be INHERITED, because the negative slug is built by the
+        # fixture's own expression and R3's whole diagnosis is that an
+        # unqualified spelling of it exited this row 3 before the host ever
+        # started.
         # Stated rather than defaulted: `wall_clock_s + 500` is the row's docker
         # timeout and it now has to cover the pre-command leg too.
         wall_clock_s: 900
@@ -1951,3 +4090,197 @@ hosts:
             `unmatched_prompts: 6` is the fan-out's validation batches meeting a
             scenario that answers the chain, not a failure; the row is graded on
             the receipts and the terminal run state.
+
+      # ----------------------------------------------------------------------
+      # THE PACKAGE ROUTE'S OTHER HALF (§3.4, T4 — AUTHORED 2026-09-22, NEITHER
+      # ROW HAS RUN).
+      #
+      # The two rows above grade the package route on `ask` and `review-plan`.
+      # The file route gets FIVE rows — `ask`, `review-plan`, `full`,
+      # `apply-executor` and the auth negative — so the package route was being
+      # graded on 2 of the 5, and the two it was missing are the two that
+      # matter most: the 8-of-8 phase row and the write row. **The package route
+      # is how opencode actually ships now** (`hosts/capabilities.yaml` calls it
+      # recommended, and `route: package` is what the npm plugin
+      # `opencode-multi-llm` installs), so grading it on the two cheapest read
+      # rows is the WEAKER HALF BEING GRADED: the route whose argv is composed in
+      # JavaScript — the one that cannot be improvised past — was untested on
+      # exactly the workloads where the file route's model HAS improvised past
+      # its baked flags (`opencode-review-plan`'s recorded `partial`).
+      #
+      # BOTH ROWS ARE DERIVED CELL FOR CELL from their file-route twins
+      # (`opencode-full` and `opencode-apply-executor` above). Everything is
+      # copied verbatim except: the `id`, `route: package`, and every cell whose
+      # evidence was a measurement TAKEN UNDER THE FILE ROUTE — those carry
+      # `unmeasured` and name **T4**. That is the same derivation rule
+      # `codex-full` states for itself ("derived from `codex-review-plan` cell
+      # for cell; only `phases` and `receipt_phase` differ"), applied across a
+      # route boundary instead of across a mode.
+      #
+      # WHAT A ROUTE'S MEASUREMENT DOES AND DOES NOT TRANSFER. The expectation
+      # cells transfer: `route: package` changes WHO composes the dispatcher
+      # argv (`index.mjs` rather than a model reading a 99-line prose runbook),
+      # not what the dispatcher is asked to do, and the routes must agree on that
+      # or the comparison between them is not a comparison. The measurements do
+      # NOT transfer: a run of the file row is evidence about the file row.
+      # ----------------------------------------------------------------------
+      - id: opencode-package-full
+        route: package
+        # IDENTICAL to `opencode-full`'s, deliberately, for the same reason
+        # `opencode-package-ask`'s is identical to `opencode-ask`'s.
+        args: '--full "plans/auth-feature.md" --quick'
+        command: "full plans/auth-feature.md --yes --exec-subagents --quick --detach"
+        expect:
+          run: done
+          exit: 0
+          # Copied from the twin, and the fact it encodes is about OUR
+          # dispatcher rather than about the host or the route: `full` calls each
+          # phase's `main(argv)` in-process, so one host turn is one dispatcher
+          # invocation carrying one MULTI_LLM_RESULT line, whose `phase` is what
+          # `modes.py` gives the mode — the string `full`.
+          receipt_phase: full
+          # The eight workflow phases `state.json` must record, cross-checked
+          # against `test_container_full_chain.py`'s CHAIN_PHASES. Mode
+          # `review-code` records phase `code-review`.
+          phases:
+            - review-plan
+            - apply-suggestions
+            - generate-tasks
+            - review-tasks
+            - apply-task-suggestions
+            - implement
+            - code-review
+            - apply-code-fixes
+          # A floor, not a count. The two measured package rows above observed
+          # the same receipt shape the file route does (1 turn on `ask`, 6 on
+          # `review-plan`), so the twin's floor carries across unchanged.
+          receipts_min: 2
+        # COPIED FROM THE TWIN, AND IT IS A DECLARATION RATHER THAN A
+        # MEASUREMENT ON THIS ROW. `opencode-full` measured 52.22 s of host wall
+        # against this 900 s bound on `runs/20260820T093838Z` (codex-full took
+        # 287.87 s for the same shape), and the two package rows above measured
+        # 18.7 s and 24.33 s against theirs — so 900 s has wide headroom on this
+        # host by every figure the file has. T4 re-records it from this row's own
+        # first pass rather than inheriting one.
+        wall_clock_s: 900
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        measured:
+          on: null
+          provenance: unmeasured
+          blocked_on: [T0, T0a, T4]
+          detail: >
+            NOTHING ABOUT THIS ROW HAS RUN — the row was authored on 2026-09-22
+            and the credentialed tier has not run since. Nor can its twin's
+            record be borrowed: `opencode-full`'s own `provenance` was re-dated
+            from `verified` to `unmeasured` in this same edit, because
+            `runs/20260820T093838Z` pre-dates the D6 pre-dispatch sandbox probe
+            (2026-09-17) by a month and that run's write dispatches went through
+            a codex runner that can no longer start one. T0 re-dates the twin,
+            T0a gives both rows a runner that works, and T4 is this row's pass.
+        provenance: unmeasured   # T4 — authored 2026-09-22, never executed
+        note: >
+          THE 8-OF-8 PHASE ROW THE PACKAGE ROUTE DID NOT HAVE. `full` is the
+          longest instruction core the lane drives, which on the FILE route is
+          the row most likely to reproduce this host's recorded shim-following
+          failure (`opencode-review-plan`: the model polled before starting
+          anything, dropped every baked flag and omitted `--detach` on a host
+          where `detach: required`). On the PACKAGE route that failure mode is
+          structurally different: the baked `--host opencode --yes
+          --exec-subagents` stop being prose a model may improvise past and
+          become code in `index.mjs`'s `execute`. So this row asks the route's
+          own question — "does the route that cannot be improvised past actually
+          not get improvised past" — on the workload where the difference is
+          largest, and it does it for the cost of one host turn.
+          ONE THING IT WILL NOT GRADE, inherited verbatim from the twin: the
+          chain's write phases really do move bytes under `src/**` (`implement`),
+          and this row declares no `write_outcome`, so
+          `TestTheWriteRowsAreGradedOnBytes` skips it by name. That is
+          deliberate — the applied-byte question belongs to the apply rows, which
+          declare an outcome to grade — and it is recorded here so a later reader
+          does not mistake the skip for an oversight.
+      - id: opencode-package-apply-executor
+        route: package
+        # IDENTICAL to `opencode-apply-executor`'s, which is itself identical to
+        # `codex-apply-executor`'s: both hosts bake the same three flags and both
+        # add `--detach` from their own shim step, so the operator form of the
+        # same `command` is the same string. On the package route the string is
+        # not retyped by a model at all — the plugin's `multi_llm` tool composes
+        # the argv — which is precisely the difference this row exists to grade.
+        args: '--apply-suggestions "plans/auth-feature.md"'
+        command: "apply-suggestions plans/auth-feature.md --yes --exec-subagents --detach"
+        # The pre-command leg — see `claude-code-apply-native` for the full cell.
+        # Copied verbatim from the twin: the leg is the RIG dispatching and does
+        # not vary by route, since `route:` governs how the HOST is given its
+        # command and the leg never goes near the host.
+        pre_commands:
+          - "review-plan plans/auth-feature.md --yes --quick --exec-subagents"
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        # Stated rather than defaulted: `wall_clock_s + 500` is the row's docker
+        # timeout and it has to cover the pre-command leg too. Copied from the
+        # twin, which measured 82.23 s of host wall against it.
+        wall_clock_s: 900
+        expect:
+          run: done
+          exit: 0
+          phases: [apply-suggestions]
+          # C4 option (b), carried across unchanged: a real executor CLI pointed
+          # at a tool-call-free stub can only ever come back with nothing moved,
+          # so the row asserts THAT instead of hoping for an applied one. An
+          # `applied` batch here fails just as loudly — bytes landing from a
+          # tool-call-free stub means the redirect leaked.
+          # CORRECTED 2026-09-22, FROM `clean-failure`, HOURS AFTER THIS ROW WAS
+          # AUTHORED and for a reason that has nothing to do with the route: the
+          # word was copied from the sibling rows, and the sibling rows had it
+          # from `runs/20260820T093838Z`, which pre-dates `1633dd4` (2026-09-16).
+          # That commit split `write_batch_scheduler`'s empty-diff branch by the
+          # runner's CLAIM, and this lane's canned write-batch document has said
+          # `{"status": "no-op"}` since 2026-08-15. The full derivation is at
+          # `codex-apply-executor`'s own `write_outcome` cell; the short version
+          # is that the leak guarantee is unchanged, because both words are
+          # assigned only inside the classifier's `if not changed:` branch and
+          # `applied` is reachable only past a NON-empty snapshot diff.
+          write_outcome: no-op
+          bytes_must_change: false
+        measured:
+          on: runs/20260922T124956Z
+          provenance: measured-red
+          blocked_on: [T4]
+          detail: >
+            THIS ROW HAS NOW RUN, on 2026-09-22, and the cell above is what it
+            corrected. T0 and T0a landed on that run: the write batches went
+            through `opencode:stub/stub-model` (the write report's own
+            `runner_versions`), all four DISPATCHED and were classified, and no
+            `sandbox_unavailable` refusal appears anywhere in the bundle. The
+            row reached `run: done`, exit 0, `phases: [apply-suggestions]`, four
+            batches at `status: ok` / `write_outcome: no-op`, zero bytes moved,
+            in 31.61 s of host wall clock and 10 stub requests past the
+            host-start watermark — the cheapest of the three apply rows by a
+            factor of four, exactly as the route promised.
+            `measured-red` RATHER THAN `verified`, and the distinction is this
+            file's whole point: that run graded the row RED, because
+            `write_outcome` still read `clean-failure` — a verdict the classifier
+            has not returned for this stub since `1633dd4`. This edit owns the
+            correction. T4 stays open and now means one thing only: re-grade the
+            row against the corrected cell, which is a container run this edit
+            did not make.
+        provenance: measured-red   # runs/20260922T124956Z — authored 2026-09-22, executed the same day; the `write_outcome` word was corrected here, T4 owns the promotion
+        note: >
+          THE WRITE ROW THE PACKAGE ROUTE DID NOT HAVE, and the only row on this
+          route that dispatches a write batch at all. It is where the route
+          difference and the write runner meet: the batch goes through the host
+          block's `runner` (T0a, `opencode:stub/stub-model` built at read time),
+          while the host's own dispatcher argv is composed by the plugin rather
+          than retyped by a model. Both halves are unmeasured, and they fail
+          distinguishably — a runner failure is a `sandbox_unavailable` or
+          `ProviderModelNotFoundError` batch record, a route failure is a missing
+          or improvised argv in `host-run.json`.
+          WHY IT IS NOT REDUNDANT WITH `opencode-apply-executor`: the twin grades
+          a 99-line prose runbook a model reads and retypes; this grades an
+          11-line command that tells the model to call the `multi_llm` TOOL,
+          whose `execute` composes the argv in JavaScript. `route: package` is
+          read into `harness.Row.route`, which makes `build_run_argv` forward
+          `--route package`, which makes `stage_host` stage NO file shim (two
+          command sources in one $HOME would leave the plugin silently
+          overwriting the shim's entry) and `_write_opencode_config` write
+          `plugin[]`. Crediting a plugin run to the shim, or the reverse, would
+          let either route rot behind the other's evidence.

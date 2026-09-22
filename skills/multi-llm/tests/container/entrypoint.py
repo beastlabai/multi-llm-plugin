@@ -775,32 +775,46 @@ def record_stub_watermark(row_id: str, removed: str | None) -> None:
     that exists only where an assertion currently reads it is a watermark the
     next assertion cannot trust.
     """
-    log_path = OUT / "stub.jsonl"
-    calls = 0
-    if log_path.is_file():
-        for line in log_path.read_text(encoding="utf-8",
-                                       errors="replace").splitlines():
-            line = line.strip()
-            if not line:
+    def _records(path: Path) -> list[dict]:
+        # A torn last line is evidence, never a failure path: the watermark is a
+        # floor and one unparsed record cannot move it in the direction that
+        # hides a call. Same rule as the reader on the other side
+        # (`harness._read_jsonl`), so an index taken here indexes the same list
+        # the grader slices.
+        rows: list[dict] = []
+        if not path.is_file():
+            return rows
+        for line in path.read_text(encoding="utf-8",
+                                   errors="replace").splitlines():
+            if not line.strip():
                 continue
             try:
-                record = json.loads(line)
+                rows.append(json.loads(line))
             except json.JSONDecodeError:
-                # A torn last line is evidence, never a failure path: the
-                # watermark is a floor and one unparsed record cannot move it in
-                # the direction that hides a call.
                 continue
-            if record.get("surface") != "health":
-                calls += 1
+        return rows
+
+    calls = sum(1 for record in _records(OUT / "stub.jsonl")
+                if record.get("surface") != "health")
+    # THE SAME LINE, DRAWN ON THE CALL LOG. The leg fans out through the very
+    # same `/opt/mllm/bin` shim, so `calls.jsonl` carries its invocations too and
+    # a per-provider grader counting the whole file credits the rig's own
+    # fan-out to the host. One index, written where the boundary is unambiguous,
+    # is what lets that grader slice both logs at the same moment.
+    invocations = len(_records(OUT / "calls.jsonl"))
     (OUT / "stub-watermark.json").write_text(json.dumps({
         "row": row_id,
         "removed_seed": removed,
         "non_health_calls_before_host": calls,
-        "meaning": ("every stub request logged at or below this count was made "
+        "call_records_before_host": invocations,
+        "meaning": ("every stub request logged at or below "
+                    "`non_health_calls_before_host`, and every `calls.jsonl` "
+                    "record at or below `call_records_before_host`, was made "
                     "by the rig's pre-command leg, before the host process "
                     "started and before any declared credential was removed"),
     }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    log(f"stub watermark before host launch: {calls} non-health request(s)")
+    log(f"stub watermark before host launch: {calls} non-health request(s), "
+        f"{invocations} wrapped CLI invocation(s)")
 
 
 def substitute_placeholders(root: Path, mapping: dict[str, str]) -> None:
@@ -2007,6 +2021,428 @@ def render_prompt(entry: dict, row: dict) -> str:
     return args if not template else template.replace("{args}", args).strip()
 
 
+# --------------------------------------------------------------------------- #
+# The host agent's OWN session transcript
+#
+# `--output-format json` prints the final envelope and nothing else. A row where
+# the agent loaded the skill and stopped before its first `uv run` produces zero
+# dispatcher receipts, `result: ""`, `subtype: "success"` and ~100 output tokens
+# — and no evidence whatsoever of WHERE it stopped. Everything the agent does
+# before its first dispatcher call (`Skill(multi-llm)`, `Read`,
+# `Bash(command -v uv)`, and any denial of those) leaves no receipt, no
+# `calls.jsonl` entry and no line on stdout. Four claude-code rows have flaked
+# across four live runs and two of them had exactly that shape; the stopping
+# point was unrecoverable, so the cause was guessed at rather than read.
+#
+# Claude Code writes that missing evidence to
+# `$HOME/.claude/projects/<slugified cwd>/<session_id>.jsonl`, and the envelope
+# already carries `session_id`. The tmpfs `$HOME` dies with the container, so the
+# file is lifted into the bundle at teardown or it is gone.
+#
+# MEASURED 2026-09-22, claude-code 2.1.278 — the version cli-versions.lock pins —
+# driven against a localhost Anthropic stub with `HOME` pointed at an empty
+# directory and `ANTHROPIC_API_KEY` present-and-empty, i.e. the host lane's own
+# wiring at zero spend:
+#
+#   * the envelope's `session_id` is exactly the file's stem;
+#   * the directory is the cwd with every non-alphanumeric run replaced by `-`;
+#   * a ONE-TURN session is already 191 KB, 168 KB of which is two
+#     `prompt_snapshot` attachments.
+#
+# WHAT IS VERIFIED OFFLINE IS THE LAYOUT, NOT THE CONTAINER. That a tmpfs `$HOME`
+# behaves like any other directory here is inference, and a CLI upgrade may move
+# the path — which is why every branch below ends in a logged reason instead of
+# an exception, and why the digest names the file it actually read.
+#
+# WHAT LANDS IN THE BUNDLE IS A DIGEST, NOT THE FILE. See `capture_host_session`.
+# --------------------------------------------------------------------------- #
+
+#: Free text kept per field before it becomes a character count. A stalled turn
+#: is ~100 output tokens, so the whole of one fits; so does a permission-denial
+#: message, which is the most likely cause of an agent that stops early.
+SESSION_TEXT_CAP = 2000
+
+#: The smaller cap for a tool RESULT that is not an error. Tool results are the
+#: bulk of a transcript (a file the agent read) and the least diagnostic part of
+#: it; an error one is kept at the full cap because that is where a denial lands.
+SESSION_RESULT_CAP = 400
+
+#: Total digest budget. A green `apply-native` row touched 2.3M cache-read
+#: tokens; the source JSONL is unbounded and a bundle is not.
+SESSION_DIGEST_CAP = 2 * 1024 * 1024
+
+#: Source lines read, as a second bound that does not depend on line length.
+SESSION_LINE_CAP = 20_000
+
+#: Wall-clock budget. This runs at teardown, and on the `docker stop` path the
+#: grace period is ten seconds — a capture that ate it would cost the artifact
+#: export it is filed beside, which is the more important artifact. A digest
+#: that stopped on this cap still says where the agent got to.
+SESSION_SECONDS_CAP = 5.0
+
+#: `{host: ($HOME-relative path of the transcript root)}`. Only claude-code is
+#: measured; a host with no entry is a logged skip, never a failure. Written as a
+#: table so adding a host is one line with its layout beside it, rather than a
+#: second `if host == ...` somewhere else in this file.
+SESSION_LAYOUTS = {"claude-code": (".claude", "projects")}
+
+
+#: The LEFT-BOUNDARY backstop, and the one thing this file redacts that the
+#: product's table does not.
+#:
+#: MEASURED 2026-09-22 against a real 5.7 MB claude-code transcript on this
+#: machine: an `OPENAI_API_KEY` survived `write_safety.redact_text` intact
+#: because the tool result it sat in read
+#:
+#:     OPENAI_API_KEY: SETsk-proj-XXXXXXXXXXXX…
+#:
+#: — a probe script that printed `SET` and the value with nothing between them.
+#: Every vendor-prefix pattern in `_REDACTIONS` is anchored with a leading `\b`,
+#: and `T` followed by `s` is not a word boundary, so none of them fired. The
+#: shape is not exotic: agents concatenate, and a transcript is full of other
+#: programs' output.
+#:
+#: Only the prefixes whose INFIX is itself distinctive are swept without a left
+#: boundary. `sk-` plus sixteen word characters is deliberately NOT here — with
+#: the boundary dropped it redacts `task-oriented-development` — but `sk-proj-`,
+#: `ghp_`, `glpat-` and the rest cannot occur inside an English word.
+#:
+#: This is a backstop, not a second source of truth: the product's table stays
+#: the redactor, and the gap above belongs in `utils/write_safety.py`, where
+#: fixing it would protect every other consumer too.
+_SESSION_PREFIX_SWEEP = re.compile(
+    r"sk-(?:ant|proj|or-v1|live)-[A-Za-z0-9_\-]{16,}"
+    r"|xox[baprse]-[A-Za-z0-9\-]{16,}"
+    r"|gh[opusr]_[A-Za-z0-9]{16,}"
+    r"|AIza[0-9A-Za-z_\-]{35,}"
+    r"|glpat-[A-Za-z0-9_\-]{20,}"
+    r"|hf_[A-Za-z0-9]{30,}"
+    r"|eyJ[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}\.[A-Za-z0-9_\-]{8,}"
+)
+
+
+def _sweep_prefixes(text: str) -> str:
+    """`_SESSION_PREFIX_SWEEP`, applied after the product redactor has run."""
+    return _SESSION_PREFIX_SWEEP.sub("<redacted:prefix-sweep>", text or "")
+
+
+def _session_redactor():
+    """The PRODUCT's credential/identity redactor, or `None` — and then we stop.
+
+    `utils.write_safety.redact_text` is the shipped one: vendor key prefixes
+    (`sk-ant-`/`sk-proj-`/`sk-or-v1-`, `ghp_`, `xox…`, `AIza…`, `glpat-`, `hf_`,
+    AWS ids), JWTs, basic-auth URLs, PEM private keys, `Authorization:` headers,
+    the predicate-gated `<secret-named key>: <value>` branch, and the identity
+    fields. Reached through the same `sys.path` insert `opencode_plugin_spec()`
+    already uses, and for the same reason: `sys.path[0]` is the rig directory,
+    so a bare `from utils import ...` cannot work here.
+
+    IT FAILS CLOSED. If the import does not work — a rig driving an image that
+    predates the skill install, a future layout change — no digest is written at
+    all. A bundle is a shareable artifact, and MEASURED on this machine's own
+    session files: real transcripts do contain `sk-or-v1-…` and `sk-proj-…`
+    values that the agent read out of a file or printed from an environment. The
+    per-row `_scrub` covers the one key THIS row was handed; it cannot cover a
+    credential the transcript picked up from somewhere else, and duplicating the
+    product's pattern table into the rig would make this repo hold two of them.
+    """
+    if str(SKILL_DIR) not in sys.path:
+        sys.path.insert(0, str(SKILL_DIR))
+    try:
+        from utils.write_safety import redact_text
+    except ImportError as exc:  # pragma: no cover - the rig runs outside the skill too
+        log(f"session transcript: the skill's redactor is unreachable ({exc})")
+        return None
+    return redact_text
+
+
+def session_id_from_envelope(stdout_text: str) -> str:
+    """`session_id` out of `--output-format json`'s final envelope, or `""`.
+
+    Tried whole-document first and then line by line from the end, so a
+    pretty-printed envelope and a stream of JSON lines both resolve, and a host
+    that printed prose before its envelope does not defeat it.
+    """
+    text = (stdout_text or "").strip()
+    if not text:
+        return ""
+    for chunk in [text] + [line.strip() for line in reversed(text.splitlines())]:
+        if not chunk.startswith("{"):
+            continue
+        try:
+            payload = json.loads(chunk)
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and payload.get("session_id"):
+            return str(payload["session_id"])
+    return ""
+
+
+def find_host_session(host: str, home: Path, session_id: str = "") -> tuple:
+    """`(path or None, siblings)` — this row's session JSONL under its `$HOME`.
+
+    The id is the exact answer and is what a completed row has. A row that was
+    killed before its envelope reached stdout has no id, and then the NEWEST
+    transcript is the best available guess — recorded as such in the metadata,
+    because "we guessed" and "we matched" are different claims. `siblings` is how
+    many other transcripts were sitting there, so a bundle never silently drops
+    one this function did not pick.
+    """
+    parts = SESSION_LAYOUTS.get(host)
+    if not parts:
+        return None, 0
+    root = home.joinpath(*parts)
+    if not root.is_dir():
+        return None, 0
+    found = [p for p in sorted(root.glob("*/*.jsonl")) if p.is_file()]
+    if not found:
+        return None, 0
+    named = [p for p in found if session_id and p.stem == session_id]
+    if named:
+        return named[0], len(found) - 1
+    return max(found, key=lambda p: p.stat().st_mtime), len(found) - 1
+
+
+def _clip(value, cap: int = SESSION_TEXT_CAP) -> str:
+    """A string kept whole, or its head plus a count of what was dropped."""
+    text = value if isinstance(value, str) else json.dumps(value, default=str)
+    if len(text) <= cap:
+        return text
+    return text[:cap] + f"...<+{len(text) - cap} chars>"
+
+
+def _digest_message(message: dict) -> dict:
+    """The parts of one API message that say where a turn went.
+
+    Structure is always kept; free text is kept up to a cap and otherwise
+    becomes a length. The one asymmetry is deliberate: a `tool_use` input is
+    kept generously because it IS the diagnosis — `Skill(multi-llm)` followed by
+    nothing is the "never started" shape, and `Bash(command -v uv)` followed by
+    an error is a different row entirely — while a non-error `tool_result` is a
+    file the agent read, which is most of the bytes and none of the answer.
+    """
+    out: dict = {"role": message.get("role"),
+                 "model": message.get("model"),
+                 "stop_reason": message.get("stop_reason")}
+    usage = message.get("usage")
+    if isinstance(usage, dict):
+        out["usage"] = {name: usage[name] for name in (
+            "input_tokens", "output_tokens", "cache_read_input_tokens",
+            "cache_creation_input_tokens") if name in usage}
+    content = message.get("content")
+    if isinstance(content, str):
+        out["chars"] = len(content)
+        out["preview"] = _clip(content)
+        return out
+    if not isinstance(content, list):
+        return out
+    blocks = []
+    for block in content:
+        if not isinstance(block, dict):
+            blocks.append({"type": type(block).__name__})
+            continue
+        kind = block.get("type")
+        item: dict = {"type": kind}
+        if kind in ("text", "thinking", "redacted_thinking"):
+            body = block.get("text") or block.get("thinking") or ""
+            item["chars"] = len(body)
+            item["preview"] = _clip(body)
+        elif kind == "tool_use":
+            item["name"] = block.get("name")
+            item["id"] = block.get("id")
+            item["input"] = _clip(block.get("input"))
+        elif kind == "tool_result":
+            item["tool_use_id"] = block.get("tool_use_id")
+            item["is_error"] = bool(block.get("is_error"))
+            body = block.get("content")
+            text = body if isinstance(body, str) else json.dumps(body, default=str)
+            item["chars"] = len(text)
+            if item["is_error"] or len(text) <= SESSION_RESULT_CAP:
+                item["preview"] = _clip(text, SESSION_TEXT_CAP)
+        else:
+            item["chars"] = len(json.dumps(block, default=str))
+        blocks.append(item)
+    out["blocks"] = blocks
+    return out
+
+
+def _digest_record(index: int, record: dict, size: int) -> dict:
+    """One transcript line, reduced to what diagnoses a stall."""
+    out: dict = {"i": index, "bytes": size, "type": record.get("type")}
+    for name in ("timestamp", "uuid", "parentUuid", "isSidechain", "subtype",
+                 "level", "toolUseID", "stopReason", "isMeta", "requestId",
+                 "durationMs", "preventedContinuation", "hookErrors"):
+        if name in record:
+            out[name] = record[name]
+    known = False
+    message = record.get("message")
+    if isinstance(message, dict):
+        out["message"] = _digest_message(message)
+        known = True
+    attachment = record.get("attachment")
+    if isinstance(attachment, dict):
+        # The bulk of the file and the least diagnostic part of it: two
+        # `prompt_snapshot` attachments were 168 KB of the 191 KB one-turn
+        # session measured above. Type and size always; the payload only while
+        # it is small enough to be read rather than skimmed, which keeps the
+        # `environment`, `model`, `date` and `session_context` ones whole and
+        # drops the snapshots and the listings.
+        body = json.dumps(attachment, default=str)
+        out["attachment"] = {"type": attachment.get("type"), "chars": len(body)}
+        if len(body) <= SESSION_TEXT_CAP:
+            out["attachment"]["payload"] = attachment
+        known = True
+    content = record.get("content")
+    if isinstance(content, str):
+        out["content"] = _clip(content)
+        known = True
+    if record.get("type") == "cost-state":
+        for name in ("totalCostUSD", "totalDuration", "totalAPIDuration",
+                     "totalToolDuration", "totalLinesAdded", "totalLinesRemoved",
+                     "messageCount"):
+            if name in record:
+                out[name] = record[name]
+        known = True
+    if not known:
+        # A shape this rig does not model — a new record type after a CLI
+        # upgrade — is still NAMED, so the next reader knows something was there
+        # and what its fields were called.
+        out["keys"] = sorted(record)
+    return out
+
+
+def capture_host_session(host: str, home: Path, stdout_text: str,
+                         scrub, session_id: str = "") -> dict:
+    """Lift the host agent's session transcript into the bundle, as a digest.
+
+    Returns the metadata that goes into `host-run.json` under `session`, and
+    **never raises**: it is called from a `finally` that a `docker stop` reaches
+    with a short grace period left, and the artifact export runs after it. A
+    missing file, an unreadable one, a CLI that moved the path, a transcript
+    whose schema changed — each is a logged `reason` and a `captured: false`,
+    and the row goes on.
+
+    A DIGEST, NOT THE FILE, AND NOT A GZIP OF IT. Both were on the table:
+
+    * `host-session-digest.jsonl` is newline-delimited JSON, one line per source
+      record, headed by a `_capture` line naming the source, its size, the
+      session id and whether that id MATCHED or was guessed. It is greppable and
+      diffable by hand next to the rest of the bundle. MEASURED: 191 KB -> 7 KB
+      on the one-turn session above (the two `prompt_snapshot` attachments
+      become a type and a length), and 5.7 MB / 2 548 records -> 1.5 MB in 0.33 s
+      on a real long agentic session.
+    * A gzip of the raw file would lose nothing, and that is the problem: it
+      would carry the whole system prompt, every file the agent read and every
+      command's full output into an artifact that gets handed to other people,
+      as a binary blob nobody can eyeball before sharing it.
+
+    WHAT IS LOST: the tail of any free-text field past `SESSION_TEXT_CAP`, the
+    body of every non-error tool result over `SESSION_RESULT_CAP` (so "what did
+    that `Read` actually return" is answerable only by its length), the payload
+    of every large attachment, and the whole of the transcript past whichever cap
+    fired first — which the metadata names. The stall shape this exists for —
+    which tool the agent reached, what it passed, whether the result was an
+    error, what it then said, and the `stop_reason` it stopped on — survives all
+    of them.
+    """
+    meta: dict = {"captured": False, "host": host}
+    try:
+        wanted = session_id or session_id_from_envelope(stdout_text)
+        meta["session_id"] = wanted
+        source, siblings = find_host_session(host, home, wanted)
+        if source is None:
+            meta["reason"] = (
+                f"no transcript under {home.joinpath(*SESSION_LAYOUTS[host])}"
+                if host in SESSION_LAYOUTS
+                else f"no known session layout for host {host!r}")
+            log(f"session transcript: {meta['reason']}")
+            return meta
+        meta.update({
+            "source": str(source),
+            "source_bytes": source.stat().st_size,
+            "siblings": siblings,
+            "matched_by": "session_id" if source.stem == wanted else "newest",
+        })
+        redact = _session_redactor()
+        if redact is None:
+            meta["reason"] = ("no redactor: an unredacted transcript does not "
+                              "go into a shareable bundle")
+            return meta
+
+        target = OUT / "host-session-digest.jsonl"
+        deadline = time.time() + SESSION_SECONDS_CAP
+        written = records = unparsed = 0
+        stopped = ""
+
+        def _emit(sink, payload: dict) -> int:
+            # Scrub by VALUE first (this row's own key, and on the fallback path
+            # the copied credential's strings), then by PATTERN (the product's
+            # own table), then by the left-boundary backstop above. All three
+            # run on the SERIALIZED line, so nothing reaches the file
+            # unscrubbed, and no replacement contains a quote or a backslash, so
+            # the line stays valid JSON.
+            line = _sweep_prefixes(
+                redact(scrub(json.dumps(payload, default=str, sort_keys=True))))
+            sink.write(line + "\n")
+            return len(line) + 1
+
+        with source.open("r", encoding="utf-8", errors="replace") as handle, \
+                target.open("w", encoding="utf-8") as sink:
+            written += _emit(sink, {
+                "i": -1, "type": "_capture", "source": str(source),
+                "source_bytes": meta["source_bytes"], "session_id": wanted,
+                "matched_by": meta["matched_by"], "siblings": siblings,
+                "caps": {"text": SESSION_TEXT_CAP, "result": SESSION_RESULT_CAP,
+                         "digest_bytes": SESSION_DIGEST_CAP,
+                         "lines": SESSION_LINE_CAP,
+                         "seconds": SESSION_SECONDS_CAP},
+            })
+            for index, raw in enumerate(handle):
+                if index >= SESSION_LINE_CAP:
+                    stopped = "line-cap"
+                    break
+                if written >= SESSION_DIGEST_CAP:
+                    stopped = "byte-cap"
+                    break
+                if time.time() > deadline:
+                    stopped = "time-cap"
+                    break
+                # VALUE-scrubbed before the parse, not only on the way out:
+                # `_clip` cuts free text at a fixed offset, and a secret that
+                # straddles that offset leaves a head an exact-value replace can
+                # no longer match. A `str.replace` over the raw line is two
+                # passes and closes it; the pattern layer still runs on the
+                # (much smaller) serialized digest line, where a clipped vendor
+                # prefix is still long enough to match.
+                raw = scrub(raw.strip())
+                if not raw:
+                    continue
+                records += 1
+                try:
+                    record = json.loads(raw)
+                except ValueError:
+                    # A transcript read while the host is still writing it — the
+                    # `docker stop` path — ends in half a line. That is one
+                    # record, not the whole capture.
+                    unparsed += 1
+                    record = None
+                written += _emit(sink, _digest_record(index, record, len(raw))
+                                 if isinstance(record, dict)
+                                 else {"i": index, "bytes": len(raw),
+                                       "type": "_unparsed",
+                                       "preview": _clip(raw)})
+        meta.update({"captured": True, "digest": target.name,
+                     "digest_bytes": written, "records": records,
+                     "unparsed": unparsed, "stopped_early": stopped or None})
+        log(f"session transcript: {records} records of {meta['source_bytes']}B "
+            f"from {source.name} -> {target.name} ({written}B"
+            + (f", stopped on {stopped}" if stopped else "") + ")")
+    except Exception as exc:  # evidence, never a failure path
+        meta["reason"] = f"{type(exc).__name__}: {exc}"
+        log(f"could not capture the host session transcript: {exc}")
+    return meta
+
+
 def run_host(host: str, entry: dict, row: dict, home: Path, overlay: dict,
              key: str, creds: str = "openrouter", secrets=()) -> dict:
     """Launch the host itself and capture everything it said.
@@ -2021,6 +2457,13 @@ def run_host(host: str, entry: dict, row: dict, home: Path, overlay: dict,
     OpenRouter-only guard — on the fallback path the variable must be *absent*,
     since the copied `.credentials.json` is the auth) and which values the
     transcript is scrubbed of.
+
+    **"Everything it said" now includes what it said to itself.** `host-stdout`
+    is one envelope; the agent's own session transcript — every tool it reached
+    for and every result it got back, including the ones before its first
+    dispatcher call — is lifted into `host-session-digest.jsonl` by
+    `capture_host_session`, in a `finally` so the unfinished row is the one it
+    serves.
     """
     argv = build_host_argv(entry, row)
     binary = argv[0]
@@ -2047,37 +2490,55 @@ def run_host(host: str, entry: dict, row: dict, home: Path, overlay: dict,
 
     log(f"host launch: {' '.join(shlex.quote(a) for a in [binary, *argv[1:]])}")
     log(f"host wall-clock bound: {wall}s")
-    started = time.time()
-    timed_out = False
-    proc = subprocess.Popen(
-        argv, env=env, cwd=str(WORKSPACE), text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        start_new_session=True)          # its own group, so a cap hit kills the tree
-    try:
-        out, err = proc.communicate(timeout=wall)
-        code = proc.returncode
-    except subprocess.TimeoutExpired:
-        timed_out = True
-        try:
-            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            out, err = proc.communicate(timeout=20)
-        except (ProcessLookupError, subprocess.TimeoutExpired):
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            out, err = proc.communicate()
-        code = proc.returncode
 
     # Redaction at WRITE time, on a stream nobody audited: the host's own
     # transcript is third-party output and this lane's secrets are in its
     # environment (openrouter) or in the files copied into its $HOME (fallback).
     # Cheap insurance against a CLI that echoes its config.
+    #
+    # DEFINED BEFORE THE LAUNCH because the session capture below runs in a
+    # `finally` that is reached on the path where the host never returns, and a
+    # scrub defined after the wait would not exist there.
     def _scrub(text: str) -> str:
         text = text or ""
         for secret in ([key] if key else []) + list(secrets):
             text = text.replace(secret, f"<redacted:{creds}-credential>")
         return text
+
+    started = time.time()
+    timed_out = False
+    out = err = ""
+    code = None
+    proc = subprocess.Popen(
+        argv, env=env, cwd=str(WORKSPACE), text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        start_new_session=True)          # its own group, so a cap hit kills the tree
+    try:
+        try:
+            out, err = proc.communicate(timeout=wall)
+            code = proc.returncode
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                out, err = proc.communicate(timeout=20)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                out, err = proc.communicate()
+            code = proc.returncode
+    finally:
+        # IN A `finally`, for the same reason the artifact export is: the row
+        # whose evidence matters most is the one that did not finish. A
+        # `docker stop` unwinds PID 1 through `SystemExit` raised from the
+        # SIGTERM handler — `out` is never assigned, so the envelope carrying
+        # `session_id` is lost with it and `host-stdout.txt` below is never
+        # written — and the transcript on disk is then the only thing left that
+        # says where the agent stopped. It is time-capped so it cannot eat the
+        # grace period the export still needs.
+        session = capture_host_session(host, home, out, _scrub)
 
     (OUT / "host-stdout.txt").write_text(_scrub(out), encoding="utf-8")
     (OUT / "host-stderr.txt").write_text(_scrub(err), encoding="utf-8")
@@ -2091,6 +2552,11 @@ def run_host(host: str, entry: dict, row: dict, home: Path, overlay: dict,
         "timed_out": timed_out,
         "wall_clock_s": round(time.time() - started, 2),
         "bound_s": wall,
+        # Where the agent's own transcript landed, or why it did not. A
+        # `captured: false` with a reason is itself a finding on a row that
+        # produced no receipts: it separates "the agent stopped early" from
+        # "we could not see what the agent did".
+        "session": session,
     }
     (OUT / "host-run.json").write_text(json.dumps(record, indent=2, sort_keys=True),
                                        encoding="utf-8")
@@ -2247,19 +2713,139 @@ def export_artifacts(plan: Path) -> None:
         log(f"exported {source} -> {target / source.name}")
     else:
         log(f"nothing to export: {source} does not exist")
-    census = {
-        str(p.relative_to(WORKSPACE)): _sha(p)
-        for p in sorted(WORKSPACE.rglob("*"))
-        if p.is_file() and ".git/" not in str(p.relative_to(WORKSPACE))
-    }
+    export_receipt_named_plan_files(plan, target)
     (OUT / "workspace-census-after.json").write_text(
-        json.dumps(census, indent=2, sort_keys=True), encoding="utf-8")
+        json.dumps(_workspace_census(), indent=2, sort_keys=True),
+        encoding="utf-8")
+
+
+def export_receipt_named_plan_files(plan: Path, target: Path) -> None:
+    """Also export the `plans/` files this row's own RECEIPTS named.
+
+    The copy above takes the plan's output DIRECTORY, which is where every
+    phase artifact lands — but not every artifact a receipt names lives there.
+    `apply-suggestions` rewrites the plan FILE and then names it, so a receipt
+    carrying `/work/sample-project/plans/auth-feature.md` is the row's own
+    claim that it edited the plan. That file sits one level ABOVE the exported
+    directory and therefore never reached the bundle at all, which is how
+    `test_container_host_lane.py`'s `TestTheAgentReallyRanOurDispatcher::
+    test_every_named_artifact_exists_and_is_non_empty` came to fail three rows
+    on the export rather than on the artifact. It only
+    became reachable once those rows stopped dying at `container exit 3`: a row
+    that never reached `apply-suggestions` never named the plan.
+
+    THE RULE IS "WHAT THE RECEIPTS NAMED", never "everything under plans/",
+    and the narrowness is the point:
+
+    * A bundle is read and diffed by hand, and it already carries one secret
+      (`docker-inspect.json` has the OpenRouter key), so what goes into it is
+      chosen rather than swept. Exporting the plans directory wholesale would
+      pick up files nobody declared — `plans/auth-feature.ask.log`, a host
+      CLI's own scratch log, is in a recorded census and no receipt names it.
+    * `artifacts` is OUR dispatcher's declaration, not the host's, and this
+      reads the very directory the grader reads: `$MLLM_RECEIPT_DIR` is
+      `OUT/receipts/<row>`, which is `harness.RowResult.receipts` exactly. The
+      exported set and the graded set cannot drift apart.
+    * It is transport, never a verdict. A named file that does not exist is
+      not copied and the row still fails on the absent artifact — which is the
+      failure that assertion is for.
+
+    Placement mirrors the test's `_exported` map (`…/plans/<tail>` ->
+    `artifacts/<tail>`), so the plan file lands as a FILE at the artifacts
+    root. Every existing reader of that root selects directories — golden
+    `container_bundle.output_root`, the test's `_exported_before_host`, and
+    `harness.phase_status`/`workflow_state`'s `*/…` globs — so no bundle a
+    consumer already walks changes shape.
+
+    Nothing here may raise: the caller runs in `main`'s `finally`, one
+    statement before the after-census is written, and on a capped row it is
+    reached from the SIGTERM handler with a short grace period left.
+    """
+    receipt_dir = os.environ.get("MLLM_RECEIPT_DIR", "")
+    if not receipt_dir or not Path(receipt_dir).is_dir():
+        log("no receipt directory: nothing named to export beside the output dir")
+        return
+    plans_root = plan.parent
+    try:
+        resolved_root = plans_root.resolve()
+    except OSError as exc:  # evidence, never a failure path
+        log(f"could not resolve {plans_root} for the named export: {exc}")
+        return
+
+    named: list[str] = []
+    for receipt in sorted(Path(receipt_dir).glob("*.receipt.json")):
+        try:
+            payload = json.loads(receipt.read_text(encoding="utf-8")).get("result")
+        except (OSError, ValueError) as exc:
+            # One unreadable receipt — a row killed mid-write — costs its own
+            # artifacts and never the whole export.
+            log(f"could not read {receipt.name} for the named export: {exc}")
+            continue
+        if isinstance(payload, dict):
+            named.extend(str(a) for a in (payload.get("artifacts") or []))
+
+    for name in sorted(set(named)):
+        artifact = Path(name)
+        # The LEXICAL test picks the ones the bundle has a place for and yields
+        # the tail `_exported` expects; `$HOME` and `/opt/mllm` paths — the two
+        # places a credential could be — are dropped here and never read.
+        if not artifact.is_absolute() or not artifact.is_relative_to(plans_root):
+            continue
+        destination = target / artifact.relative_to(plans_root)
+        if destination.exists():
+            continue          # the directory copy above already carries it
+        try:
+            # And the RESOLVED test is containment: a `..` segment or a symlink
+            # pointing out of the workspace passes the lexical one.
+            if not artifact.resolve().is_relative_to(resolved_root):
+                log(f"named artifact {name} resolves outside {plans_root}: not exported")
+                continue
+            if not artifact.is_file():
+                continue      # absent is the grader's finding, not ours to hide
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(artifact, destination)
+        except OSError as exc:
+            log(f"could not export the named artifact {name}: {exc}")
+            continue
+        log(f"exported named artifact {artifact} -> {destination}")
 
 
 def _sha(path: Path) -> str:
     import hashlib
 
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _workspace_census() -> dict:
+    """`{relative path: sha256}` for every file in the workspace, `.git` aside."""
+    return {
+        str(p.relative_to(WORKSPACE)): _sha(p)
+        for p in sorted(WORKSPACE.rglob("*"))
+        if p.is_file() and ".git/" not in str(p.relative_to(WORKSPACE))
+    }
+
+
+def write_host_census(when: str) -> None:
+    """Bracket the HOST's own execution, in addition to the existing pair.
+
+    `workspace-census-before.json` is written right after `seed_workspace.py`
+    and **before** `run_pre_commands`. On a row whose earlier phases are seeded
+    by a pre-command leg — six of the eight claude-code phase rows, the two
+    exceptions being `review-plan` and `code-review`, which have no
+    prerequisites — every byte the leg writes therefore lands inside the
+    measured delta. Those are precisely the rows where it decides the verdict:
+    the four bytes-graded write rows.
+
+    So this pair brackets the host process alone. The existing pair is left
+    exactly where it is, so nothing already graded moves; a row that wants the
+    host's own credit reads these two instead.
+    """
+    try:
+        (OUT / f"workspace-census-host-{when}.json").write_text(
+            json.dumps(_workspace_census(), indent=2, sort_keys=True),
+            encoding="utf-8")
+    except OSError as exc:  # evidence, never a failure path
+        log(f"could not write the host-bracketed census ({when}): {exc}")
 
 
 def install_termination_handler() -> None:
@@ -2312,8 +2898,19 @@ def main(argv=None) -> int:
                              "`none` (the free discovery tier)")
     parser.add_argument("--helpers", default="",
                         help="comma-separated allowed_helpers for this row")
-    parser.add_argument("--spec", default=None, help="the row's provider:model spec")
-    parser.add_argument("--runner", default=None, help="executor runner spec")
+    # Repeatable: the row's fan-out is a LIST of provider:model specs, and the
+    # seeder writes every one of them into every selection key. One `--spec`
+    # is a fan-out of one; no `--spec` at all is an error, not a default (see
+    # the seeder call below).
+    parser.add_argument("--spec", action="append", default=None,
+                        help="one provider:model spec in the row's fan-out; "
+                             "repeatable, order preserved")
+    # Singular by construction, unlike `--spec`: `driver.subagent_runner` is
+    # one slug. REQUIRED, like `--spec` and like the seeder's own `--runner` —
+    # there is no defensible default (see the seeder call below).
+    parser.add_argument("--runner", default=None,
+                        help="executor runner spec (single; required — the "
+                             "row's write runner, named explicitly)")
     # Repeatable, and shell-split rather than whitespace-split: a chain row is
     # more than one dispatcher invocation (`full`, then a standalone `ask`, then
     # a `status` read-back), and `ask` carries a quoted question that a bare
@@ -2434,16 +3031,64 @@ def main(argv=None) -> int:
         # exactly that, logging `session=model:gpt-5.5` instead of the exec id.
         try:
             seeder = RIG_DIR / "seed_workspace.py"
+            # The fan-out is forwarded WHOLE, one `--spec` flag per member, in
+            # the order the row named them.
+            #
+            # Both of the defaults that used to stand here — one behind
+            # `--spec`, one behind `--runner` — named the same hard-coded codex
+            # stub slug, which was the single-provider fan-out this lane is
+            # getting rid of. They failed in the worst direction available: a
+            # row that forgot `--spec` still ran, still produced a bundle, and
+            # measured codex while claiming to measure whatever the row was
+            # named after. So the absence of a spec is an error now, and the
+            # slug itself is gone from this file entirely — grepping this file
+            # for that stub slug is the cheap guard that it stays gone, which
+            # is also why it is not spelled out anywhere in these comments.
+            specs = list(args.spec or [])
+            if not specs:
+                raise SystemExit(
+                    "entrypoint: --spec is required (and repeatable). It "
+                    "used to fall back to a hard-coded codex stub slug, so a "
+                    "row that named no fan-out silently measured codex; name "
+                    "the row's fan-out explicitly instead.")
+            # `--runner` stays SINGULAR — `driver.subagent_runner` is one slug
+            # — and it is REQUIRED, exactly as `--spec` is here and as
+            # `seed_workspace.py --runner` already is.
+            #
+            # It used to fall back to `specs[0]`. With `--spec` now a LIST that
+            # is not "the row's runner" at all: it is whichever provider the
+            # row's fan-out happens to name first — `codex` on the claude-code
+            # host, `claude-code` on the opencode host — which need not declare
+            # `agent-write`, and which on one host is precisely the sandboxed
+            # runner T0a exists to point away from (codex's `agent-write`
+            # renders `--sandbox workspace-write`, i.e. bubblewrap, which needs
+            # a user namespace Docker's default seccomp profile denies).
+            #
+            # The write runner is a MATRIX decision — `harness.host_runner_cli`,
+            # defaulting per host to the write-capable shared helper, and the
+            # row's own CLI on a `remove_seed` row — so the honest disposition
+            # for a row that named none is to stop, loudly, rather than to
+            # dispatch every write batch through an arbitrary fan-out member
+            # and file the result under the row's name.
+            runner = args.runner
+            if not runner:
+                raise SystemExit(
+                    f"entrypoint: --runner is required. It used to fall back "
+                    f"to the first --spec ({specs[0]!r} for this row), which "
+                    f"is only whichever provider this row's fan-out happens to "
+                    f"list first — it need not declare agent-write, and it may "
+                    f"be the sandboxed runner the matrix points away from. "
+                    f"Name the row's write runner explicitly (the matrix's "
+                    f"`runner` key, read by harness.host_runner_cli).")
+            spec_argv = [arg for spec in specs for arg in ("--spec", spec)]
             subprocess.check_call(
                 [sys.executable, str(seeder), "--root", str(WORKSPACE),
-                 "--spec", args.spec or "codex:stub-model",
-                 "--runner", args.runner or args.spec or "codex:stub-model"])
+                 *spec_argv, "--runner", runner])
+            # The WHOLE-ROW pair. Taken here, before `run_pre_commands`, so it
+            # brackets everything the container did; `write_host_census` takes
+            # the narrower pair that brackets the host process alone.
             (OUT / "workspace-census-before.json").write_text(
-                json.dumps(
-                    {str(p.relative_to(WORKSPACE)): _sha(p)
-                     for p in sorted(WORKSPACE.rglob("*"))
-                     if p.is_file() and ".git/" not in str(p.relative_to(WORKSPACE))},
-                    indent=2, sort_keys=True),
+                json.dumps(_workspace_census(), indent=2, sort_keys=True),
                 encoding="utf-8")
 
             if args.lane == "host":
@@ -2612,10 +3257,21 @@ def main(argv=None) -> int:
                     # 4. And mark the line the host's own calls start after.
                     #    Everything logged up to here belongs to the rig.
                     record_stub_watermark(args.row, row.get("remove_seed"))
+                    # 5. And the byte-level equivalent of that watermark: the
+                    #    census taken here credits the host with what the host
+                    #    did, not with what the leg prepared for it.
+                    write_host_census("before")
 
-                    record = run_host(args.host, entry, row, Path.home(),
-                                      overlay, key, creds=args.creds,
-                                      secrets=secrets)
+                    try:
+                        record = run_host(args.host, entry, row, Path.home(),
+                                          overlay, key, creds=args.creds,
+                                          secrets=secrets)
+                    finally:
+                        # In a `finally`, for the same reason the export is: a
+                        # host that died mid-phase is exactly the case where
+                        # "what moved" is the question, and a census only
+                        # written on the happy path answers it never.
+                        write_host_census("after")
                     if ((row.get("expect") or {}).get("run")) == "done":
                         poll_terminal_run(plan)
                     if args.creds != "openrouter":

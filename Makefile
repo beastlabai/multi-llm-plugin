@@ -79,6 +79,7 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
 # The image tags are values, never rule targets: `mllm-e2e:local` contains a colon,
 # which make would read as a target/prerequisite separator.
 .PHONY: help e2e-preflight e2e-image e2e-image-latest e2e-container e2e-container-host \
+        e2e-container-host-phases \
         e2e-container-host-discovery e2e-container-host-invocation \
         e2e-version-delta e2e-container-latest \
         e2e-container-latest-host e2e-live-provider e2e-lock-update e2e-verify-record \
@@ -91,6 +92,7 @@ help:
 	@echo
 	@echo "  make e2e-container                 pinned build; provider lane (no secrets, --network none)"
 	@echo "  make e2e-container-host            pinned build; host lane (needs OPENROUTER_API_KEY)"
+	@echo "  make e2e-container-host-phases     host lane, claude-code per-phase tier; EXPENSIVE (~\$$3-5/pass)"
 	@echo "  make e2e-container-host-discovery  host lane, --creds none tier: stage + list, no key, no network"
 	@echo "  make e2e-container-host-invocation host lane, --creds none tier: type the documented /multi-llm string"
 	@echo "  make e2e-container-latest         CLIs @latest; provider lane only; credential-free by construction"
@@ -162,11 +164,48 @@ e2e-image: e2e-preflight opencode-stage
 e2e-container: e2e-image
 	$(PYTEST) -m "container and not live and not live_provider"
 
+# `not live_native_phase` is a SPEND GUARD, in the same spirit as the
+# `not live_provider` one above. The claude-code per-phase rows are native Task
+# dispatches: every turn is real spend that never crosses /opt/mllm/bin and
+# never appears in the row's `num_turns`. Measured, they cost ~$0.60 per write
+# row against this lane's $0.0080-$0.0094 for an executor host's equivalent —
+# an order of magnitude — so folding them in here would make the cheap tier
+# ~$3-5 more expensive every pass. They get their own target below.
 e2e-container-host: e2e-image
 	@test -n "$${OPENROUTER_API_KEY:-}" || { \
 	  echo "make: the host lane needs OPENROUTER_API_KEY (a DEDICATED key carrying a key-level spend limit)."; \
 	  echo "      For the credential-free tier run: make e2e-container-host-discovery"; exit 1; }
-	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" $(PYTEST) -m "container and live"
+	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" $(PYTEST) -m "container and live and not live_native_phase"
+
+# The claude-code PER-PHASE tier: one workflow phase per row, seeded by the
+# row's `pre_commands` leg so the host turn does exactly one phase natively.
+#
+# A target of its own, for two independent reasons, and either one would be
+# enough:
+#
+# * **Cost.** `MLLM_E2E_BUDGET_USD` defaults to $2.00 and is not a per-row
+#   ceiling: `_Spend.check()` runs BETWEEN rows off a running key-usage total
+#   and calls `pytest.exit(..., returncode=1)`, so crossing it abandons every
+#   row after the crossing rather than trimming one. A ~$3-5 tier crosses
+#   $2.00 around its fourth row — the failure mode being a HALF-COVERED TIER,
+#   not an overspend. $6.00 covers the pass with headroom for one retried row.
+#   Raise the dedicated key's own spend limit above that figure before first
+#   use. The 13-row provider tier spent $0.1610 of $2.00 on 2026-08-20 and its
+#   default is therefore unchanged.
+# * **Wall clock.** `MLLM_E2E_MATRIX_TIMEOUT_S` defaults to 3600 s and the
+#   existing rows already spend 1968 s of it. Native phase rows measured
+#   80-376 s each, so a COMBINED lane would exceed the cap. Split, each tier
+#   fits: ~33 min for the provider tier as measured today, ~30-55 min here.
+#
+# Raise either bound deliberately, on a recorded overrun, not pre-emptively.
+e2e-container-host-phases: e2e-image
+	@test -n "$${OPENROUTER_API_KEY:-}" || { \
+	  echo "make: the host phase tier needs OPENROUTER_API_KEY (a DEDICATED key carrying a key-level spend limit)."; \
+	  echo "      It is the EXPENSIVE tier: budget ~\$$3-5 per green pass, and bring-up separately."; exit 1; }
+	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" \
+	MLLM_E2E_BUDGET_USD="$${MLLM_E2E_BUDGET_USD:-6.00}" \
+	MLLM_E2E_MATRIX_TIMEOUT_S="$${MLLM_E2E_MATRIX_TIMEOUT_S:-3600}" \
+	  $(PYTEST) -m "container and live and live_native_phase"
 
 # The third, FREE tier of the host lane (C6): stage the shim, cross the reload
 # boundary, assert the command is listed and invocable — then stop. No workflow

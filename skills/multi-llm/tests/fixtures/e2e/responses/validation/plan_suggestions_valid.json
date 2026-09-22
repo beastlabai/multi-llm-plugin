@@ -3,6 +3,53 @@
     {
       "group_index": 0,
       "group_hash": "c948ad24b1b8e432",
+      "_reviewers": 1,
+      "_theme": "Add email format validation",
+      "status": "valid",
+      "reason": "The plan names regex validation without pinning a pattern, so this is a real gap.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "764b434bc8417e3a",
+      "_reviewers": 2,
+      "_theme": "Add email format validation",
+      "status": "valid",
+      "reason": "The plan names regex validation without pinning a pattern, so this is a real gap.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "9a44126d941447bd",
+      "_reviewers": 3,
+      "_theme": "Add email format validation",
+      "status": "valid",
+      "reason": "The plan names regex validation without pinning a pattern, so this is a real gap.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "29fa04376449247b",
+      "_reviewers": 4,
+      "_theme": "Add email format validation",
+      "status": "valid",
+      "reason": "The plan names regex validation without pinning a pattern, so this is a real gap.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "f98a857df749a24d",
+      "_reviewers": 5,
+      "_theme": "Add email format validation",
+      "status": "valid",
+      "reason": "The plan names regex validation without pinning a pattern, so this is a real gap.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 0,
+      "group_hash": "8b69addedecd223d",
+      "_reviewers": 6,
+      "_theme": "Add email format validation",
       "status": "valid",
       "reason": "The plan names regex validation without pinning a pattern, so this is a real gap.",
       "confidence": 0.95
@@ -10,6 +57,53 @@
     {
       "group_index": 1,
       "group_hash": "1558bbe6cea433cf",
+      "_reviewers": 1,
+      "_theme": "Define minimum password requirements",
+      "status": "valid",
+      "reason": "Password complexity is unspecified in the plan and is a genuine security requirement.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 1,
+      "group_hash": "2c7dc7fbf5e4276d",
+      "_reviewers": 2,
+      "_theme": "Define minimum password requirements",
+      "status": "valid",
+      "reason": "Password complexity is unspecified in the plan and is a genuine security requirement.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 1,
+      "group_hash": "4e7c3dd2b1f49ce1",
+      "_reviewers": 3,
+      "_theme": "Define minimum password requirements",
+      "status": "valid",
+      "reason": "Password complexity is unspecified in the plan and is a genuine security requirement.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 1,
+      "group_hash": "6b25b8f1e3870c63",
+      "_reviewers": 4,
+      "_theme": "Define minimum password requirements",
+      "status": "valid",
+      "reason": "Password complexity is unspecified in the plan and is a genuine security requirement.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 1,
+      "group_hash": "cfbab6e2d2ed9076",
+      "_reviewers": 5,
+      "_theme": "Define minimum password requirements",
+      "status": "valid",
+      "reason": "Password complexity is unspecified in the plan and is a genuine security requirement.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 1,
+      "group_hash": "5d2e7bb874b2d7fb",
+      "_reviewers": 6,
+      "_theme": "Define minimum password requirements",
       "status": "valid",
       "reason": "Password complexity is unspecified in the plan and is a genuine security requirement.",
       "confidence": 0.95
@@ -17,6 +111,53 @@
     {
       "group_index": 2,
       "group_hash": "a4ba681281e554b8",
+      "_reviewers": 1,
+      "_theme": "Document zero-downtime migration approach",
+      "status": "valid",
+      "reason": "The plan describes migrations without saying how they are applied without downtime.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 2,
+      "group_hash": "acb7656e673cc210",
+      "_reviewers": 2,
+      "_theme": "Document zero-downtime migration approach",
+      "status": "valid",
+      "reason": "The plan describes migrations without saying how they are applied without downtime.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 2,
+      "group_hash": "69b35f5069537cfc",
+      "_reviewers": 3,
+      "_theme": "Document zero-downtime migration approach",
+      "status": "valid",
+      "reason": "The plan describes migrations without saying how they are applied without downtime.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 2,
+      "group_hash": "04af07abaced75ea",
+      "_reviewers": 4,
+      "_theme": "Document zero-downtime migration approach",
+      "status": "valid",
+      "reason": "The plan describes migrations without saying how they are applied without downtime.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 2,
+      "group_hash": "9a159705f86738a7",
+      "_reviewers": 5,
+      "_theme": "Document zero-downtime migration approach",
+      "status": "valid",
+      "reason": "The plan describes migrations without saying how they are applied without downtime.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 2,
+      "group_hash": "3ef225d10b840933",
+      "_reviewers": 6,
+      "_theme": "Document zero-downtime migration approach",
       "status": "valid",
       "reason": "The plan describes migrations without saying how they are applied without downtime.",
       "confidence": 0.95
@@ -24,6 +165,53 @@
     {
       "group_index": 3,
       "group_hash": "64ba7f164d362232",
+      "_reviewers": 1,
+      "_theme": "Specify JWT and refresh token expiration times",
+      "status": "valid",
+      "reason": "Token lifetimes are absent from the plan and are needed before implementation.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 3,
+      "group_hash": "e38a213b6653889c",
+      "_reviewers": 2,
+      "_theme": "Specify JWT and refresh token expiration times",
+      "status": "valid",
+      "reason": "Token lifetimes are absent from the plan and are needed before implementation.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 3,
+      "group_hash": "1bd8c54c601093ac",
+      "_reviewers": 3,
+      "_theme": "Specify JWT and refresh token expiration times",
+      "status": "valid",
+      "reason": "Token lifetimes are absent from the plan and are needed before implementation.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 3,
+      "group_hash": "f57936261e70e93a",
+      "_reviewers": 4,
+      "_theme": "Specify JWT and refresh token expiration times",
+      "status": "valid",
+      "reason": "Token lifetimes are absent from the plan and are needed before implementation.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 3,
+      "group_hash": "3fa0412af45f2aaa",
+      "_reviewers": 5,
+      "_theme": "Specify JWT and refresh token expiration times",
+      "status": "valid",
+      "reason": "Token lifetimes are absent from the plan and are needed before implementation.",
+      "confidence": 0.95
+    },
+    {
+      "group_index": 3,
+      "group_hash": "d63bf4965ac7beb1",
+      "_reviewers": 6,
+      "_theme": "Specify JWT and refresh token expiration times",
       "status": "valid",
       "reason": "Token lifetimes are absent from the plan and are needed before implementation.",
       "confidence": 0.95
@@ -32,6 +220,62 @@
   "metadata": {
     "model": "container-stub",
     "timestamp": "2026-01-01T00:00:00Z",
-    "schema_version": "2.1"
+    "schema_version": "2.1",
+    "phase": "review-plan suggestion validation",
+    "captured_from": "../review_plan/raw_suggestions.json",
+    "reviewer_counts": {
+      "1": "every single-spec row: the provider lane's chain rows, the `fan_out: native` rows, and any row whose fan-out left one survivor (the negative-auth rows, measured)",
+      "2": "no declared panel; reachable when a larger panel loses all but two members",
+      "3": "no declared panel; reachable when a larger panel loses all but three members",
+      "4": "the opencode host's fan_out (claude-code, omp, qwen-code, vibe), grok carved out 2026-09-22",
+      "5": "the codex host's fan_out (opencode, gemini, aider, copilot, kimi)",
+      "6": "the claude-code host's fan_out (codex, muse, cline, kilocode, pi, goose) -- the largest declared"
+    },
+    "note": [
+      "A VERDICT SHEET, NOT A SINGLE ANSWER. One row per (group, surviving-reviewer",
+      "count), because `state_manager.generate_group_id` hashes the theme plus the",
+      "NORMALIZED SUGGESTION LIST and a group holds one member per model that raised",
+      "the theme -- so a group's id is a function of HOW MANY REVIEWERS ANSWERED.",
+      "Measured 2026-09-22 on tests/container/runs/20260922T084502Z: the same four",
+      "themes grouped to one set of ids on the codex host's five-model rows and to",
+      "another on the opencode host's four, and to a third (the ids this file used to",
+      "ship alone) on every single-spec row. `merge_batched_validation_results`",
+      "joins BY HASH and discards a foreign one, and",
+      "`subagent_executor._validation_result_errors` requires a group_hash/group_id on",
+      "every entry, so a sheet that names one count joins nothing on a row of any",
+      "other -- every group lands on validation_failed and the apply phases have",
+      "nothing to apply. A sheet naming them all joins the row that belongs to this",
+      "batch and lets the merge discard the rest, which is the same mechanism that",
+      "already discards this file's OTHER GROUPS on every batch (a batch holds a",
+      "subset of the groups); it is one file rather than one per panel because a",
+      "per-panel file re-breaks on the next roster move.",
+      "",
+      "WHAT THE ID DEPENDS ON, MEASURED, AND WHAT IT DOES NOT. Only the member COUNT",
+      "and the suggestion CONTENT. Not which CLIs are in the panel, not their order,",
+      "not the host: a five-member opencode panel would reuse the five-member ids",
+      "below verbatim. So a carve-out, a roster swap or a reviewer that dies mid-run",
+      "(measured: grok on the 2026-09-22 opencode row, leaving four of five) only",
+      "picks a different row from this sheet.",
+      "",
+      "RE-CAPTURE THIS FILE WHEN, AND ONLY WHEN:",
+      "  1. the phase's fan-out fixture changes its suggestions' `type`, `reference`",
+      "     or `desc` (the first 200 chars), or the number/titles of its entries --",
+      "     those are the hash's other inputs, and a re-worded fixture moves EVERY",
+      "     id here;",
+      "  2. a host's `fan_out:` in tests/container/host_matrix.yaml grows past",
+      "     6 members, the largest this sheet covers (a SMALLER panel needs",
+      "     nothing -- every count from 1 up is already here);",
+      "  3. `state_manager.generate_group_id` changes what it hashes.",
+      "A panel that merely changes MEMBERSHIP needs nothing. Re-capture by driving",
+      "`suggestion_processor.group_similar_suggestions` + `state_manager.",
+      "stamp_stable_ids` over N copies of the fan-out fixture and reading",
+      "`generate_group_id` off each group, which is exactly what",
+      "`validation_batcher` writes into a batch's `group_ids`.",
+      "",
+      "THIS SHEET IS NOT A PANEL-SIZE ALARM, deliberately. A reviewer that silently",
+      "stops answering is caught by `harness.fan_out_correlation` and the matrix's",
+      "`fan_out_carve_outs:` cells, which own that question; making the verdicts fail",
+      "to join three phases later would only report it as the wrong defect."
+    ]
   }
 }

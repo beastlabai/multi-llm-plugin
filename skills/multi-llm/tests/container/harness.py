@@ -33,6 +33,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -73,6 +74,12 @@ IMAGE_VERSION_REPORT = "/opt/mllm/lock/cli-versions.installed.json"
 #: promotes. Read here, never written: C10 prints promotions and a human commits
 #: them.
 CAPABILITIES = HERE.parents[1] / "hosts" / "capabilities.yaml"
+#: The skill root, for the ONE import this host-side driver makes from the
+#: product itself: `sanitize_model_name`, which decides every per-model
+#: result filename (`result_file_names` below). Inserted on the path lazily,
+#: at the call, so importing this module costs nothing and a rig invoked
+#: from outside pytest reaches the same function pytest's conftest does.
+SKILL_ROOT = HERE.parents[1]
 DEFAULT_IMAGE = os.environ.get("MLLM_E2E_IMAGE", "mllm-e2e:local")
 
 
@@ -158,7 +165,15 @@ class Row:
     cli: str | None = None
     host: str | None = None
     creds: str = "none"
-    spec: str | None = None
+    #: The row's model-selection fan-out, as `provider:model` specs.
+    #:
+    #: A **list**, because `providers.tmpl.yaml`'s `defaults.models` always was
+    #: one and only happened to render with a single entry. A host row that
+    #: fans out to five providers adds five stub-backed provider subprocesses
+    #: inside the SAME host turn — no extra host turn, no extra credit — which
+    #: is what makes §3.3's partition free. A scalar is still accepted and
+    #: normalised to a one-element list, so every existing caller is unchanged.
+    spec: str | list[str] | None = None
     runner: str | None = None
     helpers: list[str] = field(default_factory=list)
     command: str = ""
@@ -211,6 +226,21 @@ class RowResult:
     #: verdict, no promotions; :class:`GradeLedger` rewrites the same path with the
     #: grader's verdict once pytest has finished asserting over this bundle.
     record_path: Path | None = None
+    #: Earlier attempts of this SAME row that the driver discarded and re-ran,
+    #: oldest first. Empty on every row that ran once — which is every row but
+    #: the never-started shape, the only one this lane retries. Each entry is a
+    #: complete `RowResult` whose `out_dir` points at its own shelved bundle
+    #: (`runs/<utc>/<row-id>/attempt-<n>/`), so a discarded attempt is read back
+    #: exactly like a graded one and lands in the record as its own row.
+    attempts: list["RowResult"] = field(default_factory=list)
+    #: On a DISCARDED attempt: the :func:`never_started_signature` that condemned
+    #: it. `None` on the attempt that was graded, whichever number it is.
+    retry_signature: dict | None = None
+
+    @property
+    def attempt(self) -> int:
+        """Which attempt of its row this is — 1 unless something was discarded."""
+        return len(self.attempts) + 1
 
     # -- the evidence, read back after the container is gone ---------------- #
     @property
@@ -299,9 +329,43 @@ class RowResult:
         return {}
 
     def census_delta(self) -> dict[str, tuple[str | None, str | None]]:
-        """Which workspace files moved, by SHA — never what was written into them."""
-        before = _read_json(self.out_dir / "workspace-census-before.json")
-        after = _read_json(self.out_dir / "workspace-census-after.json")
+        """Which workspace files moved, by SHA — never what was written into them.
+
+        The WHOLE-ROW pair: taken before `run_pre_commands` and after the
+        export, so it brackets everything the container did. Left exactly as
+        it was, so nothing already graded moves.
+        """
+        return self._census_delta("workspace-census-before.json",
+                                  "workspace-census-after.json")
+
+    def host_census_delta(self) -> dict[str, tuple[str | None, str | None]]:
+        """The same, bracketing the HOST PROCESS alone.
+
+        On a row whose earlier phases are seeded by a `pre_commands` leg —
+        six of the eight claude-code phase rows — every byte the leg writes
+        lands inside `census_delta`, because the whole-row `before` snapshot
+        is taken right after `seed_workspace.py` and **before** the leg runs.
+        Those are precisely the rows where it decides the verdict.
+
+        Falls back to the whole-row pair when the narrower one is absent, so
+        a bundle exported by an older image still grades rather than
+        vanishing — the caller is told which pair it got by
+        :meth:`has_host_census`.
+        """
+        if not self.has_host_census:
+            return self.census_delta()
+        return self._census_delta("workspace-census-host-before.json",
+                                  "workspace-census-host-after.json")
+
+    @property
+    def has_host_census(self) -> bool:
+        return ((self.out_dir / "workspace-census-host-before.json").is_file()
+                and (self.out_dir / "workspace-census-host-after.json").is_file())
+
+    def _census_delta(self, before_name: str, after_name: str
+                      ) -> dict[str, tuple[str | None, str | None]]:
+        before = _read_json(self.out_dir / before_name)
+        after = _read_json(self.out_dir / after_name)
         delta = {}
         for name in sorted(set(before) | set(after)):
             if before.get(name) != after.get(name):
@@ -422,6 +486,495 @@ def network_mode(row: Row, posture: dict) -> str:
     return str(network["host_lane"])
 
 
+# --------------------------------------------------------------------------- #
+# The host lane's fan-out, runner and helper derivation — ONE source of truth.
+#
+# These live here rather than in `test_container_host_lane.py` so the plain-CI
+# guard in `test_redirect_matrix_claims.py` and the fixture that actually
+# builds the row read the SAME functions. A guard that re-derives the partition
+# asserts its own copy of it, which is how a lane ends up green over a fan-out
+# nothing executes.
+#
+# `host_matrix.yaml` names **CLI ids only, never slugs**. The 16 provider rows
+# carry eight distinct spellings of the stub model (`gpt-5.5`,
+# `openai/stub-model`, `stub-model`, `stub/stub-model`, `muse-spark-1.2`,
+# `haiku`, `gemini-2.5-flash`, `openai/gpt-5.6-luna`), every one of them a
+# hand-typed matrix cell can get wrong — and this lane has already paid for
+# exactly that once: opencode handed a bare `stub-model` raised
+# `ProviderModelNotFoundError` before a single HTTP call left the process.
+# Ids-only is also what gives the disjoint/union guard a single source of
+# truth: it compares ids against `redirect.yaml`'s `lane: provider` rows and
+# never has to parse a slug back into a CLI name.
+# --------------------------------------------------------------------------- #
+
+#: A row whose dispatch never crosses `/opt/mllm/bin` — the host's own Task
+#: tool does the work — so a fan-out list has no mechanism to act through.
+#: Declared explicitly rather than by omitting the key, so the guard can tell
+#: "deliberately outside the partition" from "somebody forgot".
+FAN_OUT_NATIVE = "native"
+
+
+@functools.lru_cache(maxsize=None)
+def provider_model_args() -> dict[str, str]:
+    """`{cli: model_arg}` for every `lane: provider` row in `redirect.yaml`."""
+    return {
+        str(row["cli"]): str(row.get("model_arg") or "stub-model")
+        for row in (load_redirect().get("clis") or [])
+        if row.get("lane") == "provider"
+    }
+
+
+def provider_spec(cli: str) -> str:
+    """One fan-out member's spec, in that CLI's OWN addressing scheme."""
+    return f"{cli}:{provider_model_args().get(cli, 'stub-model')}"
+
+
+@functools.lru_cache(maxsize=None)
+def result_file_names(cli: str) -> tuple[str, ...]:
+    """The EXACT filenames this fan-out member's own result can land under.
+
+    Built from `provider_spec(cli)` — the same function that produced the
+    fan-out's config — through the product's own `sanitize_model_name`, which
+    is the ONE thing that decides a per-model filename: the review phases
+    write `{stem}.json` (`code_review_orchestrator.save_model_result`,
+    `review_orchestrator_base`) and `ask` writes `answer_{stem}.md`
+    (`ask_orchestrator`). Imported rather than re-spelled as a local
+    `re.sub`, because a test-side copy is how a correlation starts grading a
+    filename shape the product stopped writing.
+
+    Exact names rather than the substring test `fan_out_correlation` used to
+    run: a CLI id that occurs inside a SIBLING's result filename had its
+    `result` fact satisfied by that sibling's file, so a provider that
+    produced nothing could be credited with another's output and the
+    exactly-N rule was weaker than it claimed. `pi` sits inside
+    `copilot_stub-model.json` and is the pair to watch; the two are on
+    different hosts today, which makes the defect latent rather than live —
+    and a partition is re-cut by editing one list in `host_matrix.yaml`,
+    which is not a change anybody would expect to weaken a grader.
+    """
+    if str(SKILL_ROOT) not in sys.path:
+        sys.path.insert(0, str(SKILL_ROOT))
+    from utils.json_extractor import sanitize_model_name
+
+    stem = sanitize_model_name(provider_spec(cli))
+    return (f"{stem}.json", f"answer_{stem}.md")
+
+
+def host_fan_out(host_entry: dict, matrix_row: dict) -> list[str] | str:
+    """This row's effective fan-out: a list of CLI ids, or ``"native"``.
+
+    Declared once per host and inherited by every fan-out row on it, including
+    **both opencode routes** — the package row then grades the same partition
+    through a different loader, which is what makes it a route test rather
+    than a second, smaller partition.
+
+    A row-level `fan_out:` is an override for a declared exception, not the
+    normal spelling. The guard reduces to the HOST's declared list for the
+    union and the disjointness check and separately asserts that no row's
+    effective list names a CLI outside its own host's list — so an override
+    can narrow a row and can never silently widen the partition or move a CLI
+    between hosts.
+
+    `remove_seed` rows inherit nothing: they are graded on the refusal landing
+    *before* the first model call, which is upstream of any point a fan-out
+    could act.
+    """
+    if matrix_row.get("remove_seed"):
+        return []
+    declared = matrix_row.get("fan_out", host_entry.get("fan_out"))
+    if declared == FAN_OUT_NATIVE:
+        return FAN_OUT_NATIVE
+    return [str(cli) for cli in (declared or [])]
+
+
+def host_runner_cli(host: str, host_entry: dict, matrix_row: dict) -> str:
+    """The CLI id this row dispatches its write batches through.
+
+    On a `remove_seed` row it MUST be the row's own host CLI: the row's
+    `remove_seed` names a file under that CLI's seeded home, and the gate it
+    trips is the executor preflighting the CONFIGURED runner — a shared runner
+    would sail straight past the file the row removes and the row would assert
+    nothing at all.
+
+    Everywhere else it is a matrix key, defaulting per host. It is emphatically
+    no longer the hard-coded `codex:stub-model` every non-negative row on all
+    three hosts used: codex's `agent-write` renders `--sandbox
+    workspace-write`, which is bubblewrap, which needs a user namespace
+    Docker's default seccomp profile denies.
+    """
+    if matrix_row.get("remove_seed"):
+        return host
+    return str(matrix_row.get("runner", host_entry.get("runner")) or "")
+
+
+def host_helpers(host: str, host_entry: dict, matrix_row: dict) -> list[str]:
+    """Which CLIs this row needs a seeded home for.
+
+    The union of the fan-out and the runner, plus the host itself on the
+    negative rows that already needed it.
+
+    **The runner is unioned in rather than required to be inside the
+    partition.** The partition is about graded provider *coverage* and is
+    disjoint by construction, so the one shared write runner can appear in at
+    most one host's `fan_out`; `helpers` is about seeded *homes*, and a runner
+    with no seeded home fails preflight for a reason that has nothing to do
+    with the phase under test.
+    """
+    fan_out = host_fan_out(host_entry, matrix_row)
+    members = set() if fan_out == FAN_OUT_NATIVE else set(fan_out)
+    runner = host_runner_cli(host, host_entry, matrix_row)
+    if runner:
+        members.add(runner)
+    if matrix_row.get("remove_seed"):
+        members.add(host)
+    return sorted(members)
+
+
+# --------------------------------------------------------------------------- #
+# What counts as workflow bookkeeping, and what is the phase's own output.
+#
+# `test_container_host_lane._source_delta` drops EVERY path under `plans/` and
+# `.multi-llm/` as bookkeeping. That is right for a row whose subject is
+# `apply-code-fixes` touching `src/**` and `tests/test_*.py`; it is exactly
+# wrong for `apply-suggestions`, whose entire intended effect **is** an edit to
+# the plan file under `plans/`. A row graded by that predicate could rewrite
+# the plan, or fail to, and pass either way.
+#
+# The real distinction is not the `plans/` prefix. It is the plan's own OUTPUT
+# DIRECTORY: `StateManager.plan_dir` is `get_output_dir(plan_path)`, which for
+# `plans/auth-feature.md` is `plans/auth-feature/`, and every `{phase}/`
+# artifact dir, `state.json`, `.status.json` and `report.html` lands inside it.
+# Measured against a real census on 2026-09-22
+# (`runs/20260920T091849Z/chain-omp`): 25 added paths, every one of them under
+# `plans/auth-feature/`, and the plan file `plans/auth-feature.md` a sibling of
+# that directory rather than a child of it.
+#
+# So: one directory level under `plans/` is a plan FILE and is gradeable; two
+# or more is the workflow's own output and is bookkeeping.
+# --------------------------------------------------------------------------- #
+
+def workflow_bookkeeping(name: str) -> bool:
+    """Is this census path the workflow's own record-keeping rather than work?
+
+    `.multi-llm/**` is the run registry. `plans/<stem>/**` is that plan's
+    output directory. `plans/<stem>.md` is **not** — it is the artifact
+    `apply-suggestions` exists to edit.
+    """
+    if name.startswith(".multi-llm/"):
+        return True
+    if name.startswith("plans/"):
+        # Inside a plan's output directory (two or more levels), not the plan
+        # file itself (exactly one).
+        return "/" in name[len("plans/"):]
+    return False
+
+
+def graded_delta(names: Iterable[str], declared: Iterable[str] | None = None
+                 ) -> list[str]:
+    """The census paths a phase row is answerable for, bookkeeping removed.
+
+    ``declared`` is the row's `editable_artifacts`, and it is consulted
+    **before** the bookkeeping predicate, not after it. A path the row
+    explicitly declares is that row's grade by definition, wherever it happens
+    to live — so the declaration outranks every prefix rule here.
+
+    That ordering is the whole of `apply-task-suggestions`. Its one editable
+    artifact is the tasks document, and `utils/tasks_file.py:137-138` puts it
+    at `{plan_dir}/{sanitize_prefix(plan)}/tasks/tasks.md` — i.e.
+    `plans/auth-feature/tasks/tasks.md`, two levels under `plans/` and
+    therefore inside the plan's output directory. A grader that ran
+    `workflow_bookkeeping` first would discard the only file that row can be
+    graded on, and `bytes_must_change: true` would be unsatisfiable on it:
+    header finding (3) recurring on a third row, which is exactly what §3.4's
+    grader change exists to end. The tasks document is not bookkeeping merely
+    for sitting beside `state.json`; it is bookkeeping for no row, and work
+    for the one row that declares it.
+
+    Undeclared paths then fall through to the prefix rules, and there the
+    declaration still matters for the plan file: `finalize_tracking` writes a
+    tracking back-reference into it on every phase, so on a row that does
+    **not** own the plan file that change is bookkeeping — while on
+    `apply-suggestions`, which does own it, the very same change is the grade.
+    A path predicate alone cannot tell those apart, which is why the
+    declaration is an input here rather than only a filter applied afterwards.
+    """
+    owned = list(declared or [])
+    kept: list[str] = []
+    for name in names:
+        # The declaration first: an explicitly declared editable artifact is
+        # gradeable even when it sits inside the plan's output directory.
+        if owned and not stray_paths([name], owned):
+            kept.append(name)
+            continue
+        if workflow_bookkeeping(name):
+            continue
+        is_plan_file = (name.startswith("plans/")
+                        and "/" not in name[len("plans/"):])
+        if is_plan_file:
+            # A plan file this row does not declare: the tracking
+            # back-reference, not work the row did.
+            continue
+        kept.append(name)
+    return sorted(kept)
+
+
+# --------------------------------------------------------------------------- #
+# A third-party tool's cache is not a product write.
+#
+# `workflow_bookkeeping` above is a different category and must not absorb this
+# one: it is THE WORKFLOW'S OWN record-keeping (`.multi-llm/**`, the plan's
+# output directory), written by this product, in places this product chose.
+# What follows is the opposite — bytes a VENDOR's CLI drops into the workspace
+# because that is what that binary does, in a place nobody here chose.
+#
+# The case, and the only one so far: aider builds a repo map on every
+# invocation and writes it to `<cwd>/.aider.tags.cache.v4/cache.db`. Measured
+# across four recorded bundles — it appears on exactly the rows where aider
+# ran, and nowhere else:
+#
+#   runs/20260922T084502Z  codex-ask, codex-review-plan, codex-full,
+#                          codex-apply-executor   (aider is in codex's fan-out)
+#   runs/20260920T105458Z  chain-aider   ...and on none of the other 17 rows
+#   runs/20260921T224840Z  chain-aider   ...and on none of the other 7 rows
+#
+# On `codex-apply-executor` it was the whole census delta, and the row failed
+# `AssertionError: bytes moved on a row declared 'clean-failure'`.
+#
+# THREE THINGS KEEP THIS FROM BEING A HOLE IN THE NET.
+#
+# 1. It is DECLARED, per CLI, in `redirect.yaml` — beside `credential_vars`
+#    and `seed_files`, in the same written-down-rather-than-inherited style,
+#    with the same rule that a row states what was measured about that binary.
+#    Nothing here hardcodes a path, so adding a tool means editing the matrix
+#    that already describes these binaries, on a line a reviewer reads as a
+#    claim about a vendor's behaviour.
+# 2. It is SCOPED TO THE ROW'S OWN FAN-OUT. `tool_artifact_paths` takes the
+#    CLIs this row actually dispatches to, so aider's declaration buys nothing
+#    on a row aider does not run on. The one row on either lane with a
+#    byte-level applied-write grade, `claude-code-apply-native`, declares
+#    `fan_out: native` and therefore gets NO exemption at all — its measured
+#    delta in the same bundle is exactly `src/auth.py`, `src/security.py`,
+#    `tests/test_security.py` and stays graded to the byte.
+# 3. THE ROW'S OWN DECLARATION OUTRANKS IT, the same way it outranks
+#    `workflow_bookkeeping` in `graded_delta`: a path a row names in
+#    `editable_artifacts` is that row's grade by definition and is never
+#    exempted out from under it.
+#
+# The glob is the version the run measured (`…cache.v4`), not a `v*` guess. An
+# aider release that bumps the cache version turns these rows red with a path
+# in the message, which is a re-measurement this file is meant to force — a
+# wildcard would swallow it silently, and every other pin in this matrix is
+# spelled the same way for the same reason.
+# --------------------------------------------------------------------------- #
+
+@functools.lru_cache(maxsize=1)
+def tool_artifacts() -> dict[str, tuple[str, ...]]:
+    """`{cli: (glob, …)}` — the caches each CLI leaves in the workspace.
+
+    Read from `redirect.yaml`'s per-CLI rows. A CLI that declares none is
+    absent rather than present-and-empty, so "nothing is exempt here" and
+    "somebody wrote an empty list" are the same fact for every caller.
+    """
+    declared: dict[str, tuple[str, ...]] = {}
+    for row in (load_redirect().get("clis") or []):
+        patterns = tuple(str(p) for p in (row.get("tool_artifacts") or [])
+                         if str(p).strip())
+        if patterns:
+            declared[str(row["cli"])] = patterns
+    return declared
+
+
+def tool_artifact_patterns(clis: Iterable[str] | str) -> list[str]:
+    """Every declared artifact glob for exactly these CLIs — sorted, deduped.
+
+    `clis` is the row's own effective fan-out. `FAN_OUT_NATIVE` — a string,
+    not a list — yields NOTHING rather than being iterated character by
+    character: a native row dispatches through the host's own subagent tool,
+    crosses no `/opt/mllm/bin` shim and therefore runs none of these binaries.
+    """
+    if isinstance(clis, str):
+        return []
+    declared = tool_artifacts()
+    return sorted({pattern for cli in clis
+                   for pattern in declared.get(str(cli), ())})
+
+
+def tool_artifact_paths(names: Iterable[str], clis: Iterable[str] | str,
+                        declared: Iterable[str] | None = None) -> list[str]:
+    """Which of `names` are third-party tool artifacts this row may ignore.
+
+    The positive statement — the exempted paths, sorted — so a caller
+    subtracts a named set rather than applying a filter whose effect it cannot
+    print, and so the plain-CI control can assert on exactly what was forgiven.
+
+    `declared` is the row's `editable_artifacts`, and a path it admits is
+    NEVER returned here: the declaration outranks this rule as it outranks
+    `workflow_bookkeeping`. Nothing is forgiven when the row declares no
+    fan-out, when that fan-out is `native`, or when none of its CLIs declares
+    an artifact — the default is to grade the byte.
+    """
+    patterns = tool_artifact_patterns(clis)
+    if not patterns:
+        return []
+    owned = list(declared or [])
+    exempt = []
+    for name in names:
+        if owned and not stray_paths([name], owned):
+            continue
+        if any(fnmatch.fnmatch(name, pattern) for pattern in patterns):
+            exempt.append(name)
+    return sorted(exempt)
+
+
+# --------------------------------------------------------------------------- #
+# An error body is not an answer.
+#
+# `runs/20260922T084502Z` is the run that made this necessary. grok failed on
+# all six opencode fan-out rows; four went red, and `opencode-ask` and
+# `opencode-package-ask` went GREEN — because the ask lane persisted grok's
+# error body as its answer. `answer_grok_stub-model.md`, 219 bytes:
+#
+#     {"type":"error","message":"Not signed in. To authenticate without a
+#      browser, run:\n  grok login --device-code\n\n…"}
+#
+# The file has that provider's exact expected name, so the `result` fact — the
+# one whose whole job is to prove the provider produced something — was
+# satisfied by the CLI's own failure report. `ask_orchestrator.recover_answer_
+# text` is why it is on disk at all: with `data` unusable it falls back to the
+# provider's raw stdout, which for a failed grok run IS the envelope.
+#
+# THE DISCRIMINATOR IS THE CLI'S OWN, NOT A GUESS ABOUT PROSE. Two values, each
+# already named and measured inside this repo's adapters:
+#
+#   * `type: "error"` — grok's own error discriminator. `utils/providers/
+#     grok.py:186-192` states it against ten distinct injected failures (401,
+#     429, 404, 400 context-length, 5xx-forever, a cut stream, a zero-byte
+#     response, a 200 carrying an error object, an empty assistant message and
+#     grok's pre-flight model rejection): every one of them arrives as
+#     `{"type":"error","message":…}`. `utils/providers/cline.py:101-102`
+#     records the identical shape for a second CLI.
+#   * `is_error: true` — the result envelope claude-code and cursor-agent both
+#     print, read by `utils/providers/result_envelope.py` off eleven committed
+#     claude-code captures.
+#
+# AND THE SHAPE IS CHECKED BEFORE THE KEYS, which is what keeps this from
+# turning a genuine answer red. The body must parse WHOLE as a JSON **object**.
+# Measured over every per-provider result file in `runs/20260922T084502Z` (64
+# files) and `runs/20260920T105458Z` (24 files): every genuine review result is
+# a JSON **array** of findings, every genuine `ask` answer is prose that is not
+# JSON at all (`OK`, and the 421- and 1044-byte answers), and the ONLY
+# top-level object among all 88 is grok's envelope, twice. A result that merely
+# mentions the word error, or that opens with a `{` inside prose, is untouched.
+# --------------------------------------------------------------------------- #
+
+def error_envelope_reason(text: str) -> str | None:
+    """The CLI's own failure message when `text` IS an error envelope, else None.
+
+    `None` means "this is a result"; a string means "this is that provider
+    reporting that it failed" and the caller must not count it. The message is
+    returned rather than a bare bool so the grader's failure can quote the
+    reason the provider gave instead of only naming the file.
+    """
+    stripped = (text or "").strip()
+    # Cheap and load-bearing: a prose answer is not parsed at all, so no
+    # markdown answer can be reclassified by a JSON decoder's opinion of it.
+    if not stripped.startswith("{"):
+        return None
+    try:
+        payload = json.loads(stripped)
+    except ValueError:
+        # Prose that happens to open with a brace. Not an envelope.
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if payload.get("type") == "error":
+        message = payload.get("message")
+        return (str(message).strip() if isinstance(message, str) and message.strip()
+                else 'type: "error"')
+    if payload.get("is_error") is True:
+        for key in ("result", "error", "api_error_status", "terminal_reason"):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+        return "is_error: true"
+    return None
+
+
+def fan_out_correlation(fan_out: Iterable[str], *, invoked: Iterable[str],
+                        reached: Iterable[str],
+                        produced: Iterable[str]) -> dict[str, list[str]]:
+    """Which of the three facts each assigned provider failed to produce.
+
+    `{cli: [missing fact, …]}`, empty when every assigned provider produced
+    all three. The facts are the ones §3.3 names and they fail differently:
+    `invocation` (a `/opt/mllm/bin` record, so the shim really ran for it),
+    `stub-session` (it reached the model surface instead of dying in argument
+    parsing) and `result` (a result file of its own).
+
+    A pure function, taking the three already-extracted name sets, so the
+    **negative control** can be a plain-CI fixture over recorded evidence
+    rather than a keyed container row. Without that control a correlation
+    that matched on the wrong field, or that iterated an empty list, reads
+    exactly like complete coverage.
+
+    The caller extracts those three sets and nothing else: the `result` fact
+    is decided here, against `result_file_names(cli)` — the exact filenames
+    `provider_spec(cli)` produces — rather than by asking whether the CLI id
+    occurs anywhere in a filename, which credited a provider with a
+    sibling's file whenever one id was a substring of another's stem.
+
+    **`produced` is a list of files that carry an ANSWER**, and that is the
+    caller's second obligation: it filters each candidate through
+    :func:`error_envelope_reason` before appending its name. A provider that
+    failed can still leave a file under its own exact expected name — grok did,
+    on both `ask` rows of `runs/20260922T084502Z`, and those rows went green
+    while grok was failing — so a name alone is not the fact. This function
+    still grades names, because the name is what carries provider identity;
+    what a name may no longer do is arrive here off a body the CLI wrote to
+    say it had failed.
+
+    `reached` carries NO tolerance for being empty as a whole, and that is the
+    correction this predicate exists under: `stub.jsonl` records have no `cli`
+    field, so a caller that read one got an empty set on every row, and a
+    "grade it only if it is non-empty" rule then skipped the fact everywhere —
+    silently, and exactly on the opencode `ProviderModelNotFoundError` shape
+    (invoked, zero stub records) the fact was added to catch. The identity is
+    the caller's join to make — `calls.jsonl`'s `exec_id`, which the wrapper
+    bakes into the stub base URL — and an empty `reached` is a finding against
+    every assigned provider rather than a pass.
+    """
+    invoked, reached, produced = set(invoked), set(reached), list(produced)
+    missing: dict[str, list[str]] = {}
+    for cli in fan_out:
+        gaps = []
+        if cli not in invoked:
+            gaps.append("invocation")
+        if cli not in reached:
+            gaps.append("stub-session")
+        expected = result_file_names(cli)
+        if not any(name in expected for name in produced):
+            gaps.append("result")
+        if gaps:
+            missing[cli] = gaps
+    return missing
+
+
+def spec_list(row: Row) -> list[str]:
+    """``row.spec`` as a list, whatever shape it was written in.
+
+    One place that normalises the scalar, so the four layers between the matrix
+    row and the rendered config cannot disagree about whether `spec` is one
+    value or many. That disagreement is the half-done version of §3.3's change:
+    a row renders one spec while its guard asserts five, and the row looks like
+    a fan-out while running `models[0]`.
+    """
+    if not row.spec:
+        return []
+    if isinstance(row.spec, str):
+        return [row.spec]
+    return [str(entry) for entry in row.spec if str(entry).strip()]
+
+
 def build_run_argv(row: Row, out_dir: Path, posture: dict,
                    image: str = DEFAULT_IMAGE) -> list[str]:
     """Assemble the run command from posture.yaml. No flag is written twice."""
@@ -515,8 +1068,14 @@ def build_run_argv(row: Row, out_dir: Path, posture: dict,
         argv += ["--cli", row.cli]
     if row.host:
         argv += ["--host", row.host]
-    if row.spec:
-        argv += ["--spec", row.spec]
+    for spec in spec_list(row):
+        # REPEATED `--spec`, not one comma-joined value. A spec may itself
+        # carry `/` and `:` (`opencode:stub/stub-model`, `vibe:openai/
+        # gpt-5.6-luna`), and the eight distinct spellings across the 16
+        # provider rows are exactly the surface a second separator would have
+        # to stay clear of. `--helpers` can comma-join because a CLI id is one
+        # token; a spec is not.
+        argv += ["--spec", spec]
     if row.runner:
         argv += ["--runner", row.runner]
     if row.helpers:
@@ -692,6 +1251,243 @@ def classify_cap_hit(result: RowResult) -> str:
 
 
 # --------------------------------------------------------------------------- #
+# THE ONE RETRYABLE SHAPE: a host turn that never started.
+#
+# Measured twice, in four live runs: `runs/20260922T143440Z/claude-code-review-
+# plan` and `runs/20260922T154654Z/claude-code-ask`. Both rows exited 0, both
+# printed a clean result envelope — `subtype: "success"`, `is_error: false`,
+# `stop_reason: "end_turn"` — and both carried an EMPTY `result`. Neither ever
+# invoked our dispatcher (zero receipts once the rig's own `install-host --check`
+# is discounted), neither left one byte in `artifacts/`, and between them they
+# spent $0.0000 and $0.0007 of the dedicated key. The agent ended its turn
+# without starting the work. There is nothing in either bundle to grade.
+#
+# Such a row is worthless as evidence and costs essentially nothing, so running
+# it a second time is nearly free — about +$0.002 for a three-row tier in the
+# worst case. That is the whole justification for retrying it, and it does not
+# generalise: it is a licence for exactly this shape and no other.
+#
+# WHAT THIS MUST NOT FIRE ON, and the reason the clauses are written the way they
+# are. Also measured twice, in `runs/20260922T124956Z/claude-code-review-plan`
+# and `.../claude-code-apply-native`: the agent does most of the work, returns
+# from a backgrounded native `Task` batch and ends its turn early — one lost
+# `validation_batch_0.json`, or a `--mark-completed` never typed. Those rows had
+# already spent $0.0966 and $0.4794 and left a half-written workspace behind.
+# Retrying THEM would double the tier's cost and paper over a real product bug,
+# so the predicate is built out of the facts that separate the two shapes in the
+# recorded data with no overlap at all:
+#
+#   fact                    never-started      half-finished     green (10 rows)
+#   ------------------------------------------------------------------------
+#   result (chars)          0, 0               53, 894           847 … 2395
+#   dispatcher receipts     0, 0               6, 2              4 … 17
+#   artifacts/ files        0, 0               23, 18            15 … 29
+#   key spend ($)           0.0000, 0.0007     0.0966, 0.4794    0.0121 … 1.7002
+#
+# Three independent sources — the host's own envelope, the shim's receipts, the
+# workspace — have to agree that nothing happened before a row is re-run, and the
+# spend clause bounds what a false positive could ever cost.
+#
+# TWO FACTS DELIBERATELY LEFT OUT.
+#
+# * **Output tokens** (95 and 165 here, 250 on the cheaper half-finished row).
+#   A threshold there would separate the shapes by 1.5x while duplicating what
+#   `result` and the receipts already separate by everything; the tightest
+#   number in a predicate is the first one to misfire, and this one buys nothing.
+# * **The idle gap before exit** (125.8 s and 190.2 s on the half-finished rows
+#   against 10-26 s on green ones). It is a real discriminator, but it needs a
+#   transcript timeline to compute and it answers a question the receipt count
+#   already answers exactly.
+# --------------------------------------------------------------------------- #
+
+#: The measured ceiling on what a never-started attempt may have spent. Both
+#: recorded ones are under it by 14x ($0.0007 and $0.0000); the cheapest GREEN
+#: claude-code row in the same four runs is $0.0121 and the cheapest
+#: half-finished one is $0.0966, so nothing that did real work is anywhere near
+#: it. This is the clause that bounds the blast radius: whatever else a future
+#: envelope does, a row this rig re-runs on its own authority had already been
+#: measured to cost a cent or less, and a row whose spend could NOT be measured
+#: is never re-run at all.
+NEVER_STARTED_MAX_USD = 0.01
+
+#: The census word for a discarded attempt. Kept out of `pass` and out of
+#: `failed` for the same reason `sandbox-skip` is: an attempt that never started
+#: has not failed its question, it has left it unanswered — and an unanswered
+#: question is not coverage either.
+RETRY_OUTCOME = "retried"
+
+#: The manifest that makes a retry impossible to miss, written into the bundle
+#: root beside the graded attempt's own evidence.
+RETRY_MANIFEST_NAME = "retry.json"
+
+#: Where a discarded attempt's bundle is kept: `runs/<utc>/<row-id>/attempt-<n>/`.
+#: NESTED INSIDE the row's bundle rather than beside it, so the record's digest —
+#: which is `hash_bundle`'s `rglob` over exactly this directory — covers both
+#: attempts. A sibling directory would leave the discarded one unhashed, i.e.
+#: rewritable after the fact without the record noticing, which is the one
+#: property this suite's evidence may not lose.
+ATTEMPT_DIR_FMT = "attempt-{n}"
+
+
+def retry_never_started_enabled() -> bool:
+    """Whether the one-shot retry is armed. `MLLM_E2E_RETRY_NEVER_STARTED=0` disarms it.
+
+    Read per call rather than at import, like every other knob here, so a test can
+    set it the way the Makefile would. Detection is NOT disarmed with it: a
+    disarmed lane still writes the manifest saying the shape was seen and no
+    retry was run, because "we saw it and chose not to" and "we never looked" are
+    different facts about the same red row.
+    """
+    raw = os.environ.get("MLLM_E2E_RETRY_NEVER_STARTED", "").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def host_result_envelope(result: RowResult) -> dict:
+    """The host's own result envelope out of `host-stdout.txt`, or `{}`.
+
+    The LAST line that parses as a JSON object carrying `type: "result"`. Both
+    shapes this lane records are covered by that rule and neither is guessed at:
+    claude-code with `--output-format json` writes the envelope as the whole
+    file (one line), while codex and opencode write JSONL whose earlier lines are
+    events rather than verdicts. `{}` means this host printed no such envelope —
+    which is itself the answer for every host that does not speak this dialect.
+    """
+    path = result.out_dir / "host-stdout.txt"
+    if not path.is_file():
+        return {}
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    for line in reversed(text.splitlines()):
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            payload = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(payload, dict) and payload.get("type") == "result":
+            return payload
+    return {}
+
+
+def dispatcher_receipts(result: RowResult) -> list[dict]:
+    """Every receipt except the rig's own `install-host` staging invocation.
+
+    `install-host --check` is the entrypoint staging the shim, not the host
+    running our dispatcher, so counting it would let a row pass — or, here, let a
+    row that touched nothing look like a row that did — on the harness's own
+    work. `test_container_host_lane._dispatcher_receipts` is the same rule and
+    now delegates here: two copies of it is how the grader and the retry would
+    start disagreeing about whether a row did anything.
+    """
+    return [receipt for receipt in result.receipts
+            if "install-host" not in (receipt.get("argv") or [])]
+
+
+def artifact_files(result: RowResult) -> list[str]:
+    """Every file the row exported under `artifacts/`, relative and sorted."""
+    root = result.out_dir / "artifacts"
+    if not root.is_dir():
+        return []
+    return sorted(str(path.relative_to(root))
+                  for path in root.rglob("*") if path.is_file())
+
+
+def never_started_signature(result: RowResult) -> dict | None:
+    """The evidence that this row never started, or `None` — see the block above.
+
+    A dict rather than a bool, because the manifest and the record quote it: a
+    retry that cannot say what it saw is a retry nobody can audit later.
+    """
+    row = result.row
+    # (1) The credentialed host tier only. The provider lane prints no host
+    # envelope at all, and the two credential-free host tiers (`dry_run_host`,
+    # `documented_invocation`) are graded on `invocation.json` rather than on a
+    # dispatcher receipt and already cost nothing — re-running one buys nothing
+    # and would re-run it on a rule written for a different tier's evidence.
+    if row.lane != "host" or row.dry_run_host or row.documented_invocation:
+        return None
+    # (2) A row that hit its cap or exited non-zero is already classified —
+    # `cap-hit`, `sandbox-skip`, `fail` — and each of those has a diagnosis and
+    # an owner. This shape is specifically the row that exits 0 and LOOKS green.
+    if result.timed_out or result.exit_code != 0:
+        return None
+    envelope = host_result_envelope(result)
+    if not envelope:
+        return None
+    # (3) The host reported a clean, complete turn. Not an error, not a cap, not
+    # a refusal: `end_turn` is the host saying it finished normally, which is
+    # what makes an empty answer an anomaly rather than a reported failure.
+    if (envelope.get("subtype") != "success"
+            or envelope.get("is_error") is not False
+            or envelope.get("stop_reason") != "end_turn"):
+        return None
+    # (4) …and said nothing at all. An empty `result` on a successful `end_turn`
+    # is the anomaly itself. `""` only — a whitespace-only answer is spelled the
+    # same way here, and anything with a character in it is a turn that produced
+    # something and belongs to whoever grades it.
+    answer = envelope.get("result")
+    if not isinstance(answer, str) or answer.strip():
+        return None
+    # (5) THE CLAUSE THAT SEPARATES THE SHAPES. Zero dispatcher receipts means
+    # the agent never touched the shim, so this row observed nothing about the
+    # product. The half-finished shape carries 2 and 6.
+    receipts = dispatcher_receipts(result)
+    if receipts:
+        return None
+    # (6) The same fact from an independent source — the workspace rather than
+    # the shim — so one missing receipts directory cannot on its own authorise a
+    # re-run. The half-finished shape carries 18 and 23 files.
+    artifacts = artifact_files(result)
+    if artifacts:
+        return None
+    # (7) The blast-radius bound. An unmeasured spend is NOT a small spend: a row
+    # whose key readback did not answer is never re-run on this rig's initiative,
+    # because the one thing an automatic retry has to guarantee is a bounded bill.
+    spend = result.usage.get("delta_usd")
+    if not isinstance(spend, (int, float)) or isinstance(spend, bool):
+        return None
+    if float(spend) > NEVER_STARTED_MAX_USD:
+        return None
+    usage = envelope.get("usage") or {}
+    return {
+        "shape": "never-started",
+        "envelope": {
+            "type": envelope.get("type"),
+            "subtype": envelope.get("subtype"),
+            "is_error": envelope.get("is_error"),
+            "stop_reason": envelope.get("stop_reason"),
+            "result_chars": len(answer),
+            "num_turns": envelope.get("num_turns"),
+            # Recorded, never gated on — see the block above.
+            "output_tokens": usage.get("output_tokens"),
+        },
+        "dispatcher_receipts": 0,
+        "artifact_files": 0,
+        "spend_usd": round(float(spend), 6),
+        "spend_ceiling_usd": NEVER_STARTED_MAX_USD,
+        "wall_clock_s": result.wall_clock_s,
+    }
+
+
+def never_started_reason(signature: dict | None) -> str:
+    """One sentence a record can carry, built from what was actually measured."""
+    signature = signature or {}
+    envelope = signature.get("envelope") or {}
+    return (
+        "never-started: the host reported a clean turn "
+        f"(subtype {envelope.get('subtype')!r}, stop_reason "
+        f"{envelope.get('stop_reason')!r}, is_error "
+        f"{envelope.get('is_error')!r}) with an EMPTY result, and never invoked "
+        f"the dispatcher — {signature.get('dispatcher_receipts')} receipts, "
+        f"{signature.get('artifact_files')} exported artifacts, "
+        f"${signature.get('spend_usd')} of key spend. The attempt observed "
+        f"nothing about the product, so there is nothing in it to grade")
+
+
+# --------------------------------------------------------------------------- #
 # C1 — the WHOLE-LANE cap, enforced here because here is where a run is started.
 #
 # `MLLM_E2E_MATRIX_TIMEOUT_S` is exported by the `Makefile` and read *here*. The
@@ -846,7 +1642,31 @@ class MatrixBudget:
 
     def census(self) -> dict:
         ran = [entry for entry in self.rows if entry["outcome"] == "pass"]
-        failed = [entry for entry in self.rows if entry["outcome"] != "pass"]
+        # `sandbox-skip` is a FOURTH named list, beside `failed`, `cap-hit` and
+        # `never_started`, and it is what stops the named skip decaying back
+        # into a bare red. Today the same condition reads
+        # `{"row": "chain-codex", "outcome": "fail", "reason": "container exit
+        # 3"}` here, which is indistinguishable from a broken write path. Dated
+        # by the run directory it is written into, so a skip cannot quietly
+        # outlive its blocker without that being visible in the record.
+        #
+        # It is kept OUT of `failed` deliberately: a row whose sandbox could not
+        # start has not failed its question, it has left it unanswered, and
+        # `expired`/`failed` are what a reader counts reds from. It is equally
+        # kept out of `ran`, because an unanswered question is not coverage.
+        skipped = [entry for entry in self.rows
+                   if entry["outcome"] == "sandbox-skip"]
+        # A FIFTH list, for the same reason `sandbox_skip` is a fourth: an
+        # attempt this driver discarded and re-ran has neither passed nor failed
+        # its question. Counting it under `failed` would report a red lane that
+        # is green, and dropping it would be the lane quietly retrying — the one
+        # thing a rig whose product is evidence about reliability may not do. It
+        # is kept out of `ran` too, because a discarded attempt is not coverage.
+        retried = [entry for entry in self.rows
+                   if entry["outcome"] == RETRY_OUTCOME]
+        failed = [entry for entry in self.rows
+                  if entry["outcome"] not in ("pass", "sandbox-skip",
+                                              RETRY_OUTCOME)]
         return {
             "cap_s": self.timeout_s,
             # The lane total, beside each row's own wall clock: it is the number
@@ -856,6 +1676,8 @@ class MatrixBudget:
             "expired": bool(self.refused),
             "ran": ran,
             "failed": failed,
+            "sandbox_skip": skipped,
+            "retried": retried,
             "never_started": list(self.refused),
         }
 
@@ -873,6 +1695,14 @@ class MatrixBudget:
         lines += [f"    {entry['row']} ({entry['wall_clock_s']}s) — "
                   f"{entry.get('reason') or entry['outcome']}"
                   for entry in census["failed"]]
+        lines.append(f"  sandbox skip : {len(census['sandbox_skip'])}")
+        lines += [f"    {entry['row']} ({entry['wall_clock_s']}s) — "
+                  f"{entry.get('reason') or entry['outcome']}"
+                  for entry in census["sandbox_skip"]]
+        lines.append(f"  retried      : {len(census['retried'])}")
+        lines += [f"    {entry['row']} ({entry['wall_clock_s']}s) — "
+                  f"{entry.get('reason') or entry['outcome']}"
+                  for entry in census["retried"]]
         lines.append(f"  never started: {len(census['never_started'])}")
         lines += [f"    {row_id}" for row_id in census["never_started"]]
         for root in self.roots:
@@ -934,11 +1764,32 @@ MATRIX = MatrixBudget()
 #: batch over-applied when what really happened is that it wrote outside the
 #: declared path set. It travels in the row's `reason` instead, where a free string
 #: can say what it was.
+#:
+#: `no-op` is LAST, below `applied`, and both halves of that matter (2026-09-22).
+#:
+#: * **It is here at all** because it is no longer an oddity. `1633dd4`
+#:   (2026-09-16) split the classifier's empty-diff branch, so a `no-op` *claim*
+#:   over an empty diff is its own outcome rather than a `clean-failure`; the
+#:   three `*-apply-executor` rows and every provider-lane chain row now record it
+#:   as their normal outcome. Measured over `runs/20260921T224840Z`: 65 write
+#:   batches, 65 of them `no-op` — so the most common write outcome this rig
+#:   produces was the one with no column, and it reached the record only as prose
+#:   in `reason` via the `unspellable` path below.
+#: * **It is last** because this list ranks by what a reviewer most needs to see,
+#:   and `no-op` is the weakest thing a batch can report: the runner claimed
+#:   nothing was needed and the byte comparison agrees. Above `applied` it would
+#:   MASK the finding this lane exists to catch — a stub-fed chain row that
+#:   applies a byte has leaked past the redirect (`container/README.md`: "applied
+#:   is a bug in the rig"), and a row with one leaked `applied` among twelve
+#:   honest `no-op`s must not be summarized by the twelve. Last also means no
+#:   spelling any existing record carries changes: a row only reads `no-op` when
+#:   `no-op` is ALL it recorded.
 WRITE_OUTCOME_SEVERITY = [
     ("partial-application", "partial"),
     ("schema-rejection", "schema-rejected"),
     ("clean-failure", "clean-failure"),
     ("applied", "applied"),
+    ("no-op", "no-op"),
 ]
 
 
@@ -994,6 +1845,139 @@ def cli_version(cli: str | None, image: str = DEFAULT_IMAGE) -> str | None:
         if entry.get("id") == cli and entry.get("installed"):
             return str(entry["installed"])
     return None
+
+
+#: Where the in-image `sandbox_verdict` probe files its answer, beside
+#: `matrix-census.json` rather than inside it: the census is the driver's
+#: per-row ledger, and this is a per-*capability* measurement that several rows
+#: may share.
+SANDBOX_VERDICT_NAME = "sandbox-verdicts.json"
+
+#: Inside the image the skill is installed here. The probe imports the SHIPPED
+#: adapter from the SHIPPED skill rather than re-deriving codex's argv
+#: test-side, which is the whole point: a second copy of
+#: `codex sandbox -c 'sandbox_mode="workspace-write"' -- …` drifts from the
+#: first the moment the adapter changes.
+IMAGE_SKILL_DIR = "/opt/mllm/skill"
+
+#: The skill's own interpreter, with the system one behind it. `python3` runs
+#: the whole rig and carries PyYAML (`Dockerfile:218-230`), but the product is
+#: installed against `UV_PROJECT_ENVIRONMENT=/opt/mllm/skill/.venv`
+#: (`Dockerfile:212`), so the venv is the interpreter the adapters actually run
+#: under and is tried first. Falling back rather than hard-coding one, because
+#: an interpreter that is merely absent must not read as `unknown` — which on
+#: this mechanism is a hard failure.
+IMAGE_SKILL_PYTHON = "/opt/mllm/skill/.venv/bin/python"
+
+_SANDBOX_PROBE_SOURCE = """
+import json, sys
+sys.path.insert(0, {skill_dir!r})
+from utils.provider_registry import get_provider
+from utils.subagent_executor import sandbox_verdict
+provider = get_provider({cli!r})
+if provider is None:
+    print(json.dumps({{"state": "unknown",
+                       "tail": "no built-in adapter for " + {cli!r}}}))
+else:
+    state, tail = sandbox_verdict(provider, {profile!r})
+    print(json.dumps({{"state": state, "tail": tail}}))
+"""
+
+
+def sandbox_verdict_in_image(cli: str, profile: str = "agent-write",
+                             image: str = DEFAULT_IMAGE) -> tuple[str, str]:
+    """``(state, tail)`` for one CLI's sandbox self-test, measured INSIDE the image.
+
+    This is the *licence* half of the named skip, and it is deliberately
+    separate from the classification half (:func:`row_outcome`). The
+    classification says what happened; this says whether forgiving it is still
+    permitted **on this run**.
+
+    A free-text "skipped, dated" line is the allowlist shape that outlives its
+    blocker, because nothing on a later run re-asks whether the blocker is
+    still there. So the permission comes from a capability probe re-measured
+    every run, run through the adapter's own argv taken from the skill
+    installed in the container — not from a message, and not from a test-side
+    re-derivation of the detection.
+
+    Three states, three different consequences on the test side:
+
+    * ``unavailable`` — the row still RUNS, and its expected failure is
+      declared as a strict, typed xfail on :class:`SandboxSkipped`.
+    * ``ok`` / ``not-required`` — **no skip is available at all.** The row is
+      graded like every other row, and a `sandbox-skip` outcome under an `ok`
+      verdict is itself a failure: the classification and the capability
+      disagree and one of them is wrong.
+    * ``unknown`` — a hard failure, not a licence. The probe could not answer,
+      so nothing was learned about the sandbox, and an unreadable verdict must
+      not become the cheap path to a green run.
+
+    Runs in its own throwaway container with no network and no credential: the
+    probe spawns bwrap and reads an exit code, and needs nothing else.
+    """
+    source = _SANDBOX_PROBE_SOURCE.format(
+        skill_dir=IMAGE_SKILL_DIR, cli=cli, profile=profile)
+    shell = (
+        f'if [ -x {shlex.quote(IMAGE_SKILL_PYTHON)} ]; then '
+        f'  exec {shlex.quote(IMAGE_SKILL_PYTHON)} -c "$MLLM_PROBE_SRC"; '
+        f'else exec /usr/bin/python3 -c "$MLLM_PROBE_SRC"; fi'
+    )
+    try:
+        completed = subprocess.run(
+            # The source travels in the ENVIRONMENT, not in the argv: it
+            # contains quotes and newlines, and a `sh -c` that had to re-quote
+            # it would be one escaping bug away from probing the wrong thing
+            # and reporting `unknown` — which is a hard failure on this
+            # mechanism, so it must never be a rig artifact.
+            ["docker", "run", "--rm", "--network", "none",
+             # THE REAL BINARY, NOT THE SHIM. `PATH` is wrapper-first for the
+             # whole image, so a bare `codex` in the adapter's probe argv
+             # resolves to `/opt/mllm/bin/codex` — the rig's redirector, which
+             # on a bare `docker run` has none of a row's tmpfs mounts and
+             # dies in `seed_invocation_root` with
+             # `PermissionError: /tmp/mllm-inv`. Measured 2026-09-22: that
+             # crash was reported `unavailable`, which is a FALSE verdict — it
+             # says the sandbox cannot start when what could not start was the
+             # wrapper. The question here is whether the real CLI's own
+             # sandbox comes up, so the real directory goes first.
+             "-e", "PATH=/opt/mllm/real:/usr/local/bin:/usr/bin:/bin",
+             # ...and a writable /tmp, because a probe that fails on the
+             # filesystem has learned nothing about bubblewrap either.
+             "--tmpfs", "/tmp:rw,exec,mode=1777",
+             "-e", f"MLLM_PROBE_SRC={source}",
+             "--entrypoint", "/bin/sh", image, "-c", shell],
+            capture_output=True, text=True, timeout=180,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return "unknown", f"the probe could not be run: {exc}"
+    if completed.returncode != 0:
+        return "unknown", (completed.stderr or completed.stdout or "")[-500:]
+    try:
+        payload = json.loads(completed.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return "unknown", (completed.stdout or "")[-500:]
+    return str(payload.get("state") or "unknown"), str(payload.get("tail") or "")
+
+
+def record_sandbox_verdict(roots: Iterable[Path], cli: str, profile: str,
+                           state: str, tail: str) -> None:
+    """File one `(state, tail)` beside the census, so the licence is auditable.
+
+    Evidence, never a failure path: an unwritable root is skipped, exactly as
+    :meth:`MatrixBudget._write` does. A run whose verdict nobody can read back
+    is the one case where "it was skipped for a reason" is unfalsifiable, which
+    is why this is written at all.
+    """
+    for root in roots:
+        path = Path(root) / SANDBOX_VERDICT_NAME
+        try:
+            existing = _read_json(path) if path.is_file() else {}
+            existing[f"{cli}:{profile}"] = {"state": state, "tail": tail}
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(existing, indent=2, sort_keys=True) + "\n",
+                            encoding="utf-8")
+        except OSError:
+            continue
 
 
 def image_evidence(image: str = DEFAULT_IMAGE) -> dict:
@@ -1095,12 +2079,119 @@ def declared_command(row: Row) -> str:
     return " ".join([row.command, *row.commands]).strip()
 
 
+class SandboxSkipped(AssertionError):
+    """This row's write batches were refused because its sandbox could not start.
+
+    Raised — and **only** raised — where :func:`row_outcome` classified the row
+    `sandbox-skip`, so the test side can declare the expected failure as a
+    *typed* `pytest.mark.xfail(strict=True, raises=harness.SandboxSkipped)`.
+
+    Both halves of that are load-bearing. *Typed*, so a row failing for any
+    other reason raises something else and is an ordinary red — the conflation
+    an entrypoint-level skip list cannot avoid, because a row skipped before it
+    runs cannot tell "the sandbox could not start" from "the write phase was
+    broken some other way". *Strict*, so the day bwrap starts here the row
+    passes, pytest reports XPASS, and the suite is red until the declaration is
+    retired and the baseline captured.
+
+    It is deliberately **not** `pytest.skip`: a skipped row is never executed,
+    so it can never announce that its blocker has lifted. An allowlist that
+    outlives its blocker is the failure mode this whole mechanism exists to
+    prevent.
+
+    It subclasses `AssertionError` rather than `Exception` so a grader that
+    catches assertion failures keeps behaving as it does for every other row.
+    """
+
+
+def sandbox_refusals(result: RowResult) -> list[dict]:
+    """Every batch record this row wrote that names a `sandbox_unavailable` refusal.
+
+    Derived from the row's **own evidence** — the same
+    `write_batch_report.json` artifacts :func:`write_outcomes` already walks —
+    rather than from a second, test-side copy of the detection. The product
+    already knows: `_detect_sandbox` (`utils/subagent_executor.py:1754`) runs
+    the adapter's probe, `sandbox_verdict` (`:1655`) returns `unavailable`, and
+    the refusal it records carries `reason_code="sandbox_unavailable"`
+    (`:1814`, D3k rung 1). Re-deriving that outside the container drifts from
+    it the moment the probe changes.
+
+    Each element is the product's own record, so the caller can quote its
+    reason string instead of inventing one.
+
+    **Two sources, in order, and the second is not optional today.** Measured
+    on `runs/20260921T224840Z/chain-writer-codex`: a genuinely sandbox-refused
+    row's report is `{"exit": 3, "batches_dispatched": [], "tasks": []}` with
+    **no `reason_code` anywhere in it** — `preflight_runner` raises
+    `RunnerRejected` *before* the first batch record exists, so the code never
+    reaches the file. The reports are read first because they are the declared
+    source and will start hitting the day the product records it there; the
+    fallback reads the product's own refusal line out of the container's
+    stderr/stdout (`utils/subagent_executor.py:1806`,
+    `Refusing to dispatch: … (reason: sandbox_unavailable) — …`).
+
+    The fallback is **anchored**, not a bare string search: a write report must
+    exist and must record a non-zero `exit`. A green row that merely mentions
+    the string — in a prompt, a log echo or a test name — cannot ride out on
+    this door.
+    """
+    found: list[dict] = []
+    reports = sorted((result.out_dir / "artifacts").glob(
+        "*/*/write_batch_report.json"))
+    refused_exit = False
+    for report in reports:
+        payload = _read_json(report)
+        if payload.get("exit") not in (0, None):
+            refused_exit = True
+        # The refusal can be filed on the batch itself or on one of its tasks,
+        # depending on whether the preflight or the dispatch caught it; look in
+        # both rather than guessing which rung produced this one.
+        candidates = [payload, *(payload.get("tasks") or [])]
+        for node in candidates:
+            if not isinstance(node, dict):
+                continue
+            if str(node.get("reason_code") or "") == "sandbox_unavailable":
+                found.append(node)
+    if found or not refused_exit:
+        return found
+    for name in ("container-stderr.txt", "container-stdout.txt"):
+        path = result.out_dir / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if "Refusing to dispatch" not in line:
+                continue
+            if "(reason: sandbox_unavailable)" not in line:
+                continue
+            found.append({"reason_code": "sandbox_unavailable",
+                          "detail": line.strip(),
+                          "source": name})
+            return found
+    return found
+
+
 def row_outcome(result: RowResult) -> tuple[str, str | None]:
     """The driver's own verdict on a row, with the reason it is not a bare bool.
 
     This is the container's verdict, not the grader's: a row whose container
     exited 0 can still fail an assertion over its evidence, which is why
     :func:`emit_record` takes an explicit outcome and this is only the default.
+
+    **`sandbox-skip` is classified here and nowhere else**, derived exactly the
+    way `cap-hit` already is: from the row's own recorded evidence, in one
+    place. A row whose write batches carry `reason_code: sandbox_unavailable`
+    is not `fail` / `container exit 3` — that bare red is what
+    `runs/20260920T105938Z/matrix-census.json` says about `chain-codex` today,
+    and it reads identically to a broken write path.
+
+    Note the ordering: the classification is *below* the cap-hit and exit-0
+    branches. A row that ran out of wall clock is a cap hit whatever its
+    batches recorded, and a row that exited 0 passed — the sandbox refusal
+    only re-labels a **non-zero** exit whose evidence explains it.
     """
     if result.timed_out:
         return "cap-hit", result.cap_reason or classify_cap_hit(result)
@@ -1108,6 +2199,13 @@ def row_outcome(result: RowResult) -> tuple[str, str | None]:
         return "pass", None
     if result.exit_code is None:
         return "not-run", "the container produced no exit status"
+    refusals = sandbox_refusals(result)
+    if refusals:
+        # The product's own words, not the rig's paraphrase of them.
+        reason = str(refusals[0].get("detail")
+                     or refusals[0].get("message")
+                     or "sandbox_unavailable")
+        return "sandbox-skip", reason
     return "fail", f"container exit {result.exit_code}"
 
 
@@ -1192,12 +2290,30 @@ def row_record(row: Row, result: RowResult, outcome: str | None = None,
         if product_word in recorded:
             entry["write_outcome"] = schema_word
             break
+    # The escape hatch STAYS, and it is narrower than it was: `no-op` left it for
+    # a column of its own on 2026-09-22, which leaves `policy-violation` — a word
+    # the schema declines to spell rather than one nobody thought of — plus
+    # whatever the product names next. A word with no column reaching a free
+    # string is the behaviour that keeps an unknown outcome in the record at all;
+    # the alternative is a refused write, because the schema closes the enum.
     unspellable = sorted(recorded.difference(
         word for word, _ in WRITE_OUTCOME_SEVERITY))
     if unspellable:
         reason = "; ".join(part for part in
                            (reason, f"write batches also recorded "
                                     f"{', '.join(unspellable)}") if part)
+    # THE FLAG. A row that only passed because it was re-run says so in its own
+    # record entry, not only in the manifest beside the bundle: the record is
+    # what a reviewer reads at the promotion commit, and position in the `rows`
+    # array is not a fact anyone should have to infer a retry from.
+    if result.attempts:
+        reason = "; ".join(part for part in (
+            reason,
+            f"attempt {result.attempt} of {result.attempt}: this row was "
+            f"re-run after a never-started attempt — the discarded attempt is "
+            f"the preceding row entry, its bundle is "
+            f"{ATTEMPT_DIR_FMT.format(n=1)}/ and "
+            f"{RETRY_MANIFEST_NAME} beside it is the manifest") if part)
     if reason:
         entry["reason"] = reason
     if row.cli:
@@ -1524,7 +2640,15 @@ def build_record(row: Row, result: RowResult, posture: dict | None = None,
         # route to a real endpoint), `open` is detection-only.
         "egress": ("none" if network_mode(row, posture) == "none"
                    else str(network.get("egress") or "open")),
-        "rows": [row_record(row, result, outcome, reason, image)],
+        # CHRONOLOGICAL, discarded attempts first. The record is evidence and
+        # evidence is in the order it happened; every entry names its own
+        # attempt number in `reason`, so position is never the only carrier of
+        # that fact. A single-attempt row renders exactly the one-element array
+        # it always did.
+        "rows": [*(row_record(row, prior, "fail",
+                              never_started_reason(prior.retry_signature), image)
+                   for prior in result.attempts),
+                 row_record(row, result, outcome, reason, image)],
         # cap-hit and skip are row verdicts; a run is pass, fail or not-run.
         "outcome": ("pass" if outcome == "pass"
                     else "not-run" if outcome == "not-run" else "fail"),
@@ -1877,20 +3001,178 @@ class GradeLedger:
 GRADES = GradeLedger()
 
 
-def run_row(row: Row, posture: dict | None = None, image: str = DEFAULT_IMAGE,
-            runs_root: Path | None = None, utc: str | None = None) -> RowResult:
-    """Run one row to completion (or to its cap) and return its evidence.
+def _attempt_entry(n: int, result: RowResult, signature: dict | None,
+                   bundle: str, graded: bool) -> dict:
+    """One attempt's line in the manifest: what it was, and whether it counted."""
+    return {
+        "attempt": n,
+        # Relative to the row's bundle root, so the manifest is portable
+        # between checkouts exactly like the record's `bundle.root` is.
+        "bundle": bundle,
+        "graded": graded,
+        "exit_code": result.exit_code,
+        "timed_out": result.timed_out,
+        "wall_clock_s": result.wall_clock_s,
+        "spend_usd": result.usage.get("delta_usd"),
+        "dispatcher_receipts": len(dispatcher_receipts(result)),
+        "artifact_files": len(artifact_files(result)),
+        # `None` on an attempt that did NOT match the shape, which is the whole
+        # point of writing it for the graded attempt too: a retry that landed on
+        # the same empty turn twice is a broken row, not a flaky one, and the
+        # manifest is where that reads at a glance.
+        "never_started_signature": signature,
+    }
 
-    Raises :class:`MatrixExpired` — before any container exists — when the lane's
-    own `MLLM_E2E_MATRIX_TIMEOUT_S` cap is already spent (C1).
+
+def _write_retry_manifest(out_dir: Path, row: Row, attempts: list[dict],
+                          state: str, graded_attempt: int | None,
+                          declined: str | None = None) -> Path:
+    """The bundle's own statement that a retry happened, or did not.
+
+    Written TWICE on a retried row for the same reason the record is: once
+    before the second container starts, so a session that dies mid-retry still
+    leaves a bundle that explains its own `attempt-1/` directory, and once after
+    it, with both attempts and the verdict. A rig that retried silently would be
+    lying about its own reliability, which is the one thing this suite exists not
+    to do.
     """
-    posture = posture or load_posture()
-    utc = utc or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    run_root = (runs_root or RUNS) / utc
-    # The whole-lane cap, claimed before the bundle directory is even made: a
-    # refused row must leave nothing on disk that reads like a run.
-    MATRIX.claim(row.row_id, run_root)
-    out_dir = run_root / row.row_id
+    path = out_dir / RETRY_MANIFEST_NAME
+    payload = {
+        "row_id": row.row_id,
+        "host": row.host,
+        "shape": "never-started",
+        "detector": "harness.never_started_signature",
+        "state": state,
+        "max_attempts": 2,
+        "graded_attempt": graded_attempt,
+        "attempts": attempts,
+    }
+    if declined:
+        payload["declined"] = declined
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8")
+    return path
+
+
+def _stamp_attempt(out_dir: Path, attempt: int, graded: bool) -> None:
+    """Say inside one attempt's own `row-result.json` which attempt it is.
+
+    The manifest ties the attempts together; this is so the file a reader opens
+    FIRST — the row's own driver record — cannot be read as the whole row when it
+    is one discarded half of it. Best-effort: a bundle whose row-result went
+    missing is a worse problem than an unstamped one, and neither is a reason to
+    fail a row that ran.
+    """
+    path = out_dir / "row-result.json"
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    record["attempt"] = attempt
+    record["graded"] = graded
+    record["retry_shape"] = "never-started"
+    try:
+        path.write_text(json.dumps(record, indent=2, sort_keys=True) + "\n",
+                        encoding="utf-8")
+    except OSError:
+        return
+
+
+def _shelve_attempt(out_dir: Path, n: int) -> Path:
+    """Move a finished attempt's bundle to `<bundle>/attempt-<n>/`; return it.
+
+    Two renames rather than a copy, so no evidence is rewritten in the process —
+    the bytes a record digests have to be the bytes the container wrote. The
+    intermediate sibling exists because a directory cannot be renamed into
+    itself.
+    """
+    parent = out_dir.parent
+    shelf = parent / f".{out_dir.name}.{ATTEMPT_DIR_FMT.format(n=n)}"
+    if shelf.exists():
+        shutil.rmtree(shelf, ignore_errors=True)
+    out_dir.rename(shelf)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    os.chmod(out_dir, 0o777)
+    landed = out_dir / ATTEMPT_DIR_FMT.format(n=n)
+    shelf.rename(landed)
+    return landed
+
+
+def _retry_never_started(row: Row, first: RowResult, signature: dict,
+                         posture: dict, image: str, out_dir: Path,
+                         runs_root: Path, run_root: Path) -> RowResult:
+    """Re-run a row that never started, ONCE, and record both attempts.
+
+    Returns the attempt to grade: the second one when it ran, the first one when
+    the retry was declined — in which case the row grades exactly as it would
+    have with no retry mechanism at all, and the manifest says why.
+    """
+    reason = never_started_reason(signature)
+    first.retry_signature = signature
+
+    declined: str | None = None
+    if not retry_never_started_enabled():
+        declined = ("MLLM_E2E_RETRY_NEVER_STARTED is off, so the shape was "
+                    "detected and no second attempt was run")
+    else:
+        # The same admission rule `MATRIX.claim` applies, read rather than
+        # claimed: `claim` files a refused row under `never_started`, and this
+        # row demonstrably DID start once — a census that said otherwise would
+        # be describing a bundle that is sitting right there.
+        remaining = MATRIX.remaining()
+        if remaining is not None and remaining <= 0:
+            declined = (f"the lane's wall-clock budget is spent "
+                        f"({MATRIX.timeout_s:.0f}s), so no further container "
+                        f"was started")
+    if declined:
+        MATRIX.record(first)
+        _write_retry_manifest(
+            out_dir, row,
+            [_attempt_entry(1, first, signature, ".", graded=True)],
+            state="not-retried", graded_attempt=1, declined=declined)
+        return first
+
+    # Filed BEFORE the second container starts, for the same reason every other
+    # row's census entry is: the summary has to be on disk before the row that
+    # overruns the cap. The `#attempt-1` suffix keeps it a row of its own rather
+    # than a second entry under an id that also names the graded attempt.
+    MATRIX.note(f"{row.row_id}#{ATTEMPT_DIR_FMT.format(n=1)}", RETRY_OUTCOME,
+                first.wall_clock_s, reason)
+
+    shelved = _shelve_attempt(out_dir, 1)
+    first.out_dir = shelved
+    _stamp_attempt(shelved, attempt=1, graded=False)
+    first_entry = _attempt_entry(1, first, signature,
+                                 ATTEMPT_DIR_FMT.format(n=1), graded=False)
+    _write_retry_manifest(out_dir, row, [first_entry], state="retrying",
+                          graded_attempt=None)
+
+    second = _run_attempt(row, posture, image, out_dir, runs_root, run_root)
+    second.attempts = [first]
+    MATRIX.record(second)
+    _stamp_attempt(out_dir, attempt=2, graded=True)
+    # ONE SHOT. The second attempt's signature is computed and recorded, never
+    # acted on: a row that never started twice running is a finding, and the
+    # answer to it is a red row a human reads, not a third container.
+    _write_retry_manifest(
+        out_dir, row,
+        [first_entry,
+         _attempt_entry(2, second, never_started_signature(second), ".",
+                        graded=True)],
+        state="retried", graded_attempt=2)
+    return second
+
+
+def _run_attempt(row: Row, posture: dict, image: str, out_dir: Path,
+                 runs_root: Path, run_root: Path) -> RowResult:
+    """One `docker run`, from an empty bundle directory to its evidence.
+
+    Split out of :func:`run_row` so the never-started retry runs the SAME code
+    path a second time into the same directory rather than a second, subtly
+    different one — a retry that ran a different command would not be a retry.
+    It deliberately files nothing: the lane census and the record belong to the
+    ROW, and only `run_row` knows how many attempts that row took.
+    """
     # 0777 because /work/out is a host directory owned by the developer while the
     # container writes as 10001: the artifacts come back owned by 10001, readable
     # and prunable because their parent is the developer's.
@@ -1901,7 +3183,7 @@ def run_row(row: Row, posture: dict | None = None, image: str = DEFAULT_IMAGE,
     # bundle being written is passed as `protect` because it already exists by
     # this line and would otherwise be its own sweep's oldest candidate whenever
     # the directory was empty before it.
-    prune_runs(runs_root or RUNS, protect=run_root)
+    prune_runs(runs_root, protect=run_root)
 
     argv = build_run_argv(row, out_dir, posture, image)
     (out_dir / "run-command.txt").write_text(
@@ -1976,10 +3258,47 @@ def run_row(row: Row, posture: dict | None = None, image: str = DEFAULT_IMAGE,
         "cap_reason": result.cap_reason,
     }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    # The lane census, updated per row rather than at the end: the summary has to
-    # be on disk *before* the row that overruns the cap, or the one invocation
-    # that needs it is the one that never wrote it.
-    MATRIX.record(result)
+    return result
+
+
+def run_row(row: Row, posture: dict | None = None, image: str = DEFAULT_IMAGE,
+            runs_root: Path | None = None, utc: str | None = None) -> RowResult:
+    """Run one row to completion (or to its cap) and return its evidence.
+
+    Raises :class:`MatrixExpired` — before any container exists — when the lane's
+    own `MLLM_E2E_MATRIX_TIMEOUT_S` cap is already spent (C1).
+
+    **One shape, and only one, is run twice.** A credentialed host row whose turn
+    never started — a clean `end_turn` with an empty `result`, no dispatcher
+    receipt, no exported artifact and a cent or less of key spend — observed
+    nothing about the product, so it is discarded and re-run once. Every other
+    failure is returned exactly as it happened. Both attempts land in the
+    bundle: the discarded one under `attempt-1/`, both of them in `retry.json`
+    beside it, and both as rows of the tracked record. See the block above
+    :func:`never_started_signature` for why that shape and no other.
+    """
+    posture = posture or load_posture()
+    utc = utc or time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    runs_root = runs_root or RUNS
+    run_root = runs_root / utc
+    # The whole-lane cap, claimed before the bundle directory is even made: a
+    # refused row must leave nothing on disk that reads like a run.
+    MATRIX.claim(row.row_id, run_root)
+    out_dir = run_root / row.row_id
+
+    result = _run_attempt(row, posture, image, out_dir, runs_root, run_root)
+
+    signature = never_started_signature(result)
+    if signature is not None:
+        # Files its own census entries — one per attempt — because only this
+        # branch knows there was more than one.
+        result = _retry_never_started(row, result, signature, posture, image,
+                                      out_dir, runs_root, run_root)
+    else:
+        # The lane census, updated per row rather than at the end: the summary
+        # has to be on disk *before* the row that overruns the cap, or the one
+        # invocation that needs it is the one that never wrote it.
+        MATRIX.record(result)
 
     # C10, and only for the lane that can promote anything: a green HOST row is
     # the evidence `capabilities.yaml` promotions are made from, so that lane's
@@ -1994,6 +3313,9 @@ def run_row(row: Row, posture: dict | None = None, image: str = DEFAULT_IMAGE,
     # bundle. Emitting the final record straight from here is precisely the bug —
     # a container that exits 0 having produced output that then fails its own
     # assertions would propose capability edits nothing ever demonstrated.
+    #
+    # A retried row registers its GRADED attempt, which carries the discarded one
+    # in `RowResult.attempts`, so the record it writes holds both.
     if row.lane == "host":
         result.record_path = GRADES.open(row, result, posture, image)
 

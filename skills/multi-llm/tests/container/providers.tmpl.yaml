@@ -22,9 +22,34 @@
 # layer is the last layer, but it merges exactly like the project one.
 #
 # Placeholders, substituted per row by seed_workspace.py:
-#   {{spec}}            the row's single "provider:model" spec
+#   {{fan_out_specs}}   the row's FAN-OUT: its list of "provider:model" specs,
+#                       rendered as a complete quoted YAML flow list, e.g.
+#                       ["aider:openai/stub-model", "muse:muse-spark-1.2"].
+#                       One entry is a list of one, not a scalar.
 #   {{runner}}          the row's agent-write-capable executor runner spec
 #   {{runner_cheap}}    the cheap-tier runner; normally the same as {{runner}}
+#
+# WHY THE FAN-OUT SLOT IS BARE — no quotes around it, and no brackets either.
+# The renderer is a `str.replace`, and a replace INTO a quoted scalar can only
+# ever produce a scalar: the old single-spec slot sat INSIDE the quotes, so a
+# joined list substituted into it yielded one string holding five slugs rather
+# than five entries. The slot therefore swallows the whole
+# node and the RENDERER emits the punctuation — `models: {{fan_out_specs}}`
+# becomes `models: ["a:b", "c/d:e"]`, each spec quoted so a slug carrying `:` or
+# `/` cannot be re-read as a mapping key. A block sequence would render just as
+# well, but then each of the 22 selection sites below would carry its own
+# indentation for the renderer to reproduce; a flow list is indentation-free, so
+# all 22 sites share ONE spelling and a site added later cannot get the indent
+# wrong on its own.
+#
+# A MALFORMED RENDER IS THE DANGEROUS FAILURE HERE, not a loud one. This file is
+# deep-merged onto base (provider_registry.load_config -> _deep_merge), so a
+# document that fails to parse — or that lands a string where a list belongs —
+# does not stop the row: it falls straight through to base's twelve specs across
+# five providers, and the row then LOOKS like a fan-out while running someone
+# else's roster. That is precisely the outcome the header above says this file
+# exists to prevent, which is why the render guards assert over the *merged*
+# config rather than over the rendered text.
 #
 # NOTE on defaults.modes: base ships no `modes` key today, so these entries beat
 # nothing at present. They are written anyway because a mode entry wins outright
@@ -35,45 +60,48 @@
 # fanning out mid-row.
 
 defaults:
-  models:
-    - "{{spec}}"
-  quick_models:
-    - "{{spec}}"
+  models: {{fan_out_specs}}
+  quick_models: {{fan_out_specs}}
   modes:
     review-plan:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
     apply-suggestions:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
     generate-tasks:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
     review-tasks:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
     apply-task-suggestions:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
     implement:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
     review-code:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
     apply-code-fixes:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
     full:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
     ask:
-      models: ["{{spec}}"]
-      quick: ["{{spec}}"]
+      models: {{fan_out_specs}}
+      quick: {{fan_out_specs}}
 
 driver:
   # BOTH keys, not just the obvious one: an unset subagent_runner_cheap keeps
   # base's claude-code:haiku and adds a second binary to every row.
+  #
+  # These two stay SINGULAR and keep their quotes while the selection keys above
+  # became lists: driver.subagent_runner is one slug, not a fan-out, and
+  # widening it here would silently multiply the write dispatch the row is
+  # measuring.
   subagent_runner: "{{runner}}"
   subagent_runner_cheap: "{{runner_cheap}}"
   # Write concurrency stays at base's 1: the batchers partition by artifact, and
