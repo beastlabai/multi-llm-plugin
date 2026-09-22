@@ -45,8 +45,24 @@ hosts:
     # Rationale: this host's mandatory manifest is 23 lines on its own (a long
     # `description`, the rendered `argument-hint`, and 18 `allowed-tools` grants
     # that cannot be shortened without losing a permission). The shim *body* — what
-    # the ~100-line budget is actually about — is 84 lines.
-    shim_max_lines: 110
+    # the ~100-line budget is actually about — is 97 lines and still inside the
+    # 100-line contract `DEFAULT_SHIM_MAX_LINES` holds every shim to; this key only
+    # ever absorbed the frontmatter, and 120 is 23 + 97 exactly, so the next
+    # addition is the same deliberate decision again rather than slack to spend.
+    #
+    # 110 -> 120 (2026-09-22): step 4 gained the truncation rule. Measured, not
+    # defensive: Claude Code persists a Bash result over ~30 000 characters to a
+    # file and returns a ~2.2 KB stub holding the output's *first 2 KB*, and seven
+    # of the eleven cores are over that cap — so the read step this shim exists to
+    # name silently delivers a fragment. Run 20260922T191142Z has one row that took
+    # the fragment for the whole, never spawned a subagent, and reported four
+    # batches applied with zero edits made. The excess is not workflow prose (the
+    # core is host-neutral and cannot name `<persisted-output>` or `Read`), not a
+    # capability value (this file is never on an agent read path), and not shared
+    # boilerplate (no other host truncates), so it belongs in this host's own shim.
+    # `util instructions` carries the host-neutral half: a head banner naming the
+    # sentinel the core ends with, which survives because the stub keeps the head.
+    shim_max_lines: 120
     installable: false
     install_paths:
       project: [".claude/skills/multi-llm"]

@@ -265,6 +265,14 @@ above. What a host with a native subagent tool contributes is exactly one thing:
 - write the JSON object it prints to that task's `output_path`,
 - re-invoke the mode with `--reaggregate`.
 
+Do all three in one turn, and do not end that turn with any of them outstanding.
+**You** write that file, not the subagent, and a host that runs one headless turn
+has no second turn in which to write it — a reply that lands after the turn ends
+leaves `output_path` absent and the phase with nothing on disk to reaggregate or
+resume from. Confirm the file exists and is not empty before the `--reaggregate`
+call; if it is missing, re-dispatch the task rather than reaggregating over an
+absent result.
+
 The subagent explores the repository from the one path the prompt names and prints
 one JSON document. It writes no file, runs no command, and is never handed an
 interactive prompt.

@@ -613,6 +613,12 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
         )
         print()
         print(f"  {dispatcher_command(mode.name)} --help")
+        # The end marker is unconditional across `util instructions`, so "search
+        # for the end line" is a rule with no exception for a reader to hold. This
+        # branch's answer is a few hundred characters and can never be truncated;
+        # it carries the marker anyway, because a check that is sometimes
+        # inapplicable is a check an agent has to decide about.
+        print(f"{CORE_END_MARKER} {mode.name}")
         return EXIT_OK
     path = skill_dir() / relative
     legacy = _legacy_instruction_path(relative)
@@ -633,13 +639,65 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
             "The plugin install looks corrupt or partial; reinstall the skill.",
             exit_code=EXIT_ERROR,
         )
-    sys.stdout.write(
-        render_instruction_text(path.read_text(encoding="utf-8"), skill_dir())
-    )
+    core = render_instruction_text(path.read_text(encoding="utf-8"), skill_dir())
+    sys.stdout.write(_truncation_notice(mode.name, core))
+    sys.stdout.write(core)
+    if not core.endswith("\n"):
+        sys.stdout.write("\n")
+    # The sentinel closes the *core*, before the optional verb appendix, because
+    # `--host` has always appended to an unchanged core and a marker that moved
+    # depending on the flag would be a second thing to reason about. Every shim
+    # host runs the plain form, where this is the last line of content.
+    sys.stdout.write(f"{CORE_END_MARKER} {mode.name}\n")
     if host_id is not None:
         sys.stdout.write(_verb_section(host_id))
     ctx.add_artifact(path)
     return EXIT_OK
+
+
+#: Closes the served core. Its whole job is to be *checkable*: an agent does not
+#: have to judge whether it received the whole document, it searches for a literal
+#: string. Never printed anywhere else, so a match means the tail arrived.
+CORE_END_MARKER = "MULTI_LLM_CORE_END:"
+
+
+def _truncation_notice(mode_name: str, core: str) -> str:
+    """The head banner that survives a host truncating this command's output.
+
+    MEASURED, not hypothetical. Claude Code persists any Bash result over ~30 000
+    characters to a file and replaces it with a ~2.2 KB stub: a pointer line plus
+    the output's **first 2 KB** and nothing else. Seven of the eleven cores are
+    over that cap. On 2026-09-22 an `apply-suggestions` row read that stub, did not
+    follow the pointer, never saw the per-batch loop that lives in the second half,
+    and finished the turn reporting four batches applied with zero edits made.
+
+    Two facts decide the shape. The surviving region is the **head**, so a footer
+    would be the first thing lost — a notice can only live here. And the host's own
+    stub already names the byte count and the path, and was ignored; so this does
+    not repeat the pointer, it gives the reader a *test* — one literal string, at a
+    known place — that turns "did I get all of it?" from a judgement into a lookup.
+    """
+    return (
+        "=== READ THIS FIRST · multi-llm core instructions · "
+        f"{mode_name} ===\n"
+        f"The core below is {len(core):,} characters. Its last line is exactly:\n"
+        "\n"
+        f"    {CORE_END_MARKER} {mode_name}\n"
+        "\n"
+        "Search what you just received for that line. If it is not there, your host\n"
+        "truncated this command's output and saved the whole of it to a file; the\n"
+        "host's own wrapper around this text names that file's path. Stop there:\n"
+        "read that file to the end before your next tool call and follow it, not\n"
+        "this excerpt.\n"
+        "\n"
+        "Truncation keeps the head and drops the tail. The head is what the mode is\n"
+        "and how it is invoked; the tail is the loop that does the work. So a cut\n"
+        "core reads like a complete overview, and the usage line you can still see\n"
+        "runs cleanly — it starts the orchestrator, which reports success, and you\n"
+        "end the turn having applied nothing. Do not run any command from a core\n"
+        "you have not seen the end of.\n"
+        "=== the core begins on the next line ===\n"
+    )
 
 
 #: Heading the ``--host`` verb block is served under. The core files name the

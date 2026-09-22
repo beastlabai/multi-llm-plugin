@@ -1000,12 +1000,18 @@ NETWORK_DENIAL_PATTERNS: Tuple[str, ...] = (
     "egress blocked",
 )
 
+#: The word the probe asks for and then looks for. Split out of the prompt so the
+#: question and the answer cannot drift apart: the verdict below is decided by
+#: searching for this exact string, and a prompt that asked for a different one
+#: would record ``unknown`` on every healthy runner.
+NESTED_PROBE_TOKEN = "MULTI_LLM_NESTED_EXEC_OK"
+
 #: The throwaway prompt the nested-exec probe dispatches (D3c). Trivial on
 #: purpose: it is a real, billed turn, so it asks for one token and nothing that
 #: needs the workspace, and it runs under ``agent-readonly`` regardless of the
 #: profile the batch itself will use — a probe must never hold write access.
 NESTED_PROBE_PROMPT = (
-    "Reply with exactly this token and nothing else: MULTI_LLM_NESTED_EXEC_OK"
+    f"Reply with exactly this token and nothing else: {NESTED_PROBE_TOKEN}"
 )
 
 #: Wall-clock budget for that probe. Long enough for a cold agent CLI start plus
@@ -2121,11 +2127,17 @@ def _probe_nested_exec(
       is retryable);
     * an egress failure → the network leg, exit 3.
 
+    ``allowed`` requires the reply to carry :data:`NESTED_PROBE_TOKEN` — the word
+    the prompt asked for. A clean exit whose output never mentions it is
+    ``unknown`` under a warning of its own, distinct from the inconclusive one
+    below so a log tells the two causes apart.
+
     Everything else — a timeout, a non-zero exit with nothing recognized, a
-    silent zero-byte success, an adapter that will not render the probe — is
-    ``unknown`` plus one warning line. The reactive ladder still covers those,
-    and blocking a batch on an unreadable probe would be worse than the dispatch
-    the probe exists to save.
+    silent zero-byte success, a clean exit that answered with something other
+    than the token, an adapter that will not render the probe — is ``unknown``
+    plus one warning line. The reactive ladder still covers those, and blocking a
+    batch on an unreadable probe would be worse than the dispatch the probe
+    exists to save.
     """
     provider = get_provider(provider_name)
     if provider is None:  # pragma: no cover - presence is checked before this
@@ -2268,7 +2280,41 @@ def _probe_nested_exec(
         )
 
     if capture.exit_code == 0 and streams.strip():
-        return "allowed"
+        # The probe asked for a word; this is where it is read back. Until
+        # 2026-09-22 the verdict was "exit 0 and *something* on a stream", which
+        # a usage banner, a progress spinner or a CLI that echoed its prompt and
+        # quit all satisfy — so `allowed` meant "the binary ran", not "a model
+        # answered through this host", and the container lane recorded it for a
+        # runner whose every turn had been refused 422.
+        #
+        # PRESENCE, NOT EQUALITY, and deliberately so. These are the runner's raw
+        # streams, not a parsed answer: every agent CLI this dispatches wraps the
+        # reply in its own envelope (NDJSON events, usage counters, a `--print-
+        # logs` tail), and `_probe_nested_exec` never calls `parse_output` — a
+        # preflight has no result document, and adding a parse step here would
+        # let an adapter's parser failure turn a working host into `unknown`. So
+        # the prompt's "and nothing else" is a request for a cheap turn, not a
+        # condition the verdict rests on; holding a model to literal exactness
+        # would measure instruction-following rather than nested exec.
+        #
+        # The known hole, stated rather than papered over: a runner that echoes
+        # our prompt into its own event stream carries the token whether or not a
+        # model ever answered. That case read `allowed` under the old rule too,
+        # so nothing regresses — this is strictly the tighter gate — and the
+        # reactive D3k ladder still covers what it lets through.
+        if NESTED_PROBE_TOKEN.lower() in streams:
+            return "allowed"
+        print(
+            f"multi-llm warning: the nested-exec probe for {spec} on host "
+            f"{host_id} exited 0 with {len(streams.strip())} byte(s) of output, "
+            f"but none of it carried the probe's token ({NESTED_PROBE_TOKEN}) — "
+            f"recording nested_exec 'unknown' for {opened}. The runner started "
+            f"and returned, so this is not a denial; what is unproven is that a "
+            f"model answered through it. Dispatching anyway; a real denial will "
+            f"land on the D3k ladder.",
+            file=sys.stderr,
+        )
+        return "unknown"
 
     print(
         f"multi-llm warning: the nested-exec probe for {spec} on host {host_id} "

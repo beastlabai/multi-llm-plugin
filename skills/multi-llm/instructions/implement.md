@@ -336,6 +336,14 @@ your host.
      - prompt: task["prompt"]
      ```
 
+   - **Wait for every task in the batch, inside this turn.** A later batch depends
+     on this one, so do not start the next batch — or end your turn — with a
+     task still outstanding. **You** record each task's status and metrics below,
+     not the subagent, and a host that runs one headless turn has no second turn in
+     which to record them: a reply that lands after the turn ends leaves the task
+     unrecorded in `state.json` while its code is already on disk, and that is the
+     one state a later `--resume` cannot tell apart from work that never started.
+
    - **Human task handling** (tasks with `is_human: true`):
 
      **"Pause and ask me" strategy:**
@@ -453,6 +461,14 @@ your host.
        --total-batches {total_tasks} --batch-index {N}
      ```
      Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based task index across all batches. Omit any flag it does not report. The script prints an `[ETA]` line to stderr after each call.
+
+   **The last subagent returning is not the end of the phase.** Steps 6 through 11
+   still owe work — the finalization that computes which files this phase
+   changed, the regression run, the summary, the plan link and the completion
+   record. Do not end your turn between the last task and step 11, and do not
+   announce the implementation as done before it: on a host that runs one headless
+   turn the announcement *is* the end of the run, and a phase whose code landed but
+   whose tracking never ran hands the code review phase no file list to review.
 
 6. **Handle errors:**
    - If a task fails, mark it as "failed" in state
