@@ -7204,7 +7204,7 @@ class TestOmpProvider:
             "--mode", "json",
             "--config", str(OMP_OVERLAY_PATH),
             "--approval-mode", "yolo",
-            "--tools", "read,grep,glob,find,bash,edit,write",
+            "--tools", "read,grep,glob,bash,edit,write",
             "--cwd", os.getcwd(),
             "--model", self.MODEL,
             "--", self.PROMPT,
@@ -7215,7 +7215,7 @@ class TestOmpProvider:
         either one still has to face the literal."""
         assert OMP_APPROVAL_MODE == "yolo"
         assert OMP_TOOLS == (
-            "read", "grep", "glob", "find", "bash", "edit", "write"
+            "read", "grep", "glob", "bash", "edit", "write"
         )
 
     @pytest.mark.parametrize(
@@ -7619,7 +7619,7 @@ class TestOmpProvider:
     def test_the_file_channel_is_declared_and_nothing_adjudicates_it(self, provider):
         """`supports_file_output = True` is a MEASUREMENT, not an inference.
 
-        Under `--approval-mode yolo --tools read,grep,glob,find,bash,edit,write`
+        Under `--approval-mode yolo --tools read,grep,glob,bash,edit,write`
         the `write` and `edit` tools really created and edited files — a file
         appeared, and `p1.txt` went alpha→beta — so the declaration records what
         was observed. The empty atom list below is a separate fact and would be
@@ -9466,13 +9466,13 @@ PRE_L5_ARGV = {
     # here at import for the same reason the argv reads it at build time.
     # Everything else is policy and is spelled out: no `--thinking` and no
     # `--max-time` (the model carries no `:effort` and `timeout_s` is None), the
-    # approval mode and the seven-name allow-list verbatim, and the prompt last
+    # approval mode and the six-name allow-list verbatim, and the prompt last
     # behind `--`.
     "omp": [
         "omp", "--no-session", "-p", "--mode", "json",
         "--config", str(OMP_OVERLAY_PATH),
         "--approval-mode", "yolo",
-        "--tools", "read,grep,glob,find,bash,edit,write",
+        "--tools", "read,grep,glob,bash,edit,write",
         "--cwd", os.getcwd(),
         "--model", "openrouter/openai/gpt-5.6-luna",
         "--", PRE_L5_ARGV_PROMPT,

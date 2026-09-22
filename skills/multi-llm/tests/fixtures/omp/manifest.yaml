@@ -16,7 +16,9 @@ captured: "2026-09-17"
 method: >-
   All rows under the §2.2 argv — `--mode json`, the shipped
   `assets/omp/overlay.yml` (`retry.enabled: false`, `mcp.enableProjectConfig: false`),
-  `--approval-mode yolo`, `--tools read,grep,glob,find,bash,edit,write` — on the host,
+  `--approval-mode yolo`, `--tools read,grep,glob,find,bash,edit,write` (at 18.2.2
+  `find` was an ALIAS of `glob`; it became a separate default-off tool at 18.2.9 and
+  left the allow-list, so today's argv renders six names) — on the host,
   with **loopback servers only** and no API key for any real vendor anywhere in the
   environment (`OPENAI_API_KEY`/`GEMINI_API_KEY` are unset per run; the only key in
   play is the literal `stub-probe-key` in the probe HOME's `models.yml`, meaningful on

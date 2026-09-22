@@ -519,7 +519,7 @@ entries:
       "--mode": "json"
       "--model": "<model>"
       "--no-session": null
-      "--tools": "read,grep,glob,find,bash,edit,write"
+      "--tools": "read,grep,glob,bash,edit,write"
       "-p": null
     tail: []
     prompt: stdin
