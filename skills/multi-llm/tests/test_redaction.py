@@ -35,8 +35,10 @@ asserted directly, not inferred from the halves being green.
 
 import json
 import random
+import re
 import string
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -197,9 +199,9 @@ def _benign_corpus():
     responses = sorted(
         p for p in (SKILL_DIR / "tests/fixtures/e2e/responses").rglob("*") if p.is_file()
     )
-    assert len(turns) == 12, f"expected 12 container turns, found {len(turns)}"
+    assert len(turns) == 13, f"expected 13 container turns, found {len(turns)}"
     assert len(side) == 7, f"expected 7 side turns, found {len(side)}"
-    assert len(responses) == 33, f"expected 33 e2e response fixtures, found {len(responses)}"
+    assert len(responses) == 34, f"expected 34 e2e response fixtures, found {len(responses)}"
     return [
         (str(p.relative_to(SKILL_DIR)), p) for p in [*turns, *side, *responses]
     ]
@@ -357,6 +359,376 @@ class TestATokenCountIsNotAToken:
 
 
 # ---------------------------------------------------------------------------
+# 1b. Recall when the key is GLUED to a preceding word character
+# ---------------------------------------------------------------------------
+#
+# Every vendor-prefix pattern in `_REDACTIONS` used to carry a leading `\b`, and
+# a key preceded by a word character therefore did not match at all. MEASURED
+# 2026-09-22 on a real claude-code transcript: a probe script printed the word
+# `SET` with the value glued straight onto it, and the OpenRouter key — the one
+# credential this project handles end to end — reached disk intact, because its
+# line's key name was the bare word `KEY`, which P1's key half does not match
+# either. `redact_text` guards provider logs, the audit record and `redact_argv`,
+# so this was a live leak path rather than a test-only curiosity.
+#
+# The fix is per-prefix rather than a blanket un-anchoring: see the tier comment
+# over `_REDACTIONS`. These tests pin both ends of it — every re-anchored prefix
+# redacts under every glue it claims, and `TestTheLeftAnchorStillProtectsProse`
+# below pins the prose that is the reason bare `sk-` and P2 keep `\b` outright
+# and the two `(?<![a-z])` prefixes give up a lowercase-letter glue.
+
+#: The OpenRouter key: this project's own credential, and the shape that leaked.
+#: Synthesized like every other vector here — the concrete characters are drawn
+#: from the seeded RNG so this file never becomes the one committed secret.
+_OPENROUTER_KEY = "sk-or-v1-" + _body(_RNG, 64, _HEX)
+_ANTHROPIC_GLUED = _synthesize("anthropic-api-key", "glued")
+_GITHUB_GLUED = _synthesize("github-pat", "glued")
+_AWS_STS_ID = "ASIA" + _body(_RNG, 16, string.ascii_uppercase + string.digits)
+_URL_PASSWORD = _body(_RNG, 16)
+_URL_BASIC = f"https://ci:{_URL_PASSWORD}@git.example.com/acme/repo.git"
+
+#: The word characters a rendered line really puts in front of a value when
+#: something concatenated without a separator. `SET` is the measured one; the
+#: rest are the other three classes of word character.
+GLUE = ["SET", "s", "9", "_"]
+
+#: The glue set for the two prefixes guarded by `(?<![a-z])` rather than
+#: un-anchored outright. `sk-` ends `task`/`risk`/`disk`/`ask` and `gh?_` is
+#: reachable through `laughs_`, so a *lowercase letter* is the one thing that can
+#: put either inside an English word — and it is therefore the one glue those two
+#: give up. Spelled out here because it is the only place this fix is narrower
+#: than an unanchored sweep. See the `_REDACTIONS` tier comment.
+GLUE_NON_LOWERCASE = ["SET", "9", "_"]
+
+#: ``(shape, the key, the glue set it must survive)``. Every vendor-prefix row
+#: of ``_REDACTIONS`` is represented, some by more than one sub-shape (the
+#: ``sk-`` family has four vendor infixes and AWS has two prefixes, and each
+#: infix is its own adjudication); ``test_every_redaction_row_is_adjudicated``
+#: is what keeps a row from being left out.
+GLUED_SHAPES = [
+    ("sk-family/anthropic", _ANTHROPIC_GLUED, GLUE_NON_LOWERCASE),
+    ("sk-family/openai-project", _OPENAI_KEY, GLUE_NON_LOWERCASE),
+    ("sk-family/openrouter", _OPENROUTER_KEY, GLUE_NON_LOWERCASE),
+    ("sk-family/stripe-ish-live", _STRIPE_ISH, GLUE_NON_LOWERCASE),
+    ("slack", _SLACK_TOKEN, GLUE),
+    ("github", _GITHUB_GLUED, GLUE_NON_LOWERCASE),
+    ("google-api-key", _GOOGLE_KEY, GLUE),
+    ("aws-access-key-id", "AKIAIOSFODNN7EXAMPLE", GLUE),
+    ("aws-access-key-id/sts", _AWS_STS_ID, GLUE),
+    ("gitlab-pat", _GITLAB_PAT, GLUE),
+    ("huggingface", _HF_TOKEN, GLUE),
+    ("jwt", _JWT, GLUE),
+]
+
+_GLUED_CASES = [
+    (f"{shape} after {glue!r}", glue + key, key)
+    for shape, key, glue_set in GLUED_SHAPES
+    for glue in glue_set
+]
+
+
+class TestAKeyGluedToAPrecedingWordCharacterIsStillRedacted:
+    """The left-boundary gap, shape by shape and glue by glue."""
+
+    @pytest.mark.parametrize(
+        "case,line,planted", _GLUED_CASES, ids=[c[0] for c in _GLUED_CASES]
+    )
+    def test_the_glued_key_does_not_survive(self, case, line, planted):
+        out = redact_text(line)
+        assert planted not in out, (
+            f"{case}: a leading `\\b` refused the match, so the key survived.\n"
+            f"in : {line[:200]!r}\nout: {out[:200]!r}"
+        )
+
+    @pytest.mark.parametrize(
+        "case,line,planted", _GLUED_CASES, ids=[c[0] for c in _GLUED_CASES]
+    )
+    def test_the_glued_key_does_not_survive_inside_a_log_line(self, case, line, planted):
+        wrapped = f"2026-09-22T10:00:00 [codex] stderr | env dump: {line} (attempt 2)"
+        assert planted not in redact_text(wrapped), f"{case}: survived inside a log line"
+
+    @pytest.mark.parametrize(
+        "case,line,planted", _GLUED_CASES, ids=[c[0] for c in _GLUED_CASES]
+    )
+    def test_glued_redaction_is_idempotent(self, case, line, planted):
+        once = redact_text(line)
+        assert redact_text(once) == once, f"{case}: redaction is not idempotent"
+
+    def test_no_glue_lets_the_url_basic_auth_password_survive(self):
+        """P11's scheme is lowercase, so `\\b` let a lowercase glue through by
+        swallowing it as part of the scheme while refusing an uppercase one."""
+        for glue in GLUE:
+            out = redact_text(glue + _URL_BASIC)
+            assert _URL_PASSWORD not in out, f"the password survived after {glue!r}"
+
+    def test_the_measured_transcript_line(self):
+        """The exact 2026-09-22 shape, key name and all.
+
+        `KEY` is not a key half P1 matches (`api[_-]?key`/`apikey` need the
+        `api`), so before the fix nothing in the table fired on this line and
+        the OpenRouter key reached disk verbatim.
+        """
+        line = f"KEY=SET{_OPENROUTER_KEY}"
+        out = redact_text(line)
+        assert _OPENROUTER_KEY not in out, "the measured leak reproduced"
+        assert "<redacted:sk-family>" in out
+        assert out.startswith("KEY=SET"), "the surrounding text must stay diffable"
+
+    def test_every_redaction_row_is_adjudicated(self):
+        """A new pattern must land in one of three buckets, on purpose.
+
+        The anchoring decision is the whole substance of this fix, so a row
+        added later cannot inherit `\\b` by copy-paste without this going red.
+        """
+        covered = {shape.split("/")[0] for shape, _, _ in GLUED_SHAPES} | {"url-basic-auth"}
+        # Left-anchored deliberately: `bearer`/`basic` end `forbearer` and
+        # `ultrabasic`, and un-anchoring P2 would then eat the next eight-character
+        # word. See `TestTheLeftAnchorStillProtectsProse`.
+        anchored_on_purpose = {"auth-scheme"}
+        # Never carried a left boundary a word character could defeat: P12 and
+        # P13 anchor on their own literals or on the start of a line, and P1's
+        # key half anchors on the START OF THE KEY RUN — `(?<![A-Za-z0-9_.\-])`,
+        # which every key name satisfies by definition — so ASCII glue in front
+        # of the keyword is inside the run and absorbed: `XXXtoken=…` matched
+        # before the 2026-09-22 rewrite and after. That rewrite also dropped
+        # P1's `\b`, which is why it now catches a keyword glued to a *non*-ASCII
+        # word character too (`ötoken=…`); see TestSecretKvKeyHalfCoverage.
+        glue_tolerant = {
+            "pem-private-key", "identity-json", "identity-text", "secret-kv",
+        }
+        names = {name for name, _, _, _ in write_safety._REDACTIONS}
+        assert names == covered | anchored_on_purpose | glue_tolerant, (
+            "a _REDACTIONS row is not adjudicated for left-anchoring. Add it to "
+            "GLUED_SHAPES (re-anchored), to anchored_on_purpose (ambiguous prefix, "
+            "with the prose it protects added to PROSE_THE_LEFT_ANCHOR_PROTECTS), "
+            "or to glue_tolerant (no left boundary a word character can defeat)."
+        )
+
+    def test_p1_absorbs_ascii_glue_without_help(self):
+        """P1 was never part of this gap, and the fix did not change it."""
+        assert f"token={_TOKEN_HEX}" not in redact_text(f"XXXtoken={_TOKEN_HEX}")
+        assert _TOKEN_HEX not in redact_text(f"9token={_TOKEN_HEX}")
+
+
+# ---------------------------------------------------------------------------
+# 1c. P1's key half, rewritten for linearity — and the coverage it kept
+# ---------------------------------------------------------------------------
+#
+# P1 used to read `\b [KEY_CHAR]* KEYWORD [KEY_CHAR]* DELIM (VALUE)`: two
+# unbounded greedy runs around the keyword, quadratic on one line of dotted,
+# hyphenated or base64url output (see LINEARITY_PAYLOADS for the numbers). The
+# rewrite is `(?<!KEY_CHAR) (?=[KEY_CHAR]*? KEYWORD) [KEY_CHAR]* DELIM (VALUE)`
+# — the leading run is gone (it never contributed to the replaced group, which
+# sits after the keyword), the `\b` went with it (it guarded that run's start,
+# and demanding a boundary immediately before the keyword would refuse
+# `aws_secret_access_key`), and the keyword test moved into a lookahead so the
+# question "does this run hold a keyword?" is asked once per RUN rather than
+# once per keyword occurrence. Python lookaheads are atomic, which is what
+# makes that hold.
+#
+# This is a **do-not-weaken** row, so the equivalence is asserted rather than
+# argued: the pre-rewrite pattern is spelled out below and both are run over a
+# generated corpus, character index by character index. The claim is not "the
+# new one is also good" — it is "every character the old one redacted, the new
+# one redacts too".
+
+#: P1's key half exactly as it was before 2026-09-22. Spelled out rather than
+#: described, so `test_the_rewrite_redacts_everything_the_old_one_did` compares
+#: against the real thing. It is deliberately a literal and not a reconstruction
+#: from `_KEY_CHAR`/`_SECRET_KEYWORD`: a later edit to those constants must show
+#: up here as a difference, not be silently carried into the baseline.
+_SECRET_KV_BEFORE_2026_09_22 = re.compile(
+    r"(?i)\b[A-Za-z0-9_.\-]*"
+    r"(?:secret|passwd|password|token|api[_-]?key|apikey|credential)"
+    r"[A-Za-z0-9_.\-]*"
+    r"(?:[\"']?\s*[:=]\s*[\"']?)"
+    r"([^\s\"',;]{8,})"
+)
+
+_SECRET_KV_NOW = {name: pattern for name, pattern, _g, _p in write_safety._REDACTIONS}[
+    "secret-kv"
+]
+
+
+def _secret_kv_redacted_indices(pattern, text):
+    """The character indices ``pattern`` would replace, predicate included."""
+    covered = set()
+
+    def _sub(match):
+        if not write_safety._looks_like_credential(match.group(1)):
+            return match.group(0)
+        start, end = match.span(1)
+        covered.update(range(start, end))
+        return write_safety._replace_group(match, 1, "secret-kv")
+
+    pattern.sub(_sub, text)
+    return covered
+
+
+#: A credential-shaped value: passes `_looks_like_credential` on every branch
+#: that matters, and is not a placeholder.
+_KV_VALUE = "Xy9-_.z01234567"
+
+#: ``(case, rendered line)``. The behavioural enumeration the rewrite has to
+#: survive: the bare keyword, every joiner a compound key name uses, every glue
+#: class in front of the keyword, both delimiters, the quoted-JSON form, and the
+#: separator lengths that a *bounded* trailing run — the obvious alternative fix
+#: — would have silently stopped redacting.
+SECRET_KV_KEY_SHAPES = [
+    # Bare keyword, both delimiters, spaced and unspaced.
+    ("bare/token-equals", f"token={_KV_VALUE}"),
+    ("bare/secret-colon", f"secret: {_KV_VALUE}"),
+    ("bare/password-spaced", f"password = {_KV_VALUE}"),
+    ("bare/credential", f"credential:{_KV_VALUE}"),
+    ("bare/passwd", f"passwd={_KV_VALUE}"),
+    ("bare/apikey", f"apikey={_KV_VALUE}"),
+    # Compound key names — each joiner the class carries, on both sides.
+    ("compound/underscore-both", f"aws_secret_access_key={_KV_VALUE}"),
+    ("compound/dash-left", f"x-api-key: {_KV_VALUE}"),
+    ("compound/dot-left", f"providers.openrouter.token={_KV_VALUE}"),
+    ("compound/dot-right", f"token.value.v2={_KV_VALUE}"),
+    ("compound/mixed", f"app-1.auth_token-v2={_KV_VALUE}"),
+    ("compound/upper", f"OPENAI_API_KEY={_KV_VALUE}"),
+    # Glue: a word character welded straight onto the keyword with no joiner.
+    # The old leading run absorbed ASCII glue; these must not regress.
+    ("glue/uppercase-word", f"SETtoken={_KV_VALUE}"),
+    ("glue/lowercase", f"stoken={_KV_VALUE}"),
+    ("glue/digit", f"9token={_KV_VALUE}"),
+    ("glue/underscore", f"_token={_KV_VALUE}"),
+    ("glue/hyphen", f"-token={_KV_VALUE}"),
+    ("glue/dot", f".token={_KV_VALUE}"),
+    # Quoted JSON, the shape the optional quotes in `_DELIM` exist for.
+    ("quoted/json", f'{{"api_key": "{_KV_VALUE}"}}'),
+    ("quoted/single", f"'client_secret' : '{_KV_VALUE}'"),
+    # Separator length between the LAST keyword and the delimiter. A bounded
+    # trailing run loses these at whatever bound it picked; the lookahead form
+    # does not, and that is the reason it was chosen.
+    ("length/sep-8", f"secret{'x' * 8}={_KV_VALUE}"),
+    ("length/sep-32", f"secret{'x' * 32}={_KV_VALUE}"),
+    ("length/sep-64", f"secret{'x' * 64}={_KV_VALUE}"),
+    ("length/sep-256", f"secret{'x' * 256}={_KV_VALUE}"),
+    ("length/sep-4096", f"secret{'x' * 4096}={_KV_VALUE}"),
+    ("length/prefix-4096", f"{'x' * 4096}_token={_KV_VALUE}"),
+    # The keyword at the end of, and repeated inside, a long dotted run — the
+    # two shapes that were 16 s and 99 s before the rewrite.
+    ("run/dotted-tail", f"{'a.b.c.' * 200}token={_KV_VALUE}"),
+    ("run/keyword-dense", f"{'token.' * 200}token={_KV_VALUE}"),
+    # Embedded in a rendered log line rather than alone on one.
+    ("embedded/log-line", f"2026-09-22T10:00:00 [codex] stderr | token={_KV_VALUE} (attempt 2)"),
+]
+
+#: The broadening the rewrite bought, stated rather than left to be discovered.
+#: Dropping `\b` means a keyword glued to a word character *outside*
+#: ``[A-Za-z0-9_]`` is now matched; before, no `\b` existed anywhere in front of
+#: it and the row could not fire at all. This is the same gap section 1b closed
+#: for the vendor prefixes, and it is the ONLY behavioural difference the
+#: differential found over ~10^6 strings.
+SECRET_KV_NON_ASCII_GLUE = [
+    ("non-ascii/latin-1", f"ötoken={_KV_VALUE}"),
+    ("non-ascii/cjk", f"設定token={_KV_VALUE}"),
+    ("non-ascii/accented-compound", f"clé_api_key={_KV_VALUE}"),
+]
+
+
+class TestSecretKvKeyHalfCoverage:
+    """P1's key half: everything it caught before, it catches now."""
+
+    @pytest.mark.parametrize(
+        "case,line", SECRET_KV_KEY_SHAPES, ids=[c for c, _ in SECRET_KV_KEY_SHAPES]
+    )
+    def test_the_value_is_redacted(self, case, line):
+        out = redact_text(line)
+        assert _KV_VALUE not in out, (
+            f"{case}: the key half stopped matching this shape.\n"
+            f"  in : {line[:160]!r}…\n  out: {out[:160]!r}…"
+        )
+        assert "<redacted:secret-kv>" in out, f"{case}: redacted by the wrong row"
+
+    @pytest.mark.parametrize(
+        "case,line", SECRET_KV_KEY_SHAPES, ids=[c for c, _ in SECRET_KV_KEY_SHAPES]
+    )
+    def test_the_old_pattern_agreed(self, case, line):
+        """Each named shape is one the pre-rewrite row also caught.
+
+        Without this the table above could drift into asserting only what the
+        new pattern happens to do — the point is that it is a *subset* claim.
+        """
+        assert _secret_kv_redacted_indices(_SECRET_KV_BEFORE_2026_09_22, line), (
+            f"{case}: this shape is not part of the coverage claim — the "
+            f"pre-rewrite pattern did not match it either"
+        )
+
+    @pytest.mark.parametrize(
+        "case,line", SECRET_KV_NON_ASCII_GLUE, ids=[c for c, _ in SECRET_KV_NON_ASCII_GLUE]
+    )
+    def test_non_ascii_glue_is_the_one_broadening(self, case, line):
+        """Broader, on purpose, and in the direction 1b already argued for."""
+        assert _KV_VALUE not in redact_text(line), f"{case}: the value survived"
+        assert not _secret_kv_redacted_indices(_SECRET_KV_BEFORE_2026_09_22, line), (
+            f"{case}: this is supposed to be a case the OLD pattern missed; if it "
+            f"matched, the broadening claim is wrong and this row belongs above"
+        )
+
+    def test_idempotent_on_every_shape(self):
+        for case, line in [*SECRET_KV_KEY_SHAPES, *SECRET_KV_NON_ASCII_GLUE]:
+            once = redact_text(line)
+            assert redact_text(once) == once, f"{case}: redaction is not idempotent"
+
+
+def _differential_corpus():
+    """A deterministic corpus that exercises the key half from every side."""
+    glues = ["", "SET", "s", "9", "_", "-", ".", "ö", "aws_", '"', " ", "("]
+    keywords = ["secret", "passwd", "password", "token", "api_key", "api-key",
+                "apikey", "credential", "SECRET", "Token", "API_KEY"]
+    separators = ["", "_access_key", "-id", ".v2", "X" * 40, "Y" * 200, "_" * 3]
+    delimiters = ["=", ":", " = ", " : ", '":"', "':'", "\t=\t"]
+    values = ["abcdefgh", "Xy9-_.z01", "12345678", "aGVsbG8gd29ybGQK", "short",
+              "password", "os.environ.get", "<redacted:jwt>"]
+    for glue in glues:
+        for keyword in keywords:
+            for separator in separators:
+                for delimiter in delimiters:
+                    for value in values:
+                        line = glue + keyword + separator + delimiter + value
+                        yield line
+                        yield f"log | {line} | trailing words here"
+    rng = random.Random("secret-kv differential")
+    alphabet = list("abcSECRETtoken_-.=: \"'\t,;/(){}[]$\\|&*!`<>0123456789ö漢+@%")
+    for _ in range(40000):
+        yield "".join(rng.choice(alphabet) for _ in range(rng.randint(1, 60)))
+
+
+class TestTheRewriteRedactsEverythingTheOldOneDid:
+    """The do-not-weaken claim, checked rather than asserted in prose."""
+
+    def test_no_character_the_old_pattern_redacted_survives(self):
+        lost = []
+        ascii_only_differences = []
+        for line in _differential_corpus():
+            before = _secret_kv_redacted_indices(_SECRET_KV_BEFORE_2026_09_22, line)
+            after = _secret_kv_redacted_indices(_SECRET_KV_NOW, line)
+            if before - after:
+                lost.append((line, sorted(before - after)[:8]))
+                if len(lost) > 5:
+                    break
+            elif before != after and line.isascii():
+                ascii_only_differences.append((line, sorted(after - before)[:8]))
+                if len(ascii_only_differences) > 5:
+                    break
+        assert not lost, (
+            "the rewrite of P1's key half LOST coverage — these characters were "
+            "redacted before and are not now:\n  "
+            + "\n  ".join(f"{line!r} at {idx}" for line, idx in lost)
+        )
+        assert not ascii_only_differences, (
+            "the rewrite changed behaviour on an ASCII-only input. The only "
+            "behavioural difference it is allowed is the non-ASCII glue case "
+            "(see SECRET_KV_NON_ASCII_GLUE):\n  "
+            + "\n  ".join(f"{line!r} gained {idx}" for line, idx in ascii_only_differences)
+        )
+
+
+# ---------------------------------------------------------------------------
 # 2. Zero false positives
 # ---------------------------------------------------------------------------
 
@@ -403,7 +775,14 @@ class TestNoFalsePositivesOnBenignCorpora:
     #: ``credential_helper=credential_helper`` is a keyword forwarded to
     #: ``super().resolve_env``. Neither is a pattern that got looser, and
     #: neither line has ever been a redaction input: this tree is source.
-    KNOWN_SOURCE_HITS = 7
+    #:
+    #: An **eighth** arrived 2026-09-22 when the nested-exec probe was taught
+    #: to read its own reply: ``NESTED_PROBE_TOKEN = "MULTI_LLM_NESTED_EXEC_OK"``
+    #: names the sentinel the probe asks a runner to echo back. It is printed
+    #: verbatim inside the probe prompt, so it is the opposite of a secret --
+    #: the constant exists only so the question and the answer cannot drift
+    #: apart. A constant assignment in source again, same class as the rest.
+    KNOWN_SOURCE_HITS = 8
 
 
     def test_utils_source_tree_is_a_diagnostic_not_a_gate(self):
@@ -419,10 +798,70 @@ class TestNoFalsePositivesOnBenignCorpora:
             f"above the {self.KNOWN_SOURCE_HITS} known ones (`token = group_id` in "
             "human_decisions.py, `token_count=token_count` and `token_count=args.tokens` in metrics.py, "
             "`ENV_GIT_CREDENTIAL_HELPER_VAR` in provider_registry.py, `nested_exec_credentials` in "
-            "subagent_executor.py, and `OMP_CREDENTIAL_ENV` + `credential_helper=credential_helper` "
-            "in providers/omp.py). This corpus is a "
+            "subagent_executor.py, `OMP_CREDENTIAL_ENV` + `credential_helper=credential_helper` "
+            "in providers/omp.py, and `NESTED_PROBE_TOKEN` in subagent_executor.py). This corpus is a "
             "diagnostic rather than a gate, but a count that moved means a pattern got "
             "looser — investigate before shipping:\n  " + "\n  ".join(hits)
+        )
+
+
+#: The prose the left anchor exists for — the other half of 1b, and the reason
+#: the fix is per-prefix rather than a blanket un-anchoring. Hand-written rather
+#: than harvested, because the benign corpora above are this repo's own fixtures
+#: and a pattern can be loose in a way they happen not to exercise. The `ask-…`
+#: rows ARE from this tree — `git grep -oE '[A-Za-z0-9_]sk-[A-Za-z0-9_-]{8,}'`
+#: over the corpora returns those compounds and nothing else, which is the
+#: measured reason bare `sk-` can never be unanchored here; the rest are the
+#: constructions each anchoring decision was weighed against.
+PROSE_THE_LEFT_ANCHOR_PROTECTS = [
+    # Bare `sk-` + 16 body characters, which is why that branch keeps `\b`.
+    ("sk-bare/task", "task-oriented-development-workflow"),
+    ("sk-bare/risk", "risk-projection-model"),
+    ("sk-bare/repo-own", "ask-suggestion-advisory rows join ask-suggestions-batch"),
+    ("sk-bare/repo-own-2", "ask-authoring-rules-and-decomposition"),
+    ("sk-bare/desk", "desk-projection-alignment-matrix"),
+    # A vendor infix reached from an English word ending in `sk` — always with a
+    # lowercase letter in front, which is what `(?<![a-z])` refuses.
+    ("sk-infix/live", "disk-live-migration-controller"),
+    ("sk-infix/live-2", "task-live-reload-middleware-v2"),
+    ("sk-infix/ant", "risk-ant-colony-optimization-solver"),
+    ("sk-infix/or-v1", "task-or-v1-branch-protection-rules"),
+    # `gh[opusr]_` through the `-s` plural, plus a 16-character run.
+    ("github/plural", "he laughs_loudlyandforever about the release"),
+    # P2's two keywords as ordinary words, each followed by an 8-character one.
+    ("auth-scheme/basic", "the algorithm is ultrabasic compared to gradient-descent"),
+    ("auth-scheme/bearer", "a forbearer inherited the estate and never changed it"),
+    # `ASIA` as a word, and an uppercase run that is not 20 characters of key.
+    ("aws/word", "see ASIA PACIFIC REGION NOTES for details"),
+    ("aws/uppercase-run", "EURASIA and the PACIFICREGIONXYZ map"),
+    # `AIza` needs `AI` upper then `za` lower; a camelCase identifier must not
+    # be mistaken for one.
+    ("google/camel", "openAIzeroShotClassifierConfigurationBuilderFactory"),
+]
+
+
+class TestTheLeftAnchorStillProtectsProse:
+    """Section 1b's inverse: un-anchoring is per-prefix, and here is the cost it
+    refuses to pay.
+
+    The naive fix for the glued-key gap is to drop every ``\\b``, and it is
+    wrong: an unanchored bare ``sk-`` plus sixteen body characters eats
+    ``task-oriented-development-workflow``, and an unanchored vendor infix eats
+    ``risk-ant-colony-optimization-solver``. A blanket sweep is defensible in a
+    throwaway rig digest and is not defensible in the filter that renders every
+    provider log, so each prefix is adjudicated on whether English can reach it.
+    """
+
+    @pytest.mark.parametrize(
+        "case,line",
+        PROSE_THE_LEFT_ANCHOR_PROTECTS,
+        ids=[c for c, _ in PROSE_THE_LEFT_ANCHOR_PROTECTS],
+    )
+    def test_prose_is_returned_byte_for_byte(self, case, line):
+        out = redact_text(line)
+        assert out == line, (
+            f"{case}: the left anchor was widened past what this prefix can "
+            f"afford.\n  in : {line!r}\n  out: {out!r}"
         )
 
 
@@ -496,6 +935,22 @@ class TestRedactArgvRoutesThroughRedactText:
     def test_a_bare_positional_secret_is_redacted(self):
         out = redact_argv(["cli", "exec", f"Authorization: Bearer {_JWT}"], "")
         assert _JWT not in " ".join(out)
+
+    def test_a_glued_key_in_an_unhinted_argument_inherits_the_fix(self):
+        """`redact_argv` needs no change of its own: every argument that is not
+        the prompt and carries no hinted flag goes through `redact_text`, so the
+        left-boundary fix reaches argv the moment it lands in the table.
+
+        The flag-hint pass above cannot cover this — it keys on the *flag*, and
+        `--config` is not a secret-shaped name.
+        """
+        out = redact_argv(["cli", "--config", f"KEY=SET{_OPENROUTER_KEY}"], "")
+        assert _OPENROUTER_KEY not in " ".join(out)
+        assert "<redacted:sk-family>" in out[2]
+
+    def test_a_glued_key_as_a_bare_positional_inherits_the_fix(self):
+        out = redact_argv(["cli", "exec", f"probe printed SET{_GOOGLE_KEY}"], "")
+        assert _GOOGLE_KEY not in " ".join(out)
 
     def test_ordinary_arguments_survive(self):
         argv = ["claude", "-p", "--model", "sonnet", "--output-format", "stream-json"]
@@ -770,6 +1225,159 @@ class TestRedactionRunsBeforeTruncation:
         )
         assert result is not None
         assert secret not in result[1]
+
+
+# ---------------------------------------------------------------------------
+# The other half of that ordering: redaction must be LINEAR
+# ---------------------------------------------------------------------------
+#
+# Running before truncation is what makes the group gate above work, and it is
+# also what makes an unbounded quantifier in `_REDACTIONS` a hang rather than a
+# slow function: `llm_client._save_log` calls `_redact(stdout)` on the **whole**
+# stream and only then `_bound_stream`s it, so every pattern here is handed
+# however many megabytes a provider chose to emit.
+#
+# MEASURED 2026-09-22, and this is a regression that really shipped for the
+# length of one review round. Un-anchoring P11 (section 1b) took it from
+# `\b[a-z][a-z0-9+.\-]*://…` to `[a-z][a-z0-9+.\-]*://…`. P11 is the one row
+# whose pattern opens with a character class instead of a literal, so CPython
+# cannot skip start positions the way it does for `sk-`, `xox`, `gh`, `AIza`,
+# `AKIA`, `glpat-`, `hf_` and `eyJ`; without the `\b` the engine tried every
+# character in turn, each time running `[a-z0-9+.\-]*` to the end of the buffer
+# and backtracking for `://`. Quadratic: 0.16 s at 20 KB, 2.5 s at 80 KB, 40 s
+# at 320 KB, and roughly 1600 s on the 2 MB payload
+# `tests/test_mock_plugin_hook.py` plants — which is how a redaction change
+# came to fail a mock-plugin test with a 120 s timeout and no mention of a
+# credential anywhere in it. The fix was to bound the scheme run; this is the
+# tripwire that keeps it bounded.
+#
+# A ceiling, not a benchmark. Every row is under 100 ms per megabyte today, the
+# bound is 5 s, and the behaviour it exists to catch is three orders of
+# magnitude the wrong side of that — so it cannot flake on a loaded box and
+# cannot pass on a quadratic pattern.
+
+#: One megabyte, which is well inside what a provider really emits.
+LINEARITY_CHARS = 1024 * 1024
+
+#: Per-row wall-clock ceiling for one pass over ``LINEARITY_CHARS``.
+LINEARITY_CEILING_S = 5.0
+
+#: ``(label, repeating unit)``. The shapes are chosen for what they do to a
+#: greedy run: one character repeated forever (the incident's own payload),
+#: words joined by the hyphens ``_KEY_CHAR`` and P3's body both accept, a
+#: mixed-case alphanumeric blob, and the URL-scheme charset.
+#:
+#: **There is no exception list any more, and the four rows below the first
+#: four are why it went.** ``secret-kv`` used to be carved out here, because its
+#: ``\b [A-Za-z0-9_.\-]* KEYWORD [A-Za-z0-9_.\-]*`` key half was quadratic at
+#: rest — not a consequence of the 1b anchoring work, a shape this repository
+#: had been shipping for as long as the table existed. The trigger is a long
+#: run with **no whitespace, quote or brace in it** (each of those breaks the
+#: run and keeps the row linear) that is densely punctuated with ``.`` or
+#: ``-``: those two are the only members of the key-character class that are
+#: not *word* characters, so they manufacture a ``\b`` start position every few
+#: characters without ever ending the run. MEASURED 2026-09-22 at HEAD, one
+#: ``sub`` pass: hyphenated slugs 0.50 s / 1.99 s / 7.96 s at 8/16/32 KB,
+#: dotted identifiers 1.03 s / 4.17 s / 16.5 s, base64url 0.12 s / 0.50 s /
+#: 1.97 s, and a keyword-dense dotted run (``token.`` repeated) **98.9 s at
+#: 8 KB**. Fourfold per doubling is n^2, and a megabyte extrapolates to hours
+#: inside a filter that runs on the whole provider stream before any cap.
+#:
+#: Every one of those shapes is a row here now, un-excepted, and the whole
+#: table runs in about 0.04 s per megabyte — see the rewritten ``_SECRET_KEY``
+#: for the rule and for why it costs no coverage. A shape nobody measures is
+#: where the next one would hide, so the four new rows stay whether or not they
+#: are ever slow again.
+LINEARITY_PAYLOADS = [
+    ("single-character-run", "y"),
+    ("hyphenated-words", "abc-def-"),
+    ("mixed-alphanumeric", "aB3xY9zQ"),
+    ("url-scheme-charset", "a+b.c-d9"),
+    # The four shapes that made `secret-kv` quadratic, each a real line of
+    # provider output: a base64url blob, a dotted module-path list, a run of
+    # hyphenated slugs, and a dotted run that repeats a keyword.
+    ("base64url-blob", "aGVsbG8-V29ybGQ_QmFzZTY0-YmxvYl8"),
+    ("dotted-identifiers", "a.b.c.d."),
+    ("hyphenated-slugs", "alpha-beta-gamma-"),
+    ("keyword-dense-dotted-run", "token."),
+]
+
+_PAYLOAD_CACHE: dict = {}
+
+
+def _linearity_payload(unit: str) -> str:
+    """Built once and shared: four megabytes of parametrized fixture otherwise."""
+    if unit not in _PAYLOAD_CACHE:
+        _PAYLOAD_CACHE[unit] = (unit * (LINEARITY_CHARS // len(unit) + 1))[:LINEARITY_CHARS]
+    return _PAYLOAD_CACHE[unit]
+
+
+_LINEARITY_CASES = [
+    (f"{name} on {label}", name, pattern, unit)
+    for label, unit in LINEARITY_PAYLOADS
+    for name, pattern, _group, _predicate in write_safety._REDACTIONS
+]
+
+
+class TestRedactTextIsLinearOnAMegabyteStream:
+    """No row may do work proportional to the square of its input.
+
+    Every row against every payload, with **no carve-out**: a row that cannot
+    survive a shape is a row to fix, not a row to list here.
+    """
+
+    def test_no_row_is_excepted(self):
+        """The guard covers the whole table, and that is the point of it.
+
+        ``secret-kv`` was the single named exception until 2026-09-22. An
+        exception list is how a quadratic row stays shipped, so the assertion
+        that there is none is itself a test.
+        """
+        rows = {name for name, _, _, _ in write_safety._REDACTIONS}
+        covered = {name for _case, name, _pattern, _unit in _LINEARITY_CASES}
+        assert covered == rows, (
+            f"rows missing from the linearity guard: {sorted(rows - covered)}. "
+            "Every _REDACTIONS row runs against every LINEARITY_PAYLOADS shape; "
+            "fix the row rather than excepting it."
+        )
+
+    @pytest.mark.parametrize(
+        "case,name,pattern,unit", _LINEARITY_CASES, ids=[c[0] for c in _LINEARITY_CASES]
+    )
+    def test_one_row_over_one_megabyte(self, case, name, pattern, unit):
+        payload = _linearity_payload(unit)
+        started = time.perf_counter()
+        pattern.sub(lambda match: match.group(0), payload)
+        elapsed = time.perf_counter() - started
+        assert elapsed < LINEARITY_CEILING_S, (
+            f"{case}: one pass over {LINEARITY_CHARS} characters took {elapsed:.1f}s, "
+            f"over the {LINEARITY_CEILING_S}s ceiling. A pattern that opens with a "
+            f"character class and then runs an UNBOUNDED quantifier before a required "
+            f"literal is quadratic once its left anchor is removed — bound the "
+            f"quantifier (P11 is the worked example) rather than raising this ceiling. "
+            f"redact_text runs on the whole stream before any cap, so this is a hang "
+            f"in every log sink, not a slow test."
+        )
+
+    def test_the_mock_plugin_payload_that_caught_this(self):
+        """The exact 2 MB shape ``test_mock_plugin_hook`` plants.
+
+        That test installs a scratch adapter emitting ``PAYLOAD_NEEDLE`` plus
+        two megabytes of one character, runs a real ``review-plan``, and gives
+        the whole thing 120 s. With P11 unbounded, ``_save_log``'s pre-truncation
+        ``_redact`` never returned and the run died on that timeout with its
+        last line still ``Starting review with file-based output`` — a failure
+        that names no credential and looks nothing like a redaction bug.
+        """
+        payload = "M22-SCRATCH-PLUGIN-PAYLOAD" + "y" * (2 * 1024 * 1024)
+        started = time.perf_counter()
+        out = redact_text(payload)
+        elapsed = time.perf_counter() - started
+        assert elapsed < LINEARITY_CEILING_S * 2, (
+            f"redact_text took {elapsed:.1f}s on the 2 MB mock-plugin payload; "
+            f"test_mock_plugin_hook gives the whole review-plan run 120s"
+        )
+        assert out == payload, "two megabytes of one character is not a credential"
 
 
 # ---------------------------------------------------------------------------
