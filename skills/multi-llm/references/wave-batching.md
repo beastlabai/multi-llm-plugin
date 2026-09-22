@@ -14,20 +14,23 @@ When there are more than 4 batches, spawn them in waves to control context growt
    - **Spawn subagents** for every batch in the wave at once, in one parallel group
    - Run each batch's task exactly as the calling instruction's contract says (the sidecar at `prompt_path`, or `task.prompt`), writing the reply to its `output_path`
    - Wait for all agents in the wave to complete
+   - **Confirm every batch in the wave wrote its `output_path`** — the file is there and is not empty — before moving on. A missing file is not a batch that failed; it is a batch whose reply never reached you, and nothing else will write it
 3. Proceed to the next wave
-4. After ALL waves complete, continue to the next step (reaggregation, etc.)
+4. After ALL waves complete, and only once every task's `output_path` is on disk, continue to the next step (reaggregation, etc.)
 
 ## Error Handling
 
 - Per-subagent timeout: 60 seconds. If a subagent times out, mark that batch as `validation_failed`.
 - If a subagent returns malformed output or fails validation, retry it once (max 1 retry per batch). If still failing, mark it as `validation_failed` and move on.
+- A missing `output_path` spends that same one retry: re-dispatch the batch and write the reply yourself. Only a batch that comes back empty-handed a second time is `validation_failed`. A batch you never re-dispatched is not a failed batch and must not be reported as one — it is a batch the run dropped, and the merge cannot tell the two apart.
 - If any batch in a wave fails (after retry), log the failed batch index and continue to the next wave -- do NOT abort the workflow.
 - After ALL waves complete, report which batches failed (e.g., "Completed {success}/{total} batches. Failed: batch {indices}.").
-- Proceed to the next step regardless of partial failures -- `merge_batched_validation_results` already handles missing batch files gracefully, so partial results are merged automatically.
+- Proceed to the next step regardless of partial failures -- `merge_batched_validation_results` already handles missing batch files gracefully, so partial results are merged automatically. That grace is for batches the verification above has already re-dispatched and given up on: it means the merge does not crash on a missing file, never that the batch's findings survive it.
 
 ## Important Notes
 
 - Do NOT run these batches detached. Spawn them as ordinary parallel subagents so their results return inline.
+- **Do not end your turn while a dispatched batch is outstanding.** Stay in the turn until the last `output_path` above is on disk. A reply that arrives after the turn ends arrives after a one-shot headless run has ended, and the batch dies with it — unwritten, unreported, and indistinguishable afterwards from a batch that was never dispatched. Saying what you are waiting for is not waiting for it.
 - Context growth per wave is approximately 30-50 lines (4 subagent spawns with their parameters plus responses), so for 5 waves (~20 batches) expect ~150-250 lines of context growth — still manageable within typical context budgets.
 
 ## ETA Reporting

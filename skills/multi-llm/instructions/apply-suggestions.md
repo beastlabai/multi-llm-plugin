@@ -369,6 +369,8 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
 **CRITICAL**: Process batches ONE AT A TIME. Never spawn multiple subagents simultaneously.
 
+**The last subagent returning is not the end of the phase.** Every step below this loop still owes work — the human-decision items, the summary report, and whatever record this mode ends with. Do not end your turn between the last batch and that final step, and do not announce the work as done before it: on a host that runs one headless turn the announcement *is* the end of the run, and a phase whose bytes landed but whose record never did is indistinguishable afterwards from one that never ran. The loop itself takes the same rule — stay in the turn until the batch you dispatched has returned and been verified.
+
 **After the loop completes**, mark the phase finish:
 ```bash
 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics finish \
@@ -748,6 +750,8 @@ For each task in the `batches` array, run the task exactly as the contract above
 **Strategy B: Wave-based parallel spawning (> 4 batches)**
 
 Follow the wave-based spawning strategy in `references/wave-batching.md`.
+
+**Before you continue: verify every batch wrote its file, and do not end your turn before it has.** Confirm that each task's `output_path` exists and is not empty. Re-dispatch any task whose file is missing — exactly as the contract above says — and write its reply yourself; only a batch that comes back empty-handed a second time is a failed batch, and a batch nobody re-dispatched is not one. Spawn batches so their replies return inside this turn, and stay in the turn until the last file is on disk: **you** write these files, not the subagents, and a host that runs one headless turn has no second turn in which to write them — a reply that lands after the turn ends is a batch lost with nothing on disk to say so. Naming the batch you are waiting on is not waiting for it.
 
 3. After ALL batches complete, run the orchestrator again (without `--revalidate`) to merge and continue
 

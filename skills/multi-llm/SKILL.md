@@ -68,10 +68,20 @@ usage hint from `argument-hint` and stop. `--init` takes no plan path.
 uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" util instructions <mode>
 ```
 
-This prints the core with every skill-dir placeholder already substituted. Reading
-`${CLAUDE_SKILL_DIR}/instructions/<mode>.md` off disk is the documented fallback:
-that file uses a brace-delimited template placeholder no shell expands, so you
-would have to substitute the path above yourself.
+This prints the core with every skill-dir placeholder already substituted — but most
+cores exceed this host's Bash-result cap, and what comes back is then a
+`<persisted-output>` stub: a file path plus the output's first 2 KB. **That stub is
+not the core.** It keeps what the mode is and how it is invoked, which reads like a
+finished overview, and drops the end, where the steps that do the work are. So check
+before anything else: that command's opening lines name the line the core ends with,
+and if you cannot find that line in the result, `Read` the path the stub names, in
+full, before your next tool call and treat that file as the core. Never run a mode
+command from a core you have not seen the end of — the usage line in the surviving
+2 KB runs cleanly, reports success, and applies nothing.
+
+Reading `${CLAUDE_SKILL_DIR}/instructions/<mode>.md` off disk is the documented
+fallback: that file uses a brace-delimited template placeholder no shell expands, so
+you would have to substitute the path above yourself.
 
 ## 5. Capability verbs — how this host answers each one
 

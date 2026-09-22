@@ -404,7 +404,7 @@ to bare `python`.
    1. Read `validation_tasks.json` from `{plan}/review-plan/`
    2. Run the single task as the contract above says — the sidecar at
       `prompt_path` when it has one, `task.prompt` otherwise — and write its
-      JSON reply to that task's `output_path`
+      JSON reply to that task's `output_path`; do not run the next step, or end your turn, until that file exists and is not empty
    3. Run the reaggregation command under **Reaggregation (After Validation)** below. `validation_tasks.json` records `reaggregate_mode` + `plan_file`, never a resolved command, so the command is rebuilt from those two values
 
    #### Multiple Batches: `[VALIDATION_BATCHES_PENDING]`
@@ -428,6 +428,8 @@ to bare `python`.
    **Strategy B: Wave-based parallel spawning (> 4 batches)**
 
    Follow the wave-based spawning strategy in `references/wave-batching.md`.
+
+   **Before you continue: verify every batch wrote its file, and do not end your turn before it has.** Confirm that each task's `output_path` exists and is not empty. Re-dispatch any task whose file is missing — exactly as the contract above says — and write its reply yourself; only a batch that comes back empty-handed a second time is a failed batch, and a batch nobody re-dispatched is not one. Spawn batches so their replies return inside this turn, and stay in the turn until the last file is on disk: **you** write these files, not the subagents, and a host that runs one headless turn has no second turn in which to write them — a reply that lands after the turn ends is a batch lost with nothing on disk to say so. Naming the batch you are waiting on is not waiting for it.
 
    3. After ALL batches complete, run the reaggregation command below (rebuilt from `reaggregate_mode` + `plan_file`)
 
@@ -516,6 +518,8 @@ to bare `python`.
    **Strategy A (≤ 4 batches):** Run all batch subagents from the main agent in parallel (single message with multiple subagent calls).
 
    **Strategy B (> 4 batches):** Split batches into waves of up to 4 (last wave may absorb remaining batches, up to 6). For each wave, run all batch subagents in parallel (single message), wait for completion, then proceed to the next wave.
+
+   **Before you continue: verify every batch wrote its file, and do not end your turn before it has.** Confirm that each task's `output_path` — `consolidation_batch_N.json` — exists and is not empty, and re-dispatch any task whose file is missing before reaggregating; **you** write these files, and a host that runs one headless turn has no second turn in which to write them.
 
    **c) Run reaggregation after all batches complete:**
 

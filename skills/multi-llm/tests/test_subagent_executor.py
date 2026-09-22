@@ -2853,7 +2853,7 @@ class TestNestedExecPreflight:
     def test_an_unknown_host_is_probed_once_and_recorded(self, monkeypatch):
         """`unknown` in the data means "go and find out", not "assume allowed"."""
         state, spawned = self._probe(
-            monkeypatch, stdout="MULTI_LLM_NESTED_EXEC_OK", exit_code=0
+            monkeypatch, stdout=executor.NESTED_PROBE_TOKEN, exit_code=0
         )
         assert state == "allowed"
         assert len(spawned) == 1
@@ -2913,6 +2913,59 @@ class TestNestedExecPreflight:
         """A preflight probe reports; it never blocks on its own failure."""
         state, _ = self._probe(monkeypatch, **capture)
         assert state == "unknown"
+
+    def test_a_clean_exit_without_the_token_is_unknown(self, monkeypatch, capsys):
+        """Exit 0 and bytes on a stream are not an answer (2026-09-22).
+
+        The probe asks for a word; until it was read back, `allowed` meant only
+        that the binary ran — satisfied by a usage banner, a progress spinner or
+        a CLI that echoed its prompt and quit. The container lane recorded
+        exactly that for a runner whose every turn had been refused 422.
+        """
+        state, spawned = self._probe(
+            monkeypatch, stdout="I cannot comply with that request.", exit_code=0
+        )
+        assert state == "unknown"
+        assert len(spawned) == 1, "the probe still has to run to learn this"
+
+    def test_that_verdict_names_the_token_and_not_the_byte_count(
+        self, monkeypatch, capsys
+    ):
+        """Two causes of `unknown`, two warnings — a log must tell them apart."""
+        self._probe(monkeypatch, stdout="something that is not the token",
+                    exit_code=0)
+        answered = capsys.readouterr().err
+        assert executor.NESTED_PROBE_TOKEN in answered
+        assert "none of it carried the probe's token" in answered
+        assert "was inconclusive" not in answered, (
+            "the token miss must not borrow the zero-byte/non-zero-exit wording"
+        )
+
+        executor.reset_nested_exec_cache()
+        self._probe(monkeypatch, exit_code=7, stderr="unrecognized")
+        silent = capsys.readouterr().err
+        assert "was inconclusive" in silent
+        assert "none of it carried the probe's token" not in silent
+
+    def test_the_token_is_read_out_of_the_envelope_a_runner_really_writes(
+        self, monkeypatch
+    ):
+        """Presence, not equality — the decision this branch rests on.
+
+        `_probe_nested_exec` reads raw streams and deliberately never calls
+        `parse_output` (a preflight has no result document). Every agent CLI it
+        dispatches wraps the reply in its own envelope, so an equality check
+        against the stripped streams would record `unknown` on every healthy
+        runner. Case-insensitively, because the haystack is already lowered for
+        the denial-pattern scans above.
+        """
+        envelope = (
+            '{"type":"item.completed","item":{"type":"agent_message",'
+            '"text":"multi_llm_nested_exec_ok"}}\n'
+            '{"type":"turn.completed","usage":{"input_tokens":31}}'
+        )
+        state, _ = self._probe(monkeypatch, stdout=envelope, exit_code=0)
+        assert state == "allowed"
 
     def test_a_dry_run_keeps_the_verdict_and_starts_no_child(self, monkeypatch):
         """D3l: `--dry-run-subagents` promises no child, and the probe is one."""
@@ -2974,6 +3027,14 @@ class TestNestedExecPreflight:
         """
         runner_env.use("opencode:opencode/big-pickle")
         monkeypatch.setenv("MULTI_LLM_HOST", "codex")
+        # The mock CLI answers the probe the way a model would. Stated here
+        # rather than baked into the mock's generic default, because since
+        # 2026-09-22 the verdict reads the reply: a test asserting `allowed`
+        # depends on what came back, and that dependency belongs on the page.
+        monkeypatch.setenv(
+            "MOCK_LLM_CONFIG",
+            json.dumps({"response": executor.NESTED_PROBE_TOKEN}),
+        )
         executor.reset_version_cache()
         started = time.monotonic()
         state = executor._detect_nested_exec(
