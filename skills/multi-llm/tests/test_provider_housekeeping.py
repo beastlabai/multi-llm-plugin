@@ -76,7 +76,7 @@ MODELS = {
     # `test_no_adjudication_row_is_stale` on sight. The regex is NOT widened to
     # make one fit: this table is restriction-only, and a write-ENABLING flag
     # cannot cause the failure it guards. The measurement such a row would have
-    # carried (under `--approval-mode yolo` with the seven-name allow-list,
+    # carried (under `--approval-mode yolo` with the explicit allow-list,
     # `write` and `edit` really created and edited files) is pinned in
     # `tests/test_providers.py::TestOmpProvider` instead.
     "omp": "openrouter/openai/gpt-5.6-luna",

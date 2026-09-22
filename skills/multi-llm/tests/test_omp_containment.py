@@ -47,7 +47,11 @@ sys.path.insert(0, str(REPO_ROOT / "packaging"))
 from common import payload  # noqa: E402
 
 from utils.providers.base import PROFILE_GENERATE, build_child_env  # noqa: E402
-from utils.providers.omp import OMP_TOOLS, OmpProvider  # noqa: E402
+from utils.providers.omp import (  # noqa: E402
+    OMP_CREDENTIAL_ENV,
+    OMP_TOOLS,
+    OmpProvider,
+)
 
 FIXTURES = SKILL_ROOT / "tests" / "fixtures" / "omp"
 CHAIN_BUNDLE = SKILL_ROOT / "tests" / "golden" / "container" / "omp" / "bundle.json"
@@ -412,8 +416,9 @@ class TestNoMcpServerMountsOnADispatch:
                 tools.append((tool.get("function") or {}).get("name"))
         assert tools, "the request carried no tools at all"
         assert not [t for t in tools if (t or "").startswith("mcp")], tools
-        # And the built-ins really are the allow-list's (`find` is an alias of
-        # `glob`, so six schemas carry seven names).
+        # And the built-ins really are the allow-list's — six names, six
+        # schemas, since `find` (an ALIAS of `glob` at 18.2.2, a separate
+        # default-off tool at 18.2.9) left the list.
         assert set(t for t in tools if t) <= set(OMP_TOOLS), tools
 
     def test_the_user_level_config_does_not_mount_even_from_home(self, rig):
@@ -433,3 +438,94 @@ class TestNoMcpServerMountsOnADispatch:
         # relocates silently when its cwd is the user's home.
         session = next(e for e in self._events(result.stdout) if e.get("type") == "session")
         assert session["cwd"] == str(home), session
+
+
+#: The one marker omp's `--tools` validation leaves on stderr. It is MATCHED and
+#: never parsed: the "Valid tools:" list that same sentence carries is
+#: incomplete and changes between runs (plans/add-omp-provider.md §1.4), so the
+#: only question it can answer reliably is "was THIS name rejected?" — which is
+#: why the sweep below asks it one name at a time.
+_UNKNOWN_TOOL = "Unknown tool"
+
+#: A model selector no catalog can resolve. `--tools` is validated BEFORE model
+#: resolution, so every run below dies at the gate being measured and never
+#: reaches a provider; the credential is dropped from the child as well, so a
+#: name that PASSES the gate cannot spend either.
+_UNRESOLVABLE_MODEL = "multi-llm-no-such-provider/no-such-model"
+
+
+@pytest.mark.skipif(shutil.which("omp") is None, reason="needs the omp binary")
+class TestTheAllowListIsWhatTheInstalledBinaryAccepts:
+    """`OMP_TOOLS` against the omp installed on this machine, one name per spawn.
+
+    omp auto-updates and its tool registry moves with it. `--tools` is validated
+    before model resolution and before the session opens, so a name the
+    installed build does not know is exit 1, **0 B on stdout, zero requests**
+    and a `CliUsageError` on stderr — which is to say *every* omp dispatch on
+    that machine is dead at launch, at zero spend, recorded as `spawn_failed`
+    (D3k rung 1: fails the whole batch, never retried). That is the right
+    disposition and the wrong-looking failure: the run never started, so nothing
+    about containment was exercised, yet `TestNoMcpServerMountsOnADispatch`
+    above goes red exactly as if a server had mounted.
+
+    18.2.2 → 18.2.9 did precisely that. `find` was an alias of `glob` (six
+    schemas under seven names) and became a separate, default-off
+    (`find.enabled: false`), model-backed semantic-grep tool that `--tools`
+    rejects outright — a minor-version bump of an auto-updating CLI that broke
+    every dispatch and read, from the test names, like a containment breach.
+
+    So the vocabulary is checked the only way that is honest: the adapter's own
+    production argv, with the `--tools` value replaced by the single name under
+    test, run against the real binary. The check is the free pre-flight itself —
+    nothing resolves a model, the child carries no `OPENROUTER_API_KEY`, and no
+    model call is possible whatever the verdict.
+    """
+
+    def _preflight(self, tools, cwd):
+        """The production argv with `--tools` narrowed to `tools`."""
+        provider = OmpProvider()
+        argv, stdin_text = provider.build_command_for_transport(
+            "x", _UNRESOLVABLE_MODEL, "stdin", timeout_s=60, cwd=str(cwd),
+        )
+        argv = list(argv)
+        argv[argv.index("--tools") + 1] = tools
+        env = build_child_env(
+            provider,
+            provider_env=provider.resolve_env(
+                _UNRESOLVABLE_MODEL, PROFILE_GENERATE, cwd=str(cwd)
+            ),
+        )
+        env.pop(OMP_CREDENTIAL_ENV, None)
+        return subprocess.run(
+            argv, input=stdin_text, capture_output=True, text=True,
+            env=env, cwd=str(cwd), timeout=120,
+        )
+
+    @pytest.mark.parametrize("tool", OMP_TOOLS)
+    def test_every_name_on_the_allow_list_is_one_this_build_knows(
+        self, tool, tmp_path
+    ):
+        result = self._preflight(tool, tmp_path)
+
+        assert _UNKNOWN_TOOL not in result.stderr, (
+            f"the installed omp rejects `{tool}`, which OMP_TOOLS "
+            f"(utils/providers/omp.py) puts on every dispatch's --tools: this "
+            f"machine's omp dispatches all die at launch, before containment is "
+            f"reached. Re-measure the vocabulary name by name and fix the "
+            f"constant plus the prose in providers.yaml. "
+            f"{result.stderr.strip()[-300:]}"
+        )
+
+    def test_a_name_this_build_does_not_know_is_rejected(self, tmp_path):
+        """The positive control, so the sweep above cannot go vacuous.
+
+        A machine where `--tools` stopped being validated at all would pass
+        every row above while granting `yolo` over whatever omp's registry holds
+        that day — which is the one thing the allow-list exists to prevent.
+        """
+        result = self._preflight("read,multi_llm_not_a_tool", tmp_path)
+
+        assert _UNKNOWN_TOOL in result.stderr, (
+            "omp accepted a tool name that does not exist, so `--tools` is no "
+            f"longer the bound on `--approval-mode yolo`: {result.stderr[-400:]}"
+        )

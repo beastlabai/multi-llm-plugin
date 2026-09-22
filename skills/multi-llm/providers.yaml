@@ -824,7 +824,7 @@ providers:
     # how omp:<model>:auto still reaches omp's native parser.
     #
     # TOOL TIER: `--approval-mode yolo`, BOUNDED BY AN EXPLICIT ALLOW-LIST
-    # (`--tools read,grep,glob,find,bash,edit,write`). Every narrower mode
+    # (`--tools read,grep,glob,bash,edit,write`). Every narrower mode
     # denies `bash` headless, and the measured consequence is worse than a slow
     # failure: under `--approval-mode write` the model answered
     # `git version 2.43.0` after three denials without ever running the command.
@@ -832,6 +832,13 @@ providers:
     # right. Tools outside the allow-list are ABSENT rather than denied, which
     # is the shape that produced an honest refusal. See read_only_modes.omp
     # below for the declared bypass.
+    #
+    # `find` was a seventh name on that list until 18.2.9 and is not a
+    # narrowing: at 18.2.2 it was an ALIAS of `glob` (same schema, read-class),
+    # and at 18.2.9 it is a separate, default-off (`find.enabled: false`),
+    # model-backed semantic-grep tool that `--tools` rejects outright. The
+    # globbing stays under `glob`; the new capability is excluded on the same
+    # ground as `task`. See utils/providers/omp.py OMP_TOOLS.
     #
     # The prompt travels on STDIN by default, not argv: a 200 KB review prompt
     # is E2BIG from the kernel before omp starts, while the same prompt over
@@ -1006,10 +1013,14 @@ read_only_modes:
     # `generate` renders NO read-only mode, so this stays null. Two read-only
     # mechanisms ARE measured at 18.2.2 and are recorded here for the
     # agent-readonly follow-up rather than guessed at then:
-    #   * `--tools read,grep,glob,find` — the write-class tools are ABSENT, and
+    #   * `--tools read,grep,glob` — the write-class tools are ABSENT, and
     #     asked to create a file the model answered "file-writing tools are
     #     unavailable" and none appeared. PREFERRED: an honest refusal, and the
-    #     only candidate compatible with the parser's denial policy.
+    #     only candidate compatible with the parser's denial policy. The
+    #     measurement was taken as `read,grep,glob,find`, where `find` was an
+    #     ALIAS of `glob`; at 18.2.9 the name is a separate default-off tool
+    #     `--tools` rejects, so it is gone from both lists and the read-class
+    #     set is unchanged (see utils/providers/omp.py OMP_TOOLS).
     #   * `--approval-mode always-ask` — read/grep run unapproved, every
     #     write-class tool is denied with "requires approval but no interactive
     #     UI available". Under that mode every denied write is a FAILED run by
@@ -1034,7 +1045,7 @@ read_only_modes:
         `--approval-mode write` the model answered `git version 2.43.0` after
         three denials without ever running the command — a fabricated tool
         output inside a review that looks right. The actual bound is the
-        allow-list `--tools read,grep,glob,find,bash,edit,write`, under which
+        allow-list `--tools read,grep,glob,bash,edit,write`, under which
         every other tool is absent rather than denied. ACCEPTED BY THE
         REPOSITORY OWNER, 2026-09-17, for the `generate` profile only: an
         agent-write executor profile is a separate decision on its own

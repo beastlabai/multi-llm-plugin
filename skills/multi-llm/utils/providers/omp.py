@@ -121,12 +121,48 @@ REASONING_EFFORTS = EFFORT_LADDER.accepted
 #: unavailable", and no file appeared) instead of the fabrication a denial tier
 #: produced. It excludes ``task`` (sub-agent fan-out — a cost multiplier the
 #: harness cannot see), ``web_search`` and ``hub`` (egress), ``eval``, ``lsp``,
-#: ``todo`` and the ``goal``/``*_experiment``/``update_notes`` bench tools.
+#: ``todo``, ``ast_edit`` and the ``goal``/``*_experiment``/``update_notes``
+#: bench tools.
 #:
-#: ``find`` is an alias of ``glob``: the rendered request carries six tool
-#: schemas, not seven. It is named anyway so a release that splits them apart
-#: does not silently drop one.
-OMP_TOOLS = ("read", "grep", "glob", "find", "bash", "edit", "write")
+#: **``find`` was on this list until 18.2.9 and is gone because the NAME changed
+#: meaning, not because a capability was dropped.** At 18.2.2 ``find`` was an
+#: alias of ``glob`` — the same schema, ``approval: "read"`` — so the rendered
+#: request carried six tool schemas under seven names and naming it bought
+#: nothing but a guard against a release that split the two apart. That release
+#: arrived. At 18.2.9 ``find`` is its own tool (``FindTool``: *"Semantic grep:
+#: find files and line ranges by describing what they do"*, still
+#: ``approval: "read"``), gated behind the setting ``find.enabled``, whose
+#: shipped default is ``false`` — so the name is not in the registry ``--tools``
+#: validates against, and every dispatch died at ``CliUsageError: Unknown tool
+#: in --tools: find`` before the run began. The globbing the alias stood for is
+#: ``glob``'s and is still here, so **nothing narrowed**; the semantic search the
+#: name now denotes is a capability this adapter never granted and is
+#: model-backed (upstream: *"judged by the judge model role"*), which puts it
+#: with ``task`` — an unbounded per-dispatch cost the harness cannot see. It is
+#: dropped rather than re-enabled from the overlay.
+#:
+#: ``ast_edit`` is the other 18.2.9 arrival — write-class, and default **on**
+#: (``astEdit.enabled: true``) — and it stays out for the reason every
+#: write-class tool beyond ``edit``/``write`` does: this list is the whole bound
+#: on ``yolo``, so a tool nobody measured is a tool nobody declared.
+#:
+#: The accepted vocabulary at 18.2.9, swept **name by name** (the "Valid tools:"
+#: list in the error is incomplete and varies between runs — never parse it):
+#: ``read bash edit write grep glob search lsp task todo web_search hub eval
+#: ast_edit goal init_experiment run_experiment log_experiment update_notes``,
+#: where ``search`` is the alias of ``grep`` that replaced ``find``'s alias of
+#: ``glob``.
+#:
+#: **``--tools`` is validated before model resolution, at zero spend**, so an
+#: unknown name is exit 1 / 0 B stdout / zero requests with the ``CliUsageError``
+#: on stderr — ``spawn_failed`` (D3k rung 1: fails the whole batch, never
+#: retried), the right disposition for a property of the *install*, but one that
+#: reads like a containment breach when it is an argv fault and the run never
+#: started. ``tests/test_omp_containment.py``'s
+#: ``TestTheAllowListIsWhatTheInstalledBinaryAccepts`` puts every name through
+#: that same free pre-flight against the installed binary, so the next rename is
+#: a red test naming the tool rather than a dead dispatch naming nothing.
+OMP_TOOLS = ("read", "grep", "glob", "bash", "edit", "write")
 
 #: The environment variable omp's own ``$env`` chain reads its credential from,
 #: and therefore the one name this adapter passes through rather than relabels.
