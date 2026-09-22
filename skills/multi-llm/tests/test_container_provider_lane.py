@@ -195,9 +195,13 @@ class TestTheRowRanExactlyOneCli:
         """
         entry = next(r for r in VERIFIED if r["cli"] == row_result.row.cli)
         allowed = {
-            # The one model this row pinned — the same string the fixture built
-            # both driver keys from, so there is no second source to drift from.
-            row_result.row.spec.split(":", 1)[1],
+            # Every model this row pinned — the same strings the fixture built
+            # both driver keys from, so there is no second source to drift
+            # from. `Row.spec` is a LIST now (a provider-lane row still renders
+            # exactly one entry; the host lane's fan-out is what needed the
+            # width), so it is read through `harness.spec_list` rather than
+            # `.split(":")`d as a scalar.
+            *(s.split(":", 1)[1] for s in harness.spec_list(row_result.row)),
             "stub-model",  # the stub's own default for a body carrying no model
             *entry.get("side_model_ids", []),
         }

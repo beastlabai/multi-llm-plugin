@@ -35,6 +35,15 @@ scenario: ../../fixtures/e2e/scenarios/container_full_chain.yaml
 # scenario response that must answer this prompt — every rule names a distinct
 # one, so the fixture identifies the rule.
 turns:
+  nested-exec-probe:
+    fixture: ../responses/nested_exec/probe_not_measured.txt
+    note: >-
+      utils/subagent_executor.NESTED_PROBE_PROMPT, 1 turn - the preflight turn
+      `--exec-subagents` takes before the batch. Reproduced from the compile-time
+      constant rather than re-typed, which is the same thing every other entry
+      here is (a `turns:` file is the PRODUCT prompt; the CLI preamble belongs to
+      `side_turns:`). Corroborated by the recording: 11 129 wire chars minus the
+      11 057-char opencode preamble is exactly this file's 72.
   review-plan-fanout:
     fixture: ../responses/review_plan/raw_suggestions.json
     note: "prompts/plan_review.txt, 1 turn"

@@ -1,0 +1,1 @@
+This reply came from the container lane HTTP stub, not from a model: the rig answers the nested-exec preflight probe so the turn is accounted for, and it deliberately withholds the token the probe asked for. Nothing here is evidence that nested exec works on this host.

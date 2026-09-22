@@ -79,6 +79,39 @@
 #   session_prefix   whether a /s/<exec-id>/v1 base URL still works
 # NO VALUES APPEAR IN THIS FILE. Every credential is a template the wrapper fills
 # with a string that is meaningful on 127.0.0.1 and worthless anywhere else.
+#
+# GRADER CONTRACT, one key, read by tests/container/harness.py and by nothing in
+# the image:
+#   tool_artifacts   globs this CLI writes into the WORKSPACE that are the
+#                    vendor tool's own cache rather than a product write (today:
+#                    aider's repo map). `harness.tool_artifact_paths` forgives
+#                    them only on a row whose own fan-out names this CLI, and
+#                    never over a path that row declares as an editable
+#                    artifact. Distinct from `harness.workflow_bookkeeping`,
+#                    which is THIS product's record-keeping.
+#
+# ---------------------------------------------------------------------------
+# THE SHARED CHAIN WRITE RUNNER IS `opencode`, ON EVERY ROW THAT NAMES ONE.
+# The 13 rows below whose adapter declares no `agent-write` profile dispatch the
+# chain lane's write batches through one shared helper, and that helper is
+# opencode: it declares `agent-write`, its profile is the application-level
+# `--agent build` so it spawns NO sandbox, and it is already a `lane: provider`
+# row here — which is what keeps the named-runner-is-itself-a-redirected-row
+# guard in `test_redirect_matrix_claims.py` true without a carve-out. The helper
+# used to be codex, and could not stay: codex's `agent-write` renders
+# `--sandbox workspace-write`, which needs an unprivileged user namespace that
+# this host's AppArmor policy and Docker's default seccomp profile each deny, so
+# every borrowed write batch was refused with `reason_code: sandbox_unavailable`
+# before a child ever started.
+#
+# CONSEQUENCE FOR THE MEASURED NUMBERS, STATED ONCE HERE: every `chain_s` cell in
+# this file was measured with CODEX writing. For the 13 repointed rows those
+# cells — and the `chain_row_timeout_s` derived from each — are therefore STALE,
+# pending the re-seed capture pass that re-records them. opencode fires a
+# session-title completion per exec, so they are expected to move up, not down.
+# Nothing has been edited to a prediction: the numbers stay exactly as measured
+# until a capture pass replaces them.
+# ---------------------------------------------------------------------------
 
 version: 1
 measured_on: "2026-08-14"
@@ -90,6 +123,16 @@ clis:
   - cli: codex
     provenance: verified
     lane: provider
+    # CHAIN ROW ONLY. With the 13 helper rows repointed to opencode, codex is the
+    # one row whose effective write runner still returns a non-`None`
+    # `sandbox_probe_command('agent-write')`, and this host cannot satisfy it.
+    # The row still RUNS: its write batches are refused with
+    # `reason_code: sandbox_unavailable`, `harness.row_outcome` classifies the row
+    # `sandbox-skip` from those batch records, and the test side turns that into a
+    # STRICT, TYPED xfail licensed by an in-image `sandbox_verdict('agent-write')`
+    # probe re-measured every run. Never a `pytest.skip` — a row that never
+    # executes can never announce that its blocker lifted — and never a bare red.
+    sandbox_skip_when: userns-unavailable
     surface: responses
     mechanism: "$CODEX_HOME/config.toml [model_providers.stub] + env_key"
     model_arg: "gpt-5.5"
@@ -133,11 +176,13 @@ clis:
     provenance: verified
     lane: provider
     # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
-    # the executor's runner is a second binary. It is DECLARED here rather than
-    # tolerated: the per-row single-CLI assertion compares the call log against
-    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
-    # key against the adapters' own `agent_profiles` so the two cannot drift.
-    chain_write_runner: codex
+    # the executor's runner is a second binary: the shared helper `opencode`,
+    # which writes without spawning a sandbox where codex could not (header).
+    # It is DECLARED here rather than tolerated: the per-row single-CLI
+    # assertion compares the call log against {cli} u {this} in both directions,
+    # and a plain-CI test cross-checks this key against the adapters' own
+    # `agent_profiles` so the two cannot drift.
+    chain_write_runner: opencode
     surface: chat
     mechanism: "OPENAI_API_BASE + an openai/<id> litellm spec on --model (env only)"
     model_arg: "openai/stub-model"
@@ -146,6 +191,32 @@ clis:
       OPENAI_API_BASE: "{base_url}"
     credential_vars: [OPENAI_API_KEY]     # litellm refuses to start without one
     seed_files: []
+    # THE REPO MAP, and it lands in the WORKSPACE rather than in this row's
+    # per-invocation home. aider builds a tags cache of the tree it is pointed
+    # at on every invocation and writes it to
+    # `<cwd>/.aider.tags.cache.v4/cache.db` -- so on the host lane it lands in
+    # `/work/sample-project`, inside the SHA census the write rows are graded
+    # on. Measured on four bundles: it appears on every row aider runs on
+    # (`runs/20260922T084502Z` codex-ask / codex-review-plan / codex-full /
+    # codex-apply-executor, where aider is in codex's fan-out, and
+    # `runs/20260920T105458Z` + `runs/20260921T224840Z` chain-aider) and on no
+    # other row in any of them. On 2026-09-22 it was the ENTIRE census delta of
+    # `codex-apply-executor` and failed that row with
+    # `bytes moved on a row declared 'clean-failure'`.
+    #
+    # Declared here, not tolerated in the grader: `harness.tool_artifact_paths`
+    # forgives these globs only on a row whose own fan-out names this CLI, and
+    # never over a path the row declares as its own editable artifact. It is a
+    # narrow, per-CLI statement about what a VENDOR's binary does -- NOT the
+    # workflow's own bookkeeping, which is `harness.workflow_bookkeeping` and a
+    # separate category.
+    #
+    # The cache version is spelled out because it was measured, the way every
+    # other pin in this file is: aider bumping to a `v5` directory turns these
+    # rows red naming the new path, which is the re-measurement this matrix
+    # exists to force. A `v*` wildcard would absorb it silently.
+    tool_artifacts:
+      - ".aider.tags.cache.v4/**"
     http_log:
       # THE ONE NON-STREAMING ROW: --no-stream is in the adapter's own argv, so the
       # stub's single-body chat shape is load-bearing here, not decorative.
@@ -205,11 +276,13 @@ clis:
     provenance: verified
     lane: provider
     # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
-    # the executor's runner is a second binary. It is DECLARED here rather than
-    # tolerated: the per-row single-CLI assertion compares the call log against
-    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
-    # key against the adapters' own `agent_profiles` so the two cannot drift.
-    chain_write_runner: codex
+    # the executor's runner is a second binary: the shared helper `opencode`,
+    # which writes without spawning a sandbox where codex could not (header).
+    # It is DECLARED here rather than tolerated: the per-row single-CLI
+    # assertion compares the call log against {cli} u {this} in both directions,
+    # and a plain-CI test cross-checks this key against the adapters' own
+    # `agent_profiles` so the two cannot drift.
+    chain_write_runner: opencode
     surface: chat
     mechanism: "GOOSE_PROVIDER=openai + OPENAI_BASE_URL (env only)"
     model_arg: "openai/stub-model"
@@ -259,11 +332,13 @@ clis:
     provenance: verified
     lane: provider
     # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
-    # the executor's runner is a second binary. It is DECLARED here rather than
-    # tolerated: the per-row single-CLI assertion compares the call log against
-    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
-    # key against the adapters' own `agent_profiles` so the two cannot drift.
-    chain_write_runner: codex
+    # the executor's runner is a second binary: the shared helper `opencode`,
+    # which writes without spawning a sandbox where codex could not (header).
+    # It is DECLARED here rather than tolerated: the per-row single-CLI
+    # assertion compares the call log against {cli} u {this} in both directions,
+    # and a plain-CI test cross-checks this key against the adapters' own
+    # `agent_profiles` so the two cannot drift.
+    chain_write_runner: opencode
     surface: chat
     mechanism: "~/.cline/data/settings/providers.json -> openai-compatible.settings.baseUrl (NO env var exists)"
     model_arg: "openai/stub-model"
@@ -346,7 +421,9 @@ clis:
     # CHAIN ROW ONLY. qwen-code declares no `agent-write` profile -- it is
     # `(generate,)` only, like every adapter harness-expansion.md adds -- so the
     # executor's runner is a second binary and is DECLARED rather than tolerated.
-    chain_write_runner: codex
+    # That binary is the shared helper `opencode`, which writes without spawning
+    # a sandbox where codex could not (header).
+    chain_write_runner: opencode
     surface: chat
     mechanism: "OPENAI_BASE_URL/OPENAI_API_KEY/OPENAI_MODEL trio drives the generic OpenAI backend; QWEN_HOME relocates every write"
     # MUST equal env_extra.OPENAI_MODEL below, byte for byte. `-m` WINS over
@@ -432,7 +509,9 @@ clis:
     # CHAIN ROW ONLY. copilot's adapter declares no `agent-write` profile (it is
     # `(generate,)` only, like every adapter harness-expansion.md adds), so the
     # executor's runner is a second binary and is DECLARED rather than tolerated.
-    chain_write_runner: codex
+    # That binary is the shared helper `opencode`, which writes without spawning
+    # a sandbox where codex could not (header).
+    chain_write_runner: opencode
     # OQ5 RESOLVED, on its preferred branch: `chat`, and
     # COPILOT_PROVIDER_WIRE_API is NOT set. The `responses` wire was measured
     # working against the COMMITTED stub too, so the fallback for a future
@@ -525,7 +604,9 @@ clis:
     # CHAIN ROW ONLY. kimi's adapter declares no `agent-write` profile (it is
     # `(generate,)` only, like every adapter harness-expansion.md adds), so the
     # executor's runner is a second binary and is DECLARED rather than tolerated.
-    chain_write_runner: codex
+    # That binary is the shared helper `opencode`, which writes without spawning
+    # a sandbox where codex could not (header).
+    chain_write_runner: opencode
     surface: chat
     mechanism: "KIMI_MODEL_* env family synthesizes one provider+model under the fixed ids __kimi_env__/__kimi_env_model__; KIMI_CODE_HOME isolates every write"
     # MUST equal env_extra.KIMI_MODEL_NAME below, byte for byte: that variable is
@@ -598,11 +679,13 @@ clis:
     provenance: verified
     lane: provider
     # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
-    # the executor's runner is a second binary. It is DECLARED here rather than
-    # tolerated: the per-row single-CLI assertion compares the call log against
-    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
-    # key against the adapters' own `agent_profiles` so the two cannot drift.
-    chain_write_runner: codex
+    # the executor's runner is a second binary: the shared helper `opencode`,
+    # which writes without spawning a sandbox where codex could not (header).
+    # It is DECLARED here rather than tolerated: the per-row single-CLI
+    # assertion compares the call log against {cli} u {this} in both directions,
+    # and a plain-CI test cross-checks this key against the adapters' own
+    # `agent_profiles` so the two cannot drift.
+    chain_write_runner: opencode
     surface: chat
     mechanism: "$HOME/.config/kilo/kilo.jsonc provider.<id> {npm: '@ai-sdk/openai-compatible', options.baseURL}"
     model_arg: "stub/stub-model"
@@ -675,11 +758,13 @@ clis:
     provenance: verified              # the plan's ONE `unknown` row, now closed
     lane: provider
     # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
-    # the executor's runner is a second binary. It is DECLARED here rather than
-    # tolerated: the per-row single-CLI assertion compares the call log against
-    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
-    # key against the adapters' own `agent_profiles` so the two cannot drift.
-    chain_write_runner: codex
+    # the executor's runner is a second binary: the shared helper `opencode`,
+    # which writes without spawning a sandbox where codex could not (header).
+    # It is DECLARED here rather than tolerated: the per-row single-CLI
+    # assertion compares the call log against {cli} u {this} in both directions,
+    # and a plain-CI test cross-checks this key against the adapters' own
+    # `agent_profiles` so the two cannot drift.
+    chain_write_runner: opencode
     surface: chat
     mechanism: "$HOME/.pi/agent/models.json providers.<id> {baseUrl, api: openai-completions, apiKey, models[]}"
     model_arg: "stub/stub-model"
@@ -717,11 +802,13 @@ clis:
     provenance: verified              # the plan predicted `none expected`
     lane: provider
     # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
-    # the executor's runner is a second binary. It is DECLARED here rather than
-    # tolerated: the per-row single-CLI assertion compares the call log against
-    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
-    # key against the adapters' own `agent_profiles` so the two cannot drift.
-    chain_write_runner: codex
+    # the executor's runner is a second binary: the shared helper `opencode`,
+    # which writes without spawning a sandbox where codex could not (header).
+    # It is DECLARED here rather than tolerated: the per-row single-CLI
+    # assertion compares the call log against {cli} u {this} in both directions,
+    # and a plain-CI test cross-checks this key against the adapters' own
+    # `agent_profiles` so the two cannot drift.
+    chain_write_runner: opencode
     surface: chat
     mechanism: "GROK_MODELS_BASE_URL + XAI_API_KEY (a documented custom-endpoint mode)"
     # WRITTEN DOWN RATHER THAN INHERITED. Both container lanes fall back to the
@@ -787,17 +874,54 @@ clis:
       GET /v1/models catalog or grok exits 1 with `unknown model id`; and XAI_API_KEY
       must be non-empty or grok opens an interactive OAuth DEVICE FLOW against
       accounts.x.ai and blocks until timeout.
+      A THIRD PRECONDITION, MEASURED 2026-09-22, AND IT IS THE LANE'S NETWORK
+      POSTURE RATHER THAN ANYTHING IN THIS ROW: grok CONNECTs to `api.x.ai:443`
+      at startup, before its first stub request, whatever XAI_API_KEY holds. When
+      that CONNECT FAILS — `--network none`, which is every `lane: provider` row —
+      grok falls through to the documented custom-endpoint path and the four
+      requests in `http_log` above are exactly what it makes. When it SUCCEEDS,
+      grok validates the credential against xAI, the wrapper's synthesized
+      `mllm-stub-<exec_id>` is not a session there, and grok exits 1 with
+      `Not signed in. To authenticate without a browser, run: grok login
+      --device-code` after the `GET /v1/models` and before every other route
+      here. So the fake key is sufficient ONLY where egress is impossible.
+      HOW IT WAS MEASURED, host grok 1.0.24 against a localhost OpenAI stub with
+      no real credential anywhere: egress reachable -> exit 1, one stub request;
+      the same argv with HTTPS_PROXY/HTTP_PROXY/ALL_PROXY pinned at a closed port
+      and NO_PROXY=127.0.0.1 -> exit 0 and the full four-request sequence. The
+      proxy log records the two `CONNECT api.x.ai:443` attempts. A `xai-`-prefixed
+      fake key behaves identically to `mllm-stub-…`, so the shape of the value is
+      not what decides this.
+      WHAT IT MEANS FOR THE HOST LANE, which runs on `bridge` with `egress: open`
+      (`posture.yaml`): a fan-out member `grok` cannot run there on the wrapper's
+      fake key. `runs/20260922T084502Z` is the evidence — image grok 1.0.34, the
+      call log shows XAI_API_KEY and GROK_MODELS_BASE_URL both present in
+      `child_env_names`, `stub.jsonl` shows the one `GET /s/<exec>/v1/models`, and
+      the row's error log carries the `Not signed in` line — which is why all four
+      `opencode-*` fan-out rows failed `test_every_assigned_provider_really_ran`.
+      A REAL xAI KEY IS NOT THE FIX AND WAS NOT TRIED: this rig's fan-out
+      credential contract is `wrapper.py`'s rule 2 (inject only FAKE stub
+      credentials), so handing grok a live vendor key would make it the one
+      provider holding spendable credit inside a container with open egress. The
+      two routes that keep the contract are to deny grok egress for the duration
+      of its child (no such mechanism exists in the rig today — a bare `env_extra`
+      proxy pin would also reach the LIVE provider lane, which `live_provider.py`
+      strips `base_url_vars`/`credential_vars`/`http_log` from and nothing else),
+      or to carve grok out of the opencode host's `fan_out` with a dated cell, the
+      route `host_matrix.yaml`'s partition header already names.
 
   # -------------------------------------------------------------------------
   - cli: muse
     provenance: verified
     lane: provider
     # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
-    # the executor's runner is a second binary. It is DECLARED here rather than
-    # tolerated: the per-row single-CLI assertion compares the call log against
-    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
-    # key against the adapters' own `agent_profiles` so the two cannot drift.
-    chain_write_runner: codex
+    # the executor's runner is a second binary: the shared helper `opencode`,
+    # which writes without spawning a sandbox where codex could not (header).
+    # It is DECLARED here rather than tolerated: the per-row single-CLI
+    # assertion compares the call log against {cli} u {this} in both directions,
+    # and a plain-CI test cross-checks this key against the adapters' own
+    # `agent_profiles` so the two cannot drift.
+    chain_write_runner: opencode
     surface: responses
     mechanism: "muse exec --base-url (ARGV ONLY — no env var, no config key) + auth.json or META_API_KEY"
     model_arg: "muse-spark-1.2"
@@ -946,11 +1070,13 @@ clis:
     provenance: verified
     lane: provider
     # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
-    # the executor's runner is a second binary. It is DECLARED here rather than
-    # tolerated: the per-row single-CLI assertion compares the call log against
-    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
-    # key against the adapters' own `agent_profiles` so the two cannot drift.
-    chain_write_runner: codex
+    # the executor's runner is a second binary: the shared helper `opencode`,
+    # which writes without spawning a sandbox where codex could not (header).
+    # It is DECLARED here rather than tolerated: the per-row single-CLI
+    # assertion compares the call log against {cli} u {this} in both directions,
+    # and a plain-CI test cross-checks this key against the adapters' own
+    # `agent_profiles` so the two cannot drift.
+    chain_write_runner: opencode
     surface: gemini
     mechanism: "GOOGLE_GEMINI_BASE_URL (read by the bundled @google/genai SDK) + GEMINI_API_KEY"
     model_arg: "gemini-2.5-flash"
@@ -1115,7 +1241,9 @@ clis:
     # CHAIN ROW ONLY. vibe's adapter declares no `agent-write` profile (it is
     # `(generate,)` only, like every adapter harness-expansion.md adds), so the
     # executor's runner is a second binary and is DECLARED rather than tolerated.
-    chain_write_runner: codex
+    # That binary is the shared helper `opencode`, which writes without spawning
+    # a sandbox where codex could not (header).
+    chain_write_runner: opencode
     surface: chat
     mechanism: "seeded config.toml [[providers]] backend=generic/api_style=openai; the endpoint and the KEY VARIABLE NAME live in the file, the model in VIBE_ACTIVE_MODEL"
     # THE SEED ALIAS, WHICH IS DELIBERATELY THE REAL SLUG. vibe is the one row
@@ -1211,11 +1339,13 @@ clis:
     provenance: verified
     lane: provider
     # CHAIN ROW ONLY. This CLI's adapter declares no `agent-write` profile, so
-    # the executor's runner is a second binary. It is DECLARED here rather than
-    # tolerated: the per-row single-CLI assertion compares the call log against
-    # {cli} u {this} in both directions, and a plain-CI test cross-checks this
-    # key against the adapters' own `agent_profiles` so the two cannot drift.
-    chain_write_runner: codex
+    # the executor's runner is a second binary: the shared helper `opencode`,
+    # which writes without spawning a sandbox where codex could not (header).
+    # It is DECLARED here rather than tolerated: the per-row single-CLI
+    # assertion compares the call log against {cli} u {this} in both directions,
+    # and a plain-CI test cross-checks this key against the adapters' own
+    # `agent_profiles` so the two cannot drift.
+    chain_write_runner: opencode
     surface: chat
     mechanism: "$HOME/.omp/agent/models.yml providers.<id> {baseUrl, api: openai-completions, apiKey, models[]}"
     model_arg: "stub/stub-model"
@@ -1268,13 +1398,15 @@ clis:
     first_call_s: 0.486
     turn_s: 0.7
     row_timeout_s: 300
-    # NOT measured: the chain lane cannot run on this host at all today. Every
-    # row's `chain_write_runner` is codex, and codex refuses its `agent-write`
+    # NOT measured yet — but no longer blocked. This note used to read "the chain
+    # lane cannot run on this host at all today": every borrowing row's
+    # `chain_write_runner` was codex, and codex refuses its `agent-write`
     # dispatch with `sandbox_unavailable` (bwrap cannot create a user namespace
-    # under Docker's default seccomp profile), so `full --exec-subagents` stops
+    # under Docker's default seccomp profile), so `full --exec-subagents` stopped
     # at apply-suggestions for all 16 rows — pi and grok included, both of which
-    # were green here on 2026-09-10. `chain_s` and the golden bundle land when
-    # that is unblocked.
+    # were green here on 2026-09-10. The repoint of this row's helper to
+    # `opencode`, which spawns no sandbox, removes exactly that blocker; what is
+    # left is a capture pass, and `chain_s` plus the golden bundle land with it.
     chain_row_timeout_s: 600
     version_measured: "18.2.2"
     help_invocation: "omp --help"
@@ -1469,3 +1601,54 @@ clis:
          failure with zero requests reaching a stub. 'Google OAuth only' is
          accurate for every path reachable from the environment, agy is not a
          provider-lane candidate, and nobody should spend that half hour again."
+
+# ===========================================================================
+# THE WRITER AXIS. A sibling of `clis:`, deliberately NOT three more rows in it.
+#
+# WHY IT EXISTS. The 16 provider-lane chain rows above grade one question — does
+# this CLI's reviewer parse still hold across all eight phases — and the write
+# path was only ever graded as a BY-PRODUCT of whichever helper those rows
+# borrowed. The three entries below invert that: the reviewer is held fixed and
+# the WRITE RUNNER is varied, so each write-capable CLI's own write path is
+# graded exactly once, on a row that exists for it and for nothing else.
+#
+# WHY THE REVIEWER IS `pi`, AND WHY IT IS RECORDED ONCE HERE RATHER THAN PER ROW.
+# pi is one of the 13 CLIs that do NOT declare `agent-write`, so pairing it with
+# a different write runner cannot trip
+# `test_it_is_declared_exactly_where_the_cli_has_no_agent_write`. It is also the
+# cheapest reviewer to bolt onto a writer's row: `surface: chat`, `turns: 1`, one
+# `POST /v1/chat/completions` per exec, no session-title call, no
+# `side_model_ids`, no `egress_beyond_stub`, one seeded `.pi/agent/models.json`
+# and nothing else, and a measured `chain_s` of 100.7 s to price the axis from.
+# The pin is recorded ONCE, as this block's `reviewer` key, and all three entries
+# read it from here so it cannot drift per row. `qwen-code` is the declared
+# fallback if pi's seed file collides with a writer's home — also a one-turn
+# `chat` row, but with no measured `chain_s`.
+#
+# WHY A SEPARATE BLOCK AND NOT THREE MORE `clis:` ROWS. Three consumers break at
+# once if these enter the provider lane: `test_container_full_chain._rows()`
+# builds `VERIFIED` / `IDS` / `BY_CLI` from every `lane: provider` row, so a
+# second `codex` row is a duplicate pytest id and a clobbered `BY_CLI` key;
+# `test_redirect_matrix_claims` would trip its first guard on all three writers,
+# each of which declares `agent-write`; and `container_bundle.baseline_path(cli)`
+# resolves to `<cli>/bundle.json`, so `chain-writer-codex` would collide with
+# `chain-codex` and the second capture would silently overwrite the first.
+#
+# WHERE THE BASELINES LIVE. In their own namespace,
+# `tests/golden/container/writer-<cli>/bundle.json`, never beside the reviewer
+# bundle of the same CLI. `writer-codex` has NONE anywhere — no host has produced
+# one — and is exempt from the completeness check by this block's own
+# `sandbox_skip_when` declaration, reported as an uncovered writer rather than as
+# a present baseline, until a permissive-userns host captures one. The exemption
+# covers absence alone: a `writer-codex/` directory that exists is held to every
+# assertion the other two are, and retiring the declaration puts it straight back
+# into both sets.
+# ===========================================================================
+chain_writer_axis:
+  - writer: codex
+    reviewer: pi
+    sandbox_skip_when: userns-unavailable
+  - writer: opencode
+    reviewer: pi
+  - writer: claude-code
+    reviewer: pi

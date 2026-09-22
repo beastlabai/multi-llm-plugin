@@ -37,12 +37,38 @@ import yaml
 from .container import harness
 from .container import entrypoint
 
-#: The one row carrying a pin of its own, and the slug it carries. Retyped here
+#: The rows carrying a pin of their own, and the slug they carry. Retyped here
 #: on purpose — this is the assertion, so reading it from the file it is meant to
 #: guard would make the module agree with any edit at all.
 ROW_ID = "claude-code-apply-native"
 ROW_PIN = "anthropic/claude-haiku-4.5"
 HOST_PIN = "~deepseek/deepseek-v4-flash-latest"
+
+#: The claude-code per-phase rows (`live_native_phase`), added 2026-09-22 by
+#: `plans/chain-lane-write-runner-matrix.md` §3.4. Each is deliberately on the
+#: SAME pin as `claude-code-apply-native`, and the spend decision is the one
+#: this list exists to make explicit:
+#:
+#: * Every one of them is apply-native's shape — a `pre_commands` leg, then
+#:   native write batches — and apply-native is the ONLY row in the repository
+#:   that has ever landed applied bytes through a real host. Its single pass
+#:   (`runs/20260821T082250Z`) came after **four failed attempts** and carries
+#:   exactly this pin; the four failures ran on the cheap host pin. Putting a
+#:   new row on the host pin would therefore buy the failure mode that pin is
+#:   already measured to produce.
+#: * The cost is real and is budgeted, not absorbed: ~$0.586302 key-usage
+#:   delta per passing row, ~$1.80 for the three. That is why these rows carry
+#:   the `live_native_phase` marker, why `make e2e-container-host` excludes it,
+#:   and why `make e2e-container-host-phases` raises `MLLM_E2E_BUDGET_USD` to
+#:   $6.00 — the $2.00 default is a between-rows `pytest.exit` that a ~$3-5
+#:   tier crosses around its fourth row, stranding the rest.
+#: * They are `unmeasured` until T4 runs them. If a cheaper pin turns out to
+#:   complete these phases, this list is where that measurement lands.
+PHASE_ROW_IDS = (
+    "claude-code-phase-apply-suggestions",
+    "claude-code-phase-implement",
+    "claude-code-phase-apply-task-suggestions",
+)
 
 #: The repo's own skill tree, so `build_host_argv` can read the shipped
 #: SKILL.md's `allowed-tools` the way it does inside the image (where the same
@@ -113,7 +139,9 @@ class TestTheShippedMatrixDeclaresExactlyOneRowPin:
             for host, entry in _matrix().items()
             for row in (entry.get("rows") or [])
             if (row.get("model") or {}).get("slug"))
-        assert pinned == [("claude-code", ROW_ID)], (
+        expected = sorted([("claude-code", ROW_ID)]
+                          + [("claude-code", row) for row in PHASE_ROW_IDS])
+        assert pinned == expected, (
             f"rows carrying their own model pin: {pinned}. Each one costs "
             f"Anthropic-tier money on every run of that row; add it here with "
             f"the measurement that justified it.")

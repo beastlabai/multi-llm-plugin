@@ -41,6 +41,7 @@ tier claim something it cannot observe.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -65,6 +66,16 @@ HOST_MATRIX = harness.HERE / "host_matrix.yaml"
 #: D6 row 3's partial aggregate — which is precisely why membership here is not on
 #: its own evidence that a row succeeded, and why `expect.exit` is graded too.
 TERMINAL_STATES = ("done", "complete", "partial")
+
+#: The phases whose dispatch IS the model fan-out, so an assigned provider has
+#: something to be invoked BY. Every other phase — the write phases and
+#: `generate-tasks` — sends each batch through the single
+#: `driver.subagent_runner` at `max_concurrent_write_subagents: 1`
+#: (`subagent_batch_report.json`'s `runner_versions` carries exactly one entry
+#: on every recorded write phase), and its phase directory holds batch files
+#: rather than a per-provider result file. Grading a partition over one of them
+#: would be grading the runner, twice removed.
+FAN_OUT_PHASES = ("ask", "review-plan", "review-tasks", "code-review")
 
 
 def _hosts():
@@ -97,6 +108,16 @@ def discovery(request, posture, utc):
         lane="host",
         host=host,
         creds="none",
+        # NAMED RATHER THAN DEFAULTED, even though this tier makes no model
+        # call at all. The entrypoint used to fall back to a hard-coded
+        # `codex:stub-model` for any row that passed no `--spec`, which is one
+        # of the two places the whole lane's single-provider fan-out was
+        # written down implicitly. The fallback is gone, so the inert value a
+        # credential-free row renders is stated here instead of inherited from
+        # a literal nobody was reading. `opencode` is the lane's declared write
+        # runner (T0a); on this tier it is never dispatched.
+        spec=["opencode:stub/stub-model"],
+        runner="opencode:stub/stub-model",
         row_timeout_s=300,
     )
     result = harness.run_row(row, posture=posture, utc=utc)
@@ -282,7 +303,137 @@ CREDENTIALED_ROWS = [
     # out mid-lane.
     ("opencode", "opencode-package-ask"),
     ("opencode", "opencode-package-review-plan"),
+    # ...and the two rows that take the package route from 2 of the file
+    # route's 5 cells to 4 of 5. The package route is how opencode actually
+    # ships now, so grading it on the cheap half while the file route gets the
+    # write rows is the weaker half being graded. Derived cell-for-cell from
+    # their file-route twins; every measured cell on them is `unmeasured`
+    # until T4's first pass.
+    ("opencode", "opencode-package-full"),
+    ("opencode", "opencode-package-apply-executor"),
+    # ------------------------------------------------------------------- #
+    # THE claude-code PER-PHASE TIER, and it is deselected by default.
+    #
+    # Each row is one workflow phase, its prerequisites seeded from the rig by
+    # a `pre_commands` leg so the host turn does exactly one phase natively.
+    # That is `claude-code-apply-native`'s own shape — the only row in the
+    # repository where applied bytes on a real host are a pass — generalized
+    # along the phase axis.
+    #
+    # THREE ROWS, NOT EIGHT, AND THE SHORTFALL IS RECORDED RATHER THAN
+    # MISSING. Of the eight chain phases, two already exist under historical
+    # names (`apply-code-fixes` IS `claude-code-apply-native`, `review-plan`
+    # IS `claude-code-review-plan`), and the four READ phases are not
+    # authored at all: each stops at `[VALIDATION_PENDING]` and requires the
+    # host to re-invoke `--reaggregate`, which this host measurably failed to
+    # do on both model attempts. That failure is INTERNAL to the phase, so
+    # seeding phases 1..n-1 does nothing for it — four rows built on that
+    # shape would be four rows that dispatch and never complete, at
+    # ~$0.25-0.60 each. They are dated `not-applicable` cells in
+    # `host_matrix.yaml` instead, citing T4a as the task that would clear
+    # them.
+    #
+    # `pytest.param(..., marks=...)` is the one mechanism that marks an
+    # individual fixture param, and the `ids=` list below is DERIVED from
+    # these params rather than restated beside them — two hand-kept lists
+    # drift apart silently.
+    pytest.param(("claude-code", "claude-code-phase-apply-suggestions"),
+                 marks=pytest.mark.live_native_phase),
+    pytest.param(("claude-code", "claude-code-phase-implement"),
+                 marks=pytest.mark.live_native_phase),
+    pytest.param(("claude-code", "claude-code-phase-apply-task-suggestions"),
+                 marks=pytest.mark.live_native_phase),
 ]
+
+
+def _row_pair(param):
+    """The `(host, row_id)` inside a bare tuple or a `pytest.param`.
+
+    `CREDENTIALED_ROWS` holds both shapes on purpose: a plain tuple where the
+    row needs no marker, and `pytest.param(..., marks=...)` where it does —
+    that being the one mechanism that marks an individual fixture param.
+    Every consumer that wants the pair goes through here rather than
+    unpacking, because a `pytest.param` is not a 2-tuple and unpacking it
+    raises at import.
+    """
+    values = getattr(param, "values", None)
+    return values[0] if values is not None else param
+
+
+#: Derived, never restated: `ids=` and `params=` must not be two hand-kept
+#: lists. A marked param carries its value in `.values[0]`.
+#:
+#: The id stays the BARE row id, because `-k '[<row id>]'` — brackets included —
+#: is the documented per-row selector and a bare substring once matched the
+#: `skipif` keyword every item carries and silently ran the whole lane at full
+#: cost (`Makefile:402`, measured 2026-08-19).
+CREDENTIALED_PAIRS = [_row_pair(param) for param in CREDENTIALED_ROWS]
+CREDENTIALED_IDS = [row for _host, row in CREDENTIALED_PAIRS]
+
+#: The row ids the per-phase tier owns, for the census's tier accounting and
+#: for the two collection guards. Read off the marks rather than off a name
+#: pattern, so a row that loses its marker is caught by the guard rather than
+#: silently rejoining the cheap target.
+NATIVE_PHASE_ROWS = [
+    _row_pair(param)[1] for param in CREDENTIALED_ROWS
+    if any(getattr(m, "name", "") == "live_native_phase"
+           for m in getattr(param, "marks", ()))
+]
+
+#: The rows the ordinary `make e2e-container-host` target keeps.
+PROVIDER_TIER_ROWS = [row for row in CREDENTIALED_IDS
+                      if row not in NATIVE_PHASE_ROWS]
+
+
+def _invoked_tier(config) -> str:
+    """Which tier this invocation selected, read off pytest's own `-m` value.
+
+    `make e2e-container-host` types
+    `-m "container and live and not live_native_phase"` and
+    `make e2e-container-host-phases` types
+    `-m "container and live and live_native_phase"`. Read here rather than
+    guessed, because the census's whole job is to make an empty lane
+    legible, and a census that reports the wrong denominator is worse than
+    none.
+
+    **`config.getoption("markexpr")`, never `sys.argv`.** `markexpr` is the
+    expression pytest actually selected with, after it has merged
+    `PYTEST_ADDOPTS` and the ini `addopts` into the command line. Scraping
+    `sys.argv` sees only the expression someone typed on the line itself, so
+    this project's own `addopts = -m 'not container and not package'`, an
+    expression exported through `PYTEST_ADDOPTS`, or any wrapper that supplies
+    `-m` some other way would be invisible — and the census would then report
+    the wrong denominator, which is the very "unexplained gap between
+    `declared` and `ran + skipped`" the tier split exists to remove. The
+    config is threaded in from the fixture or hook that has it rather than
+    cached in a module global, so there is no window in which it is unset.
+    """
+    expression = config.getoption("markexpr", default="") or ""
+    if "not live_native_phase" in expression:
+        return "provider"
+    if "live_native_phase" in expression:
+        return "native-phase"
+    return "all"
+
+
+def _declared_for_tier(config) -> list[str]:
+    tier = _invoked_tier(config)
+    if tier == "provider":
+        return list(PROVIDER_TIER_ROWS)
+    if tier == "native-phase":
+        return list(NATIVE_PHASE_ROWS)
+    return list(CREDENTIALED_IDS)
+
+
+def _deselected_for_tier(config) -> list[str]:
+    """Named, never left as an unexplained gap.
+
+    `declared - (ran + skipped)` with no explanation reads as rows that
+    silently did not happen, which is precisely the "everything skipped looks
+    like everything passed" outcome this census exists to prevent.
+    """
+    declared = set(_declared_for_tier(config))
+    return [row for row in CREDENTIALED_IDS if row not in declared]
 
 
 class TestTheScheduleMatchesTheMatrix:
@@ -301,7 +452,7 @@ class TestTheScheduleMatchesTheMatrix:
     def test_every_matrix_row_is_scheduled(self):
         declared = {(host, row["id"]) for host, entry in HOSTS
                     for row in (entry.get("rows") or [])}
-        scheduled = set(CREDENTIALED_ROWS)
+        scheduled = set(CREDENTIALED_PAIRS)
         unscheduled = sorted(declared - scheduled)
         assert not unscheduled, (
             f"host_matrix.yaml declares {unscheduled} and CREDENTIALED_ROWS does "
@@ -395,8 +546,20 @@ class _Census:
     skipped: list[dict] = []
 
     @classmethod
-    def record_ran(cls, row_id: str, host: str, mode: str = "openrouter") -> None:
-        cls.ran.append({"row": row_id, "host": host, "credential_mode": mode})
+    def record_ran(cls, row_id: str, host: str, mode: str = "openrouter",
+                   attempts: int = 1) -> None:
+        """File one row that ran, and how many attempts it took to get there.
+
+        `attempts` is written only when it is not 1, so a lane with no retry in
+        it renders exactly the census it always did — and a lane with one in it
+        cannot render a census that hides it. This is the flag half of
+        "pass with a flag": the row counts as coverage, and the count says what
+        it cost to get.
+        """
+        entry = {"row": row_id, "host": host, "credential_mode": mode}
+        if attempts > 1:
+            entry["attempts"] = attempts
+        cls.ran.append(entry)
 
     @classmethod
     def record_skipped(cls, row_id: str, host: str, reason: str) -> None:
@@ -415,30 +578,45 @@ class _Census:
         return "ran" if cls.ran else "not-run"
 
     @classmethod
-    def report(cls) -> str:
+    def report(cls, config) -> str:
         counts = cls.counts()
         lines = [
             f"  status  : {cls.status()}",
-            f"  declared: {len(CREDENTIALED_ROWS)} credentialed row(s)",
+            f"  declared: {len(_declared_for_tier(config))} credentialed row(s) "
+            f"in the {_invoked_tier(config)} tier "
+            f"({len(_deselected_for_tier(config))} deselected)",
             f"  counts  : openrouter={counts['openrouter']} "
             f"fallback={counts['fallback']} skipped={counts['skipped']}",
         ]
         lines += [f"  ran     : {row['row']} ({row['credential_mode']})"
+                  + (f" — RETRIED, graded on attempt {row['attempts']} of "
+                     f"{row['attempts']}" if row.get("attempts", 1) > 1 else "")
                   for row in cls.ran]
         lines += [f"  skipped : {row['row']} — {row['reason']}"
                   for row in cls.skipped]
         return "\n".join(lines)
 
     @classmethod
-    def write(cls, utc: str):
-        """Beside the run bundle, so the count survives the pytest scrollback."""
+    def write(cls, config, utc: str):
+        """Beside the run bundle, so the count survives the pytest scrollback.
+
+        Takes the pytest `Config` because the tier it records is read off
+        `-m` (see `_invoked_tier`), and every caller here already has one.
+        """
         path = harness.RUNS / utc / "host-lane-census.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps({
             "lane": "host",
             "tier": "credentialed",
             "status": cls.status(),
-            "declared_rows": [row for _host, row in CREDENTIALED_ROWS],
+            # The census records the TIER it was invoked for. After the
+            # split, counting all of CREDENTIALED_ROWS would have the
+            # ordinary target report three declared rows that neither ran nor
+            # skipped, and the phase target report the other twenty-one —
+            # an unexplained gap between `declared` and `ran + skipped`.
+            "tier_invoked": _invoked_tier(config),
+            "declared_rows": _declared_for_tier(config),
+            "deselected_rows": _deselected_for_tier(config),
             "counts": cls.counts(),
             "ran": cls.ran,
             "skipped": cls.skipped,
@@ -458,23 +636,23 @@ def _refuse_empty_lane(config, utc: str) -> None:
     wired up without a key. It is never the default, because the default has to
     make "nobody here has a key" visible.
     """
-    path = _Census.write(utc)
+    path = _Census.write(config, utc)
     if _Census.ran:
         return
     if config.getoption("allow_empty_host_lane", default=False):
         return
     pytest.exit(
         "host lane: NOT-RUN — 0 of "
-        f"{len(CREDENTIALED_ROWS)} declared credentialed rows executed, so this "
+        f"{len(_declared_for_tier(config))} declared credentialed rows executed, so this "
         "lane covered nothing. That is a distinct outcome from a pass, and it is "
-        "reported as one.\n" + _Census.report() + f"\n  census  : {path}\n"
+        "reported as one.\n" + _Census.report(config) + f"\n  census  : {path}\n"
         "  Pass --allow-empty-host-lane to accept a credential-free invocation "
         "of this lane (the census is printed either way), or run the free tier: "
         "make e2e-container-host-discovery", returncode=1)
 
 
 @pytest.fixture(scope="module", params=CREDENTIALED_ROWS,
-                ids=[r for _h, r in CREDENTIALED_ROWS])
+                ids=CREDENTIALED_IDS)
 def graded(request, posture, utc):
     """Run one credentialed row and return (result, row entry, host entry).
 
@@ -523,12 +701,83 @@ def graded(request, posture, utc):
     # bare token, which codex resolves fine; `host_matrix.yaml` declares no runner
     # for either row, so this expression is the only place the slug is built.
     negative = bool(matrix_row.get("remove_seed"))
-    negative_model = "stub/stub-model" if host == "opencode" else "stub-model"
+    host_entry = entry
+
+    # THE FAN-OUT, READ FROM THE MATRIX RATHER THAN HARD-CODED. Until 2026-09-22
+    # both `spec=` and `runner=` below were the literal `"codex:stub-model"`, for
+    # every row on every host, and `host_matrix.yaml` declared neither key
+    # anywhere. The consequence was not small: 15 of the 16 stub-capable provider
+    # CLIs never appeared in this lane at all, and a reader of "three hosts,
+    # sixteen providers" would not have guessed it.
+    #
+    # Widening it is free. The lane's real spend is the HOST's own reasoning
+    # turns; the fan-out runs real provider CLIs redirected at the stub through
+    # `/opt/mllm/bin` and costs nothing. `defaults.models` was always a list and
+    # only happened to render with one entry, so N members add N stub-backed
+    # provider subprocesses INSIDE THE SAME host turn — no extra host turn, no
+    # extra credit. (That is the hypothesis T3's one-row two-spec spike
+    # measures; if host spend moves with fan-out width it is not free and the
+    # partition is re-scoped before it is widened.)
+    #
+    # Slugs are built here, from `redirect.yaml`'s own `model_arg`, because the
+    # matrix names CLI ids only — see `harness.provider_spec`.
+    fan_out = harness.host_fan_out(host_entry, matrix_row)
+    members = [] if fan_out == harness.FAN_OUT_NATIVE else list(fan_out)
+    specs = [harness.provider_spec(cli) for cli in members]
+
+    # THE WRITE RUNNER IS NOW A MATRIX KEY TOO (T0a). It was the same hard-coded
+    # `codex:stub-model`, which means every non-negative row on all three hosts
+    # dispatched its write batches through the one runner whose `agent-write`
+    # renders `--sandbox workspace-write` — bubblewrap, needing a user namespace
+    # Docker's default seccomp profile denies. That is the regression §1.4 of
+    # `plans/chain-lane-write-runner-matrix.md` predicts for `codex-full`,
+    # `opencode-full` and the two `apply-executor` rows.
+    #
+    # ON A NEGATIVE AUTH ROW THE RUNNER MUST STILL BE THE ROW'S OWN CLI. The
+    # row's `remove_seed` names a file under that CLI's seeded home, and the
+    # gate it is meant to trip is the executor's preflight of the CONFIGURED
+    # runner — so a shared runner would sail past opencode's auth.json going
+    # missing and the row would assert nothing at all.
+    #
+    # AND THE SLUG MUST BE IN THAT CLI'S OWN ADDRESSING SCHEME. opencode
+    # resolves models as `provider/model`; handed a bare `stub-model` it parses
+    # provider `stub-model` with an empty model half and raises
+    # `ProviderModelNotFoundError: Model not found: stub-model/.` before a
+    # single HTTP call leaves the process — which is what exited
+    # `opencode-auth-negative` 3 on `runs/20260820T093838Z`. `harness.provider_spec`
+    # reads the qualified form out of `redirect.yaml` rather than inventing a
+    # second spelling.
+    runner_cli = harness.host_runner_cli(host, host_entry, matrix_row)
+    if negative:
+        negative_model = "stub/stub-model" if host == "opencode" else "stub-model"
+        runner_spec = f"{host}:{negative_model}"
+    else:
+        runner_spec = harness.provider_spec(runner_cli) if runner_cli else None
+    # A native row, and a `remove_seed` row, fan out to nothing — but both
+    # still need a spec for the rendered config to be complete. A row with an
+    # EMPTY selection renders `models: []`, which deep-merges as "keep base's
+    # twelve specs across five providers", i.e. the exact fall-through the
+    # template's own header exists to prevent.
+    #
+    # One behaviour change is worth naming: `opencode-auth-negative` used to
+    # render `codex:stub-model` as its fan-out (the old hard-coded literal)
+    # beside an opencode runner. It now renders the opencode slug for both.
+    # Inert either way — the row is graded on `stub_requests: 0` counted from
+    # the watermark, and the refusal lands upstream of any model call — but
+    # naming the row's own CLI is the coherent spelling, and a row whose
+    # fan-out named a CLI it has nothing to do with was a leftover of the
+    # literal, not a decision.
+    if not specs:
+        specs = [runner_spec] if runner_spec else []
+
     row = harness.Row(
         row_id=row_id, lane="host", host=host, creds="openrouter",
-        helpers=sorted({"codex", host} if negative else {"codex"}),
-        spec="codex:stub-model",
-        runner=f"{host}:{negative_model}" if negative else "codex:stub-model",
+        # The fan-out, unioned with the runner (and the host on the negative
+        # rows). A row that fans out to five providers while its helper list
+        # still said `codex` ran four CLIs with no seeded home.
+        helpers=harness.host_helpers(host, host_entry, matrix_row),
+        spec=specs,
+        runner=runner_spec,
         row_timeout_s=int(matrix_row.get("wall_clock_s") or 600) + 500,
         # Without it the worker really runs and really fails: a scenario-less
         # stub answers a bare "OK", which is not a suggestions document, and the
@@ -556,8 +805,13 @@ def graded(request, posture, utc):
         route=str(matrix_row.get("route") or "file"),
     )
     result = harness.run_row(row, posture=posture, utc=utc)
-    _Census.record_ran(row_id, host, "openrouter")
-    _Census.write(utc)
+    # `result.attempt` is 2 on a row the driver re-ran after a never-started
+    # first attempt (`harness.never_started_signature`), and 1 on every other
+    # row. The spend below still brackets BOTH attempts — `before` was read
+    # before the first container and `after` after the last — so a retried row
+    # is charged what it really cost.
+    _Census.record_ran(row_id, host, "openrouter", attempts=result.attempt)
+    _Census.write(request.config, utc)
 
     after = _key_usage()
     if before is not None and after is not None:
@@ -1012,6 +1266,222 @@ class TestTheFanOutNeverWentLive:
             f"{result.row.host}: ZERO requests reached the stub. With egress open "
             f"that gap is exactly the signature of a provider that went live.")
 
+    def test_every_assigned_provider_really_ran(self, workflow):
+        """The runtime half of §3.3's partition — exactly N, each one named.
+
+        The union guard in `test_redirect_matrix_claims.py` reads
+        `host_matrix.yaml` and `redirect.yaml` and never starts a container,
+        so it grades CONFIGURATION coverage only. Nothing else here closes the
+        gap: `test_enough_receipts_for_the_rows_shape` grades
+        `len(dispatcher) >= receipts_min`, a floor over a count with no
+        provider identity in it, and the stub-traffic assertions grade totals
+        the pre-command leg also contributes to. **A row could fan out to six
+        providers, have five never invoked, and stay green on every other
+        assertion in this module.**
+
+        So, per assigned provider and counted **from the host-start
+        watermark**, three facts that fail differently:
+
+        * **an invocation** — a `calls.jsonl` record naming that CLI, which is
+          what `/opt/mllm/bin` writes, so the shim really ran for it. Not a
+          receipt: `MLLM_RECEIPT_DIR` is the *dispatcher* wrapper's, and no
+          provider CLI writes one.
+        * **a stub session** — at least one `stub.jsonl` record keyed to that
+          exec, so the CLI reached the model surface instead of dying in
+          argument parsing. opencode's `ProviderModelNotFoundError` failed at
+          exactly this step and produced zero stub records while the row's
+          total was non-zero, which is the shape a count-only assertion
+          cannot see. **The stub log names no CLI** — it logs the `session`
+          the wrapper minted — so this fact is a JOIN through `calls.jsonl`'s
+          `exec_id`, and reading a `cli` key off a stub record (there is none)
+          is how the fact reads as green for every provider at once.
+        * **a usable result** — that provider's own result file, under the
+          phase directories the row declares, **carrying an answer rather
+          than that CLI's error envelope**. This is the exactly-N rule with
+          a name attached to each of the N. The qualifier is not decoration:
+          on `runs/20260922T084502Z` grok failed on all six opencode fan-out
+          rows, four went red, and `opencode-ask` and `opencode-package-ask`
+          went GREEN — because the ask lane persists the provider's raw
+          stdout when it cannot recover text, and for a failed grok run that
+          stdout IS `{"type":"error","message":"Not signed in…"}`, landing
+          under grok's own exact expected filename. A name alone was
+          therefore satisfiable by the CLI's own failure report, which is the
+          exact opposite of the fact this bullet exists to establish, so the
+          body is read through `harness.error_envelope_reason` before the
+          name is counted.
+
+        **All three are sliced at the host-start watermark, and the row is
+        graded on its fan-out phases only.** The pre-command leg fans out to
+        the same providers through the same shim, into the same two logs, so a
+        fact counted over a whole log is a fact the rig can satisfy on the
+        host's behalf — which is the whole failure this test was written
+        against. A missing watermark is therefore missing evidence and fails
+        here rather than defaulting to zero, and a row whose every declared
+        phase dispatches through the single write runner has no fan-out to
+        correlate and says so.
+
+        **Exactly N, never at-least-K.** The fan-out is stubbed: there is no
+        endpoint that can be flaky, so a wire-shape mismatch is a
+        deterministic defect in the scenario's rules or in the adapter, and it
+        is fixable. Grading at-least-K would convert the rig's own bugs into
+        permanent silent gaps in the coverage this exists to add, and would
+        make the union guard's "all 16 providers" claim unfalsifiable. A
+        provider the scenario cannot answer concurrently is reassigned to
+        another host's subset or recorded as a dated carve-out cell — never
+        dropped by loosening this grade.
+        """
+        result, matrix_row, entry = workflow
+        fan_out = harness.host_fan_out(entry, matrix_row)
+        if fan_out == harness.FAN_OUT_NATIVE or not fan_out:
+            pytest.skip(
+                f"{matrix_row.get('id')}: declared outside the partition "
+                f"({fan_out!r}) — a native Task dispatch never crosses "
+                f"/opt/mllm/bin, so a fan-out list has no mechanism to act "
+                f"through.")
+        phases = [str(phase) for phase
+                  in ((matrix_row.get("expect") or {}).get("phases") or [])
+                  if str(phase) in FAN_OUT_PHASES]
+        if not phases:
+            pytest.skip(
+                f"{matrix_row.get('id')}: every phase this row declares "
+                f"({(matrix_row.get('expect') or {}).get('phases')}) dispatches "
+                f"its batches through the ONE `driver.subagent_runner`, not "
+                f"through `defaults.models` — so the assigned partition has no "
+                f"mechanism to act through inside the host turn, and its only "
+                f"fan-out is the pre-command leg's, which is the rig's work "
+                f"and not this row's. The same host's `ask`, `review-plan` and "
+                f"`full` rows grade the identical list.")
+        stub_before = _stub_watermark(result)
+        calls_before = _call_watermark(result)
+        # THE THIRD EVIDENCE SOURCE'S WATERMARK, and it is a snapshot rather
+        # than an index because result files live in a DIRECTORY, not in an
+        # append-only log: `workspace-census-host-before.json` is written in
+        # the same four-step block as `stub-watermark.json` — after the
+        # pre-command leg, after the credential removal, immediately before
+        # the host process — so every phase artifact it already lists is the
+        # leg's.
+        files_before = _host_start_census(result)
+        assert (stub_before is not None and calls_before is not None
+                and files_before is not None), (
+            f"{matrix_row.get('id')}: the container wrote no host-start "
+            f"watermark (stub={stub_before}, calls={calls_before} in "
+            f"stub-watermark.json; workspace-census-host-before.json "
+            f"{'present' if files_before is not None else 'absent'}), so "
+            f"there is no line between the rig's pre-command fan-out and the "
+            f"host's own dispatch. Reading it as 0 — or reading the whole "
+            f"exported tree — would credit the leg's invocations, sessions "
+            f"and result files to the host, which is exactly the correlation "
+            f"this test exists to make: missing evidence, not zero.")
+        calls = [r for r in result.call_log[calls_before:] if r.get("cli")]
+        stub_after = [r for r in result.stub_log
+                      if r.get("surface") != "health"][stub_before:]
+        invoked = {str(r.get("cli")) for r in calls}
+        # THE JOIN, because `stub.jsonl` has no `cli` field to read. The wrapper
+        # mints one `exec_id` per invocation and bakes it into the base URL
+        # (`wrapper.stub_base_url`), and the stub logs it straight back as the
+        # record's `session` (`stub_server.session_key`). So provider identity
+        # comes from the call log's `exec_id` -> `cli` map, built from the
+        # POST-WATERMARK invocations alone: a session belonging to one of the
+        # leg's execs then names nobody instead of naming the host's provider.
+        exec_to_cli = {str(r.get("exec_id")): str(r.get("cli"))
+                       for r in calls if r.get("exec_id")}
+        reached = set()
+        for record in stub_after:
+            session = str(record.get("session") or "")
+            cli = exec_to_cli.get(session)
+            if cli is None:
+                # The two fallback spellings `session_key` can return still
+                # carry the id: a CLI that rejects the path prefix sends it as
+                # the `mllm-stub-<exec-id>` credential in a session header.
+                cli = next((name for exec_id, name in exec_to_cli.items()
+                            if exec_id and exec_id in session), None)
+            if cli:
+                reached.add(cli)
+        results_dir = _artifacts_root(result)
+        produced: list[str] = []
+        #: Files that carried a provider's own failure report instead of an
+        #: answer. Kept and printed rather than dropped, so "grok wrote
+        #: nothing" and "grok wrote its login error into the answer file" do
+        #: not read identically in the failure.
+        refused: list[str] = []
+        if results_dir is not None:
+            # The snapshot, re-keyed onto the exported tree's own paths once
+            # (`export_artifacts` drops the plan file's parent directory), so
+            # the per-file lookup below is a dict hit rather than a scan.
+            prior = _exported_before_host(files_before, results_dir)
+            for phase in phases:
+                for directory in sorted(results_dir.glob(f"*/{phase}")):
+                    # `.json` for the review phases' `<cli>_<model>.json` and
+                    # `.md` for `ask`'s `answer_<cli>_<model>.md`; never the
+                    # `log_<cli>_<model>.txt`, which a CLI that died in
+                    # argument parsing also leaves behind.
+                    for path in sorted(directory.rglob("*")):
+                        # `is_file` as well as the suffix, because the slice
+                        # below reads the bytes: a directory that happens to
+                        # end in `.json` was a name before and would be an
+                        # `IsADirectoryError` now.
+                        if (path.suffix not in (".json", ".md")
+                                or not path.is_file()):
+                            continue
+                        # AND THE SLICE. A prerequisite phase run by the leg
+                        # writes ITS providers' result files into these same
+                        # directories under these same names, so a name
+                        # counted off the whole exported tree is a name the
+                        # rig can supply on the host's behalf — the identical
+                        # defect the two log watermarks close, on the one
+                        # source that is a tree. A file the host-start census
+                        # already lists WITH THE BYTES IT STILL HAS is the
+                        # leg's; one that is absent from it, or whose sha the
+                        # host moved, is the row's own.
+                        key = path.relative_to(results_dir).as_posix()
+                        if key in prior and prior[key] == _sha256(path):
+                            continue
+                        # AND THE BODY, because a provider that FAILED can
+                        # still leave a file under its own exact expected
+                        # name. grok did, on both `ask` rows of
+                        # `runs/20260922T084502Z`: 219 bytes of
+                        # `{"type":"error","message":"Not signed in…"}` in
+                        # `answer_grok_stub-model.md`, written by
+                        # `ask_orchestrator.recover_answer_text` falling back
+                        # to the provider's raw stdout — and both rows went
+                        # GREEN on this assertion while grok was failing on
+                        # all six of that host's fan-out rows.
+                        # `harness.error_envelope_reason` reads the CLIs' own
+                        # measured discriminators (`type: "error"`,
+                        # `is_error: true`) off a body that parses WHOLE as a
+                        # JSON object; a prose answer is never parsed, and a
+                        # review result is an array.
+                        reason = harness.error_envelope_reason(
+                            path.read_text(encoding="utf-8", errors="replace"))
+                        if reason is not None:
+                            refused.append(f"{path.name} ({reason[:120]})")
+                            continue
+                        produced.append(path.name)
+        # The predicate itself is `harness.fan_out_correlation`, a pure
+        # function over the three extracted name sets — same behaviour, one
+        # importable place — because this assertion is `live`-marked beneath
+        # a container gate and therefore only ever answers inside a
+        # credentialed Docker run. Its NEGATIVE CONTROL, without which a
+        # correlation that matched on the wrong field or iterated an empty
+        # list would read exactly like complete coverage, is a plain-CI
+        # fixture in `tests/test_stray_write_paths.py`.
+        missing = harness.fan_out_correlation(
+            fan_out, invoked=invoked, reached=reached, produced=produced)
+        assert not missing, (
+            f"{matrix_row.get('id')}: the row declared a partition it did not "
+            f"execute. Per provider, the facts it could not produce:\n"
+            + "\n".join(f"    {cli}: missing {', '.join(gaps)}"
+                        for cli, gaps in sorted(missing.items()))
+            + f"\n  fan_out     : {sorted(fan_out)}"
+            + f"\n  invoked     : {sorted(n for n in invoked if n)}"
+            + f"\n  reached stub: {sorted(n for n in reached if n)}"
+            + f"\n  result files: {sorted(produced)[:20]}"
+            + (f"\n  refused as error payloads: {sorted(refused)[:20]}"
+               if refused else "")
+            + f"\n  counted from : stub.jsonl[{stub_before}:], "
+              f"calls.jsonl[{calls_before}:], result files new or rewritten "
+              f"since workspace-census-host-before.json, phases {phases}")
+
     def test_no_child_carried_a_credential(self, workflow):
         """The scrub receipt: variable NAMES only, never values."""
         result, _row, _entry = workflow
@@ -1046,10 +1516,19 @@ class TestTheWriteRowsAreGradedOnBytes:
 
     Two shapes, deliberately opposite, each declared per row rather than inferred:
 
-    * **`clean-failure`** on the two executor hosts. A real executor CLI pointed at
-      a tool-call-free stub can only ever claim success and move nothing, so that
+    * **`no-op`** on the two executor hosts. A real executor CLI pointed at
+      a tool-call-free stub can only ever claim no-op and move nothing, so that
       is what the row asserts — and an `applied` batch there fails just as loudly,
       because bytes landing from a tool-call-free stub mean the redirect leaked.
+      CORRECTED 2026-09-22, from `clean-failure`: the word moved in the PRODUCT,
+      not in the rig. `1633dd4` (2026-09-16) split the empty-diff branch so a
+      `no-op` CLAIM over an empty diff records `no-op`, while an `applied` claim
+      over an empty diff stays `clean-failure`. The stub's fixture is unchanged
+      since `f62cc89` (2026-08-15), so the input never moved. The leak guard is
+      not weaker for it: `applied` and `partial-application` are both reachable
+      only on a NON-empty snapshot diff, so refusing them is what disproves a
+      leak — not which of the two empty-diff words is named. See the matching
+      cells in `host_matrix.yaml` and the derivation in `test_container_full_chain.py`.
     * **`applied`** on the reference host's native row: the ONE row on either lane
       where an applied batch is a pass rather than a rig bug, and this plan's only
       applied-byte evidence through a real host. An all-clean-failure result there
@@ -1147,25 +1626,39 @@ class TestTheWriteRowsAreGradedOnBytes:
                 f"batch that never ran")
 
     def test_the_bytes_moved_exactly_as_the_row_declares(self, workflow):
-        """Whether these bytes changed and which paths moved — never their content."""
-        result, matrix_row, _entry = workflow
+        """Whether these bytes changed and which paths moved — never their content.
+
+        Graded through `_graded_delta`, so a row declaring
+        `editable_artifacts` is answered on the HOST-bracketed census with
+        real bookkeeping filtered — and a row that declares none keeps
+        `_source_delta` exactly as it was.
+        """
+        result, matrix_row, entry = workflow
         _write_outcome(matrix_row)
         expect = matrix_row.get("expect") or {}
-        delta = _source_delta(result)
+        delta = _graded_delta(result, matrix_row, entry)
         if expect.get("bytes_must_change"):
             assert delta, (
                 f"{result.row.host}: the SHA-256 census of /work/sample-project "
                 f"came back byte-identical outside the workflow's own outputs, so "
-                f"the native write row applied nothing")
+                f"the native write row applied nothing. Graded against this "
+                f"row's declared editable artifacts "
+                f"{_editable_artifacts(matrix_row)} over the "
+                f"{'host-bracketed' if result.has_host_census else 'whole-row'} "
+                f"census.")
         else:
             assert not delta, (
                 f"{result.row.host}: bytes moved on a row declared "
                 f"{_write_outcome(matrix_row)!r}: {sorted(delta)}")
 
     def test_no_write_landed_outside_the_declared_paths(self, workflow):
-        result, matrix_row, _entry = workflow
+        result, matrix_row, entry = workflow
         _write_outcome(matrix_row)
-        declared = (matrix_row.get("expect") or {}).get("paths")
+        # `editable_artifacts` first: it is the per-phase declaration §3.4
+        # introduces, and `expect.paths` is the older spelling the rows that
+        # predate it still carry. One accessor, so a row cannot declare both
+        # and have the weaker one graded.
+        declared = _editable_artifacts(matrix_row)
         if not declared:
             pytest.skip(f"{result.row.row_id}: the row declares no write paths")
         # The predicate itself lives in `harness.stray_paths` — same behaviour,
@@ -1174,7 +1667,8 @@ class TestTheWriteRowsAreGradedOnBytes:
         # credentialed Docker run. `tests/test_stray_write_paths.py` pins it in
         # both directions on plain CI, where a PR that widens a `paths:` glob too
         # far is actually read.
-        stray = harness.stray_paths(_source_delta(result), declared)
+        stray = harness.stray_paths(
+            _graded_delta(result, matrix_row, entry), declared)
         assert not stray, (
             f"{result.row.host}: bytes moved outside the row's declared "
             f"{declared}: {stray}. A change outside the declared set fails the row "
@@ -1317,14 +1811,13 @@ def _dispatcher_receipts(result) -> list[dict]:
 
     `install-host` is the rig staging the shim, not the host running our
     dispatcher, so counting it would let a row pass on the harness's own work.
+
+    The rule itself lives in the harness now, because the driver applies it too:
+    a zero-receipt row is one of the facts `harness.never_started_signature`
+    re-runs a row on, and two copies of "which receipts count" is how the grader
+    and the driver would start disagreeing about whether a row did anything.
     """
-    out = []
-    for receipt in result.receipts:
-        argv = receipt.get("argv") or []
-        if "install-host" in argv:
-            continue
-        out.append(receipt)
-    return out
+    return harness.dispatcher_receipts(result)
 
 
 def _mode_of(receipt: dict) -> str:
@@ -1402,6 +1895,21 @@ def _negative_expect(matrix_row: dict) -> dict:
     return matrix_row.get("expect") or {}
 
 
+def _host_start_watermark(result, key: str) -> int | None:
+    """One counter out of `stub-watermark.json`, or `None` if it is not there.
+
+    `entrypoint.record_stub_watermark` writes the file at the single moment the
+    boundary is unambiguous — after the pre-command leg, after the credential
+    removal, immediately before the host process starts — and both counters in
+    it are indexes into logs the leg also appends to.
+    """
+    path = result.out_dir / "stub-watermark.json"
+    if not path.is_file():
+        return None
+    value = json.loads(path.read_text(encoding="utf-8")).get(key)
+    return None if value is None else int(value)
+
+
 def _stub_watermark(result) -> int | None:
     """Non-health stub requests already logged when the host process started.
 
@@ -1409,12 +1917,19 @@ def _stub_watermark(result) -> int | None:
     condition rather than a zero: reading it as 0 would silently credit the rig's
     own pre-command fan-out to the host.
     """
-    path = result.out_dir / "stub-watermark.json"
-    if not path.is_file():
-        return None
-    value = json.loads(path.read_text(encoding="utf-8")).get(
-        "non_health_calls_before_host")
-    return None if value is None else int(value)
+    return _host_start_watermark(result, "non_health_calls_before_host")
+
+
+def _call_watermark(result) -> int | None:
+    """`calls.jsonl` records already written when the host process started.
+
+    The byte-for-byte counterpart of :func:`_stub_watermark` on the other log
+    the pre-command leg writes to: the leg's provider CLIs cross the same
+    `/opt/mllm/bin` shim, so an invocation count taken over the whole file is
+    the rig's fan-out plus the host's. `None` is the same missing-evidence
+    condition, never a zero.
+    """
+    return _host_start_watermark(result, "call_records_before_host")
 
 
 def _fan_out_is_native(matrix_row: dict, entry: dict) -> bool:
@@ -1430,12 +1945,146 @@ def _fan_out_is_native(matrix_row: dict, entry: dict) -> bool:
             and (entry.get("continuation") or {}).get("who") == "host")
 
 
+def _artifacts_root(result):
+    """The exported `artifacts/` tree, or `None` when the row exported none.
+
+    `None` rather than a missing directory, so the per-provider correlation
+    can tell "this row produced no artifacts at all" (someone else's failure,
+    already graded) from "this provider produced no result file" (its own).
+    """
+    root = result.out_dir / "artifacts"
+    return root if root.is_dir() else None
+
+
+def _host_start_census(result) -> dict | None:
+    """`{workspace-relative path: sha256}` at the moment the host process began.
+
+    The result-file counterpart of :func:`_stub_watermark` and
+    :func:`_call_watermark`: `entrypoint.write_host_census("before")` runs in
+    the same four-step block, one line after `record_stub_watermark`, so the
+    three evidence sources are cut at one moment. `None` is the same
+    missing-evidence condition both counters use — an absent snapshot read as
+    "nothing existed yet" would hand the pre-command leg's phase artifacts to
+    the host, which is the whole reason the boundary is recorded.
+
+    The WHOLE-ROW `workspace-census-before.json` is deliberately not a
+    fallback here: it is taken before the leg runs, so it lists none of the
+    leg's output and would restore exactly the grade this replaces.
+    """
+    path = result.out_dir / "workspace-census-host-before.json"
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _exported_before_host(census: dict, results_dir: Path) -> dict[str, str]:
+    """That census re-keyed onto the exported tree, `{artifacts-relative: sha}`.
+
+    `entrypoint._workspace_census` keys on the path relative to the workspace
+    (`plans/auth-feature/review-plan/codex_stub-model.json`) while
+    `export_artifacts` copies the plan's output directory, dropping the plan
+    file's parent (`auth-feature/review-plan/codex_stub-model.json`).
+
+    The DIRECTORIES are the whole of this re-key, and the `is_dir()` filter
+    below is what keeps it that way now that the export also carries loose
+    receipt-named files at the artifacts root (the plan file). A result file
+    is only ever read out of a phase directory, so nothing that belongs in
+    this index lives outside one.
+
+    The dropped parent is recovered from the tree rather than restated from
+    `entrypoint.py`'s plan path: a hard-coded `plans/` that drifted would stop
+    matching, and it would stop matching SILENTLY — every result file would
+    read as new and the grade would quietly revert to counting the leg's.
+    Entries outside the exported directories are simply absent, which is what
+    makes the lookup a slice rather than a filter over the workspace.
+    """
+    index: dict[str, str] = {}
+    for top in sorted(path.name for path in results_dir.iterdir()
+                      if path.is_dir()):
+        marker = f"/{top}/"
+        for key, sha in census.items():
+            if key.startswith(f"{top}/"):
+                index[key] = sha
+                continue
+            position = key.find(marker)
+            if position != -1:
+                index[key[position + 1:]] = sha
+    return index
+
+
+def _sha256(path: Path) -> str:
+    """`entrypoint._sha`, on this side of the export.
+
+    The same digest over the same bytes, so a census entry and the exported
+    file compare directly and "the host rewrote the leg's result file" reads
+    as the row's own evidence rather than as the leg's.
+    """
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
 def _write_report(result, phase: str) -> dict:
     """`{phase}/write_batch_report.json` as exported into the bundle."""
     root = result.out_dir / "artifacts"
     for candidate in sorted(root.glob(f"*/{phase}/write_batch_report.json")):
         return json.loads(candidate.read_text(encoding="utf-8"))
     return {}
+
+
+def _editable_artifacts(matrix_row: dict) -> list[str]:
+    """What this phase is allowed — and expected — to edit, from the matrix.
+
+    §3.4's grader change 2. It replaces "everything except the `plans/` and
+    `.multi-llm/` prefixes" as the grading predicate, because
+    `apply-suggestions`' entire intended effect IS an edit to a file under
+    `plans/`: a row graded by the old predicate could rewrite the plan, or
+    fail to, and pass either way.
+    """
+    declared = matrix_row.get("editable_artifacts")
+    if declared:
+        return [str(p) for p in declared]
+    return [str(p) for p in ((matrix_row.get("expect") or {}).get("paths") or [])]
+
+
+def _graded_delta(result, matrix_row: dict, host_entry: dict) -> dict:
+    """The census paths this row is answerable for.
+
+    Three corrections over `_source_delta`, and they are independent:
+
+    1. **Bracket the host's own execution.** `host_census_delta` uses the
+       narrower pair written immediately before and after the host process,
+       so setup performed by `pre_commands` cannot contaminate what the host
+       is credited with.
+    2. **Filter real bookkeeping, not the `plans/` prefix.**
+       `harness.graded_delta` drops `.multi-llm/**` and each plan's own
+       OUTPUT DIRECTORY (`plans/<stem>/**`) — but never the plan FILE, unless
+       this row does not declare it, in which case the change is
+       `finalize_tracking`'s back-reference rather than work the row did.
+    3. **Drop a third-party tool's own cache**, and only the ones the row's
+       OWN fan-out can have written. `harness.tool_artifact_paths` reads the
+       globs each CLI declares in `redirect.yaml` — today just aider's repo
+       map, `.aider.tags.cache.v4/**`, which aider rebuilds in `cwd` on every
+       invocation. It landed in the census of all four codex-host rows of
+       `runs/20260922T084502Z` (aider is in codex's fan-out) and was the whole
+       delta on `codex-apply-executor`, failing that row with `bytes moved on
+       a row declared 'clean-failure'` over bytes no subagent wrote. Applied
+       to BOTH branches below, because the rows it hits declare no
+       `editable_artifacts` and therefore never reach `harness.graded_delta`.
+
+    Rows that declare no `editable_artifacts` keep the old predicate exactly
+    apart from that subtraction, so nothing already graded moves — and the
+    subtraction is a no-op on a `fan_out: native` row, which is every row that
+    grades applied bytes.
+    """
+    declared = _editable_artifacts(matrix_row)
+    if not matrix_row.get("editable_artifacts"):
+        delta = _source_delta(result)
+    else:
+        census = result.host_census_delta()
+        kept = harness.graded_delta(census.keys(), declared)
+        delta = {name: census[name] for name in kept}
+    exempt = set(harness.tool_artifact_paths(
+        delta, harness.host_fan_out(host_entry, matrix_row), declared))
+    return {name: pair for name, pair in delta.items() if name not in exempt}
 
 
 def _source_delta(result) -> dict:
@@ -1488,6 +2137,13 @@ def _exported(result, artifact: str):
     "not our business" and moves on. A `/plans/` path therefore always maps to
     its expected location and the caller's `is_file()`/size check is what
     decides, present or absent.
+
+    Both halves of the map are now really produced:
+    `entrypoint.export_artifacts` copies the plan's output DIRECTORY
+    (`<tail>` beginning `auth-feature/`) and
+    `entrypoint.export_receipt_named_plan_files` copies the receipt-named
+    files beside it — the plan file itself, `<tail>` == `auth-feature.md`,
+    which `apply-suggestions` names and which no directory copy could reach.
     """
     marker = "/plans/"
     if marker not in artifact:

@@ -51,23 +51,86 @@
 #    each product pattern below starts with `(?s)^(?!.*(?:…))`.
 #
 # ---------------------------------------------------------------------------
-# THE ONE PAIR THAT NEEDS MORE THAN AN OPENING LINE, recorded rather than
+# THE THREE VALIDATION PHASES SHARE ONE OPENING, recorded rather than
 # discovered: `validation.txt` and `validation_code_review.txt` are
-# byte-identical for their opening 63 lines and diverge only where the
-# code-review variant appends its `file`/`line_range` paragraph. All three
-# validation phases therefore share one opening, and are separated by:
+# byte-identical for their opening 63 lines, and review-tasks' differs only in
+# what it embeds as context. All three therefore open with "You are validating
+# review suggestions for accuracy." and are separated by WHAT EACH PROMPT
+# CARRIES — never by WHICH SUGGESTIONS it carries (see the next block):
 #   * code-review — the appended "Each issue record carries `file` and
 #     `line_range`" guidance (`subagent_prompts.CODE_REVIEW_VALIDATION_GUIDANCE`);
-#   * review-plan vs review-tasks — the `group_hash` values embedded in the
-#     batch records. Those are content hashes of *this file's own* fixtures
-#     (`utils/state_manager.generate_group_id` over theme + type/section/details,
-#     with no model id in the input, so they are identical on every row). Change
-#     a suggestion's text and the hash moves; under `on_unmatched: fail` that is
-#     a first-run failure naming the prompt, never a silent mis-answer.
-# Each is answered with its OWN fixture, whose `group_id`s match the phase that
-# asked — a foreign hash is discarded by `merge_batched_validation_results` and
-# the group falls through to needs-human-decision, which is how the first draft
-# of this file turned three apply phases into a human-decision fan-out.
+#   * review-tasks — the decomposition is visible in the prompt. Two spellings
+#     of one idea, *the plan has been decomposed into tasks by now*: its own
+#     labelled context block, `## Context (Tasks file — the artifact under
+#     review)` (`review_orchestrator_base._REVIEW_TASKS_TASKS_LABEL`), which is
+#     what the product renders today; or, in a turn recorded before that block
+#     existed, the plan's own `## Implementation Tasks` section, which
+#     `update_plan_tasks` inserts when generate-tasks runs. Both are kept
+#     because `tests/golden/container_turns/validation-task-suggestions.txt`
+#     predates the two-block change and is a RECORDING (its manifest forbids
+#     hand-editing it; it is owed a re-record, not a patch);
+#   * review-plan — the same opening with neither marker. Its validation runs
+#     BEFORE generate-tasks, so the plan text it embeds carries no task section.
+#     That ordering is the invariant this rule rests on: a plan fixture that
+#     shipped its own `## Implementation Tasks` heading would hand the turn to
+#     the review-tasks rule, which the recorded-turn sweep in
+#     `tests/test_scenario_matcher_parity.py` fails on rather than tolerates.
+#
+# WHY NOT THE GROUP HASHES, WHICH IS WHAT THIS FILE PINNED UNTIL 2026-09-22.
+# review-plan and review-tasks used to be told apart by the `group_hash` values
+# embedded in their batch records, on the stated ground that those are content
+# hashes of this file's own fixtures and so "identical on every row". They are
+# not. `state_manager.generate_group_id` hashes the theme plus the NORMALIZED
+# SUGGESTION LIST, and a group collects one member per model that raised it —
+# so the id is a function of HOW MANY REVIEWERS ANSWERED. Measured on
+# `tests/container/runs/20260922T084502Z/`: the same four themes grouped to
+# f98a857df749a24d / cfbab6e2d2ed9076 / 9a159705f86738a7 / 3fa0412af45f2aaa on
+# the five-model codex rows and to 29fa04376449247b / 6b25b8f1e3870c63 /
+# 04af07abaced75ea / f57936261e70e93a on the four-model opencode rows (grok
+# lost its slot) — and to neither of those on the ids pinned here. Two rows of
+# one matrix disagreeing is what rules re-pinning out: there is no single set
+# of ids to pin, and the next roster change or one flaky reviewer moves them
+# again. The rules below therefore read the prompt's SHAPE, which a panel
+# change cannot move.
+#
+# Each phase is still answered with its OWN fixture, whose `group_id`s match
+# the phase that asked — a foreign hash is discarded by
+# `merge_batched_validation_results` and the group falls through to
+# needs-human-decision, which is how the first draft of this file turned three
+# apply phases into a human-decision fan-out.
+#
+# AND THE SAME PANEL DEPENDENCE REACHED THE VERDICTS, which is the half this
+# file could not fix in a pattern (resolved 2026-09-22). The three verdict
+# fixtures were captured on a ONE-model panel — measured: `c948ad24b1b8e432`
+# and its three siblings are exactly what `generate_group_id` returns for this
+# scenario's own `review_plan/raw_suggestions.json` grouped from a single
+# model's answer, which is every single-spec row (the provider lane's chain
+# rows, the `fan_out: native` rows, and a negative-auth row whose fan-out left
+# one survivor). On a 4- or 5-model host row nothing joined: the merge joins BY
+# HASH, `subagent_executor._validation_result_errors` requires a
+# `group_hash`/`group_id` on every entry, so a fixture cannot drop the id and
+# fall through to index joining, and every group landed on `validation_failed`
+# with the apply rows left nothing valid to apply.
+#
+# The fix is in the fixtures, not here: each `../responses/validation/*.json`
+# is now a VERDICT SHEET carrying one row per (group, surviving-reviewer
+# count), 1 through 6 — 6 being the largest `fan_out:` any host in
+# `tests/container/host_matrix.yaml` declares. The batch joins the row that
+# belongs to it and the merge discards the rest, which is the mechanism those
+# files already relied on (a batch holds a SUBSET of the groups, so this file's
+# other groups were always discarded as foreign: the 2026-09-22 auth-negative
+# rows printed 8 such `[merge] Warning:` lines across their three batches on a
+# run that joined all four of their groups, and a sheet costs 68 there — noise
+# in the log, and nothing a reader of `container-stdout.txt` should mistake for
+# a real misroute). Measured: the id is a function of the member COUNT and the
+# suggestion CONTENT only — not of which CLIs are in the panel — so a carve-out,
+# a roster swap or a reviewer that dies mid-run picks a different row from the
+# sheet rather than invalidating it. Each sheet's `metadata.note` states its own
+# re-capture condition; in short, the sheets go stale when a fan-out fixture's
+# suggestion text changes, when a host's `fan_out:` grows past 6 members, or
+# when `generate_group_id` changes what it hashes — never on a membership
+# change. Nothing below reads a group id, and nothing below may start to: the
+# discriminators stay structural, for the reason the block above gives.
 
 name: "Container Full Chain"
 description: "Every turn of `full --quick --yes --exec-subagents`, one fixture each"
@@ -93,31 +156,77 @@ prompts:
     fixture: "../responses/muse_reminder/no_reminder.md"
     description: "muse background reminder observer"
 
+  # ------------------------------------------------- nested-exec preflight probe
+  # Not a phase: `--exec-subagents` runs one throwaway `agent-readonly` turn
+  # before the batch is scheduled (D3c), and on the six rows whose runner is
+  # `opencode:stub/stub-model` it reaches the stub like any other turn. Measured
+  # on `tests/container/runs/20260922T084502Z/`: 11 129 chars, of which the last
+  # 72 are exactly `utils/subagent_executor.NESTED_PROBE_PROMPT` and the leading
+  # 11 057 are the opencode runner's own preamble — the sha is IDENTICAL on the
+  # codex-hosted and opencode-hosted rows, which is what proves the body is ours
+  # and not the host CLI's (all six pass `--runner opencode:stub/stub-model`).
+  # Unanswered, it was 1 of the 17 `unmatched: true` records each of those rows
+  # carried; the other 16 are this phase's three validation prompts counted by
+  # occurrence, which the restructure above already resolves.
+  #
+  # THE FIXTURE DELIBERATELY WITHHOLDS THE TOKEN THE PROBE ASKS FOR, and that is
+  # the whole point of the entry. `_probe_nested_exec` reads its reply back
+  # (since 2026-09-22): the token present means `nested_exec: allowed`, absent
+  # means `unknown` under a warning naming the miss. Answering here with
+  # `MULTI_LLM_NESTED_EXEC_OK` would therefore promote a rig-authored string into
+  # a capability verdict — and `hosts/capabilities.yaml` records `nested_exec`
+  # for hosts `codex` and `opencode` as `unknown`, annotated "Filled by the Phase
+  # 3 nested-exec smoke", so that verdict has somewhere real to land. The stub is
+  # not a model and this lane measured nothing about nested exec, so the turn is
+  # accounted for (no `unmatched`, no drift alarm) while the verdict stays the
+  # honest `unknown` it already was, now stated in the log rather than implied by
+  # a 422.
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Reply with exactly this token and nothing else: MULTI_LLM_NESTED_EXEC_OK"
+    fixture: "../responses/nested_exec/probe_not_measured.txt"
+    description: "nested-exec preflight probe: utils/subagent_executor.NESTED_PROBE_PROMPT"
+
   # -------------------------------------------------------------- review-plan
   - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing an implementation plan for completeness, correctness, and clarity\\."
     fixture: "../responses/review_plan/raw_suggestions.json"
     description: "review-plan fan-out: prompts/plan_review.txt"
 
   # --------------------------------------------------------------- validation
+  # Three phases, one opening line, and the discriminators are STRUCTURAL: the
+  # code-review guidance paragraph, then "has the plan been decomposed yet".
+  # Nothing here reads a group id — see the header for the measurement that
+  # ruled that out. The three rules are mutually exclusive BY CONSTRUCTION
+  # (each carries the negative of every discriminator above it), not by list
+  # order, because `matching_rules()` — what the non-overlap sweep in
+  # `tests/test_scenario_matcher_parity.py` asserts on — collects every match
+  # and not just the winning one.
   - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are validating review suggestions for accuracy\\..*Each issue record carries `file` and `line_range`"
     fixture: "../responses/validation/code_review_valid.json"
     description: "code-review issue validation (the guidance paragraph is the discriminator)"
 
-  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are validating review suggestions for accuracy\\..*(?:6779911c6f8b335b|139bdba80f54ba7d|ef911087fcf05304)"
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent))(?!.*Each issue record carries `file` and `line_range`).*You are validating review suggestions for accuracy\\..*(?:\\n## Context \\(Tasks file|\\n## Implementation Tasks)"
     fixture: "../responses/validation/task_suggestions_valid.json"
-    description: "review-tasks suggestion validation (this phase's group hashes)"
+    description: "review-tasks suggestion validation (the task list is in the prompt: its own context block, or the plan's task section)"
 
-  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are validating review suggestions for accuracy\\..*(?:c948ad24b1b8e432|1558bbe6cea433cf|a4ba681281e554b8|64ba7f164d362232)"
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent))(?!.*Each issue record carries `file` and `line_range`)(?!.*(?:\\n## Context \\(Tasks file|\\n## Implementation Tasks)).*You are validating review suggestions for accuracy\\."
     fixture: "../responses/validation/plan_suggestions_valid.json"
-    description: "review-plan suggestion validation (this phase's group hashes)"
+    description: "review-plan suggestion validation (the only one whose prompt predates decomposition)"
 
   # ------------------------------------------------------------- write phases
   # All four dispatch the `agent-write` profile through
   # utils/write_batch_scheduler.py. The stub emits no tool call, so each batch
-  # lands on the documented CLEAN FAILURE: status ok, write_outcome
-  # clean-failure, zero bytes moved, the loop continues. The document shape is
+  # lands on the documented NO-OP: status ok, write_outcome no-op, zero bytes
+  # moved, the loop continues. The document shape is
   # schemas/write_batch_result.schema.json — a prose answer here is a rung-6
   # schema_invalid, which is never retried, and the phase ends at exit 3.
+  #
+  # This comment said CLEAN FAILURE until 2026-09-22, and the word moved in the
+  # product, not here: all four fixtures below have claimed {"status": "no-op"}
+  # since f62cc89 (2026-08-15), and 1633dd4 (2026-09-16) split the classifier's
+  # empty-diff branch so that a `no-op` CLAIM over an empty diff is its own
+  # verdict rather than a clean failure. Nothing in this file changed — the four
+  # rules, their fixtures and `on_unmatched: fail` are untouched. The derivation
+  # is in tests/test_container_full_chain.py's module docstring, and
+  # runs/20260921T224840Z records `no-op` on all 130 of the sweep's batches.
   - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Apply the following (?:\\d+ related )?suggestions? to the plan file"
     fixture: "../responses/write_batches/apply_suggestions.json"
     description: "apply-suggestions batch: utils/suggestion_batcher.format_batch_for_prompt"

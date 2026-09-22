@@ -13,10 +13,16 @@ So the three things that can be checked without a daemon are checked here:
   `tests/golden/container/<cli>/bundle.json`. Asserted over the module's AST, so a
   gate that is deleted, commented out or renamed fails a PR rather than going
   quiet for another release;
-* **the baselines** — every provider-lane CLI in `redirect.yaml` has one, it is
-  current-shaped, it is filed under its own CLI and it is not vacuous. A CLI added
-  to the lane without a baseline is ungraded, which is the failure mode this row
-  makes loud and cheap;
+* **the baselines, on both axes** — every provider-lane CLI in `redirect.yaml`
+  has one, and so does every `chain_writer_axis:` writer under its own
+  `writer-<cli>/` namespace; each is current-shaped, filed under its own
+  directory, carries a manifest naming its axis (and, on the writer axis, the
+  reviewer it was pinned to) and is not vacuous. A CLI or a writer added
+  without a baseline is ungraded, which is the failure mode this row makes loud
+  and cheap. The **one** exemption is declared rather than discovered: a writer
+  whose axis entry carries `sandbox_skip_when` and which has never been
+  captured — `writer-codex` — is reported as an uncovered writer instead of
+  being counted as present, and only while it is absent;
 * **the machinery** — capture folds what it claims to fold and keeps what it
   claims to keep, and both allowlist rules (including the container lane's own
   `cli` requirement) really refuse what they say they refuse.
@@ -48,12 +54,106 @@ REDIRECT = TESTS_DIR / "container" / "redirect.yaml"
 SEEDER = TESTS_DIR / "container" / "seed_container_golden.py"
 
 
+def _redirect() -> dict:
+    return yaml.safe_load(REDIRECT.read_text(encoding="utf-8")) or {}
+
+
 def _provider_clis() -> list[str]:
-    data = yaml.safe_load(REDIRECT.read_text(encoding="utf-8"))
+    data = _redirect()
     return [row["cli"] for row in data["clis"] if row.get("lane") == "provider"]
 
 
+def _writer_axis() -> list[dict]:
+    """The `chain_writer_axis:` block, or an empty list while it is absent.
+
+    Tolerant of absence on purpose. The block is a top-level sibling of `clis:`
+    and lands in its own change; a `data["chain_writer_axis"]` would make plain
+    CI — the lane this whole module exists to be checkable in — die on a
+    KeyError mid-landing, which is exactly the "fails for a reason unrelated to
+    what it grades" failure the writer axis is being added to avoid. With no
+    block there are no writer rows to grade, and nothing here has an opinion.
+    """
+    return [dict(entry) for entry in (_redirect().get("chain_writer_axis") or [])
+            if isinstance(entry, dict) and entry.get("writer")]
+
+
 PROVIDER_CLIS = _provider_clis()
+WRITER_AXIS = _writer_axis()
+WRITER_CLIS = [entry["writer"] for entry in WRITER_AXIS]
+
+
+def _uncovered_writers() -> set[str]:
+    """The writers exempt from the completeness check — by DECLARATION, and
+    only while they are absent.
+
+    Two conditions, both required, and the second is the one that keeps this
+    from becoming a permanent hole:
+
+    * the axis entry carries `sandbox_skip_when` — the row declares a host
+      capability it may not find, so a host that cannot run it produces no
+      capture and that is a recorded fact rather than an omission; and
+    * **nothing is on disk**. Today that is `writer-codex` alone, which no host
+      has yet produced. The exemption covers ABSENCE, nothing else: the moment
+      a permissive-userns host captures `writer-codex/bundle.json`, this
+      function stops returning it and that baseline is held to every assertion
+      its two siblings are — version, manifest axis, reviewer pin, eight
+      phases, four finalized write reports.
+
+    Written as an `exists()`-conditioned subtraction rather than a
+    `pytest.skip` on the row for that reason. A skip is unconditional: it would
+    keep passing over a `writer-codex/` directory that had drifted, been
+    half-written or been captured against the wrong reviewer, and nothing would
+    ever say so. Retiring the `sandbox_skip_when` declaration likewise puts the
+    writer straight back into both sets, so the declaration is the only thing
+    holding the exemption open and retiring it is a visible, testable act.
+    """
+    exempt: set[str] = set()
+    for entry in WRITER_AXIS:
+        if not entry.get("sandbox_skip_when"):
+            continue
+        if container_bundle.baseline_path(
+                entry["writer"], container_bundle.AXIS_WRITER).exists():
+            continue
+        exempt.add(entry["writer"])
+    return exempt
+
+
+#: Declared-and-absent writers: reported as *uncovered writers*, never as
+#: present baselines.
+UNCOVERED_WRITERS = _uncovered_writers()
+
+#: The writer rows this host's plain CI actually grades.
+GRADED_WRITER_AXIS = [entry for entry in WRITER_AXIS
+                      if entry["writer"] not in UNCOVERED_WRITERS]
+GRADED_WRITER_IDS = [f"writer-{entry['writer']}" for entry in GRADED_WRITER_AXIS]
+
+
+def _assert_not_vacuous(baseline: dict, label: str) -> None:
+    """The non-vacuity bar, shared by both axes rather than copied onto one.
+
+    A writer baseline is the *same* chain — `full --quick --yes`, eight phases,
+    three dispatcher invocations — with the reviewer pinned and the write
+    runner varied, so it earns exactly the same assertions. One helper and not
+    two copies, because a bar that drifted between the axes would let a writer
+    baseline be frozen from half a run while the reviewer axis went on
+    refusing that.
+    """
+    completed = set(baseline["derived"]["phases_completed"])
+    assert completed >= {
+        "review-plan", "apply-suggestions", "generate-tasks", "review-tasks",
+        "apply-task-suggestions", "implement", "code-review",
+        "apply-code-fixes",
+    }, (label, sorted(completed))
+    assert baseline["derived"]["group_count"] > 0
+    assert all(record["exit"] == 0 for record in baseline["commands"])
+    assert len(baseline["commands"]) == 3, baseline["commands"]
+    for phase in ("review-plan", "code-review"):
+        assert baseline["phases"][phase]["artifacts"]["grouped.json"], phase
+    for phase in ("apply-suggestions", "apply-task-suggestions", "implement",
+                  "apply-fixes"):
+        report = baseline["phases"][phase]["artifacts"]["write_batch_report.json"]
+        assert report["finalized"] is True, phase
+        assert report["tasks"], phase
 
 
 class TestTheGateIsWired:
@@ -130,23 +230,83 @@ class TestEveryProviderCliHasABaseline:
     def test_the_baseline_is_not_vacuous(self, cli):
         """A baseline captured from a half-run would make every later row agree
         with a broken chain."""
-        baseline = container_bundle.load_baseline(cli)
-        completed = set(baseline["derived"]["phases_completed"])
-        assert completed >= {
-            "review-plan", "apply-suggestions", "generate-tasks", "review-tasks",
-            "apply-task-suggestions", "implement", "code-review",
-            "apply-code-fixes",
-        }, (cli, sorted(completed))
-        assert baseline["derived"]["group_count"] > 0
-        assert all(record["exit"] == 0 for record in baseline["commands"])
-        assert len(baseline["commands"]) == 3, baseline["commands"]
-        for phase in ("review-plan", "code-review"):
-            assert baseline["phases"][phase]["artifacts"]["grouped.json"], phase
-        for phase in ("apply-suggestions", "apply-task-suggestions", "implement",
-                      "apply-fixes"):
-            report = baseline["phases"][phase]["artifacts"]["write_batch_report.json"]
-            assert report["finalized"] is True, phase
-            assert report["tasks"], phase
+        _assert_not_vacuous(container_bundle.load_baseline(cli), cli)
+
+    # -- the writer axis ---------------------------------------------------
+    # Parametrized over the *graded* writers only. A declared-and-absent one
+    # (`writer-codex`) is reported by `test_a_declared_skip_is_the_only_way_out`
+    # as an uncovered writer instead, which is a different claim from "graded
+    # and green" and is kept a different claim.
+
+    @pytest.mark.parametrize("entry", GRADED_WRITER_AXIS, ids=GRADED_WRITER_IDS)
+    def test_the_writer_baseline_exists_and_is_current(self, entry):
+        cli = entry["writer"]
+        path = container_bundle.baseline_path(cli, container_bundle.AXIS_WRITER)
+        assert path.is_file(), (
+            f"{cli} is a writer-axis row in redirect.yaml's chain_writer_axis: "
+            f"block with no container golden at {path}, so the one axis that "
+            f"grades its write path is ungraded. Capture one from a green "
+            f"writer run:\n  python {SEEDER} --writer {cli}"
+        )
+        baseline = container_bundle.load_baseline(
+            cli, container_bundle.AXIS_WRITER)
+        assert (baseline.get("bundle_version")
+                == container_bundle.CONTAINER_BUNDLE_VERSION)
+        manifest = baseline.get("manifest") or {}
+        assert manifest.get("cli") == cli, (path, manifest.get("cli"))
+        assert manifest.get("axis") == container_bundle.AXIS_WRITER, (
+            f"{path} sits in the writer namespace but its manifest says "
+            f"axis={manifest.get('axis')!r}. The two axes produce the same "
+            f"shape, so nothing but this field tells them apart."
+        )
+        assert manifest.get("row_id") == container_bundle.row_id_for(
+            cli, container_bundle.AXIS_WRITER)
+        # The reviewer pin. The writer axis holds the reviewer fixed so the
+        # three writer baselines differ from one another only in the write
+        # half; one captured against a different reviewer is not comparable to
+        # its siblings at all, and would read as a write-path diff.
+        assert manifest.get("reviewer") == entry.get("reviewer"), (
+            f"{path} was captured against reviewer "
+            f"{manifest.get('reviewer')!r}, but chain_writer_axis: pins "
+            f"{entry.get('reviewer')!r}. Re-capture, or move the pin "
+            f"deliberately and re-seed all three."
+        )
+
+    @pytest.mark.parametrize("entry", GRADED_WRITER_AXIS, ids=GRADED_WRITER_IDS)
+    def test_the_writer_baseline_is_not_vacuous(self, entry):
+        baseline = container_bundle.load_baseline(
+            entry["writer"], container_bundle.AXIS_WRITER)
+        _assert_not_vacuous(baseline, f"writer-{entry['writer']}")
+
+    def test_a_declared_skip_is_the_only_way_out(self):
+        """The exemption is keyed on the DECLARATION, not on what is missing.
+
+        An axis entry with no `sandbox_skip_when` has nothing to excuse it: its
+        baseline must exist, full stop. Without this, "the directory is absent"
+        would quietly become its own justification and a writer could ship
+        ungraded simply by never having been captured — which is the failure
+        mode `TestEveryProviderCliHasABaseline` exists for on the other axis.
+        """
+        undeclared = [entry["writer"] for entry in WRITER_AXIS
+                      if not entry.get("sandbox_skip_when")]
+        missing = [
+            cli for cli in undeclared
+            if not container_bundle.baseline_path(
+                cli, container_bundle.AXIS_WRITER).is_file()
+        ]
+        assert not missing, (
+            f"{missing} declare no `sandbox_skip_when` in chain_writer_axis: "
+            f"and have no writer baseline, so their write path is ungraded "
+            f"with nothing recording why. Capture them "
+            f"(`python {SEEDER} --writer <cli>`), or — if a host genuinely "
+            f"cannot run one — declare the skip on its axis entry, which is "
+            f"the reviewed act this test requires."
+        )
+        # And the exemption can never reach further than the declarations.
+        assert UNCOVERED_WRITERS <= {
+            entry["writer"] for entry in WRITER_AXIS
+            if entry.get("sandbox_skip_when")
+        }
 
     def test_no_baseline_directory_is_orphaned(self):
         """A directory for a CLI that left the lane is a baseline nobody grades."""
@@ -155,9 +315,18 @@ class TestEveryProviderCliHasABaseline:
             for path in container_bundle.BASELINE_DIR.glob(
                 f"*/{container_bundle.BASELINE_NAME}")
         }
-        assert on_disk == set(PROVIDER_CLIS), (
-            f"tests/golden/container/ holds baselines for {sorted(on_disk)}, the "
-            f"provider lane is {sorted(PROVIDER_CLIS)}"
+        # Both axes, in their own namespaces, minus the declared-and-absent
+        # writers — subtracted from the EXPECTED set rather than ignored in the
+        # on-disk one, so a `writer-codex/` that does appear is an ordinary
+        # member of the comparison again and is graded, not tolerated.
+        expected = (set(PROVIDER_CLIS)
+                    | {f"writer-{cli}" for cli in WRITER_CLIS})
+        expected -= {f"writer-{cli}" for cli in UNCOVERED_WRITERS}
+        assert on_disk == expected, (
+            f"tests/golden/container/ holds baselines for {sorted(on_disk)}; "
+            f"the provider lane is {sorted(PROVIDER_CLIS)}, the writer axis is "
+            f"{sorted(WRITER_CLIS)} and the declared-uncovered writers are "
+            f"{sorted(UNCOVERED_WRITERS)}"
         )
 
 

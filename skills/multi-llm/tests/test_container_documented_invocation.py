@@ -198,6 +198,12 @@ def probe(request, posture, utc):
         host=host,
         creds="none",
         documented_invocation=True,
+        # Inert on this tier — no credential, no model call — but NAMED, for
+        # the same reason the discovery row now names one: the entrypoint's
+        # hard-coded `codex:stub-model` fallback is gone, and a row's rendered
+        # selection should come from the row rather than from a literal.
+        spec=["opencode:stub/stub-model"],
+        runner="opencode:stub/stub-model",
         # The container's own bound is the outer one: the entrypoint stops the
         # host at `documented_invocation.wall_clock_s` and still writes its
         # record, so a row that hits THIS cap has failed the rig rather than the

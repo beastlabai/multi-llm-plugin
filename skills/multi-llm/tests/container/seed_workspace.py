@@ -30,11 +30,23 @@ have to distinguish from a mounted one.
 **There is no remote and no way to reach one.** No ``origin``, no credential
 helper, ``GIT_TERMINAL_PROMPT=0``. Nothing inside the container can push anywhere,
 including the ``agent-write`` rows that are allowed to edit files.
+
+**A one-spec render is no longer BYTE-identical to the pre-change render, and
+that is deliberate.** ``--spec`` is a repeatable fan-out now, and the template's
+selection slot became a bare one that the renderer fills with a whole YAML flow
+list (``models: ["codex:gpt-5.5"]`` where a two-line block sequence used to
+stand). A one-element list re-renders through that slot like any other, so the
+bytes move even when nothing about the row did. What must not move is the
+*parse*: the plain-CI render guards load both documents and compare the loaded
+objects, never the text, because byte identity is what was traded away to get a
+slot a ``str.replace`` can fill with a sequence at all (``providers.tmpl.yaml``
+carries the full reasoning in its header).
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shutil
 import subprocess
@@ -269,17 +281,55 @@ def _git(args, cwd, env):
     )
 
 
-def render_override(spec: str, runner: str, runner_cheap: str | None = None) -> str:
-    """Render the row's complete selection override from the template."""
+def render_override(specs: list[str] | str, runner: str,
+                    runner_cheap: str | None = None) -> str:
+    """Render the row's complete selection override from the template.
+
+    ``specs`` is the row's **fan-out**: every ``provider:model`` spec the row
+    dispatches to, in order, written into all 22 selection positions the
+    template carries. A bare string is accepted and read as a one-element list
+    — the single-spec rows predate the fan-out and there is no reason to make
+    every one of their callers learn a list.
+
+    ``runner`` and ``runner_cheap`` stay singular: ``driver.subagent_runner`` is
+    one slug, and widening it here would multiply the write dispatch the row is
+    measuring.
+    """
+    if isinstance(specs, str):
+        specs = [specs]
+    specs = list(specs)
+    if not specs:
+        # Rejected loudly rather than rendered as `[]`. An empty selection list
+        # deep-merges onto base as an empty selection, so the row would start,
+        # dispatch to nobody, and report a shape no one typed.
+        raise ValueError(
+            "seed_workspace.render_override: the fan-out is empty. Name at "
+            "least one provider:model spec — an empty list renders "
+            "`models: []`, which leaves the row with nothing to dispatch to.")
+
+    # `json.dumps`, not an f-string join: a JSON array of JSON strings IS a
+    # valid YAML flow sequence of double-quoted scalars, punctuation included,
+    # and the quoting is the load-bearing half. Every spec carries a `:` and
+    # some carry a `/` (opencode's `stub/stub-model`), and an UNQUOTED `a:b`
+    # inside a flow sequence re-reads as the mapping `{a: b}` — a row that
+    # rendered that way would merge a dict where a list belongs and fall
+    # through to base's roster without a word.
+    fan_out = json.dumps(specs)
+
     text = TEMPLATE.read_text(encoding="utf-8")
     return (
-        text.replace("{{spec}}", spec)
+        text.replace("{{fan_out_specs}}", fan_out)
+        # `{{runner_cheap}}` is substituted BEFORE `{{runner}}`, and the order
+        # is kept deliberately: it is the only order that survives one slot
+        # being renamed to a prefix of another, which is exactly how a chained
+        # `str.replace` renderer springs a silent leak.
         .replace("{{runner_cheap}}", runner_cheap or runner)
         .replace("{{runner}}", runner)
     )
 
 
-def seed(root: Path, spec: str, runner: str, runner_cheap: str | None = None) -> Path:
+def seed(root: Path, specs: list[str] | str, runner: str,
+         runner_cheap: str | None = None) -> Path:
     """Build the sample project at ``root`` and return it.
 
     Clears the directory's *contents* rather than the directory. ``rmtree(root)``
@@ -335,7 +385,7 @@ def seed(root: Path, spec: str, runner: str, runner_cheap: str | None = None) ->
     config_dir = root / ".multi-llm"
     config_dir.mkdir(exist_ok=True)
     (config_dir / "providers.yaml").write_text(
-        render_override(spec, runner, runner_cheap), encoding="utf-8"
+        render_override(specs, runner, runner_cheap), encoding="utf-8"
     )
     return root
 
@@ -343,13 +393,18 @@ def seed(root: Path, spec: str, runner: str, runner_cheap: str | None = None) ->
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", default="/work/sample-project")
-    parser.add_argument("--spec", required=True,
-                        help="the row's single provider:model spec")
+    # Repeatable and order-preserving: one `--spec` per fan-out member. Every
+    # one of them lands in all 22 selection positions, in the order given, so
+    # `--spec a:b --spec c:d` is a two-provider row rather than two rows.
+    parser.add_argument("--spec", action="append", required=True,
+                        help="one provider:model spec in the row's fan-out; "
+                             "repeatable, order preserved")
     parser.add_argument("--runner", required=True,
                         help="the row's agent-write-capable executor runner spec")
     parser.add_argument("--runner-cheap", default=None,
                         help="cheap-tier runner (defaults to --runner)")
     args = parser.parse_args(argv)
+    # `args.spec` is a LIST here (action="append"), forwarded whole.
     root = seed(Path(args.root), args.spec, args.runner, args.runner_cheap)
     print(f"seeded {root}")
     return 0
