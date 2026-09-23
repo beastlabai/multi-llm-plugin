@@ -25,6 +25,15 @@
 # 1.0.x added a `GET /` reachability probe and renamed its hardcoded
 # session-title model to `grok-4.6`.
 #
+# RE-SEEDED 2026-09-23 for ten pin moves (codex 0.156.1, claude-code 2.1.280,
+# opencode 1.18.32, cline 3.0.64, kilocode 7.7.9, pi 0.87.1, goose 1.52.0, grok
+# 1.0.41, agy 1.2.9, omp 18.2.11). `missing_options` was grok's hidden
+# `--no-auto-update` alone, still accepted at 1.0.41 (exit 0 against a bogus
+# flag's 2). Three help digests moved, each read against the previous binary
+# (whose help reproduced the old digest byte for byte) and each purely additive:
+# claude-code reworded `--bare` and `--safe-mode`; pi lists META_API_KEY; omp
+# added `--system-prompt-template`, four subcommands and three provider keys.
+#
 # Captured 2026-08-14 against the pinned image, offline. `options` is derived from
 # each adapter's own build_command()/build_agent_command() across every profile it
 # declares — never hand-listed — so the contract cannot drift from what we
@@ -82,7 +91,7 @@ clis:
   # not a deprecation. Read the help before moving the digest anyway.
   - cli: agy
     binary: agy
-    version: "1.2.7"
+    version: "1.2.9"
     probe: ok
     help_invocation: "agy --help"
     help_sha256: 5a03bf7dc9d3d7645f5853906cc117363fd8978a79c2a89521f0ff7590dbe454
@@ -138,11 +147,11 @@ clis:
 
   - cli: claude-code
     binary: claude
-    version: "2.1.278 (Claude Code)"
+    version: "2.1.280 (Claude Code)"
     probe: ok
     help_invocation: "claude --help"
-    help_sha256: ae85d661e9c086f05637ebcd868f5702b477ff6e55e2e65b8ada7807cd51a4b6
-    help_bytes: 21393
+    help_sha256: 23937937c79878eb95be2a6676d46730328adc03413f4a50f1b6d1852e7d52f3
+    help_bytes: 21636
     profiles: [generate, agent-readonly, agent-write]
     options:
       - "--allowed-tools"
@@ -154,7 +163,7 @@ clis:
 
   - cli: cline
     binary: cline
-    version: "3.0.62"
+    version: "3.0.64"
     probe: ok
     help_invocation: "cline --help"
     help_sha256: 5eb3b0a80e8dd33501f32f4b4d8996390d21604e8719f39caee8e3ecb1c06242
@@ -167,7 +176,7 @@ clis:
 
   - cli: codex
     binary: codex
-    version: "codex-cli 0.155.1"
+    version: "codex-cli 0.156.1"
     probe: ok
     help_invocation: "codex exec --help"
     help_sha256: 0e82cfde0122715250e93dc65866caa956b2ac5b9d0b20ec4ad4f9e81486509e
@@ -261,7 +270,7 @@ clis:
 
   - cli: goose
     binary: goose
-    version: "1.51.0"
+    version: "1.52.0"
     probe: ok
     help_invocation: "goose run --help"
     help_sha256: c6c76cbcf38ba3839df9e36b66bee049c435bb9ec9ba320404fa87ca5b353583
@@ -281,7 +290,7 @@ clis:
 
   - cli: grok
     binary: grok
-    version: "grok 1.0.34 (3736acbc8658)"
+    version: "grok 1.0.41 (4220f3b224a6)"
     probe: ok
     help_invocation: "grok --help"
     help_sha256: cda6873e2f90a7d77de94c2e3026794671fac04b2e40ac74e4d91f429f829403
@@ -346,7 +355,7 @@ clis:
 
   - cli: kilocode
     binary: kilocode
-    version: "7.7.5"
+    version: "7.7.9"
     probe: ok
     help_invocation: "kilocode run --help"
     help_sha256: 4fff43529130e190fee0b7336c8187fe31298d364ffbaf25d50caa237e2a3300
@@ -380,7 +389,7 @@ clis:
 
   - cli: opencode
     binary: opencode
-    version: "1.18.31"
+    version: "1.18.32"
     probe: ok
     help_invocation: "opencode run --help"
     help_sha256: d62299ebc267afdf5bab2c07fbfe1a6625cc8769cb7073b3bad975e9531c5732
@@ -396,11 +405,11 @@ clis:
 
   - cli: pi
     binary: pi
-    version: "0.85.1"
+    version: "0.87.1"
     probe: ok
     help_invocation: "pi --help"
-    help_sha256: 894957a01dfbf97ec0723edadbbc95094e0f216fc735705f47b94c2ddcb0962a
-    help_bytes: 10120
+    help_sha256: 5668cff3cf34fd6f0dbcb7b0d10667761219ca47879ba09d11c137507245824c
+    help_bytes: 10176
     profiles: [generate]
     options:
       - "--model"
@@ -444,11 +453,11 @@ clis:
   # the same guarantee this row gives for the eight below.
   - cli: omp
     binary: omp
-    version: "omp/18.2.6"
+    version: "omp/18.2.11"
     probe: ok
     help_invocation: "omp --help"
-    help_sha256: 920f1b8a2bde8fc79a9507c4066e931f3824378cc84dc79ff5bf34105cea24da
-    help_bytes: 13743
+    help_sha256: 3d288a68741f02faca9d9a039d07a804fdc0bb86da78885d31ccc5bbf69c2d8f
+    help_bytes: 14551
     profiles: [generate]
     options:
       - "--approval-mode"

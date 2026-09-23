@@ -660,6 +660,14 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
 #: string. Never printed anywhere else, so a match means the tail arrived.
 CORE_END_MARKER = "MULTI_LLM_CORE_END:"
 
+#: How :func:`_truncation_notice`'s head banner opens. A constant rather than
+#: a literal inside the banner because a package route's server reads the
+#: ``util instructions`` stdout through a pipe and *drops* the banner before it
+#: attaches the runbook (its character count describes the unscrubbed core):
+#: it finds the banner by this prefix, read off the generated surface, never
+#: by a spelling of its own.
+TRUNCATION_BANNER_OPENING = "=== READ THIS FIRST"
+
 
 def _truncation_notice(mode_name: str, core: str) -> str:
     """The head banner that survives a host truncating this command's output.
@@ -678,7 +686,7 @@ def _truncation_notice(mode_name: str, core: str) -> str:
     known place — that turns "did I get all of it?" from a judgement into a lookup.
     """
     return (
-        "=== READ THIS FIRST · multi-llm core instructions · "
+        f"{TRUNCATION_BANNER_OPENING} · multi-llm core instructions · "
         f"{mode_name} ===\n"
         f"The core below is {len(core):,} characters. Its last line is exactly:\n"
         "\n"

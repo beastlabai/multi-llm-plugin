@@ -201,7 +201,7 @@ first line matches on the fake-binary lane and matches nothing at all here.
   > no `auth_check`, so the absence of an `AUTH_PROBE_ARGS` row is the correct
   > answer and `test_fake_lane_roster.py` asserts exactly that).
 
-  agy is also **in the image** (1.2.7) and has a fixture set
+  agy is also **in the image** (1.2.9) and has a fixture set
   (`tests/fixtures/agy/`), neither of which contradicts the above: it is
   installed for the `cli-surface` help-drift probe, which needs the binary and
   no backend, and the fixture set is **one graded row and eleven written
@@ -808,6 +808,96 @@ failure mode that once shipped a modes table pointing at a module the payload di
 not contain. The staged `dist/` and `skills/` are build output — `make e2e-image`
 stages them before it builds, and `context_manifest.txt` marks them `# optional`
 so the clean-checkout build-context guard still passes.
+
+### The codex package route: seed, probes, and one credentialed row
+
+**None of this has run yet.** It is written against `plans/codex-native-plugin.md`
+Phase 1 (items 1, 1a, 5–16), before the plugin tree it installs
+(`packaging/codex/multi-llm/`) exists. Every cell is `unmeasured` in
+`host_matrix.yaml`, and every grader skips by name while the tree is absent or
+the image's codex is below the plugin floor.
+
+**The marketplace mirror.** Dockerfile §10c copies two tracked paths into the
+image *at their own relative paths*:
+
+```
+/opt/mllm/codex-marketplace/.agents/plugins/marketplace.json
+/opt/mllm/codex-marketplace/packaging/codex/multi-llm/
+```
+
+`codex plugin marketplace add <dir>` reads `<dir>/.agents/plugins/marketplace.json`,
+and that file names the plugin by a path relative to the marketplace root — so
+the catalog users fetch is the catalog the row installs from, byte for byte. No
+`.claude-plugin/` is copied: codex reads that catalog too, and its one entry
+points at the repository root. The layer asserts the real dispatch through the
+payload (`uv run --frozen --no-dev --project …/skills/multi-llm -- python
+multi_llm.py --help`, the shared venv, §10b's shape) and that `python3
+mcp/server.py` answers `initialize` + `tools/list` on stdin with `multi_llm`.
+Both paths are **tracked**, so `.dockerignore` negates them and
+`context_manifest.txt` lists them as ordinary rows, not `# optional` — with
+`packaging/codex/multi-llm/skills/multi-llm/.venv/**` re-excluded below the
+negation, beside the opencode twin, because running the server in place builds
+one.
+
+**The seed** (`entrypoint._seed_codex_plugin(home, route)`), on every
+`route: package` row, into `<home>/.codex` — the host's own `$CODEX_HOME`, the
+same one the config writers point it at. Three commands, in order: `codex plugin
+marketplace add /opt/mllm/codex-marketplace`, `codex plugin add
+multi-llm@beastlabai --json`, `codex plugin list --json`. `plugin-install.json`
+records all three argvs and exits, the `add` document and its `installedPath`
+(R40 — `add` carries it, `list` does not), the config.toml table the install
+wrote, whether a file shim is present (it must not be) and `divergence: null`.
+The list's stdout is committed verbatim as `codex-plugin-list.json`, because it is
+the only measurement of what a list entry carries. The generated config.toml
+**stays quiet** — no `[plugins.*]`, no `[marketplaces.*]` — and the seed asserts
+that before it installs, so the table's presence afterwards is the install's own
+evidence. `stage_host` stages nothing on a package row, exactly as for opencode.
+`/work/homes/codex` is deliberately **not** used: it is the provider identity the
+wrapper copies into every nested codex dispatch, and a plugin enabled there would
+start the MCP server inside every nested provider run.
+
+**The zero-quota rows** are the matrix's `codex.package_probes:` list — *not*
+under `rows:`, which is the credentialed schedule. Each is `--creds none --route
+package --probe <name>` under `--network none`, with the host's own model pointed
+at the loopback stub (`wire_stub_host`, route threaded through), and writes
+`probe-<name>.json`: the floor and `codex features list`, the seed, the scripted
+call, the three loader rows (`codex mcp get multi_llm --json`, `codex debug
+prompt-input` resolved through its roots table, the stub's `tools[]` capture),
+anchor, runnability (a stdio client, then the partial payload), environment,
+progress-and-cancellation, `${PLUGIN_DATA}`, sandbox posture, the MCP overlay
+census and the `tool_timeout_sec` re-read. A probe records what it cannot drive
+yet under `legs_not_driven`, so an absent reading never reads as a green one.
+`test_container_codex_meets_plugin_floor` reads the image's `codex --version`
+and skips every plugin row below `plugin_floor`, naming both.
+
+**The scripted call** (`scripted_codex_plugin_tool_call.yaml`) is the one scenario that
+makes `stub_server.py` emit a tool call: a Responses request advertising
+`mcp__multi_llm` → `multi_llm` gets one `function_call` with the scenario's
+arguments; the request carrying that call's `function_call_output` gets a plain
+terminal message; every served frame, the declaration codex advertised and the
+output it sent back land in `stub.jsonl` under `scripted`. It grades the
+mechanism and never a model choosing the tool. No other scenario, and no request
+that does not advertise the tool, ever sees a call.
+
+**The credential, twice** (`codex-package-ask` only). The session keeps reading
+`OPENROUTER_API_KEY` from its own environment — the `sh -c` auth command in the
+generated config, unchanged — and `write_profile_credential` also writes `export
+OPENROUTER_API_KEY=…` into the tmpfs home's `.profile` (mode 0600, the value never
+in the bundle; `profile-export.json` records the name and the placement) for the
+MCP server's login-shell child, which codex's `env_vars` allowlist never carries.
+`export` rather than a bare assignment, because the dispatcher's own children
+read no startup file.
+
+**Two startup-file traps, both asserted.** A login shell re-derives `PATH` from
+`/etc/profile`, so `/etc/profile.d/00-mllm-path.sh` keeps `/opt/mllm/bin` first
+and the build asserts `/bin/bash -lc 'command -v uv'` resolves to the wrapper
+(the 2026-08-14 finding above); the MCP server's `bash -lc` child relies on the
+same file. And `bash -l` reads only the **first** of `~/.bash_profile`,
+`~/.bash_login`, `~/.profile` — so straight after the export the seed fails the
+row, naming the file, if either of the first two exists in the home. Without
+that, a stray `.bash_profile` makes `.profile` silently unread and every
+credentialed row fails on a missing key, indistinguishable from a real D3a
+regression.
 
 ### The one measured surprise worth knowing
 

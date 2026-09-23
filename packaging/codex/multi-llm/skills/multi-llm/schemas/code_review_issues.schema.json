@@ -1,0 +1,35 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Code Review Issues",
+  "type": "array",
+  "items": {
+    "type": "object",
+    "required": ["title", "desc", "importance", "file", "type"],
+    "properties": {
+      "title": { "type": "string" },
+      "desc": { "type": "string" },
+      "importance": { "type": "string", "enum": ["high", "medium", "low"] },
+      "file": { "type": "string" },
+      "line_range": {
+        "type": "array",
+        "items": { "type": "integer" },
+        "minItems": 2,
+        "maxItems": 2
+      },
+      "type": {
+        "type": "string",
+        "enum": ["bug", "missing", "improvement", "style", "scope"]
+      },
+      "anchor_text": { "type": "string" },
+      "suggested_fix": {
+        "type": "object",
+        "properties": {
+          "format": { "type": "string", "enum": ["unified_diff", "before_after"] },
+          "before": { "type": "string" },
+          "after": { "type": "string" },
+          "diff": { "type": "string" }
+        }
+      }
+    }
+  }
+}

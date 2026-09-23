@@ -71,8 +71,11 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           # The staging step refuses a dirty tree, and `git status --porcelain`
-          # needs real history to answer. A shallow checkout is enough for that.
-          fetch-depth: 1
+          # needs real history to answer. Full depth rather than shallow, and
+          # the tags with it: the codex route's `test_version_bumps_with_payload`
+          # reads `dist/tree.sha256` and the version at every `codex-v*` tag with
+          # `git show`, so a checkout without them would grade no release at all.
+          fetch-depth: 0
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
         with:
@@ -83,3 +86,9 @@ jobs:
       # demands the full one rather than trusting a green PR.
       - name: Package gate (A4 rows 1-6)
         run: make opencode-package-check-ci
+      # The codex plugin's CI tier, beside the npm one: the clean rebuild must
+      # equal the committed `packaging/codex/multi-llm/` (the Git route serves
+      # those bytes with no build), then the codex suite's plain and
+      # `package`-marked rows. No Docker, no codex binary, no stamp.
+      - name: Codex plugin gate (CI tier)
+        run: make codex-package-check-ci

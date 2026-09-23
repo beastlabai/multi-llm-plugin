@@ -208,6 +208,11 @@ class Row:
     #: ``documented_invocation`` carve-out below was added to stop after a refused
     #: command printed five of them.
     route: str = "file"
+    #: Host lane, codex package route, `creds="none"` only: which zero-quota
+    #: probe this row runs (`entrypoint.CODEX_PACKAGE_PROBES`, read off the
+    #: matrix's `package_probes:` rows). ``None`` on every other row, and then
+    #: never forwarded, so no existing row's argv moves.
+    probe: str | None = None
 
 
 @dataclass
@@ -275,6 +280,16 @@ class RowResult:
         host process never got far enough to record one.
         """
         return _read_json(self.out_dir / "invocation.json")
+
+    @property
+    def install_source(self) -> str | None:
+        """Where a package row's plugin install came from, as the bundle's
+        ``plugin-install.json`` recorded it (``local-path``, ``git``), or ``None``
+        when nothing recorded one. :func:`promotable_fields` keys ``package`` on
+        this, never on the route word (rule j)."""
+        value = _read_json(self.out_dir / "plugin-install.json").get(
+            "install_source")
+        return str(value) if value else None
 
     @property
     def host_run(self) -> dict:
@@ -1104,6 +1119,8 @@ def build_run_argv(row: Row, out_dir: Path, posture: dict,
         # and therefore every existing row's rendered host config — stays
         # byte-identical.
         argv += ["--route", row.route]
+    if row.probe:
+        argv += ["--probe", row.probe]
     if row.documented_invocation:
         argv += ["--documented-invocation"]
     if row.command:
@@ -2483,6 +2500,13 @@ def promotable_fields(row: Row, result: RowResult) -> set[str]:
     """
     if row.lane != "host" or not row.host:
         return set()
+    if row.probe:
+        # A zero-quota PROBE row is not a host turn. Its receipts are the
+        # harness's own stdio client driving the dispatcher through the same
+        # receipt-writing `uv` wrapper, so crediting them would promote
+        # `package` and `multi_turn` on a row where the host took no turn at
+        # all — the `documented_invocation` trap below, in another shape.
+        return set()
     fields: set[str] = set()
     if row.route == "package":
         # A package row promotes `package` plus the route-NEUTRAL behavioural
@@ -2493,8 +2517,14 @@ def promotable_fields(row: Row, result: RowResult) -> set[str]:
         # `reload` are claims about a FILE this row never wrote.
         #
         # `package` itself needs the same two-part evidence a receipt gives the
-        # file route: the payload was found and the dispatcher really ran.
-        if result.receipts:
+        # file route: the payload was found and the dispatcher really ran —
+        # AND the install must have come through the Git route. Rule (j):
+        # local-build evidence never promotes a distribution claim, and both
+        # the local-path seed and the Git install spell `route: package`, so
+        # the gate keys on the RECORDED install source, not on the route word.
+        # A row that recorded none (or `local-path`) earns the behavioural
+        # cells only.
+        if result.receipts and result.install_source == "git":
             fields.add("package")
         if len(result.receipts) >= 2:
             fields.add("multi_turn")

@@ -1505,13 +1505,43 @@ def mentions(text: str, path: str) -> bool:
 
 
 class TestPackagingAndDocs:
-    def test_exactly_one_auto_discoverable_skill_manifest_still_ships(self):
-        manifests = [
+    #: Every ``SKILL.md`` the repository may carry outside ``.claude/`` (a
+    #: developer's own workflow skills live there and ship nowhere): the core
+    #: skill, and the codex plugin's generated thin skill (plans/codex-native-
+    #: plugin.md, D1/D7), which sits under ``packaging/`` precisely so the
+    #: skill tree still holds exactly one.
+    PERMITTED_SKILL_MANIFESTS = frozenset({
+        "skills/multi-llm/SKILL.md",
+        "packaging/codex/multi-llm/skills/multi-llm/SKILL.md",
+    })
+
+    def test_exactly_the_permitted_skill_manifests_ship(self):
+        """Repo-rooted and ``git ls-files``-based, against an explicit allow-set.
+
+        Tracked *and* untracked-but-not-ignored, so a generated tree that is
+        about to be committed is graded before the commit rather than after it.
+        The skill-tree half still holds on its own: a second ``SKILL.md`` under
+        ``skills/multi-llm/`` is a second auto-discoverable skill to every host
+        that scans that directory.
+        """
+        import subprocess
+
+        listed = subprocess.run(
+            ["git", "ls-files", "-z", "--cached", "--others", "--exclude-standard",
+             "--", ":(glob)**/SKILL.md", ":(exclude).claude/**"],
+            cwd=REPO_ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+        manifests = {path for path in listed.split("\0") if path}
+        assert manifests == self.PERMITTED_SKILL_MANIFESTS, (
+            f"unexpected: {sorted(manifests - self.PERMITTED_SKILL_MANIFESTS)}; "
+            f"missing: {sorted(self.PERMITTED_SKILL_MANIFESTS - manifests)}"
+        )
+        in_skill_tree = [
             path.relative_to(SKILL_ROOT).as_posix()
             for path in SKILL_ROOT.rglob("SKILL.md")
             if ".venv" not in path.parts and "tests" not in path.parts
         ]
-        assert manifests == ["SKILL.md"], manifests
+        assert in_skill_tree == ["SKILL.md"], in_skill_tree
 
     def test_the_templates_are_tmpl_suffixed_and_declared(self):
         for host_id in INSTALLABLE:

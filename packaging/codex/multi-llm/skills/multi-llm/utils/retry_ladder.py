@@ -1,0 +1,425 @@
+"""The one retry policy both invocation lanes obey (§7.1.b, §7.5).
+
+Two lanes retry dispatches and until now they disagreed about everything that
+matters. Lane B (``subagent_executor._dispatch_task``) had the D3k rung ladder,
+a monotonic per-task deadline and two separate retry counters; Lane A
+(``review_orchestrator_base.run_single_model``) had ``'429' in str(error)`` and
+a *recursive self-call that handed every attempt a fresh full timeout*, so a
+claude-code slot at ``default_timeout: 1800`` could run 4 × 1800 s + 35 s of
+backoff ≈ **2 h** against a configured ceiling of 1800 s.
+
+**What is shared is the policy, not the loop.** Lane B's loop is synchronous and
+drives a blocking capture; Lane A's ``run_single_model`` is a coroutine awaited
+inside ``asyncio.gather`` under two semaphores. Importing Lane B's loop into the
+coroutine would block the event loop and serialize the whole fan-out, and hiding
+it behind ``to_thread`` would put an already-async invocation behind a thread
+boundary for no gain. So this module holds a **pure** decision object — no I/O,
+no sleeping, no clock beyond an injected ``now`` — and each lane keeps its own
+three-line loop:
+
+    ladder = RetryLadder(timeout=resolved_timeout,
+                         retries=get_subagent_retries(anchor=anchor),
+                         envelope=provider.internal_retries,
+                         now=time.monotonic)
+    while (slice_s := ladder.next_attempt()) is not None:
+        status = await dispatch(..., timeout=slice_s)   # Lane A awaits
+        action = ladder.record(status)                  # Lane B blocks
+        if action.delay:
+            await asyncio.sleep(action.delay)           # Lane B: napper(delay)
+
+``next_attempt()`` is where §7.5 rules 1, 3 and 4 live; ``record()`` is where
+rule 2's two counters and rule 6's composition tests live. The only lane-specific
+lines are the dispatch call and the sleep.
+
+The status vocabulary and the D3k rung table live here rather than in
+``subagent_executor`` because the ladder is now their only consumer;
+``subagent_executor`` re-exports every name it used to define, so nothing that
+imported them from there has to change.
+"""
+
+from __future__ import annotations
+
+import random
+from dataclasses import dataclass
+from typing import Callable, Optional, Protocol
+
+
+# ---------------------------------------------------------------------------
+# Status vocabulary and the D3k rung table (moved here from subagent_executor,
+# which re-exports all of it).
+# ---------------------------------------------------------------------------
+
+STATUS_OK = "ok"
+STATUS_TIMEOUT = "timeout"
+STATUS_RATE_LIMITED = "rate_limited"
+STATUS_RUNNER_ERROR = "runner_error"
+STATUS_UNPARSEABLE = "unparseable_result"
+STATUS_SCHEMA_INVALID = "schema_invalid"
+STATUS_REJECTED = "rejected"
+STATUS_SPAWN_FAILED = "spawn_failed"
+STATUS_AUTH_FAILED = "auth_failed"
+#: The runner rejected the model id itself (D4). Deliberately the same string
+#: as the classifier's ``CATEGORY_INVALID_MODEL`` — an alias for a word already
+#: in the vocabulary, not a second spelling — so the category reaches
+#: :meth:`RetryLadder.record` under its own name on both lanes. A rejected id is
+#: a property of the *spec*, not of the turn: the fix is a config edit, never a
+#: retry, and every sibling resolving the same spec fails identically.
+STATUS_INVALID_MODEL = "invalid_model"
+#: The runner's own OS sandbox could not start (D6) — bubblewrap on a stock
+#: Ubuntu 24.04, where ``kernel.apparmor_restrict_unprivileged_userns=1``
+#: denies it the user namespace it needs. The same string as the classifier's
+#: ``CATEGORY_SANDBOX_UNAVAILABLE`` on D4's reasoning: a property of the
+#: *machine*, not of the turn, so every sibling on that runner fails
+#: identically and the fix (an AppArmor profile, ``multi_llm.py doctor`` prints
+#: it) is never a retry.
+STATUS_SANDBOX_UNAVAILABLE = "sandbox_unavailable"
+#: Not a dispatch outcome: a task with no result file at all (an orphan from a
+#: run killed mid-batch). Defined by artifacts, never by memory (D3i).
+STATUS_INCOMPLETE = "incomplete"
+#: Terminal, and deliberately **not** retryable: re-sending an unchanged
+#: oversized prompt is the one retry guaranteed to fail identically (§7.6(a)).
+#: Splitting is a feature with its own design, not a line in a classifier table.
+STATUS_CONTEXT_LENGTH_EXCEEDED = "context_length_exceeded"
+#: Not a dispatch outcome either: rule 4 refused to *start* an attempt because
+#: what is left of the deadline cannot hold one worst-case attempt of this
+#: adapter's declared vendor envelope.
+STATUS_BUDGET_EXHAUSTED = "budget_exhausted"
+
+#: ``salvage`` only: the subagent read the raw output it was handed and reported
+#: back that it holds no recoverable document
+#: (``{"salvage_failed": true, "reason": ...}``, ``build_salvage_prompt``'s
+#: fallback). Terminal, and in **none** of the three policy sets below: the
+#: dispatch worked, the answer is a definite negative, and re-sending an
+#: unchanged raw output to an unchanged prompt asks a question already answered.
+#:
+#: Deliberately absent from ``RUNG_BY_STATUS`` too. A rung is a position on the
+#: *transport* failure ladder, and nothing about this dispatch failed — the child
+#: spawned, replied and was understood. What is being recorded is the content of
+#: the reply, so a rung here would be a category error in the same way it is for
+#: ``budget_exhausted`` and the two D3g verification failures.
+STATUS_SALVAGE_UNRECOVERABLE = "salvage_unrecoverable"
+
+#: The D3k ladder, first match wins. Every dispatch failure lands on exactly one
+#: rung, and the status is what ``subagent_batch_report.json`` records verbatim.
+RUNG_BY_STATUS = {
+    STATUS_SPAWN_FAILED: 1,
+    STATUS_AUTH_FAILED: 1,
+    STATUS_INVALID_MODEL: 1,
+    STATUS_SANDBOX_UNAVAILABLE: 1,
+    STATUS_TIMEOUT: 2,
+    STATUS_RATE_LIMITED: 3,
+    STATUS_RUNNER_ERROR: 4,
+    STATUS_UNPARSEABLE: 5,
+    STATUS_SCHEMA_INVALID: 6,
+    STATUS_REJECTED: 7,
+}
+
+#: Statuses that consume ``driver.subagent_retries``.
+RETRYABLE_STATUSES = frozenset({STATUS_TIMEOUT, STATUS_RUNNER_ERROR, STATUS_UNPARSEABLE})
+
+#: Rate limiting is retried with backoff+jitter and does **not** consume the
+#: retry budget (D3i) — it is not a transport failure.
+BACKOFF_STATUSES = frozenset({STATUS_RATE_LIMITED})
+
+#: Rungs that fail the whole batch immediately: every sibling would fail
+#: identically, so continuing would only burn the retry budget N times.
+#: ``invalid_model`` qualifies because the failure is a property of the spec
+#: (D4): a sibling on the *same* spec cannot do anything but fail again, and a
+#: sibling on a different spec is settled by the dispatch gate, not predicted.
+#: ``sandbox_unavailable`` qualifies because the failure is a property of the
+#: machine (D6): bubblewrap cannot start for any sibling either.
+FATAL_STATUSES = frozenset({
+    STATUS_SPAWN_FAILED, STATUS_AUTH_FAILED, STATUS_INVALID_MODEL,
+    STATUS_SANDBOX_UNAVAILABLE,
+})
+
+#: The smallest slice of the per-slot budget worth *starting* an attempt with
+#: (D3i). The timeout is the slot's total wall-clock budget, so a retry gets what
+#: is left of it — and a runner handed under a second would spend it on process
+#: start-up and be killed for the same reason the previous attempt was, having
+#: added only a spawn and a kill to the batch.
+MIN_ATTEMPT_BUDGET_S = 1.0
+
+#: §7.5 rule 2: at most three rate-limit backoffs per slot, and they do not
+#: consume the transport budget.
+MAX_RATE_LIMIT_BACKOFFS = 3
+
+
+def backoff_delay(attempt: int, jitter: Callable[[], float] = random.random) -> float:
+    """Exponential backoff **plus jitter** for rate-limit rung 3.
+
+    "Equal jitter": half the exponential step is deterministic and half is
+    random, so a retry is never immediate and never longer than the step itself.
+    Without the random half, the N sibling slots a shared provider throttled at
+    the same moment re-attempt in lockstep and re-trip the same limit together,
+    which is the failure the backoff exists to avoid.
+
+    Pure: the caller supplies the randomness and applies any test fast-backoff
+    hook to the result, so this module keeps no import of either.
+    """
+    step = min(2.0 ** attempt, 30.0)
+    half = step / 2.0
+    return half + jitter() * half
+
+
+class InternalRetryEnvelopeLike(Protocol):
+    """What the ladder reads off an adapter's ``internal_retries`` (§7.6(b)).
+
+    Structural, not an import: the declaration lives on ``LLMProvider`` beside
+    the adapters that populate it, and the ladder must stay free of provider
+    imports to remain pure.
+    """
+
+    max_requests: int
+    max_wall_s: Optional[float]
+    retries_rate_limit: bool
+
+
+#: Why the ladder stopped. ``None`` while it is still willing to dispatch.
+STOP_EXHAUSTED_ATTEMPTS = "attempts_exhausted"
+STOP_BUDGET = "budget_exhausted"
+STOP_DEADLINE = "deadline_reached"
+STOP_FATAL = "fatal"
+STOP_TERMINAL = "terminal_status"
+STOP_VENDOR_ALREADY_RETRIED = "vendor_already_retried_rate_limit"
+
+
+@dataclass(frozen=True)
+class Action:
+    """What the caller does after reporting an attempt's status.
+
+    ``delay`` is the only thing the caller *performs*; everything else is
+    bookkeeping the ladder has already done. ``retry`` is False exactly when
+    ``next_attempt()`` will return ``None``.
+    """
+
+    retry: bool
+    delay: float = 0.0
+    reason: Optional[str] = None
+
+
+class RetryLadder:
+    """One slot's retry policy: a deadline, two counters, and an admission test.
+
+    Pure by construction — it never sleeps, never spawns and never reads a
+    clock other than the ``now`` it was handed. That is what lets Lane A's
+    ``async`` loop and Lane B's blocking loop share it.
+    """
+
+    def __init__(
+        self,
+        timeout: float,
+        retries: int,
+        envelope: Optional[InternalRetryEnvelopeLike] = None,
+        now: Callable[[], float] = None,
+        jitter: Callable[[], float] = random.random,
+        max_rate_limit_backoffs: int = MAX_RATE_LIMIT_BACKOFFS,
+        min_attempt_budget_s: float = MIN_ATTEMPT_BUDGET_S,
+    ) -> None:
+        if now is None:  # pragma: no cover - the default is the real clock
+            import time
+
+            now = time.monotonic
+        self._now = now
+        self._jitter = jitter
+        self.timeout = float(timeout)
+        # §7.5 rule 1: ONE deadline per slot, taken once. Every attempt is
+        # spawned with what is LEFT of it, never with a fresh copy — which is
+        # precisely what Lane A's recursion did.
+        self._started_at = now()
+        self._deadline = self._started_at + self.timeout
+        self.envelope = envelope
+        self._min_attempt_budget_s = min_attempt_budget_s
+        self._max_rate_limit_backoffs = max_rate_limit_backoffs
+
+        # §7.5 rule 2: two SEPARATE counters. Transport-shaped failures consume
+        # `driver.subagent_retries`; rate limiting backs off without consuming
+        # it. Lane A's `retry_count < 3` recursion is replaced by these, never
+        # added to them.
+        self._transport_retries_left = int(retries)
+        self._rate_limit_attempts = 0
+
+        self.attempt_index = 0
+        self.stop_reason: Optional[str] = None
+        self._last_status: Optional[str] = None
+
+    # -- clock ------------------------------------------------------------
+
+    def elapsed(self) -> float:
+        return self._now() - self._started_at
+
+    def remaining(self) -> float:
+        return self._deadline - self._now()
+
+    # -- rules 1, 3 and 4 -------------------------------------------------
+
+    def next_attempt(self) -> Optional[float]:
+        """The slice the next attempt may run for, or ``None`` to stop.
+
+        ``None`` always leaves :attr:`stop_reason` set, so a caller never has to
+        infer *why* a slot ended.
+        """
+        if self.stop_reason is not None:
+            return None
+
+        left = self.remaining()
+        # Rule 3: no attempt starts with less than MIN_ATTEMPT_BUDGET_S. A
+        # runner handed a sliver spends it on process start-up and is killed for
+        # the same reason the previous attempt was.
+        if left < self._min_attempt_budget_s:
+            self.stop_reason = (
+                STOP_DEADLINE if self.attempt_index else STOP_BUDGET
+            )
+            return None
+
+        # Rule 4: vendor-internal retries are DECLARED, not discovered. If the
+        # adapter's own worst-case wall for one attempt does not fit in what is
+        # left, fail as `budget_exhausted` rather than spawn a child only to
+        # kill it mid-retry. Strictly a pre-dispatch admission test — never a
+        # second debit, because the deadline is already charged the awaited
+        # subprocess's whole duration (rule 6(a)).
+        bound = getattr(self.envelope, "max_wall_s", None) if self.envelope else None
+        if bound is not None and left < bound:
+            self.stop_reason = STOP_BUDGET
+            return None
+
+        self.attempt_index += 1
+        return left
+
+    # -- rule 2 and rule 6 ------------------------------------------------
+
+    def record(self, status: str) -> Action:
+        """Report an attempt's classified status; get the next move."""
+        self._last_status = status
+
+        if status == STATUS_OK:
+            self.stop_reason = STOP_TERMINAL
+            return Action(retry=False, reason="ok")
+
+        if status in FATAL_STATUSES:
+            # Every sibling would fail identically; continuing only burns the
+            # retry budget N times.
+            self.stop_reason = STOP_FATAL
+            return Action(retry=False, reason=f"{status} is fatal to the batch")
+
+        if status in BACKOFF_STATUSES:
+            return self._record_rate_limited()
+
+        if status in RETRYABLE_STATUSES:
+            return self._record_transport(status)
+
+        # Rungs 6 and 7, and the terminal §7.6(a) status: never retried.
+        self.stop_reason = STOP_TERMINAL
+        return Action(retry=False, reason=f"{status} is never retried")
+
+    def _record_rate_limited(self) -> Action:
+        # Rule 6(b): a rate-limit rung may not re-issue an identical dispatch
+        # the vendor already exhausted. If the adapter declares it retries 429s
+        # internally (claude-code), an identical same-rung re-dispatch repeats a
+        # chain that already ran `max_requests` times against the same upstream,
+        # at the same price, for the same verdict — ≤ 3 backoffs would turn 4
+        # requests into 20. A *rung-down* stays legitimate, because it changes
+        # the request the upstream prices; that is the caller's move, not ours.
+        if getattr(self.envelope, "retries_rate_limit", False):
+            self.stop_reason = STOP_VENDOR_ALREADY_RETRIED
+            requests = getattr(self.envelope, "max_requests", None)
+            return Action(
+                retry=False,
+                reason=(
+                    "rate_limited, and this adapter declares it already retries "
+                    f"rate limits internally ({requests} requests per dispatch); "
+                    "an identical re-dispatch would repeat a chain that already ran"
+                ),
+            )
+
+        self._rate_limit_attempts += 1
+        if self._rate_limit_attempts > self._max_rate_limit_backoffs:
+            self.stop_reason = STOP_EXHAUSTED_ATTEMPTS
+            return Action(
+                retry=False,
+                reason=(
+                    f"rate_limited after {self._max_rate_limit_backoffs} backoffs"
+                ),
+            )
+
+        delay = backoff_delay(self._rate_limit_attempts, self._jitter)
+        # Rule 3 again, for the sleep: the backoff is charged to the SAME
+        # deadline as the spawns. Waiting past the ceiling only to dispatch one
+        # more attempt spends the budget twice, and a slice the next attempt
+        # could not use is not worth waiting for either.
+        if self.remaining() - delay < self._min_attempt_budget_s:
+            self.stop_reason = STOP_DEADLINE
+            return Action(
+                retry=False,
+                reason="rate_limited, and the backoff would not fit in the budget",
+            )
+        return Action(retry=True, delay=delay, reason="rate_limited")
+
+    def _record_transport(self, status: str) -> Action:
+        if self._transport_retries_left <= 0:
+            self.stop_reason = STOP_EXHAUSTED_ATTEMPTS
+            return Action(retry=False, reason=f"{status}, retry budget spent")
+        if self.remaining() < self._min_attempt_budget_s:
+            # The retry budget is not the only budget: a retry runs inside the
+            # slot's remaining wall clock, never on a fresh copy of it.
+            unused = self._transport_retries_left
+            self.stop_reason = STOP_DEADLINE
+            return Action(
+                retry=False,
+                reason=(
+                    f"{status} (no retry: the per-slot wall-clock budget of "
+                    f"{self.timeout}s is exhausted, {unused} retr"
+                    f"{'y' if unused == 1 else 'ies'} unused)"
+                ),
+            )
+        self._transport_retries_left -= 1
+        return Action(retry=True, reason=status)
+
+    # -- introspection ----------------------------------------------------
+
+    @property
+    def transport_retries_left(self) -> int:
+        return self._transport_retries_left
+
+    @property
+    def rate_limit_attempts(self) -> int:
+        return self._rate_limit_attempts
+
+    @property
+    def spawns(self) -> int:
+        """Total dispatches admitted so far — the ≤ 5 of §7.5 rule 2."""
+        return self.attempt_index
+
+
+def budget_exhausted_reason(
+    ladder: "RetryLadder", target: str, timeout: float
+) -> str:
+    """The one sentence a rule-4 refusal is recorded with, for **both** lanes.
+
+    It has to say three things, because a slot that spawned nothing is the one
+    failure with no captured streams to read: what the harness gave the slot,
+    what the adapter *declared* one worst-case attempt costs, and that the
+    refusal is a policy decision rather than a crash. The declared numbers are
+    read structurally off the envelope (never imported), so this stays inside the
+    provider-free boundary the AST guard enforces.
+    """
+    wall = getattr(ladder.envelope, "max_wall_s", None)
+    requests = getattr(ladder.envelope, "max_requests", None)
+    left = max(0.0, ladder.remaining())
+    if wall is None:
+        # Rule 3, before the first attempt: the slot's own ceiling is already
+        # under MIN_ATTEMPT_BUDGET_S, so no declared envelope is involved.
+        return (
+            f"{STATUS_BUDGET_EXHAUSTED}: {target} was given a {timeout}s slot and "
+            f"{left:.1f}s of it is left, below the {ladder._min_attempt_budget_s}s "
+            f"minimum an attempt is worth starting with. Nothing was dispatched."
+        )
+    return (
+        f"{STATUS_BUDGET_EXHAUSTED}: {target} declares one dispatch may cost up to "
+        f"{wall:g}s of wall clock inside the CLI"
+        + (f" ({requests} upstream requests)" if requests is not None else "")
+        + f", and only {left:.1f}s of this slot's {timeout}s budget is left. "
+        f"Nothing was dispatched — §7.5 rule 4 refuses a child it would have to "
+        f"kill part-way through a retry chain the harness cannot see. Raise the "
+        f"slot timeout above {wall:g}s, or pick a runner with a smaller envelope."
+    )

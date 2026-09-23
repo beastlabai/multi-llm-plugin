@@ -3884,6 +3884,257 @@ hosts:
           it. Its opencode counterpart is the row that did NOT reach its host —
           see `opencode-auth-negative` and R3.)
 
+      # ----------------------------------------------------------------------
+      # THE CODEX PACKAGE ROUTE's CREDENTIALED ROW (plans/codex-native-plugin.md
+      # Phase 1 item 16 — AUTHORED 2026-09-23, NEVER RUN).
+      #
+      # Everything above grades the FILE shim `install-host codex --global`
+      # writes. This row grades the codex PLUGIN: `_seed_codex_plugin` installs
+      # it from Dockerfile §10c's mirror (`codex plugin marketplace add
+      # /opt/mllm/codex-marketplace`, then `codex plugin add
+      # multi-llm@beastlabai --json`), `stage_host` stages NO shim, and the model
+      # is meant to call the `multi_llm` TOOL rather than retype a command.
+      #
+      # MIRRORS `opencode-package-ask` ARGUMENT FOR ARGUMENT — cited by ROW ID,
+      # because the line-number pin the plan inherited had already drifted onto
+      # an unrelated row. `args`, `command`, `expect`, `wall_clock_s` and
+      # `cost_budget_usd` are that row's, so the two package routes are graded
+      # on one workload. What differs is the prompt: the plugin advertises the
+      # skill NAMESPACED (`multi-llm:multi-llm`, R8′), so this row carries its
+      # own `prompt_template` — the plan's row-16 sentence — and every other
+      # codex row keeps the host's.
+      #
+      # THE KEY IS CARRIED TWICE, by the two mechanisms D3a names, and the row
+      # records both: the codex session reads OPENROUTER_API_KEY from its own
+      # process environment (`run_host`'s `dict(os.environ)`, the `sh -c` auth
+      # command in the generated config), and `write_profile_credential` writes
+      # `export OPENROUTER_API_KEY=…` into the tmpfs home's `.profile` for the MCP
+      # server's login-shell child — then fails the row if a `.bash_profile` or
+      # `.bash_login` would shadow it.
+      #
+      # TRIAGE is the header's own provenance key (item 16): infrastructure (no
+      # key, 429, a retired pin, the image not building) → `unmeasured`, naming
+      # it; the route (narration instead of a call, properties filled wrong, no
+      # dispatch, no terminal result, the child's key from the session rather
+      # than the profile) → `measured-red`, and that alone blocks Phase 2.
+      # ----------------------------------------------------------------------
+      - id: codex-package-ask
+        route: package
+        args: '--ask "plans/auth-feature.md" "What does this plan change?" --quick'
+        # The plan's row-16 sentence, verbatim around `{args}`.
+        prompt_template: |
+          Use the `multi-llm:multi-llm` skill with exactly these arguments: {args}
+        command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick --detach"
+        expect: {run: done, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
+        wall_clock_s: 600
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — copied from opencode-package-ask; 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
+        measured:
+          on: null
+          provenance: unmeasured
+          blocked_on: [codex-native-plugin Phase 1 items 2-5, codex-native-plugin Phase 1 item 16]
+          detail: >
+            NOTHING ABOUT THIS ROW HAS RUN — authored 2026-09-23, before the
+            plugin tree (`packaging/codex/multi-llm/`) it installs existed. It
+            needs the tree, the filled catalog entry, and §10c's image layer,
+            and its first pass is the plan's item 16. No per-row usd will be
+            claimed: the lane's spend is a key-usage delta across the whole
+            invocation (see `opencode-package-ask`'s own measured block).
+        provenance: unmeasured   # codex-native-plugin Phase 1 item 16 — authored 2026-09-23, never executed
+        note: >
+          The zero-quota rows under `package_probes:` below are its
+          prerequisites, not its substitutes, and a red here does not retract
+          them. Its scripted-call control is `codex-package-scripted-call`, which
+          grades the MECHANISM and never a model choosing the tool.
+
+    # -------------------------------------------------------------------------
+    # THE CODEX PACKAGE ROUTE's ZERO-QUOTA ROWS (plans/codex-native-plugin.md
+    # Phase 1 items 1, 1a, 5–14 — AUTHORED 2026-09-23, NONE HAS RUN).
+    #
+    # NOT UNDER `rows:`, deliberately. Every entry under `rows:` is a
+    # CREDENTIALED row — `test_host_lane_budget` requires its
+    # `cost_budget_usd`, and `TestTheScheduleMatchesTheMatrix` requires
+    # `CREDENTIALED_ROWS` to schedule it with the OpenRouter key. These spend
+    # nothing: each runs at `--creds none` under `--network none`, the host's own
+    # model is the loopback stub, and the scripted-call scenario
+    # (`scripted_codex_plugin_tool_call.yaml`) is the only thing that ever "calls" the
+    # tool. `test_container_host_lane.py`'s `package_probe` fixture schedules
+    # exactly this list, `container`-marked but not `live`.
+    #
+    # EACH ROW IS ONE `--probe` of `entrypoint.run_codex_package_probe`, on a
+    # fresh container whose wiring step already installed the plugin
+    # (`_seed_codex_plugin`, so every bundle carries `plugin-install.json` and
+    # `codex-plugin-list.json`). A probe writes `probe-<name>.json`.
+    #
+    # `blocking:` is the plan's item 15: `true` rows must come back GREEN on the
+    # cells the grader names; `false` rows are done when their answer is
+    # RECORDED, never when it is a particular answer. Legs a probe does not drive
+    # yet are named inside its record (`legs_not_driven`), so an absent reading
+    # is never read as a green one.
+    #
+    # EVERY CELL IS `unmeasured` — no credential was needed and none was the
+    # blocker; what never happened is the run, because the plugin tree these
+    # rows install does not exist yet (Phase 1 items 2–4). The first run of the
+    # tier promotes or reds each row by bundle id, per this file's header.
+    # -------------------------------------------------------------------------
+    plugin_floor: "0.156.1"
+    plugin_floor_note: >
+      The codex version every plugin row below was designed against (the pin in
+      cli-versions.lock, and `SOURCE_CODEX_VERSION` in
+      packaging/codex/ingestion_rules.py once it lands).
+      `test_container_codex_meets_plugin_floor` reads `codex --version` in the
+      image and SKIPS every plugin row below this floor, naming the measured
+      version and the floor.
+    package_probes:
+      - id: codex-package-floor
+        probe: floor
+        item: "1"
+        blocking: true
+        provenance: unmeasured   # authored 2026-09-23; never executed — the plugin tree does not exist yet
+        records: [probe-floor.json]
+      - id: codex-package-features
+        probe: features
+        item: "1"
+        blocking: false
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-features.json, codex-features.txt]
+        note: >
+          The printout is the run record: `plugins stable true`, `plugin_hooks
+          removed false`, `multi_agent stable true` at the 0.155.1 pin, and again at 0.156.1.
+      - id: codex-package-seed
+        probe: seed
+        item: "5"
+        blocking: true
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [plugin-install.json, codex-plugin-list.json]
+        note: >
+          Measured under `--network none`: the local route copies from a path
+          and contacts nothing (R33/R16), and this row is what turns that into a
+          record. The grader asserts the install's own table in config.toml
+          (quiet before), an installed directory under the cache root, and NO
+          file shim in the home.
+      - id: codex-package-scripted-call
+        probe: scripted-call
+        item: "1a"
+        blocking: true
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-scripted-call.json, codex-exec-scripted-call.jsonl, stub.jsonl]
+        note: >
+          One `function_call` served on the named scenario, the
+          `function_call_output` round-tripping, the served frames recorded.
+          Evidence of the MECHANISM only — never of a model choosing the tool.
+      - id: codex-package-loader-mcp-get
+        probe: loader-mcp-get
+        item: "6"
+        blocking: true
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-loader-mcp-get.json, codex-mcp-get.json]
+        note: >
+          Its own row because it is the single point the skill's fallback
+          sentence rests on and `codex doctor` cannot see the same server (R43):
+          the server echoed, `cwd` expanded to the cache root, and
+          `tool_timeout_sec` as shipped.
+      - id: codex-package-loader-prompt-input
+        probe: loader-prompt-input
+        item: "6"
+        blocking: true
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-loader-prompt-input.json, codex-prompt-input.txt]
+        note: >
+          `multi-llm:multi-llm` advertised, with a locator that resolves to the
+          installed SKILL.md only AFTER substituting the printed roots table
+          (R8′ — the locator is root-relative).
+      - id: codex-package-loader-tools
+        probe: loader-tools
+        item: "6"
+        blocking: true
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-loader-tools.json, stub.jsonl]
+        note: >
+          The capture stub's `tools[]` carries `mcp__multi_llm` -> `multi_llm`
+          with the schema verbatim (read off the stub log's
+          `scripted.declaration`).
+      - id: codex-package-anchor
+        probe: anchor
+        item: "7"
+        blocking: false
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-anchor.json]
+        note: >
+          7(a) is recorded either way; 7(b) and 7(c) are blocking once the
+          anchor winner is wired, and the probe names them in `legs_not_driven`
+          until then.
+      - id: codex-package-runnability
+        probe: runnability
+        item: "8"
+        blocking: true
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-runnability.json]
+        note: >
+          The stdio `tools/call` with `mode: status` that reaches
+          `MULTI_LLM_RESULT` at exit 2, then the partial-payload variant (the
+          cache copy's uv.lock removed: a tool error naming that path, the tool
+          still listed).
+      - id: codex-package-environment
+        probe: environment
+        item: "9"
+        blocking: false
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-environment.json, codex-exec-environment.jsonl]
+        note: >
+          Two drivers, one grading: the stdio client is the CONTROL (it hands
+          the server the harness environment), the scripted-call exec is the
+          graded reading. 9(b)'s shell-ladder refusal and 9(c)'s `--check` half
+          are blocking in the plan and are named in `legs_not_driven` until the
+          server-side knob they need exists.
+      - id: codex-package-progress-cancellation
+        probe: progress-cancellation
+        item: "10"
+        blocking: false
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-progress-cancellation.json]
+      - id: codex-package-plugin-data
+        probe: plugin-data
+        item: "11"
+        blocking: false
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-plugin-data.json]
+      - id: codex-package-sandbox-posture
+        probe: sandbox-posture
+        item: "12"
+        blocking: false
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/scripted_codex_plugin_tool_call.yaml
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-sandbox-posture.json]
+        note: >
+          12(a) at zero quota, driven rather than inferred: the seeded home's
+          `approval_policy = "never"` and no `-a` in the argv, so an approval
+          wait around the call is a reading here rather than a timeout on the
+          paid row. Landlock is ENOSYS in this image, so 12(d)'s expected rung is
+          2 (`bypassed`); a rung-1 reading here would itself be a finding.
+      - id: codex-package-overlay
+        probe: overlay
+        item: "13"
+        blocking: false
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-overlay.json]
+        note: >
+          Runs before any Dockerfile-side edit of the image's copy of
+          `.mcp.json` is written (D3a's fallback waits on this answer).
+      - id: codex-package-timeout
+        probe: timeout
+        item: "14"
+        blocking: false
+        provenance: unmeasured   # authored 2026-09-23; never executed
+        records: [probe-timeout.json]
+        note: >
+          Read through row 13's answer, so it runs after it. A2b's 900 is not
+          raised until this row is green.
+
   # ===========================================================================
   opencode:
     stage:

@@ -1,0 +1,14 @@
+---
+description: "Orchestrate plan reviews, task generation, implementation and code reviews across several LLM CLIs in parallel, or ask every model one free-text question about a plan. Triggers: review my plan, multi-llm, run a code review, generate tasks from a plan, implement this plan, ask the models about my plan."
+---
+
+# Multi-LLM
+
+Call the `multi_llm` tool with the argument text above, converted to its four
+properties exactly as that tool's own argument descriptions specify. The tool is
+the only supported entry point on this host: it appends the flags this host
+requires, refuses the ones it owns, and supervises the run to a terminal result.
+Do not reach the dispatcher any other way.
+
+Read the result's `exit` and `next` the way the dispatcher's own contract reads
+them. {NEEDS_HUMAN_RULE}

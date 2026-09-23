@@ -92,6 +92,17 @@
 !packaging/opencode/dist/**
 !packaging/opencode/skills/**
 
+# ... and the codex PLUGIN tree plus the catalog that names it (the codex host's
+# package route, plans/codex-native-plugin.md Phase 1 item 5). Unlike the
+# opencode package above, both are TRACKED: `packaging/codex/multi-llm/` is the
+# checked-in plugin directory (manifest, .mcp.json, mcp/server.py, dist/,
+# LICENSE and the skills/ payload), and `.agents/plugins/marketplace.json` is
+# the catalog file users fetch. Dockerfile §10c copies both into
+# /opt/mllm/codex-marketplace/ at these same two relative paths, so the catalog
+# the row installs from IS the catalog that ships -- no edit, no second file.
+!.agents/plugins/marketplace.json
+!packaging/codex/multi-llm/**
+
 # Re-excluded from inside the allowed trees. Last match wins, so these have to
 # stay BELOW the negations above.
 **/__pycache__/**
@@ -107,6 +118,10 @@ skills/multi-llm/tests/container/runs/**
 # rebuilt inside the image by its own layer and must never ride in from the host,
 # where it carries absolute paths and host-built binaries.
 packaging/opencode/skills/multi-llm/.venv/**
+# The same trap in the codex plugin tree: running mcp/server.py in place (or a
+# `uv sync` there) builds skills/multi-llm/.venv, full of host absolute paths.
+# BELOW the `!packaging/codex/multi-llm/**` negation above, since last match wins.
+packaging/codex/multi-llm/skills/multi-llm/.venv/**
 **/creds.json
 **/creds/**
 **/*.credentials.json

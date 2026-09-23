@@ -78,11 +78,22 @@ READERS = {
     # same way before running `doctor --warn-only`; it lives at the repo root
     # beside `.claude-plugin/`, so it is the one reader outside the skill tree.
     "hooks/doctor.sh": "ls",
+    # The codex plugin's generated surface (plans/codex-native-plugin.md, D3e),
+    # committed because the Git route serves the checked-in tree: the list the
+    # server's uv preflight reads, emitted from `unattended.UV_CANDIDATES`.
+    "packaging/codex/multi-llm/dist/cli-surface.json": "generated",
 }
 
 #: Where each reader lives, relative to the repo root.
 _ROOTS = {name: SKILL_ROOT for name in READERS}
 _ROOTS["hooks/doctor.sh"] = REPO_ROOT
+_ROOTS["packaging/codex/multi-llm/dist/cli-surface.json"] = REPO_ROOT
+
+#: The codex plugin's committed copy of the skill tree. A hit under it is the
+#: *same* reader as its source — `test_checked_in_plugin_matches_build`
+#: byte-compares the copy against a fresh build — so it is graded as that
+#: source rather than listed a second time.
+CODEX_PAYLOAD_COPY = "packaging/codex/multi-llm/skills/multi-llm/"
 
 
 class TestTheListItself:
@@ -139,6 +150,15 @@ class TestEveryReaderAgrees:
                 f"{relative}'s `ls` probe does not match the source list.\n"
                 f"expected: {LS_LINE}\n"
                 "Every candidate, in probe order, `$HOME`-spelled and quoted."
+            )
+            return
+
+        if form == "generated":
+            import json
+
+            assert json.loads(text)["uv"]["candidates"] == list(CANDIDATES), (
+                f"{relative} was emitted from a different list; rebuild it "
+                "(`make codex-regen`)"
             )
             return
 
@@ -241,6 +261,9 @@ class TestNoUnlistedReader:
                 "test_unattended.py", "test_detach.py", "test_shim_correctness.py",
                 "test_install_host.py", "test_instruction_portability.py",
             ):
+                continue
+            if line.startswith(CODEX_PAYLOAD_COPY):
+                hits.add(line[len(CODEX_PAYLOAD_COPY):])
                 continue
             try:
                 hits.add(str(path.relative_to("skills/multi-llm")))
