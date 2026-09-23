@@ -680,6 +680,14 @@ class TestTheWriterAxisGradesTheWritePath:
             f"{writer_chain.entry['reviewer']!r}. A bundle captured against a "
             f"different reviewer is not comparable to its siblings."
         )
+        stale = container_bundle.stale_hash_pointers(baseline_doc)
+        assert not stale, (
+            f"{cli}: {path} was captured while file hashes were erased "
+            f"({len(stale)} `<str>` pointers, first {stale[0]}); the rig now "
+            f"pins SOURCE_DATE_EPOCH and compares them by value, so it can "
+            f"never reproduce — re-capture it with:\n"
+            f"  {RESEED.format(cli=cli).replace('--cli', '--writer')}"
+        )
         produced = container_bundle.capture_bundle(writer_chain.result.out_dir)
         diffs = container_bundle.diff_bundles(
             container_bundle.compare_payload(baseline_doc), produced)
@@ -1132,6 +1140,14 @@ class TestTheNormalizedBundleReproducesItsBaseline(_ReviewerSandboxPolicy):
             f"{chain.row.cli}: the baseline was captured at bundle_version "
             f"{baseline.get('bundle_version')}, the capture code is at "
             f"{container_bundle.CONTAINER_BUNDLE_VERSION} — re-capture it:\n"
+            f"  {RESEED.format(cli=chain.row.cli)}"
+        )
+        stale = container_bundle.stale_hash_pointers(baseline)
+        assert not stale, (
+            f"{chain.row.cli}: the baseline was captured while file hashes were "
+            f"erased ({len(stale)} `<str>` pointers, first {stale[0]}); the rig "
+            f"now pins SOURCE_DATE_EPOCH and compares them by value, so it can "
+            f"never reproduce — re-capture it:\n"
             f"  {RESEED.format(cli=chain.row.cli)}"
         )
         manifest = baseline.get("manifest") or {}

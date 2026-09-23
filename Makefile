@@ -183,12 +183,15 @@ e2e-container-host: e2e-image
 # A target of its own, for two independent reasons, and either one would be
 # enough:
 #
-# * **Cost.** `MLLM_E2E_BUDGET_USD` defaults to $2.00 and is not a per-row
-#   ceiling: `_Spend.check()` runs BETWEEN rows off a running key-usage total
-#   and calls `pytest.exit(..., returncode=1)`, so crossing it abandons every
-#   row after the crossing rather than trimming one. A ~$3-5 tier crosses
-#   $2.00 around its fourth row — the failure mode being a HALF-COVERED TIER,
-#   not an overspend. $6.00 covers the pass with headroom for one retried row.
+# * **Cost.** `MLLM_E2E_BUDGET_USD` defaults to $2.00 and is the LANE total:
+#   `_Spend.check()` refuses to start a row once the running key-usage total
+#   reaches it, and since 2026-09-23 a mid-row poller (`tests/container/
+#   host_spend.py`) also stops the row that crosses it — or crosses its own
+#   `cost_budget_usd × MLLM_E2E_ROW_BUDGET_HEADROOM` — as `budget-exceeded`.
+#   Either way every row after the crossing is abandoned rather than trimmed.
+#   A ~$3-5 tier crosses $2.00 inside its third row — the failure mode being
+#   a HALF-COVERED TIER, not an overspend. $6.00 covers the pass with headroom
+#   for one retried row.
 #   Raise the dedicated key's own spend limit above that figure before first
 #   use. The 13-row provider tier spent $0.1610 of $2.00 on 2026-08-20 and its
 #   default is therefore unchanged.

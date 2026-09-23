@@ -413,6 +413,55 @@ class TestCaptureFoldsWhatItClaims:
         assert container_bundle.fold({"group_id": "c948ad24b1b8e432"}) != (
             container_bundle.fold({"group_id": "0000000000000000"}))
 
+    def test_file_hashes_are_compared_by_value(self):
+        """The rig pins SOURCE_DATE_EPOCH, so `tasks.md`'s digest repeats and
+        every file hash — the ~40 stable ones included — grades again."""
+        path = "plans/auth-feature/tasks/tasks.md"
+        one = {"tasks_sha256": "a" * 16,
+               "sha256_before": {path: "b" * 64, "src/new.py": None},
+               "sha256_after": {path: "c" * 64}}
+        assert container_bundle.fold(one) == one
+        two = dict(one, sha256_after={path: "d" * 64})
+        assert container_bundle.fold(one) != container_bundle.fold(two)
+        assert container_bundle.fold(dict(one, tasks_sha256="e" * 16)) != (
+            container_bundle.fold(one))
+
+    def test_a_baseline_captured_under_the_erasure_is_named_stale(self):
+        erased = {"outcomes": [{
+            "tasks_sha256": "<str>",
+            "sha256_before": {"plans/a/tasks/tasks.md": "<str>", "new.py": None},
+            "sha256_after": {"plans/a/tasks/tasks.md": "f" * 64},
+            "runner_versions": {"codex:gpt-5.5": "<str>"},
+        }]}
+        assert container_bundle.stale_hash_pointers(erased) == [
+            "/outcomes/0/sha256_before/plans~1a~1tasks~1tasks.md",
+            "/outcomes/0/tasks_sha256",
+        ]
+        # A real capture holds digests there; `runner_versions` is still erased
+        # by design and is never a staleness signal.
+        assert container_bundle.stale_hash_pointers(
+            container_bundle.fold({"tasks_sha256": "a" * 16,
+                                   "runner_versions": {"x:y": "1"}})) == []
+
+    @pytest.mark.parametrize("row", [
+        {"row_id": "chain-codex", "lane": "provider", "cli": "codex",
+         "creds": "none"},
+        {"row_id": "host-claude-code", "lane": "host", "host": "claude-code",
+         "creds": "openrouter"},
+    ])
+    def test_every_container_is_pinned_to_one_source_date(self, row, tmp_path):
+        """What un-erasing the file hashes rests on: the rig, not the product
+        default, makes `tasks.md` repeat."""
+        sys.path.insert(0, str(TESTS_DIR.parent))
+        from tests.container import harness
+
+        argv = harness.build_run_argv(harness.Row(**row), tmp_path,
+                                      harness.load_posture())
+        pins = [argv[i + 1] for i, token in enumerate(argv[:-1])
+                if token == "-e" and argv[i + 1].startswith("SOURCE_DATE_EPOCH=")]
+        assert pins == [f"SOURCE_DATE_EPOCH={harness.SOURCE_DATE_EPOCH}"]
+        assert harness.SOURCE_DATE_EPOCH.isdigit()
+
 
 class TestCaptureReadsAnExportedRowBundle:
     """Capture against a synthetic bundle, so the shape is asserted without Docker."""
@@ -500,6 +549,43 @@ class TestCaptureReadsAnExportedRowBundle:
         pointers = [pointer for pointer, _b, _a
                     in container_bundle.diff_bundles(before, after)]
         assert "/derived/suggestion_count" in pointers, pointers
+
+    @staticmethod
+    def _status_shape(bundle_dir, progress):
+        status = (bundle_dir / "artifacts" / "auth-feature" / "review-plan"
+                  / ".status.json")
+        status.write_text(json.dumps(
+            {"phase": "review-plan", "state": "complete",
+             "progress": progress}), encoding="utf-8")
+        return container_bundle.capture_bundle(
+            bundle_dir)["status"]["review-plan/.status.json"]["shape"]
+
+    def test_a_whole_and_a_fractional_elapsed_s_capture_the_same(self, bundle_dir):
+        """`progress_tracker._seconds()` writes 2.0 s as `2` and 2.1 s as `2.1`,
+        so the measured duration's int/float split is a coin toss per run
+        (measured 2026-09-23 on `chain-gemini`/`chain-vibe`) and must not grade."""
+        def model(elapsed):
+            return {"models": {"vibe:m": {"elapsed_s": elapsed,
+                                          "timeout_s": 600}}}
+        whole = self._status_shape(bundle_dir, model(2))
+        fractional = self._status_shape(bundle_dir, model(2.1))
+        assert whole == fractional
+        assert whole["progress"]["models"]["vibe:m"]["elapsed_s"] == (
+            container_bundle.NUMBER_TOKEN)
+        # Still graded: the key vanishing, or turning into a non-number.
+        assert self._status_shape(bundle_dir, {"models": {"vibe:m": {
+            "timeout_s": 600}}}) != whole
+        assert self._status_shape(bundle_dir, model("2s")) != whole
+
+    def test_a_non_duration_number_still_grades_its_type(self, bundle_dir):
+        """The fold is by named key, never a global number fold: a counter or a
+        configured `timeout_s` that changes int↔float is still a diff."""
+        assert container_bundle.MEASURED_DURATION_KEYS == frozenset({"elapsed_s"})
+        for key in ("timeout_s", "interval_s", "models_done", "cost_usd"):
+            as_int = self._status_shape(bundle_dir, {key: 2})
+            as_float = self._status_shape(bundle_dir, {key: 2.5})
+            assert as_int != as_float, key
+            assert as_int["progress"][key] == "<int>", key
 
     def test_an_unexported_row_captures_empty_rather_than_raising(self, tmp_path):
         """A row whose `finally` export did not run is a failed row — reported by

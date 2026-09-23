@@ -54,6 +54,7 @@ import yaml
 
 from .container.docker_probe import requires_docker
 from .container import harness
+from .container import host_spend
 
 pytestmark = [pytest.mark.container, requires_docker()]
 
@@ -491,44 +492,37 @@ class TestTheScheduleMatchesTheMatrix:
                     f"or add `full_row: not-applicable` with its reason.")
 
 
-#: The pre-flight refusal, not a ceiling (C6). It is checked BETWEEN rows, which
-#: is what turns an overshoot into one blown row instead of six.
-BUDGET_USD = float(os.environ.get("MLLM_E2E_BUDGET_USD", "2.00"))
+#: THE SPEND GUARD, in `container/host_spend.py` so it is unit-tested offline
+#: (`tests/test_host_lane_budget.py`). Three limits: the key's own `limit`
+#: (the only hard one — OpenRouter enforces it), the lane total
+#: `MLLM_E2E_BUDGET_USD` (between rows, and mid-row as remaining headroom), and
+#: each row's `cost_budget_usd × MLLM_E2E_ROW_BUDGET_HEADROOM`, enforced mid-row
+#: by a poller that STOPS the row's container. The readback fails CLOSED: a
+#: usage that cannot be read refuses the next row instead of crediting $0.
+BUDGET_USD = host_spend.lane_budget_usd()
 
-def _key_usage() -> float | None:
-    """The dedicated key's own `usage`, which is this lane's measured actual.
+
+def _key_usage() -> float:
+    """The dedicated key's own `usage`, or `host_spend.SpendUnobservable`.
 
     Attributable to one row precisely because the key is dedicated and the rows
-    run one at a time. `None` means the readback was unavailable, and a row is
-    then reported `actual: unavailable` rather than credited with a number
-    nobody measured.
+    run one at a time. It used to return `None` on a network error and the row
+    was credited $0 — the lane then started the next paid row having measured
+    none of this one. It now retries a bounded number of times and raises.
     """
-    import urllib.error
-    import urllib.request
-
-    request = urllib.request.Request(
-        "https://openrouter.ai/api/v1/key",
-        headers={"Authorization": f"Bearer {os.environ['OPENROUTER_API_KEY']}"})
-    try:
-        with urllib.request.urlopen(request, timeout=30) as response:
-            return json.load(response)["data"]["usage"]
-    except (urllib.error.URLError, OSError, ValueError, KeyError):
-        return None
+    return host_spend.read_usage()
 
 
 class _Spend:
     """The running total the sequential checkpoint consumes."""
 
-    baseline: float | None = None
-    total: float = 0.0
+    ledger = host_spend.Ledger(BUDGET_USD)
 
     @classmethod
     def check(cls) -> None:
-        if cls.total > BUDGET_USD:
-            pytest.exit(
-                f"host lane: cumulative spend ${cls.total:.4f} crossed "
-                f"MLLM_E2E_BUDGET_USD=${BUDGET_USD:.2f} — refusing to start "
-                f"another row", returncode=1)
+        refusal = cls.ledger.refusal()
+        if refusal:
+            pytest.exit(refusal, returncode=1)
 
 
 class _Census:
@@ -671,12 +665,25 @@ def graded(request, posture, utc):
         pytest.skip("the credentialed host lane needs OPENROUTER_API_KEY (a "
                     "DEDICATED key carrying a key-level spend limit)")
     _Spend.check()
-    before = _key_usage()
 
     entry = dict(dict(HOSTS)[host])
     matrix_row = next((dict(r) for r in entry.get("rows") or []
                        if r.get("id") == row_id), None)
     assert matrix_row, f"host_matrix.yaml names no row {row_id!r} under {host!r}"
+    # Refused BEFORE a token is spent: a row with no numeric budget has nothing
+    # to stop it but the lane total. `test_host_lane_budget.py` catches the same
+    # thing in plain CI; this is the run-time half for a matrix edited since.
+    try:
+        host_spend.row_ceiling(matrix_row)
+    except ValueError as exc:
+        pytest.fail(f"host lane: {exc}. Declare `cost_budget_usd` on the row.")
+    # FAIL CLOSED on the opening readback: nothing has been spent on this row
+    # yet, so stopping the lane here costs nothing and brackets nothing wrongly.
+    try:
+        before = _key_usage()
+    except host_spend.SpendUnobservable as exc:
+        pytest.exit(f"host lane: refusing to start {row_id} — {exc}",
+                    returncode=1)
 
     # The provider fan-out identity: every model call the workflow makes is
     # dispatched by name through /opt/mllm/bin and lands on the stub. The HOST's
@@ -804,7 +811,17 @@ def graded(request, posture, utc):
         # green, and grading the wrong object.
         route=str(matrix_row.get("route") or "file"),
     )
-    result = harness.run_row(row, posture=posture, utc=utc)
+    # THE MID-ROW STOP. Polls the key while the container runs and `docker
+    # stop`s it — with the same grace the wall-clock cap uses, so the export
+    # still runs — once the row's delta crosses the lower of its own ceiling and
+    # the lane's remaining headroom. Bounded by a poll interval plus the
+    # endpoint's settling lag, NOT a hard cap; see `host_spend`'s docstring.
+    # It brackets BOTH attempts of a never-started retry, which reuse the name.
+    watch = host_spend.RowWatch.for_row(
+        matrix_row, _Spend.ledger, before,
+        stop_row=lambda: harness._stop_container(harness.container_name(row)))
+    with watch:
+        result = harness.run_row(row, posture=posture, utc=utc)
     # `result.attempt` is 2 on a row the driver re-ran after a never-started
     # first attempt (`harness.never_started_signature`), and 1 on every other
     # row. The spend below still brackets BOTH attempts — `before` was read
@@ -813,9 +830,34 @@ def graded(request, posture, utc):
     _Census.record_ran(row_id, host, "openrouter", attempts=result.attempt)
     _Census.write(request.config, utc)
 
-    after = _key_usage()
-    if before is not None and after is not None:
-        _Spend.total += after - before
+    # FAIL CLOSED on the closing readback too — but without throwing away the
+    # row that already ran: it is graded, and the NEXT row is refused, because
+    # the lane total is now a number nobody measured.
+    try:
+        after = _key_usage()
+    except host_spend.SpendUnobservable as exc:
+        _Spend.ledger.unobservable = f"{row_id}'s closing readback: {exc}"
+        after = None
+    if after is not None:
+        _Spend.ledger.charge(before, after)
+    if watch.tripped:
+        # A distinct outcome, on disk beside the bundle and in the census, and
+        # a failure of every test graded on this row: a row stopped mid-turn
+        # proves nothing about the product either way.
+        tripped = dict(watch.tripped, row=row_id,
+                       delta_usd=None if after is None else round(after - before, 6))
+        (result.out_dir / "budget.json").write_text(
+            json.dumps(tripped, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        _Census.ran[-1]["outcome"] = tripped["outcome"]
+        _Census.write(request.config, utc)
+        if tripped["bound"] == "lane" or tripped["outcome"] != host_spend.BUDGET_EXCEEDED:
+            # The lane ran out, or spend went dark mid-row: either way no
+            # further row may start.
+            _Spend.ledger.halted = (
+                f"{row_id} was stopped mid-row: {tripped['reason']}")
+        pytest.fail(f"host lane: {row_id} {tripped['outcome'].upper()} — "
+                    f"{tripped['reason']}; the container was stopped mid-row. "
+                    f"Evidence: {result.out_dir / 'budget.json'}")
     return result, matrix_row, entry
 
 

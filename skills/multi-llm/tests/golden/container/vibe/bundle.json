@@ -40,26 +40,181 @@
     }
   },
   "manifest": {
+    "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-08-27T14:10:33Z",
+    "captured_at": "2026-09-23T11:41:56Z",
     "cli": "vibe",
+    "host": {
+      "host_id": "sha256:e9ce53674803",
+      "kernel_release": "6.17.0-35-generic",
+      "machine": "x86_64",
+      "system": "Linux",
+      "unprivileged_userns": {
+        "probe": "unshare -Un true",
+        "sysctl": {
+          "kernel.apparmor_restrict_unprivileged_userns": "1",
+          "kernel.unprivileged_userns_clone": "1"
+        },
+        "verdict": "permitted"
+      }
+    },
     "image": "mllm-e2e:local",
+    "reviewer": "vibe",
     "row_id": "chain-vibe",
-    "run_bundle": "20260827T131354Z"
+    "run_bundle": "20260923T111529Z"
   },
   "markers": [
+    "[PROGRESS]",
+    "[PROGRESS]",
     "[VALIDATION_BATCHES_PENDING]",
+    "[PROGRESS]",
     "[SKIPPED]",
+    "[AUTO_RESOLVED]",
     "[TASK_GENERATION_PENDING]",
     "[AUTO_RESOLVED]",
+    "[PROGRESS]",
+    "[PROGRESS]",
     "[VALIDATION_BATCHES_PENDING]",
+    "[PROGRESS]",
+    "[AUTO_RESOLVED]",
+    "[PROGRESS]",
+    "[PROGRESS]",
     "[VALIDATION_BATCHES_PENDING]",
+    "[PROGRESS]",
+    "[AUTO_RESOLVED]",
+    "[PROGRESS]",
+    "[PROGRESS]",
+    "[PROGRESS]",
     "[OUTPUT_FILE]",
     "[WARN]",
     "[OUTPUT_FILE]",
     "[OUTPUT_FILE]"
   ],
-  "metrics_shape": "<null>",
+  "metrics_shape": {
+    "apply-code-fixes": {
+      "<item-types>": [
+        "<dict>"
+      ],
+      "<items>": [
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        }
+      ],
+      "<list>": 3
+    },
+    "apply-suggestions": {
+      "<item-types>": [
+        "<dict>"
+      ],
+      "<items>": [
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        }
+      ],
+      "<list>": 4
+    },
+    "apply-task-suggestions": {
+      "<item-types>": [
+        "<dict>"
+      ],
+      "<items>": [
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        }
+      ],
+      "<list>": 3
+    },
+    "implement": {
+      "<item-types>": [
+        "<dict>"
+      ],
+      "<items>": [
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "<str>",
+          "subagent_type": "<str>",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        }
+      ],
+      "<list>": 3
+    }
+  },
   "output_root_paths": [
     "apply-fixes/",
     "apply-fixes/.status.json",
@@ -84,6 +239,7 @@
     "apply-fixes/pre_batch/apply-fix-batch-2/manifest.json",
     "apply-fixes/subagent_audit.jsonl",
     "apply-fixes/subagent_batch_report.json",
+    "apply-fixes/summary.md",
     "apply-fixes/write_batch_report.json",
     "apply-fixes/write_tasks.json",
     "apply-suggestions/",
@@ -94,6 +250,7 @@
     "apply-suggestions/apply_batch_1.json",
     "apply-suggestions/apply_batch_2.json",
     "apply-suggestions/apply_batch_3.json",
+    "apply-suggestions/backup.md",
     "apply-suggestions/orchestrator_output.json",
     "apply-suggestions/pre_batch/",
     "apply-suggestions/pre_batch/apply-batch-0/",
@@ -114,6 +271,7 @@
     "apply-suggestions/pre_batch/apply-batch-3/manifest.json",
     "apply-suggestions/subagent_audit.jsonl",
     "apply-suggestions/subagent_batch_report.json",
+    "apply-suggestions/summary.md",
     "apply-suggestions/write_batch_report.json",
     "apply-suggestions/write_tasks.json",
     "apply-task-suggestions/",
@@ -139,6 +297,7 @@
     "apply-task-suggestions/pre_batch/apply-task-batch-2/manifest.json",
     "apply-task-suggestions/subagent_audit.jsonl",
     "apply-task-suggestions/subagent_batch_report.json",
+    "apply-task-suggestions/summary.md",
     "apply-task-suggestions/tasks-backup.md",
     "apply-task-suggestions/write_batch_report.json",
     "apply-task-suggestions/write_tasks.json",
@@ -161,7 +320,9 @@
     "code-review/subagent_batch_report.json",
     "code-review/validation.json",
     "code-review/validation_batch_0.json",
+    "code-review/validation_batch_0.prompt.txt",
     "code-review/validation_batch_1.json",
+    "code-review/validation_batch_1.prompt.txt",
     "code-review/validation_tasks.json",
     "code-review/vibe_openai_gpt-5_6-luna.json",
     "full/",
@@ -208,23 +369,28 @@
     "review-plan/subagent_batch_report.json",
     "review-plan/validation.json",
     "review-plan/validation_batch_0.json",
+    "review-plan/validation_batch_0.prompt.txt",
     "review-plan/validation_batch_1.json",
+    "review-plan/validation_batch_1.prompt.txt",
     "review-plan/validation_batch_2.json",
+    "review-plan/validation_batch_2.prompt.txt",
     "review-plan/validation_tasks.json",
     "review-plan/vibe_openai_gpt-5_6-luna.json",
     "review-tasks/",
     "review-tasks/.status.json",
     "review-tasks/.status.lock",
-    "review-tasks/backup.md",
     "review-tasks/grouped.json",
     "review-tasks/log_vibe_openai_gpt-5_6-luna.txt",
     "review-tasks/report.html",
     "review-tasks/report.md",
     "review-tasks/report_data.json",
     "review-tasks/subagent_batch_report.json",
+    "review-tasks/tasks-backup.md",
     "review-tasks/validation.json",
     "review-tasks/validation_batch_0.json",
+    "review-tasks/validation_batch_0.prompt.txt",
     "review-tasks/validation_batch_1.json",
+    "review-tasks/validation_batch_1.prompt.txt",
     "review-tasks/validation_tasks.json",
     "review-tasks/vibe_openai_gpt-5_6-luna.json",
     "state.json",
@@ -238,6 +404,7 @@
           "base_ref": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
           "batches": [
             {
+              "batch_index": 0,
               "batch_type": "mixed",
               "executor_role": "agent",
               "file_key": "src/security.py",
@@ -321,11 +488,12 @@
               ],
               "prior_changes_id": "src/security.py#b17808f6",
               "priority_score": 5.0,
-              "prompt": "<text:sha256:00d990014472:2010>",
+              "prompt": "<text:sha256:1f63429505fc:2759>",
               "subagent_type": "general-purpose",
               "total_chars": 550
             },
             {
+              "batch_index": 1,
               "batch_type": "missing",
               "executor_role": "agent",
               "file_key": "src/auth.py",
@@ -360,11 +528,12 @@
               ],
               "prior_changes_id": "src/auth.py#fd43b6fc",
               "priority_score": 2.0,
-              "prompt": "<text:sha256:4e2c1dc8c002:1017>",
+              "prompt": "<text:sha256:c964ee0f08fc:1765>",
               "subagent_type": "general-purpose",
               "total_chars": 207
             },
             {
+              "batch_index": 2,
               "batch_type": "bug",
               "executor_role": "agent",
               "file_key": "src/security.py",
@@ -399,7 +568,7 @@
               ],
               "prior_changes_id": "src/security.py#22cf58a5",
               "priority_score": 1.0,
-              "prompt": "<text:sha256:873e3e371ce4:973>",
+              "prompt": "<text:sha256:3d70550478bb:1721>",
               "subagent_type": "general-purpose",
               "total_chars": 165
             }
@@ -603,7 +772,7 @@
             "effective": 1,
             "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
-              "codex": null
+              "opencode": null
             },
             "shared_artifact_phase": false
           },
@@ -614,8 +783,10 @@
           "kind": "apply_code_fixes",
           "phase": "apply-code-fixes",
           "report_version": 1,
-          "runner_versions": {},
-          "task_file": null,
+          "runner_versions": {
+            "opencode:stub/stub-model": "<str>"
+          },
+          "task_file": "<run-root>/plans/auth-feature/apply-fixes/write_tasks.json",
           "tasks": [
             {
               "attempt_count": 1,
@@ -627,6 +798,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -634,23 +806,36 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "cf093f90d561613c",
+                "d948c7a933b2e244",
+                "93c4a25d0e7f6cf6"
+              ],
               "files_touched": [],
               "kind": "apply_code_fixes",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_0.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
+              "sha256_before": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-0",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "apply-fix-batch-0",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -662,6 +847,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -669,23 +855,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "ed2a0235cc4d9050"
+              ],
               "files_touched": [],
               "kind": "apply_code_fixes",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_1.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/auth.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/auth.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/auth.py": "16d4f894f64a06873309bb9dc1eee41ef859d9aa693ac745f52702ed3fcc72d2"
+              },
+              "sha256_before": {
+                "src/auth.py": "16d4f894f64a06873309bb9dc1eee41ef859d9aa693ac745f52702ed3fcc72d2"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-1",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "apply-fix-batch-1",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -697,6 +894,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -704,28 +902,40 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "5d4efdfb196e11f2"
+              ],
               "files_touched": [],
               "kind": "apply_code_fixes",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_2.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
+              "sha256_before": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-2",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "apply-fix-batch-2",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             }
           ],
           "usage": {
             "attempts": 3,
             "cached_input_tokens": 0,
+            "cost_usd": "<float>",
             "input_tokens": "<int>",
             "output_tokens": "<int>",
             "tasks_without_usage": 0,
@@ -748,7 +958,7 @@
           "report_version": 1,
           "skipped_tasks": {},
           "stopped_at_batch": null,
-          "summary_file": null,
+          "summary_file": "<run-root>/plans/auth-feature/apply-fixes/summary.md",
           "tasks": [
             {
               "attempt_count": 1,
@@ -760,6 +970,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -767,23 +978,36 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "cf093f90d561613c",
+                "d948c7a933b2e244",
+                "93c4a25d0e7f6cf6"
+              ],
               "files_touched": [],
               "kind": "apply_code_fixes",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_0.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
+              "sha256_before": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-0",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "apply-fix-batch-0",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -795,6 +1019,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -802,23 +1027,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "ed2a0235cc4d9050"
+              ],
               "files_touched": [],
               "kind": "apply_code_fixes",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_1.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/auth.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/auth.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/auth.py": "16d4f894f64a06873309bb9dc1eee41ef859d9aa693ac745f52702ed3fcc72d2"
+              },
+              "sha256_before": {
+                "src/auth.py": "16d4f894f64a06873309bb9dc1eee41ef859d9aa693ac745f52702ed3fcc72d2"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-1",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "apply-fix-batch-1",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -830,6 +1066,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -837,25 +1074,37 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "5d4efdfb196e11f2"
+              ],
               "files_touched": [],
               "kind": "apply_code_fixes",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_2.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
+              "sha256_before": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-2",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "apply-fix-batch-2",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             }
-          ]
+          ],
+          "verification": null
         },
         "write_tasks.json": {
           "batches": [
@@ -883,7 +1132,7 @@
               "output_name": "apply_fix_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_0.json",
               "prior_changes_id": "src/security.py#b17808f6",
-              "prompt": "<text:sha256:00d990014472:2010>",
+              "prompt": "<text:sha256:1f63429505fc:2759>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "apply-fix-batch-0",
@@ -912,7 +1161,7 @@
               "output_name": "apply_fix_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_1.json",
               "prior_changes_id": "src/auth.py#fd43b6fc",
-              "prompt": "<text:sha256:4e2c1dc8c002:1017>",
+              "prompt": "<text:sha256:c964ee0f08fc:1765>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "apply-fix-batch-1",
@@ -941,7 +1190,7 @@
               "output_name": "apply_fix_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/apply-fixes/apply_fix_batch_2.json",
               "prior_changes_id": "src/security.py#22cf58a5",
-              "prompt": "<text:sha256:873e3e371ce4:973>",
+              "prompt": "<text:sha256:3d70550478bb:1721>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "apply-fix-batch-2",
@@ -1220,7 +1469,7 @@
             "effective": 1,
             "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
-              "codex": null
+              "opencode": null
             },
             "shared_artifact_phase": true
           },
@@ -1231,8 +1480,10 @@
           "kind": "apply_suggestions",
           "phase": "apply-suggestions",
           "report_version": 1,
-          "runner_versions": {},
-          "task_file": null,
+          "runner_versions": {
+            "opencode:stub/stub-model": "<str>"
+          },
+          "task_file": "<run-root>/plans/auth-feature/apply-suggestions/write_tasks.json",
           "tasks": [
             {
               "attempt_count": 1,
@@ -1244,6 +1495,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1251,23 +1503,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "a4ba681281e554b8"
+              ],
               "files_touched": [],
               "kind": "apply_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_0.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
+              "sha256_before": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-0",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged.",
               "task_id": "apply-batch-0",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -1279,6 +1542,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1286,23 +1550,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "1558bbe6cea433cf"
+              ],
               "files_touched": [],
               "kind": "apply_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_1.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
+              "sha256_before": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-1",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged.",
               "task_id": "apply-batch-1",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -1314,6 +1589,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1321,23 +1597,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "c948ad24b1b8e432"
+              ],
               "files_touched": [],
               "kind": "apply_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_2.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
+              "sha256_before": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-2",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged.",
               "task_id": "apply-batch-2",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -1349,6 +1636,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1356,28 +1644,40 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "64ba7f164d362232"
+              ],
               "files_touched": [],
               "kind": "apply_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_3.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
+              "sha256_before": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-3",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged.",
               "task_id": "apply-batch-3",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             }
           ],
           "usage": {
             "attempts": 4,
             "cached_input_tokens": 0,
+            "cost_usd": "<float>",
             "input_tokens": "<int>",
             "output_tokens": "<int>",
             "tasks_without_usage": 0,
@@ -1401,7 +1701,7 @@
           "report_version": 1,
           "skipped_tasks": {},
           "stopped_at_batch": null,
-          "summary_file": null,
+          "summary_file": "<run-root>/plans/auth-feature/apply-suggestions/summary.md",
           "tasks": [
             {
               "attempt_count": 1,
@@ -1413,6 +1713,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1420,23 +1721,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "a4ba681281e554b8"
+              ],
               "files_touched": [],
               "kind": "apply_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_0.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
+              "sha256_before": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-0",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged.",
               "task_id": "apply-batch-0",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -1448,6 +1760,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1455,23 +1768,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "1558bbe6cea433cf"
+              ],
               "files_touched": [],
               "kind": "apply_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_1.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
+              "sha256_before": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-1",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged.",
               "task_id": "apply-batch-1",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -1483,6 +1807,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1490,23 +1815,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "c948ad24b1b8e432"
+              ],
               "files_touched": [],
               "kind": "apply_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_2.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
+              "sha256_before": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-2",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged.",
               "task_id": "apply-batch-2",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -1518,6 +1854,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1525,25 +1862,37 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "64ba7f164d362232"
+              ],
               "files_touched": [],
               "kind": "apply_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-suggestions/apply_batch_3.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
+              "sha256_before": {
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-3",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the plan file is unchanged.",
               "task_id": "apply-batch-3",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             }
-          ]
+          ],
+          "verification": null
         },
         "write_tasks.json": {
           "batches": [
@@ -1686,7 +2035,7 @@
               "batch_type": "addition",
               "prior_changes_id": "section:plan_coverage#f6649fb6",
               "priority_score": 3.0,
-              "prompt": "<text:sha256:8f8bdfc35cb0:5150>",
+              "prompt": "<text:sha256:75f5682f9aee:3404>",
               "section_key": "section:plan_coverage",
               "suggestion_count": 1,
               "suggestions": [
@@ -1716,7 +2065,7 @@
               "batch_type": "clarification",
               "prior_changes_id": "section:t002#3f5dc1a6",
               "priority_score": 2.0,
-              "prompt": "<text:sha256:28381e1455a4:5169>",
+              "prompt": "<text:sha256:dfa32cac0868:3423>",
               "section_key": "section:t002",
               "suggestion_count": 1,
               "suggestions": [
@@ -1746,7 +2095,7 @@
               "batch_type": "modification",
               "prior_changes_id": "section:t003#65f886c7",
               "priority_score": 1.0,
-              "prompt": "<text:sha256:acc685460420:5103>",
+              "prompt": "<text:sha256:6acdffbf6acb:3357>",
               "section_key": "section:t003",
               "suggestion_count": 1,
               "suggestions": [
@@ -1762,7 +2111,7 @@
                   "reference": "T003",
                   "suggestion_count": 1,
                   "task_reference": "Task T003",
-                  "theme": "T003 does not name the lockout threshold under tes",
+                  "theme": "T003 does not name the lockout threshold under test",
                   "title": "T003 does not name the lockout threshold under test",
                   "type": "modification",
                   "validation_confidence": 0.9,
@@ -1881,7 +2230,7 @@
               "reference": "T003",
               "suggestion_count": 1,
               "task_reference": "Task T003",
-              "theme": "T003 does not name the lockout threshold under tes",
+              "theme": "T003 does not name the lockout threshold under test",
               "title": "T003 does not name the lockout threshold under test",
               "type": "modification",
               "validation_confidence": 0.9,
@@ -1897,7 +2246,7 @@
             "effective": 1,
             "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
-              "codex": null
+              "opencode": null
             },
             "shared_artifact_phase": true
           },
@@ -1908,8 +2257,10 @@
           "kind": "apply_task_suggestions",
           "phase": "apply-task-suggestions",
           "report_version": 1,
-          "runner_versions": {},
-          "task_file": null,
+          "runner_versions": {
+            "opencode:stub/stub-model": "<str>"
+          },
+          "task_file": "<run-root>/plans/auth-feature/apply-task-suggestions/write_tasks.json",
           "tasks": [
             {
               "attempt_count": 1,
@@ -1921,6 +2272,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1928,23 +2280,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "6779911c6f8b335b"
+              ],
               "files_touched": [],
               "kind": "apply_task_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_0.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
+              "sha256_before": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-0",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged.",
               "task_id": "apply-task-batch-0",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -1956,6 +2319,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1963,23 +2327,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "139bdba80f54ba7d"
+              ],
               "files_touched": [],
               "kind": "apply_task_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_1.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
+              "sha256_before": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-1",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged.",
               "task_id": "apply-task-batch-1",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -1991,6 +2366,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -1998,28 +2374,40 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "ef911087fcf05304"
+              ],
               "files_touched": [],
               "kind": "apply_task_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_2.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
+              "sha256_before": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-2",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged.",
               "task_id": "apply-task-batch-2",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             }
           ],
           "usage": {
             "attempts": 3,
             "cached_input_tokens": 0,
+            "cost_usd": "<float>",
             "input_tokens": "<int>",
             "output_tokens": "<int>",
             "tasks_without_usage": 0,
@@ -2042,7 +2430,7 @@
           "report_version": 1,
           "skipped_tasks": {},
           "stopped_at_batch": null,
-          "summary_file": null,
+          "summary_file": "<run-root>/plans/auth-feature/apply-task-suggestions/summary.md",
           "tasks": [
             {
               "attempt_count": 1,
@@ -2054,6 +2442,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -2061,23 +2450,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "6779911c6f8b335b"
+              ],
               "files_touched": [],
               "kind": "apply_task_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_0.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
+              "sha256_before": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-0",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged.",
               "task_id": "apply-task-batch-0",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -2089,6 +2489,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -2096,23 +2497,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "139bdba80f54ba7d"
+              ],
               "files_touched": [],
               "kind": "apply_task_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_1.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
+              "sha256_before": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-1",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged.",
               "task_id": "apply-task-batch-1",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -2124,6 +2536,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -2131,25 +2544,37 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "ef911087fcf05304"
+              ],
               "files_touched": [],
               "kind": "apply_task_suggestions",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_2.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in plans/auth-feature/tasks/tasks.md. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
+              "sha256_before": {
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-2",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so the tasks file is unchanged.",
               "task_id": "apply-task-batch-2",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             }
-          ]
+          ],
+          "verification": null
         },
         "write_tasks.json": {
           "batches": [
@@ -2166,15 +2591,16 @@
                 "6779911c6f8b335b"
               ],
               "inputs": {
-                "grouped_sha256": "f0cb7f2e730e608b",
-                "plan_sha256": "f767e856b63b3cdd"
+                "grouped_sha256": "3862e5852566e787",
+                "plan_sha256": "f767e856b63b3cdd",
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "apply_task_suggestions",
               "output_name": "apply_task_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_0.json",
               "prior_changes_id": "section:plan_coverage#f6649fb6",
-              "prompt": "<text:sha256:8f8bdfc35cb0:5150>",
+              "prompt": "<text:sha256:75f5682f9aee:3404>",
               "result_channel": "file",
               "section_key": "section:plan_coverage",
               "subagent_type": "general-purpose",
@@ -2195,15 +2621,16 @@
                 "139bdba80f54ba7d"
               ],
               "inputs": {
-                "grouped_sha256": "f0cb7f2e730e608b",
-                "plan_sha256": "f767e856b63b3cdd"
+                "grouped_sha256": "3862e5852566e787",
+                "plan_sha256": "f767e856b63b3cdd",
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "apply_task_suggestions",
               "output_name": "apply_task_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_1.json",
               "prior_changes_id": "section:t002#3f5dc1a6",
-              "prompt": "<text:sha256:28381e1455a4:5169>",
+              "prompt": "<text:sha256:dfa32cac0868:3423>",
               "result_channel": "file",
               "section_key": "section:t002",
               "subagent_type": "general-purpose",
@@ -2224,15 +2651,16 @@
                 "ef911087fcf05304"
               ],
               "inputs": {
-                "grouped_sha256": "f0cb7f2e730e608b",
-                "plan_sha256": "f767e856b63b3cdd"
+                "grouped_sha256": "3862e5852566e787",
+                "plan_sha256": "f767e856b63b3cdd",
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "apply_task_suggestions",
               "output_name": "apply_task_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/apply-task-suggestions/apply_task_batch_2.json",
               "prior_changes_id": "section:t003#65f886c7",
-              "prompt": "<text:sha256:acc685460420:5103>",
+              "prompt": "<text:sha256:6acdffbf6acb:3357>",
               "result_channel": "file",
               "section_key": "section:t003",
               "subagent_type": "general-purpose",
@@ -2242,8 +2670,9 @@
             }
           ],
           "inputs": {
-            "grouped_sha256": "f0cb7f2e730e608b",
-            "plan_sha256": "f767e856b63b3cdd"
+            "grouped_sha256": "3862e5852566e787",
+            "plan_sha256": "f767e856b63b3cdd",
+            "tasks_sha256": "cc8d69478fa43f4b"
           },
           "kind": "apply_task_suggestions",
           "phase": "apply-task-suggestions",
@@ -2494,7 +2923,7 @@
             "effective": 4,
             "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
-              "codex": null
+              "opencode": null
             }
           },
           "counts": {
@@ -2505,7 +2934,7 @@
           "phase": "code-review",
           "report_version": 1,
           "runner_versions": {
-            "codex:gpt-5.5": "<str>"
+            "opencode:stub/stub-model": "<str>"
           },
           "task_file": "<run-root>/plans/auth-feature/code-review/validation_tasks.json",
           "tasks": [
@@ -2519,6 +2948,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -2529,11 +2959,12 @@
               "kind": "validation",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.json",
               "profile": "agent-readonly",
-              "runner": "codex:gpt-5.5",
+              "runner": "opencode:stub/stub-model",
               "status": "ok",
               "task_id": "validation-batch-0",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
@@ -2549,6 +2980,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -2559,11 +2991,12 @@
               "kind": "validation",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.json",
               "profile": "agent-readonly",
-              "runner": "codex:gpt-5.5",
+              "runner": "opencode:stub/stub-model",
               "status": "ok",
               "task_id": "validation-batch-1",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
@@ -2573,6 +3006,7 @@
           "usage": {
             "attempts": 2,
             "cached_input_tokens": 0,
+            "cost_usd": "<float>",
             "input_tokens": "<int>",
             "output_tokens": "<int>",
             "tasks_without_usage": 0,
@@ -2634,7 +3068,9 @@
             }
           ],
           "metadata": {
-            "model": "unknown",
+            "grouped_sha256": "d3fc28380b5955ad",
+            "model": "opencode:stub/stub-model",
+            "runner": "opencode:stub/stub-model",
             "schema_version": "2.1",
             "timestamp": "<str>"
           }
@@ -2664,7 +3100,8 @@
               "inputs": {
                 "diff_base": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
                 "grouped_sha256": "d3fc28380b5955ad",
-                "plan_sha256": "74ed440ba06bd1a1"
+                "plan_sha256": "74ed440ba06bd1a1",
+                "reviewed_code_sha256": "c57c145cb2e57c25"
               },
               "is_high_priority": false,
               "kind": "validation",
@@ -2672,7 +3109,9 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:942cb1b62191:8812>",
+              "prompt": "<text:sha256:f47d084071d2:13513>",
+              "prompt_lines": 399,
+              "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "validation-batch-0",
@@ -2694,7 +3133,8 @@
               "inputs": {
                 "diff_base": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
                 "grouped_sha256": "d3fc28380b5955ad",
-                "plan_sha256": "74ed440ba06bd1a1"
+                "plan_sha256": "74ed440ba06bd1a1",
+                "reviewed_code_sha256": "c57c145cb2e57c25"
               },
               "is_high_priority": false,
               "kind": "validation",
@@ -2702,7 +3142,9 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:5389ce33d5c6:6963>",
+              "prompt": "<text:sha256:47387e460df1:11421>",
+              "prompt_lines": 334,
+              "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "validation-batch-1",
@@ -2721,13 +3163,15 @@
           "inputs": {
             "diff_base": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
             "grouped_sha256": "d3fc28380b5955ad",
-            "plan_sha256": "74ed440ba06bd1a1"
+            "plan_sha256": "74ed440ba06bd1a1",
+            "reviewed_code_sha256": "c57c145cb2e57c25"
           },
           "kind": "validation",
           "model_hint": "auto",
           "phase_dir": "<run-root>/plans/auth-feature/code-review",
           "plan_file": "<run-root>/plans/auth-feature.md",
           "reaggregate_mode": "review-code",
+          "replay_flags": [],
           "tasks_schema_version": 2,
           "total_batches": 2
         }
@@ -2742,7 +3186,7 @@
             "effective": 4,
             "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
-              "codex": null
+              "opencode": null
             }
           },
           "counts": {
@@ -2753,7 +3197,7 @@
           "phase": "generate-tasks",
           "report_version": 1,
           "runner_versions": {
-            "codex:gpt-5.5": "<str>"
+            "opencode:stub/stub-model": "<str>"
           },
           "task_file": "<run-root>/plans/auth-feature/generate-tasks/task_generation_tasks.json",
           "tasks": [
@@ -2767,6 +3211,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -2777,12 +3222,13 @@
               "kind": "task_generation",
               "output_path": "<run-root>/plans/auth-feature/generate-tasks/task_generation_result.json",
               "profile": "agent-readonly",
-              "runner": "codex:gpt-5.5",
+              "runner": "opencode:stub/stub-model",
               "status": "ok",
               "structured_output": "recovered",
               "task_id": "task_generation",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
@@ -2792,6 +3238,7 @@
           "usage": {
             "attempts": 1,
             "cached_input_tokens": 0,
+            "cost_usd": "<float>",
             "input_tokens": "<int>",
             "output_tokens": "<int>",
             "tasks_without_usage": 0,
@@ -2873,7 +3320,7 @@
               "output_path": "<run-root>/plans/auth-feature/generate-tasks/task_generation_result.json",
               "phase": "generate-tasks",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:8b5b13a9429e:8969>",
+              "prompt": "<text:sha256:66998e633c84:9121>",
               "repo_root": "<run-root>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -2894,7 +3341,7 @@
             "effective": 1,
             "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
-              "codex": null
+              "opencode": null
             },
             "shared_artifact_phase": false
           },
@@ -2905,8 +3352,10 @@
           "kind": "implement",
           "phase": "implement",
           "report_version": 1,
-          "runner_versions": {},
-          "task_file": null,
+          "runner_versions": {
+            "opencode:stub/stub-model": "<str>"
+          },
+          "task_file": "<run-root>/plans/auth-feature/implement/write_tasks.json",
           "tasks": [
             {
               "attempt_count": 1,
@@ -2918,6 +3367,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -2925,23 +3375,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "T001"
+              ],
               "files_touched": [],
               "kind": "implement",
               "output_path": "<run-root>/plans/auth-feature/implement/implement_batch_T001.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
+              "sha256_before": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T001",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "T001",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -2953,6 +3414,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -2960,23 +3422,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "T002"
+              ],
               "files_touched": [],
               "kind": "implement",
               "output_path": "<run-root>/plans/auth-feature/implement/implement_batch_T002.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
+              "sha256_before": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T002",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "T002",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -2988,6 +3461,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -2995,28 +3469,40 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "T003"
+              ],
               "files_touched": [],
               "kind": "implement",
               "output_path": "<run-root>/plans/auth-feature/implement/implement_batch_T003.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in tests/test_security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in tests/test_security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "tests/test_security.py": null
+              },
+              "sha256_before": {
+                "tests/test_security.py": null
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T003",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "T003",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             }
           ],
           "usage": {
             "attempts": 3,
             "cached_input_tokens": 0,
+            "cost_usd": "<float>",
             "input_tokens": "<int>",
             "output_tokens": "<int>",
             "tasks_without_usage": 0,
@@ -3051,6 +3537,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -3058,23 +3545,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "T001"
+              ],
               "files_touched": [],
               "kind": "implement",
               "output_path": "<run-root>/plans/auth-feature/implement/implement_batch_T001.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
+              "sha256_before": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T001",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "T001",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -3086,6 +3584,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -3093,23 +3592,34 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "T002"
+              ],
               "files_touched": [],
               "kind": "implement",
               "output_path": "<run-root>/plans/auth-feature/implement/implement_batch_T002.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in src/security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in src/security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
+              "sha256_before": {
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T002",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "T002",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             },
             {
               "attempt_count": 1,
@@ -3121,6 +3631,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -3128,25 +3639,37 @@
                 }
               ],
               "duration_seconds": "<float>",
+              "expected_ids": [
+                "T003"
+              ],
               "files_touched": [],
               "kind": "implement",
               "output_path": "<run-root>/plans/auth-feature/implement/implement_batch_T003.json",
               "profile": "agent-write",
-              "reason": "CLEAN FAILURE: the batch reported 'no-op' but the pre-batch snapshot comparison found no byte changes in tests/test_security.py. Recorded; the loop continues.",
-              "runner": "codex:gpt-5.5",
+              "reason": "NO-OP: the batch reported 'no-op' and the pre-batch snapshot comparison confirms no byte changes in tests/test_security.py. Recorded; the loop continues.",
+              "returned_ids": [],
+              "runner": "opencode:stub/stub-model",
+              "sha256_after": {
+                "tests/test_security.py": null
+              },
+              "sha256_before": {
+                "tests/test_security.py": null
+              },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T003",
               "status": "ok",
               "summary": "No edit tool call was made: the container lane answers from a canned fixture, so no source file is changed.",
               "task_id": "T003",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
               },
-              "write_outcome": "clean-failure"
+              "write_outcome": "no-op"
             }
-          ]
+          ],
+          "verification": null
         },
         "write_tasks.json": {
           "batches": [
@@ -3164,14 +3687,15 @@
                 "T001"
               ],
               "inputs": {
-                "plan_sha256": "f767e856b63b3cdd"
+                "plan_sha256": "f767e856b63b3cdd",
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "implement",
               "output_name": "implement_batch_T001.json",
               "output_path": "<run-root>/plans/auth-feature/implement/implement_batch_T001.json",
               "prior_changes_id": "T001",
-              "prompt": "<text:sha256:a170e0a74de0:2063>",
+              "prompt": "<text:sha256:475d7389c4b2:2288>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "T001",
@@ -3192,14 +3716,15 @@
                 "T002"
               ],
               "inputs": {
-                "plan_sha256": "f767e856b63b3cdd"
+                "plan_sha256": "f767e856b63b3cdd",
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "implement",
               "output_name": "implement_batch_T002.json",
               "output_path": "<run-root>/plans/auth-feature/implement/implement_batch_T002.json",
               "prior_changes_id": "T002",
-              "prompt": "<text:sha256:b708f48e438d:2080>",
+              "prompt": "<text:sha256:c984bf74abc7:2305>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "T002",
@@ -3223,14 +3748,15 @@
                 "T003"
               ],
               "inputs": {
-                "plan_sha256": "f767e856b63b3cdd"
+                "plan_sha256": "f767e856b63b3cdd",
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "implement",
               "output_name": "implement_batch_T003.json",
               "output_path": "<run-root>/plans/auth-feature/implement/implement_batch_T003.json",
               "prior_changes_id": "T003",
-              "prompt": "<text:sha256:00e1e39484a0:2237>",
+              "prompt": "<text:sha256:38d9cdee3bab:2755>",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "T003",
@@ -3239,7 +3765,8 @@
             }
           ],
           "inputs": {
-            "plan_sha256": "f767e856b63b3cdd"
+            "plan_sha256": "f767e856b63b3cdd",
+            "tasks_sha256": "cc8d69478fa43f4b"
           },
           "kind": "implement",
           "phase": "implement",
@@ -3367,7 +3894,7 @@
             "effective": 4,
             "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
-              "codex": null
+              "opencode": null
             }
           },
           "counts": {
@@ -3378,7 +3905,7 @@
           "phase": "review-plan",
           "report_version": 1,
           "runner_versions": {
-            "codex:gpt-5.5": "<str>"
+            "opencode:stub/stub-model": "<str>"
           },
           "task_file": "<run-root>/plans/auth-feature/review-plan/validation_tasks.json",
           "tasks": [
@@ -3392,6 +3919,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -3402,11 +3930,12 @@
               "kind": "validation",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.json",
               "profile": "agent-readonly",
-              "runner": "codex:gpt-5.5",
+              "runner": "opencode:stub/stub-model",
               "status": "ok",
               "task_id": "validation-batch-0",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
@@ -3422,6 +3951,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -3432,11 +3962,12 @@
               "kind": "validation",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.json",
               "profile": "agent-readonly",
-              "runner": "codex:gpt-5.5",
+              "runner": "opencode:stub/stub-model",
               "status": "ok",
               "task_id": "validation-batch-1",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
@@ -3452,6 +3983,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -3462,11 +3994,12 @@
               "kind": "validation",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.json",
               "profile": "agent-readonly",
-              "runner": "codex:gpt-5.5",
+              "runner": "opencode:stub/stub-model",
               "status": "ok",
               "task_id": "validation-batch-2",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
@@ -3476,6 +4009,7 @@
           "usage": {
             "attempts": 3,
             "cached_input_tokens": 0,
+            "cost_usd": "<float>",
             "input_tokens": "<int>",
             "output_tokens": "<int>",
             "tasks_without_usage": 0,
@@ -3527,7 +4061,9 @@
             }
           ],
           "metadata": {
-            "model": "unknown",
+            "grouped_sha256": "33ab6d1fdbf58820",
+            "model": "opencode:stub/stub-model",
+            "runner": "opencode:stub/stub-model",
             "schema_version": "2.1",
             "timestamp": "<str>"
           }
@@ -3558,7 +4094,9 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:c226df79c729:5789>",
+              "prompt": "<text:sha256:91b60a296af1:7062>",
+              "prompt_lines": 214,
+              "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "validation-batch-0",
@@ -3587,7 +4125,9 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:5d2f8b35f6c3:5745>",
+              "prompt": "<text:sha256:776254cf7b48:7018>",
+              "prompt_lines": 214,
+              "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "validation-batch-1",
@@ -3618,7 +4158,9 @@
               "output_name": "validation_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:be1c1011bc16:6384>",
+              "prompt": "<text:sha256:c4dd7c0de730:7663>",
+              "prompt_lines": 232,
+              "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "validation-batch-2",
@@ -3644,6 +4186,7 @@
           "phase_dir": "<run-root>/plans/auth-feature/review-plan",
           "plan_file": "<run-root>/plans/auth-feature.md",
           "reaggregate_mode": "review-plan",
+          "replay_flags": [],
           "tasks_schema_version": 2,
           "total_batches": 3
         }
@@ -3729,7 +4272,7 @@
                   "type": "modification"
                 }
               ],
-              "theme": "T003 does not name the lockout threshold under tes",
+              "theme": "T003 does not name the lockout threshold under test",
               "validation_reason": null,
               "validation_status": null
             }
@@ -3741,7 +4284,7 @@
             "effective": 4,
             "host_max_concurrent_subagents": 10,
             "provider_max_concurrent": {
-              "codex": null
+              "opencode": null
             }
           },
           "counts": {
@@ -3752,7 +4295,7 @@
           "phase": "review-tasks",
           "report_version": 1,
           "runner_versions": {
-            "codex:gpt-5.5": "<str>"
+            "opencode:stub/stub-model": "<str>"
           },
           "task_file": "<run-root>/plans/auth-feature/review-tasks/validation_tasks.json",
           "tasks": [
@@ -3766,6 +4309,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -3776,11 +4320,12 @@
               "kind": "validation",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.json",
               "profile": "agent-readonly",
-              "runner": "codex:gpt-5.5",
+              "runner": "opencode:stub/stub-model",
               "status": "ok",
               "task_id": "validation-batch-0",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
@@ -3796,6 +4341,7 @@
                   "status": "ok",
                   "usage": {
                     "cached_input_tokens": 0,
+                    "cost_usd": "<float>",
                     "input_tokens": "<int>",
                     "output_tokens": "<int>",
                     "total_tokens": "<int>"
@@ -3806,11 +4352,12 @@
               "kind": "validation",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.json",
               "profile": "agent-readonly",
-              "runner": "codex:gpt-5.5",
+              "runner": "opencode:stub/stub-model",
               "status": "ok",
               "task_id": "validation-batch-1",
               "usage": {
                 "cached_input_tokens": 0,
+                "cost_usd": "<float>",
                 "input_tokens": "<int>",
                 "output_tokens": "<int>",
                 "total_tokens": "<int>"
@@ -3820,6 +4367,7 @@
           "usage": {
             "attempts": 2,
             "cached_input_tokens": 0,
+            "cost_usd": "<float>",
             "input_tokens": "<int>",
             "output_tokens": "<int>",
             "tasks_without_usage": 0,
@@ -3861,7 +4409,9 @@
             }
           ],
           "metadata": {
-            "model": "unknown",
+            "grouped_sha256": "3862e5852566e787",
+            "model": "opencode:stub/stub-model",
+            "runner": "opencode:stub/stub-model",
             "schema_version": "2.1",
             "timestamp": "<str>"
           }
@@ -3883,8 +4433,9 @@
               "grouped_file": "<run-root>/plans/auth-feature/review-tasks/grouped.json",
               "groups_count": 1,
               "inputs": {
-                "grouped_sha256": "f0cb7f2e730e608b",
-                "plan_sha256": "f767e856b63b3cdd"
+                "grouped_sha256": "3862e5852566e787",
+                "plan_sha256": "f767e856b63b3cdd",
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_high_priority": true,
               "kind": "validation",
@@ -3892,7 +4443,9 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:a26f09ea24a2:5988>",
+              "prompt": "<text:sha256:37f037e59692:9305>",
+              "prompt_lines": 294,
+              "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "validation-batch-0",
@@ -3914,8 +4467,9 @@
               "grouped_file": "<run-root>/plans/auth-feature/review-tasks/grouped.json",
               "groups_count": 2,
               "inputs": {
-                "grouped_sha256": "f0cb7f2e730e608b",
-                "plan_sha256": "f767e856b63b3cdd"
+                "grouped_sha256": "3862e5852566e787",
+                "plan_sha256": "f767e856b63b3cdd",
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_high_priority": false,
               "kind": "validation",
@@ -3923,7 +4477,9 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:27dc0f11e0ee:6662>",
+              "prompt": "<text:sha256:e8b310e09d77:9986>",
+              "prompt_lines": 312,
+              "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
               "task_id": "validation-batch-1",
@@ -3941,14 +4497,16 @@
           "format_version": 2,
           "grouped_file": "<run-root>/plans/auth-feature/review-tasks/grouped.json",
           "inputs": {
-            "grouped_sha256": "f0cb7f2e730e608b",
-            "plan_sha256": "f767e856b63b3cdd"
+            "grouped_sha256": "3862e5852566e787",
+            "plan_sha256": "f767e856b63b3cdd",
+            "tasks_sha256": "cc8d69478fa43f4b"
           },
           "kind": "validation",
           "model_hint": "auto",
           "phase_dir": "<run-root>/plans/auth-feature/review-tasks",
           "plan_file": "<run-root>/plans/auth-feature.md",
-          "reaggregate_mode": "review-plan",
+          "reaggregate_mode": "review-tasks",
+          "replay_flags": [],
           "tasks_file": "<run-root>/plans/auth-feature/tasks/tasks.md",
           "tasks_schema_version": 2,
           "total_batches": 2
@@ -3960,13 +4518,36 @@
   "result_lines": [
     {
       "artifacts": [
+        "<run-root>/plans/auth-feature/review-plan/report.md",
+        "<run-root>/plans/auth-feature/review-plan/report.html",
+        "<run-root>/plans/auth-feature/review-plan/grouped.json",
+        "<run-root>/plans/auth-feature/review-plan/validation.json",
+        "<run-root>/plans/auth-feature.md",
+        "<run-root>/plans/auth-feature/apply-suggestions/orchestrator_output.json",
+        "<run-root>/plans/auth-feature/apply-suggestions/write_batch_report.json",
+        "<run-root>/plans/auth-feature/prior_changes.jsonl",
+        "<run-root>/plans/auth-feature/apply-suggestions/summary.md",
         "<run-root>/plans/auth-feature/generate-tasks/task_generation_tasks.json",
         "<run-root>/plans/auth-feature/tasks/tasks.md",
-        "<run-root>/plans/auth-feature.md",
-        "<run-root>/plans/auth-feature/review-plan/report.html",
+        "<run-root>/plans/auth-feature/review-tasks/report.md",
         "<run-root>/plans/auth-feature/review-tasks/report.html",
+        "<run-root>/plans/auth-feature/review-tasks/grouped.json",
+        "<run-root>/plans/auth-feature/review-tasks/validation.json",
         "<run-root>/plans/auth-feature/apply-task-suggestions/orchestrator_output.json",
-        "<run-root>/plans/auth-feature/code-review/report.html"
+        "<run-root>/plans/auth-feature/apply-task-suggestions/write_batch_report.json",
+        "<run-root>/plans/auth-feature/apply-task-suggestions/summary.md",
+        "<run-root>/plans/auth-feature/implement/write_tasks.json",
+        "<run-root>/plans/auth-feature/implement/write_batch_report.json",
+        "<run-root>/plans/auth-feature/implement/subagent_batch_report.json",
+        "<run-root>/plans/auth-feature/implement/summary.md",
+        "<run-root>/plans/auth-feature/code-review/report.md",
+        "<run-root>/plans/auth-feature/code-review/report.html",
+        "<run-root>/plans/auth-feature/code-review/grouped.json",
+        "<run-root>/plans/auth-feature/code-review/validation.json",
+        "<run-root>/plans/auth-feature/code-review/issues.json",
+        "<run-root>/plans/auth-feature/apply-fixes/orchestrator_output.json",
+        "<run-root>/plans/auth-feature/apply-fixes/write_batch_report.json",
+        "<run-root>/plans/auth-feature/apply-fixes/summary.md"
       ],
       "exit": 0,
       "mode": "full",
@@ -4011,6 +4592,107 @@
     },
     "head_at_start": "<str>",
     "head_before_implement": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
+    "metrics": {
+      "apply-code-fixes": [
+        {
+          "duration_ms": "<int>",
+          "label": "apply-fix-batch-0: apply 3 fix(es) to src/security.py [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "apply-fix-batch-1: apply 1 fix(es) to src/auth.py [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "apply-fix-batch-2: apply 1 fix(es) to src/security.py [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        }
+      ],
+      "apply-suggestions": [
+        {
+          "duration_ms": "<int>",
+          "label": "apply-batch-0: apply 1 suggestion(s) to step_1 [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "apply-batch-1: apply 1 suggestion(s) to step_6 [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "apply-batch-2: apply 1 suggestion(s) to step_2 [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "apply-batch-3: apply 1 suggestion(s) to step_3 [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        }
+      ],
+      "apply-task-suggestions": [
+        {
+          "duration_ms": "<int>",
+          "label": "apply-task-batch-0: apply 1 task suggestion(s) to section:plan_coverage [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "apply-task-batch-1: apply 1 task suggestion(s) to section:t002 [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "apply-task-batch-2: apply 1 task suggestion(s) to section:t003 [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        }
+      ],
+      "implement": [
+        {
+          "duration_ms": "<int>",
+          "label": "T001: Make token comparison constant time [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "T002: Bound the login attempt store [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        },
+        {
+          "duration_ms": "<int>",
+          "label": "T003: Add regression tests for lockout [no-op]",
+          "subagent_type": "opencode:stub/stub-model",
+          "timestamp": "<str>",
+          "token_count": "<int>"
+        }
+      ]
+    },
     "phases_completed": {
       "apply-code-fixes": "<timestamp>",
       "apply-suggestions": "<timestamp>",
@@ -4022,7 +4704,6 @@
       "review-tasks": "<timestamp>"
     },
     "phases_skipped": {},
-    "plan_changed": true,
     "plan_hash": "<str>",
     "plan_path": "<run-root>/plans/auth-feature.md",
     "plan_preamble": "<text:sha256:81ad69eb8347:476>",
@@ -4032,7 +4713,7 @@
       "src/auth.py",
       "src/security.py"
     ],
-    "review_phase_completed": false,
+    "review_phase_completed": true,
     "schema_version": "2.0",
     "task_status": {
       "T001": "completed",
@@ -4078,6 +4759,131 @@
     },
     "head_at_start": "<str>",
     "head_before_implement": "<str>",
+    "metrics": {
+      "apply-code-fixes": {
+        "<item-types>": [
+          "<dict>"
+        ],
+        "<items>": [
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          },
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          },
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          }
+        ],
+        "<list>": 3
+      },
+      "apply-suggestions": {
+        "<item-types>": [
+          "<dict>"
+        ],
+        "<items>": [
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          },
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          },
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          },
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          }
+        ],
+        "<list>": 4
+      },
+      "apply-task-suggestions": {
+        "<item-types>": [
+          "<dict>"
+        ],
+        "<items>": [
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          },
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          },
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          }
+        ],
+        "<list>": 3
+      },
+      "implement": {
+        "<item-types>": [
+          "<dict>"
+        ],
+        "<items>": [
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          },
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          },
+          {
+            "duration_ms": "<int>",
+            "label": "<str>",
+            "subagent_type": "<str>",
+            "timestamp": "<str>",
+            "token_count": "<int>"
+          }
+        ],
+        "<list>": 3
+      }
+    },
     "phases_completed": {
       "apply-code-fixes": "<str>",
       "apply-suggestions": "<str>",
@@ -4089,7 +4895,6 @@
       "review-tasks": "<str>"
     },
     "phases_skipped": {},
-    "plan_changed": "<bool>",
     "plan_hash": "<str>",
     "plan_path": "<str>",
     "plan_preamble": "<str>",
@@ -4140,7 +4945,9 @@
   "status": {
     "apply-fixes/.status.json": {
       "shape": {
+        "phase": "<str>",
         "progress": {
+          "step": "<str>",
           "write_subagents": {
             "batches_dispatched": {
               "<item-types>": [
@@ -4153,7 +4960,7 @@
               ],
               "<list>": 3
             },
-            "dispatched": "<int>",
+            "completed": "<int>",
             "failed_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -4161,12 +4968,22 @@
             },
             "finalized": "<bool>",
             "human_task_strategy": "<null>",
+            "in_flight": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "invoker": "<str>",
+            "items_applied": "<int>",
+            "items_total": "<int>",
             "kind": "<str>",
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
               "<list>": 0
+            },
+            "runner_versions": {
+              "opencode:stub/stub-model": "<str>"
             },
             "skipped_task_ids": {
               "<item-types>": [],
@@ -4218,15 +5035,21 @@
             "total": "<int>"
           }
         },
+        "state": "<str>",
         "updated_at": "<str>"
       },
       "steps": [
+        "phase=apply-code-fixes",
+        "state=complete",
+        "progress.step",
         "progress.write_subagents"
       ]
     },
     "apply-suggestions/.status.json": {
       "shape": {
+        "phase": "<str>",
         "progress": {
+          "step": "<str>",
           "write_subagents": {
             "batches_dispatched": {
               "<item-types>": [
@@ -4240,7 +5063,7 @@
               ],
               "<list>": 4
             },
-            "dispatched": "<int>",
+            "completed": "<int>",
             "failed_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -4248,12 +5071,22 @@
             },
             "finalized": "<bool>",
             "human_task_strategy": "<null>",
+            "in_flight": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "invoker": "<str>",
+            "items_applied": "<int>",
+            "items_total": "<int>",
             "kind": "<str>",
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
               "<list>": 0
+            },
+            "runner_versions": {
+              "opencode:stub/stub-model": "<str>"
             },
             "skipped_task_ids": {
               "<item-types>": [],
@@ -4316,15 +5149,21 @@
             "total": "<int>"
           }
         },
+        "state": "<str>",
         "updated_at": "<str>"
       },
       "steps": [
+        "phase=apply-suggestions",
+        "state=complete",
+        "progress.step",
         "progress.write_subagents"
       ]
     },
     "apply-task-suggestions/.status.json": {
       "shape": {
+        "phase": "<str>",
         "progress": {
+          "step": "<str>",
           "write_subagents": {
             "batches_dispatched": {
               "<item-types>": [
@@ -4337,7 +5176,7 @@
               ],
               "<list>": 3
             },
-            "dispatched": "<int>",
+            "completed": "<int>",
             "failed_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -4345,12 +5184,22 @@
             },
             "finalized": "<bool>",
             "human_task_strategy": "<null>",
+            "in_flight": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "invoker": "<str>",
+            "items_applied": "<int>",
+            "items_total": "<int>",
             "kind": "<str>",
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
               "<list>": 0
+            },
+            "runner_versions": {
+              "opencode:stub/stub-model": "<str>"
             },
             "skipped_task_ids": {
               "<item-types>": [],
@@ -4402,9 +5251,13 @@
             "total": "<int>"
           }
         },
+        "state": "<str>",
         "updated_at": "<str>"
       },
       "steps": [
+        "phase=apply-task-suggestions",
+        "state=complete",
+        "progress.step",
         "progress.write_subagents"
       ]
     },
@@ -4432,6 +5285,25 @@
         },
         "phase": "<str>",
         "plan_hash": "<str>",
+        "progress": {
+          "interval_s": "<int>",
+          "models": {
+            "vibe:openai/gpt-5.6-luna": {
+              "attempt": "<int>",
+              "elapsed_s": "<number>",
+              "ended_at": "<str>",
+              "source": "<str>",
+              "started_at": "<str>",
+              "state": "<str>",
+              "timeout_s": "<int>",
+              "updated_at": "<str>"
+            }
+          },
+          "models_done": "<int>",
+          "models_succeeded": "<int>",
+          "models_total": "<int>",
+          "step": "<str>"
+        },
         "question": "<str>",
         "question_slug": "<str>",
         "started_at": "<str>",
@@ -4440,7 +5312,13 @@
       },
       "steps": [
         "phase=ask",
-        "state=completed"
+        "state=completed",
+        "progress.interval_s",
+        "progress.models",
+        "progress.models_done",
+        "progress.models_succeeded",
+        "progress.models_total",
+        "progress.step"
       ]
     },
     "code-review/.status.json": {
@@ -4467,6 +5345,23 @@
         },
         "phase": "<str>",
         "progress": {
+          "interval_s": "<int>",
+          "models": {
+            "vibe:openai/gpt-5.6-luna": {
+              "attempt": "<int>",
+              "elapsed_s": "<number>",
+              "ended_at": "<str>",
+              "source": "<str>",
+              "started_at": "<str>",
+              "state": "<str>",
+              "timeout_s": "<int>",
+              "updated_at": "<str>"
+            }
+          },
+          "models_done": "<int>",
+          "models_succeeded": "<int>",
+          "models_total": "<int>",
+          "step": "<str>",
           "subagents": {
             "counts": {
               "ok": "<int>"
@@ -4481,7 +5376,7 @@
             "kind": "<str>",
             "ok": "<int>",
             "runner_versions": {
-              "codex:gpt-5.5": "<str>"
+              "opencode:stub/stub-model": "<str>"
             },
             "total": "<int>"
           }
@@ -4492,13 +5387,20 @@
       },
       "steps": [
         "phase=code-review",
-        "state=models_complete",
+        "state=complete",
+        "progress.interval_s",
+        "progress.models",
+        "progress.models_done",
+        "progress.models_succeeded",
+        "progress.models_total",
+        "progress.step",
         "progress.subagents"
       ]
     },
     "generate-tasks/.status.json": {
       "shape": {
         "progress": {
+          "step": "<str>",
           "subagents": {
             "counts": {
               "ok": "<int>"
@@ -4513,20 +5415,29 @@
             "kind": "<str>",
             "ok": "<int>",
             "runner_versions": {
-              "codex:gpt-5.5": "<str>"
+              "opencode:stub/stub-model": "<str>"
             },
             "total": "<int>"
-          }
+          },
+          "tasks_done": "<int>",
+          "tasks_total": "<int>"
         },
+        "state": "<str>",
         "updated_at": "<str>"
       },
       "steps": [
-        "progress.subagents"
+        "state=complete",
+        "progress.step",
+        "progress.subagents",
+        "progress.tasks_done",
+        "progress.tasks_total"
       ]
     },
     "implement/.status.json": {
       "shape": {
+        "phase": "<str>",
         "progress": {
+          "step": "<str>",
           "write_subagents": {
             "batches_dispatched": {
               "<item-types>": [
@@ -4539,7 +5450,7 @@
               ],
               "<list>": 3
             },
-            "dispatched": "<int>",
+            "completed": "<int>",
             "failed_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -4547,12 +5458,22 @@
             },
             "finalized": "<bool>",
             "human_task_strategy": "<null>",
+            "in_flight": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "invoker": "<str>",
+            "items_applied": "<int>",
+            "items_total": "<int>",
             "kind": "<str>",
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
               "<list>": 0
+            },
+            "runner_versions": {
+              "opencode:stub/stub-model": "<str>"
             },
             "skipped_task_ids": {
               "<item-types>": [],
@@ -4604,15 +5525,22 @@
             "total": "<int>"
           }
         },
+        "state": "<str>",
         "updated_at": "<str>"
       },
       "steps": [
+        "phase=implement",
+        "state=complete",
+        "progress.step",
         "progress.write_subagents"
       ]
     },
     "review-plan/.status.json": {
       "shape": {
         "error": "<null>",
+        "high_priority_groups": {
+          "count": "<int>"
+        },
         "models_completed": {
           "<item-types>": [
             "<str>"
@@ -4634,6 +5562,23 @@
         },
         "phase": "<str>",
         "progress": {
+          "interval_s": "<int>",
+          "models": {
+            "vibe:openai/gpt-5.6-luna": {
+              "attempt": "<int>",
+              "elapsed_s": "<number>",
+              "ended_at": "<str>",
+              "source": "<str>",
+              "started_at": "<str>",
+              "state": "<str>",
+              "timeout_s": "<int>",
+              "updated_at": "<str>"
+            }
+          },
+          "models_done": "<int>",
+          "models_succeeded": "<int>",
+          "models_total": "<int>",
+          "step": "<str>",
           "subagents": {
             "counts": {
               "ok": "<int>"
@@ -4648,7 +5593,7 @@
             "kind": "<str>",
             "ok": "<int>",
             "runner_versions": {
-              "codex:gpt-5.5": "<str>"
+              "opencode:stub/stub-model": "<str>"
             },
             "total": "<int>"
           }
@@ -4661,13 +5606,22 @@
       },
       "steps": [
         "phase=review-plan",
-        "state=grouping_complete",
+        "state=complete",
+        "progress.interval_s",
+        "progress.models",
+        "progress.models_done",
+        "progress.models_succeeded",
+        "progress.models_total",
+        "progress.step",
         "progress.subagents"
       ]
     },
     "review-tasks/.status.json": {
       "shape": {
         "error": "<null>",
+        "high_priority_groups": {
+          "count": "<int>"
+        },
         "models_completed": {
           "<item-types>": [
             "<str>"
@@ -4689,6 +5643,23 @@
         },
         "phase": "<str>",
         "progress": {
+          "interval_s": "<int>",
+          "models": {
+            "vibe:openai/gpt-5.6-luna": {
+              "attempt": "<int>",
+              "elapsed_s": "<number>",
+              "ended_at": "<str>",
+              "source": "<str>",
+              "started_at": "<str>",
+              "state": "<str>",
+              "timeout_s": "<int>",
+              "updated_at": "<str>"
+            }
+          },
+          "models_done": "<int>",
+          "models_succeeded": "<int>",
+          "models_total": "<int>",
+          "step": "<str>",
           "subagents": {
             "counts": {
               "ok": "<int>"
@@ -4703,7 +5674,7 @@
             "kind": "<str>",
             "ok": "<int>",
             "runner_versions": {
-              "codex:gpt-5.5": "<str>"
+              "opencode:stub/stub-model": "<str>"
             },
             "total": "<int>"
           }
@@ -4716,7 +5687,13 @@
       },
       "steps": [
         "phase=review-tasks",
-        "state=grouping_complete",
+        "state=complete",
+        "progress.interval_s",
+        "progress.models",
+        "progress.models_done",
+        "progress.models_succeeded",
+        "progress.models_total",
+        "progress.step",
         "progress.subagents"
       ]
     }

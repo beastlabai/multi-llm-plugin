@@ -37,41 +37,37 @@ command's exit code, and which workspace files outside the output dir moved.
   C9's subject (`cli-versions.lock`, the drift report, the run record); a moved
   pin must show up there and must not turn every container baseline red at the
   same time.
-* **`tasks_sha256`, `sha256_before` and `sha256_after`** values become type
-  tokens — keys kept, values erased, exactly the `runner_versions` treatment.
-  These are sha256s **of files on disk**, and one of the files they hash carries
-  a wall-clock reading: `update_plan_tasks.generate_tasks_markdown` renders
-  `*Generated: <YYYY-MM-DD HH:MM:SS>*` as the third line of every `tasks.md`.
-  `normalize_run` folds a timestamp out of a JSON *value* (that same line, where
-  it reaches a prompt, is already `<timestamp>`), but it cannot fold one out of a
-  **hash** of a file that contains one — so every `tasks.md` digest is effectively
-  a fresh random number per run. Measured 2026-09-22 on `chain-omp`,
-  `chain-writer-opencode` and `chain-writer-claude-code`: two consecutive captures
-  of the same row differed in exactly 23 pointers, all of them that one file's
-  digest (11 `tasks_sha256`, 12 `sha256_before`/`sha256_after` entries keyed by
-  `plans/<plan>/tasks/tasks.md`), payload byte-length identical, zero diffs
-  elsewhere. A value that cannot repeat grades nothing; it only prevents any row
-  that runs the task phases from ever having a baseline.
 
-  **Erased by key rather than by path**, which costs something and is the honest
-  trade: the other 40 hash pointers in a chain bundle (`plans/<plan>.md`,
-  `src/*.py`, `tests/*.py`) *are* stable, and their values stop being compared
-  too. What those uniquely attested is the byte identity of each written file and
-  whether `before != after` — i.e. whether a write phase moved bytes. Both remain
-  graded one level up, by the same artifacts in the same bundle: `write_outcome`
-  (`applied` / `no-op` / the failure words), `files_touched`, `expected_ids` /
-  `returned_ids` and `workspace_delta` — which is where the D3g outcome axis is
-  decided in the product too, the hashes being the evidence a *reader* checks it
-  against rather than the verdict. The alternative — keying the fold on the tasks
-  file's path — would encode "this product stamps a clock into that file" in the
-  rig, and would stop applying, silently, the day a row runs a differently-named
-  plan fixture. The *set* of hashed paths keeps grading either way, which is what
-  catches a write that touched a file it should not have.
+**Not folded: `tasks_sha256`, `sha256_before` and `sha256_after`.** These are
+sha256s **of files on disk**, and one of those files used to carry a wall-clock
+reading: `update_plan_tasks.generate_tasks_markdown` renders
+`*Generated: <YYYY-MM-DD HH:MM:SS>*` as the third line of every `tasks.md`.
+`normalize_run` folds a timestamp out of a JSON *value*, but not out of a
+**hash** of a file that contains one, so every `tasks.md` digest was a fresh
+number per run — measured 2026-09-22 on `chain-omp`, `chain-writer-opencode` and
+`chain-writer-claude-code`: two consecutive captures differed in exactly 23
+pointers, all of them that one file's digest. For a while this module erased the
+three keys' values to get a baseline at all, which also stopped the other ~40
+*stable* hash pointers per chain bundle (`plans/<plan>.md`, `src/*.py`,
+`tests/*.py`) from grading. The fix is at the source instead: the product renders
+`SOURCE_DATE_EPOCH` when it is set (`update_plan_tasks.generated_stamp`), and the
+rig pins it for every container (`harness.SOURCE_DATE_EPOCH`), so the digest
+repeats and every hash pointer grades by value again.
+
+A baseline captured **during** the erasure carries `"<str>"` at those keys and
+can never match a real digest. `stale_hash_pointers` names such pointers, and the
+container lane refuses the baseline with a re-seed command rather than listing
+sixty-odd `"<str>"` diffs per row as if each were a regression.
+
+**Folded to one type token: `elapsed_s` in the `.status.json` shapes**
+(`MEASURED_DURATION_KEYS`). Its value was never compared, only its type, and the
+product writes a whole-number measurement as an `int` and anything else as a
+`float` (`progress_tracker._seconds`), so `<int>`/`<float>` there is a coin toss
+per run; both become `<number>`.
 
 Nothing else is erased. In particular the content hashes that are derived from
-the fixture text rather than read off a clock-stamped file (group ids, suggestion
-ids, `prior_changes_id`) stay compared, because a changed grouping is precisely
-what a silently-changed parse produces.
+the fixture text (group ids, suggestion ids, `prior_changes_id`) stay compared,
+because a changed grouping is precisely what a silently-changed parse produces.
 
 Capture is deliberately **separate from asserting**, like `expected_argv.yaml`:
 `tests/container/seed_container_golden.py` writes baselines on the host from a
@@ -122,6 +118,9 @@ __all__ = [
     "CHAIN_PHASE_DIRS",
     "CONTAINER_COMPARED_JSON",
     "ERASED_VALUE_KEYS",
+    "FILE_HASH_KEYS",
+    "MEASURED_DURATION_KEYS",
+    "fold_measured_durations",
     "WORKSPACE_ROOT",
     "AXES",
     "AXIS_REVIEWER",
@@ -133,10 +132,18 @@ __all__ = [
     "load_baseline",
     "write_baseline",
     "row_id_for",
+    "stale_hash_pointers",
 ]
 
 #: Bundle *shape* version. Bumped when the layout below changes, so a baseline
 #: captured against an older shape fails loudly instead of diffing nonsensically.
+#:
+#: NOT bumped for the ``elapsed_s`` → ``<number>`` fold (2026-09-23): the layout
+#: is unchanged, only a token value at one key moves, and an older baseline
+#: holding ``<int>``/``<float>`` there fails at that exact pointer, which names
+#: its own cause. A bump would also mark the FROZEN `codex` baseline (captured
+#: 2026-08-27, before `elapsed_s` existed, so the fold cannot touch it) as a
+#: stale shape that this host cannot re-capture.
 CONTAINER_BUNDLE_VERSION = 1
 
 #: The in-container workspace root. A constant rather than a discovered path, and
@@ -177,26 +184,55 @@ TEXT_DIGEST_THRESHOLD = 200
 
 _RESULT_MARKER = "MULTI_LLM_RESULT:"
 
-#: Keys whose value is erased while the key itself keeps grading. Two families,
-#: one rule: the value varies between two identical runs for a reason that is
-#: not this guard's subject, and the *presence* of the key is what a regression
-#: would remove.
-#:
-#: * ``runner_versions`` — the installed CLI pin, C9's subject.
-#: * ``tasks_sha256`` / ``sha256_before`` / ``sha256_after`` — sha256s of files
-#:   on disk, one of which (``tasks.md``) carries a rendered wall clock, so the
-#:   digest is unreproducible by construction. See the module docstring for the
-#:   measurement and for what the by-key scope costs.
+#: Keys whose value is erased while the key itself keeps grading: the value
+#: varies between two identical runs for a reason that is not this guard's
+#: subject, and the *presence* of the key is what a regression would remove.
+#: ``runner_versions`` — the installed CLI pin — is C9's subject.
 #:
 #: A **scalar** at one of these keys becomes its type token; a **mapping** keeps
-#: its keys and tokenizes each value, so the set of hashed paths is still
-#: compared exactly.
+#: its keys and tokenizes each value, so the set of keys is still compared.
 ERASED_VALUE_KEYS = frozenset({
     "runner_versions",
+})
+
+#: sha256s of files on disk, compared **by value** since the rig pins
+#: ``SOURCE_DATE_EPOCH`` (module docstring). Named only so a baseline captured
+#: while they were erased can be recognised — see ``stale_hash_pointers``.
+FILE_HASH_KEYS = frozenset({
     "tasks_sha256",
     "sha256_before",
     "sha256_after",
 })
+
+#: Measured wall-clock durations in a ``.status.json`` whose *numeric type* is
+#: itself nondeterministic. ``utils/progress_tracker._seconds()`` writes a whole
+#: number as an ``int`` ("writing ``1800.0`` … buys nothing") and anything else as
+#: a 1-decimal ``float``, and ``elapsed_s`` is ``_seconds(round(monotonic_delta,
+#: 1))`` — so the same slot is ``<int>`` on one run and ``<float>`` on the next
+#: (measured 2026-09-23: 6 of 71 values integral per run, flipping `chain-gemini`
+#: and `chain-vibe` between two captures of one tree). In the status *shapes*
+#: only, ``<int>``/``<float>`` at these keys become one ``<number>`` token: the
+#: key's presence and its being numeric still grade, only the int/float split
+#: does not. Deliberately a named list and not a global number fold — a counter
+#: turning into a float, or a configured ``timeout_s``/``interval_s`` changing
+#: type, is still a diff.
+MEASURED_DURATION_KEYS = frozenset({
+    "elapsed_s",
+})
+
+NUMBER_TOKEN = "<number>"
+
+
+def fold_measured_durations(shape: Any, _key: str = "") -> Any:
+    """``structure()`` output with ``MEASURED_DURATION_KEYS`` numbers unified."""
+    if isinstance(shape, dict):
+        return {key: fold_measured_durations(item, key)
+                for key, item in shape.items()}
+    if isinstance(shape, list):
+        return [fold_measured_durations(item, _key) for item in shape]
+    if _key in MEASURED_DURATION_KEYS and shape in ("<int>", "<float>"):
+        return NUMBER_TOKEN
+    return shape
 
 
 # ---------------------------------------------------------------------------
@@ -213,12 +249,10 @@ def fold(value: Any, _key: str = "") -> Any:
     """Apply the container lane's extra folds to an already-normalized value."""
     if isinstance(value, dict):
         if _key in ERASED_VALUE_KEYS:
-            # Keys kept, values erased: a *new* runner — or a write that touched
-            # a file no baseline run touched — still shows as a diff; a moved CLI
-            # pin, or a digest of a file the product stamps with a clock, does
-            # not. `None` is left as itself rather than tokenized: on a
-            # `sha256_before` map it means "this file did not exist before the
-            # batch", which is a fact about the run and not a volatile value.
+            # Keys kept, values erased: a *new* runner still shows as a diff; a
+            # moved CLI pin does not. `None` is left as itself rather than
+            # tokenized — an absent value is a fact about the run, not a
+            # volatile one.
             return {
                 key: ("<str>" if isinstance(item, str) else fold(item, key))
                 for key, item in sorted(value.items())
@@ -227,15 +261,44 @@ def fold(value: Any, _key: str = "") -> Any:
     if isinstance(value, list):
         return [fold(item, _key) for item in value]
     if _key in ERASED_VALUE_KEYS:
-        # The scalar spelling of the same rule — `tasks_sha256` is one string,
-        # not a map. Type token rather than a bare drop, so a key that stops
-        # being written, or starts being written as something other than a
-        # string, is still a diff.
+        # The scalar spelling of the same rule. Type token rather than a bare
+        # drop, so a key that stops being written, or starts being written as
+        # something other than a string, is still a diff.
         return "<str>" if isinstance(value, str) else value
     if isinstance(value, str) and (_key == "prompt"
                                    or len(value) > TEXT_DIGEST_THRESHOLD):
         return _digest(value)
     return value
+
+
+def _pointer_token(key: Any) -> str:
+    """RFC 6901 escaping, as ``bundle_compare`` spells its own pointers."""
+    return str(key).replace("~", "~0").replace("/", "~1")
+
+
+def stale_hash_pointers(value: Any, _pointer: str = "") -> List[str]:
+    """JSON pointers where a baseline holds an *erased* file hash.
+
+    ``"<str>"`` under a ``FILE_HASH_KEYS`` key is what capture wrote while those
+    values were folded away; a real capture now writes a 64-hex digest there, so
+    such a baseline cannot reproduce and is stale rather than regressed. Walks
+    the whole document — a mapping under the key (``sha256_before``) and the
+    scalar spelling (``tasks_sha256``) alike.
+    """
+    found: List[str] = []
+    if isinstance(value, dict):
+        for key in sorted(value):
+            child = f"{_pointer}/{_pointer_token(key)}"
+            item = value[key]
+            if key in FILE_HASH_KEYS:
+                items = item.items() if isinstance(item, dict) else [("", item)]
+                found.extend(f"{child}/{_pointer_token(sub)}" if sub else child
+                             for sub, leaf in items if leaf == "<str>")
+            found.extend(stale_hash_pointers(item, child))
+    elif isinstance(value, list):
+        for index, item in enumerate(value):
+            found.extend(stale_hash_pointers(item, f"{_pointer}/{index}"))
+    return found
 
 
 def _normalize(value: Any) -> Any:
@@ -284,7 +347,7 @@ def _status_map(root: Path) -> Dict[str, Any]:
         raw = load_json(path)
         out[path.relative_to(root).as_posix()] = {
             "steps": status_steps(raw),
-            "shape": structure(raw),
+            "shape": fold_measured_durations(structure(raw)),
         }
     return out
 
