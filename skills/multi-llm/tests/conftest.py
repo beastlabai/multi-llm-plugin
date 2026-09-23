@@ -8,7 +8,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Generator, Optional, Set
+from typing import Generator, Optional, Set, Tuple
 from unittest.mock import MagicMock, patch
 
 # Make the skill's own packages (utils.*) importable from conftest regardless of
@@ -241,7 +241,12 @@ def _pin_real_sandbox_probes(request, monkeypatch):
     probe. A probe whose argv names a registered provider command that resolves
     OUTSIDE the temp dir (i.e. not a mock launcher) is answered ``None``, which
     ``sandbox_verdict`` reads as ``unknown`` — dispatch exactly as before the
-    gate existed. Mock launchers under ``tmp_path`` and the fake ``sh`` probes
+    gate existed. A *fallback rung's* probe (landlock rung, 2026-09-22) is the
+    one exception: ``None`` there would stop the ladder walk and refuse the
+    slot, the opposite of "as before". It is answered as a CLI that does not
+    know the rung (``unexpected argument``), which the walk reads as *this rung
+    is absent* — so the ladder falls through to exactly the pre-ladder bypass,
+    and a test that wants rung 1 fakes its probe itself. Mock launchers under ``tmp_path`` and the fake ``sh`` probes
     the gate's own tests build run for real. The fan-out's per-process verdict
     cache is reset around every test so one verdict never leaks into the next.
     Opt out with ``@pytest.mark.sandbox_probe``.
@@ -270,6 +275,20 @@ def _pin_real_sandbox_probes(request, monkeypatch):
                 names.add(os.path.basename(str(command)))
         return names or {"codex"}
 
+    def _rung_probes() -> Set[Tuple[str, ...]]:
+        from utils.providers.base import SANDBOX_FALLBACK_PROFILES
+
+        probes: Set[Tuple[str, ...]] = set()
+        for provider in list(getattr(registry, "_PROVIDERS", {}).values()):
+            hook = getattr(provider, "sandbox_fallback_rungs", None)
+            if not callable(hook):
+                continue
+            for profile in SANDBOX_FALLBACK_PROFILES:
+                for rung in hook(profile) or ():
+                    if rung.probe_argv:
+                        probes.add(tuple(rung.probe_argv))
+        return probes
+
     def guarded(argv, **kwargs):
         head = os.path.basename(str(argv[0])) if argv else ""
         if head in _provider_commands():
@@ -279,6 +298,12 @@ def _pin_real_sandbox_probes(request, monkeypatch):
             # fact that matters.
             resolved = os.path.abspath(str(launcher[0])) if launcher else ""
             if not resolved.startswith(temp_root + os.sep):
+                if tuple(str(a) for a in argv) in _rung_probes():
+                    return subprocess.CompletedProcess(
+                        list(argv), 2, "",
+                        "error: unexpected argument (the default suite never "
+                        "probes a real CLI's fallback rung)\n",
+                    )
                 return None
         return real(argv, **kwargs)
 

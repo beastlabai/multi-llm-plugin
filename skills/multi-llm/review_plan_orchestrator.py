@@ -77,6 +77,7 @@ from utils.review_orchestrator_base import (
     reaggregate_from_existing_files as _base_reaggregate,
     run_single_model as _base_run_single_model,
     run_all_models as _base_run_all_models,
+    spawn_fanout_slot,
     format_group,
     format_suggestion_in_group,
     format_suggestion,
@@ -236,7 +237,10 @@ async def run_all_models(
                 result = await run_single_model(model_spec, plan_path, timeout, out_dir=out_dir, prefix=prefix)
                 return (model_spec, result)
 
-    tasks = [asyncio.create_task(_run_with_semaphore(spec, idx)) for idx, spec in enumerate(model_specs)]
+    tasks = [
+        spawn_fanout_slot(model_specs, _run_with_semaphore(spec, idx))
+        for idx, spec in enumerate(model_specs)
+    ]
 
     if timeout is not None:
         base_timeout = timeout

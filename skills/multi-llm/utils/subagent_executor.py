@@ -42,10 +42,13 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import (
+    Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple,
+)
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
@@ -77,11 +80,20 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         SANDBOX_BYPASSED_MARKER,
+        SANDBOX_CANARY_DENIED,
+        SANDBOX_CANARY_NOT_DENIED,
         SANDBOX_FALLBACK_AUTO,
+        SANDBOX_FALLBACK_CONTAINED,
+        SANDBOX_FALLBACK_OFF,
         SANDBOX_FALLBACK_PROFILES,
+        SANDBOX_RUNG_UNSANDBOXED,
         ProfileUnsupported,
+        SandboxRung,
         StructuredOutputUnavailable,
         availability_from_failure,
+        sandbox_fallback_notice_text,
+        sandbox_rung_allowed,
+        sandbox_rung_id,
         split_reasoning_effort,
         build_child_env,
         matches_any,
@@ -154,11 +166,20 @@ except ImportError:  # pragma: no cover - direct-script import shim
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
         SANDBOX_BYPASSED_MARKER,
+        SANDBOX_CANARY_DENIED,
+        SANDBOX_CANARY_NOT_DENIED,
         SANDBOX_FALLBACK_AUTO,
+        SANDBOX_FALLBACK_CONTAINED,
+        SANDBOX_FALLBACK_OFF,
         SANDBOX_FALLBACK_PROFILES,
+        SANDBOX_RUNG_UNSANDBOXED,
         ProfileUnsupported,
+        SandboxRung,
         StructuredOutputUnavailable,
         availability_from_failure,
+        sandbox_fallback_notice_text,
+        sandbox_rung_allowed,
+        sandbox_rung_id,
         split_reasoning_effort,
         build_child_env,
         matches_any,
@@ -1414,33 +1435,55 @@ _NESTED_CACHE: Dict[str, str] = {}
 _MODEL_CACHE: Dict[str, str] = {}
 
 #: The same, for the D6 sandbox self-test: ``ok`` | ``unknown`` |
-#: ``not-required`` | ``bypassed`` per ``<host id>|<runner spec>|<profile>`` —
+#: ``not-required`` | a **rung id** per ``<host id>|<runner spec>|<profile>`` —
 #: the profile is part of the key because the adapter answers a different
 #: command (or none) per profile. A refusal is never cached — it raises.
-#: ``bypassed`` (D6 override, 2026-09-17) is the one ``unavailable`` that did
-#: not raise: an ``agent-readonly`` runner under ``sandbox_fallback: auto``
-#: (the default; ``off`` raises as before). It is cached so the marker prints
-#: once per runner rather than once per batch, and so :func:`sandbox_bypassed`
-#: can hand the flag to every dispatch of that runner under that profile.
+#: A rung id (``landlock``, ``unsandboxed`` — landlock rung, 2026-09-22) is the
+#: one ``unavailable`` that did not raise: an ``agent-readonly`` runner whose
+#: fallback ladder produced a rung the ``sandbox_fallback`` key permits. It is
+#: cached so the notice prints once per runner rather than once per batch, and
+#: so :func:`sandbox_rung` can hand the id to every dispatch of that runner
+#: under that profile — the id, never a bool, because the dispatch must render
+#: *that* rung and a bool cannot say which.
 _SANDBOX_CACHE: Dict[str, str] = {}
 
-#: The cache state that carries the D6 override to the spawn.
+#: What :func:`_detect_sandbox` returns (and ``preflight_runner`` records as
+#: ``info["sandbox"]``) for the uncontained rung — the word it has always been.
+#: The cache itself stores the rung id; this word is derived from exactly
+#: :data:`SANDBOX_RUNG_UNSANDBOXED` and nothing else.
 SANDBOX_STATE_BYPASSED = "bypassed"
+
+#: The cache states that are **not** a rung id.
+_PLAIN_SANDBOX_STATES = frozenset({"ok", "unknown", "not-required"})
+
+
+def sandbox_rung(spec: str, profile: str) -> Optional[str]:
+    """The fallback rung id the preflight recorded for this runner and profile,
+    or ``None``.
+
+    Read by :func:`dispatch_task` (and the dry-run preview) to hand
+    ``sandbox_fallback=<rung id>`` to the argv build, which renders that rung.
+    Strictly the cache, never a fresh probe or a config read: the decision was
+    taken once, in :func:`_detect_sandbox`, with every gate in hand, and a
+    dispatch may only replay it. A runner the preflight never saw (or saw
+    under another profile) is ``None`` and renders the argv it always did.
+    """
+    recorded = _SANDBOX_CACHE.get(f"{_current_host_id()}|{spec}|{profile}")
+    if not recorded or recorded in _PLAIN_SANDBOX_STATES:
+        return None
+    return recorded
 
 
 def sandbox_bypassed(spec: str, profile: str) -> bool:
-    """Whether the preflight recorded ``bypassed`` for this runner and profile.
+    """Whether the preflight recorded the **uncontained** rung for this runner
+    and profile — rung 2 exactly, never a contained rung."""
+    return sandbox_rung(spec, profile) == SANDBOX_RUNG_UNSANDBOXED
 
-    Read by :func:`dispatch_task` to hand ``sandbox_fallback=True`` to the
-    argv build. Strictly the cache, never a fresh probe or a config read: the
-    decision was taken once, in :func:`_detect_sandbox`, with all four gates
-    in hand, and a dispatch may only replay it. A runner the preflight never
-    saw (or saw under another profile) is ``False`` and renders the argv it
-    always did.
-    """
-    return _SANDBOX_CACHE.get(f"{_current_host_id()}|{spec}|{profile}") == (
-        SANDBOX_STATE_BYPASSED
-    )
+
+def _sandbox_state_word(recorded: str) -> str:
+    """The ``info["sandbox"]`` word for a cached state: ``bypassed`` for the
+    uncontained rung (unchanged since D6), the recorded value otherwise."""
+    return SANDBOX_STATE_BYPASSED if recorded == SANDBOX_RUNG_UNSANDBOXED else recorded
 
 
 def reset_version_cache() -> None:
@@ -1658,14 +1701,197 @@ def _run_sandbox_probe(
         return None
 
 
+#: How one rung of the fallback walk ended (landlock rung, 2026-09-22).
+#: ``taken`` — the rung was selected; ``rejected`` — its probe exited but its
+#: containment canary's write was NOT denied (the flag was a no-op: fail-open);
+#: ``unavailable`` — a real sandbox failure; ``absent`` — the CLI did not
+#: understand the probe (this build does not know the rung), or exited 0
+#: without the canary's affirmative ``SANDBOX_CANARY_DENIED`` marker (the
+#: canary never ran to completion, so no boundary was measured); ``unprobed`` — the
+#: walk's shared deadline ran out before or while this rung was measured;
+#: ``unknown`` — the probe produced no exit status for another reason (spawn
+#: failure), or the rung's canary directory (``SandboxRung.probe_workdir``)
+#: could not be created and proven writable outside the sandbox, so the probe
+#: was never run. The first four let the walk continue (``taken`` ends it with a
+#: rung); the last two **stop** it with none: "nothing learned" never licenses
+#: a widening.
+RUNG_TAKEN = "taken"
+RUNG_REJECTED = "rejected"
+RUNG_UNAVAILABLE = "unavailable"
+RUNG_ABSENT = "absent"
+RUNG_UNPROBED = "unprobed"
+RUNG_UNKNOWN = "unknown"
+
+
+class SandboxProbeResult(NamedTuple):
+    """What :func:`sandbox_verdict` measured: ``(state, tail, rung, walk)``.
+
+    A NamedTuple, not a widened plain tuple, so a stale two-value unpack
+    (``state, tail = sandbox_verdict(...)``) *raises* instead of silently
+    dropping the rung — the rung is what makes the dispatch render the right
+    argv, and losing it quietly re-opens the skip-the-rewrite failure.
+
+    * ``state`` — the profile's own probe: ``ok`` | ``unavailable`` |
+      ``unknown`` | ``not-required``, exactly as before the ladder.
+    * ``tail`` — the redacted end of what that probe printed.
+    * ``rung`` — the id of the fallback rung the walk selected, or ``None``.
+      Only ever set beside ``state == "unavailable"``; whether the rung may be
+      *taken* is still the gates' decision (the ``sandbox_fallback`` key).
+    * ``walk`` — ``((rung id, outcome), …)`` for every rung the walk reached,
+      in order, outcomes from the ``RUNG_*`` constants. ``()`` when no walk
+      ran. It is how a reader tells a rung that was measured and rejected from
+      one the deadline never let anyone measure (``unprobed``).
+    """
+
+    state: str
+    tail: str
+    rung: Optional[str] = None
+    walk: Tuple[Tuple[str, str], ...] = ()
+
+
+def _sandbox_probe_inconclusive(text: str) -> bool:
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .providers.base import sandbox_probe_inconclusive
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.providers.base import sandbox_probe_inconclusive
+    return sandbox_probe_inconclusive(text)
+
+
+def _fallback_rungs(provider: Any, profile: str) -> Tuple[SandboxRung, ...]:
+    """The adapter's declared ladder for ``profile``, or ``()``.
+
+    ``getattr`` because a test's stand-in adapter may not declare the hook, and
+    any failure reads as "no ladder" — a diagnostic may not break a preflight,
+    and no ladder is the narrow reading.
+    """
+    hook = getattr(provider, "sandbox_fallback_rungs", None)
+    if not callable(hook):
+        return ()
+    try:
+        return tuple(hook(profile) or ())
+    except Exception:  # noqa: BLE001 - a diagnostic may not break a preflight
+        return ()
+
+
+def _prepare_probe_workdir(cwd: Optional[str], workdir: str) -> Optional[List[str]]:
+    """Create ``workdir`` under ``cwd`` and prove a file can be written there —
+    outside any sandbox — before a contained rung's canary runs in it.
+
+    Returns the directories this call created (deepest first, for
+    :func:`_remove_created_dirs`), or ``None`` when the directory cannot be
+    made (a non-directory in the way) or is not writable by this user: a
+    canary whose write is refused by plain permissions must not read as a
+    boundary. Anything this call created is removed again on failure.
+    """
+    base = os.path.abspath(cwd or os.getcwd())
+    target = os.path.join(base, workdir)
+    created: List[str] = []
+    missing: List[str] = []
+    probe = target
+    while probe != base and not os.path.lexists(probe):
+        missing.append(probe)
+        probe = os.path.dirname(probe)
+    try:
+        for path in reversed(missing):
+            os.mkdir(path)
+            created.insert(0, path)
+        if not os.path.isdir(target):
+            raise NotADirectoryError(target)
+        fd, scratch = tempfile.mkstemp(prefix="sandbox-setup-", dir=target)
+        os.close(fd)
+        os.unlink(scratch)
+    except OSError:
+        _remove_created_dirs(created)
+        return None
+    return created
+
+
+def _remove_created_dirs(created: Optional[Sequence[str]]) -> None:
+    """``rmdir`` what :func:`_prepare_probe_workdir` created, deepest first.
+
+    Only ever those directories, only if empty, and quietly: a canary that ran
+    unsandboxed may already have removed them itself.
+    """
+    for path in created or ():
+        try:
+            os.rmdir(path)
+        except OSError:
+            pass
+
+
+def _walk_fallback_rungs(
+    rungs: Sequence[SandboxRung], *, cwd: Optional[str], deadline: float
+) -> Tuple[Optional[str], Tuple[Tuple[str, str], ...]]:
+    """Walk ``rungs`` in order under one shared ``deadline`` (T3's walk table).
+
+    Returns ``(selected rung id or None, walk record)``. Each rung probe gets
+    only what is left of the deadline; a rung with nothing left is not started
+    and is recorded ``unprobed``, which — like a probe with no exit status —
+    stops the walk with no rung, so the uncontained rung is never rendered on
+    exhausted time.
+    """
+    walk: List[Tuple[str, str]] = []
+    for rung in rungs:
+        if not rung.probe_argv:
+            # Nothing to measure (the uncontained rung): reaching it is taking it.
+            walk.append((rung.name, RUNG_TAKEN))
+            return rung.name, tuple(walk)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            walk.append((rung.name, RUNG_UNPROBED))
+            return None, tuple(walk)
+        workdir = getattr(rung, "probe_workdir", None)
+        created: Optional[List[str]] = []
+        if workdir:
+            created = _prepare_probe_workdir(cwd, workdir)
+            if created is None:
+                # The canary's directory could not be made writable *outside*
+                # the sandbox, so a denied write inside it would prove nothing
+                # about the boundary: nothing was measured, never a widening.
+                walk.append((rung.name, RUNG_UNKNOWN))
+                return None, tuple(walk)
+        try:
+            completed = _run_sandbox_probe(
+                list(rung.probe_argv), cwd=cwd, timeout=max(remaining, 0.0)
+            )
+        finally:
+            _remove_created_dirs(created)
+        if completed is None:
+            ran_out = time.monotonic() >= deadline
+            walk.append((rung.name, RUNG_UNPROBED if ran_out else RUNG_UNKNOWN))
+            return None, tuple(walk)
+        said = f"{completed.stdout}\n{completed.stderr}"
+        if SANDBOX_CANARY_NOT_DENIED in said:
+            # Checked first: a write that landed rejects the rung whatever the
+            # exit status says.
+            walk.append((rung.name, RUNG_REJECTED))
+        elif completed.returncode == 0 and SANDBOX_CANARY_DENIED in said:
+            # Exit 0 *and* the canary's own affirmative marker: the canary ran
+            # to completion and its write was denied.
+            walk.append((rung.name, RUNG_TAKEN))
+            return rung.name, tuple(walk)
+        elif completed.returncode == 0:
+            # Exit 0 without the marker is not containment: the canary never
+            # ran to completion (a CLI that printed usage and exited 0, a flag
+            # accepted as a no-op). Nothing about a boundary was measured, so
+            # the rung is not usable here — read like a probe the CLI did not
+            # understand.
+            walk.append((rung.name, RUNG_ABSENT))
+        elif _sandbox_probe_inconclusive(said):
+            walk.append((rung.name, RUNG_ABSENT))
+        else:
+            walk.append((rung.name, RUNG_UNAVAILABLE))
+    return None, tuple(walk)
+
+
 def sandbox_verdict(
     provider: Any,
     profile: str,
     *,
     cwd: Optional[str] = None,
     timeout: Optional[float] = None,
-) -> Tuple[str, str]:
-    """``(state, tail)`` for one adapter's sandbox self-test (D6 step 3).
+) -> SandboxProbeResult:
+    """One adapter's sandbox self-test (D6 step 3), plus its fallback walk.
 
     ``state`` is ``not-required`` when the adapter answers no command for this
     profile, ``ok`` on exit 0, ``unavailable`` on any other exit, and
@@ -1673,31 +1899,44 @@ def sandbox_verdict(
     is the redacted end of what the command printed — the ``bwrap:`` line, on
     the machine this was written for. Shared by the executor's preflight and
     ``multi_llm.py doctor`` so both read the same command the same way.
+
+    On ``unavailable`` — and only then — the adapter's fallback ladder
+    (``sandbox_fallback_rungs``) is walked in order (landlock rung,
+    2026-09-22): a rung whose probe exits 0 **and** prints the canary's
+    affirmative ``SANDBOX_CANARY_DENIED`` marker (its canary write was
+    *denied*) is selected — exit 0 alone is not containment; a rejected
+    canary, a real sandbox failure, a probe the CLI did not understand or an
+    exit 0 without the marker moves on; a probe with no exit status
+    stops the walk with no rung. ``timeout`` is the budget for the **whole**
+    call, not per probe: the deadline is taken once on entry and every rung
+    probe gets only what is left of it, so a two-probe ladder never costs more
+    than one ``SANDBOX_PROBE_TIMEOUT_S``.
     """
     try:
         argv = provider.sandbox_probe_command(profile)
     except Exception:  # noqa: BLE001 - a diagnostic may not break a preflight
         argv = None
     if not argv:
-        return "not-required", ""
+        return SandboxProbeResult("not-required", "")
     if timeout is None:
         # Resolved at call time so a test can shorten the module constant.
         timeout = SANDBOX_PROBE_TIMEOUT_S
+    deadline = time.monotonic() + max(timeout, 0.0)
     completed = _run_sandbox_probe(list(argv), cwd=cwd, timeout=timeout)
     if completed is None:
-        return "unknown", ""
+        return SandboxProbeResult("unknown", "")
     tail = _redact_probe_tail(completed.stderr or completed.stdout, 500)
     if completed.returncode == 0:
-        return "ok", tail
-    try:  # pragma: no cover - import shim mirrors the rest of utils/
-        from .providers.base import sandbox_probe_inconclusive
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.providers.base import sandbox_probe_inconclusive
-    if sandbox_probe_inconclusive(f"{completed.stdout}\n{completed.stderr}"):
+        return SandboxProbeResult("ok", tail)
+    if _sandbox_probe_inconclusive(f"{completed.stdout}\n{completed.stderr}"):
         # The CLI did not understand the probe (a build older than its
         # `sandbox` subcommand): nothing about the sandbox was learned.
-        return "unknown", tail
-    return "unavailable", tail
+        return SandboxProbeResult("unknown", tail)
+    rungs = _fallback_rungs(provider, profile)
+    if not rungs:
+        return SandboxProbeResult("unavailable", tail)
+    rung, walk = _walk_fallback_rungs(rungs, cwd=cwd, deadline=deadline)
+    return SandboxProbeResult("unavailable", tail, rung, walk)
 
 
 def _probe_cwd(anchor: Optional[str]) -> Optional[str]:
@@ -1728,33 +1967,82 @@ def _current_host_id() -> str:
     return resolved[0] if resolved else "unknown-host"
 
 
-def _sandbox_fallback_allowed(
+def _sandbox_fallback_policy(
     provider: Any, profile: str, *, anchor: Optional[str]
-) -> bool:
-    """Whether ``sandbox_fallback`` resolves to ``auto`` for this dispatch.
+) -> Optional[str]:
+    """The adapter's resolved ``sandbox_fallback`` policy for ``profile``, or
+    ``None`` when it declares none (or the read fails).
 
-    Two of the four gates, answered by the adapter: it declares the hook at all
-    (``None`` for every adapter without a fallback — a stand-in in a test may
-    not declare it, hence ``getattr``), and it resolves the key to ``auto`` —
-    the default unless a config layer wrote ``off`` — for *this* profile,
-    which the adapter answers ``None`` for outside
-    ``SANDBOX_FALLBACK_PROFILES``, so ``agent-write`` cannot pass here. The
-    profile check is repeated locally all the same: two places have to agree
-    before a write profile could slip through. The probe verdict is the
-    caller's gate; ``anchor`` is the plan path, so the key is read from the
-    same ``.multi-llm/providers.yaml`` the dispatch's env and timeout come from.
-    A config read that raises is "not allowed" — the narrow reading, and the
-    one that matches every other gate's posture on a config it cannot read.
+    ``getattr`` because a test's stand-in adapter may not declare the hook; a
+    config read that raises is ``None`` — the narrow reading, and the one that
+    matches every other gate's posture on a config it cannot read. ``anchor``
+    is the plan path, so the key is read from the same
+    ``.multi-llm/providers.yaml`` the dispatch's env and timeout come from.
     """
-    if profile not in SANDBOX_FALLBACK_PROFILES:
-        return False
     hook = getattr(provider, "sandbox_fallback_policy", None)
     if not callable(hook):
-        return False
+        return None
     try:
-        return hook(profile, anchor=anchor) == SANDBOX_FALLBACK_AUTO
+        policy = hook(profile, anchor=anchor)
     except Exception:  # noqa: BLE001 - a config read may never end a preflight
-        return False
+        return None
+    return policy if isinstance(policy, str) else None
+
+
+def sandbox_fallback_rung(
+    provider: Any, profile: str, rung_id: Optional[str], policy: Optional[str]
+) -> Optional[SandboxRung]:
+    """The declared rung ``rung_id`` if ``policy`` may take it for ``profile``.
+
+    The policy half of both gates (this module's :func:`_detect_sandbox` and
+    ``review_orchestrator_base.sandbox_refusal``), in one place: the profile is
+    one of ``SANDBOX_FALLBACK_PROFILES`` (repeated here although the adapter
+    answers ``None``/``()`` outside it — two places have to agree before a
+    write profile could slip through), the walk selected a rung the adapter
+    actually declares for that profile, and :func:`sandbox_rung_allowed` says
+    the key permits it — ``auto`` any rung, ``contained`` a contained one only,
+    ``off`` none. The probe verdict ``unavailable`` is the caller's gate.
+    """
+    if profile not in SANDBOX_FALLBACK_PROFILES or not rung_id:
+        return None
+    for rung in _fallback_rungs(provider, profile):
+        if rung.name == rung_id:
+            return rung if sandbox_rung_allowed(rung, policy) else None
+    return None
+
+
+def sandbox_walk_note(
+    verdict: "SandboxProbeResult", policy: Optional[str]
+) -> str:
+    """One sentence on why an ``unavailable`` verdict took no rung, or ``""``.
+
+    Said only where it changes what the reader should do: the walk stopped on
+    a probe that produced no answer (fail-closed — a hung or unstartable rung
+    probe refuses where the old single probe would have bypassed), or
+    ``contained`` refused the uncontained rung the walk reached. ``off`` and an
+    adapter with no ladder say nothing new: that refusal is the old one.
+    """
+    if policy in (None, SANDBOX_FALLBACK_OFF):
+        return ""
+    stopped = next(
+        (
+            (name, outcome) for name, outcome in verdict.walk
+            if outcome in (RUNG_UNPROBED, RUNG_UNKNOWN)
+        ),
+        None,
+    )
+    if stopped is not None:
+        return (
+            f"fallback rung {stopped[0]!r} was {stopped[1]} (its probe gave no "
+            f"answer), so no fallback rung was taken"
+        )
+    if policy == SANDBOX_FALLBACK_CONTAINED and verdict.walk:
+        return (
+            f"sandbox_fallback={SANDBOX_FALLBACK_CONTAINED}: no contained "
+            f"fallback rung is usable here, and the uncontained one is never "
+            f"taken under that value"
+        )
+    return ""
 
 
 def _detect_sandbox(
@@ -1768,53 +2056,71 @@ def _detect_sandbox(
     """Run the adapter's model-free sandbox self-test once per host/spec/profile
     and refuse a runner whose own sandbox cannot run (D6 step 3).
 
-    Returns ``ok`` | ``unknown`` | ``not-required`` | ``bypassed``; a non-zero
-    exit raises, because bubblewrap failing to start is a property of the
-    machine — every sibling on this runner would fail identically, and the fix
-    (an AppArmor profile ``multi_llm.py doctor`` prints) is never a retry. A
-    timeout or a command that could not run records ``unknown`` and
-    dispatches, exactly like the nested-exec probe's inconclusive branch.
+    Returns ``ok`` | ``unknown`` | ``not-required`` | ``bypassed`` | a contained
+    rung id (``landlock``); a non-zero exit with no permitted rung raises,
+    because bubblewrap failing to start is a property of the machine — every
+    sibling on this runner would fail identically, and the fix (an AppArmor
+    profile ``multi_llm.py doctor`` prints) is never a retry. A timeout or a
+    command that could not run records ``unknown`` and dispatches, exactly
+    like the nested-exec probe's inconclusive branch.
 
-    ``bypassed`` is the D6 override (2026-09-17), and it is the *only* way an
-    ``unavailable`` verdict does not raise here: the adapter declares a
-    fallback for this profile, the key resolves to ``auto`` (the shipped
-    default — ``off`` is the operator restoring the refusal), and the profile
-    is ``agent-readonly`` — the one executor profile in
-    ``SANDBOX_FALLBACK_PROFILES``. Every WRITE kind runs ``agent-write``,
-    for which the adapter's hook answers ``None`` whatever the config says,
-    so a write batch under a broken sandbox is exit 3 exactly as before.
+    A **rung** (D6 override 2026-09-17, landlock rung 2026-09-22) is the *only*
+    way an ``unavailable`` verdict does not raise here: the adapter's ladder
+    walk selected one, the adapter declares it for this profile, and the
+    ``sandbox_fallback`` key permits it — a contained rung under ``auto`` or
+    ``contained``, the uncontained rung under ``auto`` alone, nothing under
+    ``off`` — and the profile is ``agent-readonly``, the one executor profile
+    in ``SANDBOX_FALLBACK_PROFILES``. Every WRITE kind runs ``agent-write``,
+    which has no ladder whatever the config says, so a write batch under a
+    broken sandbox is exit 3 exactly as before. The selected rung's **id** is
+    what gets cached — never the old constant — so :func:`sandbox_rung` hands
+    the dispatch the rung it must render.
     """
     provider = get_provider(provider_name)
     cache_key = f"{_current_host_id()}|{spec}|{profile}"
     if cache_key in _SANDBOX_CACHE:
-        return _SANDBOX_CACHE[cache_key]
+        return _sandbox_state_word(_SANDBOX_CACHE[cache_key])
 
-    state, tail = sandbox_verdict(provider, profile, cwd=_probe_cwd(anchor))
-    if state == "unavailable" and _sandbox_fallback_allowed(
-        provider, profile, anchor=anchor
-    ):
-        # One line per runner per process, on stdout beside the other
-        # preflight lines, in the same words the fan-out prints — the reader
-        # greps one marker across the run. `unknown` never reaches here: the
-        # override widens nothing on a probe that was not read.
-        print(
-            f"[exec-subagents] {SANDBOX_BYPASSED_MARKER} {provider_name}: "
-            f"bubblewrap cannot start; running --sandbox danger-full-access "
-            f"under providers.{provider_name}.sandbox_fallback="
-            f"{SANDBOX_FALLBACK_AUTO} (read-only phase; no OS boundary "
-            f"between the model's shell and this machine)"
-        )
-        _SANDBOX_CACHE[cache_key] = SANDBOX_STATE_BYPASSED
-        return SANDBOX_STATE_BYPASSED
+    verdict = sandbox_verdict(provider, profile, cwd=_probe_cwd(anchor))
+    state, tail = verdict.state, verdict.tail
+    policy: Optional[str] = None
     if state == "unavailable":
+        policy = (
+            _sandbox_fallback_policy(provider, profile, anchor=anchor)
+            if profile in SANDBOX_FALLBACK_PROFILES else None
+        )
+        rung = sandbox_fallback_rung(provider, profile, verdict.rung, policy)
+        if rung is not None:
+            # One line per runner per process, on stdout beside the other
+            # preflight lines, in the same words the fan-out prints — the
+            # reader greps one marker across the run. `unknown` never reaches
+            # here: no rung widens anything on a probe that was not read.
+            if rung.contained:
+                print(
+                    "[exec-subagents] "
+                    + sandbox_fallback_notice_text(provider_name, rung, policy)
+                )
+            else:
+                print(
+                    f"[exec-subagents] {SANDBOX_BYPASSED_MARKER} {provider_name}: "
+                    f"bubblewrap cannot start; running --sandbox danger-full-access "
+                    f"under providers.{provider_name}.sandbox_fallback="
+                    f"{SANDBOX_FALLBACK_AUTO} (read-only phase; no OS boundary "
+                    f"between the model's shell and this machine)"
+                )
+            _SANDBOX_CACHE[cache_key] = rung.name
+            return _sandbox_state_word(rung.name)
+    if state == "unavailable":
+        note = sandbox_walk_note(verdict, policy)
         raise RunnerRejected(
             f"Refusing to dispatch: {key} is {spec!r} (reason: "
             f"sandbox_unavailable) — "
             f"{_REASON_EXPLANATION['sandbox_unavailable']}. "
             f"Probe tail: {tail!r}. "
-            f"Fix: run `multi_llm.py doctor` and install the AppArmor profile it "
-            f"prints (or use a runner without an OS sandbox). Nothing was "
-            f"dispatched.",
+            + (f"Fallback ladder: {note}. " if note else "")
+            + "Fix: run `multi_llm.py doctor` and install the AppArmor profile it "
+            "prints (or use a runner without an OS sandbox). Nothing was "
+            "dispatched.",
             key=key,
             spec=spec,
             reason_code="sandbox_unavailable",
@@ -3198,7 +3504,7 @@ def _spawn(
     cwd: Optional[str],
     schema: Optional[Any] = None,
     anchor: Optional[str] = None,
-    sandbox_fallback: bool = False,
+    sandbox_fallback: Optional[str] = None,
 ) -> _Capture:
     """Run one dispatch, materializing ``schema`` for the CLIs that take a file.
 
@@ -3255,7 +3561,7 @@ def _spawn_child(
     cwd: Optional[str],
     schema: Optional[Any] = None,
     anchor: Optional[str] = None,
-    sandbox_fallback: bool = False,
+    sandbox_fallback: Optional[str] = None,
 ) -> _Capture:
     """Run one dispatch: build argv for the profile, spawn, capture everything.
 
@@ -3314,14 +3620,15 @@ def _spawn_in_context(
     cwd: Optional[str],
     schema: Optional[Any] = None,
     anchor: Optional[str] = None,
-    sandbox_fallback: bool = False,
+    sandbox_fallback: Optional[str] = None,
 ) -> _Capture:
     """:func:`_spawn_child`'s body, inside the adapter's dispatch context.
 
-    ``sandbox_fallback`` is the D6 override (2026-09-17), ``True`` only when
-    :func:`dispatch_task` read ``bypassed`` off the preflight's cache for this
-    runner and profile; the adapter's ``apply_sandbox_fallback`` is what turns
-    it into argv, and every adapter without one ignores it.
+    ``sandbox_fallback`` is the D6 override (2026-09-17): the rung id
+    :func:`dispatch_task` read off the preflight's cache for this runner and
+    profile (:func:`sandbox_rung`), or ``None``; the adapter's
+    ``apply_sandbox_fallback`` is what turns that rung into argv, and every
+    adapter without one ignores it.
     """
     capture = _Capture()
     argv, stdin_text = provider.build_agent_command_for_transport(
@@ -3613,9 +3920,10 @@ def dispatch_task(
     budget = retries if retries is not None else get_subagent_retries(anchor=anchor)
     napper = sleep or time.sleep
     # D6 override (2026-09-17): replay the preflight's decision, never re-take
-    # it here. `bypassed` is only ever recorded for `agent-readonly`, so a
-    # WRITE kind reads `False` by construction and renders its argv unchanged.
-    fallback = sandbox_bypassed(runner, profile)
+    # it here. A rung id is only ever recorded for `agent-readonly`, so a WRITE
+    # kind reads `None` by construction and renders its argv unchanged; a read
+    # kind reads the id of the rung its argv must render (landlock rung).
+    fallback = sandbox_rung(runner, profile)
 
     # §4.2.2's "the caller reads the flag before dispatch", on this lane and once
     # per dispatch — the schema file is read here, not per attempt, and the
@@ -5260,7 +5568,7 @@ def _preview_argv(
     profile: str,
     schema: Optional[Any],
     anchor: Optional[str] = None,
-    sandbox_fallback: bool = False,
+    sandbox_fallback: Optional[str] = None,
 ) -> Tuple[Optional[List[str]], Optional[str]]:
     """The argv a dispatch WOULD render, built the way a dispatch builds it.
 
@@ -5287,16 +5595,19 @@ def _preview_argv(
 
     ``schema=None`` — every kind with no schema phase, and every adapter that
     declined the flag — renders exactly what this preview rendered before.
-    ``sandbox_fallback`` is the D6 override the preflight just recorded (or
-    not): a dry run's argv has to show the ``danger-full-access`` a real
-    dispatch would carry, or the preview would be the one artifact that hid it.
+    ``sandbox_fallback`` is the rung id the preflight just recorded (or
+    ``None``): a dry run's argv has to show the rung a real dispatch would
+    render — ``danger-full-access``, or ``read-only`` plus the landlock feature
+    — or the preview would be the one artifact that hid it.
     """
+    rung = sandbox_rung_id(sandbox_fallback)
+
     def _render(materialized_schema: Optional[Any]) -> List[str]:
         argv = provider.build_agent_command(
             prompt, model, profile, schema=materialized_schema
         )
-        if sandbox_fallback:
-            argv = provider.apply_sandbox_fallback(argv, profile)
+        if rung:
+            argv = provider.apply_sandbox_fallback(argv, profile, rung)
         return argv
 
     with provider_dispatch_context(
@@ -5443,7 +5754,7 @@ def dry_run_report(
             argv, refusal = _preview_argv(
                 provider, prompt=prompt, model=model, profile=entry["profile"],
                 schema=schema, anchor=anchor,
-                sandbox_fallback=sandbox_bypassed(runner, entry["profile"]),
+                sandbox_fallback=sandbox_rung(runner, entry["profile"]),
             )
         except Exception as exc:  # noqa: BLE001 - a preflight must not raise
             entry["would_dispatch"] = False

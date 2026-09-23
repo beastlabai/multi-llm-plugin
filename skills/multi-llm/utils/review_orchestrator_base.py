@@ -16,6 +16,7 @@ Functions cover:
 
 import argparse
 import asyncio
+import contextvars
 import json
 import os
 import re
@@ -66,6 +67,8 @@ from .schema_validator import drop_non_record_entries
 from .llm_client import (
     SANDBOX_BYPASSED,
     STDOUT_OUTPUT_LOCATION,
+    sandbox_fallback_rung_of,
+    sandbox_record_word,
     describe_output_file,
     invoke_with_provider,
     invoke_with_file_output,
@@ -80,8 +83,12 @@ from .providers.base import (
     PROFILE_GENERATE,
     SANDBOX_BYPASSED_MARKER,
     SANDBOX_FALLBACK_AUTO,
+    SANDBOX_RUNG_UNSANDBOXED,
     LLMProvider,
+    SandboxRung,
     classify_streams,
+    sandbox_fallback_notice_text,
+    sandbox_rung_retired_notice,
     context_length_message,
 )
 from .retry_ladder import (
@@ -1525,7 +1532,10 @@ def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
     ``invoke_with_provider`` ran under ``sandbox_fallback`` carries
     ``details["sandbox"] == "bypassed"``, and the record gets a ``sandbox``
     key for it — independent of whether a served model was claimed, so the
-    two facts can travel alone or together.
+    two facts can travel alone or together. A slot on a **contained** rung
+    (landlock rung, 2026-09-22) carries the rung id there instead, and the
+    record says ``fallback-<rung>`` (``sandbox_record_word``) — only the
+    uncontained rung is ever recorded as ``bypassed``.
     """
     fields: Dict[str, Any] = {}
     served = (details or {}).get("served_model")
@@ -1534,8 +1544,9 @@ def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
         fields["served_model_is_fallback"] = bool(
             details.get("served_model_is_fallback")
         )
-    if (details or {}).get("sandbox") == SANDBOX_BYPASSED:
-        fields["sandbox"] = SANDBOX_BYPASSED
+    word = sandbox_record_word((details or {}).get("sandbox"))
+    if word:
+        fields["sandbox"] = word
     return fields
 
 
@@ -1645,7 +1656,8 @@ def collect_served_models(
     :func:`run_single_model` returns. Empty for a default run, which is what
     keeps every downstream artifact unchanged. A bypassed slot contributes an
     entry with ``sandbox: "bypassed"`` even when nothing served it by fallback
-    — ``served_model_label`` renders either half, or both.
+    — ``served_model_label`` renders either half, or both. A slot on a
+    contained rung contributes ``sandbox: "fallback-<rung>"`` instead.
     """
     served: Dict[str, Dict[str, Any]] = {}
     for model_spec, result in (results or {}).items():
@@ -1656,8 +1668,9 @@ def collect_served_models(
         if name:
             entry["served_model"] = name
             entry["fallback"] = bool(result.get("served_model_is_fallback"))
-        if result.get("sandbox") == SANDBOX_BYPASSED:
-            entry["sandbox"] = SANDBOX_BYPASSED
+        word = sandbox_record_word(result.get("sandbox"))
+        if word:
+            entry["sandbox"] = word
         if entry:
             served[model_spec] = entry
     return served
@@ -1684,9 +1697,84 @@ def record_sandbox_bypassed(
         spec for spec, entry in (served_models or {}).items()
         if isinstance(entry, dict) and entry.get("sandbox") == SANDBOX_BYPASSED
     )
+    # A contained rung (landlock rung, 2026-09-22) is a sandbox, not a bypass:
+    # it never joins the list above, and the poller is told which rung each
+    # such slot ran on under its own key, `progress.sandbox_fallback`
+    # (`{spec: rung}`), which `status --view run` renders by rung name.
+    contained = {
+        spec: rung for spec, rung in sorted(
+            (spec, sandbox_fallback_rung_of(entry.get("sandbox")))
+            for spec, entry in (served_models or {}).items()
+            if isinstance(entry, dict)
+        ) if rung
+    }
     if bypassed:
         _detach.report_progress(str(phase_dir), sandbox_bypassed=bypassed)
+    if contained:
+        _detach.report_progress(str(phase_dir), sandbox_fallback=contained)
     return bypassed
+
+
+def announce_retired_rungs(
+    prior_served: Optional[Dict[str, Dict[str, Any]]],
+    served_models: Optional[Dict[str, Dict[str, Any]]],
+    *,
+    anchor: Optional[Union[str, Path]] = None,
+) -> List[str]:
+    """Name, once, a contained rung this run could no longer take — and return
+    the lines printed.
+
+    Open question 2 of the landlock-rung plan (2026-09-22): when
+    ``use_legacy_landlock`` is removed upstream, rung 1's probe starts failing
+    and every machine on ``auto`` drops to the uncontained rung. That drop must
+    not be silent. It is a *transition*, so it is judged against the previous
+    run of this phase: ``prior_served`` is the ``models_served`` that run wrote
+    (read before this run's ``write_status`` replaced it), ``served_models``
+    this run's. A spec whose previous word was ``fallback-<rung>`` and whose
+    word now is ``bypassed`` gets one line naming the retired rung with its
+    ``retires_when`` version and sentence. The next run compares
+    ``bypassed`` with ``bypassed`` and says nothing, which is what makes it
+    once. Nothing else about the run changes.
+
+    Printed after the fan-out rather than ahead of the slot: the previous run's
+    record is read once per phase, where the checkpoint is already in hand,
+    instead of threading it through every lane's dispatch. The per-slot
+    ``[SANDBOX_BYPASSED]`` line has by then already said what this run did;
+    this line says what it no longer does.
+    """
+    lines: List[str] = []
+    for spec in sorted(served_models or {}):
+        entry = (served_models or {}).get(spec)
+        if not isinstance(entry, dict) or entry.get("sandbox") != SANDBOX_BYPASSED:
+            continue
+        before = (prior_served or {}).get(spec)
+        rung_id = (
+            sandbox_fallback_rung_of(before.get("sandbox"))
+            if isinstance(before, dict) else None
+        )
+        if not rung_id:
+            continue
+        try:
+            provider_name = parse_model_spec(spec, anchor=anchor)[0]
+        except Exception:  # noqa: BLE001 - a notice may never end a fan-out
+            provider_name = spec.split(":", 1)[0]
+        rung = None
+        try:
+            hook = getattr(get_provider(provider_name), "sandbox_fallback_rungs", None)
+            rungs = hook(PROFILE_GENERATE) if callable(hook) else ()
+            rung = next((r for r in rungs if r.name == rung_id), None)
+        except Exception:  # noqa: BLE001 - a notice may never end a fan-out
+            rung = None
+        if rung is None:
+            # The adapter no longer declares the rung at all — the retirement
+            # already reached this code. Name it without the upstream sentence.
+            rung = SandboxRung(
+                name=rung_id, probe_argv=None, argv_rewrite=(), contained=True,
+            )
+        line = sandbox_rung_retired_notice(provider_name, spec, rung)
+        print(line)
+        lines.append(line)
+    return lines
 
 
 def recorded_served_models(phase_dir: str) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -1737,13 +1825,15 @@ def recorded_usage(phase_dir: str) -> Optional[Dict[str, Dict[str, Any]]]:
     } or None
 
 
-#: ``(state, tail)`` per ``provider|profile|cwd`` for the fan-out's sandbox
-#: self-test (D6 step 3), asked once per provider per run rather than once per
-#: slot. A ``threading.Lock`` and not an ``asyncio`` one: the probe is blocking,
+#: The executor's ``SandboxProbeResult`` — ``(state, tail, rung, walk)`` — per
+#: ``provider|profile|cwd`` for the fan-out's sandbox self-test (D6 step 3),
+#: asked once per provider per run rather than once per slot; the rung the
+#: fallback walk selected rides in the cached value, so every slot of the
+#: provider renders the same rung. A ``threading.Lock`` and not an ``asyncio`` one: the probe is blocking,
 #: so it runs in a worker thread, and one process may drive more than one event
 #: loop (a phase per ``asyncio.run``) — a loop-bound primitive would be the
 #: wrong shape for both.
-_FANOUT_SANDBOX_CACHE: Dict[str, Tuple[str, str]] = {}
+_FANOUT_SANDBOX_CACHE: Dict[str, Any] = {}
 _FANOUT_SANDBOX_LOCK = threading.Lock()
 
 #: One probe lock per cache key, so the cache lock above is held only for the
@@ -1783,7 +1873,7 @@ def sandbox_unavailable_reason(provider_name: str, tail: str) -> str:
     )
 
 
-def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Tuple[str, str]:
+def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Any:
     """Run — or recall — this provider's ``generate`` sandbox self-test.
 
     Blocking, so the caller hands it to a thread. ``sandbox_verdict`` is the
@@ -1807,14 +1897,14 @@ def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Tuple[str
             cached = _FANOUT_SANDBOX_CACHE.get(key)
         if cached is not None:
             return cached
-        from .subagent_executor import sandbox_verdict
+        from .subagent_executor import SandboxProbeResult, sandbox_verdict
 
         try:
             verdict = sandbox_verdict(
                 get_provider(provider_name), PROFILE_GENERATE, cwd=cwd
             )
         except Exception:  # noqa: BLE001 - a diagnostic may never end a fan-out
-            verdict = ("unknown", "")
+            verdict = SandboxProbeResult("unknown", "")
         with _FANOUT_SANDBOX_LOCK:
             _FANOUT_SANDBOX_CACHE[key] = verdict
         return verdict
@@ -1832,14 +1922,22 @@ class SandboxVerdict(NamedTuple):
     ``verdict`` is one of :data:`SANDBOX_DISPATCH` (run as the adapter renders
     it — the answer for ``ok``, ``unknown`` and ``not-required`` alike),
     :data:`SANDBOX_REFUSE` (``reason`` is the ``[SANDBOX_UNAVAILABLE]`` line
-    the slot is failed with) or :data:`SANDBOX_DISPATCH_UNSANDBOXED` (``reason``
-    is the ``[SANDBOX_BYPASSED]`` line the lane prints once, and ``bypass`` is
-    the flag it hands the invoker). A NamedTuple rather than a str so a call
-    site cannot take the third answer for the first by truthiness.
+    the slot is failed with) or :data:`SANDBOX_DISPATCH_UNSANDBOXED` — the
+    slot runs on a fallback **rung**, named by ``rung`` (landlock rung,
+    2026-09-22), which is what :func:`sandbox_fallback_kwargs` hands the
+    invoker. ``reason`` is then the one line the lane prints: the
+    ``[SANDBOX_BYPASSED]`` line for the uncontained rung, a
+    ``[SANDBOX_FALLBACK]`` line for a contained one. ``bypass`` means the
+    uncontained rung **exactly** — it is what the lanes gate the
+    ``[SANDBOX_BYPASSED]`` print on (the porcelain detective check reads the
+    rung id itself, :func:`porcelain_check_applies`), and a contained rung is
+    a sandbox, not a bypass. A NamedTuple rather than a str
+    so a call site cannot take the third answer for the first by truthiness.
     """
 
     verdict: str
     reason: Optional[str]
+    rung: Optional[str] = None
 
     @property
     def refused(self) -> bool:
@@ -1847,7 +1945,18 @@ class SandboxVerdict(NamedTuple):
 
     @property
     def bypass(self) -> bool:
-        return self.verdict == SANDBOX_DISPATCH_UNSANDBOXED
+        return (
+            self.verdict == SANDBOX_DISPATCH_UNSANDBOXED
+            and self.rung == SANDBOX_RUNG_UNSANDBOXED
+        )
+
+    @property
+    def fallback(self) -> bool:
+        """The slot runs on **any** fallback rung, contained or not — what the
+        lanes gate the one per-slot notice on (``reason``: ``[SANDBOX_FALLBACK]``
+        for a contained rung, ``[SANDBOX_BYPASSED]`` for the uncontained one).
+        Never the porcelain check's gate: that is ``porcelain_check_applies``."""
+        return self.verdict == SANDBOX_DISPATCH_UNSANDBOXED and bool(self.reason)
 
 
 def sandbox_bypassed_notice(provider_name: str) -> str:
@@ -1871,6 +1980,16 @@ def sandbox_bypassed_notice(provider_name: str) -> str:
         f"(read-only phase; no OS boundary between the model's shell and this "
         f"machine)"
     )
+
+
+def sandbox_fallback_notice(provider_name: str, rung: Any, policy: str) -> str:
+    """The one line a lane prints for a slot dispatched on a **contained**
+    fallback rung — never the ``[SANDBOX_BYPASSED]`` sentence, which would
+    claim the opposite of what happened. Names the rung, its deprecation when
+    it has one, and that the raw capture's ``"type":"error"`` deprecation item
+    is not the failure (``base.sandbox_fallback_notice_text``, shared with the
+    executor's preflight line)."""
+    return sandbox_fallback_notice_text(provider_name, rung, policy)
 
 
 def _fanout_sandbox_fallback(provider_name: str, cwd: Optional[str]) -> Optional[str]:
@@ -1908,32 +2027,52 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
     ladder as rung 1.
 
     ``unavailable`` answers ``dispatch_unsandboxed`` — the D6 override
-    (2026-09-17) — when **all** of its conditions hold: the adapter declares a
-    fallback for ``generate`` at all (codex alone; a stand-in without the hook
-    is refused as before) and the key resolves to ``auto``, which is the
-    shipped default. The verdict itself is the third condition
-    (``unavailable``, never ``unknown``: the override widens nothing on a
-    probe that was not read), and ``generate`` is the profile this gate
-    exists for, so the fourth holds by construction. The lane then prints the
-    ``[SANDBOX_BYPASSED]`` line and runs the slot with the flag. ``refuse`` —
-    the ``[SANDBOX_UNAVAILABLE]`` line — is the answer under
-    ``providers.<name>.sandbox_fallback: off``, and for every adapter that
-    declares no fallback.
+    (2026-09-17), now a ladder (landlock rung, 2026-09-22) — when the
+    adapter's fallback walk selected a rung it declares for ``generate`` and
+    ``providers.<name>.sandbox_fallback`` permits that rung. The key gates
+    **every** rung: ``auto`` (the shipped default) takes whichever rung the
+    walk selected — the contained ``landlock`` rung first, the uncontained
+    ``unsandboxed`` rung only when the contained one's probe failed;
+    ``contained`` takes a contained rung and **never** the uncontained one;
+    ``off`` takes none. The verdict carries the rung id, which is what
+    :func:`sandbox_fallback_kwargs` hands the invoker. ``refuse`` — the
+    ``[SANDBOX_UNAVAILABLE]`` line — is therefore the answer under ``off``
+    (exactly as before the ladder: ``off`` still means refusal), under
+    ``contained`` when no contained rung is usable, when the walk stopped on a
+    rung probe that gave no answer (fail-closed: nothing learned never licenses
+    a widening), and for every adapter that declares no fallback.
     """
-    state, tail = _fanout_sandbox_verdict(provider_name, cwd)
-    if state != "unavailable":
+    from .subagent_executor import sandbox_fallback_rung, sandbox_walk_note
+
+    probe = _fanout_sandbox_verdict(provider_name, cwd)
+    if probe.state != "unavailable":
         return SandboxVerdict(SANDBOX_DISPATCH, None)
-    if _fanout_sandbox_fallback(provider_name, cwd) == SANDBOX_FALLBACK_AUTO:
-        return SandboxVerdict(
-            SANDBOX_DISPATCH_UNSANDBOXED, sandbox_bypassed_notice(provider_name)
+    policy = _fanout_sandbox_fallback(provider_name, cwd)
+    try:
+        rung = sandbox_fallback_rung(
+            get_provider(provider_name), PROFILE_GENERATE, probe.rung, policy
         )
-    return SandboxVerdict(
-        SANDBOX_REFUSE, sandbox_unavailable_reason(provider_name, tail)
-    )
+    except Exception:  # noqa: BLE001 - a diagnostic may never end a fan-out
+        rung = None
+    if rung is not None:
+        if rung.contained:
+            notice = sandbox_fallback_notice(provider_name, rung, policy or "")
+        else:
+            notice = sandbox_bypassed_notice(provider_name)
+        return SandboxVerdict(SANDBOX_DISPATCH_UNSANDBOXED, notice, rung.name)
+    reason = sandbox_unavailable_reason(provider_name, probe.tail)
+    note = sandbox_walk_note(probe, policy)
+    if note:
+        reason = f"{reason} ({note})"
+    return SandboxVerdict(SANDBOX_REFUSE, reason)
 
 
-def sandbox_fallback_kwargs(verdict: SandboxVerdict) -> Dict[str, bool]:
-    """``{"sandbox_fallback": True}`` for a bypassed slot, else ``{}``.
+def sandbox_fallback_kwargs(verdict: SandboxVerdict) -> Dict[str, str]:
+    """``{"sandbox_fallback": <rung id>}`` for a slot on a fallback rung, else ``{}``.
+
+    The rung id, never a bool: the invoker hands it to the adapter's argv
+    build, which renders *that* rung — a bool would leave it to guess, and the
+    only guess it ever had was the uncontained one.
 
     Splatted into the invoker call rather than passed as a positional default,
     because the invokers (``invoke_with_provider``, ``invoke_with_file_output``)
@@ -1941,7 +2080,9 @@ def sandbox_fallback_kwargs(verdict: SandboxVerdict) -> Dict[str, bool]:
     that travels only when it is load-bearing leaves every one of them — and
     every default fan-out — byte-for-byte as it was.
     """
-    return {"sandbox_fallback": True} if verdict.bypass else {}
+    if verdict.verdict == SANDBOX_DISPATCH_UNSANDBOXED and verdict.rung:
+        return {"sandbox_fallback": verdict.rung}
+    return {}
 
 
 def porcelain_snapshot(cwd: Optional[str]) -> Optional[FrozenSet[str]]:
@@ -1954,8 +2095,21 @@ def porcelain_snapshot(cwd: Optional[str]) -> Optional[FrozenSet[str]]:
     ``XY path`` record, so a tracked file going from clean to modified counts
     and so does a new untracked file. What it cannot see, stated plainly: a
     write to a file that was *already* modified or untracked before the slot
-    (its porcelain line does not change), a write outside the repository, and
-    anything under ``$HOME``. It is a cheap, honest check, not a boundary.
+    (its porcelain line does not change), a write outside the repository,
+    anything under ``$HOME`` — and **who** made a change: the snapshot is of
+    the whole tree, and the other slots of the fan-out run in that same tree
+    for the whole window, several of them (cursor-agent, pi, claude-code) with
+    no sandbox by design, so a sibling's write lands in this slot's diff
+    exactly as the slot's own would (the 2026-09-22 misattribution). The
+    reason line therefore reports the change and the count of boundary-less
+    siblings (:func:`bypass_write_violation`), never an author. It is a
+    cheap, honest check, not a boundary.
+
+    Scope, recorded rather than fixed (T7): only the three fan-out lanes take
+    this snapshot. The executor lane (``subagent_executor``: validation,
+    task generation) takes none, so a read-only dispatch there on the
+    uncontained rung is unchecked — before T7 and after it. Widening the check
+    to that lane is separate work.
     ``None`` when git cannot answer (no repo, no ``git``), and the caller then
     skips the comparison rather than failing a slot on a check it never ran.
     """
@@ -2013,11 +2167,108 @@ def unexpected_writes(
     return sorted(set(paths))
 
 
-def bypass_write_violation(provider_name: str, paths: Sequence[str]) -> str:
-    """The reason a bypassed slot is failed with when the detective check fires."""
+def porcelain_check_applies(verdict: SandboxVerdict) -> bool:
+    """Whether this slot is bracketed by the porcelain detective check.
+
+    Read off the **rung id**, not off truthiness or the ``bypass`` flag's
+    incidental agreement (T7, landlock rung, 2026-09-22): the check fires for
+    the uncontained rung — :data:`SANDBOX_RUNG_UNSANDBOXED` — alone. A slot on
+    a contained rung is fenced by the kernel and has nothing to detect after
+    the fact; a sandboxed or ``not-required`` slot never took a rung at all.
+    """
     return (
-        f"{SANDBOX_BYPASSED_MARKER} {provider_name} wrote outside its read-only "
-        f"contract: {', '.join(paths)}"
+        verdict.verdict == SANDBOX_DISPATCH_UNSANDBOXED
+        and verdict.rung == SANDBOX_RUNG_UNSANDBOXED
+    )
+
+
+#: The model specs of the fan-out the current slot was scheduled in. Set per
+#: slot task by :func:`spawn_fanout_slot` — each task carries its own context
+#: copy, so nothing leaks between fan-outs — and read by
+#: :func:`boundaryless_sibling_count`. Empty for a slot run outside a fan-out
+#: (a direct call), which then has no siblings to count.
+_FANOUT_ROSTER: "contextvars.ContextVar[Tuple[str, ...]]" = contextvars.ContextVar(
+    "multi_llm_fanout_roster", default=()
+)
+
+
+def spawn_fanout_slot(roster: Sequence[str], coro: Any) -> "asyncio.Task[Any]":
+    """``asyncio.create_task(coro)`` with the fan-out's roster in its context.
+
+    The one piece of plumbing the detective check's sibling count needs: the
+    fan-out already knows which slots it scheduled, and this hands that roster
+    to each slot without touching a single slot signature (the lanes are stood
+    in for by dozens of test fakes). ``ctx.run(create_task, …)`` rather than
+    ``create_task(context=…)``, which is 3.11+ and this skill supports 3.10.
+    """
+    ctx = contextvars.copy_context()
+    ctx.run(_FANOUT_ROSTER.set, tuple(roster))
+    return ctx.run(asyncio.create_task, coro)
+
+
+def boundaryless_sibling_count(
+    model_spec: str, cwd: Optional[str], anchor: Optional[Union[str, Path]] = None
+) -> int:
+    """How many **other** slots of this slot's fan-out had no OS boundary.
+
+    What makes the detective check's verdict ambiguous (T7, 2026-09-22): every
+    such slot could have written into the tree during this slot's window. Two
+    kinds count — an adapter whose ``generate`` sandbox probe answers
+    ``not-required`` (it declares no sandbox by design: cursor-agent, pi,
+    claude-code, …) and a sibling that also took the uncontained rung. A count
+    taken from the uncontained verdicts alone would have read zero on the
+    2026-09-22 run that misfired. A sandboxed, contained-rung, ``unknown`` or
+    refused sibling does not count. Derived from the answers the fan-out's own
+    gate already gave (:func:`sandbox_refusal` and its cached probe, asked by
+    every lane for every roster model), so it costs no new bookkeeping; the
+    roster is what the fan-out *scheduled*, so under a ``max_parallel`` smaller
+    than the roster a counted sibling may not have overlapped this window —
+    the message says "in this fan-out", not "running at the same time".
+    Blocking (a sibling not yet started may still need its probe); the caller
+    hands it to a thread. A roster entry that cannot be resolved is skipped.
+    """
+    siblings = list(_FANOUT_ROSTER.get())
+    if model_spec in siblings:
+        siblings.remove(model_spec)
+    count = 0
+    for spec in siblings:
+        try:
+            provider_name, _model = parse_model_spec(spec, anchor=anchor)
+            if _fanout_sandbox_verdict(provider_name, cwd).state == "not-required":
+                count += 1
+            elif porcelain_check_applies(sandbox_refusal(provider_name, cwd)):
+                count += 1
+        except Exception:  # noqa: BLE001 - a count may never end a fan-out
+            continue
+    return count
+
+
+def bypass_write_violation(
+    provider_name: str, paths: Sequence[str], *, boundaryless_siblings: int
+) -> str:
+    """The reason an uncontained slot is failed with when the detective check fires.
+
+    It states what was **observed** — the tree changed during this slot's
+    window, and how many other boundary-less slots of the fan-out could have
+    made that change — and never who made it: a whole-tree porcelain diff has
+    no evidence of authorship, and on 2026-09-22 it named codex for a file it
+    had no reason to think codex wrote. ``boundaryless_siblings`` is
+    :func:`boundaryless_sibling_count`'s answer; keyword-only and required, so
+    no caller can print a count it never took.
+
+    The **verdict** is unchanged by the wording (T7 changes the sentence, not
+    the outcome): the slot still fails, its ``output`` is still dropped and its
+    findings are still discarded — fail-closed, because on a machine with no
+    contained rung this diff is the only containment evidence the slot has.
+    """
+    n = boundaryless_siblings
+    plural = "slot" if n == 1 else "slots"
+    return (
+        f"{SANDBOX_BYPASSED_MARKER} {provider_name}: the working tree changed "
+        f"during this unsandboxed slot's window ({', '.join(paths)}) while {n} "
+        f"other boundary-less {plural} in this fan-out could also write to it; "
+        f"the check cannot tell which slot made the change, so this slot fails "
+        f"closed and its output is discarded"
     )
 
 
@@ -2207,8 +2458,9 @@ async def run_single_model(
             "source": "not-dispatched",
         }
     tree_before: Optional[FrozenSet[str]] = None
-    if sandbox.bypass:
+    if sandbox.fallback:
         print(f"[{display_name}] {sandbox.reason}")
+    if porcelain_check_applies(sandbox):
         tree_before = await asyncio.to_thread(porcelain_snapshot, project_root)
 
     async def _bypass_write_check() -> Optional[str]:
@@ -2219,12 +2471,16 @@ async def run_single_model(
         review this phase may count — and nothing is restored: no snapshot was
         taken of the files, so the operator is told which paths and left to
         decide. The caller drops ``output`` so ``save_model_result`` never
-        parses it. ``None`` for every slot that was not bypassed, so the
-        default lane makes no git call at all. The ``git status`` runs in a
+        parses it — and so the slot's findings are discarded, never kept
+        beside the failure: that is the fail-closed policy, and the reason line
+        (:func:`bypass_write_violation`) reports the change without naming an
+        author. ``None`` for every slot not on the uncontained rung — gated on
+        the rung id (:func:`porcelain_check_applies`), so a contained-rung or
+        sandboxed slot makes no git call at all. The ``git status`` runs in a
         thread like the one before the slot: on a large repository it is not
         instant, and the sibling slots share this event loop.
         """
-        if not sandbox.bypass:
+        if not porcelain_check_applies(sandbox):
             return None
         tree_after = await asyncio.to_thread(porcelain_snapshot, project_root)
         touched = unexpected_writes(
@@ -2233,7 +2489,12 @@ async def run_single_model(
         )
         if not touched:
             return None
-        violation = bypass_write_violation(provider_name, touched)
+        siblings = await asyncio.to_thread(
+            boundaryless_sibling_count, model_spec, project_root, plan_path
+        )
+        violation = bypass_write_violation(
+            provider_name, touched, boundaryless_siblings=siblings
+        )
         print(f"[{display_name}] {violation}")
         return violation
 
@@ -2863,7 +3124,10 @@ async def run_models_concurrent(
     if tracker is not None:
         tracker.seed()
 
-    tasks = [asyncio.create_task(run_with_semaphore(spec, idx)) for idx, spec in enumerate(model_specs)]
+    tasks = [
+        spawn_fanout_slot(model_specs, run_with_semaphore(spec, idx))
+        for idx, spec in enumerate(model_specs)
+    ]
 
     # Calculate total timeout
     if timeout is not None:
@@ -4802,6 +5066,10 @@ async def run_review_orchestration(
     # only a REUSED slot is restored: a model that really re-ran is reported on
     # what this attempt spent.
     prior_usage = recorded_usage(phase_dir) or {}
+    # Landlock rung (2026-09-22): the previous run's sandbox words, read before
+    # the same write erases them, so a contained rung this run can no longer
+    # take is named once (`announce_retired_rungs`).
+    prior_served = recorded_served_models(phase_dir) or {}
     write_status(phase_dir, {
         "phase": phase_name,
         "state": "models_running",
@@ -4902,6 +5170,7 @@ async def run_review_orchestration(
     # and `--reaggregate` reads both back off `.status.json`'s `models_served`.
     served_models = collect_served_models(results)
     record_sandbox_bypassed(phase_dir, served_models)
+    announce_retired_rungs(prior_served, served_models, anchor=plan_path)
     # Stage U, the same argument one field over: what each slot spent is on its
     # record and nowhere else, and `{model}.json` is a bare suggestion list, so
     # a reaggregation would lose every number unless the checkpoint carries it.

@@ -119,21 +119,39 @@ clear error naming the file; set `MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE=1` to
 warn-and-skip instead.
 
 One provider key does change *how* a binary executes:
-`providers.codex.sandbox_fallback` (`auto` by default, `off` to disable). codex
-is the only reviewer that insists on its own OS sandbox — `codex exec` runs the
-model's shell through bubblewrap, and on a stock Ubuntu 24.04 bwrap cannot
-start (`multi_llm.py doctor` prints the AppArmor repair). Under `auto`, once
-the sandbox probe has failed, codex's **read-only** work (the review/ask
-fan-out and the executor's validation/consolidation/salvage kinds) runs
-`--sandbox danger-full-access` in the real repo root, i.e. with the same rights
-as your shell — which is the footing cursor-agent, pi, claude-code and muse
-have always had in those phases — and every artifact of such a slot says so
-(`[SANDBOX_BYPASSED]` on stdout, `ran unsandboxed: sandbox_fallback=auto` on
-the report's model labels, a `(fallback: auto …)` note on doctor's BROKEN row,
-a `git status` check that fails the slot by path if the tree changed). `off`
-restores the refusal: codex is left out on such a machine until the repair is
-installed. The write phases are refused under a broken sandbox whatever the
-key says. Because the default is already `auto`, a cloned repository's
-`.multi-llm/providers.yaml` can only turn the fallback *off* — there is nothing
-for an untrusted override to widen here. See the key's comment in
-`providers.yaml` for what `auto` gives up.
+`providers.codex.sandbox_fallback` (`auto` by default; `contained` or `off` to
+narrow it). codex is the only reviewer that insists on its own OS sandbox —
+`codex exec` runs the model's shell through bubblewrap, and on a stock Ubuntu
+24.04 bwrap cannot start (`multi_llm.py doctor` prints the AppArmor repair).
+Once the sandbox probe has failed, codex's **read-only** work (the review/ask
+fan-out and the executor's validation/consolidation/salvage kinds) walks a
+two-rung ladder. Rung 1, `landlock`, runs `--sandbox read-only` with a
+per-dispatch `-c features.use_legacy_landlock=true` — codex's second Linux
+backend, which needs no user namespace — and is taken only when its probe's
+canary write is denied by the kernel; the slot stays sandboxed and says
+so (`[SANDBOX_FALLBACK]` on stdout, `sandboxed by fallback rung: landlock` on
+the report's model labels, `sandbox-fallback landlock <spec>` in `status`). Rung 2 runs `--sandbox danger-full-access` in the real
+repo root, i.e. with the same rights as your shell — the footing cursor-agent,
+pi, claude-code and muse have always had in those phases — and every artifact
+of such a slot says so (`[SANDBOX_BYPASSED]` on stdout,
+`ran unsandboxed: sandbox_fallback=auto` on the report's model labels, a
+`git status` check that fails the slot by path if the tree changed). `auto`
+takes rung 1, then rung 2; `contained` takes rung 1 only and otherwise refuses;
+`off` restores the refusal: codex is left out on such a machine until the
+repair is installed. A run that falls to rung 2 where the previous run of the
+phase took rung 1 says so once, on its own `[SANDBOX_RUNG_RETIRED]` line —
+never a second `[SANDBOX_BYPASSED]`, which stays one line per slot. doctor's BROKEN row names the value in force and the rung
+it selected. The write phases are refused under a broken sandbox whatever the
+key says — no rung serves them, so the AppArmor repair is still their fix.
+
+**Never enable landlock globally.** `codex features enable
+use_legacy_landlock` makes every `workspace-write` dispatch panic (exit 101),
+write phases included; the flag is only safe as the per-dispatch `-c` rung 1
+adds, and `doctor` warns if your codex config sets it. Rung 1 is read-only only
+and rides a feature codex has marked deprecated (measured at 0.155.1); when it
+is removed, `auto` falls back to rung 2 and `contained` to refusal.
+
+Because the default is already the widest value, a cloned repository's
+`.multi-llm/providers.yaml` can only narrow the fallback — there is nothing for
+an untrusted override to widen here. See the key's comment in `providers.yaml`
+for what each rung gives up.

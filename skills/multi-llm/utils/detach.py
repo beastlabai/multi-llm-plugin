@@ -1444,8 +1444,8 @@ def report_progress(phase_dir: str, **updates: Any) -> None:
     heartbeat thread against the orchestrator's main-thread phase transitions — so
     the new foreground writer adds no race. ``progress`` merges key by key at its
     top level, so a write here never erases a sibling another site wrote
-    (``step``, ``sandbox_bypassed``, the ``subagents`` / ``write_subagents``
-    executor mirrors). The merge is one level *deep* only: a nested value such as
+    (``step``, ``sandbox_bypassed``, ``sandbox_fallback``, the ``subagents`` /
+    ``write_subagents`` executor mirrors). The merge is one level *deep* only: a nested value such as
     the per-model ``models`` map is a single key, and a write carrying it replaces
     the stored map wholesale rather than deep-merging into it.
     """

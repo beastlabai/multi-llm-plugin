@@ -53,6 +53,11 @@ def clinic(tmp_path, monkeypatch):
     monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
     monkeypatch.delenv("MOCK_LLM_SANDBOX_BROKEN", raising=False)
     monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)
+    # Hermetic: the constraint-2 check reads codex's own config, never the
+    # developer's real ~/.codex/config.toml.
+    codex_home = tmp_path / "codex-home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
     monkeypatch.chdir(tmp_path)
     registry._config = None
     registry._config_key = None
@@ -147,10 +152,16 @@ class TestDoctorOnABrokenSandbox:
         _broken_bwrap(monkeypatch)
         assert doctor.main(["--budget", "10"]) == 3
         out = capsys.readouterr().out
+        # The mock replays a machine where the landlock rung's probe dies on
+        # the same bwrap line, so the walk reaches rung 2 — and the row names
+        # the contained rung it measured and could not use.
         assert (
             "sandbox BROKEN: " + BWRAP_BROKEN_LINE
-            + " (fallback: auto — codex runs unsandboxed for read-only phases)"
+            + " (fallback: auto — codex runs unsandboxed for read-only phases"
+            "; rung landlock is not usable here (unavailable) — measured at "
+            "codex 0.155.1: "
         ) in out
+        assert "→ landlock" not in out
         assert "FAIL: codex: sandbox" in out
         assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
 
@@ -159,23 +170,44 @@ class TestDoctorOnABrokenSandbox:
         codex = _row(report, "codex")
         assert codex["sandbox"]["state"] == "unavailable"
         assert codex["sandbox"]["fallback"] == "auto"
+        assert codex["sandbox"]["fallback_rung"] == "unsandboxed"
+        assert codex["sandbox"]["fallback_walk"] == [
+            ["landlock", "unavailable"], ["unsandboxed", "taken"],
+        ]
         assert codex["sandbox"]["ok"] is False
 
-    def test_off_renders_the_broken_row_exactly_as_before(
+    def test_off_says_refused_by_config_and_probes_no_rung(
         self, clinic, monkeypatch, capsys
     ):
+        """Landlock rung (2026-09-22): `off` is still a refusal, and the row
+        now says so — refused by config, not merely unavailable. No rung is
+        reachable under `off`, so the read-only probe is never spent."""
         from utils.providers import codex as codex_module
+        from utils.providers.base import PROFILE_GENERATE
 
         monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
         _broken_bwrap(monkeypatch)
         monkeypatch.setattr(
             codex_module, "sandbox_fallback_policy", lambda anchor=None: "off"
         )
+        real = executor.sandbox_verdict
+        profiles = []
+
+        def spy(provider, profile, **kwargs):
+            profiles.append(profile)
+            return real(provider, profile, **kwargs)
+
+        monkeypatch.setattr(executor, "sandbox_verdict", spy)
         assert doctor.main(["--budget", "10"]) == 3
         out = capsys.readouterr().out
-        assert "sandbox BROKEN: " + BWRAP_BROKEN_LINE + "\n" in out
-        assert "fallback:" not in out
+        assert (
+            "sandbox BROKEN: " + BWRAP_BROKEN_LINE
+            + " (fallback: off — codex is refused by config for read-only "
+            "phases too, not merely unavailable)\n"
+        ) in out
         assert "unsandboxed" not in out
+        assert "landlock" not in out
+        assert PROFILE_GENERATE not in profiles
 
         assert doctor.main(["--json", "--budget", "10"]) == 3
         report = json.loads(capsys.readouterr().out)
@@ -245,6 +277,9 @@ class TestDoctorOnAHealthyMachine:
             # shipped default is `auto`, and a healthy sandbox renders no note
             # (the fallback only means anything where the sandbox cannot start).
             "fallback": "auto",
+            # Landlock rung (2026-09-22): the read-only probe runs only when
+            # the row is BROKEN, so a healthy row carries it unspent.
+            "fallback_probe": "", "fallback_walk": [], "fallback_rung": None,
         }
         # The mock's `codex sandbox` really ran the shell script here, and the
         # script left nothing behind.
@@ -323,3 +358,257 @@ class TestDoctorIsAMode:
         assert doctor.main(["--budget", "10"]) == 0
         capsys.readouterr()
         assert sorted(p.name for p in Path.cwd().iterdir()) == before
+
+
+# ---------------------------------------------------------------------------
+# Landlock rung (2026-09-22, T6): doctor reports the ladder it probed.
+# ---------------------------------------------------------------------------
+
+LANDLOCK_SENTENCE = "`[features].use_legacy_landlock` is deprecated and will be removed soon."
+
+
+def _fake_verdicts(monkeypatch, generate_verdict, calls=None):
+    """`agent-write` answers the broken bwrap line; `generate` answers
+    ``generate_verdict`` — the one place a rung can come from."""
+    from utils.providers.base import PROFILE_GENERATE
+
+    def fake(provider, profile, **kwargs):
+        if calls is not None:
+            calls.append((profile, kwargs.get("timeout")))
+        if profile == PROFILE_GENERATE:
+            return generate_verdict
+        return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
+
+    monkeypatch.setattr(executor, "sandbox_verdict", fake)
+
+
+def _codex_line(out):
+    return next(ln for ln in out.splitlines() if ln.strip().startswith("codex"))
+
+
+class TestDoctorReportsTheLadder:
+
+    def test_a_rung_1_verdict_is_what_puts_landlock_on_screen(
+        self, clinic, monkeypatch, capsys
+    ):
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "landlock", (("landlock", "taken"),),
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        out = capsys.readouterr().out
+        line = _codex_line(out)
+        assert (
+            "sandbox BROKEN: " + BWRAP_BROKEN_LINE + " (fallback: auto → landlock — "
+            "codex runs read-only phases under a real sandbox; agent-write still refused"
+        ) in line
+        # `retires_when` rides the row: the version it was measured at and the
+        # sentence upstream prints.
+        assert "measured at codex 0.155.1: " + LANDLOCK_SENTENCE in line
+        assert "unsandboxed" not in line
+        # The verdict and the exit code do not move: agent-write is refused.
+        assert "FAIL: codex: sandbox" in out
+        assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
+
+        assert doctor.main(["--json", "--budget", "10"]) == 3
+        sandbox = _row(json.loads(capsys.readouterr().out), "codex")["sandbox"]
+        assert sandbox["state"] == "unavailable" and sandbox["ok"] is False
+        assert sandbox["fallback_rung"] == "landlock"
+        assert sandbox["fallback_retires_when"] == ["0.155.1", LANDLOCK_SENTENCE]
+
+    def test_no_row_names_a_rung_the_probe_did_not_return(
+        self, clinic, monkeypatch, capsys
+    ):
+        """The key says `auto`, which *could* reach landlock — but the probe
+        selected rung 2, so the row renders today's unsandboxed sentence and
+        never the word `landlock →`."""
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "unsandboxed",
+            (("landlock", "absent"), ("unsandboxed", "taken")),
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        line = _codex_line(capsys.readouterr().out)
+        assert "(fallback: auto — codex runs unsandboxed for read-only phases" in line
+        assert "→ landlock" not in line
+        assert "rung landlock is not usable here (absent)" in line
+
+    def test_a_none_rung_after_a_complete_walk_is_a_refusal_not_a_bypass(
+        self, clinic, monkeypatch, capsys
+    ):
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, None, (("landlock", "rejected"),),
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        line = _codex_line(capsys.readouterr().out)
+        assert "(fallback: auto — no rung usable here: codex is refused" in line
+        assert "runs unsandboxed" not in line
+        assert "→ landlock" not in line
+
+    def test_an_unprobed_rung_is_its_own_row(self, clinic, monkeypatch, capsys):
+        """Unprobed and unavailable are different rows: one says this machine
+        has no contained rung, the other says the report did not find out."""
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, None, (("landlock", "unprobed"),),
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        line = _codex_line(capsys.readouterr().out)
+        assert line.endswith(
+            "(fallback: auto — rung unprobed: the report budget was exhausted)"
+        )
+        assert "unsandboxed" not in line and "not usable" not in line
+
+    def test_contained_names_the_disabled_bypass_and_its_own_rung(
+        self, clinic, monkeypatch, capsys
+    ):
+        from utils.providers import codex as codex_module
+
+        monkeypatch.setattr(
+            codex_module, "sandbox_fallback_policy", lambda anchor=None: "contained"
+        )
+        # The walk is policy-blind: it reaches rung 2 — which `contained` never takes.
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "unsandboxed",
+            (("landlock", "unavailable"), ("unsandboxed", "taken")),
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        line = _codex_line(capsys.readouterr().out)
+        assert "(fallback: contained — bypass disabled: no contained rung is usable here" in line
+        assert "runs unsandboxed" not in line
+
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "landlock", (("landlock", "taken"),),
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        assert "(fallback: contained → landlock — " in _codex_line(capsys.readouterr().out)
+
+    def test_the_second_probe_gets_only_what_is_left_of_the_budget(self, monkeypatch):
+        """A slow `agent-write` probe truncates the read-only probe rather than
+        lengthening the report: with nothing left it is never started, and
+        the row says unprobed."""
+        import time
+        from utils.providers import codex as codex_module
+        from utils.providers.base import PROFILE_GENERATE
+
+        from utils.provider_registry import get_provider
+
+        provider = get_provider("codex")
+        monkeypatch.setattr(
+            codex_module, "sandbox_fallback_policy", lambda anchor=None: "auto"
+        )
+        calls = []
+
+        def slow(provider, profile, **kwargs):
+            calls.append((profile, kwargs.get("timeout")))
+            if profile == PROFILE_GENERATE:
+                pytest.fail("the read-only probe started on an exhausted budget")
+            time.sleep(0.25)
+            return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
+
+        monkeypatch.setattr(executor, "sandbox_verdict", slow)
+        started = time.monotonic()
+        row = doctor._probe_sandbox(provider, 0.2, None)
+        assert time.monotonic() - started < 1.0
+        assert row["state"] == "unavailable" and row["ok"] is False
+        assert row["fallback_probe"] == "unprobed"
+        assert doctor._fallback_note("codex", row) == (
+            " (fallback: auto — rung unprobed: the report budget was exhausted)"
+        )
+
+        # With budget left, the second probe is handed the remainder, not the whole.
+        calls.clear()
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "landlock", (("landlock", "taken"),),
+        ), calls=calls)
+        doctor._probe_sandbox(provider, 5.0, None)
+        assert [profile for profile, _ in calls][-1] == PROFILE_GENERATE
+        assert calls[-1][1] <= calls[0][1]
+
+
+class TestDoctorDetectsAGlobalLandlockFlag:
+    """Constraint 2: `use_legacy_landlock` enabled in codex's own config makes
+    every workspace-write dispatch panic. Detected by a plain file read."""
+
+    def _write(self, directory: Path, text: str) -> Path:
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / "config.toml"
+        target.write_text(text, encoding="utf-8")
+        return target
+
+    def _run(self, monkeypatch, capsys):
+        import subprocess
+
+        argvs = []
+        real = subprocess.run
+
+        def recording(argv, *args, **kwargs):
+            argvs.append(list(argv))
+            return real(argv, *args, **kwargs)
+
+        monkeypatch.setattr(subprocess, "run", recording)
+        monkeypatch.setattr(doctor, "_bwrap_self_test", lambda timeout: ("ok", ""))
+        doctor.main(["--budget", "10"])
+        out = capsys.readouterr().out
+        # Never `codex features enable` (nor any `features` subcommand): that
+        # would set the very thing being looked for.
+        assert not any("features" in argv for argv in argvs), argvs
+        return out
+
+    def test_codex_home_config_with_the_flag_warns_naming_the_file(
+        self, clinic, monkeypatch, capsys
+    ):
+        target = self._write(
+            Path(os.environ["CODEX_HOME"]),
+            'model = "gpt-5"\n\n[features]\nuse_legacy_landlock = true\n',
+        )
+        out = self._run(monkeypatch, capsys)
+        warn = next(ln for ln in out.splitlines() if "use_legacy_landlock" in ln)
+        assert warn.startswith("WARN: codex: " + str(target))
+        assert "agent-write" in warn and "panic" in warn
+
+        assert doctor.main(["--json", "--budget", "10"]) in (0, 3)
+        report = json.loads(capsys.readouterr().out)
+        assert any(str(target) in w for w in report["warnings"])
+
+    def test_home_dot_codex_is_the_fallback_location(
+        self, clinic, monkeypatch, capsys, tmp_path
+    ):
+        monkeypatch.delenv("CODEX_HOME", raising=False)
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        target = self._write(home / ".codex", "features.use_legacy_landlock = true\n")
+        out = self._run(monkeypatch, capsys)
+        assert "WARN: codex: " + str(target) in out
+
+    @pytest.mark.parametrize("text", [
+        None,  # missing file
+        "[features]\nuse_legacy_landlock = false\n",
+        "[features]\nother = true\n",
+        "[features\nuse_legacy_landlock = = true\n",  # unparseable
+    ])
+    def test_silent_without_the_flag_missing_or_unparseable(
+        self, clinic, monkeypatch, capsys, text
+    ):
+        if text is not None:
+            self._write(Path(os.environ["CODEX_HOME"]), text)
+        out = self._run(monkeypatch, capsys)
+        assert "use_legacy_landlock" not in out
+        assert "OK: every present provider passed its checks." in out
+
+    @pytest.mark.parametrize("text,warns", [
+        ('model = "gpt-5"\n\n[features]\nuse_legacy_landlock = true # on\n', True),
+        ("features.use_legacy_landlock = true\n", True),
+        ("features = { other = 1, use_legacy_landlock = true }\n", True),
+        ("[features]\nuse_legacy_landlock = false\n", False),
+        ("[profiles.x.features]\nuse_legacy_landlock = true\n", False),
+        ("[features]\nx = 1\n[other]\nuse_legacy_landlock = true\n", False),
+        ("# [features]\n# use_legacy_landlock = true\n", False),
+    ])
+    def test_still_detected_with_no_toml_parser(
+        self, clinic, monkeypatch, capsys, text, warns
+    ):
+        """Python 3.10 under `uv run --no-dev` has neither `tomllib` nor
+        `tomli` (the runtime dependency surface is pyyaml alone); the WARN
+        must not go silent there."""
+        monkeypatch.setattr(doctor, "_toml_module", lambda: None)
+        target = self._write(Path(os.environ["CODEX_HOME"]), text)
+        out = self._run(monkeypatch, capsys)
+        assert ("WARN: codex: " + str(target) in out) is warns

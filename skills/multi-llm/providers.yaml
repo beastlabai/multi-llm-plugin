@@ -367,60 +367,91 @@ providers:
       - gpt-5.6-terra
       - gpt-5.6-sol
       - gpt-5.6-sol:xhigh
-    # sandbox_fallback: auto | off   (default: auto)
+    # sandbox_fallback: auto | contained | off   (default: auto)
     #
-    # D6 (2026-09-17) — the ONE dispatch-time override of a sandbox refusal.
-    # codex is the only reviewer on this roster that insists on its own OS
-    # sandbox: `codex exec` runs the model's shell through bubblewrap, and on
-    # a stock Ubuntu 24.04 (kernel.apparmor_restrict_unprivileged_userns=1)
-    # bwrap cannot start: `bwrap: loopback: Failed RTM_NEWADDR: Operation not
-    # permitted`. Every other CLI in the fan-out — cursor-agent, pi,
-    # claude-code, muse (always `--disable-sandbox`) — runs the same read-only
-    # phases with no OS boundary at all, and always has.
+    # D6 (2026-09-17; ladder 2026-09-22) — the ONE dispatch-time override of a
+    # sandbox refusal. codex is the only reviewer on this roster that insists
+    # on its own OS sandbox: `codex exec` runs the model's shell through
+    # bubblewrap, and on a stock Ubuntu 24.04
+    # (kernel.apparmor_restrict_unprivileged_userns=1) bwrap cannot start:
+    # `bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted`. Every
+    # other CLI in the fan-out — cursor-agent, pi, claude-code, muse (always
+    # `--disable-sandbox`) — runs the same read-only phases with no OS
+    # boundary at all, and always has.
     #
-    #   auto     (default) When the D6 probe says the sandbox cannot start
-    #            (verdict `unavailable`; never on `unknown`), codex's read-only
-    #            phases run without it — `--sandbox danger-full-access` in the
-    #            real repo root — the same footing as every other reviewer.
-    #            Read-only means the review/ask fan-out and the executor's read
-    #            kinds: validation, revalidation, consolidation, salvage, task
-    #            generation, the human-decision judge. On a machine where the
-    #            sandbox starts, nothing changes: codex runs sandboxed. Every
-    #            slot that ran without it says so, loudly: one
-    #            `[SANDBOX_BYPASSED]` line on stdout, `models_served` in
-    #            `.status.json`, `(ran unsandboxed: sandbox_fallback=auto)` on
-    #            the report's model labels, a `(fallback: auto …)` note on
-    #            doctor's BROKEN row, and a `git status` taken before and after
-    #            the slot that fails it by path if the tree changed.
-    #   off      Restore the refusal: on such a machine codex is left out of
-    #            the fan-out and every read batch until the AppArmor repair
-    #            `multi_llm.py doctor` prints is installed. That repair is
-    #            still the fix for codex's *write* profile.
+    # Once the D6 probe says the sandbox cannot start (verdict `unavailable`;
+    # never on `unknown`), codex's read-only phases walk a two-rung ladder.
+    # Read-only means the review/ask fan-out and the executor's read kinds:
+    # validation, revalidation, consolidation, salvage, task generation, the
+    # human-decision judge. On a machine where bwrap starts, no rung is ever
+    # reached: codex runs under its own sandbox.
+    #
+    #   rung 1  `landlock` — contained. `--sandbox read-only` plus a
+    #           per-dispatch `-c features.use_legacy_landlock=true`: codex's
+    #           second Linux backend, which needs no user namespace. Taken
+    #           only when its probe's canary write is DENIED by the kernel.
+    #           Writes are refused everywhere, the model's shell has no
+    #           network, reads are unrestricted. Reported as a sandbox, not a
+    #           bypass: a `[SANDBOX_FALLBACK]` line and
+    #           `sandbox: fallback-landlock` in `models_served`.
+    #   rung 2  `unsandboxed` — `--sandbox danger-full-access` in the real repo
+    #           root, no OS boundary at all. Reported loudly: one
+    #           `[SANDBOX_BYPASSED]` line on stdout, `sandbox: bypassed` in
+    #           `models_served`, `(ran unsandboxed: sandbox_fallback=auto)` on
+    #           the report's model labels, and a `git status` taken before and
+    #           after the slot that fails it by path if the tree changed.
+    #
+    #   auto       (default) rung 1, then rung 2 when rung 1's probe fails: a
+    #              real boundary first, the bypass last.
+    #   contained  rung 1 only — yes to a real boundary, no to the bypass,
+    #              ever. Where rung 1 is unusable (or gone upstream) codex is
+    #              refused, never quietly handed rung 2.
+    #   off        No rung: refuse. On such a machine codex is left out of the
+    #              fan-out and every read batch until the AppArmor repair
+    #              `multi_llm.py doctor` prints is installed. Unchanged by the
+    #              ladder.
+    #
+    # doctor's BROKEN row names the value in force and the rung its probe
+    # selected, e.g. `(fallback: auto → landlock …)`.
+    #
+    # ⚠ NEVER enable landlock globally. `codex features enable
+    # use_legacy_landlock` (i.e. `[features] use_legacy_landlock = true` in
+    # ~/.codex/config.toml) makes EVERY workspace-write dispatch panic — exit
+    # 101, "permission profiles requiring direct runtime enforcement are
+    # incompatible with --use-legacy-landlock" — `agent-write` included. The
+    # flag is only safe as the per-dispatch `-c` rung 1 adds beside
+    # `--sandbox read-only`, and that `-c` cannot clear a global one. doctor
+    # warns if it finds it; remove the line.
+    #
+    # Rung 1 is read-only ONLY, and a stopgap: codex marks
+    # `use_legacy_landlock` deprecated ("will be removed soon"; its sibling
+    # `use_linux_sandbox_bwrap` is already removed). Measured at codex 0.155.1.
+    # Owner: whoever bumps the pinned codex version — that bump is the review
+    # trigger, and `codex features list` no longer naming the flag retires the
+    # rung (auto falls back to rung 2, contained to refusal).
     #
     # The write profile (`agent-write`, every apply/implement kind) is refused
-    # under a broken sandbox whatever this key says: the fallback keeps
-    # read-only work flowing; it never hands a model pre-approved edit access
-    # with the boundary removed.
+    # under a broken sandbox whatever this key says — no rung serves it. The
+    # AppArmor repair is still the real fix for codex's writes.
     #
-    # What `auto` gives up, in plain words: for a codex read-only slot on a
-    # machine where bwrap cannot start, no OS boundary of any kind between the
-    # model's shell and this machine — reads and writes anywhere you can,
-    # network from model commands, and no prompt-injection resistance for a
-    # validation batch beyond the detective `git status` check. That is the
-    # footing four of five reviewers already run on (measured 2026-09-17: the
-    # host's own shell tool runs in the same namespaces as your terminal), so
-    # the plugin makes no claim about a boundary it never checked — which is
-    # why the value is `auto` and not a word that would assert one. Measured
-    # the same day: a by-hand `danger-full-access` review over a worktree
-    # snapshot escaped the snapshot in 6 commands to read the real repo, and
-    # found 2 unique validated-high issues the sandboxed reviewers did not —
-    # the whole reason the fallback is on by default rather than behind a
-    # repair most machines never install. YAML booleans are read as the words
-    # they spell: `off`/`false` is `off`, `on`/`true` is `auto`.
+    # What rung 2 gives up, in plain words: for a codex read-only slot, no OS
+    # boundary of any kind between the model's shell and this machine — reads
+    # and writes anywhere you can, network from model commands, and no
+    # prompt-injection resistance for a validation batch beyond the detective
+    # `git status` check. That is the footing four of five reviewers already
+    # run on (measured 2026-09-17: the host's own shell tool runs in the same
+    # namespaces as your terminal), which is why `auto` keeps it as the last
+    # rung rather than refusing. Measured the same day: a by-hand
+    # `danger-full-access` review over a worktree snapshot escaped the snapshot
+    # in 6 commands to read the real repo, and found 2 unique validated-high
+    # issues the sandboxed reviewers did not. Set `contained` to keep the
+    # boundary and drop the bypass. YAML booleans are read as the words they
+    # spell: `off`/`false` is `off`, `on`/`true` is `auto`.
     #
     # This key is read through the normal layering, so a cloned repository's
-    # `.multi-llm/providers.yaml` can set it — and since the default is already
-    # `auto`, all a project layer can do with it is turn the fallback *off*.
+    # `.multi-llm/providers.yaml` can set it — and since the default `auto` is
+    # the widest value, all a project layer can do with it is narrow the
+    # fallback (`contained` or `off`).
     sandbox_fallback: auto
 
   kilocode:

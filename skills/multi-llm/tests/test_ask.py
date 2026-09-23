@@ -1224,7 +1224,9 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
                       "--models", "codex:gpt-5.2-codex"], inv)
         assert rc == 0
         assert inv.calls == ["codex:gpt-5.2-codex"]
-        assert inv.seen == [{"sandbox_fallback": True}]
+        # The rung id, never a bool: the uncontained rung here, because the
+        # suite's probe guard answers the real landlock probe as absent.
+        assert inv.seen == [{"sandbox_fallback": "unsandboxed"}]
         out = capsys.readouterr().out
         assert out.count("[SANDBOX_BYPASSED]") == 1
         assert f"[codex:gpt-5.2-codex] {self.BYPASS_LINE}" in out
@@ -1270,7 +1272,11 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
         assert rc == 3  # zero answers counted → nothing to aggregate
         reason = read_status(d)["models_failed"]["codex:gpt-5.2-codex"]
         assert reason == (
-            "[SANDBOX_BYPASSED] codex wrote outside its read-only contract: leak.md"
+"[SANDBOX_BYPASSED] codex: the working tree changed during this "
+            "unsandboxed slot's window (leak.md) while 0 other boundary-less "
+            "slots in this fan-out could also write to it; the check cannot "
+            "tell which slot made the change, so this slot fails closed and "
+            "its output is discarded"
         )
         assert reason in read_answers(d)
         assert read_status(d)["models_completed"] == []

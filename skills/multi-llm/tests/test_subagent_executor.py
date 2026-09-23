@@ -4669,10 +4669,16 @@ class TestSandboxUnavailable:
             task, phase_dir=str(phase_dir), runner="codex:gpt-5.5", retries=0,
         )
         assert len(spawned) == 1
-        assert spawned[0]["sandbox_fallback"] is True
+        # The rung id travels, never a bool. The mock `codex sandbox` runs the
+        # landlock canary unsandboxed, so its write lands and rung 1 is
+        # rejected — this is the machine with neither backend: today's bypass.
+        assert spawned[0]["sandbox_fallback"] == "unsandboxed"
+        assert executor.sandbox_rung("codex:gpt-5.5", PROFILE_AGENT_READONLY) == (
+            "unsandboxed"
+        )
         argv, refusal = executor._preview_argv(
             provider, prompt="p", model="gpt-5.5", profile=PROFILE_AGENT_READONLY,
-            schema=None, sandbox_fallback=True,
+            schema=None, sandbox_fallback="unsandboxed",
         )
         assert refusal is None
         assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
@@ -4896,7 +4902,11 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
 
     class _Probed:
         """An adapter declaring a `generate` probe that fails, as codex's does
-        on this machine. The `sh` is real; the bwrap line is replayed."""
+        on this machine. The `sh` is real; the bwrap line is replayed.
+
+        Its fallback ladder is the uncontained rung alone (codex's rung 2, no
+        probe), so these lanes exercise exactly the pre-ladder bypass; the
+        landlock rung is `TestTheFallbackLadder`'s."""
 
         internal_retries = None
 
@@ -4904,6 +4914,11 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
             if profile != PROFILE_GENERATE:
                 return None
             return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+
+        def sandbox_fallback_rungs(self, profile):
+            from utils.providers.codex import UNSANDBOXED_RUNG
+
+            return (UNSANDBOXED_RUNG,) if profile == PROFILE_GENERATE else ()
 
     class _Unprobed:
         """An adapter with no OS sandbox: `not-required`, and free."""
@@ -5004,8 +5019,8 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
             if provider == "slowbwrap":
                 probing.set()
                 assert release.wait(10), "the slow probe was never released"
-                return ("ok", "")
-            return ("not-required", "")
+                return executor.SandboxProbeResult("ok", "")
+            return executor.SandboxProbeResult("not-required", "")
 
         monkeypatch.setattr(executor, "sandbox_verdict", verdict)
 
@@ -5032,7 +5047,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         fast.join(10)
         slow.join(10)
         assert not blocked, "a second provider's slot waited out the first's probe"
-        assert answers == [("not-required", "")]
+        assert answers == [executor.SandboxProbeResult("not-required", "")]
 
     def test_a_provider_that_declares_no_probe_costs_the_fanout_nothing(
         self, tmp_path, monkeypatch
@@ -5089,7 +5104,8 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert verdict.verdict == rob.SANDBOX_DISPATCH_UNSANDBOXED
         assert verdict.bypass and not verdict.refused
         assert verdict.reason == self._bypass_line("fakebwrap")
-        assert rob.sandbox_fallback_kwargs(verdict) == {"sandbox_fallback": True}
+        assert verdict.rung == "unsandboxed"
+        assert rob.sandbox_fallback_kwargs(verdict) == {"sandbox_fallback": "unsandboxed"}
 
         monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._FallbackOff())
@@ -5128,7 +5144,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         result = self._run_slot(rob, tmp_path, "fakebwrap:m1")
         assert result["success"] is True
         assert result["sandbox"] == "bypassed"
-        assert len(seen) == 1 and seen[0]["sandbox_fallback"] is True
+        assert len(seen) == 1 and seen[0]["sandbox_fallback"] == "unsandboxed"
         out = capsys.readouterr().out
         assert out.count("[SANDBOX_BYPASSED]") == 1
         assert f"[fakebwrap:m1] {self._bypass_line('fakebwrap')}" in out
@@ -5215,8 +5231,11 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert result["success"] is False
         assert result["output"] is None
         assert result["error"] == (
-            "[SANDBOX_BYPASSED] fakebwrap wrote outside its read-only contract: "
-            "leak.md, tracked.txt"
+"[SANDBOX_BYPASSED] fakebwrap: the working tree changed during this "
+            "unsandboxed slot's window (leak.md, tracked.txt) while 0 other boundary-less "
+            "slots in this fan-out could also write to it; the check cannot "
+            "tell which slot made the change, so this slot fails closed and "
+            "its output is discarded"
         )
         assert result["error"] in capsys.readouterr().out
         # Nothing was restored.
@@ -5270,6 +5289,114 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert rob.unexpected_writes(before, None) == []
         # A repo-less cwd has no snapshot at all.
         assert rob.porcelain_snapshot(None) is None
+
+    # -- T7 (landlock rung, 2026-09-22): the check names no author ---------
+
+    def test_the_porcelain_gate_reads_the_rung_id(self):
+        """The check fires for the uncontained rung alone — never for a
+        contained rung, a plain dispatch or a refusal."""
+        from utils import review_orchestrator_base as rob
+
+        V = rob.SandboxVerdict
+        assert rob.porcelain_check_applies(
+            V(rob.SANDBOX_DISPATCH_UNSANDBOXED, "x", "unsandboxed"))
+        assert not rob.porcelain_check_applies(
+            V(rob.SANDBOX_DISPATCH_UNSANDBOXED, "x", "landlock"))
+        assert not rob.porcelain_check_applies(V(rob.SANDBOX_DISPATCH, None))
+        assert not rob.porcelain_check_applies(V(rob.SANDBOX_REFUSE, "x"))
+
+    def test_a_rung_two_slot_in_a_fanout_fails_naming_the_boundaryless_count(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The 2026-09-22 shape: the tree changed during the uncontained slot's
+        window while siblings with no sandbox shared it. The verdict is
+        unchanged — failed, output dropped — but the reason reports the change
+        and the count, never "<model> wrote". The count takes `not-required`
+        siblings (no sandbox by design) and rung-2 siblings; a refused sibling
+        never ran and does not count."""
+        import asyncio
+
+        from utils import review_orchestrator_base as rob
+
+        self._git_repo(tmp_path)
+        adapters = {
+            "fakebwrap": self._AutoFallback(),
+            "fakebwrap2": self._AutoFallback(),
+            "fakeplain": self._Unprobed(),
+            "fakeoff": self._FallbackOff(),
+        }
+        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr(rob, "get_provider", lambda name: adapters[name])
+        monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
+
+        def dispatch(**kwargs):
+            (tmp_path / "leak.md").write_text("notes\n", encoding="utf-8")
+            return {
+                "success": True, "data": [{"title": "x"}], "source": "stdout_fallback",
+                "output_file": str(tmp_path / "out.json"),
+                "details": {"sandbox": "bypassed"},
+            }
+
+        monkeypatch.setattr(rob, "invoke_with_file_output", dispatch)
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("plan", encoding="utf-8")
+        roster = ["fakebwrap:m1", "fakeplain:a", "fakeplain:b", "fakebwrap2:m1",
+                  "fakeoff:m1"]
+
+        async def slot():
+            return await rob.spawn_fanout_slot(roster, rob.run_single_model(
+                model_spec="fakebwrap:m1", plan_path=str(plan_path),
+                prompt_template="{prefix}{output_json_path}", prompt_context={},
+                phase_name="review-plan", invoke_phase="plan_review",
+                timeout=1800, out_dir=str(tmp_path), prefix="plan",
+            ))
+
+        result = asyncio.run(slot())
+        assert result["success"] is False
+        assert result["output"] is None
+        error = result["error"]
+        assert error.startswith("[SANDBOX_BYPASSED] fakebwrap: the working tree changed")
+        assert "(leak.md)" in error
+        assert "while 3 other boundary-less slots in this fan-out" in error
+        assert "fails closed and its output is discarded" in error
+        # No authorship claim, in either the old wording or a new one.
+        assert "wrote" not in error
+        assert "read-only contract" not in error
+        assert error in capsys.readouterr().out
+
+    def test_a_contained_rung_slot_takes_no_porcelain_check(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """A rung-1 slot is fenced by the kernel: no snapshot is taken, and a
+        change in the tree during its window does not fail it."""
+        from utils import review_orchestrator_base as rob
+
+        self._git_repo(tmp_path)
+        monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
+        monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
+        monkeypatch.setattr(rob, "sandbox_refusal", lambda _p, _c: rob.SandboxVerdict(
+            rob.SANDBOX_DISPATCH_UNSANDBOXED, "[SANDBOX_FALLBACK] contained", "landlock",
+        ))
+
+        def no_snapshot(_cwd):
+            raise AssertionError("a contained-rung slot took a porcelain snapshot")
+
+        monkeypatch.setattr(rob, "porcelain_snapshot", no_snapshot)
+        seen = []
+
+        def dispatch(**kwargs):
+            seen.append(kwargs)
+            (tmp_path / "sibling.md").write_text("x\n", encoding="utf-8")
+            return {
+                "success": True, "data": [], "source": "stdout_fallback",
+                "output_file": str(tmp_path / "out.json"), "details": {},
+            }
+
+        monkeypatch.setattr(rob, "invoke_with_file_output", dispatch)
+        result = self._run_slot(rob, tmp_path, "fakebwrap:m1")
+        assert result["success"] is True, result["error"]
+        assert seen[0]["sandbox_fallback"] == "landlock"
+        assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
 
 
 # ---------------------------------------------------------------------------

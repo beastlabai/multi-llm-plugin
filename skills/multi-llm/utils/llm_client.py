@@ -17,9 +17,12 @@ from .metrics import describe_usage as _describe_usage
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
 from .providers.base import (
     PROFILE_GENERATE,
+    SANDBOX_RUNG_LANDLOCK,
+    SANDBOX_RUNG_UNSANDBOXED,
     StructuredOutputUnavailable,
     availability_from_failure,
     build_child_env,
+    sandbox_rung_id,
 )
 
 
@@ -42,12 +45,54 @@ ERROR_FILE_NOT_FOUND = "FILE_NOT_FOUND"
 ERROR_PROMPT_TOO_LONG = "PROMPT_TOO_LONG"
 ERROR_PROMPT_UNSAFE = "PROMPT_UNSAFE"
 
-#: ``details["sandbox"]`` for a slot that ran under the D6 fallback (2026-09-17):
-#: the runner's own OS sandbox could not start and ``sandbox_fallback: auto``
-#: (the default) let the read-only dispatch run without it. Absent means "ran
-#: as the adapter's default argv renders it" — never written as any other
-#: value, so a reader tests for presence.
+#: ``details["sandbox"]`` for a slot that ran under the D6 fallback (2026-09-17)
+#: on the **uncontained** rung: the runner's own OS sandbox could not start and
+#: ``sandbox_fallback: auto`` (the default) let the read-only dispatch run
+#: without any boundary. Absent means "ran as the adapter's default argv renders
+#: it". A slot on a **contained** rung (landlock rung, 2026-09-22) carries that
+#: rung's id here instead (``landlock``) — never this word, which would claim
+#: the opposite of what happened.
 SANDBOX_BYPASSED = "bypassed"
+
+#: The per-slot record word for a contained fallback rung — ``models_served``'s
+#: ``sandbox: fallback-landlock`` — so a run's provenance greps apart from
+#: ``bypassed`` the way ``[SANDBOX_FALLBACK]`` greps apart from
+#: ``[SANDBOX_BYPASSED]``. The renderers (``html_report_generator``,
+#: ``run_status``) read the recorded word back, never a bool.
+SANDBOX_FALLBACK_WORD_PREFIX = "fallback-"
+
+#: The contained rung ids a record word may name. Closed on purpose: a value
+#: nobody declared is dropped rather than recorded, exactly as an unknown word
+#: always was, so a stray string can never read as a sandbox.
+_CONTAINED_RUNG_IDS = frozenset({SANDBOX_RUNG_LANDLOCK})
+
+
+def sandbox_record_word(value: Any) -> Optional[str]:
+    """The ``sandbox`` word a per-slot record carries for ``value``, or ``None``.
+
+    ``value`` is either ``details["sandbox"]`` (``bypassed`` or a rung id) or a
+    word already recorded (``bypassed``, ``fallback-<rung>``), so the mapping is
+    idempotent and every hop — result record, ``models_served``, reaggregate —
+    can run it. Only the uncontained rung maps to ``bypassed``; a contained rung
+    maps to ``fallback-<rung>``; anything else is dropped.
+    """
+    if value in (SANDBOX_BYPASSED, SANDBOX_RUNG_UNSANDBOXED):
+        return SANDBOX_BYPASSED
+    if not isinstance(value, str):
+        return None
+    rung = (
+        value[len(SANDBOX_FALLBACK_WORD_PREFIX):]
+        if value.startswith(SANDBOX_FALLBACK_WORD_PREFIX) else value
+    )
+    return SANDBOX_FALLBACK_WORD_PREFIX + rung if rung in _CONTAINED_RUNG_IDS else None
+
+
+def sandbox_fallback_rung_of(word: Any) -> Optional[str]:
+    """The contained rung id a recorded ``fallback-<rung>`` word names, or ``None``."""
+    recorded = sandbox_record_word(word)
+    if recorded and recorded.startswith(SANDBOX_FALLBACK_WORD_PREFIX):
+        return recorded[len(SANDBOX_FALLBACK_WORD_PREFIX):]
+    return None
 
 # Windows-only concern: POSIX exec passes argv verbatim (no reparsing) and
 # has generous per-arg limits, so prompt length is never enforced there.
@@ -681,7 +726,7 @@ def invoke_with_provider(
     anchor: Optional[Union[str, Path]] = None,
     schema_phase: Optional[str] = None,
     _defer_parse_failure_log: bool = False,
-    sandbox_fallback: bool = False,
+    sandbox_fallback: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Invoke an LLM using the provider abstraction.
 
@@ -758,15 +803,17 @@ def invoke_with_provider(
             failure (binary not found, timeout, non-zero exit) still logs
             immediately, unaffected by this flag — there is no channel choice
             to wait for.
-        sandbox_fallback: The fan-out's D6 override (2026-09-17). ``True``
-            only when ``review_orchestrator_base.sandbox_refusal`` answered
-            ``dispatch_unsandboxed`` for this slot — the runner's own sandbox
-            probe said ``unavailable``, ``providers.<name>.sandbox_fallback``
-            is ``auto`` (the default), and this is a ``generate`` dispatch. It is
-            forwarded to the adapter's ``build_command_for_transport`` (which
-            every adapter but codex ignores) and, on success, recorded as
-            ``details["sandbox"] = "bypassed"`` so the provenance rides the
-            same dict ``served_model`` does. The default renders every argv
+        sandbox_fallback: The fan-out's D6 override (2026-09-17): the rung id
+            ``review_orchestrator_base.sandbox_refusal`` selected for this slot
+            — the runner's own sandbox probe said ``unavailable``, the
+            fallback walk found a rung ``providers.<name>.sandbox_fallback``
+            permits, and this is a ``generate`` dispatch (``True`` is the
+            pre-rung spelling of the uncontained rung). It is forwarded to the
+            adapter's ``build_command_for_transport`` (which every adapter but
+            codex ignores) and, on success, recorded as ``details["sandbox"]``
+            — ``"bypassed"`` for the uncontained rung only, the rung id for a
+            contained one — so the provenance rides the same dict
+            ``served_model`` does. The default renders every argv
             byte-for-byte as before and adds no key.
 
     Returns:
@@ -1143,9 +1190,15 @@ def invoke_with_provider(
         # D6 override (2026-09-17): a slot that ran without the runner's own
         # sandbox says so on the same dict, so `served_model_fields` carries it
         # to the result record, `.status.json`'s `models_served` and the report
-        # label. Only when the override fired — a default run adds no key.
-        if sandbox_fallback:
-            parsed["details"]["sandbox"] = SANDBOX_BYPASSED
+        # label. Only when the override fired — a default run adds no key —
+        # and `bypassed` only for the uncontained rung: a contained rung is a
+        # sandbox, and records its own id rather than a word it would contradict.
+        fallback_rung = sandbox_rung_id(sandbox_fallback)
+        if fallback_rung:
+            parsed["details"]["sandbox"] = (
+                SANDBOX_BYPASSED if fallback_rung == SANDBOX_RUNG_UNSANDBOXED
+                else fallback_rung
+            )
 
         # §3.6: a fallback that fired rides out on the same details dict the
         # provider/model pair travels on, so every downstream record that names
@@ -1558,7 +1611,7 @@ def invoke_with_file_output(
     prefer_arrays: bool = True,
     cwd: Optional[str] = None,
     anchor: Optional[Union[str, Path]] = None,
-    sandbox_fallback: bool = False,
+    sandbox_fallback: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Invoke LLM with file-based JSON output.
 

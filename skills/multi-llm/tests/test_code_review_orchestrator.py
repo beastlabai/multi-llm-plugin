@@ -2153,7 +2153,11 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
 
     class _Probed:
         """An adapter declaring a `generate` probe that fails, as codex's does
-        where bwrap cannot start. The `sh` is real; the line is replayed."""
+        where bwrap cannot start. The `sh` is real; the line is replayed.
+
+        Its fallback ladder is the uncontained rung alone — codex's rung 2,
+        which needs no probe — so the lanes below exercise exactly the
+        pre-ladder bypass; the landlock rung has its own tests."""
 
         internal_retries = None
 
@@ -2163,6 +2167,12 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
             if profile != PROFILE_GENERATE:
                 return None
             return ["sh", "-c", f"echo '{_BWRAP_BROKEN_LINE}' >&2; exit 1"]
+
+        def sandbox_fallback_rungs(self, profile):
+            from utils.providers.base import PROFILE_GENERATE
+            from utils.providers.codex import UNSANDBOXED_RUNG
+
+            return (UNSANDBOXED_RUNG,) if profile == PROFILE_GENERATE else ()
 
     def test_the_code_review_fanout_refuses_a_slot_whose_sandbox_cannot_start(
         self, tmp_path, monkeypatch, capsys
@@ -2272,12 +2282,32 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
             "fakebwrap:m1", plan_path, tmp_path / "out", served_models=served,
         ))
         assert (success, issues, error) == (True, [], None)
-        assert len(seen) == 1 and seen[0]["sandbox_fallback"] is True
+        assert len(seen) == 1 and seen[0]["sandbox_fallback"] == "unsandboxed"
         # The provenance lands in the collector without a served model beside it.
         assert served == {"fakebwrap:m1": {"sandbox": "bypassed"}}
         out = capsys.readouterr().out
         assert out.count("[SANDBOX_BYPASSED]") == 1
         assert f"[fakebwrap:m1] {self.BYPASS_LINE}" in out
+
+    def test_a_landlock_code_review_slot_records_its_contained_rung(
+        self, tmp_path, monkeypatch
+    ):
+        # A contained rung arrives as its rung id; the review-code collector
+        # must record it as `fallback-landlock`, not drop it (2026-09-23).
+        def dispatch(**kwargs):
+            return {
+                "success": True, "data": [], "source": "stdout_fallback",
+                "output_file": str(tmp_path / "out" / "o.json"),
+                "details": {"sandbox": "landlock"},
+            }
+
+        plan_path = self._fallback_lane(tmp_path, monkeypatch, dispatch)
+        served = {}
+        success, _issues, _error = asyncio.run(cro.run_single_review(
+            "fakebwrap:m1", plan_path, tmp_path / "out", served_models=served,
+        ))
+        assert success is True
+        assert served == {"fakebwrap:m1": {"sandbox": "fallback-landlock"}}
 
     def test_a_bypassed_code_review_slot_that_writes_is_failed_by_path(
         self, tmp_path, monkeypatch, capsys
@@ -2306,7 +2336,11 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
         ))
         assert success is False and issues is None
         assert error == (
-            "[SANDBOX_BYPASSED] fakebwrap wrote outside its read-only contract: src.py"
+"[SANDBOX_BYPASSED] fakebwrap: the working tree changed during this "
+            "unsandboxed slot's window (src.py) while 0 other boundary-less "
+            "slots in this fan-out could also write to it; the check cannot "
+            "tell which slot made the change, so this slot fails closed and "
+            "its output is discarded"
         )
         assert error in capsys.readouterr().out
         assert (tmp_path / "src.py").read_text(encoding="utf-8") == "v2\n"
