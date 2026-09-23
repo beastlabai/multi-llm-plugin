@@ -77,6 +77,13 @@ class Mode:
         unavailable: When set, the mode is dispatchable but exits 3 with this
             reason instead of running. Keeps the boundary a shim sees stable
             while the implementation is still a markdown sequence.
+        runs_workflow: True for a mode that runs every ``is_workflow_phase``
+            mode in sequence (``full``). Data rather than a name check, because
+            a package's generated surface derives a composite mode's properties
+            from the phases it contains — ``writes_worktree`` is true of
+            ``full`` *because* it runs the apply phases and ``implement`` — and
+            a second composite added later is classified by this column, not by
+            a list in a host layer.
     """
 
     name: str
@@ -92,6 +99,7 @@ class Mode:
     injected_flags: Tuple[str, ...] = ()
     requires_uv: bool = True
     unavailable: Optional[str] = None
+    runs_workflow: bool = False
 
 
 # Reason strings for the modes that are dispatchable but not yet implemented.
@@ -211,6 +219,7 @@ MODES: Tuple[Mode, ...] = (
         phase="full",
         instruction_file="full-workflow.md",
         supports_detach=True,
+        runs_workflow=True,
     ),
     Mode(
         name="ask",
@@ -340,6 +349,21 @@ def alias_expansion(word: str) -> str:
 DEFAULT_MODE = "review-plan"
 
 
+#: The model-callable tool's registration name on every package route — the
+#: OpenCode plugin's ``tool`` hook key and the codex MCP server's ``tools/list``
+#: entry. One owner, because it is also what every re-attach and abort
+#: ``{tool, args}`` object the plugin hands back names, and two hosts spelling
+#: it twice is two chances for a continuation to point at a tool that does not
+#: exist. Emitted as the surface's ``tool_name``.
+TOOL_NAME = "multi_llm"
+
+#: The two literal values the tool description's worked examples fill in. The
+#: examples themselves are *selected by shape* from the table (rule f) — the
+#: default mode, a mode with no positional, a mode taking a question, an alias
+#: carrying a flag — so these are the only written words in them.
+EXAMPLE_PLAN_PATH = "plans/x.md"
+EXAMPLE_QUESTION = "Why is the ceiling 120 s?"
+
 #: The one authored sentence in the OpenCode plugin's model-facing tool
 #: definition. It lives here rather than in JavaScript for the same reason the uv
 #: preflight message lives in ``hosts/uv-missing.txt``: the plugin holds no prose
@@ -383,16 +407,24 @@ NEEDS_HUMAN_WORK_SENTENCE = (
 )
 
 #: The decision rule for exit 3, authored once. Every instruction surface a
-#: supported route loads renders it: both ``hosts/*/shim.md.tmpl`` and the
-#: plugin's ``hosts/opencode/plugin-command.md.tmpl`` through
+#: supported route loads renders it: both ``hosts/*/shim.md.tmpl``, the
+#: opencode plugin's ``hosts/opencode/plugin-command.md.tmpl`` and the codex
+#: plugin's ``hosts/codex/plugin-skill.md.tmpl`` through
 #: ``cli_common.NEEDS_HUMAN_RULE_TOKEN``, and Claude Code's ``SKILL.md`` — read
 #: verbatim by its host, so nothing substitutes a token there — as a literal
 #: held to this constant by ``test_needs_human_rule_has_one_owner``, the same
 #: shape :data:`DEFAULT_MODE` uses. It also owns the ``next`` clause, because
 #: ``next`` and the plugin's ``options`` are one object under two names: on
 #: ``0`` and ``2`` it runs verbatim, on ``3`` it is reported and waits for the
-#: user. Four hand-typed paraphrases of this rule are exactly how two hosts
-#: come to contradict each other on the behaviour an incident hinges on.
+#: user. "Run verbatim" is the command-string wording the file routes and
+#: Claude Code need; on the codex plugin route ``next`` is re-spelled as the
+#: tool's arguments object (D3c) and is never a shell command, so that
+#: template follows this token with its own line saying "run" means calling
+#: the tool again with ``next`` as its arguments. The gloss lives in the
+#: template, not here, so this constant — and the ``SKILL.md`` literal held
+#: to it — keep one wording. Four hand-typed paraphrases of this rule are
+#: exactly how two hosts come to contradict each other on the behaviour an
+#: incident hinges on.
 NEEDS_HUMAN_RULE = (
     "Run `next` verbatim when it is not `null` on `0` and `2`. On `3` stop: "
     "report to the user what was being run, the last error line it printed, "
@@ -472,6 +504,88 @@ NEEDS_HUMAN_OPTION = (
 #: The flag is declared by ``code_review_orchestrator``'s parser; a test holds
 #: the two spellings together.
 REVIEW_GATE = {"mode": "review-code", "flag": "--fail-on-high"}
+
+
+# ---------------------------------------------------------------------------
+# The package routes' pre-spawn refusals — authored here, read off the surface
+# ---------------------------------------------------------------------------
+#
+# Every message a package route's server returns *instead of* spawning the
+# dispatcher is a template here, emitted into ``dist/cli-surface.json`` and
+# returned by the server verbatim after token substitution — the same rule
+# that keeps the exit-3 message in :data:`NEEDS_HUMAN_MESSAGE` and the uv
+# preflight text in ``hosts/uv-missing.txt``. Tokens are literal ``{name}``
+# spans replaced by plain string substitution (never ``str.format``), so a
+# brace a user typed into a value can never be read as another token.
+
+#: The environment name that lifts the codex tool's write-posture refusal, and
+#: the one value that means "on" (the ``MULTI_LLM_ALLOW_DIRTY`` spelling:
+#: ``=1`` and nothing else, so ``=0`` does not enable it). An environment name
+#: and **not** a tool argument, because every tool argument is model-supplied
+#: and a model must never be able to authorize its own escalation (D3b).
+WRITE_POSTURE_LEVER_ENV = "MULTI_LLM_CODEX_UNSANDBOXED_WRITES"
+WRITE_POSTURE_LEVER_VALUE = "1"
+
+#: The refusal a write-capable mode gets under a read-only (or unreadable)
+#: session posture. ``{mode}`` is the mode word as sent; ``{posture}`` is the
+#: posture word the server read, or :data:`WRITE_POSTURE_UNREADABLE` when it
+#: could not read one — the refusal fails closed.
+WRITE_POSTURE_REFUSAL = (
+    "Refused before anything ran: `{mode}` edits the working tree, and this "
+    "session's sandbox posture is {posture}. This tool runs outside the "
+    "session's exec sandbox, so it will not make edits the session was not "
+    "granted. The single way to proceed is the user's, never yours: they set "
+    + WRITE_POSTURE_LEVER_ENV + "=" + WRITE_POSTURE_LEVER_VALUE
+    + " in the environment codex is launched from and restart it. Report this "
+    "to the user. " + NEEDS_HUMAN_WORK_SENTENCE
+)
+
+#: What ``{posture}`` reads when the server could not observe the session's
+#: sandbox posture at all.
+WRITE_POSTURE_UNREADABLE = (
+    "unreadable from this tool, so it is treated as read-only"
+)
+
+#: The refusal when no workspace-anchor candidate answered (D3f). ``{probed}``
+#: is the list of candidates the server tried, in its own order. The process's
+#: own working directory is never a fallback: on a plugin route it is the
+#: install location, and a run anchored there scaffolds configuration into a
+#: directory the next install deletes.
+ANCHOR_UNRESOLVED = (
+    "Refused before anything ran: this tool could not determine which "
+    "workspace to run in. It probed {probed}, and none answered. It does not "
+    "fall back to its own working directory, which is the plugin's install "
+    "location, not your project. Report this to the user; do not retry with a "
+    "different mode. " + NEEDS_HUMAN_WORK_SENTENCE
+)
+
+#: The refusal when the login shell the dispatcher is started through does not
+#: resolve (D3a) — the Windows-without-Git-Bash case, and any ``PATH`` with no
+#: POSIX shell on it. ``{shell}`` is the program searched for, ``{platform}``
+#: the platform word, ``{path}`` the ``PATH`` that was searched. A shell-less
+#: spawn is not offered: it would start the provider CLIs without the
+#: credentials a login profile exports, and fail one layer down as an opaque
+#: provider error.
+SHELL_MISSING = (
+    "Refused before anything ran: this tool starts the dispatcher through a "
+    "login `{shell}`, and no `{shell}` was found on {platform} along this "
+    "PATH: {path}. A POSIX bash on PATH is a prerequisite of this tool "
+    "(on Windows, Git Bash). Install one, put it on PATH, and restart the "
+    "host. Report this to the user; running without a login shell is not "
+    "offered, because the provider CLIs would start without the credentials "
+    "your profile sets."
+)
+
+#: The codex-only clause of the tool description (D3b: the tool says what it
+#: is). ``{modes}`` is the comma-joined list of modes whose surface row carries
+#: ``writes_worktree``. Emitted for the codex host alone; the OpenCode plugin
+#: runs inside its host's own permission model and says nothing of the kind.
+TOOL_WRITE_CAPABLE_NOTE = (
+    "This tool runs outside the session's exec sandbox. {modes} edit the "
+    "working tree through agent CLIs; under a read-only posture they are "
+    "refused unless the user has set "
+    + WRITE_POSTURE_LEVER_ENV + "=" + WRITE_POSTURE_LEVER_VALUE + "."
+)
 
 
 # The `util` namespace is a mode word for routing purposes but is deliberately

@@ -80,3 +80,16 @@ skills/multi-llm/tests/test_container_*.py  # optional
 packaging/opencode/package.json  # optional
 packaging/opencode/dist/**  # optional
 packaging/opencode/skills/**  # optional
+
+# --- the codex PLUGIN tree and its catalog ----------------------------------
+
+# The codex host's package route (plans/codex-native-plugin.md, Phase 1 item
+# 5): Dockerfile §10c copies both into /opt/mllm/codex-marketplace/ at these
+# same relative paths, and `entrypoint._seed_codex_plugin` installs from there
+# with `codex plugin marketplace add` + `codex plugin add`. ORDINARY rows, not
+# `# optional`: unlike the opencode package above, both are TRACKED, so a clean
+# checkout carries them and direction 1 must see them. The plugin tree's own
+# `skills/multi-llm/.venv/**` is re-excluded in .dockerignore and untracked, so
+# it earns no row here.
+.agents/plugins/marketplace.json
+packaging/codex/multi-llm/**

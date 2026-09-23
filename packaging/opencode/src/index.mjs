@@ -79,7 +79,14 @@ const SKILL_DIR = path.join(PACKAGE_DIR, "skills", "multi-llm")
 const DIST_DIR = path.join(PACKAGE_DIR, "dist")
 
 const COMMAND_NAME = "multi-llm"
-const TOOL_NAME = "multi_llm"
+
+/**
+ * The tool's name for the one case where there is no surface to read it from:
+ * the warning that says the tool is *not* registered. Everywhere a tool is
+ * registered or named in a result it is `surface.tool_name`, whose owner is
+ * `modes.TOOL_NAME`; this literal only ever reaches stderr.
+ */
+const DEGRADED_TOOL_NAME = "multi_llm"
 
 /**
  * The placeholder the build leaves wherever a generated artifact would
@@ -89,8 +96,12 @@ const TOOL_NAME = "multi_llm"
  */
 const SKILL_DIR_TOKEN = "{SKILL_DIR}"
 
-/** Bumped in lockstep with build.py's SURFACE_SCHEMA_VERSION. */
-const SUPPORTED_SURFACE_VERSION = 3
+/**
+ * Bumped in lockstep with `packaging/common/surface.py`'s
+ * SURFACE_SCHEMA_VERSION. 4: `tool_name`, `tool_description` and
+ * `argument_descriptions` are read from the surface rather than composed here.
+ */
+const SUPPORTED_SURFACE_VERSION = 4
 
 // ---------------------------------------------------------------------------
 // The generated surface
@@ -133,165 +144,48 @@ function describe(error) {
 }
 
 // ---------------------------------------------------------------------------
-// The model-facing definition, assembled from the generated surface
+// The model-facing definition, read whole from the generated surface
 // ---------------------------------------------------------------------------
 
 /**
- * The tool description: a fixed lede, then one generated line per exposed mode.
+ * The tool's argument schema: four required strings/arrays whose descriptions
+ * are the surface's `argument_descriptions`, byte for byte.
  *
- * The lede is the *only* authored sentence in the entire definition, and it does
- * not live here — it is `modes.TOOL_DESCRIPTION_LEDE`, rendered into the surface
- * file beside the modes. It carries the one thing no generated line can: that
- * this tool is the only way to run multi-llm on this host, and that its
- * dispatcher is not to be reached through bash.
- *
- * Examples travel inside the description because the JSON-Schema fallback has
- * nowhere to put an `examples` key the host would render.
+ * Only the JSON-Schema *types* are this file's — they are the shape `execute`
+ * validates, not words a model reads. The description text (the mode
+ * vocabulary, the plan and question rules, the reserved-flag list, and any
+ * host-keyed clause such as this host's `@` sigil) is rendered in Python by
+ * `packaging/common/surface.py` from the mode table, so this file holds no
+ * sentence of it. `mode` is a plain string, not an enum: the fallback schema
+ * is `{type, properties, required}` and has no `enum` to carry one.
  */
-function buildDescription(surface) {
-  const lines = [surface.description_lede, "", "Modes:"]
-  for (const mode of surface.modes) {
-    const names = mode.aliases.length
-      ? `${mode.name} | ${mode.aliases.join(" | ")}`
-      : mode.name
-    lines.push(`  ${names} — ${mode.summary}`)
+function toolArgs(surface) {
+  const described = surface.argument_descriptions
+  const text = (name) => {
+    const value = described[name]
+    if (typeof value !== "string") {
+      throw new TypeError(`argument_descriptions.${name} is not a string`)
+    }
+    return value
   }
-  lines.push("")
-  lines.push(`The default mode is ${surface.default_mode}.`)
-  // The outcomes line sits after the mode block, so a model reading the
-  // listing meets the exit codes — and what exit 3 decides — in the same
-  // glance as the modes, rather than buried in the opening sentence.
-  lines.push("")
-  lines.push(surface.outcomes_line)
-  lines.push("")
-  lines.push("Examples:")
-  for (const example of workedExamples(surface)) {
-    lines.push(`  ${JSON.stringify(example)}`)
-  }
-  return lines.join("\n")
-}
-
-/**
- * The four worked spellings, **selected by shape rather than by name**.
- *
- * Between them they cover every arity rule: a mode with one positional, a mode
- * with none (three empties), a mode with two (a question), and an alias
- * travelling unexpanded beside extra flags. Naming the modes here would put mode
- * words back into this file, which is the one thing it must not hold — so each
- * example is found by what the generated table says the mode *declares*, and a
- * renamed mode changes the examples without an edit.
- *
- * Examples travel inside the description because the JSON-Schema fallback has
- * nowhere to put an `examples` key the host would render.
- */
-function workedExamples(surface) {
-  const PLAN = surface.positional_kinds.plan
-  const QUESTION = surface.positional_kinds.question
-  const examples = []
-  const spell = (mode, plan, question, extra_flags) => ({
-    mode, plan, question, extra_flags,
-  })
-
-  // 1. The documented default: one plan, nothing else.
-  const fallback = resolveMode(surface.default_mode, surface)
-  if (fallback) examples.push(spell(fallback.name, "plans/x.md", "", []))
-
-  // 2. A mode declaring no positional at all — the three-empties spelling,
-  //    which is the one a flat "an empty plan is invalid" rule would forbid.
-  const nullary = surface.modes.find((mode) => mode.positionals.length === 0)
-  if (nullary) examples.push(spell(nullary.name, "", "", []))
-
-  // 3. A mode declaring a question as well as a plan.
-  const asking = surface.modes.find(
-    (mode) =>
-      mode.positionals.includes(PLAN) && mode.positionals.includes(QUESTION),
-  )
-  if (asking) {
-    examples.push(
-      spell(asking.name, "plans/x.md", "Why is the ceiling 120 s?", []),
-    )
-  }
-
-  // 4. An alias, unexpanded, carrying extra flags.
-  const aliased = surface.modes.find(
-    (mode) => mode.aliases.length > 0 && mode.positionals.includes(PLAN),
-  )
-  if (aliased) {
-    examples.push(
-      spell(aliased.aliases[0], "plans/x.md", "", [
-        surface.dispatcher.run_id_option,
-        "<id>",
-      ]),
-    )
-  }
-  return examples
-}
-
-/**
- * Argument descriptions, generated per property.
- *
- * `mode` is a plain string, not an enum: the fallback schema is
- * `{type, properties, required}` and has no `enum` to carry one, so legality is
- * the pre-spawn check against the generated table and the *description* is what
- * conveys the vocabulary. A consequence of the no-zod trade, not a preference.
- */
-function buildArgs(surface) {
-  const words = surface.modes.flatMap((mode) => [mode.name, ...mode.aliases])
-  const planModes = surface.modes
-    .filter((mode) => mode.positionals.includes(surface.positional_kinds.plan))
-    .map((mode) => mode.name)
-  const questionModes = surface.modes
-    .filter((mode) =>
-      mode.positionals.includes(surface.positional_kinds.question),
-    )
-    .map((mode) => mode.name)
-  const reserved = [
-    ...surface.reserved_flags.exact,
-    ...surface.reserved_flags.named_exception,
-    ...surface.reserved_flags.prefixes.map((prefix) => `${prefix}*`),
-  ]
   return {
-    mode: {
-      type: "string",
-      description:
-        `One of: ${words.join(", ")}. An alias travels unexpanded — do not ` +
-        `expand it and do not add the flag it already contributes. Never ` +
-        `empty. The default when the user named no mode is ` +
-        `${surface.default_mode}.`,
-    },
-    plan: {
-      type: "string",
-      description:
-        `The plan path, as exactly one argv element — never split, never ` +
-        `shell-quoted, never escaped. Strip at most one layer of matching ` +
-        `quotes, and one leading "@" (this host's file-attachment sigil), ` +
-        `from what the user typed and send the value. A path ` +
-        `containing spaces needs no escaping. Empty ("") when and only when ` +
-        `the mode declares no plan positional. Modes taking a plan: ` +
-        `${planModes.join(", ")}. Relative paths resolve against the ` +
-        `workspace.`,
-    },
-    question: {
-      type: "string",
-      description:
-        `The free-text question, as exactly one argv element — newlines ` +
-        `preserved verbatim, no truncation, no escaping. Empty ("") for every ` +
-        `mode except: ${questionModes.join(", ") || "(none)"}. A question ` +
-        `whose first character is "-" is refused, because the dispatcher's ` +
-        `grammar would read it as a flag and end the positional scan; a ` +
-        `question merely containing a flag is fine.`,
-    },
+    mode: { type: "string", description: text("mode") },
+    plan: { type: "string", description: text("plan") },
+    question: { type: "string", description: text("question") },
     extra_flags: {
       type: "array",
       items: { type: "string" },
-      description:
-        `Additional dispatcher flags, one token per array element — ` +
-        `["--view", "run"], never ["--view run"]. Use [] for none. Passed ` +
-        `verbatim, in order, never reordered or deduplicated. These are ` +
-        `rejected because this tool composes them itself: ` +
-        `${reserved.join(", ")} — including their abbreviations and "=" forms.`,
+      description: text("extra_flags"),
     },
   }
+}
+
+/** The surface's `tool_description`, checked for shape and nothing else. */
+function toolDescription(surface) {
+  if (typeof surface.tool_description !== "string") {
+    throw new TypeError("tool_description is not a string")
+  }
+  return surface.tool_description
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,7 +1078,7 @@ function relayCounts(memory) {
  * optional: without it nothing is deduplicated and the absent-channel warning
  * is not rate-limited, which is the right default for a single direct call.
  */
-function relayProgress(ctx, client, update, memory) {
+function relayProgress(ctx, client, update, memory, title) {
   let relayed = false
   countRelay(memory, "attempted")
   try {
@@ -1200,10 +1094,11 @@ function relayProgress(ctx, client, update, memory) {
     if (typeof toast === "function") {
       const answered = toast.call(client.tui, {
         body: {
-          // The tool's own registration key, which this file necessarily holds
-          // — not a word it authors about the run. It is what makes this toast
-          // identifiable among whatever else the host is showing.
-          title: TOOL_NAME,
+          // The tool's own registration key (`surface.tool_name`, handed in by
+          // `execute`) — not a word this file authors about the run. It is what
+          // makes this toast identifiable among whatever else the host is
+          // showing.
+          title,
           message: toastMessage(update, memory),
           variant: TOAST_VARIANT,
           // Omitted, this defaulted to a five-second flash once per poll. See
@@ -1435,6 +1330,7 @@ async function runWorkflow({
         surface,
       ),
       relayState,
+      surface.tool_name,
     )
 
   // Every internally-composed call — the poll, the abort — goes through the
@@ -1909,7 +1805,10 @@ async function abortAndReport({
     run_id: runId,
     log: logPath,
     abort_dispatched: dispatched,
-    abort_command: { tool: TOOL_NAME, args: abortArgs(values, runId, surface) },
+    abort_command: {
+      tool: surface.tool_name,
+      args: abortArgs(values, runId, surface),
+    },
     anchor,
     message:
       `${reason}. The detached run ${runId} was ${
@@ -1943,7 +1842,10 @@ function orphanReport({ reason, runId, logPath, anchor, surface, values }) {
     run_id: runId,
     log: logPath,
     abort_dispatched: false,
-    abort_command: { tool: TOOL_NAME, args: abortArgs(values, runId, surface) },
+    abort_command: {
+      tool: surface.tool_name,
+      args: abortArgs(values, runId, surface),
+    },
     anchor,
     message:
       `${reason}. The run ${runId} was not started by this call, so it was ` +
@@ -2343,7 +2245,11 @@ function nextAsToolCall(next, surface) {
         "shell.",
     }
   }
-  return { tool: TOOL_NAME, args: parsed, human: describeCall(parsed) }
+  return {
+    tool: surface.tool_name,
+    args: parsed,
+    human: describeCall(parsed, surface),
+  }
 }
 
 /**
@@ -2443,11 +2349,11 @@ function splitPosix(text) {
   return out
 }
 
-function describeCall(args) {
+function describeCall(args, surface) {
   const parts = [args.mode]
   if (args.plan) parts.push(args.plan)
   if (args.extra_flags.length) parts.push(...args.extra_flags)
-  return `call ${TOOL_NAME} with ${parts.join(" ")}`
+  return `call ${surface.tool_name} with ${parts.join(" ")}`
 }
 
 /**
@@ -2497,7 +2403,7 @@ function errorResult(child, message, anchor, extra = {}) {
     out.log = logPath
     if (surface && values) {
       out.abort_command = {
-        tool: TOOL_NAME,
+        tool: surface.tool_name,
         args: abortArgs(values, runId, surface),
       }
     }
@@ -2645,26 +2551,31 @@ function splitFrontmatter(text) {
  * what lets a bad surface be *reported*: there is no later hook call to report
  * from.
  *
- * `buildDescription`/`buildArgs` run inside the try for the reason the config
+ * `toolDescription`/`toolArgs` run inside the try for the reason the config
  * hook has one. `loadSurface` checks the schema *version* and nothing else, so a
- * payload that declares the right version with the wrong shape — `modes` not an
- * array, `reserved_flags` absent — throws a TypeError out of them. An
+ * payload that declares the right version with the wrong shape —
+ * `argument_descriptions` absent, `tool_name` not a string — throws a TypeError
+ * out of them. An
  * unregistered tool is a warned, degraded plugin; a throw out of the factory
  * takes OpenCode's whole plugin load with it.
  */
 function buildToolHook(surface, client) {
   if (!surface) {
     warn(
-      `the ${TOOL_NAME} tool is not registered: the generated CLI surface ` +
-        `could not be read. The package looks partial; reinstall it.`,
+      `the ${DEGRADED_TOOL_NAME} tool is not registered: the generated CLI ` +
+        `surface could not be read. The package looks partial; reinstall it.`,
     )
     return {}
   }
   try {
+    const name = surface.tool_name
+    if (typeof name !== "string" || !name) {
+      throw new TypeError("tool_name is not a non-empty string")
+    }
     return {
-      [TOOL_NAME]: {
-        description: buildDescription(surface),
-        args: buildArgs(surface),
+      [name]: {
+        description: toolDescription(surface),
+        args: toolArgs(surface),
         // `ToolResult` is `string | { output, title?, metadata?, attachments? }`
         // and opencode reads a non-string result as exactly those four keys.
         // Handing back the raw envelope would therefore keep only its `output`
@@ -2678,8 +2589,8 @@ function buildToolHook(surface, client) {
     }
   } catch (error) {
     warn(
-      `the ${TOOL_NAME} tool is not registered: the generated CLI surface ` +
-        `is not the shape this plugin build expects. The package looks ` +
+      `the ${DEGRADED_TOOL_NAME} tool is not registered: the generated CLI ` +
+        `surface is not the shape this plugin build expects. The package looks ` +
         `partial; reinstall it. ${describe(error)}`,
     )
     return {}
@@ -2834,8 +2745,6 @@ function rowNeedsInstructions(row, outcome, surface) {
 const __testing = {
   PACKAGE_DIR,
   SKILL_DIR,
-  buildArgs,
-  buildDescription,
   composeDispatcherArgv,
   composeSpawnArgv,
   expandHome,
@@ -2861,9 +2770,10 @@ const __testing = {
   terminalResult,
   toastHoldMs,
   toastMessage,
+  toolArgs,
+  toolDescription,
   uvMissingText,
   validateArgs,
-  workedExamples,
 }
 
 // Hung on the factory rather than exported, because opencode calls every export

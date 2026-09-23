@@ -64,6 +64,31 @@ PACKAGE_PYTEST := uv run --project skills/multi-llm -- pytest \
     skills/multi-llm/tests/test_opencode_package.py \
     skills/multi-llm/tests/test_uv_candidates.py
 
+# --- The codex plugin (packaging/codex/) ------------------------------------ #
+# Unlike the npm package, the built tree `packaging/codex/multi-llm/` is
+# COMMITTED: the Git marketplace route serves the checked-in copy with no build
+# on the user's machine. So there are two builds, and which one runs is the
+# ordering constraint (plans/codex-native-plugin.md, Phase 1 item 2, A6):
+#   codex-regen    the development regeneration. --allow-dirty, writes the
+#                  tracked tree, takes no stamp, reaches no publish. It runs
+#                  BEFORE the commit, on inputs dirty by construction — the
+#                  source edit and the output it implies land in one commit.
+#   codex-package  the clean build, AFTER the commit. Refuses dirty inputs
+#                  whatever ALLOW_DIRTY says, and the rebuilt tree must equal
+#                  the committed one. Both check targets and codex-publish stand
+#                  on it.
+CODEX_PKG   := packaging/codex
+CODEX_BUILD := uv run --project skills/multi-llm -- python $(CODEX_PKG)/build.py
+CODEX_STAMP := $(CODEX_PKG)/.package-check.stamp
+# The codex route's own rows. Not PACKAGE_PYTEST, which names the opencode suite
+# literally and would grade this tree with the other route's tests.
+# test_uv_candidates.py is registry-neutral (it greps the whole tracked tree), so
+# it is the row that sees a new candidate-list reader added under packaging/codex/.
+CODEX_PACKAGE_PYTEST := uv run --project skills/multi-llm -- pytest \
+    skills/multi-llm/tests/test_codex_package.py \
+    skills/multi-llm/tests/test_codex_mcp_server.py \
+    skills/multi-llm/tests/test_uv_candidates.py
+
 # The whole-lane wall-clock cap (C1). Defaulted here, overridable on the command
 # line, and ENFORCED in the host-side driver (tests/container/harness.py's
 # MatrixBudget, claimed by run_row before every docker run and by the surface
@@ -85,7 +110,9 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-container-latest-host e2e-live-provider e2e-lock-update e2e-verify-record \
         e2e-clean e2e-prune \
         opencode-stage opencode-package opencode-package-check-ci \
-        opencode-package-check opencode-publish
+        opencode-package-check opencode-publish \
+        codex-regen codex-package codex-package-check-ci codex-package-check \
+        codex-publish
 
 help:
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
@@ -111,6 +138,14 @@ help:
 	@echo "  make opencode-package-check-ci    A4 rows 1-6: no Docker, no registry, no opencode binary"
 	@echo "  make opencode-package-check       the FULL gate: rows 7-9 too; stamps only if all ran"
 	@echo "  make opencode-publish             refuses unless the full gate passed on these exact bytes"
+	@echo
+	@echo "Codex plugin, checked in at $(CODEX_PKG)/multi-llm (see $(CODEX_PKG)/README.md)"
+	@echo
+	@echo "  make codex-regen                  regenerate the tracked plugin tree from dirty inputs (before the commit)"
+	@echo "  make codex-package                clean rebuild; must equal the committed tree (after the commit)"
+	@echo "  make codex-package-check-ci       the A4 rows that need no Docker and no codex binary"
+	@echo "  make codex-package-check          the FULL gate; stamps only if every row ran"
+	@echo "  make codex-publish                refuses unless the full gate passed on these exact bytes; tags codex-v<version>"
 
 # One line naming what is missing (binary absent vs daemon unreachable), rather
 # than a page of CLI errors.
@@ -685,3 +720,73 @@ opencode-package-check: opencode-package-check-ci
 opencode-publish:
 	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-stamp
 	cd $(OPENCODE_PKG) && npm publish --provenance --access public
+
+
+# --------------------------------------------------------------------------- #
+# The codex plugin.
+#
+# The tree is committed, so there is no pack and no upload: `codex-publish` ends
+# at a tag push, and publication proper is the promote job in
+# .github/workflows/publish-codex-plugin.yml fast-forwarding `release` — the ref
+# the published install pins. The tag publishes nothing.
+# --------------------------------------------------------------------------- #
+
+codex-regen:
+	$(CODEX_BUILD) --allow-dirty
+	@echo "codex-regen: $(CODEX_PKG)/multi-llm rewritten; commit it WITH the source edit that implies it"
+
+# `MULTI_LLM_ALLOW_DIRTY=` on the recipe line, not merely no flag: the variable
+# is exported above whenever ALLOW_DIRTY is set, and this is the build the gate
+# and the publish stand on, so no spelling of the opt-in may reach it.
+codex-package:
+	MULTI_LLM_ALLOW_DIRTY= $(CODEX_BUILD) --require-no-diff
+	@echo "codex-package: clean rebuild equals the committed tree"
+
+# The rows that need no Docker daemon and no codex binary: the plain rows of the
+# codex suite, then every `package`-marked row with skips turned into failures.
+# Writes NO stamp. `ALLOW_DIRTY=1` swaps the clean build for the regeneration,
+# for a local run mid-edit; CI never sets it.
+codex-package-check-ci:
+	$(if $(ALLOW_DIRTY),$(MAKE) codex-regen,$(MAKE) codex-package)
+	$(CODEX_PACKAGE_PYTEST) -m "not live and not container and not package" -q
+	MLLM_REQUIRE_PACKAGE_ROWS=1 $(CODEX_PACKAGE_PYTEST) -m "package and not container" -q
+	@echo "codex-package-check-ci: CI tier green (no stamp written)"
+
+# The full A4 gate. IT STAMPS ONLY WHAT IT RAN: rows 1, 6b, 7, 13 and 14 need
+# the seeded container (and row 14 the network), and each refuses below by
+# number until its row exists, rather than being quietly absent (rule i).
+codex-package-check: codex-package-check-ci
+	@command -v docker >/dev/null 2>&1 || { \
+	  echo "make: the full gate needs a Docker daemon (rows 1, 7, 13); run codex-package-check-ci instead"; exit 1; }
+	@uv run --project skills/multi-llm -- python -c \
+	  'import sys; sys.path.insert(0, "skills/multi-llm"); \
+	   from tests.container.harness import load_host_matrix; \
+	   rows = (load_host_matrix().get("codex") or {}).get("rows") or []; \
+	   sys.exit(0 if any(r.get("route") == "package" for r in rows) else 1)' || { \
+	  echo "make: REFUSING (rows 1, 7, 13): host_matrix.yaml declares no codex row with" >&2; \
+	  echo "      'route: package'. A green file-shim run is no evidence about the plugin," >&2; \
+	  echo "      and this gate does not stamp rows it never ran." >&2; \
+	  exit 1; }
+	$(PYTEST) -m container -q -k "codex and (package or plugin_floor)"
+	$(CODEX_BUILD) --check-bump
+	@echo "make: REFUSING (rows 6b, 14): the offline Git-route container row (Phase 4) and" >&2; \
+	echo "      the newest-codex ceiling row are not wired. Until both exist this gate" >&2; \
+	echo "      writes no stamp and codex-publish stays refused, which is the point." >&2; \
+	exit 1
+	$(CODEX_BUILD) --write-stamp "$$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+	@echo "codex-package-check: full gate green; stamp written to $(CODEX_STAMP)"
+
+# Developer-facing, never a CI target: CI holds no credential that pushes a tag.
+# Refuses before tagging on a missing or stale stamp (rule i) and on a digest
+# that moved since the newest codex-v* tag under an unmoved version (A4 row 10).
+codex-publish:
+	$(CODEX_BUILD) --check-stamp
+	$(CODEX_BUILD) --check-bump
+	@version="$$($(CODEX_BUILD) --print-version)"; tag="codex-v$$version"; \
+	if git rev-parse -q --verify "refs/tags/$$tag" >/dev/null; then \
+	  echo "make: REFUSING (row 9): $$tag already exists. Bump skills/multi-llm/pyproject.toml." >&2; \
+	  exit 1; \
+	fi; \
+	git tag -a "$$tag" -m "codex plugin $$version" && \
+	git push origin HEAD "$$tag" && \
+	echo "codex-publish: pushed $$tag. The tag publishes nothing; the promote job moves 'release'."

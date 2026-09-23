@@ -282,23 +282,108 @@ def _shell_dispatcher() -> str:
 #: Keyed by the `package.registry` discriminator rather than by host id, so a
 #: second host on the same registry inherits the wording and a second registry
 #: is one row rather than a branch.
-_REGISTRY_FORMS: Dict[str, Dict[str, str]] = {
+#:
+#: **Every registry-specific sentence of the paragraph lives here**, never in
+#: :func:`_package_section`: the install intro (``config``), the install
+#: commands (``fence``, one template per command, rendered in order into one
+#: fence), the provenance blurbs (``verified`` / ``documented``), and — where the
+#: upgrade is a different command sequence from the install — ``upgrade`` plus
+#: ``upgrade_fence``. Each is ``.format()``ed from :func:`_format_keywords`, so a
+#: slug, a ref or a sparse path is a ``package:`` cell rather than a literal a
+#: later package on the same registry would inherit.
+_REGISTRY_FORMS: Dict[str, Dict[str, Any]] = {
     "npm": {
         "config": (
             'Add it to the host config (`~/.config/{host}/{host}.json`) and '
             "restart:"
         ),
-        "fence": '{{ "{config_key}": ["{spec}"] }}',
+        "fence": ['{{ "{config_key}": ["{spec}"] }}'],
         "language": "json",
+        "verified": (
+            "The recommended route on `{host}`: one config edit, no shell "
+            "bootstrap, and no baked path that goes stale on an update — the "
+            "plugin resolves its own location at every startup."
+        ),
+        "documented": (
+            "A second route on `{host}`, and the one this documentation "
+            "will recommend once it is published. **No published install has "
+            "been verified yet**, so a config entry naming this spec resolves "
+            "to nothing today — and on this host that failure is silent: the "
+            "plugin stays listed, the exit code is 0, and the debug log is "
+            "empty. Until then, use the `install-host` route above, or build "
+            "the package and name its **directory** — `npm pack`'s `.tgz` is "
+            "not an installable spec on this host: MEASURED 2026-09-19 against "
+            "opencode 1.18.31, a config entry naming a tarball resolves to the "
+            "archive's *containing directory* and never opens the archive, so "
+            "it loads nothing unless that directory happens to be an unpacked "
+            "package itself."
+        ),
     },
     "codex-marketplace": {
-        "config": "Install it from the marketplace:",
-        "fence": "{host} plugin add {marketplace} {name}",
+        "config": (
+            "Install it from the marketplace — two commands, in this order, "
+            "then start a **new** {host} session:"
+        ),
+        # R30's measured order: the marketplace first, then the plugin from it.
+        "fence": [
+            "{host} plugin marketplace add {repo} --ref {ref} {sparse_flags}",
+            "{host} plugin add {name}@{marketplace}",
+        ],
         "language": "bash",
+        # The namespaced name the plugin's skill is advertised under — a worked
+        # example of its own, because it is NOT the `install-host` paragraph's
+        # bare name, and a reader copying that one would name the file shim.
+        "examples": [
+            "Use the {name}:{name} skill with exactly these arguments: "
+            "plans/my-feature.md",
+            "Use the {name}:{name} skill with exactly these arguments: "
+            "--review-code plans/my-feature.md",
+        ],
+        # Once per repository, in the new session. The plugin's own copy of the
+        # provider config lives in the version-keyed install, which the next
+        # `plugin add` replaces wholesale — so the pointer is `--init`, never
+        # the installed file.
+        "configure": (
+            "Then configure providers once per repository, in the new session: "
+            "`Use the {name}:{name} skill with exactly these arguments: --init` "
+            "writes `<git-root>/.multi-llm/providers.yaml`, outside "
+            "`$CODEX_HOME`, where no reinstall or upgrade touches it."
+        ),
+        # Not the install re-run: adding a marketplace that is already added is
+        # a no-op (R37), so a reader told to repeat the install would re-install
+        # the version they already had and be told nothing.
+        "upgrade": (
+            "Upgrading is a different sequence from the install, because "
+            "repeating the install is a no-op on a marketplace that is already "
+            "registered: refresh the marketplace, re-add the plugin from it, then "
+            "start a **new** {host} session:"
+        ),
+        "upgrade_fence": [
+            "{host} plugin marketplace upgrade",
+            "{host} plugin add {name}@{marketplace}",
+        ],
+        "verified": (
+            "The recommended route on `{host}`: two commands in this order, no "
+            "config file edited by hand, and no baked path that goes stale on an "
+            "update — the plugin is a copy of the `{ref}` ref, installed where "
+            "{host} resolves it."
+        ),
+        "documented": (
+            "A second route on `{host}`, and the one this documentation will "
+            "recommend once it is published. **It is not yet published**: the "
+            "`{ref}` ref the first command names does not exist until the "
+            "publish workflow first moves it, so today `{host} plugin "
+            "marketplace add … --ref {ref}` fails **loudly**, with a git error "
+            "naming the missing ref — nothing is half-installed. Until then, the "
+            "`install-host {host}` route above is what works."
+        ),
     },
 }
 
-#: What ``update`` means, in words, per enum value.
+#: What ``update`` means, in words, per enum value. Registry-neutral words only:
+#: a registry whose row carries its own ``upgrade`` text renders none of these,
+#: so the neutral sentence can neither contradict that row's fence nor be
+#: deleted out from under a later host that selects it.
 _UPDATE_FORMS: Dict[str, str] = {
     "pinned-spec": (
         "Upgrading is bumping the pin and restarting: the cache key is the "
@@ -306,9 +391,50 @@ _UPDATE_FORMS: Dict[str, str] = {
         "directory already exists, so an **unpinned** entry resolves once and "
         "never again"
     ),
-    "reinstall": "Upgrading is re-running the install command",
+    "reinstall": (
+        "Upgrading re-installs the package through the host's own upgrade "
+        "command — not by repeating the install, which a host may treat as "
+        "already done"
+    ),
     "range": "The host re-resolves the declared range on its own",
 }
+
+#: What ``write_posture`` means, in words. Rendered *above* the install fence,
+#: so a reader meets it before running the install rather than after.
+_WRITE_POSTURE_FORMS: Dict[str, str] = {
+    "refuses-under-readonly": (
+        "**Read this before installing.** The plugin's tool runs the "
+        "orchestrator from a server {host} starts *outside* its own exec "
+        "sandbox, so the session's `--sandbox` posture does not govern it: "
+        "installing the plugin gives a {host} session a write path it did not "
+        "have. So under a read-only posture the tool **refuses write-capable "
+        "modes** before it spawns anything, unless "
+        "`MULTI_LLM_{host_upper}_UNSANDBOXED_WRITES=1` is in the environment "
+        "that starts {host}. Provider CLIs the orchestrator dispatches stay "
+        "under their own sandboxes."
+    ),
+}
+
+
+def _format_keywords(host_id: str, package: Dict[str, Any]) -> Dict[str, str]:
+    """Every keyword a registry row's templates may name, from the block's cells."""
+    spec = package["name"]
+    if package.get("version"):
+        spec = f"{spec}@{package['version']}"
+    return {
+        "config_key": package["config_key"],
+        "spec": spec,
+        "host": host_id,
+        "host_upper": host_id.upper().replace("-", "_"),
+        "name": package["name"],
+        "marketplace": package.get("marketplace", ""),
+        "repo": package.get("repo", ""),
+        "ref": package.get("ref", ""),
+        # One `--sparse <path>` per element, so the list stays data.
+        "sparse_flags": " ".join(
+            f"--sparse {path}" for path in package.get("sparse", [])
+        ),
+    }
 
 
 def _package_section(host_id: str, host: Dict[str, Any]) -> List[str]:
@@ -321,6 +447,10 @@ def _package_section(host_id: str, host: Dict[str, Any]) -> List[str]:
     paragraph reads as the recommended install. Flipping it is a provenance edit
     and a re-render, never a prose rewrite — and the two generated pages are
     byte-compared, so a hand edit is a CI failure.
+
+    **This function holds no registry-specific sentence.** Each one is a
+    template in the registry's :data:`_REGISTRY_FORMS` row, so the npm prose
+    can never leak into a marketplace paragraph (or the reverse).
     """
     package = host.get("package")
     if not package:
@@ -335,9 +465,7 @@ def _package_section(host_id: str, host: Dict[str, Any]) -> List[str]:
             "letting the paragraph render empty."
         )
     provenance = host["provenance"].get("package", "unknown")
-    spec = package["name"]
-    if package.get("version"):
-        spec = f"{spec}@{package['version']}"
+    keywords = _format_keywords(host_id, package)
 
     verified = provenance == "verified"
     lines = [
@@ -345,54 +473,51 @@ def _package_section(host_id: str, host: Dict[str, Any]) -> List[str]:
         + ("" if verified else " (not yet published)")
         + f"** — {provenance}",
         "",
-    ]
-    if verified:
-        lines.append(
-            f"The recommended route on `{host_id}`: one config edit, no shell "
-            "bootstrap, and no baked path that goes stale on an update — the "
-            "plugin resolves its own location at every startup."
-        )
-    else:
-        lines.append(
-            f"A second route on `{host_id}`, and the one this documentation "
-            "will recommend once it is published. **No published install has "
-            "been verified yet**, so a config entry naming this spec resolves "
-            "to nothing today — and on this host that failure is silent: the "
-            "plugin stays listed, the exit code is 0, and the debug log is "
-            "empty. Until then, use the `install-host` route above, or build "
-            "the package and name its **directory** — `npm pack`'s `.tgz` is "
-            "not an installable spec on this host: MEASURED 2026-09-19 against "
-            "opencode 1.18.31, a config entry naming a tarball resolves to the "
-            "archive's *containing directory* and never opens the archive, so "
-            "it loads nothing unless that directory happens to be an unpacked "
-            "package itself."
-        )
-    lines += [
+        form["verified" if verified else "documented"].format(**keywords),
         "",
-        form["config"].format(host=host_id),
+    ]
+    # Ahead of the install fence, so a reader meets it before running it.
+    posture = package.get("write_posture")
+    if posture:
+        lines += [_WRITE_POSTURE_FORMS[posture].format(**keywords), ""]
+    lines += [
+        form["config"].format(**keywords),
         "",
         f"```{form['language']}",
-        form["fence"].format(
-            config_key=package["config_key"],
-            spec=spec,
-            host=host_id,
-            name=package["name"],
-            marketplace=package.get("marketplace", ""),
-        ),
-        "```",
-        "",
+    ]
+    lines += [command.format(**keywords) for command in form["fence"]]
+    lines += ["```", ""]
+    # A registry row that spells its own upgrade renders no neutral sentence.
+    update = "" if "upgrade" in form else _UPDATE_FORMS[package["update"]] + ". "
+    lines += [
         f"Needs {host_id} {package['min_host_version']} or newer. "
-        + _UPDATE_FORMS[package["update"]]
-        + f". It provides {_provides_sentence(package['provides'])}, and you "
+        + update
+        + f"It provides {_provides_sentence(package['provides'])}, and you "
         f"invoke it {package['invocation']}",
         "",
     ]
-    # No worked-example fence of its own. The per-host block this paragraph is
-    # appended to has already rendered one from this same `provides`, and a
-    # second byte-identical copy one paragraph later reads as a *different*
-    # example that happens to coincide. The half of `provides` the fence cannot
-    # show — a model-callable tool has no typed spelling — is named in the
-    # invocation sentence above instead.
+    if "examples" in form:
+        lines += ["```text"]
+        lines += [example.format(**keywords) for example in form["examples"]]
+        lines += ["```", ""]
+    if "configure" in form:
+        lines += [form["configure"].format(**keywords), ""]
+    if "upgrade" in form:
+        lines += [
+            form["upgrade"].format(**keywords),
+            "",
+            f"```{form['language']}",
+        ]
+        lines += [command.format(**keywords) for command in form["upgrade_fence"]]
+        lines += ["```", ""]
+    # No worked-example fence of its own *unless the registry row carries one*.
+    # On npm the per-host block this paragraph is appended to has already
+    # rendered one from this same `provides`, and a second byte-identical copy
+    # one paragraph later reads as a *different* example that happens to
+    # coincide. The codex marketplace row does carry one, because its skill is
+    # advertised under a namespaced name the file shim's fence does not spell.
+    # The half of `provides` no fence can show — a model-callable tool has no
+    # typed spelling — is named in the invocation sentence above instead.
     return lines
 
 

@@ -190,9 +190,35 @@
               ]
             },
             "marketplace": {
-              "description": "The marketplace the package is published to. Required exactly when `registry` is `codex-marketplace`, and forbidden otherwise, so a stray key on an npm block fails validation rather than rendering nowhere.",
+              "description": "The marketplace the package is published to. Required exactly when `registry` is `codex-marketplace`, and forbidden otherwise, so a stray key on an npm block fails validation rather than rendering nowhere. `repo`, `ref`, `sparse` and `write_posture` follow the same rule.",
               "type": "string",
               "minLength": 1
+            },
+            "repo": {
+              "description": "The Git source the marketplace is added from, as the `owner/repo` slug the first install command takes. A cell rather than a literal in the renderer's registry row, which every later `codex-marketplace` package would otherwise inherit. Required exactly when `registry` is `codex-marketplace`, forbidden otherwise.",
+              "type": "string",
+              "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$"
+            },
+            "ref": {
+              "description": "The Git ref the marketplace is pinned to (`--ref`): the release boundary, which only the publish workflow moves, never the default branch. Required exactly when `registry` is `codex-marketplace`, forbidden otherwise.",
+              "type": "string",
+              "minLength": 1
+            },
+            "sparse": {
+              "description": "The repository paths the marketplace checkout is narrowed to, one `--sparse <path>` per element, in order. Data rather than a literal for the same reason as `repo`. Required exactly when `registry` is `codex-marketplace`, forbidden otherwise.",
+              "type": "array",
+              "minItems": 1,
+              "uniqueItems": true,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "write_posture": {
+              "description": "What the package's tool does about writes under a read-only session posture. `refuses-under-readonly`: the tool's server runs outside the host's exec sandbox, so write-capable modes are refused before the spawn unless the user opts in through the environment. Rendered into the generated install paragraph so a user meets it before installing. Required exactly when `registry` is `codex-marketplace`, forbidden otherwise.",
+              "enum": [
+                "refuses-under-readonly"
+              ]
             },
             "invocation": {
               "description": "How a user invokes the skill once the package is installed, as a sentence fragment the generated pages append after \"Invoke it \". Required on every route: one that ships without naming its own invocation is undescribed.",
@@ -232,13 +258,41 @@
               },
               "then": {
                 "required": [
-                  "marketplace"
+                  "marketplace",
+                  "repo",
+                  "ref",
+                  "sparse",
+                  "write_posture"
                 ]
               },
               "else": {
                 "not": {
-                  "required": [
-                    "marketplace"
+                  "anyOf": [
+                    {
+                      "required": [
+                        "marketplace"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "repo"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "ref"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "sparse"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "write_posture"
+                      ]
+                    }
                   ]
                 }
               }
@@ -347,7 +401,7 @@
           }
         },
         "session_runner_provider": {
-          "description": "The provider whose CLI can be pointed at the model the HOST SESSION is itself running on, or null where this host has no such rung. It is required rather than optional precisely because it affects dispatch: `resolve_subagent_runner` reads it together with $MULTI_LLM_HOST_SESSION_MODEL and, when both are present, resolves a runner at layer `session` — below every explicit driver.* layer and above `default_subagent_runner`. An omission would be a silent guess about which CLI may serve a session model, which is the class of defaulting this schema exists to remove; `null` states 'no session rung' out loud. The named provider must be a key of this entry's own runners map, for the same reason `default_subagent_runner`'s provider must be.",
+          "description": "The provider whose CLI can be pointed at the model the HOST SESSION is itself running on, or null where this host has no such rung. It is required rather than optional precisely because it affects dispatch: `resolve_subagent_runner` reads it together with $MULTI_LLM_HOST_SESSION_MODEL and, when both are present, resolves a runner at layer `session` \u2014 below every explicit driver.* layer and above `default_subagent_runner`. An omission would be a silent guess about which CLI may serve a session model, which is the class of defaulting this schema exists to remove; `null` states 'no session rung' out loud. The named provider must be a key of this entry's own runners map, for the same reason `default_subagent_runner`'s provider must be.",
           "type": [
             "string",
             "null"

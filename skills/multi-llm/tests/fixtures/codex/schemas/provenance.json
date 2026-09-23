@@ -1,0 +1,21 @@
+{
+  "status": "not_vendored",
+  "reason": "No deliberate, network-sourced vendoring has been done (plans/codex-native-plugin.md, Testing: fetching is a hand-run maintenance step, never a test). Until the two files are committed here the schema clause of test_plugin_manifest_valid and test_mcp_json_shape is NOT CLAIMED; both rows stand on their hand-restated key-by-key assertions and on packaging/codex/ingestion_rules.py.",
+  "finding_2026_09_23": "Copies of both files, fetched in an earlier session on 2026-09-08 and left in a scratch directory (sha256 below), were read offline. They describe the cross-vendor Agent Plugins 1.0.0 format, not codex's ingestion contract, and the shipped files CANNOT validate against them as written: plugin.schema.json requires a `$schema` key and sets additionalProperties:false over a property set without `skills`, `mcpServers` or `interface` (and codex's validate_plugin.py rejects `$schema` as an unaccepted key); mcp.schema.json requires `$schema` and a per-server `type: stdio`, forbids `env_vars` and `tool_timeout_sec`, and its `cwd` pattern rejects the bare `.` codex measures and A2b ships. Vendoring them is therefore a plan decision (which document is authoritative, and whether the rows validate a projection), not a copy step.",
+  "files": {
+    "plugin.schema.json": {
+      "url": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+      "vendored": false,
+      "sha256_of_unvendored_copy_read": "0a4aad95ce337878ad38802ebf0daa3fde76abe3f65400c86bcbb1ec0b3ab883",
+      "codex_version": null,
+      "fetched": null
+    },
+    "mcp.schema.json": {
+      "url": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+      "vendored": false,
+      "sha256_of_unvendored_copy_read": "6539175bfcdf43085855183e86da40ea94b166547a72b47ae9a0a390516d3acb",
+      "codex_version": null,
+      "fetched": null
+    }
+  }
+}

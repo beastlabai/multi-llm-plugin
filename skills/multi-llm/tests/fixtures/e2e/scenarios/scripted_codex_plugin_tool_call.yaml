@@ -1,0 +1,67 @@
+# The scripted-call stub's one scenario (plans/codex-native-plugin.md, Phase 1
+# item 1a). It is the ONLY scenario in this directory that makes
+# tests/container/stub_server.py emit a tool call, and the stub emits one only
+# because this file carries a `scripted_tool_call:` block — no other scenario,
+# and no request that does not advertise the tool, ever sees one.
+#
+# THE SHAPE, two fixed answers keyed on what each Responses request carries:
+#
+#   1. a request whose `tools[]` advertises `mcp__multi_llm` -> `multi_llm`
+#      (codex presents a plugin MCP server as a `namespace` entry; measured in
+#      the plan's Appendix B) is answered with ONE `function_call` carrying
+#      `arguments` below, JSON-encoded, under `call_id`;
+#   2. the request carrying the `function_call_output` for that `call_id` is
+#      answered with the plain `terminal` message.
+#
+# Every frame served is recorded in the stub log (`scripted.frames`), together
+# with the declaration the host actually advertised (`scripted.declaration`,
+# the loader row's `tools[]` capture) and the output that came back
+# (`scripted.output`, OUR server's result string, capped).
+#
+# WHAT THIS IS AND IS NOT EVIDENCE OF, stated once (the plan's item 1a): it
+# exercises the MECHANISM end to end — the declaration codex built, the argument
+# encoding, the server's dispatch under codex's own process and environment, the
+# result's trip back into the transcript. It can never evidence a model
+# CHOOSING the tool; that is row 1b(b)'s job and `codex-package-ask`'s.
+#
+# WHY `mode: status`: it is the one mode that is zero quota and exits
+# deterministically on the seeded workspace — `plans/auth-feature.md` has no run
+# recorded, so the dispatcher answers the surface's nothing-to-do (exit 2)
+# without spawning a provider. The plan path is RELATIVE on purpose: it is
+# resolved against the anchor (D3f), which is part of what the rows driving this
+# scenario grade.
+name: scripted_codex_plugin_tool_call
+description: "Phase 1 item 1a — one scripted function_call to the plugin tool"
+
+scripted_tool_call:
+  surfaces: [responses]
+  namespace: mcp__multi_llm
+  name: multi_llm
+  call_id: call_mllm_scripted_1
+  # All four properties are required by the tool's schema; omitting
+  # `question`/`extra_flags` fails argument validation before any dispatch.
+  arguments:
+    mode: status
+    plan: plans/auth-feature.md
+    question: ""
+    extra_flags: []
+  terminal: "multi-llm tool call returned; scripted turn complete."
+
+# The TEXT path, for any request that does not advertise the tool — a nested
+# codex provider sharing this stub (sandbox-posture row 12(d)) or a CLI's side
+# turn. Lenient on purpose: this scenario is not graded on text answers, and a
+# 422 to a request the row never meant to answer would read as a redirect
+# failure.
+#
+# The one `prompts:` rule is the text answer for the probe prompt itself
+# (`entrypoint.CODEX_PROBE_PROMPT`) on a turn that does NOT advertise the tool
+# — the shape a plugin whose server never started produces (row 9(c)). It also
+# keeps this file honest under `test_scenario_matcher_parity.py`'s generic
+# sweep, which asserts the fake binary and the stub resolve every shipped
+# scenario's rules identically and refuses a scenario with no rule to probe.
+prompts:
+  - pattern: "call.*multi_llm tool"
+    content: "OK"
+    description: "the probe prompt on a turn that does not advertise the tool"
+fallback:
+  content: "OK"

@@ -790,6 +790,84 @@ def scan_tarball(
 
 
 # ---------------------------------------------------------------------------
+# Payload inventory derived from the dispatch table
+# ---------------------------------------------------------------------------
+
+def _skill_dir() -> Path:
+    """The real skill dir of this checkout: ``<repo>/skills/multi-llm``."""
+    return Path(__file__).resolve().parent.parent.parent / "skills" / "multi-llm"
+
+
+def _mode_table():
+    """``modes.py``, imported from the real skill dir.
+
+    Lazily, because nothing else in this module needs the skill tree on the
+    path, and a host build that only sweeps a tarball should not have to put
+    it there first.
+    """
+    skill = str(_skill_dir())
+    if skill not in sys.path:
+        sys.path.insert(0, skill)
+    import modes
+
+    return modes
+
+
+def target_module_paths(base: Optional[Path] = None) -> Tuple[str, ...]:
+    """Every ``modes.py`` ``target_module``, as a skill-relative file path.
+
+    Shared rather than per-host (rule h): each host build passes it to
+    :func:`stage` as ``required_extra`` and to :func:`scan_tarball`'s
+    ``required``, so every distribution derives the same inventory.
+
+    ``modes.py``'s own docstring is explicit that nothing there imports an
+    orchestrator — ``target_module`` is a dotted path the dispatcher resolves
+    *lazily* — and that laziness is exactly why :data:`REQUIRED_INVENTORY`,
+    a static hand-typed list, could not see ``utils/doctor.py`` go missing: the
+    dispatch table pointed at a module the allowlist (``git ls-files``) never
+    selected because it was untracked, and nothing failed until
+    ``multi_llm.py doctor`` ran from the staged tree and hit
+    ``ModuleNotFoundError``. This derives the same set the dispatcher resolves
+    at runtime, so a *build* fails on the gap rather than a user's first
+    invocation of the mode that has it.
+
+    Returned paths are sorted and de-duplicated (several modes share a
+    ``target_module``, e.g. ``install-host``/``uninstall-host`` both dispatch
+    to ``utils.host_install``).
+
+    *base* is where each dotted path is checked against the filesystem to tell
+    a plain module (``utils/doctor.py``) from a package (``x/__init__.py``);
+    it defaults to the real skill dir, the same default every host's
+    ``command_body`` uses. ``modes`` itself is always the top-level import —
+    resolved once against the real skill dir the way every module a host build
+    reads is — so *base* only disambiguates the file *shape* for
+    a caller pointed at a fixture tree; it is not a way to derive the set from
+    a different ``modes.py``.
+    """
+    root = Path(base) if base else _skill_dir()
+    mode_table = _mode_table()
+    found: Dict[str, str] = {}
+    for mode in mode_table.MODES:
+        dotted = mode.target_module
+        if not dotted or dotted in found:
+            continue
+        parts = dotted.split(".")
+        module_path = "/".join(parts) + ".py"
+        package_path = "/".join(parts) + "/__init__.py"
+        if (root / module_path).is_file():
+            found[dotted] = module_path
+        elif (root / package_path).is_file():
+            found[dotted] = package_path
+        else:
+            raise PayloadError(
+                f"modes.py names target_module {dotted!r}, but neither "
+                f"{module_path} nor {package_path} exists under {root}. Fix "
+                "the dotted path in modes.py, or add the file it should name."
+            )
+    return tuple(sorted(found.values()))
+
+
+# ---------------------------------------------------------------------------
 # The digest the publish gate is keyed on
 # ---------------------------------------------------------------------------
 

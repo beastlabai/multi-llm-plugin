@@ -82,12 +82,12 @@ ARG MLLM_PIN_MODE=pinned
 # tests/test_container_dockerfile_pins.py, so the two cannot drift apart.
 ARG UV_VERSION=0.11.28
 ARG UV_SHA256=e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224
-ARG GOOSE_VERSION=1.51.0
-ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.51.0/goose-x86_64-unknown-linux-gnu.tar.bz2
-ARG GOOSE_SHA256=de5bf71c6bf470fbb55276de871bbbd65c844aa066d3b09b1552da83f8e367e2
-ARG GROK_VERSION=1.0.34
-ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.34-linux-x86_64
-ARG GROK_SHA256=be5905e107d2b8b5f3c142d21ecfe4c8fd32a913d2fd551b788707930c4dc80d
+ARG GOOSE_VERSION=1.52.0
+ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.52.0/goose-x86_64-unknown-linux-gnu.tar.bz2
+ARG GOOSE_SHA256=2609109a43012ddece0f78e1e4a179b82749c424f2164b97186d3ad38518d262
+ARG GROK_VERSION=1.0.41
+ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.41-linux-x86_64
+ARG GROK_SHA256=9ce03ed23e16ea01072b4496263d6213a27899e1e3e107f008d36edf82e70407
 ARG MUSE_VERSION=1.3.0-R3401.1
 ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.3.0-R3401.1&file=muse-x86-linux
 ARG MUSE_SHA256=71b089d055dfe6e4562092bc484896b61bd96fd6ef9fef9da54a14aa174e2a33
@@ -106,9 +106,9 @@ ARG CURSOR_AGENT_SHA256=b1308f5a2fc05458b9d8966752986bb23a971bbcc67c842c1df94c4b
 #
 # agy RELEASES DAILY (1.1.15 on 2026-08-19, 1.2.7 on 2026-09-19), so this is a
 # pin to re-confirm whenever this file is touched.
-ARG AGY_VERSION=1.2.7
-ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.2.7/agy_cli_linux_x64.tar.gz
-ARG AGY_SHA256=e410dd56d8c213ef12643d3ff5eaaab57a17e05bbf72e9415322f23879fc4a18
+ARG AGY_VERSION=1.2.9
+ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.2.9/agy_cli_linux_x64.tar.gz
+ARG AGY_SHA256=d9850373f3df866011024a961fa9740cc4adaac060eebe9c70fbf263ac6b2624
 # oh-my-pi. A DOWNLOAD, never the npm layer: the npm package
 # `@oh-my-pi/pi-coding-agent` needs Bun >= 1.3.14 and does not run under node at
 # all, so `npm ci` cannot install it into this image. What ships instead is the
@@ -120,9 +120,9 @@ ARG AGY_SHA256=e410dd56d8c213ef12643d3ff5eaaab57a17e05bbf72e9415322f23879fc4a18
 # OWN: the release publishes a SHA256SUMS.txt naming it against
 # `omp-linux-x64`. Confirmed on 2026-09-17 to agree with sha256sum over the
 # fetched file -- which is the point of checking it below anyway.
-ARG OMP_VERSION=18.2.6
-ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.2.6/omp-linux-x64
-ARG OMP_SHA256=0f38598c91e823d8cce07f151ec3999d51f213fb2cc3e07d89f1af8eef9247a2
+ARG OMP_VERSION=18.2.11
+ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.2.11/omp-linux-x64
+ARG OMP_SHA256=97cf39557bf3d98327dd4c9814380b7e6bcb76e41169edd9b0ff30424c733a2a
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
@@ -921,6 +921,84 @@ RUN test -f /opt/mllm/opencode-plugin/skills/multi-llm/uv.lock \
  && /usr/bin/python3 -m compileall -q /opt/mllm/opencode-plugin/skills >/dev/null \
  && chmod -R a+rX /opt/mllm/opencode-plugin \
  && du -sh /opt/mllm/opencode-plugin \
+ && rm -rf /tmp/uv-cache
+
+# --------------------------------------------------------------------------- #
+# 10c. The codex PLUGIN route -- the codex host's second way in
+#      (plans/codex-native-plugin.md, Phase 1 item 5).
+#
+# `install-host codex` writes a FILE shim ($CODEX_HOME/skills/multi-llm/SKILL.md)
+# that a model reads and retypes. The codex plugin is the other route: a
+# marketplace entry whose directory carries a manifest, a `.mcp.json` declaring a
+# stdio MCP server, and the skill payload -- so the model calls a `multi_llm`
+# TOOL whose argv is composed in Python rather than improvised from prose.
+#
+# THE MIRROR KEEPS THE REPO'S OWN TWO RELATIVE PATHS, and that is the point of
+# the layer rather than a tidiness choice:
+#
+#     /opt/mllm/codex-marketplace/.agents/plugins/marketplace.json
+#     /opt/mllm/codex-marketplace/packaging/codex/multi-llm/
+#
+# `codex plugin marketplace add <dir>` reads `<dir>/.agents/plugins/
+# marketplace.json`, and that file names the plugin by a path relative to the
+# marketplace root. Copying both at the paths they have in the repository means
+# the catalog file users fetch is, byte for byte, the catalog file the container
+# row installs from: no edit, no second file, no rewritten source path. The
+# install itself is a RUN-TIME step (`entrypoint._seed_codex_plugin`), because
+# it writes into $CODEX_HOME, which is the row's tmpfs home and never the image.
+#
+# NO .claude-plugin/ IS COPIED, deliberately: codex also reads
+# `.claude-plugin/marketplace.json`, whose one entry's source is the repository
+# root (measured on the real checkout, see the empty-catalog note in
+# .agents/plugins/marketplace.json). The mirror carries only the codex catalog,
+# so there is no second catalog for the install to fall through to.
+#
+# THE PAYLOAD SHARES §10's VIRTUALENV, exactly as §10b's does and for the same
+# measured reason: `ENV UV_PROJECT_ENVIRONMENT=/opt/mllm/skill/.venv` is
+# image-wide, so a `uv run --project <payload>` resolves the payload's lock into
+# the skill's venv. The MCP server's child reaches the same venv only if codex
+# forwards `UV_PROJECT_ENVIRONMENT` through `.mcp.json`'s `env_vars` allowlist
+# (A2b/D3a) -- which is a run-time fact the environment-probe row records, not
+# something this build can assert.
+#
+# Two assertions, both the payload's own, both offline:
+#   1. the REAL dispatch through the payload -- `uv run --frozen --no-dev
+#      --project <payload>/skills/multi-llm -- python multi_llm.py --help`, the
+#      same shape §10b asserts -- which proves the staged tree carries every
+#      module the dispatcher imports and that the environment resolves offline;
+#   2. `python3 mcp/server.py` answers `tools/list` on stdin: `initialize`,
+#      `notifications/initialized`, `tools/list`, one JSON-RPC line each, and the
+#      answer to id 2 names `multi_llm`. Run from the plugin root because that is
+#      the server's cwd under codex (`cwd: "."` expands to the cache root, R11).
+#
+# The sources are TRACKED (unlike §10b's build output), so a clean checkout
+# carries them and context_manifest.txt lists them as ordinary rows.
+# --------------------------------------------------------------------------- #
+COPY .agents/plugins/marketplace.json /opt/mllm/codex-marketplace/.agents/plugins/marketplace.json
+COPY packaging/codex/multi-llm        /opt/mllm/codex-marketplace/packaging/codex/multi-llm
+RUN P=/opt/mllm/codex-marketplace/packaging/codex/multi-llm \
+ && for f in .codex-plugin/plugin.json .mcp.json mcp/server.py dist/cli-surface.json \
+             LICENSE skills/multi-llm/SKILL.md skills/multi-llm/multi_llm.py \
+             skills/multi-llm/uv.lock skills/multi-llm/pyproject.toml; do \
+        test -s "$P/$f" \
+          || { echo "the codex plugin tree is missing $f -- packaging/codex/multi-llm/ is checked in; rebuild it with its build step before building this image" >&2; exit 1; }; \
+    done \
+ && /usr/bin/python3 -c 'import json,sys; m=json.load(open("/opt/mllm/codex-marketplace/.agents/plugins/marketplace.json")); names=[p.get("name") for p in m.get("plugins") or []]; print("codex marketplace "+str(m.get("name"))+" plugins="+",".join(map(str,names))); sys.exit(0 if "multi-llm" in names else "the mirrored .agents/plugins/marketplace.json carries no multi-llm entry: "+repr(names))' \
+ && /opt/mllm/real/uv run --frozen --no-dev \
+      --project "$P/skills/multi-llm" \
+      -- python "$P/skills/multi-llm/multi_llm.py" --help >/dev/null \
+ && echo "codex plugin payload dispatches (uv run --frozen --no-dev, shared venv)" \
+ && cd "$P" \
+ && printf '%s\n' \
+      '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"mllm-image-build","version":"0"}}}' \
+      '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+      '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+    | timeout 60 /usr/bin/python3 mcp/server.py > /tmp/codex-mcp-tools.jsonl \
+ && /usr/bin/python3 -c 'import json,sys; rows=[json.loads(l) for l in open("/tmp/codex-mcp-tools.jsonl") if l.strip()]; hit=[r for r in rows if r.get("id")==2]; tools=[t.get("name") for t in ((hit[0].get("result") or {}).get("tools") or [])] if hit else []; print("codex plugin server tools/list: "+",".join(map(str,tools))); sys.exit(0 if "multi_llm" in tools else "mcp/server.py did not answer tools/list with multi_llm: "+repr(rows)[:2000])' \
+ && rm -f /tmp/codex-mcp-tools.jsonl \
+ && /usr/bin/python3 -m compileall -q "$P/skills" "$P/mcp" >/dev/null \
+ && chmod -R a+rX /opt/mllm/codex-marketplace \
+ && du -sh /opt/mllm/codex-marketplace \
  && rm -rf /tmp/uv-cache
 
 # --------------------------------------------------------------------------- #

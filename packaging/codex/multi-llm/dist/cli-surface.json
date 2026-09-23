@@ -1,0 +1,311 @@
+{
+  "schema_version": 4,
+  "host": "codex",
+  "tool_name": "multi_llm",
+  "tool_description": "Run a multi-LLM workflow over a plan file. This tool is the only supported way to run multi-llm on this host: never invoke multi_llm.py, uv run or any dispatcher command through bash, because the flags this host requires are appended here and a shell invocation reaches none of them.\n\nModes:\n  review-plan | review \u2014 Review a plan with every configured model, then group + validate.\n  apply-suggestions \u2014 Prepare the validated plan-review suggestions for application.\n  generate-tasks | tasks \u2014 Decompose the plan into an implementable task list.\n  review-tasks \u2014 Review the generated task list with every configured model.\n  apply-task-suggestions \u2014 Prepare the validated task-review suggestions for application.\n  implement \u2014 Batch the tasks for implementation and track progress.\n  review-code | code-review \u2014 Review the working diff against the plan with every model.\n  apply-code-fixes \u2014 Prepare the validated code-review fixes for application.\n  full \u2014 Run the whole plan-to-code workflow as one resumable sequence.\n  ask \u2014 Ask every configured model one free-text question about a plan.\n  status | abort | cancel | stop \u2014 Report workflow phases (state.json) and detached runs ({phase}/.status.json).\n  init \u2014 Scaffold a per-project .multi-llm/providers.yaml override.\n\nThe default mode is review-plan.\n\nExit codes: 0 done \u00b7 1 error \u00b7 2 nothing to do \u00b7 3 needs a human: stop, report, do not do the phase's work.\n\nThis tool runs outside the session's exec sandbox. apply-suggestions, apply-task-suggestions, implement, apply-code-fixes, full edit the working tree through agent CLIs; under a read-only posture they are refused unless the user has set MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1.\n\nExamples:\n  {\"mode\":\"review-plan\",\"plan\":\"plans/x.md\",\"question\":\"\",\"extra_flags\":[]}\n  {\"mode\":\"init\",\"plan\":\"\",\"question\":\"\",\"extra_flags\":[]}\n  {\"mode\":\"ask\",\"plan\":\"plans/x.md\",\"question\":\"Why is the ceiling 120 s?\",\"extra_flags\":[]}\n  {\"mode\":\"review\",\"plan\":\"plans/x.md\",\"question\":\"\",\"extra_flags\":[\"--quick\"]}",
+  "argument_descriptions": {
+    "mode": "One of: review-plan, review, apply-suggestions, generate-tasks, tasks, review-tasks, apply-task-suggestions, implement, review-code, code-review, apply-code-fixes, full, ask, status, abort, cancel, stop, init. An alias travels unexpanded \u2014 do not expand it and do not add the flag it already contributes. Never empty. The default when the user named no mode is review-plan.",
+    "plan": "The plan path, as exactly one argv element \u2014 never split, never shell-quoted, never escaped. Strip at most one layer of matching quotes from what the user typed and send the value. A path containing spaces needs no escaping. Empty (\"\") when and only when the mode declares no plan positional. Modes taking a plan: review-plan, apply-suggestions, generate-tasks, review-tasks, apply-task-suggestions, implement, review-code, apply-code-fixes, full, ask, status. Relative paths resolve against the workspace.",
+    "question": "The free-text question, as exactly one argv element \u2014 newlines preserved verbatim, no truncation, no escaping. Empty (\"\") for every mode except: ask. A question whose first character is \"-\" is refused, because the dispatcher's grammar would read it as a flag and end the positional scan; a question merely containing a flag is fine.",
+    "extra_flags": "Additional dispatcher flags, one token per array element \u2014 [\"--view\", \"run\"], never [\"--view run\"]. Use [] for none. Passed verbatim, in order, never reordered or deduplicated. These are rejected because this tool composes them itself: --host, --yes, -y, --non-interactive, --exec-subagents, --detach, --if-not-running, --max-detached, --interactive, -i, --internal-* \u2014 including their abbreviations and \"=\" forms."
+  },
+  "uninstall_command": "uv run --frozen --no-dev --project '{SKILL_DIR}' -- python '{SKILL_DIR}/multi_llm.py' uninstall-host codex",
+  "default_mode": "review-plan",
+  "description_lede": "Run a multi-LLM workflow over a plan file. This tool is the only supported way to run multi-llm on this host: never invoke multi_llm.py, uv run or any dispatcher command through bash, because the flags this host requires are appended here and a shell invocation reaches none of them.",
+  "outcomes_line": "Exit codes: 0 done \u00b7 1 error \u00b7 2 nothing to do \u00b7 3 needs a human: stop, report, do not do the phase's work.",
+  "needs_human_message": {
+    "template": "Stop here: this run is blocked and needs a human. {phase} {error} Report to the user what was being run (`argv`), that line, and the `options`. The dispatcher's output is included as it was rendered, except that every runnable command in it was replaced by a pointer and spelled as a tool call in `options`, in the order it appeared, and its result line is in `result` instead; do not paraphrase the output. Do not run a different mode. Do not perform the work this run was going to review, plan, or implement: doing it yourself is never a substitute for a failed run. Send back an `options` entry only after the user has picked one.",
+    "phase_incomplete": "The `{phase}` phase did not complete.",
+    "phase_known": "The `{phase}` phase was running.",
+    "review_completed": "The `{phase}` review finished, found what it was told to stop on, and needs your decision.",
+    "phase_unnamed": "Nothing in the result line names the phase that was running.",
+    "phase_unknown": "The dispatcher exited without a result line, so nothing here names the phase that was running; `log` and `argv` say what ran.",
+    "error_known": "The last line it left is: {error}",
+    "error_unknown": "Its result line names no error, and what it printed is in `output` and `stderr`; `log` and `argv` are what to report."
+  },
+  "needs_human_option": "stop here and report to the user; send back one of the options above only after the user has picked one",
+  "modes": [
+    {
+      "name": "review-plan",
+      "aliases": [
+        "review"
+      ],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": true,
+      "summary": "Review a plan with every configured model, then group + validate.",
+      "phase": "review-plan",
+      "writes_worktree": false
+    },
+    {
+      "name": "apply-suggestions",
+      "aliases": [],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": true,
+      "summary": "Prepare the validated plan-review suggestions for application.",
+      "phase": "apply-suggestions",
+      "writes_worktree": true
+    },
+    {
+      "name": "generate-tasks",
+      "aliases": [
+        "tasks"
+      ],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": true,
+      "summary": "Decompose the plan into an implementable task list.",
+      "phase": "generate-tasks",
+      "writes_worktree": false
+    },
+    {
+      "name": "review-tasks",
+      "aliases": [],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": true,
+      "summary": "Review the generated task list with every configured model.",
+      "phase": "review-tasks",
+      "writes_worktree": false
+    },
+    {
+      "name": "apply-task-suggestions",
+      "aliases": [],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": true,
+      "summary": "Prepare the validated task-review suggestions for application.",
+      "phase": "apply-task-suggestions",
+      "writes_worktree": true
+    },
+    {
+      "name": "implement",
+      "aliases": [],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": true,
+      "summary": "Batch the tasks for implementation and track progress.",
+      "phase": "implement",
+      "writes_worktree": true
+    },
+    {
+      "name": "review-code",
+      "aliases": [
+        "code-review"
+      ],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": true,
+      "summary": "Review the working diff against the plan with every model.",
+      "phase": "code-review",
+      "writes_worktree": false
+    },
+    {
+      "name": "apply-code-fixes",
+      "aliases": [],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": true,
+      "summary": "Prepare the validated code-review fixes for application.",
+      "phase": "apply-code-fixes",
+      "writes_worktree": true
+    },
+    {
+      "name": "full",
+      "aliases": [],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": true,
+      "summary": "Run the whole plan-to-code workflow as one resumable sequence.",
+      "phase": "full",
+      "writes_worktree": true
+    },
+    {
+      "name": "ask",
+      "aliases": [],
+      "positionals": [
+        "<plan>",
+        "<question>"
+      ],
+      "supports_detach": true,
+      "summary": "Ask every configured model one free-text question about a plan.",
+      "phase": "ask",
+      "writes_worktree": false
+    },
+    {
+      "name": "status",
+      "aliases": [
+        "abort",
+        "cancel",
+        "stop"
+      ],
+      "positionals": [
+        "<plan>"
+      ],
+      "supports_detach": false,
+      "summary": "Report workflow phases (state.json) and detached runs ({phase}/.status.json).",
+      "phase": null,
+      "writes_worktree": false
+    },
+    {
+      "name": "init",
+      "aliases": [],
+      "positionals": [],
+      "supports_detach": false,
+      "summary": "Scaffold a per-project .multi-llm/providers.yaml override.",
+      "phase": null,
+      "writes_worktree": false
+    }
+  ],
+  "positional_kinds": {
+    "plan": "<plan>",
+    "question": "<question>"
+  },
+  "reserved_flags": {
+    "exact": [
+      "--host",
+      "--yes",
+      "-y",
+      "--non-interactive",
+      "--exec-subagents",
+      "--detach",
+      "--if-not-running",
+      "--max-detached"
+    ],
+    "named_exception": [
+      "--interactive",
+      "-i"
+    ],
+    "prefixes": [
+      "--internal-"
+    ],
+    "exact_options": [
+      "--all",
+      "--approve-all",
+      "--consolidate",
+      "--dry-run",
+      "--force",
+      "--host",
+      "--mode",
+      "--output",
+      "--phase",
+      "--project",
+      "--question",
+      "--reaggregate",
+      "--revalidate",
+      "--skip",
+      "--summary",
+      "--task"
+    ]
+  },
+  "baked_flags": [
+    "--host",
+    "codex",
+    "--yes",
+    "--exec-subagents"
+  ],
+  "detach_flag": "--detach",
+  "uv": {
+    "env": "MULTI_LLM_UV",
+    "run_args_env": "MULTI_LLM_UV_RUN_ARGS",
+    "default_run_args": [
+      "--frozen",
+      "--no-dev"
+    ],
+    "candidates": [
+      "~/.local/bin/uv",
+      "~/.local/bin/uv.exe",
+      "~/.cargo/bin/uv",
+      "~/.cargo/bin/uv.exe",
+      "/opt/homebrew/bin/uv",
+      "/usr/local/bin/uv",
+      "/opt/local/bin/uv"
+    ],
+    "missing_message_file": "hosts/uv-missing.txt"
+  },
+  "dispatcher": {
+    "script": "multi_llm.py",
+    "result_marker": "MULTI_LLM_RESULT:",
+    "exit_codes": {
+      "ok": 0,
+      "error": 1,
+      "nothing_to_do": 2,
+      "needs_human": 3
+    },
+    "states": {
+      "ok": "done",
+      "error": "error",
+      "nothing_to_do": "nothing-to-do",
+      "needs_human": "needs-human",
+      "running": "running",
+      "died": "died"
+    },
+    "review_gate": {
+      "mode": "review-code",
+      "flag": "--fail-on-high"
+    },
+    "poll": [
+      "status",
+      "--view",
+      "run",
+      "--wait"
+    ],
+    "abort": [
+      "status",
+      "--abort"
+    ],
+    "instructions": [
+      "util",
+      "instructions"
+    ],
+    "host_option": "--host",
+    "run_id_option": "--run-id",
+    "session_model_env": "MULTI_LLM_HOST_SESSION_MODEL",
+    "mechanical_continuations": [
+      "--reaggregate",
+      "--consolidate"
+    ],
+    "banner": {
+      "headline": "=== DETACHED RUN STARTED ===",
+      "fields": [
+        "run_id",
+        "pid",
+        "mode",
+        "phase",
+        "log",
+        "status",
+        "abort"
+      ],
+      "run_id_field": "run_id",
+      "log_field": "log"
+    }
+  },
+  "nested_exec_reasons": {
+    "nested_exec_denied": "nested_exec",
+    "nested_exec_spawn": "nested_exec.spawn",
+    "nested_exec_network": "nested_exec.network",
+    "nested_exec_credentials": "nested_exec.credentials"
+  },
+  "write_posture_refusal": {
+    "template": "Refused before anything ran: `{mode}` edits the working tree, and this session's sandbox posture is {posture}. This tool runs outside the session's exec sandbox, so it will not make edits the session was not granted. The single way to proceed is the user's, never yours: they set MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1 in the environment codex is launched from and restart it. Report this to the user. Do not perform the work this run was going to review, plan, or implement: doing it yourself is never a substitute for a failed run.",
+    "posture_unreadable": "unreadable from this tool, so it is treated as read-only",
+    "lever_env": "MULTI_LLM_CODEX_UNSANDBOXED_WRITES",
+    "lever_value": "1"
+  },
+  "anchor_unresolved": "Refused before anything ran: this tool could not determine which workspace to run in. It probed {probed}, and none answered. It does not fall back to its own working directory, which is the plugin's install location, not your project. Report this to the user; do not retry with a different mode. Do not perform the work this run was going to review, plan, or implement: doing it yourself is never a substitute for a failed run.",
+  "shell_missing": "Refused before anything ran: this tool starts the dispatcher through a login `{shell}`, and no `{shell}` was found on {platform} along this PATH: {path}. A POSIX bash on PATH is a prerequisite of this tool (on Windows, Git Bash). Install one, put it on PATH, and restart the host. Report this to the user; running without a login shell is not offered, because the provider CLIs would start without the credentials your profile sets.",
+  "runbook": {
+    "core_end_marker": "MULTI_LLM_CORE_END:",
+    "banner_opening": "=== READ THIS FIRST"
+  }
+}

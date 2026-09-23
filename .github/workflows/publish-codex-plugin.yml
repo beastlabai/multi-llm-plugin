@@ -1,0 +1,202 @@
+# The codex plugin's release workflow. Two jobs, and neither uploads anything.
+#
+# WHY "PUBLISH" IS A REF MOVE HERE. The Git marketplace route has no registry:
+# the published install pins `--ref release`, and codex copies the checked-in
+# `packaging/codex/multi-llm/` at that ref. So a tag publishes nothing — the tag
+# push runs the GATE job below and stops — and the release becomes public only
+# when the PROMOTE job fast-forwards the protected `release` branch to the
+# tagged commit (plans/codex-native-plugin.md, A6 steps 5-8).
+#
+# WHAT CARRIES OVER FROM THE OPENCODE WORKFLOW, and what does not. Its safeguard
+# 1 (a tag pattern of this route's own), 2 (the tag equals the one version owner,
+# here skills/multi-llm/pyproject.toml) and 4 (the gate runs in this job, on the
+# tagged commit — never "it ran on the PR") carry, as does pinning every action
+# by commit SHA. Safeguard 3's pinned npm, the registry probe and `npm publish
+# --provenance` go with the registry, and so does `id-token: write`: nothing is
+# signed and nothing is uploaded, on either job.
+
+name: publish codex plugin
+
+on:
+  push:
+    # A tag pattern of its own: `opencode-v*` belongs to the npm route, and the
+    # two share one version number (D6), so a bare `v*` would collide.
+    tags:
+      - 'codex-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The codex-v<version> tag whose commit `release` should point at"
+        required: true
+        type: string
+      rollback:
+        description: "Move `release` BACK to an older tag (A6 step 8); otherwise only a fast-forward is allowed"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  # A4 on the tag, moving nothing. Rows 1, 6b, 7, 13 and 14 need the seeded
+  # container (and 14 the network) and cannot run on a Docker-less runner; they
+  # are the maintainer's local `make codex-package-check`, whose stamp is what
+  # `make codex-publish` refused without before this tag could exist.
+  gate:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      # Pinned by commit SHA, not by tag: `@v4` is a mutable ref. The trailing
+      # comment is the tag each SHA was resolved from — bump the two together.
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Every codex-v* tag, for the bump-discipline rows (A4 rows 9 and 10).
+          fetch-depth: 0
+
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
+      # Safeguard 2: the tag's number is the owner's number (A4 row 9's first half).
+      - name: Tag must equal pyproject.toml's version
+        run: |
+          set -euo pipefail
+          tag="${GITHUB_REF_NAME#codex-v}"
+          declared="$(uv run --project skills/multi-llm -- python packaging/codex/build.py --print-version)"
+          if [ "$tag" != "$declared" ]; then
+            echo "REFUSING: tag ${GITHUB_REF_NAME} says ${tag}, pyproject.toml says ${declared}." >&2
+            exit 1
+          fi
+          echo "tag and version owner agree on ${declared}"
+
+      # A4 rows 2-5, 8, 11, 11a and the plain/package rows: the clean rebuild
+      # equals the committed tree, then the codex suite.
+      - name: Codex plugin gate (CI tier)
+        run: make codex-package-check-ci
+
+      # A4 rows 9 and 10: no version carried by two tags, and a digest that
+      # moved between releases moved the version too.
+      - name: Bump discipline
+        run: uv run --project skills/multi-llm -- python packaging/codex/build.py --check-bump
+
+  # The one write this route needs. Reads the committed network-check record the
+  # maintainer wrote after verifying the tag as a user would (A6 step 6), and
+  # moves `release` only when that record names this tag, this sha, and each of
+  # the six pinned criteria as a pass — and only when this workflow's own gate
+  # job went green on that tag. `release`'s protection rule should admit this
+  # workflow's actor and no other.
+  promote:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Read-only: the gate-run lookup below. Still no `id-token: write`.
+      actions: read
+    steps:
+      # The record is committed to the default branch (A6 step 6), so it is read
+      # there and nowhere else: a dispatch from another branch would read that
+      # branch's records — and that branch's copy of this job.
+      - name: Refuse a dispatch from any branch but the default one
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          if [ "$GITHUB_REF" != "refs/heads/${DEFAULT_BRANCH}" ]; then
+            echo "REFUSING: dispatched from ${GITHUB_REF}; the network-check record lives on refs/heads/${DEFAULT_BRANCH}." >&2
+            exit 1
+          fi
+
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the tag and read its network-check record
+        id: record
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          case "$TAG" in
+            codex-v*) ;;
+            *) echo "REFUSING: ${TAG} is not a codex-v* tag." >&2; exit 1 ;;
+          esac
+          sha="$(git rev-parse -q --verify "refs/tags/${TAG}^{commit}")" || {
+            echo "REFUSING: tag ${TAG} does not resolve." >&2; exit 1; }
+          python3 - "$TAG" "$sha" <<'PY'
+          import glob, json, sys
+          tag, sha = sys.argv[1], sys.argv[2]
+          # The six written pass criteria (plans/codex-native-plugin.md, Phase 4:
+          # revision 1's five, criterion 4 restated for R8', plus `codex mcp get`).
+          # Pinned by name: six unnamed passes, a duplicate, or a renamed
+          # criterion is not the check the plan wrote down.
+          REQUIRED = [
+              "marketplace_added",
+              "plugin_listed_with_published_version",
+              "install_root_matches_tree",
+              "locator_inside_cache_dir",
+              "skill_resolution_exports_root",
+              "mcp_get_echoes_server",
+          ]
+          pattern = "skills/multi-llm/tests/container/records/*-codex-release-network-check.json"
+          matches = []
+          for path in sorted(glob.glob(pattern)):
+              with open(path, encoding="utf-8") as handle:
+                  record = json.load(handle)
+              if record.get("tag") == tag and record.get("sha") == sha:
+                  matches.append((path, record))
+          if not matches:
+              sys.exit(f"REFUSING: no committed {pattern} names {tag} at {sha}.")
+          path, record = matches[-1]
+          criteria = record.get("criteria")
+          if not isinstance(criteria, list) or not all(isinstance(c, dict) for c in criteria):
+              sys.exit(f"REFUSING: {path} has no list of criterion objects.")
+          names = [c.get("name") for c in criteria]
+          if sorted(map(str, names)) != sorted(REQUIRED):
+              sys.exit(f"REFUSING: {path} names criteria {names}; expected exactly {REQUIRED}.")
+          failed = [c["name"] for c in criteria if c.get("pass") is not True]
+          if failed:
+              sys.exit(f"REFUSING: {path} does not record a pass for {failed}.")
+          print(f"{path}: all six criteria pass for {tag} at {sha}")
+          PY
+          echo "sha=${sha}" >> "$GITHUB_OUTPUT"
+
+      # Safeguard 4 carried to the promote side: the record says a human checked
+      # the tag, and this says the gate job did too — a successful tag-push run
+      # of this workflow on exactly this sha. A tag whose gate went red, or never
+      # ran, is refused here rather than trusted because a record exists.
+      - name: Require this workflow's gate to have passed on the tag
+        env:
+          TAG: ${{ inputs.tag }}
+          SHA: ${{ steps.record.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          green="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/publish-codex-plugin.yml/runs?event=push&head_sha=${SHA}&status=success&per_page=100" \
+            --jq '[.workflow_runs[] | select(.head_branch == $ENV.TAG and .head_sha == $ENV.SHA)] | length')"
+          if [ "${green:-0}" -lt 1 ]; then
+            echo "REFUSING: no successful gate run of this workflow on ${TAG} at ${SHA}." >&2
+            exit 1
+          fi
+          echo "gate passed on ${TAG} at ${SHA} (${green} run(s))"
+
+      # A fast-forward by default: `git push` refuses a non-fast-forward without
+      # a force flag, so a promote can never silently rewind `release`. The
+      # rollback input is the one explicit way back (A6 step 8), and it still
+      # names a tag rather than a free sha. Even then the force is leased on the
+      # `release` this job fetched: if anything moved it since, the push is
+      # refused rather than overwriting a move this job never saw.
+      - name: Move release
+        env:
+          SHA: ${{ steps.record.outputs.sha }}
+          ROLLBACK: ${{ inputs.rollback }}
+        run: |
+          set -euo pipefail
+          if [ "$ROLLBACK" = "true" ]; then
+            current="$(git rev-parse -q --verify refs/remotes/origin/release)" || {
+              echo "REFUSING: rollback needs an existing release branch to lease against." >&2; exit 1; }
+            git push --force-with-lease="refs/heads/release:${current}" origin "${SHA}:refs/heads/release"
+          else
+            git push origin "${SHA}:refs/heads/release"
+          fi
+          echo "release -> ${SHA}"

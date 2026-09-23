@@ -57,6 +57,47 @@ The marketplace cache only refreshes when you explicitly ask it to - `/plugin ma
 
 This plugin also works with **Codex** and **OpenCode**. `install-host` writes a native entry point into either one: an OpenCode `/multi-llm` command, a Codex skill. Install, invocation, and host-specific differences are in **[docs/hosts.md](docs/hosts.md)**.
 
+#### Codex plugin route
+
+**Built, but not yet published.** The two commands below install multi-llm as a Codex plugin — a `multi_llm` tool plus a `multi-llm:multi-llm` skill that points at it, with no shell bootstrap and no baked path to go stale. The `release` ref they name does not exist until the first release is promoted, so today `--ref release` does not resolve and `codex plugin marketplace add` fails with a git error. **What works today is `install-host codex`** — the file route in [docs/hosts.md](docs/hosts.md).
+
+Floors — published, not enforced, since nothing in the plugin checks them: **codex >= 0.156.1**, **python3 >= 3.9** on `PATH` under that exact name, and **uv** at any version.
+
+```bash
+codex --version                     # 0.156.1 or newer
+python3 --version && uv --version   # python3 3.9 or newer, under these exact names
+codex plugin marketplace add beastlabai/multi-llm-plugin --ref release \
+  --sparse .agents --sparse packaging/codex
+codex plugin add multi-llm@beastlabai
+# then start a NEW session
+```
+
+Neither command installs dependencies: the first invocation builds the plugin's venv (`pyyaml` alone), which needs the network or a warm uv cache. Then, once per repository and in the new session, configure providers with *"Use the `multi-llm:multi-llm` skill with exactly these arguments: `--init`"* — it writes `<git-root>/.multi-llm/providers.yaml`, outside `$CODEX_HOME`, where no plugin reinstall or upgrade touches it. Configure through that file, never the copy installed inside the plugin.
+
+**What it runs and what it may write — read this before the first command.** The tool starts the orchestrator from a server Codex launches *outside* its own exec sandbox, so the session's `--sandbox` posture does not govern it: installing the plugin gives a Codex session a write path it did not have. So under a read-only posture the tool **refuses write-capable modes** before it spawns anything, unless `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is in the environment that starts Codex. Provider CLIs the orchestrator dispatches stay under their own sandboxes. The install itself is a Git clone and a directory copy with no signature: you are trusting whoever can move the `release` ref and the workflow that moves it.
+
+| Platform | Status | Prerequisites |
+| --- | --- | --- |
+| Linux | `verified` — the only platform this route claims | codex >= 0.156.1; `uv` and python3 >= 3.9 on `PATH` |
+| macOS | `unmeasured` | codex >= 0.156.1; `uv` and python3 >= 3.9 on `PATH` (the command-line-tools `python3` is 3.9). Caveat: the run starts through a `bash -lc` login shell, which reads `~/.bash_profile` / `~/.profile` and **not** `~/.zprofile` or `~/.zshrc` — keys and `PATH` edits that live only in the zsh files never reach it |
+| Windows | `unsupported for the tool route` — `python3` is usually absent under that name, so the plugin's server never starts and the tool never lists. Use `install-host codex` (the file route) instead | codex >= 0.156.1; `uv`; python3 >= 3.9 **under that exact name**; **plus Git Bash (or another POSIX `bash`) on `PATH` — a hard prerequisite**: without it the tool refuses with a missing-`bash` error naming the `PATH` it searched, rather than running without a login shell |
+
+If the new session does not know the skill, or knows it and has no tool:
+
+```bash
+codex plugin list             # multi-llm@beastlabai — look at `enabled`; no entry means removed
+codex mcp get multi_llm       # the server codex tried to start; python3 must be on PATH
+python3 --version             # if this fails the server never started, and that is the whole story
+```
+
+`codex doctor` does not see plugin servers, so it will not help here.
+
+**Provider keys go in the file your login shell reads.** Codex starts the plugin's server with a stripped environment, so a key exported only in the terminal you launched Codex from never reaches the run. Put `export OPENROUTER_API_KEY=…` (and whatever else your providers read) in `~/.profile` or `~/.bash_profile` — not `~/.bashrc`, and on macOS not `~/.zprofile`. Do not edit the installed `.mcp.json` to pass keys: the next `codex plugin add` replaces it wholesale. When a key does not arrive, the tool result's `environment` block (`login_shell`, `profile_shell`) says which startup file was read.
+
+**Upgrade:** `codex plugin marketplace upgrade`, then `codex plugin add multi-llm@beastlabai`, then a new session — re-running the install's first command is a no-op on a marketplace already added. **Coming from the file route:** remove the shim with `install-host`'s counterpart, `uninstall-host codex --global`, or both skills stay advertised (`install-host codex --check` warns when they are). **Uninstall:** `codex plugin remove multi-llm@beastlabai`; your `.multi-llm/providers.yaml` is not touched. The plugin's own page is [`packaging/codex/README.md`](packaging/codex/README.md).
+
+#### OpenCode npm route
+
 **An npm route for OpenCode is built but not yet published.** `packaging/opencode/` produces `opencode-multi-llm`, which ships the skill tree inside the package and registers a model-callable `multi_llm` tool alongside the `/multi-llm` command — so there is no baked path to go stale and no `install-host --all` owed after an update. Until it is on npm, the way to run it is a local tarball:
 
 ```bash

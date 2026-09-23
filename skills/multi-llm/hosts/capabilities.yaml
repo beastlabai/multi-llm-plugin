@@ -252,7 +252,20 @@ hosts:
     # codex exposes the session model, this becomes `codex` and the ladder needs
     # no edit.
     session_runner_provider: null
-    default_subagent_runner: "codex:gpt-5.2-codex"
+    # UNVALIDATED MODEL ID — THE ROSTER OWNS THE ID; THIS PIN FOLLOWS IT. This is
+    # a credential-free floor (the last rung of `resolve_subagent_runner`'s
+    # ladder, chosen so a zero-config install dispatches at all), not an
+    # independent opinion about which model is current. `providers.yaml` is where
+    # the codex model is actually chosen and re-measured (0626b9e moved the whole
+    # fan-out to gpt-6-astra against a live catalog), so the edit only ever runs
+    # one way: the roster moves, then this pin. The fan-out's `:xhigh` effort
+    # suffix does NOT come across — the floor takes the model's default effort
+    # until somebody measures that it is not enough for a subagent dispatch.
+    # No test resolves this id against a catalog (only kilocode has a captured
+    # one), so this rule buys consistency, not correctness: after it, the pin is
+    # wrong only when the roster is. Whoever finds a dead id edits
+    # `providers.yaml` and lets this line follow.
+    default_subagent_runner: "codex:gpt-6-astra"
     subagent_tiers: null             # forbidden to carry a map: subagents != native
     runners:
       codex: {bundled: true, needs_auth: false, login_cmd: "",
@@ -260,7 +273,7 @@ hosts:
       claude-code: {bundled: false, needs_auth: true, login_cmd: "claude login",
                     profiles: [generate, agent-readonly, agent-write], usage: full}
     nested_exec: {spawn: unknown, network: unknown, credentials: unknown,
-                  notes: "Filled by the Phase 3 nested-exec smoke: --exec-subagents
+                  notes: "Filled by the Phase 2 nested-exec smoke: --exec-subagents
                     launched from inside `codex exec`'s own sandboxed shell, for
                     both the same-host runner and a third-party one."}
     # Empty because the env diff has not run yet, not because the host is clean —
@@ -269,6 +282,52 @@ hosts:
     max_concurrent_subagents: 4
     timeout_ceiling_s: 0             # 0 = no documented cap on `codex exec`
     timeout_override: {frontmatter: none, env: unknown, config: unknown}
+    # A second install route — the Codex plugin marketplace — NOT a second host,
+    # for the same reason as opencode's block below: every harness property above
+    # is the same however the skill got installed. What the plugin adds is a
+    # model-callable `multi_llm` tool (an MCP server bundled with the plugin) and
+    # a thin skill advertised as `multi-llm:multi-llm` that points at it. A
+    # plugin exposes no slash command (R21), so `provides` has no `command`.
+    #
+    # `update: reinstall` is two different commands from the install, not the
+    # install re-run: `marketplace add` on a marketplace already added is a
+    # no-op ("Marketplace … is already added", R37), so the upgrade is
+    # `codex plugin marketplace upgrade` then `codex plugin add`, then a new
+    # session (R30). The renderer's registry row owns that sentence.
+    #
+    # No `version`: the number is owned by `skills/multi-llm/pyproject.toml`,
+    # and the codex end of that chain is the GENERATED
+    # `.codex-plugin/plugin.json`, never a hand-typed copy here.
+    package:
+      registry: codex-marketplace
+      name: multi-llm
+      marketplace: beastlabai
+      repo: beastlabai/multi-llm-plugin
+      ref: release
+      sparse: [.agents, packaging/codex]
+                                      # The slug, the ref and the two sparse paths the first
+                                      # install command needs. Cells rather than literals in
+                                      # the shared form string, which every later
+                                      # codex-marketplace package would inherit.
+      config_key: plugins             # [plugins."multi-llm@beastlabai"] in $CODEX_HOME/config.toml (R15)
+      provides: [skill, tool]         # NOT command (R21)
+      update: reinstall               # `marketplace upgrade` then `plugin add` (R30/R37)
+      write_posture: refuses-under-readonly
+                                      # The server runs outside the session's exec sandbox
+                                      # (R46), so an install hands a `--sandbox read-only`
+                                      # session a write path it had refused (R45).
+                                      # Write-capable modes are refused before the spawn
+                                      # unless MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1 is in the
+                                      # environment (D3b). The renderer reads this cell into
+                                      # the generated install paragraph, so a user meets it
+                                      # before installing, not after.
+      min_host_version: "0.156.1"     # the pin; replaced by the version the first green plugin row
+                                      # reports, since the schema's own wording is "the lowest actually RUN"
+                                      # — and not bisected (Open question 5)
+      invocation: >-
+        by name with its namespace — `Use the multi-llm:multi-llm skill with exactly
+        these arguments: <the same arguments the Claude Code skill takes>` — or by the
+        model calling the `multi_llm` tool directly.
     provenance:
       shim: documented
       installable: documented
@@ -290,6 +349,12 @@ hosts:
       max_concurrent_subagents: documented
       timeout_ceiling_s: unknown
       timeout_override: unknown
+      # `documented` until a Git-route install is recorded: the `release` ref
+      # the install line names does not exist until the publish workflow first
+      # moves it, so today `marketplace add … --ref release` fails loudly with a
+      # git error. The container's local-path installs never promote this line
+      # (a local directory is not the published route).
+      package: documented
 
   opencode:
     # commands/ is PLURAL — the singular command/ path is simply not scanned.

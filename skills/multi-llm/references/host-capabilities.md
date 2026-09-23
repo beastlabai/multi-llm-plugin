@@ -26,7 +26,7 @@ sentence when it is installed.
 | Host | Shim (repo → installed) | `arguments` | *spawn subagents* | *ask the user* | *run detached* | Default runner | `nested_exec` (spawn/network/creds) | Max subagents | Timeout ceiling | Verified |
 |---|---|---|---|---|---|---|---|---|---|---|
 | `claude-code` | *not rendered* → `SKILL.md` | `placeholder` | `native` (`Task`) — verified | `structured` (`AskUserQuestion`) — verified | `native` (`run_in_background`) — verified | `claude-code:sonnet` | allowed/allowed/allowed | 10 | 600 s (not raisable) | `arguments`, `ask`, `default_subagent_runner`, `detach`, `installable`, `multi_turn`, `native_tool`, `shim_max_lines`, `subagent_tiers`, `subagents` |
-| `codex` | `hosts/codex/shim.md.tmpl` → `SKILL.md` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-5.2-codex` | unknown/unknown/unknown | 4 | none documented | `invocation` |
+| `codex` | `hosts/codex/shim.md.tmpl` → `SKILL.md` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-6-astra` | unknown/unknown/unknown | 4 | none documented | `invocation` |
 | `opencode` | `hosts/opencode/shim.md.tmpl` → `commands/multi-llm.md` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/big-pickle` | unknown/unknown/unknown | 4 | 120 s (raise via env: `unknown`, config: `unknown`) | `arguments`, `detach`, `headless_invocation`, `install_paths`, `installable`, `invocation`, `multi_turn`, `reload`, `shim` |
 
 ## Per-host notes and stripped variables
@@ -71,7 +71,7 @@ sentence when it is installed.
 - Refuse-to-start guards stripped from a dispatched runner: *none recorded* — the env diff has not run yet
 - Session-scoping variables stripped: *none recorded* — the env diff has not run yet
 - Sanctioned exceptions that survive stripping: *none recorded* — the env diff has not run yet
-- Nested-exec notes: Filled by the Phase 3 nested-exec smoke: --exec-subagents launched from inside `codex exec`'s own sandboxed shell, for both the same-host runner and a third-party one.
+- Nested-exec notes: Filled by the Phase 2 nested-exec smoke: --exec-subagents launched from inside `codex exec`'s own sandboxed shell, for both the same-host runner and a third-party one.
 
 ### `opencode`
 

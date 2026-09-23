@@ -65,6 +65,35 @@ Use the multi-llm skill with exactly these arguments: plans/my-feature.md
 Use the multi-llm skill with exactly these arguments: --review-code plans/my-feature.md
 ```
 
+**`codex` — install via codex-marketplace (not yet published)** — documented
+
+A second route on `codex`, and the one this documentation will recommend once it is published. **It is not yet published**: the `release` ref the first command names does not exist until the publish workflow first moves it, so today `codex plugin marketplace add … --ref release` fails **loudly**, with a git error naming the missing ref — nothing is half-installed. Until then, the `install-host codex` route above is what works.
+
+**Read this before installing.** The plugin's tool runs the orchestrator from a server codex starts *outside* its own exec sandbox, so the session's `--sandbox` posture does not govern it: installing the plugin gives a codex session a write path it did not have. So under a read-only posture the tool **refuses write-capable modes** before it spawns anything, unless `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is in the environment that starts codex. Provider CLIs the orchestrator dispatches stay under their own sandboxes.
+
+Install it from the marketplace — two commands, in this order, then start a **new** codex session:
+
+```bash
+codex plugin marketplace add beastlabai/multi-llm-plugin --ref release --sparse .agents --sparse packaging/codex
+codex plugin add multi-llm@beastlabai
+```
+
+Needs codex 0.156.1 or newer. It provides a skill and a model-callable tool, and you invoke it by name with its namespace — `Use the multi-llm:multi-llm skill with exactly these arguments: <the same arguments the Claude Code skill takes>` — or by the model calling the `multi_llm` tool directly.
+
+```text
+Use the multi-llm:multi-llm skill with exactly these arguments: plans/my-feature.md
+Use the multi-llm:multi-llm skill with exactly these arguments: --review-code plans/my-feature.md
+```
+
+Then configure providers once per repository, in the new session: `Use the multi-llm:multi-llm skill with exactly these arguments: --init` writes `<git-root>/.multi-llm/providers.yaml`, outside `$CODEX_HOME`, where no reinstall or upgrade touches it.
+
+Upgrading is a different sequence from the install, because repeating the install is a no-op on a marketplace that is already registered: refresh the marketplace, re-add the plugin from it, then start a **new** codex session:
+
+```bash
+codex plugin marketplace upgrade
+codex plugin add multi-llm@beastlabai
+```
+
 **`opencode`**
 
 ```bash
@@ -98,8 +127,8 @@ Needs opencode 1.18.18 or newer. Upgrading is bumping the pin and restarting: th
 
 Three differences worth knowing on these hosts:
 
-- **Unattended is the default.** Claude Code is the only host with a structured question tool, so the shim bakes in `--yes`: every gate resolves from config and flags instead of prompting you. On the `install-host` file route, `--interactive` opts back into a rendered gate. The package route on `opencode` refuses `--interactive` and `-i` instead — it spawns the dispatcher with nothing on its stdin, so the model picker they force could not prompt — and asks you to choose non-interactively: `--models "provider:model,…"` or `--quick`, or `defaults.models` in `providers.yaml`.
-- **Subagents are dispatched through a provider CLI** rather than a native task tool, so the default runner is `codex:gpt-5.2-codex` on `codex` and `opencode:opencode/big-pickle` on `opencode` — not a Claude subagent.
+- **Unattended is the default.** Claude Code is the only host with a structured question tool, so the shim bakes in `--yes`: every gate resolves from config and flags instead of prompting you. On the `install-host` file route, `--interactive` opts back into a rendered gate. The package route on `codex` and `opencode` refuses `--interactive` and `-i` instead — it spawns the dispatcher with nothing on its stdin, so the model picker they force could not prompt — and asks you to choose non-interactively: `--models "provider:model,…"` or `--quick`, or `defaults.models` in `providers.yaml`.
+- **Subagents are dispatched through a provider CLI** rather than a native task tool, so the default runner is `codex:gpt-6-astra` on `codex` and `opencode:opencode/big-pickle` on `opencode` — not a Claude subagent.
 - **Headless `opencode` needs its own separator:** `opencode run --command multi-llm -- "<args>"`.
 
 ## Capability matrix
@@ -109,7 +138,7 @@ Generated from `skills/multi-llm/hosts/capabilities.yaml` — the same data `ins
 | Host | Installable | Command format | Args | *spawn subagents* | *ask the user* | *run detached* | Default runner | Reload |
 |---|---|---|---|---|---|---|---|---|
 | `claude-code` | no (ships with the plugin) | `markdown+frontmatter` | `placeholder` | `native` (`Task`) — verified | `structured` (`AskUserQuestion`) — verified | `native` (`run_in_background`) — verified | `claude-code:sonnet` | `none` |
-| `codex` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-5.2-codex` | `new-session` |
+| `codex` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`agent`) — documented | `free-text` — documented | `python` — documented | `codex:gpt-6-astra` | `new-session` |
 | `opencode` | yes | `markdown+frontmatter` | `placeholder` | `executor` (`task`) — documented | `free-text` — documented | `required` — verified | `opencode:opencode/big-pickle` | `new-session` |
 
 ## Where the shim goes

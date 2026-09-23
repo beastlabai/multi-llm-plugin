@@ -1,0 +1,140 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "State File",
+  "type": "object",
+  "required": ["schema_version", "plan_path", "plan_hash", "created_at", "head_at_start", "branch_name", "review_phase_completed", "tracked_files", "task_status"],
+  "properties": {
+    "schema_version": { "type": "string" },
+    "plan_path": { "type": "string" },
+    "plan_hash": {
+      "type": "string",
+      "description": "Hash of plan content for detecting changes"
+    },
+    "plan_changed": {
+      "type": "boolean",
+      "description": "Flag indicating plan content has changed since last run"
+    },
+    "created_at": { "type": "string", "format": "date-time" },
+    "updated_at": { "type": "string", "format": "date-time" },
+    "head_at_start": { "type": "string" },
+    "head_before_implement": {
+      "type": "string",
+      "description": "Git HEAD captured when implement phase starts; preferred over head_at_start for code review diffs"
+    },
+    "branch_name": { "type": "string" },
+    "review_phase_completed": { "type": "boolean" },
+    "tracked_files": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["path", "action", "task_id"],
+        "properties": {
+          "path": { "type": "string" },
+          "action": { "type": "string", "enum": ["created", "modified", "deleted"] },
+          "task_id": { "type": "string" }
+        }
+      }
+    },
+    "task_status": {
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "task_status_reasons": {
+      "type": "object",
+      "description": "Per-task reason for current status (e.g., why a task was skipped)",
+      "additionalProperties": { "type": ["string", "null"] }
+    },
+    "human_task_strategy": {
+      "type": "string",
+      "description": "Chosen strategy for handling human tasks during implementation",
+      "enum": ["pause-and-ask", "skip-continue", "skip-dependents", "cancel"]
+    },
+    "dependency_overrides": {
+      "type": "object",
+      "description": "Tasks whose human-task dependencies were overridden (skip-continue strategy)",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "overridden_deps": {
+            "type": "array",
+            "items": { "type": "string" },
+            "description": "Human task IDs whose dependency was treated as satisfied"
+          },
+          "timestamp": { "type": "string", "format": "date-time" }
+        },
+        "required": ["overridden_deps", "timestamp"]
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "description": "Task subagent resource usage metrics per phase",
+      "additionalProperties": false,
+      "patternProperties": {
+        "^[a-z-]+$": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "label": { "type": "string" },
+              "subagent_type": { "type": ["string", "null"] },
+              "token_count": { "type": ["integer", "null"] },
+              "tool_uses": { "type": ["integer", "null"] },
+              "duration_ms": { "type": ["integer", "null"] },
+              "timestamp": { "type": "string", "format": "date-time" }
+            },
+            "required": ["label", "timestamp"]
+          }
+        }
+      }
+    }
+  },
+  "patternProperties": {
+    "^human_decisions_": {
+      "type": "object",
+      "description": "Human decisions keyed by group_id",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "decision": { "type": "string", "enum": ["approved", "skipped", "deferred"] },
+          "reason": { "type": ["string", "null"] },
+          "timestamp": { "type": "string", "format": "date-time" },
+          "batch_context": {
+            "type": "object",
+            "properties": {
+              "batch_id": { "type": "string" },
+              "batch_action": { "type": "string" },
+              "importance_at_decision": { "type": "string" }
+            }
+          },
+          "remapped": { "type": "boolean" }
+        },
+        "required": ["decision", "timestamp"]
+      }
+    },
+    "^progress_": {
+      "type": "object",
+      "description": "Progress tracking for a phase",
+      "properties": {
+        "total_items": { "type": "integer" },
+        "processed_items": { "type": "integer" },
+        "current_batch": { "type": "integer" },
+        "total_batches": { "type": "integer" },
+        "last_updated": { "type": "string", "format": "date-time" }
+      }
+    },
+    "^processed_": {
+      "type": "object",
+      "description": "Processed items keyed by group_id",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "status": { "type": "string", "enum": ["applied", "skipped", "failed"] },
+          "details": { "type": "object" },
+          "timestamp": { "type": "string", "format": "date-time" }
+        },
+        "required": ["status", "timestamp"]
+      }
+    }
+  },
+  "additionalProperties": true
+}

@@ -1,5 +1,14 @@
 {
   "name": "beastlabai",
-  "description": "Codex marketplace catalog for this repository. Deliberately empty until packaging/codex/multi-llm/ ships (plans/codex-native-plugin.md, Phase 1). Its job today is to SHADOW .claude-plugin/marketplace.json, which codex also reads and whose one entry has source './' — the repository root. Measured on codex-cli 0.149.1: with only that file present, `codex plugin add multi-llm@beastlabai` succeeded and copied the entire working tree (264 MB here; 1.5 GB before the runs/ cap) into plugins/cache/beastlabai/multi-llm/local/, .git, .venv and the gitignored plans/ scratch included, at a version segment of 'local' that no version-pinned resolution can match. With this file present the same command exits 1 with `plugin `multi-llm` was not found in marketplace `beastlabai`` and copies nothing. A clean error beats a 264 MB wrong answer. Phase 1 replaces the empty array with the real entry; tests/test_marketplace_manifest_location.py is the guard on both states.",
-  "plugins": []
+  "description": "Codex marketplace catalog for this repository. Its one entry installs packaging/codex/multi-llm/, the generated and checked-in plugin tree (plans/codex-native-plugin.md, D1) — never the repository root. This file also SHADOWS .claude-plugin/marketplace.json, which codex reads too and whose one entry has source './': with only that file present, `codex plugin add multi-llm@beastlabai` copied the entire working tree (264 MB, .git, .venv and gitignored scratch included) into the plugin cache at a version segment of 'local'. The entry's path must stay relative and inside the repository (R20′: anything else is skipped silently), its name must equal the plugin manifest's (R29), and it carries no version and no policy. tests/test_marketplace_manifest_location.py is the guard.",
+  "plugins": [
+    {
+      "name": "multi-llm",
+      "source": {
+        "source": "local",
+        "path": "./packaging/codex/multi-llm"
+      },
+      "category": "Developer Tools"
+    }
+  ]
 }

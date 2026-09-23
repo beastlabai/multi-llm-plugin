@@ -6,10 +6,23 @@ and torn down with it — not by the pytest harness on the host. That is forced 
 the lane's own rule: under ``--network none`` the container has loopback and
 nothing else, so a host-side process has no address a redirected CLI could reach.
 
-**It never emits tool calls.** Provider-role invocations run the `generate`
-profile: one prompt in, one answer out. Making the stub drive a tool loop would be
-simulating an agent, which is the host lane's job and needs a real model. Stated
-here so nobody later "improves" this into a fake agent.
+**It emits no tool call unless a scenario asks for exactly one.** Provider-role
+invocations run the `generate` profile: one prompt in, one answer out. Making the
+stub drive a tool loop would be simulating an agent, which is the host lane's job
+and needs a real model. Stated here so nobody later "improves" this into a fake
+agent.
+
+**The one exception is a scripted shape, not an agent** (plans/codex-native-
+plugin.md, Phase 1 item 1a). A scenario carrying a `scripted_tool_call:` block
+makes the Responses surface answer a request that ADVERTISES that tool with a
+single `function_call` (the scenario's arguments, verbatim), and answer the
+request that carries the matching `function_call_output` with a plain terminal
+message. That is two fixed frames keyed on what the request carries, never on a
+model's choice: it grades the *mechanism* — the declaration codex built, the
+argument encoding, the server's dispatch, the result's trip back — and can never
+evidence a model choosing the tool. A scenario without the block, and a request
+that does not advertise the named tool, take the text path byte-for-byte as
+before. See `ScriptedToolCall`.
 
 **Response selection reuses the existing matcher** rather than inventing a second
 one, so the fake binary (`tests/mocks/mock_llm.py`) and this server can never
@@ -42,6 +55,10 @@ _turns: dict[str, int] = {}
 _log_path: Path | None = None
 _scenario_path: Path | None = None
 _resolver = None
+#: The scenario's `scripted_tool_call:` block, parsed, or ``None``. Set only by
+#: `install_resolver`, so a stub started without a scenario — and every scenario
+#: that does not declare the block — can never reach the tool-call path.
+_tool_script: "ScriptedToolCall | None" = None
 
 #: `[(fact_name, compiled_regex)]` — the OPT-IN prompt-fact probe (`--facts`).
 #:
@@ -301,6 +318,167 @@ def messages_stream(model: str, answer: str):
     yield "message_stop", {"type": "message_stop"}
 
 
+# --------------------------------------------------------------------------- #
+# The scripted tool call (Phase 1 item 1a) — one shape, two fixed answers.
+# --------------------------------------------------------------------------- #
+
+#: How much of a returned `function_call_output` the log keeps. The output is
+#: OUR server's result string (the dispatcher's `MULTI_LLM_RESULT` envelope and
+#: the D3a `environment` block, which reports presence and never a value), not
+#: third-party prompt text, so recording it is the point: a row asserts that the
+#: result re-entered the transcript. Bounded all the same, with the full sha.
+SCRIPTED_OUTPUT_CAP = 16384
+
+
+class ScriptedToolCall:
+    """A scenario's `scripted_tool_call:` block.
+
+    ``namespace`` / ``name`` name the tool as the host presents it in `tools[]`:
+    for a codex plugin server that is a ``{"type": "namespace", "name":
+    "mcp__multi_llm", "tools": [{"type": "function", "name": "multi_llm"}]}``
+    entry (measured in the plan's Appendix B). A flat function whose name is
+    ``<namespace>__<name>`` is recognised too, so a host that flattens the
+    namespace is still answered — and the declaration actually seen is recorded
+    either way, which is what the loader row grades.
+
+    ``arguments`` is sent JSON-encoded, exactly as the scenario spells it.
+    ``terminal`` is the plain message that answers the turn carrying the output.
+    ``call_id`` is fixed so a row can find its output by id; nothing in this stub
+    counts calls globally (see *Sessions* above).
+    """
+
+    def __init__(self, block: dict, source: str = "<scenario>"):
+        if not isinstance(block, dict):
+            raise ValueError(f"{source}: `scripted_tool_call` must be a mapping")
+        self.name = str(block.get("name") or "")
+        self.namespace = str(block.get("namespace") or "")
+        if not self.name:
+            raise ValueError(f"{source}: `scripted_tool_call.name` is required")
+        arguments = block.get("arguments")
+        if not isinstance(arguments, dict):
+            raise ValueError(
+                f"{source}: `scripted_tool_call.arguments` must be a mapping — "
+                f"it is the tool's input object, JSON-encoded on the wire")
+        self.arguments = arguments
+        self.call_id = str(block.get("call_id") or "call_mllm_scripted_1")
+        self.terminal = str(block.get("terminal")
+                            or "scripted tool call complete")
+        surfaces = block.get("surfaces") or ["responses"]
+        self.surfaces = tuple(str(s) for s in surfaces)
+        if set(self.surfaces) - {"responses"}:
+            raise ValueError(
+                f"{source}: `scripted_tool_call.surfaces` may only name "
+                f"`responses` — the one surface this shape is rendered for")
+
+    # -- what the request carries ------------------------------------------ #
+    def declaration(self, body: dict) -> dict | None:
+        """The advertised tool entry matching this script, or ``None``."""
+        flat = f"{self.namespace}__{self.name}" if self.namespace else self.name
+        for tool in body.get("tools") or []:
+            if not isinstance(tool, dict):
+                continue
+            if (self.namespace and tool.get("type") == "namespace"
+                    and tool.get("name") == self.namespace):
+                for inner in tool.get("tools") or []:
+                    if isinstance(inner, dict) and inner.get("name") == self.name:
+                        return tool
+            if tool.get("type") != "namespace" and tool.get("name") == flat:
+                return tool
+        return None
+
+    def returned_output(self, body: dict) -> str | None:
+        """The `function_call_output` for OUR call id, as text, or ``None``."""
+        for item in body.get("input") or []:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") != "function_call_output":
+                continue
+            if item.get("call_id") != self.call_id:
+                continue
+            output = item.get("output")
+            if isinstance(output, str):
+                return output
+            # A content-item list (`[{"type": "input_text", "text": …}]`) or an
+            # object: flattened the way `extract_prompt` walks text.
+            parts: list[str] = []
+
+            def walk(value):
+                if isinstance(value, str):
+                    parts.append(value)
+                elif isinstance(value, list):
+                    for entry in value:
+                        walk(entry)
+                elif isinstance(value, dict):
+                    for key in ("text", "content", "output"):
+                        if key in value:
+                            walk(value[key])
+
+            walk(output)
+            return "\n".join(parts) if parts else json.dumps(output)
+        return None
+
+    # -- what it answers ---------------------------------------------------- #
+    def call_item(self, status: str = "completed", arguments: str | None = None,
+                  flat: bool = False) -> dict:
+        """The one `function_call` item. ``flat`` answers a host that advertised
+        the tool as a flat ``<namespace>__<name>`` function rather than as a
+        namespace entry, in that host's own spelling."""
+        name = (f"{self.namespace}__{self.name}"
+                if flat and self.namespace else self.name)
+        item = {"id": "fc_mllm_scripted", "type": "function_call",
+                "status": status, "call_id": self.call_id, "name": name,
+                "arguments": (json.dumps(self.arguments, sort_keys=True)
+                              if arguments is None else arguments)}
+        if self.namespace and not flat:
+            item["namespace"] = self.namespace
+        return item
+
+
+def responses_call_body(model: str, script: ScriptedToolCall,
+                        flat: bool = False) -> dict:
+    return {
+        "id": "resp_stub_call", "object": "response", "created_at": 0,
+        "status": "completed", "model": model,
+        "output": [script.call_item(flat=flat)],
+        "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
+    }
+
+
+def responses_call_stream(model: str, script: ScriptedToolCall,
+                          flat: bool = False):
+    """The Responses SSE sequence for ONE function_call output item.
+
+    Same envelope as `responses_stream` — created, in_progress, the item's
+    added/done pair, completed — with the argument delta/done pair in place of
+    the text content parts, which is the shape the Responses API streams a
+    function call in.
+    """
+    resp = responses_call_body(model, script, flat=flat)
+    item = resp["output"][0]
+    in_progress = dict(resp, status="in_progress", output=[])
+    yield "response.created", {"type": "response.created", "sequence_number": 0,
+                               "response": in_progress}
+    yield "response.in_progress", {"type": "response.in_progress",
+                                   "sequence_number": 1, "response": in_progress}
+    yield "response.output_item.added", {
+        "type": "response.output_item.added", "sequence_number": 2,
+        "output_index": 0,
+        "item": script.call_item(status="in_progress", arguments="",
+                                 flat=flat)}
+    yield "response.function_call_arguments.delta", {
+        "type": "response.function_call_arguments.delta", "sequence_number": 3,
+        "item_id": item["id"], "output_index": 0, "delta": item["arguments"]}
+    yield "response.function_call_arguments.done", {
+        "type": "response.function_call_arguments.done", "sequence_number": 4,
+        "item_id": item["id"], "output_index": 0,
+        "arguments": item["arguments"]}
+    yield "response.output_item.done", {
+        "type": "response.output_item.done", "sequence_number": 5,
+        "output_index": 0, "item": item}
+    yield "response.completed", {"type": "response.completed",
+                                 "sequence_number": 6, "response": resp}
+
+
 def catalog(surface: str) -> dict:
     if surface == "anthropic":
         return {"data": [{"id": m, "type": "model", "display_name": m,
@@ -463,6 +641,67 @@ class Handler(BaseHTTPRequestHandler):
         entry["fixture"] = getattr(resolve, "last_fixture", None)
         return True, answer
 
+    def _scripted_tool_call(self, body, model, streamed, entry) -> bool:
+        """Answer from the scenario's `scripted_tool_call:` block, or decline.
+
+        Keyed on what the REQUEST carries, never on a turn number, so a retried
+        or re-ordered request gets the same answer:
+
+        * the matching `function_call_output` is present → the terminal message
+          (turn 2 of the shape, whatever turn the session counter says);
+        * else the tool is advertised in `tools[]` → the single `function_call`;
+        * else → ``False``, and the caller's text path answers. A nested
+          provider CLI that shares this stub (the sandbox-posture row's codex
+          provider) advertises no plugin tool, so it is never handed a call it
+          cannot route.
+
+        Every served frame is kept in the log line (`scripted.frames`), so a row
+        asserts on what the model was HANDED rather than on what the scenario
+        meant to hand it — plus the declaration the host actually advertised,
+        which is the loader row's `tools[]` capture.
+        """
+        script = _tool_script
+        assert script is not None
+        declaration = script.declaration(body)
+        output = script.returned_output(body)
+        record: dict = {
+            "tool": {"namespace": script.namespace or None, "name": script.name},
+            "call_id": script.call_id,
+            "declaration": declaration,
+        }
+        if output is not None:
+            record["phase"] = "terminal"
+            record["output_sha"] = _sha(output)
+            record["output_len"] = len(output)
+            record["output"] = output[:SCRIPTED_OUTPUT_CAP]
+            record["output_truncated"] = len(output) > SCRIPTED_OUTPUT_CAP
+            if streamed:
+                frames = list(responses_stream(model, script.terminal))
+            else:
+                frames = [(None, responses_body(model, script.terminal))]
+        elif declaration is not None:
+            flat = declaration.get("type") != "namespace"
+            record["phase"] = "call"
+            record["flat"] = flat
+            record["arguments"] = script.arguments
+            if streamed:
+                frames = list(responses_call_stream(model, script, flat=flat))
+            else:
+                frames = [(None, responses_call_body(model, script, flat=flat))]
+        else:
+            entry["scripted"] = dict(record, phase="not-advertised")
+            return False
+
+        record["frames"] = [{"event": name, "data": data}
+                            for name, data in frames]
+        entry["scripted"] = record
+        entry["fixture"] = f"scripted_tool_call:{record['phase']}"
+        if streamed:
+            self._send_sse(iter(frames))
+        else:
+            self._send_json(frames[0][1])
+        return True
+
     def _route(self, method, path, query, body, model, prompt, turn, streamed,
                entry):
         # `query` is a routing input, not just a logged one: the gemini surface
@@ -493,6 +732,13 @@ class Handler(BaseHTTPRequestHandler):
             surface = "responses"
         elif method == "POST" and path.endswith("/messages"):
             surface = "anthropic"
+
+        if surface == "responses" and _tool_script is not None:
+            entry["surface"] = surface
+            if self._scripted_tool_call(body, model, streamed, entry):
+                return None
+            # The script did not own this request (the tool is not advertised
+            # on it): the text path below answers it, unchanged.
 
         if surface:
             entry["surface"] = surface
@@ -573,13 +819,28 @@ def install_resolver(scenario: Path | None):
     server resolving a scenario differently is the seam most likely to rot, and a
     plain-CI parity test asserts they do not.
     """
-    global _resolver
+    global _resolver, _tool_script
     if scenario is None:
         return
     sys.path.insert(0, "/opt/mllm/skill")
     from tests.scenario_matcher import ScenarioMatcher, UnmatchedPrompt  # type: ignore
 
     matcher = ScenarioMatcher.load(scenario)
+
+    # The scripted tool call is SELECTED HERE, the same way the text answers
+    # are: by the scenario the row names, read through the one loader. The
+    # matcher leaves keys it does not own in `Scenario.raw`, and this is one of
+    # them. A malformed block is fatal at startup rather than a stub that
+    # silently answers text to a row that asked for a call.
+    block = (matcher.scenario.raw or {}).get("scripted_tool_call")
+    if block is not None:
+        try:
+            _tool_script = ScriptedToolCall(dict(block), source=str(scenario))
+        except (TypeError, ValueError) as exc:
+            raise SystemExit(f"stub: {exc}") from exc
+        print(f"stub: scripted tool call armed for "
+              f"{_tool_script.namespace or '-'}/{_tool_script.name} "
+              f"(call_id {_tool_script.call_id})", flush=True)
 
     def _resolve(prompt: str, turn: int) -> str:
         try:

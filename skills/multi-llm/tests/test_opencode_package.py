@@ -405,6 +405,10 @@ class TestJavaScriptSource:
             surface["outcomes_line"],
             surface["needs_human_option"],
             mode_table.TOOL_DESCRIPTION_LEDE,
+            # Schema v4: the argument descriptions and the description's
+            # connective text are the emitter's, never this file's.
+            *surface["argument_descriptions"].values(),
+            surface["tool_description"],
         ]
         joined = _joined_literals(body)
         for clause in authored:
@@ -1301,13 +1305,21 @@ class TestToolDefinition:
             "`Hooks.tool` is `{ [id]: ToolDefinition }`; opencode reads it with "
             "`Object.entries`, and a function contributes no tools at all"
         )
-        assert definition["names"] == ["multi_llm"], (
+        surface = pkg_build.cli_surface()
+        assert definition["names"] == [surface["tool_name"]] == [
+            mode_table.TOOL_NAME
+        ] == ["multi_llm"], (
             "the id is `multi_llm`: never versioned, never suffixed"
         )
         assert definition["hasExecute"]
 
-        surface = pkg_build.cli_surface()
         description = definition["description"]
+        # Schema v4: the registered definition IS the surface's, byte for byte.
+        assert description == surface["tool_description"]
+        assert {
+            name: prop["description"]
+            for name, prop in definition["args"].items()
+        } == surface["argument_descriptions"]
         # The lede is the only authored sentence, and it lives in modes.py.
         assert description.startswith(mode_table.TOOL_DESCRIPTION_LEDE)
         # Every mode word, alias and summary traces to the generated file.
@@ -1373,9 +1385,14 @@ class TestToolDefinition:
         alias, and a mode with ``extra_flags``.
 
         Examples travel inside the description because the fallback schema has
-        nowhere to put an ``examples`` key the host would render.
+        nowhere to put an ``examples`` key the host would render. Rendered by
+        ``packaging/common/surface.py`` since schema v4, so this reads them out
+        of the surface's ``tool_description`` — the string the plugin
+        registers unchanged (``test_tool_definition_matches_the_generated_surface``).
         """
-        examples = node_json("emit(T.workedExamples(surface))", built_package)
+        description = pkg_build.cli_surface()["tool_description"]
+        block = description.split("\nExamples:\n", 1)[1]
+        examples = [json.loads(line) for line in block.splitlines()]
         by_mode = {e["mode"]: e for e in examples}
         assert by_mode["init"] == {
             "mode": "init", "plan": "", "question": "", "extra_flags": []
@@ -1466,9 +1483,8 @@ class TestConfigHook:
         ``loadSurface`` checks the *version* and nothing else, so a truncated or
         hand-edited payload that still declares the current version sails past
         it and only
-        blows up later, inside ``buildDescription``/``buildArgs``, where
-        ``surface.modes`` and ``surface.reserved_flags.exact`` are indexed
-        unguarded. Unlike ``config``, the ``tool`` hook is a **map built eagerly
+        blows up later, inside ``toolDescription``/``toolArgs``, where
+        ``surface.tool_name`` and ``surface.argument_descriptions`` are read. Unlike ``config``, the ``tool`` hook is a **map built eagerly
         at plugin init**, so that TypeError would escape the factory itself and
         take OpenCode's whole plugin load with it — the one thing the header's
         rule 4 says must never happen. An unregistered tool is a warned,
@@ -4542,7 +4558,7 @@ class TestPlanSigil:
     def test_the_plan_property_says_so(self, built_package):
         """A model reading only the schema has to know, or it sends the sigil."""
         described = node_json(
-            "emit(T.buildArgs(surface).plan.description)", built_package
+            "emit(T.toolArgs(surface).plan.description)", built_package
         )
         assert "@" in described
 
@@ -4830,6 +4846,24 @@ class TestStaging:
             f"plugin.json says {declared['version']}, pyproject.toml says {owner}"
         )
 
+        # The codex end of the chain is GENERATED — build.py fills it from
+        # pyproject.toml — and checked in, so a bump without `make codex-regen`
+        # leaves the committed copy behind (plans/codex-native-plugin.md, D6).
+        codex_manifest = (
+            REPO_ROOT / "packaging" / "codex" / "multi-llm" / ".codex-plugin"
+            / "plugin.json"
+        )
+        assert codex_manifest.is_file(), (
+            f"{codex_manifest} is missing; run `make codex-regen`"
+        )
+        codex_version = json.loads(
+            codex_manifest.read_text(encoding="utf-8")
+        ).get("version")
+        assert codex_version == owner, (
+            f"the codex plugin.json says {codex_version}, pyproject.toml says "
+            f"{owner}. It is generated: run `make codex-regen`."
+        )
+
     def test_lockfile_parity_with_image(self):
         """The packaged pair matches what the image bakes.
 
@@ -5103,7 +5137,12 @@ class TestPackageBlock:
             .read_text(encoding="utf-8")
         )
         document = json.loads(json.dumps(caps.load()))
-        host = next(iter(_hosts_with_a_package_block()))
+        # An npm block specifically: once codex declares its marketplace block,
+        # the first host in sorted order is no longer one this row can stray on.
+        host = next(
+            h for h in _hosts_with_a_package_block()
+            if document["hosts"][h]["package"]["registry"] == "npm"
+        )
         block = document["hosts"][host]["package"]
 
         block["marketplace"] = "somewhere"
@@ -5113,6 +5152,9 @@ class TestPackageBlock:
         block["registry"] = "codex-marketplace"
         block["update"] = "reinstall"
         block.pop("version", None)
+        # The other registry-conditional keys a marketplace block requires.
+        block.update(repo="owner/repo", ref="release", sparse=["."],
+                     write_posture="refuses-under-readonly")
         jsonschema.validate(document, schema)
 
         block.pop("marketplace")
@@ -5186,24 +5228,53 @@ class TestGeneratedDocs:
         """
         from utils import host_capabilities as caps
 
+        # The pre-publish sentence each registry's paragraph must carry. Keyed
+        # by registry, so a host is graded against its own wording and a
+        # registry with no row here fails loudly instead of passing on another
+        # host's sentence.
+        not_yet_published = {
+            # A config entry naming an unpublished spec resolves to nothing,
+            # and on opencode that failure is silent.
+            "npm": "No published install has been verified yet",
+            # The ref the install names does not exist until the first publish.
+            "codex-marketplace": "It is not yet published",
+        }
         page = (REPO_ROOT / "docs" / "hosts.md").read_text(encoding="utf-8")
+        lines = page.splitlines()
         for host_id in _hosts_with_a_package_block():
             host = caps.entry(host_id)
             package = host["package"]
             provenance = host["provenance"]["package"]
+            registry = package["registry"]
+            # Grade the host's own paragraph, not the page: from its heading to
+            # the next host heading or section.
+            heading = f"**`{host_id}` — install via {registry}"
+            starts = [i for i, line in enumerate(lines) if line.startswith(heading)]
+            assert len(starts) == 1, (
+                f"expected one {heading!r} paragraph, found {len(starts)}"
+            )
+            end = next(
+                (i for i in range(starts[0] + 1, len(lines))
+                 if lines[i].startswith(("**`", "## "))),
+                len(lines),
+            )
+            block = "\n".join(lines[starts[0]:end])
             spec = package["name"]
             if package.get("version"):
                 spec = f"{spec}@{package['version']}"
-            assert spec in page, f"the pinned spec {spec!r} is not rendered"
-            assert f"install via {package['registry']}" in page
+            assert spec in block, f"the pinned spec {spec!r} is not rendered"
             if provenance == "verified":
-                assert "recommended route" in page
+                assert "recommended route" in block
+                assert "(not yet published)" not in block
             else:
-                assert "No published install has been verified yet" in page, (
-                    "the pre-publish paragraph must say so plainly: a config "
-                    "entry naming an unpublished spec resolves to nothing, and "
-                    "on this host that failure is silent"
+                assert registry in not_yet_published, (
+                    f"no pre-publish sentence recorded for registry {registry!r}"
                 )
+                assert not_yet_published[registry] in block, (
+                    f"{host_id}'s pre-publish paragraph must say plainly that "
+                    "the route is not yet published"
+                )
+                assert "recommended route" not in block
 
     def test_the_readme_is_in_its_pre_publish_state(self):
         """Until a registry install is recorded, the docs must not recommend it.
@@ -5592,7 +5663,8 @@ class TestRoutePromotion:
         defaults.update(kwargs)
         return harness.Row(**defaults)
 
-    def _result(self, row, out_dir, *, receipts=2, done=True):
+    def _result(self, row, out_dir, *, receipts=2, done=True,
+                install_source=None):
         """A real bundle on disk, because ``RowResult``'s evidence is read from
         one — a stubbed attribute would grade a shape the harness never uses."""
         from tests.container import harness
@@ -5610,6 +5682,11 @@ class TestRoutePromotion:
             ),
             encoding="utf-8",
         )
+        if install_source:
+            (out_dir / "plugin-install.json").write_text(
+                json.dumps({"install_source": install_source}),
+                encoding="utf-8",
+            )
         return harness.RowResult(
             row=row, exit_code=0, wall_clock_s=1.0, out_dir=out_dir,
         )
@@ -5633,8 +5710,12 @@ class TestRoutePromotion:
         file_fields = harness.promotable_fields(
             file_row, self._result(file_row, tmp_path / "file")
         )
+        # `package` is keyed on the recorded install source (rule j): only a
+        # Git-route install is evidence for it, so this half records one.
         package_fields = harness.promotable_fields(
-            package_row, self._result(package_row, tmp_path / "package")
+            package_row,
+            self._result(package_row, tmp_path / "package",
+                         install_source="git"),
         )
 
         file_only = {"shim", "install_paths", "arguments", "reload"}
@@ -5652,6 +5733,14 @@ class TestRoutePromotion:
         # once the skill is reachable does not depend on how it became reachable.
         assert {"detach", "subagents", "multi_turn"} <= package_fields
 
+        # The refusal half: the same green row from a local build keeps the
+        # behavioural cells and never reaches `package`.
+        local_fields = harness.promotable_fields(
+            package_row, self._result(package_row, tmp_path / "local")
+        )
+        assert "package" not in local_fields
+        assert {"detach", "subagents", "multi_turn"} <= local_fields
+
     def test_the_default_route_is_file(self):
         """Every row written before a package route existed stays a file row."""
         from tests.container import harness
@@ -5667,7 +5756,7 @@ class TestRoutePromotion:
 
         row = self._row(route="package")
         assert "package" not in harness.promotable_fields(
-            row, self._result(row, tmp_path, receipts=0)
+            row, self._result(row, tmp_path, receipts=0, install_source="git")
         )
 
     def test_the_record_schema_admits_route(self):

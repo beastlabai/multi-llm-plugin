@@ -1,0 +1,971 @@
+"""Git utilities for the multi-llm skill."""
+
+import os
+import re
+import subprocess
+import sys
+import time
+from contextlib import contextmanager
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+
+class GitError(Exception):
+    """Raised when a git operation fails."""
+    pass
+
+def _run_git(*args: str, check: bool = True) -> Tuple[str, str, int]:
+    """Run a git command and return (stdout, stderr, returncode)."""
+    # Decode git output as UTF-8 with errors="replace": lossy for non-UTF-8
+    # bytes but guarantees a total decode, the standard choice for tool/LLM
+    # text output. Rejected alternatives: surrogateescape (lone surrogates
+    # raise UnicodeEncodeError on downstream UTF-8 re-encode) and
+    # backslashreplace (noisier in model-visible output).
+    result = subprocess.run(
+        ["git"] + list(args),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if check and result.returncode != 0:
+        raise GitError(f"git {' '.join(args)} failed: {result.stderr}")
+    return result.stdout, result.stderr, result.returncode
+
+def get_project_root(from_path: str) -> Optional[str]:
+    """Detect project root via git rev-parse --show-toplevel.
+
+    Args:
+        from_path: A file path within the project (used to determine
+                   which directory to run git from).
+
+    Returns:
+        Absolute path to the project root, or None if not in a git repo.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+        cwd=os.path.dirname(from_path) or "."
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return None
+
+
+def get_project_root_from_dir(directory: Optional[str] = None) -> Optional[str]:
+    """Detect the git project root by running git from a *directory* directly.
+
+    Unlike :func:`get_project_root`, which takes a *file* path and uses its
+    ``dirname`` to choose where to run git, this takes a directory and runs
+    ``git rev-parse --show-toplevel`` there with no path manipulation. Pass a
+    directory (e.g. CWD or a target-repo dir) directly without the brittle
+    synthetic-path trick (``get_project_root(os.path.join(cwd, "_"))``) that
+    relies on ``dirname`` stripping a fake segment.
+
+    Args:
+        directory: Directory to run git discovery from. Defaults to CWD.
+
+    Returns:
+        Absolute path to the project root, or None if not in a git repo.
+    """
+    result = subprocess.run(
+        ["git", "rev-parse", "--show-toplevel"],
+        capture_output=True, text=True,
+        encoding="utf-8", errors="replace",
+        cwd=directory or "."
+    )
+    if result.returncode == 0:
+        return result.stdout.strip()
+    return None
+
+
+def _porcelain_destination(path_field: str) -> str:
+    """Return the on-disk path of a ``git status --porcelain`` path field.
+
+    Rename and copy entries render as ``<old> -> <new>``; the path that exists
+    in the working tree is the destination, so the source half is dropped. Git
+    quotes either side when it contains a space, which is what makes the
+    separator unambiguous: an unquoted destination contains no space of its own,
+    and a quoted one is the trailing ``"..."``.
+    """
+    if path_field.endswith('"'):
+        index = path_field.rfind(' -> "')
+        if index != -1:
+            return path_field[index + len(" -> "):]
+        return path_field
+    index = path_field.rfind(" -> ")
+    if index != -1:
+        return path_field[index + len(" -> "):]
+    return path_field
+
+
+_C_ESCAPES = {
+    "a": "\a", "b": "\b", "f": "\f", "n": "\n",
+    "r": "\r", "t": "\t", "v": "\v", "\\": "\\", '"': '"',
+}
+
+
+def _unescape_c_quoted(body: str) -> str:
+    """Undo git's C-style escaping inside a quoted path field.
+
+    Git escapes the control characters and the quote/backslash by name and
+    every other byte it does not consider printable as a three-digit octal
+    ``\\303`` — one per UTF-8 *byte*, so the octals are collected as bytes and
+    decoded together at the end (``errors="replace"``, matching `_run_git`).
+    """
+    out = bytearray()
+    i = 0
+    while i < len(body):
+        ch = body[i]
+        if ch != "\\" or i + 1 >= len(body):
+            out += ch.encode("utf-8")
+            i += 1
+            continue
+        nxt = body[i + 1]
+        if nxt in _C_ESCAPES:
+            out += _C_ESCAPES[nxt].encode("utf-8")
+            i += 2
+        elif nxt.isdigit() and len(body) >= i + 4:
+            try:
+                out.append(int(body[i + 1:i + 4], 8))
+                i += 4
+            except ValueError:
+                out += ch.encode("utf-8")
+                i += 1
+        else:
+            # Not an escape git produces; keep the backslash verbatim rather
+            # than inventing a path that does not exist.
+            out += ch.encode("utf-8")
+            i += 1
+    return out.decode("utf-8", errors="replace")
+
+
+def _unquote_porcelain_path(path: str) -> str:
+    """Return the real on-disk path behind a quoted ``git status`` path field.
+
+    Git quotes a path that contains a space, a quote or a non-printable byte
+    and C-escapes what is inside. Both halves have to come off: a census entry
+    left as ``"sp ace.txt"`` (quotes included) matches no baseline entry, lands
+    in ``tracked_files`` verbatim, and `review-code` then diffs a path that
+    does not exist (F6, 2026-09-16). An unquoted path is returned untouched —
+    a literal backslash in a bare porcelain path is not an escape.
+    """
+    if len(path) >= 2 and path.startswith('"') and path.endswith('"'):
+        return _unescape_c_quoted(path[1:-1])
+    return path
+
+
+def subtract_baseline(paths: Iterable[str], baseline: Iterable[str]) -> List[str]:
+    """Return the ``paths`` a dirty-tree ``baseline`` does *not* already cover.
+
+    A baseline entry ending in ``/`` is a *directory*, and it covers everything
+    under it. That is not a convenience: ``git status --porcelain`` reports an
+    untracked directory as a single ``?? some_dir/`` line, so every baseline
+    ever recorded names directories alongside files, and a plain set difference
+    subtracts none of them — no file path equals ``"plans/"``. Measured
+    2026-09-16: a run whose baseline was the four directories ``.claude/``,
+    ``.multi-llm/``, ``plans/``, ``saved/`` subtracted nothing and tracked all
+    1 511 untracked files in the repo as its own changes.
+
+    Order is preserved so a caller's list stays in the order it discovered
+    things in.
+    """
+    exact = set()
+    prefixes = []
+    for entry in baseline:
+        if not entry:
+            continue
+        exact.add(entry)
+        bare = _unquote_porcelain_path(entry)
+        if bare.endswith("/"):
+            # The directory itself, with and without the separator, plus
+            # everything beneath it.
+            exact.add(bare)
+            exact.add(bare.rstrip("/"))
+            prefixes.append(bare)
+        else:
+            exact.add(bare)
+    kept = []
+    for path in paths:
+        if path in exact:
+            continue
+        bare_path = _unquote_porcelain_path(path)
+        if bare_path in exact:
+            continue
+        if any(bare_path.startswith(prefix) for prefix in prefixes):
+            continue
+        kept.append(path)
+    return kept
+
+
+def baseline_covers(path: str, baseline: Iterable[str]) -> bool:
+    """True when ``baseline`` already accounts for ``path`` (see above)."""
+    return not subtract_baseline([path], baseline)
+
+
+def get_modified_files() -> List[str]:
+    """Get list of modified and untracked files.
+
+    Deliberately plain ``--porcelain``, so an untracked *directory* stays one
+    ``?? some_dir/`` line instead of expanding to every file beneath it. A
+    file-granular census cannot tell an edit inside an untracked tree from the
+    rest of that tree anyway — an untracked file has no "modified" state in git
+    — so the expansion bought nothing and cost a great deal: it made the census
+    disagree with the compact baselines already stored in ``state.json`` (see
+    ``subtract_baseline``, which is what reconciles the two), and in a repo with
+    1 511 untracked files it wrote all of them into ``tracked_files``. The
+    authoritative signal for what a run changed is the write executor's verified
+    ``files_touched``, threaded to ``finalize_tracking`` as ``--touched``.
+    """
+    stdout, _, _ = _run_git("status", "--porcelain")
+    files = []
+    # NEVER strip leading whitespace off this output: a worktree-only change is
+    # reported as `" M path"`, so `stdout.strip()` would eat the first line's
+    # status column and `line[3:]` would then cut a character off the filename.
+    # Only the trailing newline is dropped, by filtering short/blank lines.
+    for line in stdout.split("\n"):
+        # A real entry is `XY <path>`: two status columns, a space, a path.
+        if len(line) < 4:
+            continue
+        status = line[:2]
+        if not status.strip():
+            continue
+        # Unquote here and not only in `subtract_baseline`: the census is what
+        # gets STORED (in `tracked_files`, and handed to every consumer that
+        # opens the file), so a path with a space has to leave this function as
+        # the path it really is (F6, 2026-09-16).
+        filename = _unquote_porcelain_path(_porcelain_destination(line[3:]))
+        if filename:
+            files.append(filename)
+    return files
+
+
+def list_untracked_files(directory: str) -> List[str]:
+    """List the untracked files git reports under ``directory``.
+
+    The counterpart of the compact census above: `get_modified_files` collapses
+    an untracked directory to one ``dir/`` entry, which is what lets a stored
+    baseline subtract a whole pre-existing tree cheaply — but a directory the
+    run itself CREATED survives that subtraction, and a directory path is not
+    something a diff or a file read can act on. Expanding just that entry
+    recovers the files without re-censusing the whole repo.
+
+    ``-z`` so the paths come back raw, with no C-quoting to undo. Best-effort:
+    a git failure (or a directory that has since gone) returns nothing and the
+    caller keeps whatever it had.
+    """
+    stdout, _, rc = _run_git(
+        "ls-files", "--others", "--exclude-standard", "-z", "--", directory,
+        check=False,
+    )
+    if rc != 0:
+        return []
+    return [path for path in stdout.split("\0") if path]
+
+def get_staged_files() -> List[str]:
+    """Get list of currently staged files."""
+    stdout, _, _ = _run_git("diff", "--cached", "--name-only")
+    # Like porcelain, --name-only C-quotes non-ASCII and control characters.
+    # Keep the same decoded paths as get_modified_files so their union cannot
+    # contain a second, nonexistent quoted spelling of a staged file.
+    return [_unquote_porcelain_path(f) for f in stdout.split("\n") if f]
+
+def stage_files(files: List[str]) -> None:
+    """Stage specific files."""
+    if files:
+        _run_git("add", "--", *files)
+
+def unstage_files(files: List[str]) -> None:
+    """Unstage specific files."""
+    if files:
+        _run_git("reset", "HEAD", "--", *files)
+
+
+@contextmanager
+def intent_to_add_untracked(file_paths: List[str]) -> Iterator[List[str]]:
+    """Temporarily mark untracked files as intent-to-add so `git diff` picks them up.
+
+    `git diff` (all variants -- `git diff`, `git diff HEAD`, `git diff A..B`) silently
+    ignores fully-untracked files. For code review flows that rely on git diff to
+    surface implementation changes, this means new files never show up. Marking them
+    with `git add -N` creates an empty index entry so diffs treat them as full-file
+    additions without staging any content.
+
+    On exit, any files this context manager added are reset back to untracked via
+    `git reset HEAD -- <file>`. Files that were already in the index (staged, or
+    already intent-to-add by the user) are never touched.
+
+    Args:
+        file_paths: Candidate files to consider. Files not currently untracked are
+            skipped. A file listed here but missing from the working tree is also
+            skipped.
+
+    Yields:
+        The list of files this context manager actually marked (may be empty).
+    """
+    touched: List[str] = []
+    if file_paths:
+        try:
+            stdout, _, rc = _run_git(
+                "ls-files", "--others", "--exclude-standard", "--", *file_paths,
+                check=False,
+            )
+            if rc == 0:
+                touched = [line for line in stdout.splitlines() if line.strip()]
+        except Exception as exc:
+            print(
+                f"Warning: could not list untracked files for intent-to-add: {exc}",
+                file=sys.stderr,
+            )
+            touched = []
+
+        if touched:
+            try:
+                _run_git("add", "-N", "--", *touched)
+                print(
+                    f"Marked {len(touched)} untracked file(s) as intent-to-add "
+                    f"so review can see their contents"
+                )
+            except GitError as exc:
+                print(
+                    f"Warning: git add -N failed ({exc}); untracked files may be "
+                    f"invisible to reviewers",
+                    file=sys.stderr,
+                )
+                touched = []
+    try:
+        yield touched
+    finally:
+        if touched:
+            try:
+                _run_git("reset", "HEAD", "--", *touched)
+            except GitError as exc:
+                print(
+                    f"Warning: failed to reset intent-to-add entries for "
+                    f"{len(touched)} file(s): {exc}. Run `git reset HEAD -- "
+                    f"{' '.join(touched)}` to clean up manually.",
+                    file=sys.stderr,
+                )
+
+def get_staged_diff() -> str:
+    """Get diff of all staged changes."""
+    stdout, _, _ = _run_git("diff", "--cached")
+    return stdout
+
+def get_file_diff(file_path: str, base_ref: Optional[str] = None) -> str:
+    """Get diff for a specific file."""
+    if base_ref:
+        stdout, _, _ = _run_git("diff", base_ref, "--", file_path)
+    else:
+        stdout, _, _ = _run_git("diff", "--", file_path)
+    return stdout
+
+def get_current_head() -> str:
+    """Get current HEAD commit hash."""
+    stdout, _, _ = _run_git("rev-parse", "HEAD")
+    return stdout.strip()
+
+def get_branch_name() -> Optional[str]:
+    """Get current branch name, or None if detached HEAD."""
+    stdout, _, code = _run_git("symbolic-ref", "--short", "HEAD", check=False)
+    if code == 0:
+        return stdout.strip()
+    return None
+
+def is_clean_working_tree() -> bool:
+    """Check if working tree is clean (no uncommitted changes)."""
+    _, _, code = _run_git("diff", "--quiet", check=False)
+    if code != 0:
+        return False
+    _, _, code = _run_git("diff", "--cached", "--quiet", check=False)
+    return code == 0
+
+def get_diff_since_ref(base_ref: str) -> str:
+    """Get diff of all changes since a reference commit."""
+    stdout, _, _ = _run_git("diff", base_ref)
+    return stdout
+
+def get_files_changed_since_ref(base_ref: str) -> List[str]:
+    """Get list of files changed since a reference commit."""
+    stdout, _, _ = _run_git("diff", "--name-only", base_ref)
+    # Same rule as get_staged_files: one unquoted path per line, so the only
+    # thing safe to drop is the line separator.
+    return [f for f in stdout.split("\n") if f]
+
+
+def validate_git_ref(ref: str) -> str:
+    """Validate a git ref using git rev-parse --verify.
+
+    If the ref is invalid, falls back to HEAD~1. If HEAD~1 is also invalid
+    (or the original ref was already HEAD~1), returns an empty string.
+
+    Args:
+        ref: The git ref to validate (e.g., a commit hash, branch name, HEAD~1).
+
+    Returns:
+        The validated ref if valid, 'HEAD~1' as fallback, or empty string
+        if both the ref and HEAD~1 are invalid.
+    """
+    if not ref:
+        return ""
+
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--verify", ref],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return ref
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print(
+            f"Warning: git ref '{ref}' is invalid, falling back to HEAD~1",
+            file=sys.stderr,
+        )
+
+    # If the ref was already HEAD~1, don't redundantly retry it
+    if ref == "HEAD~1":
+        print(
+            "Warning: HEAD~1 is not a valid git ref (shallow clone or initial commit?), "
+            "using empty base_ref",
+            file=sys.stderr,
+        )
+        return ""
+
+    # Fallback to HEAD~1
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--verify", "HEAD~1"],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+        return "HEAD~1"
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        print(
+            "Warning: HEAD~1 is also not a valid git ref (shallow clone or initial commit?), "
+            "using empty base_ref",
+            file=sys.stderr,
+        )
+        return ""
+
+
+# ---------------------------------------------------------------------------
+# Diff hunk capture and file content capture utilities
+# ---------------------------------------------------------------------------
+
+# Budget constants for embedded context data
+_MAX_LINES_PER_FILE = 200
+_MAX_TOTAL_BYTES = 500 * 1024  # 500KB
+_GIT_TIMEOUT_SECONDS = 10
+
+# Rough amortized width of one diff line (prefix char + content + newline),
+# used only to convert a byte budget into a line-count cap — see
+# _per_file_line_cap.
+_ASSUMED_BYTES_PER_DIFF_LINE = 80
+
+
+def _per_file_line_cap(file_count: int) -> int:
+    """Per-file line budget for ``_parse_unified_diff``, scaled by how many
+    files share ``_MAX_TOTAL_BYTES``.
+
+    ``_MAX_LINES_PER_FILE`` used to be a flat cap applied to every file
+    regardless of how many were being reviewed, so a single ~1,400-line file
+    (the common case for a whole-file review) got the same 200-line cap as
+    one file among fifty — 86% of it silently dropped — while the byte
+    budget that actually bounds total output sat almost unused. Scale the
+    cap with the remaining budget split across the files being diffed, so a
+    lone file is allowed most of the budget and a large fan-out still gets a
+    floor of ``_MAX_LINES_PER_FILE``.
+    """
+    if file_count <= 0:
+        return _MAX_LINES_PER_FILE
+    per_file_bytes = _MAX_TOTAL_BYTES / file_count
+    return max(_MAX_LINES_PER_FILE, int(per_file_bytes / _ASSUMED_BYTES_PER_DIFF_LINE))
+
+
+def _is_binary_file(path: str) -> bool:
+    """Heuristic check for binary file content.
+
+    Reads the first 8KB and looks for null bytes.
+    """
+    try:
+        with open(path, "rb") as f:
+            chunk = f.read(8192)
+        return b"\x00" in chunk
+    except (OSError, IOError):
+        return False
+
+
+def _parse_unified_diff(diff_text: str, max_lines: int = _MAX_LINES_PER_FILE) -> Dict[str, Any]:
+    """Parse unified diff text for a single file into structured hunk data.
+
+    Args:
+        diff_text: unified diff for one file.
+        max_lines: cap on captured add/remove/context lines (see
+            ``_per_file_line_cap`` for how callers scale this).
+
+    Returns a dict with keys:
+      - hunks: list of hunk objects (header + lines)
+      - old_path / new_path: for renamed files
+      - binary: True if the diff indicates a binary file
+      - deleted: True if the file was deleted
+      - truncated_at: int if lines were capped
+      - total_lines: int, present only alongside truncated_at — the full
+        count of add/remove/context lines the diff actually has, so a
+        reader can say "showing first N of <total_lines>" instead of "?"
+
+    Each hunk contains:
+      - header: the @@ line
+      - lines: list of {type, old_line, new_line, content}
+    """
+    lines = diff_text.split("\n")
+    result: Dict[str, Any] = {
+        "hunks": [],
+        "old_path": None,
+        "new_path": None,
+        "binary": False,
+        "deleted": False,
+    }
+
+    total_content_lines = 0
+    total_lines = 0
+    truncated = False
+
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+
+        # Detect binary file marker
+        if line.startswith("Binary files") or line.startswith("GIT binary patch"):
+            result["binary"] = True
+            return result
+
+        # Detect rename
+        if line.startswith("rename from "):
+            result["old_path"] = line[len("rename from "):]
+        elif line.startswith("rename to "):
+            result["new_path"] = line[len("rename to "):]
+
+        # Detect old/new paths from --- / +++ headers
+        if line.startswith("--- a/"):
+            result["old_path"] = result["old_path"] or line[6:]
+        elif line.startswith("--- /dev/null"):
+            # New file – no old path
+            pass
+        elif line.startswith("+++ b/"):
+            result["new_path"] = result["new_path"] or line[6:]
+        elif line.startswith("+++ /dev/null"):
+            result["deleted"] = True
+
+        # Parse hunk header
+        hunk_match = re.match(
+            r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(.*)", line
+        )
+        if hunk_match:
+            old_start = int(hunk_match.group(1))
+            new_start = int(hunk_match.group(3))
+            hunk_header_text = line
+
+            hunk: Dict[str, Any] = {
+                "header": hunk_header_text,
+                "lines": [],
+            }
+
+            old_line = old_start
+            new_line = new_start
+
+            i += 1
+            while i < len(lines):
+                hline = lines[i]
+
+                # Stop at next hunk, next file header, or end
+                if (
+                    hline.startswith("@@ ")
+                    or hline.startswith("diff --git")
+                    or hline.startswith("--- a/")
+                    or hline.startswith("--- /dev/null")
+                ):
+                    break
+
+                # Count every real content line up front (even once
+                # truncated) so a truncated result can still report how
+                # many lines it dropped.
+                if hline.startswith("+") or hline.startswith("-") or hline.startswith(" "):
+                    total_lines += 1
+
+                if truncated:
+                    i += 1
+                    continue
+
+                if total_content_lines >= max_lines:
+                    truncated = True
+                    result["truncated_at"] = max_lines
+                    i += 1
+                    continue
+
+                if hline.startswith("+"):
+                    hunk["lines"].append({
+                        "type": "add",
+                        "old_line": None,
+                        "new_line": new_line,
+                        "content": hline[1:],
+                    })
+                    new_line += 1
+                    total_content_lines += 1
+                elif hline.startswith("-"):
+                    hunk["lines"].append({
+                        "type": "remove",
+                        "old_line": old_line,
+                        "new_line": None,
+                        "content": hline[1:],
+                    })
+                    old_line += 1
+                    total_content_lines += 1
+                elif hline.startswith(" "):
+                    hunk["lines"].append({
+                        "type": "context",
+                        "old_line": old_line,
+                        "new_line": new_line,
+                        "content": hline[1:],
+                    })
+                    old_line += 1
+                    new_line += 1
+                    total_content_lines += 1
+                elif hline.startswith("\\ No newline at end of file"):
+                    # Marker line – skip, don't count toward budget
+                    pass
+                else:
+                    # Unknown line in hunk (e.g., empty trailing line) – skip
+                    pass
+
+                i += 1
+
+            result["hunks"].append(hunk)
+            continue  # Don't increment i again – already positioned
+
+        i += 1
+
+    if truncated:
+        result["total_lines"] = total_lines
+
+    return result
+
+
+def _split_diff_by_file(raw_diff: str) -> Dict[str, str]:
+    """Split a multi-file unified diff into per-file chunks.
+
+    Returns a dict mapping file paths to their diff text.
+    The key is the new-side path (b/ path) from the diff header.
+    """
+    file_diffs: Dict[str, str] = {}
+    current_path: Optional[str] = None
+    current_lines: List[str] = []
+
+    for line in raw_diff.split("\n"):
+        if line.startswith("diff --git"):
+            # Save previous file's diff
+            if current_path is not None:
+                file_diffs[current_path] = "\n".join(current_lines)
+
+            # Extract path from "diff --git a/path b/path"
+            parts = line.split(" b/", 1)
+            current_path = parts[1] if len(parts) > 1 else None
+            current_lines = [line]
+        else:
+            current_lines.append(line)
+
+    # Save last file
+    if current_path is not None:
+        file_diffs[current_path] = "\n".join(current_lines)
+
+    return file_diffs
+
+
+def capture_diff_hunks(
+    base_ref: str,
+    file_paths: List[str],
+) -> Dict[str, Any]:
+    """Capture structured diff hunks for specified files against a base ref.
+
+    Runs ``git diff base_ref -- <files>`` and parses the unified diff output
+    into structured per-file data consumed by the PR-style report template.
+
+    Args:
+        base_ref: Git ref to diff against (commit SHA, branch name, HEAD~N).
+        file_paths: List of file paths to capture diffs for.  Only files in
+            this list are processed (scoped to suggestion-referenced files).
+
+    Returns:
+        A dict with:
+          - Per file-path key: structured hunk data (see ``_parse_unified_diff``).
+          - ``_notices``: list of notice strings (e.g., uncommitted changes).
+          - ``_error``: error string when git is unavailable.
+
+    Edge cases handled:
+      - Binary files → ``{binary: true}``
+      - Renamed files → ``old_path`` and ``new_path`` included
+      - Deleted files → ``deleted: true``, content retrieved via ``git show``
+      - Invalid base_ref → empty dict with warning
+      - Git not available → empty dict with notice
+      - 10-second timeout enforced
+      - Per-file line cap, scaled by file count (floor 200 lines; see
+        ``_per_file_line_cap``) so a single-file review is not held to the
+        same cap as a large fan-out
+      - 500KB total budget
+    """
+    if not file_paths:
+        return {}
+
+    result: Dict[str, Any] = {}
+    notices: List[str] = []
+
+    # --- Check for uncommitted changes ---
+    try:
+        status_result = subprocess.run(
+            ["git", "status", "--porcelain"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+        if status_result.returncode == 0 and status_result.stdout.strip():
+            notices.append("Diff includes uncommitted changes")
+    except FileNotFoundError:
+        result["_notices"] = ["Git not available -- code context shown from file content only."]
+        print(
+            "Warning: git is not available (not installed or not in PATH)",
+            file=sys.stderr,
+        )
+        return result
+    except subprocess.TimeoutExpired:
+        notices.append("git status timed out")
+    except OSError:
+        result["_notices"] = ["Git not available -- code context shown from file content only."]
+        print(
+            "Warning: git is not available (OS error)",
+            file=sys.stderr,
+        )
+        return result
+
+    # --- Run git diff ---
+    try:
+        diff_result = subprocess.run(
+            ["git", "diff", base_ref, "--"] + list(file_paths),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_GIT_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        result["_notices"] = ["Git not available -- code context shown from file content only."]
+        print(
+            "Warning: git is not available (not installed or not in PATH)",
+            file=sys.stderr,
+        )
+        return result
+    except subprocess.TimeoutExpired:
+        notices.append("diff capture timed out")
+        result["_notices"] = notices
+        return result
+    except OSError:
+        result["_notices"] = ["Git not available -- code context shown from file content only."]
+        print(
+            "Warning: git is not available (OS error)",
+            file=sys.stderr,
+        )
+        return result
+
+    if diff_result.returncode != 0:
+        # Invalid base_ref or other git error
+        print(
+            f"Warning: git diff failed for base_ref '{base_ref}': "
+            f"{diff_result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        result["_notices"] = notices
+        return result
+
+    raw_diff = diff_result.stdout
+
+    # --- Split and parse per-file diffs ---
+    per_file_diffs = _split_diff_by_file(raw_diff)
+    total_bytes = 0
+    # Scaled once per call: a review of one file should not be held to the
+    # same flat 200-line cap as a review of fifty (see _per_file_line_cap).
+    line_cap = _per_file_line_cap(len(file_paths))
+
+    start_time = time.monotonic()
+
+    for fpath in file_paths:
+        # Timeout check
+        if time.monotonic() - start_time > _GIT_TIMEOUT_SECONDS:
+            notices.append("diff capture timed out")
+            break
+
+        file_diff_text = per_file_diffs.get(fpath)
+        if file_diff_text is None:
+            # File may not have changes in the diff – skip silently
+            continue
+
+        # Budget check
+        diff_bytes = len(file_diff_text.encode("utf-8", errors="replace"))
+        if total_bytes + diff_bytes > _MAX_TOTAL_BYTES:
+            result[fpath] = {"truncated": True}
+            notices.append(
+                f"Size budget exceeded at {fpath} – remaining files omitted"
+            )
+            break
+
+        total_bytes += diff_bytes
+
+        parsed = _parse_unified_diff(file_diff_text, max_lines=line_cap)
+        result[fpath] = parsed
+
+    # --- Handle deleted files: retrieve last-known content ---
+    for fpath in file_paths:
+        if fpath in result and isinstance(result[fpath], dict) and result[fpath].get("deleted"):
+            try:
+                show_result = subprocess.run(
+                    ["git", "show", f"{base_ref}:{fpath}"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=_GIT_TIMEOUT_SECONDS,
+                )
+                if show_result.returncode == 0:
+                    result[fpath]["last_known_content"] = show_result.stdout
+            except (subprocess.TimeoutExpired, FileNotFoundError, OSError):
+                pass  # Best effort – content unavailable
+
+    if notices:
+        result["_notices"] = notices
+
+    return result
+
+
+def capture_file_snapshots(
+    file_paths: List[str],
+) -> Dict[str, List[str]]:
+    """Capture file content for multiple files at a point in time.
+
+    Call this at the START of a review phase (before model invocations begin)
+    to snapshot file content.  The returned dict can be passed as
+    ``file_snapshots`` to ``generate_html_report()`` and ultimately to
+    ``capture_file_context()``, ensuring the report reflects file state at
+    review start rather than at report-generation time.
+
+    Args:
+        file_paths: List of file paths (absolute or relative to cwd) to
+            snapshot.
+
+    Returns:
+        Dict mapping each readable, non-binary file path to a list of its
+        lines (with trailing newlines stripped).  Files that do not exist,
+        are binary, or cannot be read are silently omitted.
+    """
+    snapshots: Dict[str, List[str]] = {}
+    for fpath in file_paths:
+        if not fpath or not os.path.isfile(fpath):
+            continue
+        if _is_binary_file(fpath):
+            continue
+        try:
+            with open(fpath, "r", encoding="utf-8", errors="replace") as f:
+                snapshots[fpath] = [
+                    ln.rstrip("\n").rstrip("\r") for ln in f.readlines()
+                ]
+        except (OSError, IOError):
+            continue
+    return snapshots
+
+
+def capture_file_context(
+    file_path: str,
+    line_range: List[int],
+    context_lines: int = 5,
+    file_snapshots: Optional[Dict[str, List[str]]] = None,
+) -> Optional[List[Dict[str, Any]]]:
+    """Read lines around a line range from a file.
+
+    Returns an array of ``{line_number: int, content: str}`` objects covering
+    ``context_lines`` before and after the specified ``line_range``.
+
+    When ``file_snapshots`` is provided and contains ``file_path``, the
+    pre-captured snapshot is used instead of reading the file from disk.
+    This allows callers to capture file content at the START of a review
+    phase (via ``capture_file_snapshots()``) and avoid stale data if files
+    are modified between review start and report generation.
+
+    When no snapshot is available, falls back to reading the file from disk
+    at call time.  For accurate context when files may have been modified
+    after review start, prefer providing ``file_snapshots`` or using
+    ``capture_diff_hunks`` with a ``base_ref`` (which uses git history).
+
+    Args:
+        file_path: Path to the file on disk (absolute or relative to cwd).
+        line_range: Two-element list ``[start_line, end_line]`` (1-indexed,
+            inclusive).
+        context_lines: Number of extra lines to include before ``start_line``
+            and after ``end_line``.  Defaults to 5.
+        file_snapshots: Optional dict mapping file paths to pre-captured
+            line lists (as returned by ``capture_file_snapshots()``).  When
+            the file is found in this dict, its snapshot is used instead of
+            reading from disk.
+
+    Returns:
+        List of ``{line_number, content}`` dicts, or ``None`` if the file
+        does not exist or is binary.
+    """
+    if not file_path or not line_range:
+        return None
+
+    # Try snapshot first
+    if file_snapshots and file_path in file_snapshots:
+        all_lines = file_snapshots[file_path]
+    else:
+        # Fall back to reading from disk
+        if not os.path.isfile(file_path):
+            return None
+
+        # Check for binary content
+        if _is_binary_file(file_path):
+            return None
+
+        try:
+            with open(file_path, "r", encoding="utf-8", errors="replace") as f:
+                all_lines = [
+                    ln.rstrip("\n").rstrip("\r") for ln in f.readlines()
+                ]
+        except (OSError, IOError):
+            return None
+
+    if not all_lines:
+        return None
+
+    start_line = line_range[0]
+    end_line = line_range[1] if len(line_range) > 1 else start_line
+
+    # Clamp to valid range
+    context_start = max(1, start_line - context_lines)
+    context_end = end_line + context_lines
+
+    # Clamp end to file length
+    context_end = min(context_end, len(all_lines))
+
+    result = []
+    for i in range(context_start - 1, context_end):
+        if i < 0 or i >= len(all_lines):
+            continue
+        result.append({
+            "line_number": i + 1,
+            "content": all_lines[i],
+        })
+
+    return result if result else None

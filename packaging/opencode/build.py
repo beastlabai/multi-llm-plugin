@@ -62,15 +62,11 @@ for _path in (str(SKILL_DIR), str(REPO_ROOT / "packaging")):
     if _path not in sys.path:
         sys.path.insert(0, _path)
 
-import modes as mode_table  # noqa: E402
-from common import payload  # noqa: E402
+from common import payload, surface  # noqa: E402
 from common.payload import (  # noqa: F401  (re-exported for the Make targets)
-    PayloadError, scan_tarball, scan_tree, tree_digest,
+    PayloadError, scan_tarball, scan_tree, target_module_paths, tree_digest,
 )
-from utils import (  # noqa: E402
-    cli_common, detach, host_install, provider_registry, subagent_executor,
-    unattended,
-)
+from utils import host_install  # noqa: E402
 
 #: The host this package is a distribution of. Not a new host id — the harness
 #: capabilities are the harness's, however we got installed.
@@ -80,7 +76,7 @@ HOST_ID = "opencode"
 #: The plugin resolves it from ``import.meta.dirname`` at startup, which is the
 #: whole point of the route: the skill tree and the entry point ship in the same
 #: directory, so there is no baked path to go stale.
-SKILL_DIR_TOKEN = "{SKILL_DIR}"
+SKILL_DIR_TOKEN = surface.SKILL_DIR_TOKEN
 
 #: The digest file's own name inside ``dist/``. Written last, and it can never
 #: attest to itself.
@@ -133,25 +129,14 @@ PACKAGING_INPUTS: Tuple[str, ...] = (
     "packaging/opencode/README.md",
     "packaging/opencode/build.py",
     "packaging/common/payload.py",
+    "packaging/common/surface.py",
     "LICENSE",
 )
 
-#: Bumped when the *shape* of ``cli-surface.json`` changes. The plugin refuses a
-#: version it does not know, so a payload/plugin mismatch is a named error rather
-#: than a ``TypeError`` inside a ``.map``.
-#:
-#: 2: ``needs_human_message``, ``needs_human_option`` and ``outcomes_line``
-#: joined the surface (the plugin's exit-3 message and its tool description's
-#: outcomes line are read from here, never authored in JS), every mode row
-#: carries its ``phase``, and ``dispatcher`` gained ``states`` and
-#: ``review_gate`` — the data the exit-3 message is selected from.
-#:
-#: 3: ``dispatcher`` gained ``session_model_env`` — the name of the variable the
-#: plugin exports the *session's own model* on, so the resolution ladder can
-#: prefer what the operator selected over the shipped credential-free floor. The
-#: name's owner is ``provider_registry.HOST_SESSION_MODEL_ENV``; the plugin reads
-#: it from here rather than spelling it, exactly like every flag and mode word.
-SURFACE_SCHEMA_VERSION = 3
+#: The surface's shape version. Owned by :mod:`common.surface`, where its
+#: version history lives; re-exported so the suite and the plugin's lockstep
+#: constant have one name to compare against.
+SURFACE_SCHEMA_VERSION = surface.SURFACE_SCHEMA_VERSION
 
 #: Opt-in that lets a staging run proceed from a dirty tree.
 #:
@@ -204,262 +189,23 @@ def command_body(base: Optional[Path] = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# dist/cli-surface.json
+# dist/cli-surface.json — the emitter is packaging/common/surface.py
 # ---------------------------------------------------------------------------
 
-def _aliases_for(name: str) -> List[str]:
-    """Every alias that resolves to *name*, in table order."""
-    return [word for word, target in mode_table.ALIASES.items() if target == name]
-
-
-def _exposed_modes() -> List[Dict[str, Any]]:
-    """What the tool exposes: ``user_facing_modes()`` plus nothing wider.
-
-    That is the ten work modes, ``init``, and ``status`` — which is plumbing but
-    must stay exposed, because re-attaching to a detached run is a tool call with
-    ``mode: "status"`` and stopping one is the ``abort``/``cancel``/``stop``
-    alias. Not ``util`` (a routing word, never user-facing; ``execute`` reaches
-    ``util instructions`` itself on a path the model cannot address) and not
-    ``install-host``/``uninstall-host`` (already ``user_facing=False``, and on
-    this route installing is npm's job).
-    """
-    rows: List[Dict[str, Any]] = []
-    for mode in mode_table.user_facing_modes():
-        rows.append({
-            "name": mode.name,
-            "aliases": _aliases_for(mode.name),
-            "positionals": list(mode.positionals),
-            "supports_detach": mode.supports_detach,
-            "summary": mode.summary,
-            # The phase word the exit-3 message names. From the *launch*, never
-            # from the payload: a poll's result line is `status`'s own and
-            # declares no phase, so the payload cannot say which phase died.
-            "phase": mode.phase,
-        })
-    return rows
-
-
-def _reserved_flags() -> Dict[str, Any]:
-    """The flags ``extra_flags`` may not carry, generated from their owners.
-
-    **The set is closed by construction: it is exactly the flags the plugin
-    composes** — not a hand-picked list that happens to hold four entries today.
-    Any flag ``execute`` appends to the dispatcher argv is reserved, so a model
-    can never duplicate one, contradict one, or change behaviour by restating
-    one.
-
-    Two flags the plugin *also* composes are deliberately absent, and the reason
-    is where they sit rather than a judgement: ``--frozen`` and ``--no-dev`` are
-    **uv** arguments, composed before the ``--`` separator, while ``extra_flags``
-    is appended after it and reaches only ``multi_llm.py``. A model sending
-    ``--no-dev`` there cannot duplicate the uv-side flag or re-enable the
-    dev-group sync; it hands the dispatcher an unknown option and gets exit 3.
-    Reserving it would be reserving a name the plugin does not own on that side
-    of the line.
-
-    ``--interactive``/``-i`` are the one entry that is *not* a flag the plugin
-    composes, so they ride beside the closure as a **named exception** rather
-    than as a quiet addition: with ``--detach`` the dispatcher rejects the pair
-    at parse time, and without it the forced model picker has no TTY on this
-    route, so the flag has nothing behind it in any posture.
-    """
-    return {
-        # Matched by normalized option head — split at the first `=`, take the
-        # head — and then by argparse's own binding rule, because no parser in
-        # this tree passes ``allow_abbrev=False``: `--ho`, `--ye` and `--det`
-        # all bind to their full options, so a guard that scanned for exact
-        # spellings was bypassable by typing three fewer characters.
-        "exact": [
-            "--host",
-            "--yes", "-y", "--non-interactive",
-            "--exec-subagents",
-            "--detach", "--if-not-running", "--max-detached",
-        ],
-        "named_exception": ["--interactive", "-i"],
-        "prefixes": [cli_common.INTERNAL_FLAG_PREFIX],
-        # A long option that is a strict prefix of another real one. argparse
-        # resolves an exact match before it considers any abbreviation, so
-        # these never read as an abbreviation of something longer.
-        "exact_options": sorted(cli_common._EXACT_OPTIONS),
-    }
-
-
 def cli_surface(base: Optional[Path] = None) -> Dict[str, Any]:
-    """Everything the plugin needs to know about the CLI, generated.
-
-    The plugin reads this at load and holds no mode word, no alias, no summary
-    text and no flag name of its own — the same rule that makes the preflight
-    message ``hosts/uv-missing.txt`` rather than a JS string literal. The one
-    authored sentence in the whole model-facing definition is
-    ``modes.TOOL_DESCRIPTION_LEDE``, which lives beside the table it describes.
+    """This package's surface: :func:`surface.cli_surface` for :data:`HOST_ID`.
 
     *base* is accepted for signature symmetry with :func:`command_body` and is
-    deliberately unused: every field below is generated from the imported
-    tables, and none is read out of a skill tree on disk. The one field that
-    *was* — the three resolved capability-verb sentences — is gone. The plugin
-    never read them from here: it asks ``util instructions <mode> --host <id>``
-    at run time, which is the single owner of that text, and a second copy in a
-    file nothing consumes is a copy that can only go stale.
+    deliberately unused — the surface is a function of the imported tables and
+    the host id alone (D3e), which is what lets the codex plugin ship the same
+    emitter.
     """
-    return {
-        "schema_version": SURFACE_SCHEMA_VERSION,
-        "host": HOST_ID,
-        # The one runnable spelling of "remove the now-dead file shim", carried
-        # as data so the plugin's collision warning composes nothing: it is
-        # ``host_install.uninstall_line()``, the same string ``--check`` prints
-        # for the both-routes posture, so the installer's note and the warning
-        # can never name two different commands — or, as the warning did, a
-        # placeholder host and a bare ``multi_llm.py`` nobody can run.
-        # ``{SKILL_DIR}`` stays a token for exactly the reason
-        # :func:`command_body` leaves one: the package lands in whatever cache
-        # directory npm gives it, and only the plugin knows where that is.
-        "uninstall_command": host_install.uninstall_line(
-            HOST_ID, SKILL_DIR_TOKEN
-        ),
-        # The single owner of "no mode flag means review-plan".
-        "default_mode": mode_table.DEFAULT_MODE,
-        "description_lede": mode_table.TOOL_DESCRIPTION_LEDE,
-        # The lede's sibling: the four exit codes and what exit 3 decides,
-        # pushed into the description after the mode block.
-        "outcomes_line": mode_table.TOOL_OUTCOMES_LINE,
-        # The exit-3 `message`, as a template plus the clauses its tokens are
-        # filled with. The plugin selects and substitutes; it authors nothing,
-        # not even a fallback — the same rule that keeps the uv preflight text
-        # in `hosts/uv-missing.txt`.
-        "needs_human_message": dict(mode_table.NEEDS_HUMAN_MESSAGE),
-        # The one `options` entry that is not a retry.
-        "needs_human_option": mode_table.NEEDS_HUMAN_OPTION,
-        "modes": _exposed_modes(),
-        "positional_kinds": {
-            "plan": mode_table.POS_PLAN,
-            "question": mode_table.POS_QUESTION,
-        },
-        "reserved_flags": _reserved_flags(),
-        # The flags ``execute`` appends to every dispatch, in composition order.
-        # ``--yes`` is unconditional: the ``--interactive`` substitution is
-        # retired and the flag is refused before the spawn.
-        "baked_flags": ["--host", HOST_ID, "--yes", "--exec-subagents"],
-        "detach_flag": "--detach",
-        "uv": {
-            "env": unattended.UV_ENV,
-            "run_args_env": unattended.UV_RUN_ARGS_ENV,
-            "default_run_args": list(unattended.DEFAULT_UV_RUN_ARGS),
-            # Element for element, in probe order. A JS reimplementation that
-            # drops the two ``.exe`` entries recreates precisely the Windows
-            # failure this route exists to remove: they are what the official
-            # installer creates, and Git Bash is the only supported Windows
-            # shell.
-            "candidates": list(unattended.UV_CANDIDATES),
-            "missing_message_file": unattended.UV_MISSING_FILE.replace(
-                os.sep, "/"
-            ),
-        },
-        "dispatcher": {
-            "script": "multi_llm.py",
-            "result_marker": cli_common.RESULT_MARKER,
-            # Read from cli_common's constants, never as JS literals.
-            "exit_codes": {
-                "ok": cli_common.EXIT_OK,
-                "error": cli_common.EXIT_ERROR,
-                "nothing_to_do": cli_common.EXIT_NOTHING_TO_DO,
-                "needs_human": cli_common.EXIT_NEEDS_HUMAN,
-            },
-            # The `state` word the result line carries for each exit, keyed
-            # like `exit_codes`. The exit-3 message claims "did not complete"
-            # only when the result line's state is the needs-human one.
-            "states": {
-                "ok": cli_common._STATE_BY_EXIT[cli_common.EXIT_OK],
-                "error": cli_common._STATE_BY_EXIT[cli_common.EXIT_ERROR],
-                "nothing_to_do": cli_common._STATE_BY_EXIT[
-                    cli_common.EXIT_NOTHING_TO_DO
-                ],
-                "needs_human": cli_common._STATE_BY_EXIT[
-                    cli_common.EXIT_NEEDS_HUMAN
-                ],
-                # The two override words exit 2 also carries, keyed by the word
-                # rather than by an exit they share with ``nothing_to_do``.
-                # They are here because ``_STATE_BY_EXIT``'s own comment makes
-                # this dict the place a host learns the vocabulary, and because
-                # a predicate that decides what an ``ok: true`` state owes the
-                # model (``rowNeedsInstructions``) must be able to name every
-                # word it can be handed without spelling one in JS.
-                "running": cli_common.STATE_RUNNING,
-                "died": cli_common.STATE_DIED,
-            },
-            # The one exit 3 that is a *completed* run: a review held for a
-            # decision. Read from the launch, because its result line carries
-            # the same state as every other exit 3.
-            "review_gate": dict(mode_table.REVIEW_GATE),
-            # ``--wait`` is a store_true and the plugin passes the bare flag,
-            # never a ``--timeout``: the duration is the dispatcher's to
-            # resolve. What that resolution *is* changed underneath this row —
-            # ``_resolve_wait_timeout`` now takes the project's
-            # ``progress.poll_s`` (90 s as shipped, so a default install polls
-            # exactly as it always did) and then clamps the resolved value to
-            # the named host's ``timeout_ceiling_s`` less ``WAIT_CAP_MARGIN_S``.
-            #
-            # The clamp therefore *does* bind this route, whatever was once
-            # written here: ``baked_flags`` above puts ``--host`` on every
-            # dispatch and the poll is composed through the same function, so
-            # the runtime ``--host`` the clamp reads is never absent. It is
-            # accepted rather than routed around, even though
-            # ``timeout_ceiling_s`` is documented as the cap on a *foreground
-            # shell command* and binds no tool execution: the plugin's poll is
-            # a child spawned with the call's remaining budget as its timeout
-            # and killed by process group the moment the call is cancelled, so
-            # a long cadence costs neither abort latency nor budget overshoot
-            # nor a killed child — it costs a thinned progress relay, one
-            # update per poll, and the clamp is the one thing bounding that.
-            #
-            # The alternative, weighed and refused, was to compute a number here
-            # from the host entry this surface is already built against and bake
-            # it in as ``--timeout <n>``. That keeps the duration Python-owned
-            # too, but it makes this the *second* place that computes it: it
-            # would have to track the margin, the tightest-cap fallback for an
-            # unrouted poll and the ``poll_s`` floor by hand, and the two would
-            # drift the first time one of them moved.
-            "poll": ["status", "--view", "run", "--wait"],
-            "abort": ["status", "--abort"],
-            "instructions": ["util", "instructions"],
-            "host_option": "--host",
-            "run_id_option": "--run-id",
-            # The variable the plugin sets to the model the OpenCode session is
-            # itself running on, read back off the session's newest assistant
-            # message. Python owns the name (`provider_registry`), because
-            # `resolve_subagent_runner` is the only thing that reads it: the
-            # plugin's job is to *observe* the session model and the ladder's is
-            # to decide what that means. Without this the run dispatches the
-            # host's credential-free floor while the picker two inches above the
-            # prompt says something else.
-            "session_model_env": provider_registry.HOST_SESSION_MODEL_ENV,
-            # A `next` carrying one of these is a *mechanical* continuation —
-            # the same phase finishing itself off — so `execute` follows it
-            # internally under its own cap rather than handing it back for a
-            # round of turns. Anything else is returned to the model as a tool
-            # call. Both markers are flags the dispatcher already owns; the
-            # plugin never invents a continuation of its own.
-            "mechanical_continuations": ["--reaggregate", "--consolidate"],
-            # The banner is the ONLY place a launch reports its run id — the
-            # result payload has no such key, and the launch's `next` carries
-            # `--run-id` for `ask` runs alone. So the field names ship as data
-            # and the plugin parses them rather than spelling them in JS.
-            "banner": {
-                "headline": detach.BANNER_HEADLINE,
-                "fields": list(detach.BANNER_FIELDS),
-                "run_id_field": "run_id",
-                "log_field": "log",
-            },
-        },
-        # The executor's structured refusals, paired with the capability field
-        # each is a verdict about. Generated so the plugin can name both without
-        # holding a reason-code table of its own.
-        "nested_exec_reasons": dict(subagent_executor.NESTED_EXEC_FIELDS),
-    }
+    return surface.cli_surface(HOST_ID)
 
 
 def cli_surface_json(base: Optional[Path] = None) -> str:
     """:func:`cli_surface` serialized exactly as the build writes it."""
-    return json.dumps(cli_surface(base), indent=2, sort_keys=False) + "\n"
+    return surface.cli_surface_json(HOST_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -600,59 +346,6 @@ def _not_shipped(relative: str) -> bool:
     return not (
         relative in SHIPPED_FILES or relative.startswith(SHIPPED_TREES)
     )
-
-
-# ---------------------------------------------------------------------------
-# Payload inventory derived from the dispatch table
-# ---------------------------------------------------------------------------
-
-def target_module_paths(base: Optional[Path] = None) -> Tuple[str, ...]:
-    """Every ``modes.py`` ``target_module``, as a skill-relative file path.
-
-    ``modes.py``'s own docstring is explicit that nothing there imports an
-    orchestrator — ``target_module`` is a dotted path the dispatcher resolves
-    *lazily* — and that laziness is exactly why :data:`payload.REQUIRED_INVENTORY`,
-    a static hand-typed list, could not see ``utils/doctor.py`` go missing: the
-    dispatch table pointed at a module the allowlist (``git ls-files``) never
-    selected because it was untracked, and nothing failed until
-    ``multi_llm.py doctor`` ran from the staged tree and hit
-    ``ModuleNotFoundError``. This derives the same set the dispatcher resolves
-    at runtime, so a *build* fails on the gap rather than a user's first
-    invocation of the mode that has it.
-
-    Returned paths are sorted and de-duplicated (several modes share a
-    ``target_module``, e.g. ``install-host``/``uninstall-host`` both dispatch
-    to ``utils.host_install``).
-
-    *base* is where each dotted path is checked against the filesystem to tell
-    a plain module (``utils/doctor.py``) from a package (``x/__init__.py``);
-    it defaults to the real skill dir, the same default :func:`command_body`
-    uses. ``mode_table`` itself is always the top-level import — resolved once
-    against the real skill dir the way every module this build reads is (see
-    the module docstring) — so *base* only disambiguates the file *shape* for
-    a caller pointed at a fixture tree; it is not a way to derive the set from
-    a different ``modes.py``.
-    """
-    root = Path(base) if base else SKILL_DIR
-    found: Dict[str, str] = {}
-    for mode in mode_table.MODES:
-        dotted = mode.target_module
-        if not dotted or dotted in found:
-            continue
-        parts = dotted.split(".")
-        module_path = "/".join(parts) + ".py"
-        package_path = "/".join(parts) + "/__init__.py"
-        if (root / module_path).is_file():
-            found[dotted] = module_path
-        elif (root / package_path).is_file():
-            found[dotted] = package_path
-        else:
-            raise PayloadError(
-                f"modes.py names target_module {dotted!r}, but neither "
-                f"{module_path} nor {package_path} exists under {root}. Fix "
-                "the dotted path in modes.py, or add the file it should name."
-            )
-    return tuple(sorted(found.values()))
 
 
 # ---------------------------------------------------------------------------

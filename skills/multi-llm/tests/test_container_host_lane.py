@@ -44,6 +44,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -312,6 +313,13 @@ CREDENTIALED_ROWS = [
     # until T4's first pass.
     ("opencode", "opencode-package-full"),
     ("opencode", "opencode-package-apply-executor"),
+    # THE CODEX PACKAGE ROUTE's one credentialed row (plans/codex-native-
+    # plugin.md, Phase 1 item 16). It mirrors `opencode-package-ask` argument
+    # for argument; its zero-quota prerequisites are NOT here — they are the
+    # `package_probes:` list, scheduled by the `package_probe` fixture below at
+    # `--creds none`. Last, like the rows above it: newest, and the cheapest to
+    # lose if the lane budget runs out.
+    ("codex", "codex-package-ask"),
     # ------------------------------------------------------------------- #
     # THE claude-code PER-PHASE TIER, and it is deselected by default.
     #
@@ -2356,3 +2364,415 @@ print(json.dumps(out))
         assert info["auth"] == "not-required", info
         assert info["model_catalog"] == "ok", info
         assert result["gated"] == "not_authenticated", result
+
+
+# --------------------------------------------------------------------------- #
+# THE CODEX PACKAGE ROUTE (plans/codex-native-plugin.md, Phase 1 items 1–16)
+#
+# Two tiers, graded on different evidence and never on each other's:
+#
+# * the ZERO-QUOTA rows — `host_matrix.yaml`'s `codex.package_probes:` list,
+#   each one `--creds none --route package --probe <name>` under `--network
+#   none`, the host's model the loopback stub. `container`-marked, NOT `live`.
+# * `codex-package-ask`, the one credentialed row, scheduled with the others in
+#   `CREDENTIALED_ROWS` and graded here on the route-specific evidence
+#   (`TestTheCodexPackageAskUsedThePlugin`) on top of every generic workflow
+#   assertion above.
+#
+# THE RULE THE GRADERS KEEP (the plan's "Traps on record"): assert on the
+# advertised surface and on mutated keys, never on exit status or presence.
+# `codex plugin list` proves a catalog entry exists (R25); `codex doctor` cannot
+# see a plugin server (R43). So the seed is graded on the config table the
+# install wrote and the directory it left, the loader on `codex mcp get`, the
+# advertised skill and the `tools[]` capture — and NEVER on a shim path, which a
+# package row must not have at all.
+#
+# TOLERANT OF ROWS NOT YET RUN: every grader reads its row's bundle through the
+# fixture, which SKIPS BY NAME when the plugin tree the rows install does not
+# exist yet, or when the image's codex is below the plugin floor. Plain CI never
+# reaches any of it — the module is `container`-marked.
+# --------------------------------------------------------------------------- #
+
+REPO_ROOT = harness.HERE.parents[3]
+CODEX_PLUGIN_TREE = REPO_ROOT / "packaging" / "codex" / "multi-llm"
+CODEX_ENTRY = dict(dict(HOSTS).get("codex") or {})
+PACKAGE_PROBES = [dict(p) for p in (CODEX_ENTRY.get("package_probes") or [])]
+PACKAGE_PROBE_IDS = [p["id"] for p in PACKAGE_PROBES]
+#: The plugin floor, from the matrix cell that names it.
+CODEX_PLUGIN_FLOOR = str(CODEX_ENTRY.get("plugin_floor") or "0.156.1")
+CODEX_PLUGIN_ID = "multi-llm@beastlabai"
+CODEX_PLUGIN_TABLE = f'[plugins."{CODEX_PLUGIN_ID}"]'
+
+
+def _version_tuple(text: str | None) -> tuple[int, ...] | None:
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", text or "")
+    return tuple(int(part) for part in match.groups()) if match else None
+
+
+def _codex_floor_skip_reason() -> str | None:
+    """`None` when the image's codex meets the plugin floor, else why not.
+
+    Read off the image's own version report (`harness.cli_version`), which is
+    the build's measurement of what landed — never the lock's request.
+    """
+    measured = harness.cli_version("codex")
+    have = _version_tuple(measured)
+    floor = _version_tuple(CODEX_PLUGIN_FLOOR)
+    if have is None:
+        return (f"the image reports no readable codex version ({measured!r}); "
+                f"the plugin floor is {CODEX_PLUGIN_FLOOR}")
+    if floor and have < floor:
+        return (f"codex {measured} is below the plugin floor "
+                f"{CODEX_PLUGIN_FLOOR}; every codex plugin row is skipped")
+    return None
+
+
+def _plugin_tree_skip_reason() -> str | None:
+    if not (CODEX_PLUGIN_TREE / ".codex-plugin" / "plugin.json").is_file():
+        return (f"{CODEX_PLUGIN_TREE.relative_to(REPO_ROOT)}/ does not exist yet "
+                f"(plans/codex-native-plugin.md Phase 1 items 2-4 build it); the "
+                f"codex package rows install it and Dockerfile §10c copies it")
+    return None
+
+
+def test_container_codex_meets_plugin_floor():
+    """Phase 1 item 1: the image's codex is at or above the plugin floor.
+
+    A SKIP, never a failure, below the floor — and the skip names the measured
+    version and the floor, because "the plugin rows did not run" must say why
+    in the one sentence a reader sees. Every plugin row's fixture asks the same
+    question and skips with the same words.
+    """
+    reason = _codex_floor_skip_reason()
+    if reason:
+        pytest.skip(reason)
+    assert _version_tuple(harness.cli_version("codex")) >= _version_tuple(
+        CODEX_PLUGIN_FLOOR)
+
+
+class TestThePackageProbesAreScheduled:
+    """The probe list is read from the matrix, so it cannot fall behind it —
+    but a probe the ENTRYPOINT does not know would run as a refused row, so
+    the two tables are compared here."""
+
+    def test_every_matrix_probe_is_one_the_entrypoint_runs(self):
+        from .container import entrypoint
+
+        unknown = sorted({p.get("probe") for p in PACKAGE_PROBES}
+                         - set(entrypoint.CODEX_PACKAGE_PROBES))
+        assert not unknown, (
+            f"host_matrix.yaml's codex package_probes name {unknown}, which "
+            f"entrypoint.CODEX_PACKAGE_PROBES does not run")
+
+    def test_every_probe_row_is_package_route_and_unmeasured_or_dated(self):
+        for probe in PACKAGE_PROBES:
+            assert probe.get("probe"), probe
+            assert str(probe.get("provenance") or "") in (
+                "unmeasured", "verified", "measured-red"), probe
+
+
+@pytest.fixture(scope="module", params=PACKAGE_PROBES, ids=PACKAGE_PROBE_IDS)
+def package_probe(request, posture, utc):
+    """Run one zero-quota codex package row and return (result, probe row)."""
+    probe = request.param
+    for reason in (_plugin_tree_skip_reason(), _codex_floor_skip_reason()):
+        if reason:
+            pytest.skip(reason)
+    row = harness.Row(
+        row_id=probe["id"], lane="host", host="codex", creds="none",
+        # Inert on this tier (nothing dispatches a provider except the
+        # sandbox-posture leg's nested codex, which the stub answers), and
+        # NAMED rather than defaulted, for the discovery fixture's reason.
+        spec=["opencode:stub/stub-model"],
+        runner="opencode:stub/stub-model",
+        scenario=probe.get("scenario"),
+        route="package",
+        probe=str(probe["probe"]),
+        row_timeout_s=int(probe.get("wall_clock_s") or 900),
+    )
+    result = harness.run_row(row, posture=posture, utc=utc)
+    return result, probe
+
+
+def _bundle_json(result, name: str):
+    path = result.out_dir / name
+    if not path.is_file():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _probe_record(package_probe) -> dict:
+    result, probe = package_probe
+    record = _bundle_json(result, f"probe-{probe['probe']}.json")
+    assert record is not None, (
+        f"{probe['id']}: no probe-{probe['probe']}.json in {result.out_dir} — "
+        f"the row did not reach its probe (see the container's stdout/stderr)")
+    return record
+
+
+def _tool_envelope(value):
+    """The server's one envelope (``ok``/``state``/``exit``/…), decoded.
+
+    The server replies ``{"content": [{"type": "text", "text": <envelope
+    JSON>}], "isError": …}``; a probe records that inside a JSON-RPC response,
+    and codex hands it back to the model as a string (the text itself, or the
+    content list serialized). Every layer is unwrapped here, so a grade reads
+    the envelope's fields rather than substring-searching a serialization whose
+    inner JSON is escaped. ``None`` when no envelope is found.
+    """
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return None
+    if isinstance(value, list):
+        for item in value:
+            found = _tool_envelope(item)
+            if found is not None:
+                return found
+        return None
+    if not isinstance(value, dict):
+        return None
+    if "ok" in value and "state" in value and "exit" in value:
+        return value
+    for key in ("result", "content", "text", "output"):
+        if key in value:
+            found = _tool_envelope(value[key])
+            if found is not None:
+                return found
+    return None
+
+
+#: What a zero-quota `status` on the seeded workspace may exit with: ok, or the
+#: surface's nothing-to-do (no run recorded for the plan).
+_STATUS_EXITS = (0, 2)
+
+
+def _assert_status_envelope(envelope, where: str, raw) -> None:
+    assert envelope is not None, f"{where}: no tool envelope in {raw!r}"
+    assert envelope["ok"] is True, f"{where}: not ok: {envelope}"
+    assert envelope["exit"] in _STATUS_EXITS, f"{where}: {envelope}"
+    assert isinstance(envelope.get("result"), dict), (
+        f"{where}: the envelope carries no parsed dispatcher result "
+        f"(MULTI_LLM_RESULT): {envelope}")
+
+
+def _only(package_probe, *probes: str) -> None:
+    _result, probe = package_probe
+    if probe["probe"] not in probes:
+        pytest.skip(f"{probe['id']} is not a {'/'.join(probes)} row")
+
+
+class TestTheCodexPackageSeed:
+    """Item 5, on EVERY package row: each container re-seeds, so each bundle
+    carries its own install record."""
+
+    def test_the_row_completed_offline(self, package_probe):
+        result, probe = package_probe
+        assert not result.timed_out, f"{probe['id']}: {result.cap_reason}"
+        inside = _bundle_json(result, "posture-inside.json") or {}
+        assert not (inside.get("network") or {}).get("default_route"), (
+            f"{probe['id']}: a zero-quota package row had a route out")
+
+    def test_the_install_wrote_its_own_table_into_a_quiet_config(self, package_probe):
+        result, probe = package_probe
+        install = _bundle_json(result, "plugin-install.json")
+        assert install, f"{probe['id']}: no plugin-install.json"
+        tables = install["config_toml"]
+        assert CODEX_PLUGIN_TABLE not in tables["tables_before"]
+        assert not any(t.startswith(("[plugins", "[marketplaces"))
+                       for t in tables["tables_before"]), tables
+        assert tables["plugin_table"], (
+            f"{probe['id']}: `codex plugin add` left no {CODEX_PLUGIN_TABLE} "
+            f"table — the key the install mutates is the evidence, not its "
+            f"exit code")
+        assert re.search(r"(?m)^\s*enabled\s*=\s*true\b", tables["plugin_table"]), (
+            tables["plugin_table"])
+
+    def test_the_install_left_a_directory_under_the_cache(self, package_probe):
+        result, probe = package_probe
+        install = _bundle_json(result, "plugin-install.json")
+        assert install["installed_root_exists"], install
+        assert "/plugins/cache/beastlabai/multi-llm/" in install["installed_root"]
+        assert install["installedPath"], (
+            "R40: `codex plugin add --json` carries installedPath")
+
+    def test_the_list_document_was_committed_verbatim(self, package_probe):
+        result, probe = package_probe
+        listing = result.out_dir / "codex-plugin-list.json"
+        assert listing.is_file(), f"{probe['id']}: no codex-plugin-list.json"
+        document = json.loads(listing.read_text(encoding="utf-8"))
+        assert CODEX_PLUGIN_ID in json.dumps(document)
+
+    def test_no_file_shim_rides_beside_the_plugin(self, package_probe):
+        result, probe = package_probe
+        install = _bundle_json(result, "plugin-install.json")
+        assert install["file_shim_present"] is False, (
+            f"{probe['id']}: a package row carries the FILE shim too — two "
+            f"advertised copies of the skill, and a grade that could be the "
+            f"shim's")
+        assert install["divergence"] is None, (
+            "the installed tree was edited before the row ran; a row that "
+            "passes only over an edited copy grades the edit (D3a)")
+
+
+class TestTheCodexPluginFloorAndFeatures:
+    def test_the_features_printout_is_the_record(self, package_probe):
+        _only(package_probe, "features")
+        record = _probe_record(package_probe)
+        features = record["features"]
+        assert features, "codex features list printed no parsable row"
+        assert features.get("plugins", [None, None])[1] is True, features
+
+    def test_the_floor_row_read_a_version(self, package_probe):
+        _only(package_probe, "floor")
+        record = _probe_record(package_probe)
+        assert _version_tuple(record["codex_version"]["version"]) >= \
+            _version_tuple(CODEX_PLUGIN_FLOOR)
+
+
+class TestTheLoaderRows:
+    """Item 6 — zero quota, all three."""
+
+    def test_codex_mcp_get_echoes_the_server_from_the_cache(self, package_probe):
+        _only(package_probe, "loader-mcp-get")
+        record = _probe_record(package_probe)
+        document = record["document"]
+        assert document, f"`codex mcp get multi_llm --json` printed no JSON: " \
+                         f"{record['command']}"
+        text = json.dumps(document)
+        assert "/plugins/cache/beastlabai/multi-llm/" in text, (
+            "the server's cwd did not expand to the cache root (R11)")
+        assert "tool_timeout_sec" in text
+
+    def test_the_skill_is_advertised_and_resolves_through_the_roots(
+            self, package_probe):
+        _only(package_probe, "loader-prompt-input")
+        skill = _probe_record(package_probe)["skill"]
+        assert skill["advertised"], "multi-llm:multi-llm is not advertised"
+        assert skill["resolved"], (
+            f"the locator {skill['locator']!r} did not resolve through the "
+            f"printed roots table {skill['roots']} (R8′: it is root-relative)")
+        assert skill["resolved"].endswith("skills/multi-llm/SKILL.md")
+        assert "/plugins/cache/" in skill["resolved"], (
+            "the advertised skill is not the installed plugin's — a shim path "
+            "would be the other route's evidence")
+
+    def test_tools_carries_the_namespaced_tool(self, package_probe):
+        _only(package_probe, "loader-tools", "scripted-call")
+        exec_leg = _probe_record(package_probe)["exec"]
+        assert exec_leg["declarations"], (
+            "the stub saw no tools[] entry for mcp__multi_llm -> multi_llm")
+        declaration = exec_leg["declarations"][0]
+        assert declaration["type"] == "namespace"
+        assert declaration["name"] == "mcp__multi_llm"
+        names = [t.get("name") for t in declaration.get("tools") or []]
+        assert "multi_llm" in names, declaration
+
+
+class TestTheScriptedCallRoundTrips:
+    """Item 1a: the mechanism, end to end — never a model choosing."""
+
+    def test_the_call_was_served_and_its_output_came_back(self, package_probe):
+        _only(package_probe, "scripted-call")
+        exec_leg = _probe_record(package_probe)["exec"]
+        assert "call" in exec_leg["scripted_phases"], exec_leg
+        assert "terminal" in exec_leg["scripted_phases"], (
+            "codex never sent the function_call_output back — the server's "
+            "result did not re-enter the transcript")
+        returned = exec_leg["returned_output"]
+        _assert_status_envelope(
+            _tool_envelope(returned),
+            "the output that came back is not the dispatcher's result", returned)
+
+
+class TestTheRunnabilityRow:
+    """Item 8 — the whole chain from a Python stdio client."""
+
+    def test_status_reaches_a_result_at_nothing_to_do(self, package_probe):
+        _only(package_probe, "runnability")
+        stdio = _probe_record(package_probe)["stdio"]
+        assert stdio, "no installed root to drive"
+        listed = [t.get("name") for t in
+                  ((stdio["tools_list"].get("result") or {}).get("tools") or [])]
+        assert "multi_llm" in listed
+        response = stdio["calls"][0]["response"]
+        assert (response.get("result") or {}).get("isError") is False, response
+        _assert_status_envelope(_tool_envelope(response), "status", response)
+
+    def test_a_partial_payload_names_the_missing_lock(self, package_probe):
+        _only(package_probe, "runnability")
+        record = _probe_record(package_probe)
+        partial = record.get("partial_payload")
+        if not partial:
+            pytest.skip(f"not driven: {record['legs_not_driven']}")
+        listed = [t.get("name") for t in
+                  ((partial["stdio"]["tools_list"].get("result") or {})
+                   .get("tools") or [])]
+        assert "multi_llm" in listed, "the tool must stay listed (D3 rule 4)"
+        assert partial["removed"] in json.dumps(partial["stdio"]["calls"][0])
+
+
+class TestTheRecordedProbes:
+    """Items 7(a), 9, 10, 11, 12(a), 13, 14: done when RECORDED (item 15)."""
+
+    def test_the_probe_record_exists(self, package_probe):
+        _result, probe = package_probe
+        if probe.get("blocking"):
+            pytest.skip(f"{probe['id']} is a blocking row, graded above")
+        record = _probe_record(package_probe)
+        assert record["probe"] == probe["probe"]
+        for name in probe.get("records") or []:
+            assert (package_probe[0].out_dir / name).is_file(), (
+                f"{probe['id']}: declared record {name} is missing")
+
+
+@pytest.fixture
+def codex_package_ask(graded):
+    result, matrix_row, entry = graded
+    if matrix_row.get("id") != "codex-package-ask":
+        pytest.skip(f"{matrix_row.get('id')} is not the codex package row")
+    for reason in (_plugin_tree_skip_reason(), _codex_floor_skip_reason()):
+        if reason:
+            pytest.skip(reason)
+    return result, matrix_row, entry
+
+
+class TestTheCodexPackageAskUsedThePlugin:
+    """Item 16's route-specific half; the workflow half is graded above."""
+
+    def test_the_plugin_was_installed_and_no_shim_staged(self, codex_package_ask):
+        result, _row, _entry = codex_package_ask
+        install = _bundle_json(result, "plugin-install.json")
+        assert install and install["installed_root_exists"], install
+        assert install["file_shim_present"] is False
+
+    def test_the_key_was_exported_into_an_unshadowed_profile(self, codex_package_ask):
+        result, _row, _entry = codex_package_ask
+        export = _bundle_json(result, "profile-export.json")
+        assert export, "no profile-export.json: D3a's second carrier was not written"
+        assert export["form"] == "export"
+        assert export["exported"] == ["OPENROUTER_API_KEY"]
+        assert export["shadowed_by"] is None
+
+    def test_the_host_called_the_tool_rather_than_a_shell_line(
+            self, codex_package_ask):
+        result, _row, _entry = codex_package_ask
+        stdout = (result.out_dir / "host-stdout.txt")
+        assert stdout.is_file(), "no host-stdout.txt"
+        tool_items = []
+        for line in stdout.read_text(encoding="utf-8").splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                continue
+            item = event.get("item") or {}
+            if item.get("type") in ("command_execution", "agent_message",
+                                    "reasoning", None):
+                continue
+            if "multi_llm" in json.dumps(item):
+                tool_items.append(item.get("type"))
+        assert tool_items, (
+            "the codex session never emitted a multi_llm tool item — it "
+            "narrated or ran a shell line instead, which is the route's red "
+            "(measured-red, not unmeasured, per the matrix header)")

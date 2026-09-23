@@ -28,6 +28,7 @@ import fcntl
 import json
 import os
 import pty
+import queue
 import re
 import select
 import shlex
@@ -37,6 +38,7 @@ import struct
 import subprocess
 import sys
 import termios
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -1059,7 +1061,8 @@ RESOLVED_FACTS = ("shim_body", "shim_dispatcher_block",
 UNRESOLVED_FACT = "skill_dir_placeholder_unfilled"
 
 
-def wire_stub_host(host: str, home: Path, base_url: str) -> dict:
+def wire_stub_host(host: str, home: Path, base_url: str,
+                   route: str = "file") -> dict:
     """Point the HOST's own model at the container stub. No credential, no route.
 
     The credentialed twin of this is `wire_credentials`, and the differences are
@@ -1092,6 +1095,9 @@ def wire_stub_host(host: str, home: Path, base_url: str) -> dict:
             encoding="utf-8")
         overlay["CODEX_HOME"] = str(codex_home)
         overlay["MLLM_STUB_API_KEY"] = STUB_PLACEHOLDER_KEY
+        # The package route's install, into the config just written (which
+        # stays quiet — `_seed_codex_plugin` asserts it). A no-op on `file`.
+        _seed_codex_plugin(home, route)
 
     elif host == "opencode":
         # The image's baked cold-start tree, for the same reason the credentialed
@@ -1585,6 +1591,16 @@ def wire_credentials(host: str, home: Path, key: str, slug: str,
             'args = ["-c", "echo $OPENROUTER_API_KEY"]\n',
             encoding="utf-8")
         overlay["CODEX_HOME"] = str(codex_home)
+        if route == "package":
+            # The plugin install, then the key's SECOND carrier (D3a): the
+            # session keeps reading it from its own environment through the
+            # `sh -c` auth command above, and the MCP server's login-shell child
+            # re-derives it from `.profile`, which codex's `env_vars` allowlist
+            # never carries. The precedence assertion runs inside the write.
+            # File-route rows are untouched: they spawn no MCP server, and their
+            # host environment stays byte-identical to every recorded run.
+            _seed_codex_plugin(home, route)
+            write_profile_credential(home, key)
 
     elif host == "opencode":
         # The baked cold-start tree (node_modules + the models.dev catalog) comes
@@ -1793,6 +1809,986 @@ def _write_opencode_config(home: Path, slug: str,
     )
 
 
+# --------------------------------------------------------------------------- #
+# The codex PACKAGE route (plans/codex-native-plugin.md, Phase 1 items 1–14)
+#
+# `install-host codex` writes a FILE shim a model reads and retypes. The package
+# route installs the codex PLUGIN instead — a marketplace entry whose directory
+# carries a manifest, a `.mcp.json` declaring a stdio MCP server, and the skill
+# payload — so the model calls a `multi_llm` TOOL. Dockerfile §10c mirrors the
+# repository's catalog and plugin tree into /opt/mllm/codex-marketplace/ at
+# their own relative paths; everything below installs from there at RUN time,
+# because an install writes into $CODEX_HOME and $CODEX_HOME is the row's tmpfs
+# home, never the image.
+#
+# WHERE $CODEX_HOME IS. The plan's item 5 spells it `/work/homes/<host>/.codex`;
+# on this lane the HOST's home is `Path.home()` (posture.yaml: the tmpfs
+# /home/e2e), and every existing codex host row already runs with
+# `CODEX_HOME=$HOME/.codex` (the three config writers' overlays). `/work/homes/
+# codex` is the PROVIDER identity the wrapper copies into every nested codex
+# dispatch — installing the plugin there would enable the plugin's MCP server
+# inside every nested provider codex, the sandbox-posture row's grandchild
+# included. So the install goes where the host reads: `<home>/.codex`, with the
+# same argument that picks the host's config. Neither is under /tmp, which is
+# the refusal the plan's placement note was guarding against.
+# --------------------------------------------------------------------------- #
+
+#: Dockerfile §10c's mirror root: `.agents/plugins/marketplace.json` and
+#: `packaging/codex/multi-llm/` under it, at the repository's own relative paths.
+CODEX_MARKETPLACE_DIR = Path(
+    os.environ.get("MLLM_CODEX_MARKETPLACE_DIR", "/opt/mllm/codex-marketplace"))
+#: The marketplace name the catalog declares and the plugin id it installs as.
+CODEX_MARKETPLACE = "beastlabai"
+CODEX_PLUGIN_ID = f"multi-llm@{CODEX_MARKETPLACE}"
+#: The table `codex plugin add` writes into config.toml (R15). The generated
+#: config is QUIET — it never carries this or any `[marketplaces.*]` table — so
+#: the table's presence after the install is evidence the install wrote it.
+CODEX_PLUGIN_TABLE = f'[plugins."{CODEX_PLUGIN_ID}"]'
+#: The MCP server's name in `.mcp.json`, which is what `codex mcp get` takes
+#: and what codex namespaces the tool under (`mcp__multi_llm`).
+CODEX_MCP_SERVER = "multi_llm"
+#: What a shim-route install would leave behind. A package row must never have
+#: one: two advertised copies of the skill is the state D5's note warns about,
+#: and grading one route on the other's file is the false promotion `Row.route`
+#: exists to stop.
+CODEX_FILE_SHIM = Path(".codex") / "skills" / "multi-llm" / "SKILL.md"
+#: Bytes of any one command's stdout/stderr kept in a probe record.
+CODEX_OUTPUT_CAP = 65536
+
+
+def _codex_env(home: Path, extra: dict | None = None) -> dict:
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env["CODEX_HOME"] = str(home / ".codex")
+    env.update(extra or {})
+    return env
+
+
+def _run_codex(args: list[str], env: dict, timeout: float = 120.0,
+               cwd: Path | None = None) -> dict:
+    """One codex subcommand by its REAL path, recorded whole.
+
+    By absolute path for `discovery_step`'s reason: the wrapper rebuilds the
+    child's environment and points `$HOME` at a provider root, and every
+    question asked here is about the HOST's own `$CODEX_HOME`.
+    """
+    argv = [str(REAL_DIR / "codex"), *args]
+    started = time.time()
+    try:
+        done = subprocess.run(argv, env=env, cwd=str(cwd or WORKSPACE),
+                              capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL)
+        code, out, err, timed_out = done.returncode, done.stdout, done.stderr, False
+    except subprocess.TimeoutExpired as exc:
+        code, timed_out = None, True
+        out = exc.stdout.decode() if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        err = exc.stderr.decode() if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+    except FileNotFoundError as exc:
+        code, out, err, timed_out = None, "", str(exc), False
+    return {
+        "argv": ["codex", *args],
+        "exit": code,
+        "timed_out": timed_out,
+        "wall_clock_s": round(time.time() - started, 2),
+        "stdout": out[:CODEX_OUTPUT_CAP],
+        "stdout_truncated": len(out) > CODEX_OUTPUT_CAP,
+        "stderr": err[:CODEX_OUTPUT_CAP],
+        "stderr_truncated": len(err) > CODEX_OUTPUT_CAP,
+        "_stdout_full": out,
+    }
+
+
+def _public(result: dict) -> dict:
+    """A `_run_codex` result without its uncapped copy of stdout."""
+    return {k: v for k, v in result.items() if not k.startswith("_")}
+
+
+def _json_or_none(text: str):
+    try:
+        return json.loads(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_key(node, key: str):
+    """The first value stored under ``key`` anywhere in a JSON document."""
+    if isinstance(node, dict):
+        if key in node:
+            return node[key]
+        for value in node.values():
+            found = _find_key(value, key)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for value in node:
+            found = _find_key(value, key)
+            if found is not None:
+                return found
+    return None
+
+
+def _config_toml_tables(text: str) -> list[str]:
+    """Every table header line in a config.toml, verbatim, comments excluded."""
+    headers = []
+    for line in text.splitlines():
+        body = line.split("#", 1)[0].strip()
+        if body.startswith("["):
+            headers.append(body)
+    return headers
+
+
+def _plugin_table_text(text: str) -> str | None:
+    """The `[plugins."multi-llm@beastlabai"]` table, header to the next header."""
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        if line.split("#", 1)[0].strip() == CODEX_PLUGIN_TABLE:
+            block = [line]
+            for follow in lines[index + 1:]:
+                if follow.split("#", 1)[0].strip().startswith("["):
+                    break
+                block.append(follow)
+            return "\n".join(block).rstrip() + "\n"
+    return None
+
+
+def assert_codex_config_quiet(home: Path) -> None:
+    """The generated config.toml carries no `[plugins.*]` / `[marketplaces.*]`.
+
+    Asserted rather than assumed: the install's own table is the evidence the
+    install ran, and a seed that pre-wrote one would make that evidence the
+    rig's rather than codex's.
+    """
+    config = home / ".codex" / "config.toml"
+    text = config.read_text(encoding="utf-8") if config.is_file() else ""
+    loud = [h for h in _config_toml_tables(text)
+            if h.startswith(("[plugins", "[marketplaces"))]
+    if loud:
+        raise SystemExit(
+            f"entrypoint: {config} already carries {loud} before the plugin "
+            f"install ran. The generated codex config must stay quiet, or the "
+            f"install's own table stops being evidence the install wrote it.")
+
+
+def codex_installed_root(home: Path, install: dict | None = None) -> Path | None:
+    """The installed plugin directory: `installedPath` off `plugin add --json`
+    (R40 — the one document that carries it), else the one version directory
+    under the cache root, else ``None``."""
+    recorded = (install or {}).get("installedPath")
+    if recorded and Path(recorded).is_dir():
+        return Path(recorded)
+    cache = home / ".codex" / "plugins" / "cache" / CODEX_MARKETPLACE / "multi-llm"
+    versions = sorted(p for p in cache.glob("*") if p.is_dir()) if cache.is_dir() else []
+    return versions[-1] if len(versions) == 1 else None
+
+
+def _seed_codex_plugin(home: Path, route: str) -> dict | None:
+    """Install the codex plugin into ``<home>/.codex`` on a `route: package` row.
+
+    Three commands, in the order the plan fixes (item 5), each recorded whole
+    in ``plugin-install.json``:
+
+    1. ``codex plugin marketplace add /opt/mllm/codex-marketplace`` — the
+       mirror §10c built, whose ``.agents/plugins/marketplace.json`` is the
+       catalog file users fetch, unedited;
+    2. ``codex plugin add multi-llm@beastlabai --json`` — whose document is the
+       one that carries ``installedPath`` (R40);
+    3. ``codex plugin list --json`` — its stdout committed VERBATIM as
+       ``codex-plugin-list.json``, because it is the only measurement of what a
+       *list* entry carries, as against the ``add`` entry. D5's resolver and the
+       ``--check`` fixtures replay that document, so the two payloads are never
+       conflated again.
+
+    The record also carries the config.toml table the install wrote (quiet
+    before, asserted), whether a file shim is present (it must not be), and
+    ``divergence: null`` — the slot D3a reserves for the one line by which an
+    image-side edit of the installed ``.mcp.json`` would make the tested tree
+    differ from the shipped one. Nothing here edits it.
+
+    Returns the record, or ``None`` on a file-route row (nothing to install).
+    Raises when the install did not produce an installed directory: every row
+    below the seed stands on it, so a missing install is a stopped row rather
+    than a row that grades an empty home.
+    """
+    if route != "package":
+        return None
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True, exist_ok=True)
+    assert_codex_config_quiet(home)
+    config = codex_home / "config.toml"
+    before = config.read_text(encoding="utf-8") if config.is_file() else ""
+    env = _codex_env(home)
+
+    marketplace = _run_codex(
+        ["plugin", "marketplace", "add", str(CODEX_MARKETPLACE_DIR)], env)
+    add = _run_codex(["plugin", "add", CODEX_PLUGIN_ID, "--json"], env)
+    listing = _run_codex(["plugin", "list", "--json"], env)
+    # VERBATIM — the whole stdout, uncapped, as codex printed it.
+    (OUT / "codex-plugin-list.json").write_text(listing["_stdout_full"],
+                                                encoding="utf-8")
+
+    add_doc = _json_or_none(add["_stdout_full"])
+    installed_path = _find_key(add_doc, "installedPath")
+    after = config.read_text(encoding="utf-8") if config.is_file() else ""
+    root = codex_installed_root(home, {"installedPath": installed_path})
+    record = {
+        "plugin_id": CODEX_PLUGIN_ID,
+        # WHERE the install came from — the datum `harness.promotable_fields`
+        # keys `package` on (rule j). This seed is a local-path marketplace,
+        # so it earns the behavioural cells only; `package` moves solely on a
+        # row whose install source is recorded as `git` (Phase 4's route).
+        "install_source": "local-path",
+        "marketplace_dir": str(CODEX_MARKETPLACE_DIR),
+        "codex_home": str(codex_home),
+        "commands": [_public(marketplace), _public(add), _public(listing)],
+        "add_document": add_doc,
+        "installedPath": installed_path,
+        "installed_root": str(root) if root else None,
+        "installed_root_exists": bool(root and root.is_dir()),
+        "config_toml": {
+            "tables_before": _config_toml_tables(before),
+            "tables_after": _config_toml_tables(after),
+            "plugin_table": _plugin_table_text(after),
+        },
+        "list_document_file": "codex-plugin-list.json",
+        "list_entry_has_installedPath": (
+            _find_key(_json_or_none(listing["_stdout_full"]), "installedPath")
+            is not None),
+        "file_shim_present": (home / CODEX_FILE_SHIM).exists(),
+        "divergence": None,
+    }
+    (OUT / "plugin-install.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True), encoding="utf-8")
+    log(f"route=package: codex plugin {CODEX_PLUGIN_ID} "
+        f"marketplace add -> {marketplace['exit']}, add -> {add['exit']}, "
+        f"list -> {listing['exit']}; installed at {record['installed_root']}")
+    if not record["installed_root_exists"]:
+        raise SystemExit(
+            f"entrypoint: `codex plugin add {CODEX_PLUGIN_ID} --json` left no "
+            f"installed directory (exit {add['exit']}, installedPath "
+            f"{installed_path!r}); plugin-install.json has all three commands. "
+            f"Every package row stands on this install.")
+    return record
+
+
+def write_profile_credential(home: Path, key: str) -> Path:
+    """`export OPENROUTER_API_KEY=…` into ``$HOME/.profile``, at run time (D3a).
+
+    The SECOND carrier of the key, never a replacement for the first: the codex
+    session still reads it from its own process environment (`run_host`'s
+    `dict(os.environ)`), and without that no tool call is ever emitted. This one
+    is for the MCP server's login-shell child, which codex's `env_vars`
+    allowlist does not carry — so a credentialed package row is a live
+    measurement of D3a rather than a bypass of it.
+
+    `export`, not a bare assignment: the dispatcher's own children (a provider
+    CLI, a nested codex whose auth is a non-login `sh -c`) read no startup file
+    and inherit through the environment or not at all.
+
+    THEN THE PRECEDENCE ASSERTION — D3a's second harness trap. `bash -l` reads
+    only the FIRST that exists of `~/.bash_profile`, `~/.bash_login`,
+    `~/.profile`; a higher-precedence file anywhere in this home makes the
+    export silently unread and every credentialed row fail on a missing key, a
+    reading indistinguishable from a genuine D3a regression. So the row fails
+    here, naming the file, instead.
+
+    The tmpfs home, never `home_seed/codex/.codex/.profile` and never a
+    committed file. Mode 0600. The value is never logged.
+
+    NOT THE CARRIER FOR `MULTI_LLM_CODEX_UNSANDBOXED_WRITES` (D3b). The MCP
+    server reads that lever from its OWN environment (D9 layer 1) at call entry,
+    before any spawn, so a `.profile` export — read only by the login-shell
+    child, layer 4 — can never lift the write refusal. An apply row (Phase 2's
+    `codex-package-apply-executor`) must put the name in codex's own process
+    environment — `run_host`'s env — from which the `.mcp.json` allowlist
+    forwards it to the server. Nothing exports it today; a row that relies on
+    this file for it is refused and reads as measured-red.
+    """
+    profile = home / ".profile"
+    existing = profile.read_text(encoding="utf-8") if profile.is_file() else ""
+    line = f"export OPENROUTER_API_KEY={shlex.quote(key)}\n"
+    profile.write_text(existing + ("" if not existing or existing.endswith("\n")
+                                   else "\n") + line, encoding="utf-8")
+    os.chmod(profile, 0o600)
+    assert_profile_is_read(home)
+    # The NAME and the placement, never the value: what the grader needs to see
+    # is that the export was written as an `export`, into the file a login shell
+    # reads, with nothing shadowing it.
+    (OUT / "profile-export.json").write_text(json.dumps({
+        "path": str(profile),
+        "exported": ["OPENROUTER_API_KEY"],
+        "form": "export",
+        "precedence_checked": [str(home / ".bash_profile"),
+                               str(home / ".bash_login")],
+        "shadowed_by": None,
+    }, indent=2, sort_keys=True), encoding="utf-8")
+    log(f"wrote the credential export into {profile} (value not logged); "
+        f"no higher-precedence bash startup file in {home}")
+    return profile
+
+
+def assert_profile_is_read(home: Path) -> None:
+    """Fail the row if a login shell would read something other than .profile."""
+    for name in (".bash_profile", ".bash_login"):
+        shadow = home / name
+        if shadow.exists():
+            raise SystemExit(
+                f"entrypoint: {shadow} exists, so a `bash -l` login shell reads "
+                f"it and never reaches {home / '.profile'} — the credential "
+                f"export (and the environment probe's markers) would be silently "
+                f"unread (plans/codex-native-plugin.md D3a, the startup-file "
+                f"precedence trap). Remove it from the seed.")
+
+
+# -- the probes ------------------------------------------------------------- #
+
+#: A prompt for the stub-driven exec legs. Its words do not matter — the stub's
+#: scripted scenario answers whatever the prompt says — and it names the tool so
+#: a transcript read by a human says what the turn was for.
+CODEX_PROBE_PROMPT = "Call the multi_llm tool."
+
+
+def _stub_entries(log_path: Path) -> list[dict]:
+    if not log_path.is_file():
+        return []
+    rows = []
+    for line in log_path.read_text(encoding="utf-8").splitlines():
+        try:
+            rows.append(json.loads(line))
+        except ValueError:
+            continue
+    return rows
+
+
+def codex_exec_leg(home: Path, overlay: dict, stub_log: Path, label: str,
+                   extra_args: tuple[str, ...] = (), env_extra: dict | None = None,
+                   interrupt_after_call: bool = False, timeout: float = 300.0
+                   ) -> dict:
+    """One `codex exec --json` turn against the stub, bracketed in its log.
+
+    The stub's scripted scenario (`scripted_codex_plugin_tool_call.yaml`) serves the
+    call; this records the event stream and the stub entries the turn made —
+    the `tools[]` declaration codex built, the frames it was handed, and the
+    output it sent back. `interrupt_after_call` sends SIGINT once the stub has
+    served the call, for the cancellation leg (row 10(b)).
+    """
+    mark = len(_stub_entries(stub_log))
+    env = _codex_env(home, overlay)
+    env.update(env_extra or {})
+    argv = [str(REAL_DIR / "codex"), "exec", "--json", "--skip-git-repo-check",
+            *extra_args, "--model", "stub-model", CODEX_PROBE_PROMPT]
+    started = time.time()
+    proc = subprocess.Popen(argv, env=env, cwd=str(WORKSPACE), text=True,
+                            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, start_new_session=True)
+    interrupted = None
+    if interrupt_after_call:
+        deadline = time.time() + timeout
+        while time.time() < deadline and proc.poll() is None:
+            served = [e for e in _stub_entries(stub_log)[mark:]
+                      if (e.get("scripted") or {}).get("phase") == "call"]
+            if served:
+                time.sleep(0.5)
+                os.killpg(os.getpgid(proc.pid), signal.SIGINT)
+                interrupted = round(time.time() - started, 2)
+                break
+            time.sleep(0.2)
+    try:
+        out, err = proc.communicate(timeout=timeout)
+        timed_out = False
+    except subprocess.TimeoutExpired:
+        timed_out = True
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        out, err = proc.communicate()
+    events_file = OUT / f"codex-exec-{label}.jsonl"
+    events_file.write_text(out, encoding="utf-8")
+    events = [e for e in (_json_or_none(line) for line in out.splitlines())
+              if isinstance(e, dict)]
+    entries = _stub_entries(stub_log)[mark:]
+    scripted = [e.get("scripted") for e in entries if e.get("scripted")]
+    return {
+        "label": label,
+        "argv": ["codex", *argv[1:]],
+        "exit": proc.returncode,
+        "timed_out": timed_out,
+        "interrupted_at_s": interrupted,
+        "wall_clock_s": round(time.time() - started, 2),
+        "events_file": events_file.name,
+        "event_types": sorted({str(e.get("type")) for e in events}),
+        "item_types": sorted({str((e.get("item") or {}).get("type"))
+                              for e in events if e.get("item")}),
+        "stderr": err[:CODEX_OUTPUT_CAP],
+        "stub_requests": len(entries),
+        "scripted_phases": [s.get("phase") for s in scripted],
+        "declarations": [s.get("declaration") for s in scripted
+                         if s.get("declaration") is not None][:1],
+        "returned_output": next((s.get("output") for s in scripted
+                                 if s.get("phase") == "terminal"), None),
+    }
+
+
+class McpStdioClient:
+    """A minimal JSON-RPC-over-stdio client for the installed server.
+
+    Launches the server exactly as the installed `.mcp.json` declares it
+    (`command`, `args`, `cwd` relative to the installed root), in the
+    HARNESS's environment — which is why every reading taken through it is the
+    CONTROL and never the graded one (item 9: the stdio client hands the
+    server the harness environment, so both D3a populations can come back green
+    with no forwarding and no login shell). Server-initiated requests
+    (`roots/list`, …) are recorded, never answered unless `roots` is given.
+    """
+
+    def __init__(self, root: Path, env: dict, roots: list[str] | None = None):
+        declared = _mcp_declaration(root) or {}
+        command = str(declared.get("command") or "python3")
+        args = [str(a) for a in (declared.get("args") or ["./mcp/server.py"])]
+        cwd = root / str(declared.get("cwd") or ".")
+        self.argv = [command, *args]
+        self.roots = roots
+        self.server_requests: list[dict] = []
+        self.notifications: list[dict] = []
+        self.proc = subprocess.Popen(
+            self.argv, cwd=str(cwd), env=env, text=True, bufsize=1,
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self._next = 0
+        # A reader thread owns stdout, never select() on its fd: a text-mode
+        # readline() pulls a whole kernel chunk into Python's buffer, so a
+        # response that arrives in the same read as a progress/log
+        # notification sits buffered while the fd never reports readable
+        # again, and a select-gated loop spins to its deadline with the answer
+        # already in hand. `None` on the queue is EOF.
+        self._lines: queue.Queue = queue.Queue()
+        self._eof = False
+        self._reader = threading.Thread(target=self._pump, daemon=True)
+        self._reader.start()
+
+    def _pump(self) -> None:
+        try:
+            for line in self.proc.stdout:
+                self._lines.put(line)
+        except (OSError, ValueError):
+            pass
+        finally:
+            self._lines.put(None)
+
+    def request(self, method: str, params: dict | None = None,
+                timeout: float = 180.0) -> dict:
+        self._next += 1
+        ident = self._next
+        self._send({"jsonrpc": "2.0", "id": ident, "method": method,
+                    **({"params": params} if params is not None else {})})
+        deadline = time.time() + timeout
+        while not self._eof and time.time() < deadline:
+            try:
+                line = self._lines.get(
+                    timeout=max(0.0, min(1.0, deadline - time.time())))
+            except queue.Empty:
+                continue
+            if line is None:
+                self._eof = True
+                break
+            message = _json_or_none(line)
+            if not isinstance(message, dict):
+                continue
+            if message.get("id") == ident and "method" not in message:
+                return message
+            if "method" in message and "id" in message:
+                self.server_requests.append(message)
+                if message["method"] == "roots/list" and self.roots is not None:
+                    self._send({"jsonrpc": "2.0", "id": message["id"],
+                                "result": {"roots": [
+                                    {"uri": f"file://{r}", "name": Path(r).name}
+                                    for r in self.roots]}})
+            elif "method" in message:
+                self.notifications.append(message)
+        return {"id": ident, "error": {"code": "harness-timeout",
+                                       "message": f"no answer to {method} "
+                                                  f"within {timeout}s"}}
+
+    def notify(self, method: str, params: dict | None = None) -> None:
+        self._send({"jsonrpc": "2.0", "method": method,
+                    **({"params": params} if params is not None else {})})
+
+    def _send(self, message: dict) -> None:
+        self.proc.stdin.write(json.dumps(message) + "\n")
+        self.proc.stdin.flush()
+
+    def close(self) -> dict:
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.proc.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+            self.proc.wait()
+        self._reader.join(timeout=5)
+        err = self.proc.stderr.read() if self.proc.stderr else ""
+        return {"argv": self.argv, "exit": self.proc.returncode,
+                "stderr": (err or "")[:CODEX_OUTPUT_CAP],
+                "server_requests": self.server_requests,
+                "notifications": self.notifications[:200]}
+
+
+def _mcp_declaration(root: Path) -> dict | None:
+    path = root / ".mcp.json"
+    doc = _json_or_none(path.read_text(encoding="utf-8")) if path.is_file() else None
+    servers = (doc or {}).get("mcpServers") or {}
+    entry = servers.get(CODEX_MCP_SERVER)
+    return entry if isinstance(entry, dict) else None
+
+
+def stdio_session(root: Path, calls: list[dict], env: dict | None = None,
+                  roots: list[str] | None = None,
+                  capabilities: dict | None = None) -> dict:
+    """initialize → initialized → tools/list → each `tools/call`, recorded."""
+    client = McpStdioClient(root, env or dict(os.environ), roots=roots)
+    initialize = client.request("initialize", {
+        "protocolVersion": "2025-06-18",
+        "capabilities": capabilities or {},
+        "clientInfo": {"name": "mllm-container-probe", "version": "0"}})
+    client.notify("notifications/initialized")
+    tools = client.request("tools/list")
+    results = [client.request("tools/call",
+                              {"name": CODEX_MCP_SERVER, "arguments": call})
+               for call in calls]
+    return {"initialize": initialize, "tools_list": tools,
+            "calls": [{"arguments": c, "response": r}
+                      for c, r in zip(calls, results)],
+            "server": client.close()}
+
+
+#: The probe table: `--probe <name>` → what the row records. Each writes
+#: `probe-<name>.json`; the ones whose answer is only RECORDED (7(a), 9, 10,
+#: 11, 12(a), 12(d), 13, 14 — the plan's item 15) are done when the file
+#: exists, and the grader never asserts a particular answer on them.
+CODEX_PACKAGE_PROBES = (
+    "seed", "floor", "features", "scripted-call",
+    "loader-mcp-get", "loader-prompt-input", "loader-tools",
+    "anchor", "runnability", "environment", "progress-cancellation",
+    "plugin-data", "sandbox-posture", "overlay", "timeout",
+)
+
+#: Markers for the environment probe (D3a, row 9(a)). Presence is asserted,
+#: never a value — the dummy credential is a NAME whose arrival is the reading.
+PROBE_LAUNCH_MARKER = "MULTI_LLM_PROBE"
+PROBE_OVERRIDE_MARKER = "MULTI_LLM_PROBE_OVERRIDE"
+PROBE_PROFILE_CREDENTIAL = "MLLM_PROBE_DUMMY_API_KEY"
+PROBE_PROFILE_PATH = "/opt/mllm-probe-profile-marker/bin"
+PROBE_BASHRC_MARKER = "MLLM_PROBE_BASHRC_ONLY"
+
+#: Every planted NAME the child observations report on (never a value). The
+#: profile's PATH entry is reported as the pseudo-name ``PATH``.
+PROBE_MARKER_NAMES = (PROBE_LAUNCH_MARKER, PROBE_OVERRIDE_MARKER,
+                      PROBE_PROFILE_CREDENTIAL, PROBE_BASHRC_MARKER)
+PROBE_LAUNCH_POPULATION = (PROBE_LAUNCH_MARKER, PROBE_OVERRIDE_MARKER)
+PROBE_PROFILE_POPULATION = (PROBE_PROFILE_CREDENTIAL, "PATH")
+
+#: Where the login shell's DEBUG-trap observer appends one JSON line per
+#: `exec` it sees: marker presence and cwd at the login-shell depth and at a
+#: shell-less child of it (the depth a provider CLI's auth command runs at).
+PROBE_CHILDREN_FILE = "probe-environment-children.jsonl"
+
+#: The shell-less child. argv: out, exec target basename, login_shell,
+#: the shell's $PWD, the comma-joined names set in the shell (plus `+PATH`
+#: when the profile's PATH entry is on the shell's PATH). It reads names
+#: only and writes names only — no environment value is ever recorded.
+_PROBE_OBSERVER = """\
+import json, os, sys
+NAMES = {names!r}
+PATH_ENTRY = {path_entry!r}
+out, target, login, shell_pwd, seen = sys.argv[1:6]
+seen = set(seen.split(","))
+child = [n for n in NAMES if n in os.environ]
+if PATH_ENTRY in os.environ.get("PATH", "").split(":"):
+    child.append("PATH")
+row = {{"target": target, "login_shell": login == "true",
+        "shell": {{"present": sorted(
+                       [n for n in NAMES if n in seen]
+                       + (["PATH"] if "+PATH" in seen else [])),
+                   "cwd": shell_pwd}},
+        "child": {{"present": sorted(child), "cwd": os.getcwd()}}}}
+with open(out, "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(row, sort_keys=True) + "\\n")
+"""
+
+
+def _probe_profile_hook(observer: Path, python: str, out: Path) -> str:
+    """The `.profile` tail that reports what the login-shell child received.
+
+    The server's constant `-c` string is `cd -- "$1" && shift && exec "$@"`,
+    so a DEBUG trap set in the profile fires before that `exec` with the cd
+    already done: `$PWD` is the anchor the shell moved to, the names set in
+    the shell are the login-shell population, and a child spawned from the
+    trap (no shell in between) sees only what was EXPORTED — the grandchild
+    depth D3a's missing-`export` red lives at. The shell hands the child the
+    NAMES it has set (`compgen -v`, names only, never a value) and the child
+    keeps only the planted ones — so no marker name, the `.bashrc`-only one
+    included, is ever spelled in the profile. bash-only and guarded, so a
+    POSIX `sh -l` reading the same file parses nothing it cannot run; every
+    other command is filtered out on `$BASH_COMMAND`.
+    """
+    argv = " ".join(shlex.quote(str(a)) for a in (python, observer, out))
+    return (
+        'if [ -n "${BASH_VERSION-}" ]; then\n'
+        "_mllm_probe_observe() {\n"
+        '  case "$BASH_COMMAND" in exec\\ *) ;; *) return 0 ;; esac\n'
+        '  _mllm_seen=$(compgen -v | tr "\\n" ,)\n'
+        f'  case ":$PATH:" in *":{PROBE_PROFILE_PATH}:"*) '
+        '_mllm_seen="$_mllm_seen,+PATH" ;; esac\n'
+        "  _mllm_login=false; shopt -q login_shell && _mllm_login=true\n"
+        f'  {argv} "${{1##*/}}" "$_mllm_login" "$PWD" "$_mllm_seen" '
+        ">/dev/null 2>&1 || true\n"
+        "}\n"
+        "trap '_mllm_probe_observe \"$@\"' DEBUG\n"
+        "fi\n")
+
+
+def plant_environment_markers(home: Path) -> dict:
+    """Plant D3a's markers: launch-env only, `.profile` (export), `.bashrc`.
+
+    The `.bashrc` marker is planted to be ABSENT — a non-interactive login
+    shell does not read it, and a green there would mean the startup chain is
+    not the one D3a names. The `.profile` PATH entry doubles as evidence the
+    file was read (the precedence assertion runs straight after). The profile
+    also carries the observer hook (`_probe_profile_hook`), so the probe reads
+    which markers the dispatcher's login shell and its shell-less child
+    actually received, and their cwd, into `PROBE_CHILDREN_FILE`.
+    """
+    observer = home / ".mllm-probe-observer.py"
+    observer.write_text(_PROBE_OBSERVER.format(
+        names=list(PROBE_MARKER_NAMES), path_entry=PROBE_PROFILE_PATH),
+        encoding="utf-8")
+    python = shutil.which("python3") or sys.executable
+    profile = home / ".profile"
+    existing = profile.read_text(encoding="utf-8") if profile.is_file() else ""
+    profile.write_text(
+        existing
+        + f"export {PROBE_PROFILE_CREDENTIAL}=planted-profile-credential\n"
+        + f"export PATH={PROBE_PROFILE_PATH}:$PATH\n"
+        + _probe_profile_hook(observer, python, OUT / PROBE_CHILDREN_FILE),
+        encoding="utf-8")
+    (home / ".bashrc").write_text(
+        f"export {PROBE_BASHRC_MARKER}=planted-bashrc-only\n", encoding="utf-8")
+    assert_profile_is_read(home)
+    return {PROBE_LAUNCH_MARKER: "planted-launch-value",
+            PROBE_OVERRIDE_MARKER: "planted-override-value"}
+
+
+def _child_observations() -> list[dict]:
+    return _stub_entries(OUT / PROBE_CHILDREN_FILE)
+
+
+def _envelope_of(value):
+    """The server's envelope (``ok``/``state``/``exit``/…) under any wrapping."""
+    if isinstance(value, str):
+        value = _json_or_none(value)
+    if isinstance(value, list):
+        for item in value:
+            found = _envelope_of(item)
+            if found is not None:
+                return found
+        return None
+    if not isinstance(value, dict):
+        return None
+    if "ok" in value and "state" in value and "exit" in value:
+        return value
+    for key in ("result", "content", "text", "output"):
+        if key in value:
+            found = _envelope_of(value[key])
+            if found is not None:
+                return found
+    return None
+
+
+def grade_child_observations(rows: list[dict], anchor) -> dict:
+    """Grade what the dispatcher's two depths received (D3a's red ladder).
+
+    Only the row whose `exec` target is `uv` is the dispatcher; any other
+    login shell reading the same profile is kept but not graded. Names and
+    paths only — the observer never carries a value.
+    """
+    dispatcher = [r for r in rows
+                  if str(r.get("target") or "").startswith("uv")]
+    graded: dict = {"observations": rows, "anchor": anchor,
+                    "dispatcher_observed": bool(dispatcher)}
+    if not dispatcher:
+        graded["reading"] = "not-observed"
+        graded["why"] = ("no login shell exec'd the dispatcher, so no child "
+                         "received anything to observe")
+        return graded
+    row = dispatcher[0]
+    shell = set((row.get("shell") or {}).get("present") or [])
+    child = set((row.get("child") or {}).get("present") or [])
+    profile = set(PROBE_PROFILE_POPULATION)
+    graded["login_shell"] = bool(row.get("login_shell"))
+    graded["launch_population"] = {
+        "shell": sorted(shell & set(PROBE_LAUNCH_POPULATION)),
+        "child": sorted(child & set(PROBE_LAUNCH_POPULATION))}
+    graded["profile_population"] = {"shell": sorted(shell & profile),
+                                    "child": sorted(child & profile)}
+    graded["bashrc_marker_seen"] = PROBE_BASHRC_MARKER in (shell | child)
+    cwds = {"shell": (row.get("shell") or {}).get("cwd"),
+            "child": (row.get("child") or {}).get("cwd")}
+    graded["cwd"] = cwds
+    graded["cwd_is_anchor"] = (
+        None if not anchor else
+        all(c and os.path.realpath(c) == os.path.realpath(str(anchor))
+            for c in cwds.values()))
+    if graded["bashrc_marker_seen"]:
+        reading = "red-bashrc-read"
+    elif profile <= shell and not profile <= child:
+        reading = "red-grandchild-only"
+    elif not profile <= shell:
+        reading = ("red-profile-population" if graded["login_shell"]
+                   else "red-no-login-shell")
+    elif graded["cwd_is_anchor"] is False:
+        reading = "red-cwd-not-anchor"
+    else:
+        reading = "green"
+    graded["reading"] = reading
+    return graded
+
+
+def _codex_version(home: Path) -> dict:
+    result = _run_codex(["--version"], _codex_env(home), timeout=60)
+    match = re.search(r"(\d+)\.(\d+)\.(\d+)", result["stdout"] or "")
+    return {"raw": (result["stdout"] or "").strip(), "exit": result["exit"],
+            "version": ".".join(match.groups()) if match else None}
+
+
+def _parse_features(text: str) -> dict:
+    """`codex features list` → `{name: [stage, enabled]}`, one row per line."""
+    table = {}
+    for line in (text or "").splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[-1] in ("true", "false"):
+            table[parts[0]] = [" ".join(parts[1:-1]), parts[-1] == "true"]
+    return table
+
+
+def _parse_prompt_input(text: str) -> dict:
+    """The `### Skill roots` table and the `multi-llm:multi-llm` locator (R8′)."""
+    roots: dict[str, str] = {}
+    in_roots = False
+    for line in (text or "").splitlines():
+        if line.strip().lower().startswith("### skill roots"):
+            in_roots = True
+            continue
+        if in_roots:
+            if line.startswith("#"):
+                in_roots = False
+                continue
+            match = re.match(r"\s*[-|*]?\s*`?([A-Za-z0-9_.\-]+)`?\s*[:=|]\s*`?([^`|]+?)`?\s*\|?\s*$",
+                             line)
+            if match:
+                roots[match.group(1)] = match.group(2).strip()
+    locator = None
+    for line in (text or "").splitlines():
+        if "multi-llm:multi-llm" in line:
+            found = re.search(r"\(file:\s*([^)]+)\)", line)
+            locator = found.group(1).strip() if found else line.strip()
+            break
+    resolved = None
+    if locator:
+        if os.path.isabs(locator):
+            resolved = locator
+        else:
+            head, _, rest = locator.partition("/")
+            if head in roots:
+                resolved = os.path.join(roots[head], rest)
+    return {"roots": roots, "advertised": locator is not None,
+            "locator": locator, "resolved": resolved,
+            "resolved_exists": bool(resolved and Path(resolved).is_file())}
+
+
+def _tree_census(root: Path, limit: int = 5000) -> list[dict]:
+    """Relative paths and sizes under ``root`` — names only, never contents."""
+    rows = []
+    if not root.is_dir():
+        return rows
+    for path in sorted(root.rglob("*")):
+        if len(rows) >= limit:
+            break
+        rel = path.relative_to(root).as_posix()
+        if "/node_modules/" in f"/{rel}/" or "/__pycache__/" in f"/{rel}/":
+            continue
+        rows.append({"path": rel, "dir": path.is_dir(),
+                     "size": path.stat().st_size if path.is_file() else None})
+    return rows
+
+
+def run_codex_package_probe(probe: str, home: Path, overlay: dict,
+                            stub_log: Path, install: dict | None) -> dict:
+    """Run one package-route probe row and write `probe-<name>.json`.
+
+    Every leg is RECORDED, not judged: the entrypoint exits 0 on a probe whose
+    answer is merely recorded, and the grader in test_container_host_lane.py
+    decides which readings are blocking (the plan's item 15). Legs this driver
+    does not drive yet are named in `legs_not_driven` with the reason, so an
+    absent reading is never mistaken for a green one.
+    """
+    if probe not in CODEX_PACKAGE_PROBES:
+        raise SystemExit(f"entrypoint: unknown codex package probe {probe!r}; "
+                         f"known: {', '.join(CODEX_PACKAGE_PROBES)}")
+    root = codex_installed_root(home, install)
+    env = _codex_env(home, overlay)
+    record: dict = {"probe": probe, "installed_root": str(root) if root else None,
+                    "legs_not_driven": {}}
+    # All four properties: the tool schema requires every one, and a call that
+    # omits `question`/`extra_flags` is refused at argument validation before
+    # any dispatcher starts, so the leg would never reach `status`.
+    status_call = {"mode": "status", "plan": "plans/auth-feature.md",
+                   "question": "", "extra_flags": []}
+
+    if probe == "seed":
+        record["plugin_install"] = "plugin-install.json"
+    elif probe == "floor":
+        record["codex_version"] = _codex_version(home)
+    elif probe == "features":
+        result = _run_codex(["features", "list"], env, timeout=60)
+        (OUT / "codex-features.txt").write_text(result["_stdout_full"],
+                                                encoding="utf-8")
+        record["codex_version"] = _codex_version(home)
+        record["command"] = _public(result)
+        record["features"] = _parse_features(result["_stdout_full"])
+    elif probe == "loader-mcp-get":
+        result = _run_codex(["mcp", "get", CODEX_MCP_SERVER, "--json"], env)
+        (OUT / "codex-mcp-get.json").write_text(result["_stdout_full"],
+                                                encoding="utf-8")
+        record["command"] = _public(result)
+        record["document"] = _json_or_none(result["_stdout_full"])
+    elif probe == "loader-prompt-input":
+        result = _run_codex(["debug", "prompt-input"], env)
+        (OUT / "codex-prompt-input.txt").write_text(result["_stdout_full"],
+                                                    encoding="utf-8")
+        record["command"] = _public(result)
+        record["skill"] = _parse_prompt_input(result["_stdout_full"])
+    elif probe in ("scripted-call", "loader-tools"):
+        record["exec"] = codex_exec_leg(home, overlay, stub_log, probe)
+    elif probe == "runnability":
+        record["stdio"] = stdio_session(root, [status_call]) if root else None
+        lock = (root / "skills" / "multi-llm" / "uv.lock") if root else None
+        if lock and lock.is_file():
+            lock.unlink()
+            record["partial_payload"] = {
+                "removed": str(lock),
+                "stdio": stdio_session(root, [status_call])}
+        else:
+            record["legs_not_driven"]["partial_payload"] = (
+                "no installed uv.lock to remove")
+    elif probe == "anchor":
+        record["stdio_with_roots"] = (stdio_session(
+            root, [status_call], roots=[str(WORKSPACE)],
+            capabilities={"roots": {"listChanged": False}}) if root else None)
+        record["stdio_without_roots"] = (stdio_session(root, [status_call])
+                                         if root else None)
+        record["exec"] = codex_exec_leg(home, overlay, stub_log, "anchor")
+        record["legs_not_driven"]["git_worktree"] = (
+            "7(b)'s repeat from a `git worktree` checkout needs the tool's anchor "
+            "winner wired first (row 7(a)'s answer)")
+        record["legs_not_driven"]["init_leaves_cache_unchanged"] = (
+            "7(c)'s `mode: init` byte-identity of $CODEX_HOME is written against "
+            "the anchored server; not driven by this revision of the probe")
+    elif probe == "environment":
+        launch = plant_environment_markers(home)
+        record["planted"] = {"launch_only": sorted(launch),
+                             "profile": [PROBE_PROFILE_CREDENTIAL, "PATH"],
+                             "bashrc_only": [PROBE_BASHRC_MARKER]}
+        record["children_file"] = PROBE_CHILDREN_FILE
+        mark = len(_child_observations())
+        record["control_stdio"] = (stdio_session(
+            root, [status_call], env={**os.environ, **launch,
+                                      "HOME": str(home)}) if root else None)
+        control_rows = _child_observations()[mark:]
+        control_env = _envelope_of(
+            ((record["control_stdio"] or {}).get("calls") or [{}])[0]
+            .get("response"))
+        record["control_children"] = grade_child_observations(
+            control_rows, (control_env or {}).get("anchor"))
+        mark = len(_child_observations())
+        record["graded_exec"] = codex_exec_leg(
+            home, overlay, stub_log, "environment", env_extra=launch)
+        graded_env = _envelope_of(record["graded_exec"].get("returned_output"))
+        record["graded_children"] = grade_child_observations(
+            _child_observations()[mark:], (graded_env or {}).get("anchor"))
+        record["legs_not_driven"]["shell_ladder_refusal"] = (
+            "9(b) needs the server's child-spawn lookup PATH pointed at a "
+            "bash-less directory — a server-side knob this driver does not set")
+        record["legs_not_driven"]["interpreter_absent"] = (
+            "9(c) needs a seeded PATH with no python3; the image's python3 sits "
+            "in /usr/bin beside every other tool")
+    elif probe == "progress-cancellation":
+        record["progress_exec"] = codex_exec_leg(home, overlay, stub_log,
+                                                 "progress")
+        record["cancel_exec"] = codex_exec_leg(home, overlay, stub_log,
+                                               "cancel",
+                                               interrupt_after_call=True)
+        record["legs_not_driven"]["server_side_receipt"] = (
+            "what the SERVER received on interrupt (notifications/cancelled, "
+            "EOF, neither) is read from the server's own record, not the event "
+            "stream; this driver records the host side only")
+    elif probe == "plugin-data":
+        cache_home = home / ".codex"
+        first = sorted(str(p) for p in cache_home.rglob("*plugin-data*"))
+        again = _run_codex(["plugin", "add", CODEX_PLUGIN_ID, "--json"], env)
+        second = sorted(str(p) for p in cache_home.rglob("*plugin-data*"))
+        record["placement"] = {"before_reinstall": first,
+                               "reinstall": _public(again),
+                               "after_reinstall": second,
+                               "moved": first != second}
+        record["legs_not_driven"]["delivery"] = (
+            "11(b) edits the installed .mcp.json to spell ${PLUGIN_DATA}; that "
+            "edit is a divergence D3a says is recorded, and it waits on row 13")
+    elif probe == "sandbox-posture":
+        record["read_only"] = codex_exec_leg(
+            home, overlay, stub_log, "sandbox-read-only",
+            extra_args=("--sandbox", "read-only"))
+        record["workspace_write"] = codex_exec_leg(
+            home, overlay, stub_log, "sandbox-workspace-write",
+            extra_args=("--sandbox", "workspace-write"))
+        record["legs_not_driven"]["refusal_and_lift"] = (
+            "12(b)/(c) need an apply-mode call and the process table; written "
+            "against the server's refusal, not driven here")
+        record["legs_not_driven"]["nested_posture"] = (
+            "12(d) dispatches a codex provider from the tool; needs a scenario "
+            "whose scripted arguments name a codex fan-out")
+    elif probe == "overlay":
+        record["codex_home_census"] = _tree_census(home / ".codex")
+        record["overlay_candidates"] = [
+            row["path"] for row in record["codex_home_census"]
+            if "overlay" in row["path"].lower()]
+    elif probe == "timeout":
+        mcp = (root / ".mcp.json") if root else None
+        before = _run_codex(["mcp", "get", CODEX_MCP_SERVER, "--json"], env)
+        record["before"] = _json_or_none(before["_stdout_full"])
+        if mcp and mcp.is_file():
+            doc = json.loads(mcp.read_text(encoding="utf-8"))
+            doc["mcpServers"][CODEX_MCP_SERVER]["tool_timeout_sec"] = 3600
+            mcp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+            after = _run_codex(["mcp", "get", CODEX_MCP_SERVER, "--json"], env)
+            record["divergence"] = (
+                f"{mcp}: tool_timeout_sec set to 3600 in the INSTALLED copy "
+                f"(row 14's own edit; the shipped file is untouched)")
+            record["after"] = _json_or_none(after["_stdout_full"])
+            record["after_command"] = _public(after)
+        record["legs_not_driven"]["cap_fires"] = (
+            "row 14's second half (a few-second cap on a detaching mode) is not "
+            "driven by this revision of the probe")
+
+    path = OUT / f"probe-{probe}.json"
+    path.write_text(json.dumps(record, indent=2, sort_keys=True, default=str),
+                    encoding="utf-8")
+    log(f"codex package probe {probe!r} recorded -> {path.name}"
+        + (f" (not driven: {sorted(record['legs_not_driven'])})"
+           if record["legs_not_driven"] else ""))
+    return record
+
+
 def wire_fallback_credentials(host: str, home: Path, slug: str,
                               route: str = "file") -> tuple[dict, list[Path]]:
     """C6a's documented fallback: the host's OWN subscription / vendor auth.
@@ -1837,6 +2833,9 @@ def wire_fallback_credentials(host: str, home: Path, slug: str,
         (codex_home / "config.toml").write_text(
             _codex_first_run_config(), encoding="utf-8")
         overlay["CODEX_HOME"] = str(codex_home)
+        # No `.profile` export on this path: there is no OpenRouter key to
+        # carry, and the vendor auth codex reads is the copied auth.json.
+        _seed_codex_plugin(home, route)
 
     elif host == "opencode":
         if seed.is_dir():
@@ -2018,7 +3017,11 @@ def render_prompt(entry: dict, row: dict) -> str:
     args = row.get("args")
     if not args:
         raise SystemExit(f"entrypoint: row {row.get('id')!r} declares no `args`")
-    template = entry.get("prompt_template")
+    # A ROW may carry its own template, and only the codex package row does:
+    # the plugin advertises the skill namespaced (`multi-llm:multi-llm`, R8′),
+    # so its prompt is the plan's row-16 sentence rather than the host's
+    # file-route wording. Every other row renders exactly as before.
+    template = row.get("prompt_template") or entry.get("prompt_template")
     return args if not template else template.replace("{args}", args).strip()
 
 
@@ -2947,6 +3950,13 @@ def main(argv=None) -> int:
                              "(invocation.json). Credential-free by construction "
                              "— what is under test is argument delivery, not "
                              "model output.")
+    parser.add_argument("--probe", default=None,
+                        choices=list(CODEX_PACKAGE_PROBES),
+                        help="host lane, --creds none --route package --host "
+                             "codex: which zero-quota package-route probe this "
+                             "row runs (plans/codex-native-plugin.md Phase 1). "
+                             "Writes probe-<name>.json; the answer is recorded, "
+                             "never judged here.")
     parser.add_argument("--stub-port", type=int,
                         default=int(os.environ.get("MLLM_STUB_PORT", "8099")))
     parser.add_argument("--scenario", default=None)
@@ -2977,6 +3987,15 @@ def main(argv=None) -> int:
 
     plan = WORKSPACE / "plans" / "auth-feature.md"
     exit_code = 1
+
+    if args.probe and not (args.lane == "host" and args.host == "codex"
+                           and args.route == "package" and args.creds == "none"):
+        # A probe is a zero-quota package-route row by definition. Refused
+        # rather than ignored: a `--probe` that silently fell through to the
+        # discovery tier would record a green row that probed nothing.
+        raise SystemExit(
+            f"entrypoint: --probe {args.probe!r} runs only on the host lane with "
+            f"--host codex --route package --creds none")
 
     # The documented-invocation probe's marker and fact ladder are minted BEFORE
     # the stub starts, because the stub is the thing that has to carry them: a
@@ -3097,6 +4116,7 @@ def main(argv=None) -> int:
                 row = _matrix_row(args.host, args.row)
                 key = os.environ.get("OPENROUTER_API_KEY", "")
                 overlay: dict = {}
+                probe_overlay: dict = {}
                 secrets: list[str] = []
 
                 if args.creds in ("openrouter", "fallback") and not row:
@@ -3190,15 +4210,27 @@ def main(argv=None) -> int:
                         # model, so it buys no capability — it keeps the rendered
                         # config the same shape the credentialed opencode rows
                         # write, which is what makes the two comparable at all.
-                        if args.host != "opencode":
+                        if args.host == "codex":
+                            # The codex package route at zero quota: the host's
+                            # own model pointed at the loopback stub (the
+                            # scripted-call scenario answers the exec legs),
+                            # then the plugin installed into that home. The
+                            # config writer is the one the documented-invocation
+                            # probe uses, with the route threaded through.
+                            probe_overlay = wire_stub_host(
+                                args.host, Path.home(),
+                                f"http://127.0.0.1:{args.stub_port}/v1",
+                                route=args.route)
+                        elif args.host != "opencode":
                             raise SystemExit(
                                 f"entrypoint: --route package has no host config "
                                 f"writer for host {args.host!r}. Only opencode "
-                                f"declares a `package:` block today, and a row "
+                                f"and codex declare a package route, and a row "
                                 f"that quietly wrote nothing would stage no "
                                 f"route and then grade one.")
-                        _write_opencode_config(
-                            Path.home(), pinned_model(entry, row), args.route)
+                        else:
+                            _write_opencode_config(
+                                Path.home(), pinned_model(entry, row), args.route)
                         log(f"route=package: wrote {args.host}'s own config "
                             f"with the plugin declared; no shim will be staged")
 
@@ -3297,6 +4329,21 @@ def main(argv=None) -> int:
                     # ran" are different failures and only the receipt answers
                     # the second one.
                     log(f"host row complete (host exit {record['exit']})")
+                    return 0
+
+                if (args.creds == "none" and args.route == "package"
+                        and args.host == "codex"):
+                    # The zero-quota package rows (Phase 1 items 1–14). One
+                    # probe per row, named by the matrix; the seed itself ran in
+                    # the wiring step above and wrote plugin-install.json. 0
+                    # either way — a probe's answer is RECORDED and graded by
+                    # test_container_host_lane.py, never decided here.
+                    install_doc = _json_or_none(
+                        (OUT / "plugin-install.json").read_text(encoding="utf-8")
+                    ) if (OUT / "plugin-install.json").is_file() else None
+                    run_codex_package_probe(
+                        args.probe or "seed", Path.home(), probe_overlay,
+                        OUT / "stub.jsonl", install_doc)
                     return 0
 
                 if args.creds == "none" and args.documented_invocation:

@@ -1,0 +1,609 @@
+# Host capability data (D5b) — one entry per host id, validated against
+# schemas/host_capabilities.schema.json.
+#
+# WHAT THIS FILE IS. The verb -> mechanism map the host-neutral instruction core
+# defers to. The core says *spawn subagents* / *ask the user* / *run detached*; the
+# three fields `subagents`, `ask` and `detach` say what each one resolves to for a
+# given host. That resolution is paid **once**, when a shim is rendered, and never
+# per run by an agent.
+#
+# WHAT THIS FILE IS NOT. It is not on any agent read path. It is consumed by
+# `multi_llm.py`, by `install-host`, by `hosts/render_capabilities.py` and by the
+# tests. No instruction file and no shim ever tells an agent to open it or to open
+# `references/host-capabilities.md` — the shim's baked sentence *is* the answer this
+# matrix would have given. An agent reasoning over a capability table mid-workflow
+# would be a worse instruction-following failure mode than the one this design
+# removes.
+#
+# PROVENANCE IS LOAD-BEARING. Host docs churn faster than this design does, so
+# every value carries a provenance: `verified` (a recorded live smoke observed it),
+# `documented` (host docs only) or `unknown` (the shipping default). **A
+# `documented`-only value never selects the non-conservative path.** Concretely,
+# today: Codex and OpenCode are `subagents: executor` because spawn-from-exec is
+# unconfirmed, and `detach: python`/`required` rather than trusting a raised command
+# timeout. Promoting either is a one-line edit here, not a shim rewrite — but only
+# once a smoke run has recorded it.
+#
+# A cell is `documented` until a recorded run has observed it, and most of them
+# still are — which is why the conservative resolution is what executes. The
+# `verified` cells each name the run that promoted them in a comment beside the
+# entry, and `tests/test_host_capabilities.py`'s smoke ledger fails any promotion
+# that does not.
+
+version: 1
+
+hosts:
+
+  claude-code:
+    # The reference host. There is deliberately no hosts/claude-code/shim.md.tmpl:
+    # Claude Code loads a skill from <skill-root>/SKILL.md and nowhere else, so a
+    # copy under hosts/ could only be dead text or a duplicate to keep in sync.
+    # `installable: false` -> `install-host claude-code` is --check-only, and the
+    # shim-correctness test asserts SKILL.md's three hand-written verb sentences are
+    # byte-identical to what the renderer emits for this entry.
+    shim: {template: null, installed: SKILL.md, format: markdown+frontmatter}
+    # Rationale: this host's mandatory manifest is 23 lines on its own (a long
+    # `description`, the rendered `argument-hint`, and 18 `allowed-tools` grants
+    # that cannot be shortened without losing a permission). The shim *body* — what
+    # the ~100-line budget is actually about — is 97 lines and still inside the
+    # 100-line contract `DEFAULT_SHIM_MAX_LINES` holds every shim to; this key only
+    # ever absorbed the frontmatter, and 120 is 23 + 97 exactly, so the next
+    # addition is the same deliberate decision again rather than slack to spend.
+    #
+    # 110 -> 120 (2026-09-22): step 4 gained the truncation rule. Measured, not
+    # defensive: Claude Code persists a Bash result over ~30 000 characters to a
+    # file and returns a ~2.2 KB stub holding the output's *first 2 KB*, and seven
+    # of the eleven cores are over that cap — so the read step this shim exists to
+    # name silently delivers a fragment. Run 20260922T191142Z has one row that took
+    # the fragment for the whole, never spawned a subagent, and reported four
+    # batches applied with zero edits made. The excess is not workflow prose (the
+    # core is host-neutral and cannot name `<persisted-output>` or `Read`), not a
+    # capability value (this file is never on an agent read path), and not shared
+    # boilerplate (no other host truncates), so it belongs in this host's own shim.
+    # `util instructions` carries the host-neutral half: a head banner naming the
+    # sentinel the core ends with, which survives because the stub keeps the head.
+    shim_max_lines: 120
+    installable: false
+    install_paths:
+      project: [".claude/skills/multi-llm"]
+      global: ["$HOME/.claude/skills/multi-llm"]
+      legacy: []
+    reload: none
+    arguments: placeholder            # $ARGUMENTS / ${CLAUDE_SKILL_DIR}
+    # The plugin's own invocation, namespace included. `documented`, not
+    # `verified`: no row has ever typed it into a Claude Code session — the
+    # container lane drives this host headless with a prompt, exactly as the two
+    # installable hosts' `documented` cells were before 2026-08-24.
+    invocation: "as `/multi-llm:multi-llm <mode-flag> <plan-path> [options]`."
+    multi_turn: true
+    subagents: native
+    ask: structured
+    detach: native
+    native_tool:
+      subagents: Task
+      ask: AskUserQuestion
+      detach: run_in_background
+    # No session rung: this host dispatches subagents natively through `Task`
+    # and picks their model from `subagent_tiers`, so there is nothing for a
+    # session model to be substituted into — and nothing on the skill's side of
+    # the boundary reads the session's selected model in the first place.
+    session_runner_provider: null
+    default_subagent_runner: "claude-code:sonnet"
+    # subagents: native, so the tier -> model map lives here rather than in
+    # providers.yaml driver.subagent_runner{,_cheap} (D2e).
+    subagent_tiers: {full: sonnet, cheap: haiku}
+    runners:
+      claude-code: {bundled: true, needs_auth: false, login_cmd: "",
+                    profiles: [generate, agent-readonly, agent-write], usage: full}
+      cursor-agent: {bundled: false, needs_auth: true,
+                     login_cmd: "cursor-agent login",
+                     profiles: [generate], usage: partial}
+    # In-session native dispatch: no process of ours sits between parent and child,
+    # so there is nothing to strip and nothing to neutralize.
+    nested_exec: {spawn: allowed, network: allowed, credentials: allowed,
+                  notes: "Native subagents run in-session; the executor is not on
+                    the default path for this host."}
+    # Audited and non-empty: these are the variables Claude Code injects, which a
+    # dispatched third-party runner must not inherit. Literal names only — a
+    # wildcard would strip the runner's own credentials along with the guard.
+    #
+    # `passthrough` is EMPTY, and the entry that used to sit here is the reason
+    # this comment is worth reading. It carried `ANTHROPIC_API_KEY`, sanctioned
+    # as "an API key the host owns". `subagent_executor` re-admits every
+    # passthrough name last, so that one cell silently cancelled M3/§2.1's
+    # credential strip on the agent-profile lane while leaving it in force on
+    # the fan-out lane: the same claude-code slot stripped the key on Lane A and
+    # inherited it on Lane B, and the money bug the strip exists to close stayed
+    # open for every subagent dispatch. Re-adding it would restore exactly that.
+    #
+    # The strip is not unconditional and does not need a passthrough as its
+    # escape hatch: it is gated on the sanitized `claude auth status` preflight
+    # and fails OPEN — an API-key-only user's key is preserved byte-for-byte —
+    # and a user who wants it back unconditionally sets
+    # `providers.claude-code.strip_vendor_keys: never` in providers.yaml, which
+    # is a per-provider decision rather than a host-wide one.
+    #
+    # NOTE: this is a HOST-side allowlist, keyed by the host multi-llm is
+    # *running inside*, not by the runner it dispatches. `codex` and `opencode`
+    # both already carry `passthrough: []`, so emptying this one changes exactly
+    # one situation: claude-code dispatched from inside claude-code.
+    env_guards:
+      guards: ["CLAUDECODE", "CLAUDE_CODE_ENTRYPOINT"]
+      session_scoped: ["CLAUDE_SESSION_ID", "CLAUDE_SKILL_DIR"]
+      passthrough: []
+    max_concurrent_subagents: 10
+    timeout_ceiling_s: 600            # Bash tool hard cap, silently clamped above
+    timeout_override: {frontmatter: none, env: none, config: none}
+    provenance:
+      shim: documented
+      shim_max_lines: verified      # counted on the file in the repo
+      installable: verified
+      install_paths: documented
+      reload: documented
+      arguments: verified
+      invocation: documented
+      multi_turn: verified
+      subagents: verified
+      ask: verified
+      detach: verified
+      native_tool: verified
+      session_runner_provider: documented
+      default_subagent_runner: verified
+      subagent_tiers: verified
+      runners: documented
+      nested_exec: documented
+      env_guards: documented
+      max_concurrent_subagents: documented
+      timeout_ceiling_s: documented
+      timeout_override: documented
+
+  codex:
+    # Same skills format, and no longer on paper. The 2026-08-24 container
+    # documented-invocation row installed this shim into a fresh `$HOME` and codex
+    # enumerated it, advertising `multi-llm` to the model inside
+    # `<skills_instructions>` with its `SKILL.md` locator — so the format claim
+    # itself is measured. What the same row measured is the half that claim never
+    # covered, and it is a negative: see `invocation` below. A codex skill is
+    # reached by the MODEL choosing to read it; the composer rejects `/multi-llm`
+    # outright. `invocation` is therefore the one cell promoted to `verified` here.
+    # shim/arguments/install_paths stay `documented`: that row graded the host's
+    # command surface in one scope on one platform, not placeholder substitution
+    # and not the rest of the path matrix, and a promotion may not claim more than
+    # the run behind it.
+    shim: {template: hosts/codex/shim.md.tmpl, installed: SKILL.md,
+           format: markdown+frontmatter}
+    installable: true
+    install_paths:
+      # A preferred entry names the directory to write into (the file name comes
+      # from `shim.installed`); a legacy entry names the FILE, because a
+      # deprecated layout's file name is the host's own old convention and not
+      # ours. Deprecated Codex prompts were `~/.codex/prompts/<command>.md`, so
+      # the copy to detect is `multi-llm.md` — probing `prompts/SKILL.md` would
+      # be a path no install of any vintage ever created.
+      project: [".codex/skills/multi-llm"]
+      global: ["$HOME/.codex/skills/multi-llm"]
+      legacy: ["$HOME/.codex/prompts/multi-llm.md"]
+    reload: new-session
+    arguments: placeholder
+    # MEASURED 2026-08-24, codex-cli 0.146.0, container documented-invocation row,
+    # and it is a NEGATIVE result: typing `/multi-llm --review-plan <plan>` into a
+    # fresh composer prints `Unrecognized command '/multi-llm'` and sends nothing
+    # at all — no request reached the stub. The `/` popup lists no skill, `/multi`
+    # offers no completion, and a file at the deprecated `install_paths.legacy`
+    # prompts location is rejected the same way. Headless, `codex exec "/multi-llm
+    # …"` passes the line through verbatim. The shim IS discovered — codex
+    # advertises it to the model inside `<skills_instructions>` with its `SKILL.md`
+    # locator — so it is model-invoked rather than typed, which is what this
+    # sentence has to say. Read into the generated pages after "Invoke it ".
+    invocation: >-
+      by name rather than as a slash command — `Use the multi-llm skill with
+      exactly these arguments: <the same arguments the Claude Code skill takes>`.
+      Codex installs this shim as a **skill**, which is model-invoked rather than
+      typed: its composer answers `/multi-llm` with `Unrecognized command`.
+    multi_turn: true                 # documented, not observed: `codex exec`
+                                     # runs a tool loop and `codex exec resume`
+                                     # continues the session — either would give
+                                     # the agent the follow-up turn.
+    subagents: executor              # agents are GA in the TUI; spawn-from-exec is
+                                     # unconfirmed, and the failure is
+                                     # silent-then-fatal, so the exec profile is
+                                     # `executor` until a recorded run says
+                                     # otherwise. native_tool names the tool for
+                                     # documentation, not for dispatch.
+                                     #
+                                     # EVIDENCE, NOT A PROMOTION (2026-08-25,
+                                     # codex-cli 0.149.1, read out of the captured
+                                     # tools[] array of a real headless request):
+                                     # `multi_agent_v1` IS offered in `codex exec`,
+                                     # carrying spawn_agent, wait_agent, send_input,
+                                     # resume_agent and close_agent with a
+                                     # documented model-override list. That closes
+                                     # "is it offered" and leaves "does it work"
+                                     # open, which is the half this cell grades — a
+                                     # tool in the array is not a recorded run, and
+                                     # the failure mode here is silent-then-fatal.
+                                     # One detail a `native` promotion would have to
+                                     # clear: spawn_agent's own description reads
+                                     # "Do not spawn sub-agents unless the user or
+                                     # applicable AGENTS.md/skill instructions
+                                     # explicitly ask" — a skill CAN grant that
+                                     # permission, so the lever exists.
+    ask: free-text                   # request_user_input is Plan-Mode-only
+                                     #
+                                     # EVIDENCE, NOT A PROMOTION (same capture):
+                                     # request_user_input is in the tool list and
+                                     # its own description says "This tool is only
+                                     # available in Plan mode." — which CONFIRMS the
+                                     # line above rather than contradicting it, so
+                                     # the cell does not move. What is new is a flag
+                                     # to watch: `codex features list` reports
+                                     # `default_mode_request_user_input under
+                                     # development false`. That is the switch that
+                                     # would make the tool generally available, so
+                                     # re-probe it on each codex bump.
+    detach: python
+    native_tool:
+      subagents: agent
+    # No session rung. `codex exec` does take `--model`, so the CLI half would
+    # work — what is missing is the other half: nothing in this host's skill
+    # surface hands the running session's selected model to the dispatcher, so
+    # there is no value to promote. An explicit `null` rather than an omission,
+    # because "this host has no session rung" is a fact worth stating; the day
+    # codex exposes the session model, this becomes `codex` and the ladder needs
+    # no edit.
+    session_runner_provider: null
+    # UNVALIDATED MODEL ID — THE ROSTER OWNS THE ID; THIS PIN FOLLOWS IT. This is
+    # a credential-free floor (the last rung of `resolve_subagent_runner`'s
+    # ladder, chosen so a zero-config install dispatches at all), not an
+    # independent opinion about which model is current. `providers.yaml` is where
+    # the codex model is actually chosen and re-measured (0626b9e moved the whole
+    # fan-out to gpt-6-astra against a live catalog), so the edit only ever runs
+    # one way: the roster moves, then this pin. The fan-out's `:xhigh` effort
+    # suffix does NOT come across — the floor takes the model's default effort
+    # until somebody measures that it is not enough for a subagent dispatch.
+    # No test resolves this id against a catalog (only kilocode has a captured
+    # one), so this rule buys consistency, not correctness: after it, the pin is
+    # wrong only when the roster is. Whoever finds a dead id edits
+    # `providers.yaml` and lets this line follow.
+    default_subagent_runner: "codex:gpt-6-astra"
+    subagent_tiers: null             # forbidden to carry a map: subagents != native
+    runners:
+      codex: {bundled: true, needs_auth: false, login_cmd: "",
+              profiles: [generate, agent-readonly, agent-write], usage: full}
+      claude-code: {bundled: false, needs_auth: true, login_cmd: "claude login",
+                    profiles: [generate, agent-readonly, agent-write], usage: full}
+    nested_exec: {spawn: unknown, network: unknown, credentials: unknown,
+                  notes: "Filled by the Phase 2 nested-exec smoke: --exec-subagents
+                    launched from inside `codex exec`'s own sandboxed shell, for
+                    both the same-host runner and a third-party one."}
+    # Empty because the env diff has not run yet, not because the host is clean —
+    # which is what provenance: unknown records.
+    env_guards: {guards: [], session_scoped: [], passthrough: []}
+    max_concurrent_subagents: 4
+    timeout_ceiling_s: 0             # 0 = no documented cap on `codex exec`
+    timeout_override: {frontmatter: none, env: unknown, config: unknown}
+    # A second install route — the Codex plugin marketplace — NOT a second host,
+    # for the same reason as opencode's block below: every harness property above
+    # is the same however the skill got installed. What the plugin adds is a
+    # model-callable `multi_llm` tool (an MCP server bundled with the plugin) and
+    # a thin skill advertised as `multi-llm:multi-llm` that points at it. A
+    # plugin exposes no slash command (R21), so `provides` has no `command`.
+    #
+    # `update: reinstall` is two different commands from the install, not the
+    # install re-run: `marketplace add` on a marketplace already added is a
+    # no-op ("Marketplace … is already added", R37), so the upgrade is
+    # `codex plugin marketplace upgrade` then `codex plugin add`, then a new
+    # session (R30). The renderer's registry row owns that sentence.
+    #
+    # No `version`: the number is owned by `skills/multi-llm/pyproject.toml`,
+    # and the codex end of that chain is the GENERATED
+    # `.codex-plugin/plugin.json`, never a hand-typed copy here.
+    package:
+      registry: codex-marketplace
+      name: multi-llm
+      marketplace: beastlabai
+      repo: beastlabai/multi-llm-plugin
+      ref: release
+      sparse: [.agents, packaging/codex]
+                                      # The slug, the ref and the two sparse paths the first
+                                      # install command needs. Cells rather than literals in
+                                      # the shared form string, which every later
+                                      # codex-marketplace package would inherit.
+      config_key: plugins             # [plugins."multi-llm@beastlabai"] in $CODEX_HOME/config.toml (R15)
+      provides: [skill, tool]         # NOT command (R21)
+      update: reinstall               # `marketplace upgrade` then `plugin add` (R30/R37)
+      write_posture: refuses-under-readonly
+                                      # The server runs outside the session's exec sandbox
+                                      # (R46), so an install hands a `--sandbox read-only`
+                                      # session a write path it had refused (R45).
+                                      # Write-capable modes are refused before the spawn
+                                      # unless MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1 is in the
+                                      # environment (D3b). The renderer reads this cell into
+                                      # the generated install paragraph, so a user meets it
+                                      # before installing, not after.
+      min_host_version: "0.156.1"     # the pin; replaced by the version the first green plugin row
+                                      # reports, since the schema's own wording is "the lowest actually RUN"
+                                      # — and not bisected (Open question 5)
+      invocation: >-
+        by name with its namespace — `Use the multi-llm:multi-llm skill with exactly
+        these arguments: <the same arguments the Claude Code skill takes>` — or by the
+        model calling the `multi_llm` tool directly.
+    provenance:
+      shim: documented
+      installable: documented
+      install_paths: documented
+      reload: documented
+      arguments: documented
+      invocation: verified
+      multi_turn: documented
+      subagents: documented
+      ask: documented
+      detach: documented
+      native_tool: documented
+      session_runner_provider: documented
+      default_subagent_runner: documented
+      subagent_tiers: documented
+      runners: documented
+      nested_exec: unknown
+      env_guards: unknown
+      max_concurrent_subagents: documented
+      timeout_ceiling_s: unknown
+      timeout_override: unknown
+      # `documented` until a Git-route install is recorded: the `release` ref
+      # the install line names does not exist until the publish workflow first
+      # moves it, so today `marketplace add … --ref release` fails loudly with a
+      # git error. The container's local-path installs never promote this line
+      # (a local directory is not the published route).
+      package: documented
+
+  opencode:
+    # commands/ is PLURAL — the singular command/ path is simply not scanned.
+    shim: {template: hosts/opencode/shim.md.tmpl,
+           installed: commands/multi-llm.md, format: markdown+frontmatter}
+    installable: true
+    install_paths:
+      project: [".opencode/commands"]
+      global: ["$XDG_CONFIG_HOME/opencode/commands", "$HOME/.config/opencode/commands"]
+      # Empty on purpose, and `.opencode/command` is the entry that is NOT here:
+      # OpenCode never scans the singular directory, so a file sitting in it is
+      # not a copy that loads. Listing it would make `--check` report — and, as
+      # the highest-precedence project location, *rank first* — a file the host
+      # will never discover, marking the real install shadowed. A compatibility
+      # location is a place an install of an older vintage really works, never
+      # a place a file might merely exist.
+      legacy: []
+    reload: new-session
+    arguments: placeholder           # $ARGUMENTS / $1 — verified: the message
+                                     # text reaches the command body.
+    # Measured, and a trap worth shipping: `opencode run` parses the message
+    # with yargs, so an argument list that STARTS with a flag (`--ask …`,
+    # `--review-plan …` — i.e. every invocation this skill takes) is swallowed
+    # as an option and the run silently prints yargs' own help instead. The
+    # `--` separator is mandatory headless. Harmless in the TUI, where
+    # `/multi-llm --ask …` needs no separator.
+    headless_invocation: 'opencode run --command multi-llm -- "<args>"'
+    # MEASURED 2026-08-24, opencode 1.18.18, container documented-invocation row:
+    # the published spelling WORKS in a fresh TUI session. Typing
+    # `/multi-llm --review-plan <plan>` expanded the installed command into the
+    # turn the host sent — the shim's own text, its dispatcher block with
+    # `{SKILL_DIR}` already substituted, the baked `--host opencode --yes
+    # --exec-subagents`, and the mode flag still adjacent to its argument. Read
+    # into the generated pages after "Invoke it "; the headless correction above
+    # is rendered separately, because `--command` is what resolves the shim
+    # there, not this spelling.
+    invocation: "as `/multi-llm <the same arguments the Claude Code skill takes>`."
+    # A second, recommended install route — NOT a second host. `reload`,
+    # `subagents`, `ask`, `detach`, `max_concurrent_subagents` and
+    # `timeout_ceiling_s` are properties of this harness, not of how the skill
+    # got installed, so an `opencode-plugin` host id would duplicate every one
+    # of them and split the matrix.
+    #
+    # What it buys over the file shim: the plugin computes the skill dir from
+    # its own on-disk location at every startup, so there is no baked absolute
+    # prefix to go stale and no `install-host --all` owed after an update. The
+    # baked flags stop being prose a model may improvise past and become code
+    # the plugin appends.
+    #
+    # `update: pinned-spec` is not a preference. The npm cache key is the
+    # literal spec string and the installer early-returns whenever the package
+    # directory already exists, so an unpinned entry resolves ONCE and never
+    # again — bumping the pin is the only clean upgrade, and there is no
+    # `opencode plugin update` command.
+    #
+    # `version` is a COPY. The number is owned by
+    # `skills/multi-llm/pyproject.toml` — which ships *inside* the tarball, so a
+    # package declaring a different one would ship a payload that disagrees with
+    # it — and `test_version_source_is_singular` asserts the chain.
+    package:
+      registry: npm
+      name: opencode-multi-llm
+      version: "0.1.0"
+      config_key: plugin
+      provides: [command, tool]
+      min_host_version: "1.18.18"   # the lowest version actually RUN, not the
+                                    # lowest that might work: `engines` is a hard
+                                    # gate, and a floor asserted from an
+                                    # assumption either admits a version that
+                                    # then fails somewhere less legible or gets
+                                    # defended by a claim no evidence backs.
+      update: pinned-spec
+      invocation: "as `/multi-llm <the same arguments the Claude Code skill takes>`, or by calling the `multi_llm` tool directly."
+    multi_turn: true                 # measured: its agent takes further tool
+                                     # turns inside one `opencode run` and acts
+                                     # on what they printed — see the promotion
+                                     # note below.
+    subagents: executor              # `mode: subagent` dispatch is documented only;
+                                     # dispatch is instructed in the command body,
+                                     # never via frontmatter `subtask:` (which the
+                                     # parser accepts and then ignores).
+    ask: free-text                   # the `question` tool is unreliable headless
+    detach: required                 # the ~120 s bash cap is documented, not
+                                     # measured, and every fan-out mode runs far
+                                     # longer than it — so no foreground fan-out
+                                     # path is offered at all.
+    native_tool:
+      subagents: task
+    # A CREDENTIAL-FREE FLOOR WITH A KNOWN EXPIRY, NOT A RECOMMENDATION (D3).
+    # This is the last rung of `resolve_subagent_runner`'s ladder — what a user
+    # who configured nothing falls to — so its one requirement is that it
+    # dispatches on a fresh install with nothing logged in. It is NOT the
+    # recommended validation runner: validation-grade work configures
+    # `driver.subagent_runner` with a full-capability model (`providers.yaml`
+    # ships `claude-code:sonnet` in that shape). `opencode/big-pickle` is a Zen
+    # stealth id served from the same server-side catalog that retired
+    # `opencode/sonnet`, so it is measured, dated, and re-probed on each
+    # opencode bump — that re-probe is the gate on any commit that moves an
+    # opencode version (container pin, `engines` floor, or a fixture
+    # recapture), and `tests/test_container_host_lane.py`'s catalog diff is
+    # what makes a skipped ritual visible.
+    #
+    # PROBED 2026-09-11 on opencode 1.18.30 (the installed build), zero
+    # credentials: HOME, XDG_CONFIG_HOME, XDG_DATA_HOME and XDG_STATE_HOME at
+    # empty scratch dirs (`opencode auth list` → `└  0 credentials`), with
+    # OPENAI_API_KEY, GEMINI_API_KEY, ANTHROPIC_API_KEY and OPENROUTER_API_KEY
+    # unset, never wrapped in `timeout` (which wedges `opencode run`).
+    #   $ opencode models | grep '^opencode/'      (same 7 ids from the user's
+    #   opencode/big-pickle                          own HOME and the scratch one:
+    #   opencode/ling-3.0-flash-fin-free             the listing is a catalog,
+    #   opencode/mimo-v2.5-free                      not an entitlement check)
+    #   opencode/muse-spark-1.2-contributor-free
+    #   opencode/muse-spark-1.3-contributor-free
+    #   opencode/nemotron-3-ultra-free
+    #   opencode/nemotron-3.5-lightning-free
+    # No `opencode/sonnet`, `opencode/deepseek-v4-flash-free` or
+    # `opencode/hy3-free` (all three dropped from providers.yaml the same day).
+    #   `opencode run --model <id> --print-logs --log-level ERROR
+    #    "Reply with the single word OK."`
+    #   opencode/big-pickle                 exit 0, stdout `OK`, a few seconds
+    #   opencode/nemotron-3.5-lightning-free zero bytes on either stream >7 min,
+    #                                        killed (exit 143)
+    #   opencode/sonnet                     exit 1, `ProviderModelNotFoundError:
+    #                                        Model not found: opencode/sonnet`
+    # The `*-free` siblings are NOT the safer alternative: the one probed
+    # reproduced the zero-byte hang, which costs `default_timeout` per task.
+    # VALIDATION-BATCH GATE (existence is not fitness), MEASURED 2026-09-11
+    # from the same zero-credential pair, opencode 1.18.30: a scratch git repo
+    # whose `.multi-llm/providers.yaml` set `driver.subagent_runner:
+    # opencode:opencode/big-pickle` (and `quick_models` to the same id, so the
+    # whole run was credential-free), `multi_llm.py review-plan plans/tiny.md
+    # --host opencode --yes --quick --exec-subagents` over the 285-byte
+    # tests/fixtures/sample_plan.md: 12 suggestions → 10 groups → 7
+    # `agent-readonly` validation batches; `subagent_batch_report.json`
+    # `counts: {ok: 7}`, 0 unparseable_result, 0 schema_invalid, 7 attempts,
+    # 34,679 tokens at `cost_usd: 0.0`, batches 4.5–29 s each; `validation.json`
+    # carried 10 per-group verdicts each with its own reason and confidence
+    # (0.85–0.98). Exit 0, 77 s wall clock.
+    # The preflight itself, same pair, completes rather than exiting 3:
+    # `auth: not-required`, `model_catalog: ok`, `nested_exec: allowed`, while
+    # `opencode:openrouter/deepseek/deepseek-v4-flash-0731` on the same CLI in
+    # the same process is refused `not_authenticated`.
+    # If this id vanishes: the replacement is whichever `opencode/*` id answers
+    # `OK` from a zero-credential HOME AND clears the validation-batch gate; if
+    # none does, opencode has no credential-free default — drop the entry from
+    # `OpenCodeProvider.credential_free_models` in the same commit and let the
+    # out-of-the-box run refuse `not_authenticated` with its login hint.
+    # The floor (1.18.18) is the LOWEST VERSION EVER RUN, not what the lane
+    # pins: the container moved to 1.18.31 on 2026-09-19, so nothing exercises
+    # the floor itself any more. It stays where it is because lowering a floor
+    # needs a recorded run at the lower version and raising one needs a reason;
+    # `test_engines_floor_matches_the_container_pin` asserts floor <= pin, which
+    # is the direction that matters -- the container must be able to load what
+    # the package declares it supports.
+    # THE SESSION RUNG (`resolve_subagent_runner`, layer `session`). Names the
+    # CLI of this host's own that can be pointed at whatever model the *session*
+    # is currently running on, which the plugin exports as
+    # `MULTI_LLM_HOST_SESSION_MODEL` (owned by `utils/provider_registry.py`; the
+    # plugin reads the name out of the generated cli-surface.json and never
+    # spells it in JS). The rung sits below every explicit `driver.*` layer and
+    # above `default_subagent_runner`.
+    #
+    # WHY. A `--review-plan --quick` run launched from the TUI with
+    # "Nemotron 3 Ultra Free · OpenCode Zen" selected validated all sixteen of
+    # its batches on `opencode/big-pickle`: no layer above the floor had an
+    # opinion, and the floor is a credential-free *default*, not a choice anyone
+    # made. The session's own model is the nearest thing to an operator opinion
+    # that exists when no config file does.
+    #
+    # MEASURED 2026-09-11, opencode 1.18.30 (the installed build), never wrapped
+    # in `timeout`:
+    #   $ opencode run --model opencode/nemotron-3-ultra-free \
+    #       "Reply with the single word OK."
+    #   OK                                 exit 0, 62 s
+    # So `opencode run --model <the session's own id>` really serves a TUI model
+    # id, which is the whole claim this field makes. `opencode/big-pickle` stays
+    # the credential-free floor below it, and the fallback is what keeps the
+    # rung safe: a session model that fails preflight for any reason (a private
+    # id, a logged-out provider, an unresolvable slug) drops to the next rung
+    # with one printed line rather than refusing the batch.
+    session_runner_provider: opencode
+    default_subagent_runner: "opencode:opencode/big-pickle"
+    subagent_tiers: null
+    runners:
+      opencode: {bundled: true, needs_auth: false, login_cmd: "",
+                 profiles: [generate, agent-readonly, agent-write], usage: full}
+      claude-code: {bundled: false, needs_auth: true, login_cmd: "claude login",
+                    profiles: [generate, agent-readonly, agent-write], usage: full}
+    nested_exec: {spawn: unknown, network: unknown, credentials: unknown,
+                  notes: "Filled by the Phase 3 nested-exec smoke from inside
+                    `opencode run`."}
+    env_guards: {guards: [], session_scoped: [], passthrough: []}
+    max_concurrent_subagents: 4
+    timeout_ceiling_s: 120           # documented default bash timeout
+    # No `timeout` field exists in the V2 command contract, so the ceiling moves
+    # only through the environment/config surface — and the installer only ever
+    # writes through a non-`none` channel.
+    timeout_override: {frontmatter: none, env: unknown, config: unknown}
+    # Promoted from a recorded smoke on opencode 1.18.12 (2026-08-08): the
+    # installed command was discovered by name in a new session, its uv
+    # preflight ran ahead of the first `uv run`, the baked prefix resolved, and
+    # a `--detach`ed `ask` fan-out was polled through `status --wait` to a
+    # terminal `done` and its answers file read back. That same run settles
+    # `multi_turn`, which had shipped `false` on nothing: its agent took four
+    # tool turns inside a single `opencode run` — `command -v uv`, then
+    # `util instructions status`, then `status`, then a read of the answers —
+    # and followed `MULTI_LLM_RESULT.next` on its own initiative, which is
+    # precisely the follow-up turn the field claims. Everything that run did
+    # not exercise stays where it was — in particular `subagents` (no subagent
+    # was dispatched) and `ask` (nothing was asked), which is what keeps the
+    # conservative resolution in force.
+    provenance:
+      shim: verified
+      installable: verified
+      install_paths: verified
+      reload: verified
+      arguments: verified
+      headless_invocation: verified
+      # `documented` until a real registry install is observed. Nothing is on a
+      # registry yet, so every claim here is host docs plus a local build — and
+      # the generated "Install via npm" paragraph is written to say exactly
+      # that. Promoting this to `verified` and re-rendering is what turns the
+      # same paragraph into a recommendation.
+      #
+      # THE CONTAINER LANE NOW EXERCISES THIS ROUTE AND IT STILL DOES NOT PROMOTE
+      # IT. Since 2026-09-19 two `route: package` rows
+      # (`opencode-package-ask`, `opencode-package-review-plan`) install the
+      # plugin from `/opt/mllm/opencode-plugin` and pass against a real model, and
+      # `harness.candidate_promotions` duly prints `package documented → verified`
+      # after each. It is declined on purpose: those rows install a LOCAL
+      # DIRECTORY, and the sentence above makes a *registry* install the
+      # criterion. Promoting on local-build evidence would re-render the generated
+      # paragraph into "install via npm" for a package npm does not carry.
+      # What the rows do earn is narrower and lives where it is measured: the
+      # plugin loads, injects its command and dispatches. The day
+      # `opencode-publish` succeeds, one registry-spec row promotes this line.
+      package: documented
+      invocation: verified
+      multi_turn: verified
+      subagents: documented
+      ask: documented
+      detach: verified
+      native_tool: documented
+      session_runner_provider: documented
+      default_subagent_runner: documented
+      subagent_tiers: documented
+      runners: documented
+      nested_exec: unknown
+      env_guards: unknown
+      max_concurrent_subagents: documented
+      timeout_ceiling_s: documented
+      timeout_override: unknown
