@@ -492,8 +492,11 @@ def _attribution_notes(model: str, entry: Any) -> List[str]:
             f"served by {served}, fallback" if entry.get("fallback")
             else f"served by {served}"
         )
-    if entry.get("sandbox") == "bypassed":
+    sandbox = entry.get("sandbox")
+    if sandbox == "bypassed":
         notes.append(SANDBOX_BYPASSED_LABEL)
+    elif isinstance(sandbox, str) and sandbox.startswith(SANDBOX_FALLBACK_WORD_PREFIX):
+        notes.append(sandbox_fallback_label(sandbox))
     return notes
 
 
@@ -515,7 +518,10 @@ def served_model_label(
     ``sandbox: "bypassed"`` in the entry appends ``ran unsandboxed:
     sandbox_fallback=auto``, so a report reader sees which slot's findings
     came from a model that ran with the operator's shell rights — beside the
-    served-model note when both apply, alone when only one does.
+    served-model note when both apply, alone when only one does. A slot on a
+    **contained** fallback rung (``sandbox: "fallback-landlock"``, 2026-09-22)
+    is not unsandboxed and never gets that label: it gets
+    :func:`sandbox_fallback_label` instead, which names the rung.
     """
     notes = _attribution_notes(model, (served_models or {}).get(model))
     if not notes:
@@ -595,6 +601,25 @@ def sum_usage(usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
 #: kept the slot out), and the reader of a report is the person who should
 #: know it.
 SANDBOX_BYPASSED_LABEL = "ran unsandboxed: sandbox_fallback=auto"
+
+#: The ``models_served`` word prefix for a slot on a **contained** fallback
+#: rung (``fallback-landlock``) — ``llm_client.SANDBOX_FALLBACK_WORD_PREFIX``,
+#: spelled here because this renderer reads recorded data and imports no
+#: provider code.
+SANDBOX_FALLBACK_WORD_PREFIX = "fallback-"
+
+
+def sandbox_fallback_label(word: str) -> str:
+    """The report note for a slot on a contained fallback rung.
+
+    Says the slot was sandboxed — by a fallback boundary, named — because its
+    findings came from a model whose writes the kernel denied, which is the
+    opposite of what :data:`SANDBOX_BYPASSED_LABEL` tells a reader.
+    """
+    rung = word[len(SANDBOX_FALLBACK_WORD_PREFIX):] if word.startswith(
+        SANDBOX_FALLBACK_WORD_PREFIX
+    ) else word
+    return f"sandboxed by fallback rung: {rung}"
 
 
 def extract_section_contexts(
@@ -1414,6 +1439,16 @@ def generate_html_report(
             model_metadata[model]["sandbox"] = "bypassed"
             model_metadata[model]["model"] = (
                 f"{model_metadata[model]['model']} (unsandboxed)"
+            )
+        # Landlock rung (2026-09-22): a contained fallback rung is a sandbox,
+        # so the badge names the rung and never says "unsandboxed".
+        elif isinstance(served_entry, dict) and str(
+            served_entry.get("sandbox") or ""
+        ).startswith(SANDBOX_FALLBACK_WORD_PREFIX):
+            word = served_entry["sandbox"]
+            model_metadata[model]["sandbox"] = word
+            model_metadata[model]["model"] = (
+                f"{model_metadata[model]['model']} ({sandbox_fallback_label(word)})"
             )
         # Stage U: what this slot spent, on the same metadata dict the badge is
         # rendered from — the numbers for anything that wants to compute, and

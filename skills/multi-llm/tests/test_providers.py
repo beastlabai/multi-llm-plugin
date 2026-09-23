@@ -6293,6 +6293,10 @@ _DESCRIBE_FAILURE_CHANNELS = {
     # declared stdout channel to answer on its own — and composing the two would
     # let stderr edit an answer the stream had already given.
     "omp": STDOUT_ELSE_STDERR,
+    # codex names one failure only — the exit-101 panic a globally enabled
+    # `use_legacy_landlock` causes on every workspace-write dispatch (landlock
+    # rung, constraint 2) — and a Rust panic is printed on stderr.
+    "codex": "stderr",
 }
 
 

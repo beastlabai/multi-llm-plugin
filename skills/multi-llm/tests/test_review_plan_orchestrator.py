@@ -37,6 +37,8 @@ _RESERVED_PROGRESS_KEYS = {
     # Written straight through ``update_status`` by the two executor mirrors,
     # so they already reach a foreground checkpoint.
     "subagents", "write_subagents", "sandbox_bypassed",
+    # Landlock rung (2026-09-22): the contained-rung slots, `{spec: rung}`.
+    "sandbox_fallback",
 }
 
 

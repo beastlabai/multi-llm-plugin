@@ -73,8 +73,10 @@ from utils.progress_tracker import FanoutProgress, PhaseProgress
 from utils.review_orchestrator_base import (
     backfill_deadline_losses,
     bypass_ignore_prefixes,
+    boundaryless_sibling_count,
     bypass_write_violation,
     maybe_detach,
+    porcelain_check_applies,
     porcelain_snapshot,
     read_plan,
     run_models_concurrent,
@@ -1011,8 +1013,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
             return {"model": model_spec, "success": False, "error": sandbox.reason,
                     "source": "not-dispatched"}
         tree_before = None
-        if sandbox.bypass:
+        # Any fallback rung prints its one line: `[SANDBOX_FALLBACK]` for a
+        # contained rung, `[SANDBOX_BYPASSED]` for the uncontained one.
+        if sandbox.fallback:
             print(f"[{model_spec}] {sandbox.reason}")
+        if porcelain_check_applies(sandbox):
             tree_before = await asyncio.to_thread(porcelain_snapshot, project_root)
 
         sanitized = sanitize_model_name(model_spec)
@@ -1084,14 +1089,19 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # is success regardless of how the subprocess exited" was written for
         # a slot that could not write anything else. The question dir itself
         # is the plugin's own tree and is excluded (`bypass_ignore_prefixes`).
-        if sandbox.bypass:
+        if porcelain_check_applies(sandbox):
             tree_after = await asyncio.to_thread(porcelain_snapshot, project_root)
             touched = unexpected_writes(
                 tree_before, tree_after,
                 ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
             )
             if touched:
-                violation = bypass_write_violation(provider_name, touched)
+                siblings = await asyncio.to_thread(
+                    boundaryless_sibling_count, model_spec, project_root, plan_path
+                )
+                violation = bypass_write_violation(
+                    provider_name, touched, boundaryless_siblings=siblings
+                )
                 print(f"[{model_spec}] {violation}")
                 write_error_log(question_dir, model_spec, violation, result)
                 # `collect_completed` reads the answer files, not this return,

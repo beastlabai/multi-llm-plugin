@@ -1879,8 +1879,13 @@ if provider is None:
     print(json.dumps({{"state": "unknown",
                        "tail": "no built-in adapter for " + {cli!r}}}))
 else:
-    state, tail = sandbox_verdict(provider, {profile!r})
-    print(json.dumps({{"state": state, "tail": tail}}))
+    # Indexed, never a two-value unpack: `sandbox_verdict` returns a NamedTuple
+    # whose third field is the fallback rung, and a stale `state, tail = …`
+    # raises rather than drop it. Indexing also reads an older image's plain
+    # `(state, tail)` the same way.
+    verdict = sandbox_verdict(provider, {profile!r})
+    print(json.dumps({{"state": verdict[0], "tail": verdict[1],
+                       "rung": getattr(verdict, "rung", None)}}))
 """
 
 

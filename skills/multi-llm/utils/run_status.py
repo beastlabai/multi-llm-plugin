@@ -745,6 +745,16 @@ def _progress_text(progress: Dict[str, Any]) -> str:
     bypassed = progress.get("sandbox_bypassed")
     if isinstance(bypassed, list) and bypassed:
         parts.append(f"unsandboxed {', '.join(map(str, bypassed))}")
+    # Landlock rung (2026-09-22): a slot on a *contained* fallback rung is
+    # recorded under `progress.sandbox_fallback` as `{spec: rung}` and rendered
+    # by rung name — never as "unsandboxed", which is the one thing it was not.
+    contained = progress.get("sandbox_fallback")
+    if isinstance(contained, dict) and contained:
+        by_rung: Dict[str, List[str]] = {}
+        for spec, rung in contained.items():
+            by_rung.setdefault(str(rung), []).append(str(spec))
+        for rung in sorted(by_rung):
+            parts.append(f"sandbox-fallback {rung} {', '.join(sorted(by_rung[rung]))}")
     return ", ".join(parts) or NO_PROGRESS_RECORDED
 
 

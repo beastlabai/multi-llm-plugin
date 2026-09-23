@@ -88,14 +88,18 @@ from utils.review_orchestrator_base import (
     retire_salvage_artifacts,
     retire_stale_validation,
     retire_stale_validation_round,
+    announce_retired_rungs,
     bypass_ignore_prefixes,
+    boundaryless_sibling_count,
     bypass_write_violation,
+    porcelain_check_applies,
     porcelain_snapshot,
     record_sandbox_bypassed,
     recorded_served_models,
     recorded_usage,
     sandbox_fallback_kwargs,
     sandbox_refusal,
+    spawn_fanout_slot,
     unexpected_writes,
     update_status,
     write_status,
@@ -140,11 +144,11 @@ from utils.json_extractor import (
     sanitize_model_name,
 )
 from utils.llm_client import (
-    SANDBOX_BYPASSED,
     describe_output_file,
     describe_usage,
     invoke_with_file_output,
     invoke_with_provider,
+    sandbox_record_word,
 )
 from utils.git_utils import (
     capture_file_context,
@@ -1189,8 +1193,9 @@ async def run_single_review(
             )
         return False, None, sandbox.reason
     tree_before = None
-    if sandbox.bypass:
+    if sandbox.fallback:
         print(f"[{display_name}] {sandbox.reason}")
+    if porcelain_check_applies(sandbox):
         tree_before = await asyncio.to_thread(porcelain_snapshot, project_root)
 
     # Generate log file path for debugging
@@ -1312,8 +1317,12 @@ async def run_single_review(
         if details.get("served_model"):
             entry["served_model"] = details["served_model"]
             entry["fallback"] = bool(details.get("served_model_is_fallback"))
-        if details.get("sandbox") == SANDBOX_BYPASSED:
-            entry["sandbox"] = SANDBOX_BYPASSED
+        # A contained rung arrives as its rung id (`landlock`), so map through
+        # the same helper the review-plan collector uses: `bypassed` for the
+        # uncontained rung, `fallback-<rung>` for a contained one.
+        word = sandbox_record_word(details.get("sandbox"))
+        if word:
+            entry["sandbox"] = word
         if entry:
             served_models[model_spec] = entry
     # Stage U: and what it spent, recorded here for the same reason and before
@@ -1329,14 +1338,19 @@ async def run_single_review(
     # slot that changed the working tree is failed by path whatever the
     # invocation reported — nothing is restored, and nothing it returned is
     # parsed as a review. Skipped entirely (no git call) for a sandboxed slot.
-    if sandbox.bypass:
+    if porcelain_check_applies(sandbox):
         tree_after = await asyncio.to_thread(porcelain_snapshot, project_root)
         touched = unexpected_writes(
             tree_before, tree_after,
             ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
         )
         if touched:
-            violation = bypass_write_violation(provider_name, touched)
+            siblings = await asyncio.to_thread(
+                boundaryless_sibling_count, model_spec, project_root, plan_path
+            )
+            violation = bypass_write_violation(
+                provider_name, touched, boundaryless_siblings=siblings
+            )
             print(f"[{display_name}] {violation}")
             # Failed by path, whatever the invocation reported: `source` records
             # which channel the rejected answer arrived on, `error` why nothing
@@ -1791,7 +1805,7 @@ async def run_all_reviews(
     # from either. Scheduling is unchanged: nothing between here and the
     # `gather` awaits, and `gather` would have scheduled them at the same point.
     tasks = [
-        asyncio.create_task(run_with_semaphore(spec, idx))
+        spawn_fanout_slot(model_specs, run_with_semaphore(spec, idx))
         for idx, spec in enumerate(model_specs)
     ]
 
@@ -3053,6 +3067,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # that really re-ran is reported on what *this* attempt spent, and a
     # re-run that reported nothing keeps no stale number.
     prior_usage = recorded_usage(str(detach_phase_dir)) or {}
+    # Landlock rung (2026-09-22): the previous run's sandbox words, read before
+    # this run's `write_status` erases them (`announce_retired_rungs`).
+    prior_served = recorded_served_models(str(detach_phase_dir)) or {}
 
     # The checkpoint this phase's *own* salvage path reads back (W3). Below the
     # boundary for the same reason the base fan-out writes it there — nothing
@@ -3335,6 +3352,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         })
         # D6 override (2026-09-17): the poller's copy, under `progress`.
         record_sandbox_bypassed(str(phase_dir), served_models)
+        announce_retired_rungs(prior_served, served_models, anchor=str(plan_path))
         # Both counters, restated on the post-salvage truth. `models_done` is
         # the *terminal* count — every slot has finished by now, which is what
         # the retired slot counter meant by "done" and what a live progress line

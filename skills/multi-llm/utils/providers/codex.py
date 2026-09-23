@@ -12,16 +12,23 @@ from .base import (
     SANDBOX_FALLBACK_AUTO,
     SANDBOX_FALLBACK_OFF,
     SANDBOX_FALLBACK_POLICIES,
+    SANDBOX_CANARY_DENIED,
+    SANDBOX_CANARY_NOT_DENIED,
     SANDBOX_FALLBACK_PROFILES,
+    SANDBOX_RUNG_LANDLOCK,
+    SANDBOX_RUNG_UNSANDBOXED,
     USAGE_FULL,
     REASONING_LADDER,
     InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
+    SandboxRung,
     StructuredOutputUnavailable,
     StructuredSchema,
     _provider_block,
     _resolve_policy,
+    canary_marker_shell_words,
+    sandbox_rung_id,
     split_reasoning_effort,
 )
 
@@ -86,8 +93,27 @@ _SANDBOX_BY_PROFILE = {
 
 #: The one `--sandbox` value this adapter renders that is NOT a row of the table
 #: above, and the only way it is ever rendered is `_apply_sandbox(...,
-#: fallback=True)` — a dispatch-time override no default argv carries (D6,
-#: 2026-09-17). `danger-full-access` is codex's own third documented policy
+#: rung="unsandboxed")` — the last rung of the fallback ladder, a dispatch-time
+#: override no default argv carries (D6, 2026-09-17; ladder 2026-09-22).
+#:
+#: The ladder, walked only after the D6 probe said `unavailable` (never
+#: `unknown`) and only for the two read-only profiles in
+#: `SANDBOX_FALLBACK_PROFILES`: rung 1 `landlock` (`LANDLOCK_RUNG` below —
+#: `--sandbox read-only` + a per-dispatch `-c features.use_legacy_landlock=true`,
+#: a real kernel boundary, taken only when its canary write is denied, reported
+#: `[SANDBOX_FALLBACK]` / `sandbox: fallback-landlock`), then rung 2
+#: `unsandboxed` (this value, no boundary, reported `[SANDBOX_BYPASSED]`).
+#: `providers.codex.sandbox_fallback` gates every rung: `auto` (default) walks
+#: both, `contained` takes rung 1 and refuses rather than reach rung 2, `off`
+#: takes none and refuses — unchanged by the ladder. ⚠ Never enable landlock
+#: globally (`codex features enable use_legacy_landlock`): every
+#: `workspace-write` dispatch then panics, `agent-write` included — see
+#: `LANDLOCK_FEATURE_FLAG`. Rung 1 is read-only only and deprecated upstream
+#: (measured at 0.155.1; owner: whoever bumps the pinned codex version), so the
+#: AppArmor repair `doctor` prints is still the real fix for `agent-write`,
+#: which no rung serves.
+#:
+#: `danger-full-access` is codex's own third documented policy
 #: (`codex exec --help`: `-s, --sandbox {read-only, workspace-write,
 #: danger-full-access}`), chosen over `--dangerously-bypass-approvals-and-sandbox`
 #: because approvals are already `never` in exec mode (see `build_command`) and
@@ -106,15 +132,167 @@ _SANDBOX_BY_PROFILE = {
 #: commands (workspace-write unshares it). `agent-readonly`'s "real denial
 #: mechanism" does not exist under it; a prompt-injected validator could write.
 #: That is exactly the footing cursor-agent, pi, claude-code and muse (always
-#: `--disable-sandbox`) run the same read-only phases on, which is why the
-#: value is rendered by default (`sandbox_fallback: auto`) rather than being
-#: held back until a machine installs the AppArmor repair — codex is the one
-#: reviewer that insists on its own sandbox, and a fan-out that dropped it for
-#: that reason alone was measured (2026-09-17) to miss 2 unique validated-high
-#: issues. Still: only after the probe said `unavailable` (never `unknown`),
-#: only for the two read-only profiles in `SANDBOX_FALLBACK_PROFILES`, and
-#: `off` puts the refusal back.
+#: `--disable-sandbox`) run the same read-only phases on, which is why `auto`
+#: keeps it as the last rung rather than holding codex back until a machine
+#: installs the AppArmor repair — codex is the one reviewer that insists on its
+#: own sandbox, and a fan-out that dropped it for that reason alone was
+#: measured (2026-09-17) to miss 2 unique validated-high issues. Still: only
+#: when rung 1 is unusable, only under `auto`; `contained` and `off` never
+#: render it.
 SANDBOX_FALLBACK_VALUE = "danger-full-access"
+
+#: The one `-c` key the landlock rung adds (2026-09-22). codex-cli 0.155.1 still
+#: ships a second Linux sandbox backend, `[features] use_legacy_landlock`, which
+#: needs no user namespace — so on a machine where bubblewrap cannot start it
+#: starts, and it really contains: under `sandbox_mode="read-only"` every write
+#: is denied by the kernel (inside and outside cwd, `/tmp` included) and the
+#: model's shell has no network, while reads are unrestricted.
+#:
+#: ⚠ Only ever a **per-dispatch** `-c`, paired with `--sandbox read-only`.
+#: Enabled globally (`codex features enable use_legacy_landlock`, i.e. written
+#: into `~/.codex/config.toml`) it makes every `workspace-write` dispatch panic —
+#: `permission profiles requiring direct runtime enforcement are incompatible
+#: with --use-legacy-landlock`, exit 101 — `agent-write` included. Nothing here
+#: ever writes a config file or runs `codex features`; the `-c` lives and dies
+#: with the one process it is on.
+#:
+#: Deliberately **not** in `flags_verified_at_floor`: it was measured on 0.155.1
+#: alone, not at `min_version`. The rung is gated by its probe at run time
+#: instead, so a build that lacks (or has dropped) the feature falls through to
+#: the next rung by probe failure.
+LANDLOCK_FEATURE_FLAG = "features.use_legacy_landlock"
+LANDLOCK_FEATURE_PAIR = ("-c", f"{LANDLOCK_FEATURE_FLAG}=true")
+
+#: The containment canary the landlock rung's probe runs. Exit 0 proves only
+#: that a process started — a deprecated flag that is accepted and then fails
+#: open passes `sh -c 'exit 0'` while reporting a boundary that is not there —
+#: so the canary attempts the same `.multi-llm/tmp` write the profile probe
+#: uses and inverts the convention: a **denied** write (no file afterwards) is
+#: its exit 0, **and** it prints `SANDBOX_CANARY_DENIED` on stdout — the walk
+#: takes the rung only on exit 0 *with* that marker, so a CLI that prints usage
+#: and exits 0 without running the canary is not read as containment. The
+#: marker is spelled split in the script's source
+#: (`canary_marker_shell_words`), so a CLI echoing its argv cannot forge it. A
+#: write that lands is removed again and reported as exit 3 with
+#: `SANDBOX_CANARY_NOT_DENIED` on stderr, which the walk reads as a rejected
+#: rung. The write runs in a subshell because a redirection failure on a
+#: special builtin (`:`) exits a POSIX `sh` outright — measured: dash died on
+#: the denied redirect with exit 2 before the verdict line ran.
+#:
+#: Only the **write** may count as the denial. A failed `mkdir` (the sandbox
+#: refusing to create the directory, or a non-directory already at
+#: `.multi-llm/tmp`) is a setup failure, not containment: the canary then exits
+#: `LANDLOCK_CANARY_SETUP_EXIT` with `LANDLOCK_CANARY_SETUP_FAILED` on stderr
+#: and no marker, which the walk never takes. The directory is created — and
+#: proven writable — *outside* the sandbox by the walk before the probe runs
+#: (`LANDLOCK_RUNG.probe_workdir`), so under a working boundary the `mkdir -p`
+#: here is a no-op on an existing directory and a denied write can only be the
+#: boundary's, never ordinary filesystem permissions. The canary removes only
+#: the directories its own `mkdir -p` created (checked before it runs), so a
+#: fail-open probe never deletes a pre-existing — e.g. the walk's — `.multi-llm`
+#: or `.multi-llm/tmp`; what the walk created, the walk removes.
+LANDLOCK_CANARY_WORKDIR = ".multi-llm/tmp"
+LANDLOCK_CANARY_SETUP_EXIT = 4
+LANDLOCK_CANARY_SETUP_FAILED = (
+    "multi-llm sandbox canary: setup failed (no writable .multi-llm/tmp directory)"
+)
+LANDLOCK_CANARY_SCRIPT = (
+    f'd={LANDLOCK_CANARY_WORKDIR}; f="$d/sandbox-canary-$$"; m=; t=; '
+    '[ -e .multi-llm ] || [ -L .multi-llm ] || m=1; '
+    '[ -e "$d" ] || [ -L "$d" ] || t=1; '
+    'mkdir -p "$d" 2>/dev/null; '
+    'if [ ! -d "$d" ]; then [ -n "$m" ] && rmdir .multi-llm 2>/dev/null; '
+    f'echo "{LANDLOCK_CANARY_SETUP_FAILED}" >&2; '
+    f'exit {LANDLOCK_CANARY_SETUP_EXIT}; fi; '
+    'if (: > "$f") 2>/dev/null; '
+    'then rm -f "$f"; rc=3; else rc=0; fi; '
+    '[ -n "$t" ] && rmdir "$d" 2>/dev/null; '
+    '[ -n "$m" ] && rmdir .multi-llm 2>/dev/null; '
+    '[ -e "$f" ] && rc=3; '
+    f'if [ "$rc" -eq 0 ]; then echo {canary_marker_shell_words(SANDBOX_CANARY_DENIED)}; '
+    f'else echo "{SANDBOX_CANARY_NOT_DENIED}" >&2; fi; exit $rc'
+)
+
+#: The landlock rung's probe, pinned verbatim — never rebuilt from the
+#: profile's probe (whose `generate` form *writes* a byte, so under read-only
+#: landlock it would exit non-zero exactly when the rung works) nor from the
+#: dispatch argv. It carries the feature in the **dispatch's own spelling**
+#: (`-c features.use_legacy_landlock=true`, not `codex sandbox --enable
+#: use_legacy_landlock`), so probe and dispatch exercise one mechanism.
+#: Measured 2026-09-23, codex-cli 0.155.1, this repo's host (bwrap broken by
+#: `apparmor_restrict_unprivileged_userns=1`): exit 0 in 0.03 s, canary write
+#: denied, nothing left behind — with and without a pre-existing
+#: `.multi-llm/tmp`; the `--enable` spelling gives the same answer; without the
+#: flag the same argv dies on `bwrap: loopback: …` (exit 1); an unknown
+#: `features.*` key is silently ignored and also dies on bwrap (so a build
+#: without the feature reads `unavailable`, not a false pass); and under
+#: `sandbox_mode="danger-full-access"` — the fail-open shape — the canary
+#: reports the write not denied, exit 3.
+LANDLOCK_PROBE_ARGV: Tuple[str, ...] = (
+    "codex", "sandbox", *LANDLOCK_FEATURE_PAIR, "-c", 'sandbox_mode="read-only"',
+    "--", "sh", "-c", LANDLOCK_CANARY_SCRIPT,
+)
+
+#: Rung 1 — a real OS boundary on a bwrap-less machine. Serves the two
+#: read-only profiles only, and always renders `--sandbox read-only` whatever
+#: the profile's own row says (`generate` defaults to `workspace-write`, and
+#: `workspace-write` + landlock is the exit-101 panic).
+LANDLOCK_RUNG = SandboxRung(
+    name=SANDBOX_RUNG_LANDLOCK,
+    probe_argv=LANDLOCK_PROBE_ARGV,
+    argv_rewrite=("--sandbox", "read-only", *LANDLOCK_FEATURE_PAIR),
+    contained=True,
+    retires_when=(
+        "0.155.1",
+        "`[features].use_legacy_landlock` is deprecated and will be removed soon.",
+    ),
+    probe_workdir=LANDLOCK_CANARY_WORKDIR,
+)
+
+#: Rung 2 — today's D6 bypass, now the last rung rather than the first. No
+#: probe: there is no boundary to ask about.
+UNSANDBOXED_RUNG = SandboxRung(
+    name=SANDBOX_RUNG_UNSANDBOXED,
+    probe_argv=None,
+    argv_rewrite=("--sandbox", SANDBOX_FALLBACK_VALUE),
+    contained=False,
+)
+
+#: The ladder, in walk order.
+SANDBOX_FALLBACK_RUNGS: Tuple[SandboxRung, ...] = (LANDLOCK_RUNG, UNSANDBOXED_RUNG)
+_RUNGS_BY_NAME = {rung.name: rung for rung in SANDBOX_FALLBACK_RUNGS}
+
+#: Constraint 2 of the landlock rung, as codex 0.155.1 reports it: a
+#: `workspace-write` dispatch on a machine whose **own** codex config enables
+#: `[features] use_legacy_landlock` panics (exit 101,
+#: `linux-sandbox/src/linux_run_main.rs:392`) with this sentence. Matched
+#: whitespace-insensitively because the panic message may wrap.
+LANDLOCK_GLOBAL_PANIC = (
+    "permission profiles requiring direct runtime enforcement are "
+    "incompatible with --use-legacy-landlock"
+)
+
+#: What :meth:`CodexProvider.describe_failure` reports for that panic: the
+#: cause named, instead of a Rust backtrace that names no config file.
+LANDLOCK_GLOBAL_PANIC_REASON = (
+    "codex panicked because `[features] use_legacy_landlock` is enabled in "
+    "your own codex config ($CODEX_HOME/config.toml, else "
+    "~/.codex/config.toml — e.g. by `codex features enable "
+    "use_legacy_landlock`). multi-llm never sets it globally and cannot unset "
+    "it per dispatch; every workspace-write dispatch (agent-write included) "
+    "will keep panicking until that line is removed. `multi_llm.py doctor` "
+    "names the file"
+)
+
+
+def is_landlock_global_panic(stderr: str) -> bool:
+    """Whether a failed run's stderr carries constraint 2's panic sentence.
+
+    stderr only: a Rust panic is written there, never into the ``--json``
+    event stream on stdout, and :meth:`CodexProvider.describe_failure` reads
+    the one channel it declares (``tests/test_providers.py``'s channel table).
+    """
+    return LANDLOCK_GLOBAL_PANIC in " ".join((stderr or "").split())
 
 
 def sandbox_fallback_policy(anchor: Optional[str] = None) -> str:
@@ -138,6 +316,19 @@ def sandbox_fallback_policy(anchor: Optional[str] = None) -> str:
         SANDBOX_FALLBACK_POLICIES,
         SANDBOX_FALLBACK_AUTO,
         "providers.codex.sandbox_fallback",
+    )
+
+
+def _has_pair(cmd: List[str], pair: Tuple[str, str]) -> bool:
+    """Whether ``cmd`` already carries ``pair`` as adjacent flag/value elements.
+
+    The final element is the prompt (arbitrary text) and is never read as a
+    value, so a prompt that happens to spell the value cannot suppress the
+    insert.
+    """
+    flag, value = pair
+    return any(
+        cmd[i] == flag and cmd[i + 1] == value for i in range(len(cmd) - 2)
     )
 
 
@@ -530,15 +721,16 @@ class CodexProvider(LLMProvider):
         *,
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
-        sandbox_fallback: bool = False,
+        sandbox_fallback: Optional[str] = None,
         cwd: Optional[str] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """Deliver the prompt on argv or on stdin (prompt omitted from argv).
 
-        ``sandbox_fallback`` is applied on the stdin leg here and on the argv leg
-        by the base class — both through :meth:`apply_sandbox_fallback`, and
-        both **before** the prompt is dropped, so the positional rewrite sees
-        the argv exactly as :meth:`build_command` laid it out.
+        ``sandbox_fallback`` — the selected rung id — is applied on the stdin leg
+        here and on the argv leg by the base class — both through
+        :meth:`apply_sandbox_fallback` with that rung, and both **before** the
+        prompt is dropped, so the positional rewrite (and the landlock rung's
+        insert) sees the argv exactly as :meth:`build_command` laid it out.
         """
         if transport != "stdin":
             return super().build_command_for_transport(
@@ -546,8 +738,9 @@ class CodexProvider(LLMProvider):
                 schema=schema, sandbox_fallback=sandbox_fallback,
             )
         cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
-        if sandbox_fallback:
-            cmd = self.apply_sandbox_fallback(cmd, PROFILE_GENERATE)
+        rung = sandbox_rung_id(sandbox_fallback)
+        if rung:
+            cmd = self.apply_sandbox_fallback(cmd, PROFILE_GENERATE, rung)
         return cmd[:-1], prompt
 
     def sandbox_fallback_policy(
@@ -559,27 +752,51 @@ class CodexProvider(LLMProvider):
         the call sites: ``agent-write`` comes back ``None`` whatever the config
         says, so no gate that consults this hook can be talked into widening a
         write dispatch by a config line. The two read-only profiles return the
-        resolved policy (``auto`` by default), which the gates then require to
-        be ``auto`` — beside the probe verdict ``unavailable`` — and ``off`` is
-        the one word that puts the refusal back.
+        resolved policy (``auto`` by default), which the gates then match
+        against the rung the walk selected — ``auto`` takes either rung,
+        ``contained`` the landlock rung only — beside the probe verdict
+        ``unavailable``; ``off`` is the one word that puts the refusal back.
         """
         if profile not in SANDBOX_FALLBACK_PROFILES:
             return None
         return sandbox_fallback_policy(anchor)
 
-    def apply_sandbox_fallback(self, argv: List[str], profile: str) -> List[str]:
-        """Point ``argv``'s ``--sandbox`` slot at ``danger-full-access`` (D6 override).
+    def sandbox_fallback_rungs(self, profile: str) -> Tuple[SandboxRung, ...]:
+        """``(landlock, unsandboxed)`` for a read-only profile; ``()`` otherwise.
 
-        Structural, not policy: a profile outside ``SANDBOX_FALLBACK_PROFILES``
-        raises rather than rendering, so the write profile cannot reach this
-        value even from a caller that got every other gate wrong.
+        ``agent-write`` has no ladder at all: the landlock rung panics under
+        ``workspace-write`` and the uncontained rung never reaches a write
+        profile.
+        """
+        if profile not in SANDBOX_FALLBACK_PROFILES:
+            return ()
+        return SANDBOX_FALLBACK_RUNGS
+
+    def apply_sandbox_fallback(
+        self, argv: List[str], profile: str, rung: Optional[str] = None
+    ) -> List[str]:
+        """Render fallback ``rung`` onto ``argv`` (D6 override, landlock rung).
+
+        ``landlock`` writes ``read-only`` into the ``--sandbox`` slot and adds
+        ``-c features.use_legacy_landlock=true`` once; ``unsandboxed`` writes
+        ``danger-full-access``. Structural, not policy: a profile outside
+        ``SANDBOX_FALLBACK_PROFILES`` raises rather than rendering, so the write
+        profile cannot reach either rung even from a caller that got every
+        other gate wrong — and so does a missing or unknown rung, because a
+        caller that forgot to say *which* rung must not get the widest one.
         """
         if profile not in SANDBOX_FALLBACK_PROFILES:
             raise ValueError(
-                f"codex never runs the {profile!r} profile unsandboxed (the "
-                f"fallback covers: {', '.join(SANDBOX_FALLBACK_PROFILES)})"
+                f"codex never runs the {profile!r} profile on a sandbox "
+                f"fallback (the fallback covers: "
+                f"{', '.join(SANDBOX_FALLBACK_PROFILES)})"
             )
-        return self._apply_sandbox(argv, profile, fallback=True)
+        if rung not in _RUNGS_BY_NAME:
+            raise ValueError(
+                f"codex has no sandbox fallback rung {rung!r} (declared: "
+                f"{', '.join(_RUNGS_BY_NAME)})"
+            )
+        return self._apply_sandbox(argv, profile, rung=rung)
 
     def build_agent_command(
         self,
@@ -639,7 +856,7 @@ class CodexProvider(LLMProvider):
 
     @staticmethod
     def _apply_sandbox(
-        cmd: List[str], profile: str, *, fallback: bool = False
+        cmd: List[str], profile: str, *, rung: Optional[str] = None
     ) -> List[str]:
         """Point ``cmd``'s ``--sandbox`` value at ``profile``'s policy (M5).
 
@@ -654,25 +871,58 @@ class CodexProvider(LLMProvider):
         hands over a list :meth:`build_command` just built, so nothing shared is
         touched.
 
-        ``fallback=True`` writes :data:`SANDBOX_FALLBACK_VALUE` into the slot
-        instead of the profile's row (D6 override, 2026-09-17) — keyword-only,
-        default ``False``, so every existing caller renders the row it always
-        did. ``_sandbox_for`` still runs first: an unknown profile raises the
-        same way on both paths, and a profile outside
-        ``SANDBOX_FALLBACK_PROFILES`` is refused here too, one level below
-        :meth:`apply_sandbox_fallback`, because two callers rendering the
-        value is one too many places for a write profile to slip through.
+        ``rung=`` renders a fallback rung instead of the profile's row (D6
+        override 2026-09-17, landlock rung 2026-09-22) — keyword-only, default
+        ``None``, so every existing caller renders the row it always did.
+        ``unsandboxed`` writes :data:`SANDBOX_FALLBACK_VALUE` into the slot.
+        ``landlock`` writes ``read-only`` — whatever the profile's row, because
+        ``workspace-write`` plus the feature is the exit-101 panic — and
+        **inserts** :data:`LANDLOCK_FEATURE_PAIR` at the measured splice site:
+        immediately after ``--skip-git-repo-check`` (the end of ``_BASE_ARGV``)
+        and so ahead of ``--output-schema`` and ``--model``, which keeps
+        ``--sandbox`` at index 2 and the prompt last. The insert is idempotent:
+        an agent leg passes through here twice (``build_agent_command``, then
+        ``apply_sandbox_fallback`` at dispatch), and a slot rewrite survives
+        that by construction where an insert would render the pair twice.
+        ``_sandbox_for`` still runs first: an unknown profile raises the same
+        way on every path, and a profile outside ``SANDBOX_FALLBACK_PROFILES``
+        is refused here too, one level below :meth:`apply_sandbox_fallback`,
+        because two callers rendering a rung is one too many places for a
+        write profile to slip through.
         """
         sandbox_at = cmd.index("--sandbox")
         policy = _sandbox_for(profile)
-        if fallback:
+        if rung is not None:
             if profile not in SANDBOX_FALLBACK_PROFILES:
                 raise ValueError(
-                    f"codex never runs the {profile!r} profile unsandboxed"
+                    f"codex never runs the {profile!r} profile on a sandbox "
+                    f"fallback"
                 )
-            policy = SANDBOX_FALLBACK_VALUE
+            if rung == SANDBOX_RUNG_UNSANDBOXED:
+                policy = SANDBOX_FALLBACK_VALUE
+            elif rung == SANDBOX_RUNG_LANDLOCK:
+                policy = "read-only"
+                if not _has_pair(cmd, LANDLOCK_FEATURE_PAIR):
+                    splice = cmd.index("--skip-git-repo-check") + 1
+                    cmd[splice:splice] = list(LANDLOCK_FEATURE_PAIR)
+            else:
+                raise ValueError(f"codex has no sandbox fallback rung {rung!r}")
         cmd[sandbox_at + 1] = policy
         return cmd
+
+    def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
+        """Name constraint 2's panic by its cause; nothing to add otherwise.
+
+        A user who once ran ``codex features enable use_legacy_landlock`` sees
+        every ``workspace-write`` dispatch die with exit 101 and a Rust
+        backtrace that names no config file. The one sentence that identifies
+        it is mapped back to :data:`LANDLOCK_GLOBAL_PANIC_REASON`. Reads stderr,
+        the channel a panic is printed on. Diagnostics only, as the base
+        contract requires: the classification is untouched.
+        """
+        if is_landlock_global_panic(stderr):
+            return LANDLOCK_GLOBAL_PANIC_REASON
+        return super().describe_failure(stdout, stderr)
 
     def parse_usage(self, stdout: str, stderr: str) -> Optional[Dict[str, Any]]:
         """Read usage off the terminal turn event of ``codex exec --json`` (D3j).

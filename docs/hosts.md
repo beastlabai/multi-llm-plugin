@@ -163,7 +163,7 @@ profile bwrap /usr/bin/bwrap flags=(unconfined) {
 }
 ```
 
-then `sudo apparmor_parser -r /etc/apparmor.d/bwrap`. That grants the right to `/usr/bin/bwrap` alone; `sysctl kernel.apparmor_restrict_unprivileged_userns=0` also works but loosens every binary on the machine and is not recommended. Reviews are unaffected either way — the fan-out asks codex for its array on stdout rather than for a sandboxed file write. `grok`'s workspace-trust gate (`grok inspect` → `Project trusted: no`, dispatched with `--always-approve` and no trust flag) is an open question: whether it blocks a headless write is unmeasured, and `doctor` prints `trust: untested` for it until it is.
+then `sudo apparmor_parser -r /etc/apparmor.d/bwrap`. That grants the right to `/usr/bin/bwrap` alone; `sysctl kernel.apparmor_restrict_unprivileged_userns=0` also works but loosens every binary on the machine and is not recommended. Reviews are unaffected either way — the fan-out asks codex for its array on stdout rather than for a sandboxed file write, and without the repair codex's read-only phases take the `providers.codex.sandbox_fallback` ladder (a contained landlock rung first, `danger-full-access` last; see [configuration](configuration.md)). No rung serves writes, so this profile remains the fix for the write phases. `grok`'s workspace-trust gate (`grok inspect` → `Project trusted: no`, dispatched with `--always-approve` and no trust flag) is an open question: whether it blocks a headless write is unmeasured, and `doctor` prints `trust: untested` for it until it is.
 
 ---
 

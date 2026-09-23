@@ -539,7 +539,7 @@ class CopilotProvider(LLMProvider):
         *,
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
-        sandbox_fallback: bool = False,
+        sandbox_fallback: Optional[str] = None,
         cwd: Optional[str] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """Deliver the prompt on argv or on stdin.

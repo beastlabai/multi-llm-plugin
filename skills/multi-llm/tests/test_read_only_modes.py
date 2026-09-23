@@ -87,8 +87,8 @@ NEGATIVE_TOKEN_PREFIXES = ("--dangerously",)
 #: codex's own third sandbox policy, and before it was here the guard was blind
 #: to it — a value, not a `--dangerously` prefix. The default argv of every
 #: profile must still never carry it; the one place it may appear is the
-#: dispatch-time rewrite `DISPATCH_TIME_OVERRIDE` declares below, and that class
-#: checks the rewrite from both sides.
+#: uncontained rung of the dispatch-time ladder `DISPATCH_TIME_OVERRIDE`
+#: declares below, and that class checks every rung from both sides.
 #:
 #: `yolo` joined on the same reading (2026-09-17, the omp adapter): it is the
 #: value half of `--approval-mode yolo`, and without it in this set the pair
@@ -110,30 +110,79 @@ NEGATIVE_VALUE_TOKENS = frozenset(
 #: (`test_an_exception_row_is_a_null_row`) rightly refuses a row that claims
 #: both a mechanism and an exception. What differs from a `bypass_exception:`
 #: is where the token lives: never in a rendered default, only behind a kwarg
-#: (`sandbox_fallback=True`) that a gate sets after all four of its conditions
-#: hold. `TestTheOneDispatchTimeOverride` reads it from both sides — the
-#: default argv stays clean, the override renders exactly this token on
-#: exactly these profiles, and the write profile raises rather than renders.
+#: (`sandbox_fallback=<rung id>`) that a gate sets after all four of its
+#: conditions hold.
+#:
+#: Since the landlock rung (2026-09-22) the override is a LADDER, in walk order,
+#: and each rung carries its own disposition. Rung 1 (`landlock`) is a real
+#: kernel boundary and carries NO negative token — it renders `--sandbox
+#: read-only` plus the per-dispatch feature pair, and the negative-set scan must
+#: stay silent on it; its hazard is the other one, `workspace-write` beside the
+#: feature (the exit-101 panic), so the rung pins `read-only` as its value.
+#: Rung 2 (`unsandboxed`) is the D6 bypass and its token is the negative-set
+#: `danger-full-access`. `TestTheOneDispatchTimeOverride` reads every rung from
+#: both sides — the default argv stays clean of it, the override renders exactly
+#: this rewrite on exactly these profiles, the write profile raises — and pins
+#: this declaration against the adapter's own `SANDBOX_FALLBACK_RUNGS`.
 DISPATCH_TIME_OVERRIDE = {
     "provider": "codex",
-    "token": "danger-full-access",
     "profiles": (PROFILE_GENERATE, PROFILE_AGENT_READONLY),
-    "reason": (
-        "D6 (2026-09-17): on a machine where bubblewrap cannot start, codex — "
-        "the one reviewer that insists on its own OS sandbox — runs its "
-        "read-only phases without it under `providers.codex.sandbox_fallback: "
-        "auto` (the default; `off` restores the refusal), the footing every "
-        "other reviewer already has there; the D6 probe verdict must be "
-        "`unavailable` (never `unknown`) and the profile read-only. A by-hand "
-        "run under this value found 2 unique validated-high issues the "
-        "sandboxed reviewers did not."
-    ),
-    "retires_when": (
-        "the AppArmor repair `multi_llm.py doctor` prints is the norm on the "
-        "hosts this runs on, or codex ships a sandbox that does not need a "
-        "user namespace — then the key and the rewrite go together."
+    "rungs": (
+        {
+            "rung": "landlock",
+            "rewrite": (
+                "--sandbox", "read-only", "-c", "features.use_legacy_landlock=true",
+            ),
+            "token": None,
+            "contained": True,
+            "reason": (
+                "landlock rung (2026-09-22): codex 0.155.1 still ships a second "
+                "Linux sandbox backend that needs no user namespace, so on a "
+                "machine where bubblewrap cannot start a read-only phase runs "
+                "under a real kernel boundary — every write denied, no network — "
+                "instead of none. Taken only when its pinned probe exits 0 with "
+                "its canary write DENIED, and only under `auto` or `contained`."
+            ),
+            "retires_when": (
+                "upstream removes `[features] use_legacy_landlock` (deprecated at "
+                "0.155.1; `codex features list` no longer naming it is the "
+                "signal) — the probe then fails, the rung is deleted, and the "
+                "ladder collapses to rung 2 alone."
+            ),
+        },
+        {
+            "rung": "unsandboxed",
+            "rewrite": ("--sandbox", "danger-full-access"),
+            "token": "danger-full-access",
+            "contained": False,
+            "reason": (
+                "D6 (2026-09-17): on a machine where bubblewrap cannot start, "
+                "codex — the one reviewer that insists on its own OS sandbox — "
+                "runs its read-only phases without it under "
+                "`providers.codex.sandbox_fallback: auto` (the default; "
+                "`contained` and `off` never reach it), the footing every other "
+                "reviewer already has there; the D6 probe verdict must be "
+                "`unavailable` (never `unknown`), rung 1's probe must have "
+                "failed, and the profile read-only. A by-hand run under this "
+                "value found 2 unique validated-high issues the sandboxed "
+                "reviewers did not."
+            ),
+            "retires_when": (
+                "the AppArmor repair `multi_llm.py doctor` prints is the norm on "
+                "the hosts this runs on, or codex ships a sandbox that does not "
+                "need a user namespace — then the key and the rewrite go together."
+            ),
+        },
     ),
 }
+
+#: The rung ids, in walk order — the parametrize axis below.
+OVERRIDE_RUNGS = tuple(row["rung"] for row in DISPATCH_TIME_OVERRIDE["rungs"])
+
+
+def _override_rung(rung):
+    return next(row for row in DISPATCH_TIME_OVERRIDE["rungs"] if row["rung"] == rung)
+
 
 #: The env case: a variable whose value is the bypass.
 NEGATIVE_ENV = {"GOOSE_MODE": "auto"}
@@ -679,46 +728,72 @@ class TestTheYoloClassNegativeSet:
 
 
 class TestTheOneDispatchTimeOverride:
-    """`DISPATCH_TIME_OVERRIDE`, checked from both sides (D6, 2026-09-17).
+    """`DISPATCH_TIME_OVERRIDE`, a ladder, checked rung by rung from both sides.
 
-    The sweeps above prove the default argv of every profile is bypass-free —
+    D6 (2026-09-17) made `danger-full-access` the one dispatch-time override;
+    the landlock rung (2026-09-22) put a contained rung above it. The sweeps
+    above prove the default argv of every profile is bypass-free —
     `danger-full-access` is in `NEGATIVE_VALUE_TOKENS`, so they would go red
-    the day it leaked into a default. This class proves the other half: the
-    rewrite exists, renders exactly the declared token on exactly the declared
-    profiles, is unreachable from the write profile, and is a no-op on every
-    adapter that is not the declared one — so the override cannot quietly grow
-    a second adapter or a third profile without this file changing.
+    the day it leaked into a default. This class proves the other half for
+    EVERY rung: the rewrite exists, renders exactly the declared atoms on
+    exactly the declared profiles, is unreachable from the write profile, is
+    absent from every default argv, and is a no-op on every adapter that is not
+    the declared one — so the ladder cannot quietly grow a second adapter, a
+    third profile or a third rung without this file changing. Rung 1 gets the
+    one assertion that is its own: it ALWAYS renders `--sandbox read-only`
+    beside its feature and never `workspace-write`, because that pairing is the
+    exit-101 panic.
     """
 
+    FEATURE = "features.use_legacy_landlock"
+
     @staticmethod
-    def _override_argv(name, profile):
+    def _override_argv(name, profile, rung, transport="argv"):
         provider = _PROVIDERS[name]
         if profile == PROFILE_GENERATE:
             argv, _ = provider.build_command_for_transport(
-                PROMPT, _model_for(name), "argv", sandbox_fallback=True
+                PROMPT, _model_for(name), transport, sandbox_fallback=rung
             )
             return argv
         if profile not in provider.agent_profiles:
             return None
         argv, _ = provider.build_agent_command_for_transport(
-            PROMPT, _model_for(name), profile, "argv", sandbox_fallback=True
+            PROMPT, _model_for(name), profile, transport, sandbox_fallback=rung
         )
         return argv
 
-    def test_the_declared_token_is_in_the_negative_set(self):
-        """The guard has to be able to see the thing it is excusing."""
-        assert DISPATCH_TIME_OVERRIDE["token"] in NEGATIVE_VALUE_TOKENS
+    @staticmethod
+    def _default_argv(name, profile):
+        if profile == PROFILE_GENERATE:
+            return _generate_argv(name)
+        return _profile_argv(name, profile)
+
+    def _mentions_feature(self, argv):
+        return any(self.FEATURE in element for element in argv)
 
     def test_the_declaration_carries_every_field_of_a_disposition(self):
-        assert set(DISPATCH_TIME_OVERRIDE) == {
-            "provider", "token", "profiles", "reason", "retires_when",
-        }
-        for key in ("provider", "token", "reason", "retires_when"):
-            value = DISPATCH_TIME_OVERRIDE[key]
-            assert isinstance(value, str) and value.strip(), key
+        assert set(DISPATCH_TIME_OVERRIDE) == {"provider", "profiles", "rungs"}
         assert set(DISPATCH_TIME_OVERRIDE["profiles"]) == {
             PROFILE_GENERATE, PROFILE_AGENT_READONLY,
         }, "the override may only ever cover the two read-only profiles"
+        for row in DISPATCH_TIME_OVERRIDE["rungs"]:
+            assert set(row) == {
+                "rung", "rewrite", "token", "contained", "reason", "retires_when",
+            }, row["rung"]
+            for key in ("rung", "reason", "retires_when"):
+                assert isinstance(row[key], str) and row[key].strip(), (row["rung"], key)
+            assert row["rewrite"][:1] == ("--sandbox",), row["rung"]
+
+    def test_only_the_uncontained_rung_owes_a_negative_token(self):
+        """The guard has to be able to see the thing it is excusing — and a
+        real boundary is not a bypass, so the contained rung excuses nothing."""
+        for row in DISPATCH_TIME_OVERRIDE["rungs"]:
+            if row["contained"]:
+                assert row["token"] is None, row["rung"]
+                assert negative_tokens_in_argv(list(row["rewrite"])) == [], row["rung"]
+            else:
+                assert row["token"] in NEGATIVE_VALUE_TOKENS, row["rung"]
+                assert negative_tokens_in_argv(list(row["rewrite"])) == [row["token"]]
 
     def test_the_declaration_matches_the_base_class_tuple(self):
         """One tuple, declared once: the adapters read it, this file pins it."""
@@ -728,39 +803,98 @@ class TestTheOneDispatchTimeOverride:
         assert PROFILE_AGENT_WRITE not in base_module.SANDBOX_FALLBACK_PROFILES
 
     @pytest.mark.parametrize("profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY])
-    def test_the_override_renders_the_declared_token_on_a_read_only_profile(self, profile):
+    def test_the_declaration_matches_the_adapters_ladder(self, profile):
+        """Same rungs, same order, same atoms, same containment — as the adapter
+        declares them, so neither side can move without the other."""
         name = DISPATCH_TIME_OVERRIDE["provider"]
-        argv = self._override_argv(name, profile)
+        declared = _PROVIDERS[name].sandbox_fallback_rungs(profile)
+        assert tuple(r.name for r in declared) == OVERRIDE_RUNGS
+        for rung in declared:
+            row = _override_rung(rung.name)
+            assert tuple(rung.argv_rewrite) == row["rewrite"], rung.name
+            assert rung.contained is row["contained"], rung.name
+        assert _PROVIDERS[name].sandbox_fallback_rungs(PROFILE_AGENT_WRITE) == ()
 
-        assert negative_tokens_in_argv(argv) == [DISPATCH_TIME_OVERRIDE["token"]]
-        # And ONLY as the `--sandbox` value: the same slot the profile's own
-        # row occupies, so the override is a value change and not a new flag.
-        assert argv[argv.index("--sandbox") + 1] == DISPATCH_TIME_OVERRIDE["token"]
-
+    @pytest.mark.parametrize("transport", ["argv", "stdin"])
     @pytest.mark.parametrize("profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY])
-    def test_the_default_argv_of_the_same_profile_stays_clean(self, profile):
-        """Mutation-shaped: drop the kwarg and the token must vanish."""
-        name = DISPATCH_TIME_OVERRIDE["provider"]
-        if profile == PROFILE_GENERATE:
-            argv = _generate_argv(name)
-        else:
-            argv = _profile_argv(name, profile)
-        assert negative_tokens_in_argv(argv) == []
+    @pytest.mark.parametrize("rung", OVERRIDE_RUNGS)
+    def test_the_override_renders_the_declared_rewrite_on_a_read_only_profile(
+        self, rung, profile, transport
+    ):
+        row = _override_rung(rung)
+        argv = self._override_argv(
+            DISPATCH_TIME_OVERRIDE["provider"], profile, rung, transport
+        )
 
-    def test_the_write_profile_raises_rather_than_rendering_it(self):
+        expected = [] if row["token"] is None else [row["token"]]
+        assert negative_tokens_in_argv(argv) == expected
+        # The `--sandbox` value rides in the same slot the profile's own row
+        # occupies, so the override is a value change and not a new flag...
+        at = argv.index("--sandbox")
+        assert argv[at:at + 2] == list(row["rewrite"][:2])
+        # ...and any further atoms (rung 1's `-c` pair) appear exactly once,
+        # adjacent, never anywhere else.
+        extra = list(row["rewrite"][2:])
+        if extra:
+            hits = [i for i in range(len(argv) - len(extra) + 1)
+                    if argv[i:i + len(extra)] == extra]
+            assert len(hits) == 1, (rung, profile, argv)
+        else:
+            assert not self._mentions_feature(argv), (rung, profile, argv)
+
+    @pytest.mark.parametrize("transport", ["argv", "stdin"])
+    @pytest.mark.parametrize("profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY])
+    def test_rung_one_always_pairs_its_feature_with_read_only(self, profile, transport):
+        """`workspace-write` + the feature is the exit-101 panic, and `generate`'s
+        own row IS `workspace-write` — so the rung must overwrite it, always."""
+        argv = self._override_argv(
+            DISPATCH_TIME_OVERRIDE["provider"], profile, "landlock", transport
+        )
+        assert argv[argv.index("--sandbox") + 1] == "read-only"
+        assert "workspace-write" not in argv
+        assert self._mentions_feature(argv)
+
+    @pytest.mark.parametrize(
+        "profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE]
+    )
+    def test_the_default_argv_carries_no_rung(self, profile):
+        """Mutation-shaped: drop the kwarg and every rung must vanish — neither
+        the bypass token nor the landlock feature is in any default argv."""
+        argv = self._default_argv(DISPATCH_TIME_OVERRIDE["provider"], profile)
+        assert negative_tokens_in_argv(argv) == []
+        assert not self._mentions_feature(argv)
+
+    def test_generate_keeps_workspace_write_on_the_healthy_path(self):
+        """The other side of rung 1's `read-only`: it is rendered only on a
+        dispatch that took the rung. `generate`'s default argv and its table
+        row both still say `workspace-write`, with no feature beside it — the
+        rung cannot leak into the healthy-machine path or into
+        `_SANDBOX_BY_PROFILE`."""
+        from utils.providers import codex as codex_module
+
+        argv = _generate_argv(DISPATCH_TIME_OVERRIDE["provider"])
+        assert argv[argv.index("--sandbox") + 1] == "workspace-write"
+        assert not self._mentions_feature(argv)
+        assert codex_module._SANDBOX_BY_PROFILE[PROFILE_GENERATE] == "workspace-write"
+
+    @pytest.mark.parametrize("rung", OVERRIDE_RUNGS)
+    def test_the_write_profile_raises_rather_than_rendering_it(self, rung):
         name = DISPATCH_TIME_OVERRIDE["provider"]
-        with pytest.raises(ValueError, match="never runs the 'agent-write' profile unsandboxed"):
-            self._override_argv(name, PROFILE_AGENT_WRITE)
+        with pytest.raises(
+            ValueError, match="never runs the 'agent-write' profile on a sandbox fallback"
+        ):
+            self._override_argv(name, PROFILE_AGENT_WRITE, rung)
         # And the policy hook answers None for it whatever the config says.
         assert _PROVIDERS[name].sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
 
+    @pytest.mark.parametrize("rung", OVERRIDE_RUNGS)
     @pytest.mark.parametrize("name", _registered_provider_names())
-    def test_no_other_adapter_changes_its_argv_under_the_flag(self, name):
+    def test_no_other_adapter_changes_its_argv_under_a_rung(self, name, rung):
         """The kwarg is accepted everywhere and acted on in exactly one place."""
         if name == DISPATCH_TIME_OVERRIDE["provider"]:
             pytest.skip("the declared adapter — covered above")
-        assert self._override_argv(name, PROFILE_GENERATE) == _generate_argv(name)
-        readonly = self._override_argv(name, PROFILE_AGENT_READONLY)
+        assert self._override_argv(name, PROFILE_GENERATE, rung) == _generate_argv(name)
+        readonly = self._override_argv(name, PROFILE_AGENT_READONLY, rung)
         assert readonly == _profile_argv(name, PROFILE_AGENT_READONLY)
         assert _PROVIDERS[name].sandbox_fallback_policy(PROFILE_GENERATE) is None
 
@@ -779,10 +913,13 @@ class TestTheOneDispatchTimeOverride:
             codex_module, "_provider_block", lambda name, anchor=None: {}
         )
         assert codex_module.sandbox_fallback_policy() == "auto"
-        assert base_module.SANDBOX_FALLBACK_POLICIES == ("off", "auto")
+        assert base_module.SANDBOX_FALLBACK_POLICIES == ("off", "auto", "contained")
         for value, expected, warns in (
             ("auto", "auto", False), ("AUTO", "auto", False),
             ("off", "off", False), (False, "off", False), (True, "auto", False),
+            # The landlock rung's third value: not a word YAML coerces, so it
+            # has no bool leg and resolves verbatim.
+            ("contained", "contained", False), ("Contained", "contained", False),
             ("external", "auto", True), ("garbage", "auto", True),
         ):
             base_module.reset_env_policy_warnings()
@@ -794,6 +931,40 @@ class TestTheOneDispatchTimeOverride:
             assert codex_module.sandbox_fallback_policy() == expected, value
             err = capsys.readouterr().err
             assert ("providers.codex.sandbox_fallback" in err) is warns, (value, err)
+
+
+class TestTheLandlockPairInTheGoldenNormalizer:
+    """`tests/golden/normalize_argv.py` classifies rung 1's `-c` pair explicitly.
+
+    The container lane's argv golden reduces run-varying values to placeholders;
+    a policy token reduced to one makes the golden row vacuous (§14.1). Rung 1's
+    `features.use_legacy_landlock=true` is policy in both halves, so it must
+    survive normalization byte-for-byte — beside codex's row-derived `-c`
+    overrides, which still collapse — and it must be a named entry rather than
+    whatever `_classify`'s generic split happens to do with it.
+    """
+
+    def test_the_pair_is_kept_verbatim_and_named(self):
+        from .golden import normalize_argv as golden
+
+        assert "features.use_legacy_landlock" in golden._KV_POLICY_KEYS
+        assert "features.use_legacy_landlock" not in golden._KV_ROW_DERIVED_KEYS
+        argv, _ = _PROVIDERS["codex"].build_agent_command_for_transport(
+            PROMPT, _model_for("codex"), PROFILE_AGENT_READONLY, "stdin",
+            sandbox_fallback="landlock",
+        )
+        view = golden.normalize_argv(argv)
+        dash_c = view["options"]["-c"]
+        values = dash_c if isinstance(dash_c, list) else [dash_c]
+        assert "features.use_legacy_landlock=true" in values
+        assert view["options"]["--sandbox"] == "read-only"
+
+    def test_a_different_value_does_not_normalize_to_the_same_row(self):
+        from .golden.normalize_argv import normalize_argv
+
+        on = normalize_argv(["codex", "exec", "-c", "features.use_legacy_landlock=true"])
+        off = normalize_argv(["codex", "exec", "-c", "features.use_legacy_landlock=false"])
+        assert on != off
 
 
 class TestAgentsMdCarriesTheProfileScopedRule:

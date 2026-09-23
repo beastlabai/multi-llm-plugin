@@ -123,6 +123,21 @@ _ROW_DERIVED = {
 #: assertion (codex's `-c model_reasoning_effort=high`).
 _KV_ROW_DERIVED_KEYS = {"model_reasoning_effort", "model", "base_url"}
 
+#: `key=value` config overrides whose WHOLE token is policy and is kept
+#: VERBATIM — the key and the value are both the assertion. codex's landlock
+#: rung (2026-09-22) renders `-c features.use_legacy_landlock=true` beside
+#: `--sandbox read-only`; the value is not drawn from the row, the run or the
+#: environment, and `=false` (or any other value) would be a different sandbox,
+#: so a placeholder here would make a golden row vacuous (§14.1). Listed
+#: explicitly rather than left to `_classify`'s generic `key=value` split,
+#: which happens to keep `true` today but would normalize any path-shaped or
+#: prompt-shaped value a future edit gave it. No `expected_argv.yaml` row
+#: carries it: the container lane cannot reach the rung — measured 2026-09-23
+#: in the lane image, the pinned probe exits 101 (`Sandbox(LandlockRestrict)`,
+#: landlock syscalls ENOSYS under Docker's default seccomp profile) — so a
+#: record carrying this pair there is itself a finding.
+_KV_POLICY_KEYS = {"features.use_legacy_landlock"}
+
 #: §4.2's `--json-schema <inline json>`. The value is **policy** — it is the
 #: constraint the model is handed, and a schema swapped for another schema is
 #: exactly the regression this table exists to catch — so it is kept VERBATIM,
@@ -148,6 +163,8 @@ def _classify(token: str) -> str:
         return PLACEHOLDER_PATH
     if "=" in token:
         key, _, value = token.partition("=")
+        if key in _KV_POLICY_KEYS:
+            return token
         if key in _KV_ROW_DERIVED_KEYS:
             return f"{key}=<{key.split('_')[-1]}>"
         return f"{key}={_classify(value)}" if value else token

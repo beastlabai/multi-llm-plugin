@@ -75,9 +75,18 @@ PROFILE_AGENT_WRITE = "agent-write"
 #: that would assert a boundary nobody checked.
 SANDBOX_FALLBACK_OFF = "off"
 SANDBOX_FALLBACK_AUTO = "auto"
+#: The third value (landlock rung, 2026-09-22): *yes to any real boundary, no to
+#: the bypass, ever*. A ``contained`` rung (:attr:`SandboxRung.contained`) is
+#: reached under ``auto`` **or** ``contained``; an uncontained one under
+#: ``auto`` alone; ``off`` reaches no rung at all, which is the refusal it
+#: always meant. When every contained rung is gone (``use_legacy_landlock``
+#: removed upstream) ``contained`` degrades to that refusal, never to the
+#: bypass the operator opted out of.
+SANDBOX_FALLBACK_CONTAINED = "contained"
 SANDBOX_FALLBACK_POLICIES: Tuple[str, ...] = (
     SANDBOX_FALLBACK_OFF,
     SANDBOX_FALLBACK_AUTO,
+    SANDBOX_FALLBACK_CONTAINED,
 )
 
 #: The only profiles the fallback may ever widen. ``generate`` is the review/ask
@@ -97,6 +106,188 @@ SANDBOX_FALLBACK_PROFILES: Tuple[str, ...] = (PROFILE_GENERATE, PROFILE_AGENT_RE
 #: ``.status.json``, the report label. One string so the reader can grep one
 #: marker across the run, the way ``[SANDBOX_UNAVAILABLE]`` reads today.
 SANDBOX_BYPASSED_MARKER = "[SANDBOX_BYPASSED]"
+
+#: The marker for a slot that ran on a **contained** fallback rung — a real OS
+#: boundary that is not the adapter's default one. Never ``[SANDBOX_BYPASSED]``:
+#: such a slot is sandboxed, and saying otherwise is the mislabel the rung id
+#: exists to prevent.
+SANDBOX_FALLBACK_MARKER = "[SANDBOX_FALLBACK]"
+
+#: The marker for the once-only line saying a contained rung the previous run
+#: took is no longer usable (:func:`sandbox_rung_retired_notice`). Its own
+#: marker, never ``[SANDBOX_BYPASSED]``: that one stays exactly one line per
+#: bypassed slot, so counting it across a run counts slots — the slot that
+#: fell to the uncontained rung already prints its own ``[SANDBOX_BYPASSED]``.
+SANDBOX_RUNG_RETIRED_MARKER = "[SANDBOX_RUNG_RETIRED]"
+
+#: The well-known rung ids. What travels from the probe to the argv is one of
+#: these strings (or ``None``), never a bool: a two-state flag cannot name
+#: "contained fallback", "no boundary" and "no fallback" apart. The id is also
+#: what the executor's sandbox cache records as the state of a runner that took
+#: a rung. :data:`SANDBOX_RUNG_UNSANDBOXED` is the one uncontained rung and the
+#: only one any ``bypassed`` word may ever be derived from.
+SANDBOX_RUNG_LANDLOCK = "landlock"
+SANDBOX_RUNG_UNSANDBOXED = "unsandboxed"
+
+#: What a contained rung's probe canary prints (on stderr, exit non-zero) when
+#: the write it attempted was **not** denied — the fail-open shape: the flag
+#: was accepted and no boundary came up. The walk reads it as a *rejected* rung
+#: (move on), distinct from a sandbox that could not start.
+SANDBOX_CANARY_NOT_DENIED = "multi-llm sandbox canary: the write was not denied"
+
+#: What a contained rung's probe canary prints when it **ran to completion and
+#: its write was denied** — the only answer the walk takes a contained rung on.
+#: Exit 0 alone is not containment: a CLI that prints usage and exits 0 without
+#: ever running the canary would otherwise read as a boundary nobody measured.
+#: A canary script must never carry this sentence contiguously in its own text
+#: (a CLI that echoes its argv back would then forge it); see
+#: :func:`canary_marker_shell_words`.
+SANDBOX_CANARY_DENIED = "multi-llm sandbox canary: the write was denied"
+
+
+def canary_marker_shell_words(marker: str) -> str:
+    """``marker`` as a double-quoted shell word that ``echo`` prints verbatim
+    but whose **source text** never contains ``marker`` contiguously.
+
+    The sentence is split at its first ``": "`` into two adjacent quoted
+    strings (``"a: ""b"``), which a POSIX shell concatenates. So a CLI that
+    prints usage echoing the probe's argv cannot put the marker on its output
+    — only a shell that actually ran the script can.
+    """
+    head, sep, tail = marker.partition(": ")
+    if not sep:
+        raise ValueError(f"marker has no ': ' to split at: {marker!r}")
+    return f'"{head}{sep}""{tail}"'
+
+
+@dataclass(frozen=True)
+class SandboxRung:
+    """One rung of an adapter's sandbox-fallback ladder (landlock rung, 2026-09-22).
+
+    Declared by the adapter through :meth:`LLMProvider.sandbox_fallback_rungs`,
+    walked in order by ``subagent_executor.sandbox_verdict`` only after the
+    profile's own probe answered ``unavailable``, and rendered by
+    :meth:`LLMProvider.apply_sandbox_fallback` from its ``name``.
+
+    * ``name`` — the rung id that travels (:data:`SANDBOX_RUNG_LANDLOCK`, …).
+    * ``probe_argv`` — the model-free command that decides whether this rung is
+      usable here, **pinned verbatim**: never rebuilt from the profile's probe
+      or from the dispatch argv. ``None`` means the rung needs no probe (the
+      uncontained rung: there is no boundary to ask about). A contained rung's
+      probe must exit 0 **only when a write it attempts is denied**, and then
+      print :data:`SANDBOX_CANARY_DENIED` — exit 0 alone proves that a process
+      started, not that a boundary exists, and the walk refuses a markerless
+      exit 0.
+    * ``argv_rewrite`` — the argv atoms this rung renders, as data (for the
+      guards and for ``doctor``); the rendering itself is the adapter's
+      :meth:`~LLMProvider.apply_sandbox_fallback`.
+    * ``contained`` — whether the rung is a real OS boundary. Decides which
+      ``sandbox_fallback`` values may reach it (``auto``/``contained`` vs.
+      ``auto`` alone) and whether any artifact may call the slot bypassed.
+    * ``retires_when`` — ``(measured_at_version, upstream_deprecation_sentence)``
+      for a rung that rides a feature upstream has announced it will remove, or
+      ``None``. Rendered for a human; nothing compares a running CLI's version
+      against it — the probe answers that question.
+    * ``probe_workdir`` — the cwd-relative directory a contained rung's canary
+      writes into, or ``None``. The walk creates it and proves it writable
+      **outside** the sandbox before the probe runs, so a denial the canary
+      sees inside can only be the boundary's — never a ``mkdir`` the sandbox
+      refused, a non-directory in the way, or plain filesystem permissions.
+      A setup that fails is recorded ``unknown`` (the rung is not taken).
+    """
+
+    name: str
+    probe_argv: Optional[Tuple[str, ...]]
+    argv_rewrite: Tuple[str, ...]
+    contained: bool
+    retires_when: Optional[Tuple[str, str]] = None
+    probe_workdir: Optional[str] = None
+
+
+def sandbox_rung_id(value: Any) -> Optional[str]:
+    """Normalise a ``sandbox_fallback`` carrier value to a rung id, or ``None``.
+
+    The carrier was a ``bool`` until the landlock rung; it is now the rung id.
+    ``True`` is still accepted as the old spelling of *the* fallback, which was
+    always the uncontained rung — so a caller (or a test fake) that still hands
+    ``True`` renders exactly what it rendered before, and never a contained
+    rung it did not name. Falsy is "no rung".
+    """
+    if value is True:
+        return SANDBOX_RUNG_UNSANDBOXED
+    if not value:
+        return None
+    return str(value)
+
+
+def sandbox_fallback_notice_text(
+    provider_name: str, rung: "SandboxRung", policy: Optional[str]
+) -> str:
+    """The one ``[SANDBOX_FALLBACK]`` line for a slot on a **contained** rung.
+
+    One builder for the fan-out lanes and the executor's preflight line, so the
+    reader greps one sentence across a run the way ``[SANDBOX_BYPASSED]`` reads.
+    It names the rung, what it renders, and the key value that permitted it; for
+    a rung riding a feature upstream has announced it will remove
+    (``retires_when``) it names that too, and says in advance what a reader of
+    the raw capture will find: the deprecation sentence arrives as an
+    ``item.completed`` whose item is ``"type":"error"`` on **every** run of this
+    rung, healthy ones included — the marker that the run took the rung, never
+    the failure.
+    """
+    text = (
+        f"{SANDBOX_FALLBACK_MARKER} {provider_name}: bubblewrap cannot start; "
+        f"running on the contained {rung.name!r} fallback rung "
+        f"({' '.join(rung.argv_rewrite)}) under "
+        f"providers.{provider_name}.sandbox_fallback={policy or SANDBOX_FALLBACK_AUTO} "
+        f"(read-only phase; writes denied by the kernel)"
+    )
+    if rung.retires_when:
+        version, sentence = rung.retires_when
+        text += (
+            f"; deprecated upstream (measured at {provider_name} {version}: "
+            f"{sentence!r}) — every raw capture of this slot carries that "
+            f"sentence as a \"type\":\"error\" item, healthy runs included; it "
+            f"marks the rung, it is not the failure"
+        )
+    return text
+
+
+def sandbox_rung_retired_notice(
+    provider_name: str, spec: str, rung: "SandboxRung"
+) -> str:
+    """The one line naming a contained rung this run could no longer take.
+
+    Open question 2 of the landlock-rung plan: when the previous run of this
+    phase recorded ``spec`` on ``rung`` and this run took the uncontained rung
+    instead, the boundary the operator had last time is gone — most likely
+    because upstream removed the feature. Said once, with ``retires_when``'s
+    version and sentence, and nothing else about the run changes.
+    """
+    said = ""
+    if rung.retires_when:
+        version, sentence = rung.retires_when
+        said = f" (measured at {provider_name} {version}; upstream said {sentence!r})"
+    return (
+        f"{SANDBOX_RUNG_RETIRED_MARKER} {spec}: the contained {rung.name!r} fallback "
+        f"rung the previous run used is no longer usable here{said}; this run fell "
+        f"to the uncontained rung. Set providers.{provider_name}.sandbox_fallback="
+        f"{SANDBOX_FALLBACK_CONTAINED} to refuse instead"
+    )
+
+
+def sandbox_rung_allowed(rung: "SandboxRung", policy: Optional[str]) -> bool:
+    """Whether a resolved ``sandbox_fallback`` ``policy`` may take ``rung``.
+
+    The Configuration table, in one place: ``auto`` reaches every rung,
+    ``contained`` only a contained one, ``off`` (and ``None`` — an adapter with
+    no fallback, or a write profile) none.
+    """
+    if policy == SANDBOX_FALLBACK_AUTO:
+        return True
+    if policy == SANDBOX_FALLBACK_CONTAINED:
+        return bool(rung.contained)
+    return False
 
 # ---------------------------------------------------------------------------
 # Non-interactive git env (§2.2)
@@ -2497,25 +2688,41 @@ class LLMProvider(ABC):
         :data:`SANDBOX_FALLBACK_PROFILES` — ``agent-write`` must come back
         ``None`` whatever the config says. Every gate that consults this
         (``review_orchestrator_base.sandbox_refusal``,
-        ``subagent_executor._detect_sandbox``) requires *all four* of: the
+        ``subagent_executor._detect_sandbox``) requires *all five* of: the
         probe verdict ``unavailable`` (never ``unknown`` — a probe that could
-        not be read must not widen anything), this answer ``auto`` (the
-        shipped default; ``off`` is the operator turning it off), a read-only
-        profile, and the adapter declaring the hook at all.
+        not be read must not widen anything), a rung the walk selected, this
+        answer permitting that rung (:func:`sandbox_rung_allowed`: ``auto``
+        reaches every rung, ``contained`` a contained one only, ``off`` none),
+        a read-only profile, and the adapter declaring the hook at all.
         """
         return None
 
-    def apply_sandbox_fallback(self, argv: List[str], profile: str) -> List[str]:
-        """Rewrite a rendered ``argv`` to run **without** this adapter's own
-        sandbox, for a ``profile`` in :data:`SANDBOX_FALLBACK_PROFILES`.
+    def sandbox_fallback_rungs(self, profile: str) -> Tuple["SandboxRung", ...]:
+        """The ordered fallback ladder for ``profile`` (landlock rung, 2026-09-22).
 
-        Called by the transport builders only when a gate has already decided
-        the four conditions above hold, so the default — ``argv`` unchanged —
-        is what every adapter without a fallback does with a flag it was never
-        going to be handed. An adapter that answers a policy from
-        :meth:`sandbox_fallback_policy` must override this, and must raise on a
-        profile outside the tuple rather than render it: the write profiles are
-        never widened, structurally, not by policy.
+        ``()`` — the default — means no fallback exists for this profile. An
+        adapter that declares rungs does so only for a profile in
+        :data:`SANDBOX_FALLBACK_PROFILES`; ``agent-write`` must come back
+        ``()``. The executor's ``sandbox_verdict`` walks them in order after
+        the profile's own probe said ``unavailable``, and the gates then decide
+        by :func:`sandbox_rung_allowed` whether the selected rung may be taken.
+        """
+        return ()
+
+    def apply_sandbox_fallback(
+        self, argv: List[str], profile: str, rung: Optional[str] = None
+    ) -> List[str]:
+        """Rewrite a rendered ``argv`` onto fallback ``rung`` of this adapter's
+        ladder, for a ``profile`` in :data:`SANDBOX_FALLBACK_PROFILES`.
+
+        Called by the transport builders only when a gate has already selected
+        ``rung`` (a :class:`SandboxRung` ``name``), so the default — ``argv``
+        unchanged — is what every adapter without a fallback does with a rung
+        it was never going to be handed. An adapter that declares rungs from
+        :meth:`sandbox_fallback_rungs` must override this, must render **that**
+        rung's rewrite (never a default one), and must raise on a profile
+        outside the tuple or a rung it does not declare rather than render it:
+        the write profiles are never widened, structurally, not by policy.
         """
         return argv
 
@@ -2866,7 +3073,7 @@ class LLMProvider(ABC):
         *,
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
-        sandbox_fallback: bool = False,
+        sandbox_fallback: Optional[str] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """``build_agent_command`` plus the text to write to the child's stdin.
 
@@ -2875,18 +3082,22 @@ class LLMProvider(ABC):
         (which every profile command this repo ships builds that way), so a
         ``stdin`` transport simply drops it and returns it as the child's input.
 
-        ``sandbox_fallback`` is the executor's D6 override (2026-09-17): ``True``
-        only when ``_detect_sandbox`` recorded ``bypassed`` for this runner and
-        profile, and it reaches the argv through :meth:`apply_sandbox_fallback`
-        *before* the prompt is split off — so the rewrite sees the same
-        positions ``build_agent_command`` rendered. Ignored by every adapter
-        that keeps the default hook.
+        ``sandbox_fallback`` is the executor's D6 override (2026-09-17), now the
+        **rung id** the preflight selected (landlock rung, 2026-09-22): set only
+        when ``_detect_sandbox`` recorded a rung for this runner and profile,
+        and it reaches the argv through :meth:`apply_sandbox_fallback` —
+        which renders *that* rung — *before* the prompt is split off, so the
+        rewrite sees the same positions ``build_agent_command`` rendered. A
+        bare ``True`` is the pre-rung spelling and means the uncontained rung
+        (:func:`sandbox_rung_id`). Ignored by every adapter that keeps the
+        default hook.
         """
         argv = self.build_agent_command(
             prompt, model, profile, timeout_s=timeout_s, schema=schema
         )
-        if sandbox_fallback:
-            argv = self.apply_sandbox_fallback(argv, profile)
+        rung = sandbox_rung_id(sandbox_fallback)
+        if rung:
+            argv = self.apply_sandbox_fallback(argv, profile, rung)
         if transport == "argv":
             return argv, None
         if transport == "stdin" and self.supports_prompt_transport("stdin"):
@@ -3053,7 +3264,7 @@ class LLMProvider(ABC):
         *,
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
-        sandbox_fallback: bool = False,
+        sandbox_fallback: Optional[str] = None,
         cwd: Optional[str] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """Build argv plus the text to write to the child's stdin.
@@ -3070,13 +3281,14 @@ class LLMProvider(ABC):
                 :meth:`build_command` (§9.6.a/b). This is the Lane A leg:
                 ``invoke_with_provider`` computes ``effective_timeout`` before it
                 builds anything, so the adapter never re-derives it.
-            sandbox_fallback: The fan-out's D6 override (2026-09-17). ``True``
-                only when ``sandbox_refusal`` answered ``dispatch_unsandboxed``
-                for this slot — probe ``unavailable``, policy ``auto``,
-                profile ``generate`` — and it reaches the argv through
-                :meth:`apply_sandbox_fallback`. Keyword-only, default
-                ``False``, and ignored by every adapter that keeps the default
-                hook, so every existing argv is rendered byte-for-byte.
+            sandbox_fallback: The fan-out's D6 override (2026-09-17): the rung
+                id ``sandbox_refusal`` selected for this slot (probe
+                ``unavailable``, a rung the policy permits, profile
+                ``generate``), rendered through :meth:`apply_sandbox_fallback`.
+                ``True`` is the pre-rung spelling of the uncontained rung.
+                Keyword-only, default ``None``, and ignored by every adapter
+                that keeps the default hook, so every existing argv is
+                rendered byte-for-byte.
             cwd: The directory the child will really be spawned in (``None``
                 means "inherit this process's"), threaded from the spawn site on
                 exactly the terms :meth:`resolve_env` already takes it — this and
@@ -3106,8 +3318,9 @@ class LLMProvider(ABC):
             argv = self.build_command(
                 prompt, model, timeout_s=timeout_s, schema=schema
             )
-            if sandbox_fallback:
-                argv = self.apply_sandbox_fallback(argv, PROFILE_GENERATE)
+            rung = sandbox_rung_id(sandbox_fallback)
+            if rung:
+                argv = self.apply_sandbox_fallback(argv, PROFILE_GENERATE, rung)
             return argv, None
         raise ValueError(
             f"{self.name} does not support the {transport!r} prompt transport "
