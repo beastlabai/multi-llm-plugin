@@ -3,6 +3,8 @@
 import json
 import subprocess
 import sys
+import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -10,9 +12,11 @@ import pytest
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
+import update_plan_tasks  # noqa: E402
 from update_plan_tasks import (
     generate_dependency_diagram,
     generate_tasks_markdown,
+    generated_stamp,
     validate_tasks_json,
 )
 
@@ -212,6 +216,79 @@ class TestGenerateTasksMarkdown:
         result = generate_tasks_markdown(tasks, "plan.md")
 
         assert "This is the task description." in result
+
+
+class _FrozenNow(datetime):
+    """A local wall clock that reads one known instant."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return cls(2026, 3, 4, 5, 6, 7)
+
+
+class TestGeneratedStamp:
+    """The `*Generated: …*` line honours SOURCE_DATE_EPOCH, and only it.
+
+    The stamp is hashed into every digest of tasks.md, so without the pin no two
+    runs agree on one; the container rig's golden baselines depend on it.
+    """
+
+    @pytest.fixture
+    def frozen(self, monkeypatch):
+        monkeypatch.setattr(update_plan_tasks, "datetime", _FrozenNow)
+
+    def test_unset_is_the_local_wall_clock_as_before(self, frozen, monkeypatch):
+        monkeypatch.delenv("SOURCE_DATE_EPOCH", raising=False)
+        assert generated_stamp() == "2026-03-04 05:06:07"
+        lines = generate_tasks_markdown([], "plan.md").splitlines()
+        assert lines[2] == "*Generated: 2026-03-04 05:06:07*"
+
+    def test_empty_counts_as_unset(self, frozen, monkeypatch):
+        monkeypatch.setenv("SOURCE_DATE_EPOCH", "")
+        assert generated_stamp() == "2026-03-04 05:06:07"
+
+    @pytest.mark.skipif(not hasattr(time, "tzset"), reason="POSIX-only tzset")
+    def test_set_renders_that_instant_in_utc(self, frozen, monkeypatch):
+        # A non-UTC local zone, so a local-time rendering would be caught.
+        monkeypatch.setenv("TZ", "Asia/Tokyo")
+        time.tzset()
+        try:
+            monkeypatch.setenv("SOURCE_DATE_EPOCH", "1767225600")
+            assert generated_stamp() == "2026-01-01 00:00:00"
+            one = generate_tasks_markdown([], "plan.md")
+            assert one.splitlines()[2] == "*Generated: 2026-01-01 00:00:00*"
+            assert generate_tasks_markdown([], "plan.md") == one
+        finally:
+            monkeypatch.undo()
+            time.tzset()
+
+    @pytest.mark.parametrize("raw", [
+        "abc", "1.5", "-1", " 12", "1_000", "+5", "99999999999999999999",
+    ])
+    def test_a_malformed_value_raises_rather_than_falling_back(
+            self, monkeypatch, raw):
+        """Only something asking for determinism sets it; a silent wall-clock
+        fallback would hand it a non-repeatable file and no reason why."""
+        monkeypatch.setenv("SOURCE_DATE_EPOCH", raw)
+        with pytest.raises(ValueError, match="SOURCE_DATE_EPOCH"):
+            generated_stamp()
+
+    def test_a_malformed_value_fails_the_script_before_any_write(
+            self, monkeypatch, temp_dir, sample_tasks_json, capsys):
+        plan_path = temp_dir / "my-plan.md"
+        plan_path.write_text("# My Plan\n", encoding="utf-8")
+        tasks_json_path = temp_dir / "tasks.json"
+        tasks_json_path.write_text(
+            json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
+        monkeypatch.setenv("SOURCE_DATE_EPOCH", "yesterday")
+
+        code = update_plan_tasks.main(["--plan-file", str(plan_path),
+                                       "--tasks-file", str(tasks_json_path)])
+
+        assert code == 1
+        assert "SOURCE_DATE_EPOCH" in capsys.readouterr().err
+        assert not (temp_dir / "my-plan").exists()
+        assert plan_path.read_text(encoding="utf-8") == "# My Plan\n"
 
 
 class TestGenerateDependencyDiagram:

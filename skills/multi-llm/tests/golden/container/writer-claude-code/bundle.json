@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "writer",
     "bundle_version": 1,
-    "captured_at": "2026-09-22T20:23:44Z",
+    "captured_at": "2026-09-23T11:41:56Z",
     "cli": "claude-code",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -61,7 +61,7 @@
     "image": "mllm-e2e:local",
     "reviewer": "pi",
     "row_id": "chain-writer-claude-code",
-    "run_bundle": "20260922T202134Z"
+    "run_bundle": "20260923T111529Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -820,10 +820,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "sha256_before": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-0",
               "status": "ok",
@@ -868,10 +868,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/auth.py": "<str>"
+                "src/auth.py": "16d4f894f64a06873309bb9dc1eee41ef859d9aa693ac745f52702ed3fcc72d2"
               },
               "sha256_before": {
-                "src/auth.py": "<str>"
+                "src/auth.py": "16d4f894f64a06873309bb9dc1eee41ef859d9aa693ac745f52702ed3fcc72d2"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-1",
               "status": "ok",
@@ -916,10 +916,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "sha256_before": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-2",
               "status": "ok",
@@ -995,10 +995,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "sha256_before": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-0",
               "status": "ok",
@@ -1043,10 +1043,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/auth.py": "<str>"
+                "src/auth.py": "16d4f894f64a06873309bb9dc1eee41ef859d9aa693ac745f52702ed3fcc72d2"
               },
               "sha256_before": {
-                "src/auth.py": "<str>"
+                "src/auth.py": "16d4f894f64a06873309bb9dc1eee41ef859d9aa693ac745f52702ed3fcc72d2"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-1",
               "status": "ok",
@@ -1091,10 +1091,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "sha256_before": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-fixes/pre_batch/apply-fix-batch-2",
               "status": "ok",
@@ -1521,10 +1521,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "sha256_before": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-0",
               "status": "ok",
@@ -1569,10 +1569,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "sha256_before": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-1",
               "status": "ok",
@@ -1617,10 +1617,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "sha256_before": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-2",
               "status": "ok",
@@ -1665,10 +1665,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "sha256_before": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-3",
               "status": "ok",
@@ -1743,10 +1743,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "sha256_before": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-0",
               "status": "ok",
@@ -1791,10 +1791,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "sha256_before": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-1",
               "status": "ok",
@@ -1839,10 +1839,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "sha256_before": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-2",
               "status": "ok",
@@ -1887,10 +1887,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "sha256_before": {
-                "plans/auth-feature.md": "<str>"
+                "plans/auth-feature.md": "d1adcaf742ee85f3e1a7190828f5da793ead2e72fedd2fb85b3c7e50ababcc32"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-suggestions/pre_batch/apply-batch-3",
               "status": "ok",
@@ -2306,10 +2306,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "sha256_before": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-0",
               "status": "ok",
@@ -2354,10 +2354,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "sha256_before": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-1",
               "status": "ok",
@@ -2402,10 +2402,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "sha256_before": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-2",
               "status": "ok",
@@ -2479,10 +2479,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "sha256_before": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-0",
               "status": "ok",
@@ -2527,10 +2527,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "sha256_before": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-1",
               "status": "ok",
@@ -2575,10 +2575,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "sha256_before": {
-                "plans/auth-feature/tasks/tasks.md": "<str>"
+                "plans/auth-feature/tasks/tasks.md": "cc8d69478fa43f4b22dc5ce05d525a6f7475c98ea4288868eef361e1580b1582"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/apply-task-suggestions/pre_batch/apply-task-batch-2",
               "status": "ok",
@@ -2613,7 +2613,7 @@
               "inputs": {
                 "grouped_sha256": "2c653f5395b41947",
                 "plan_sha256": "f767e856b63b3cdd",
-                "tasks_sha256": "<str>"
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "apply_task_suggestions",
@@ -2643,7 +2643,7 @@
               "inputs": {
                 "grouped_sha256": "2c653f5395b41947",
                 "plan_sha256": "f767e856b63b3cdd",
-                "tasks_sha256": "<str>"
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "apply_task_suggestions",
@@ -2673,7 +2673,7 @@
               "inputs": {
                 "grouped_sha256": "2c653f5395b41947",
                 "plan_sha256": "f767e856b63b3cdd",
-                "tasks_sha256": "<str>"
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "apply_task_suggestions",
@@ -2692,7 +2692,7 @@
           "inputs": {
             "grouped_sha256": "2c653f5395b41947",
             "plan_sha256": "f767e856b63b3cdd",
-            "tasks_sha256": "<str>"
+            "tasks_sha256": "cc8d69478fa43f4b"
           },
           "kind": "apply_task_suggestions",
           "phase": "apply-task-suggestions",
@@ -3410,10 +3410,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "sha256_before": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T001",
               "status": "ok",
@@ -3458,10 +3458,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "sha256_before": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T002",
               "status": "ok",
@@ -3583,10 +3583,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "sha256_before": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T001",
               "status": "ok",
@@ -3631,10 +3631,10 @@
               "returned_ids": [],
               "runner": "claude-code:haiku",
               "sha256_after": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "sha256_before": {
-                "src/security.py": "<str>"
+                "src/security.py": "ef9dee146e4854f7d26943ce151ebdb5fb813664f686e4a46aa2640e71e84aba"
               },
               "snapshot_dir": "<run-root>/plans/auth-feature/implement/pre_batch/T002",
               "status": "ok",
@@ -3717,7 +3717,7 @@
               ],
               "inputs": {
                 "plan_sha256": "f767e856b63b3cdd",
-                "tasks_sha256": "<str>"
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "implement",
@@ -3746,7 +3746,7 @@
               ],
               "inputs": {
                 "plan_sha256": "f767e856b63b3cdd",
-                "tasks_sha256": "<str>"
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "implement",
@@ -3778,7 +3778,7 @@
               ],
               "inputs": {
                 "plan_sha256": "f767e856b63b3cdd",
-                "tasks_sha256": "<str>"
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_human": false,
               "kind": "implement",
@@ -3795,7 +3795,7 @@
           ],
           "inputs": {
             "plan_sha256": "f767e856b63b3cdd",
-            "tasks_sha256": "<str>"
+            "tasks_sha256": "cc8d69478fa43f4b"
           },
           "kind": "implement",
           "phase": "implement",
@@ -4469,7 +4469,7 @@
               "inputs": {
                 "grouped_sha256": "2c653f5395b41947",
                 "plan_sha256": "f767e856b63b3cdd",
-                "tasks_sha256": "<str>"
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_high_priority": true,
               "kind": "validation",
@@ -4503,7 +4503,7 @@
               "inputs": {
                 "grouped_sha256": "2c653f5395b41947",
                 "plan_sha256": "f767e856b63b3cdd",
-                "tasks_sha256": "<str>"
+                "tasks_sha256": "cc8d69478fa43f4b"
               },
               "is_high_priority": false,
               "kind": "validation",
@@ -4533,7 +4533,7 @@
           "inputs": {
             "grouped_sha256": "2c653f5395b41947",
             "plan_sha256": "f767e856b63b3cdd",
-            "tasks_sha256": "<str>"
+            "tasks_sha256": "cc8d69478fa43f4b"
           },
           "kind": "validation",
           "model_hint": "auto",
@@ -5324,7 +5324,7 @@
           "models": {
             "pi:stub/stub-model": {
               "attempt": "<int>",
-              "elapsed_s": "<float>",
+              "elapsed_s": "<number>",
               "ended_at": "<str>",
               "source": "<str>",
               "started_at": "<str>",
@@ -5383,7 +5383,7 @@
           "models": {
             "pi:stub/stub-model": {
               "attempt": "<int>",
-              "elapsed_s": "<float>",
+              "elapsed_s": "<number>",
               "ended_at": "<str>",
               "source": "<str>",
               "started_at": "<str>",
@@ -5600,7 +5600,7 @@
           "models": {
             "pi:stub/stub-model": {
               "attempt": "<int>",
-              "elapsed_s": "<float>",
+              "elapsed_s": "<number>",
               "ended_at": "<str>",
               "source": "<str>",
               "started_at": "<str>",
@@ -5681,7 +5681,7 @@
           "models": {
             "pi:stub/stub-model": {
               "attempt": "<int>",
-              "elapsed_s": "<float>",
+              "elapsed_s": "<number>",
               "ended_at": "<str>",
               "source": "<str>",
               "started_at": "<str>",

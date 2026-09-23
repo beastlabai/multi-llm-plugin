@@ -12,8 +12,10 @@ This script:
 
 import argparse
 import json
+import os
+import re
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -32,6 +34,38 @@ COMPLEXITY_COLORS = {
     "medium": "#f4a460",
     "high": "#cd5c5c",
 }
+
+
+#: The one format the tasks file's ``*Generated: …*`` line is rendered in.
+GENERATED_STAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+def generated_stamp() -> str:
+    """The instant the tasks file says it was generated, as rendered text.
+
+    Local wall clock, exactly as it always was — unless ``SOURCE_DATE_EPOCH``
+    is set, the reproducible-builds convention: then that instant, in UTC, so
+    two runs pinned to the same epoch write byte-identical tasks files. The
+    container rig pins it; without that the stamp made every digest of
+    ``tasks.md`` a fresh number per run, and a golden baseline could not repeat.
+
+    A malformed value raises rather than falling back: the variable is only ever
+    set by something asking for determinism, and a silent wall-clock fallback
+    would hand it a non-repeatable file with nothing to say why. Empty counts as
+    unset, the way an env file spells "not configured".
+    """
+    raw = os.environ.get("SOURCE_DATE_EPOCH", "")
+    if not raw:
+        return datetime.now().strftime(GENERATED_STAMP_FORMAT)
+    try:
+        if not re.fullmatch(r"[0-9]+", raw):
+            raise ValueError("not a non-negative integer")
+        instant = datetime.fromtimestamp(int(raw), tz=timezone.utc)
+    except (ValueError, OverflowError, OSError) as exc:  # out of range, too
+        raise ValueError(
+            f"SOURCE_DATE_EPOCH must be a non-negative integer count of seconds "
+            f"since the Unix epoch, got {raw!r} ({exc})") from exc
+    return instant.strftime(GENERATED_STAMP_FORMAT)
 
 
 def task_executor_role(task: Dict[str, Any]) -> str:
@@ -113,7 +147,7 @@ def generate_tasks_markdown(tasks: List[Dict[str, Any]], plan_name: str) -> str:
     lines = [
         f"# Implementation Tasks for {plan_name}",
         "",
-        f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
+        f"*Generated: {generated_stamp()}*",
         "",
         f"**Parent Plan**: [{plan_name}](../{plan_name})",
         "",
@@ -279,7 +313,11 @@ def main(argv=None) -> int:
 
     # Generate tasks markdown
     plan_name = plan_path.name
-    tasks_markdown = generate_tasks_markdown(tasks, plan_name)
+    try:
+        tasks_markdown = generate_tasks_markdown(tasks, plan_name)
+    except ValueError as e:  # a malformed SOURCE_DATE_EPOCH; nothing written yet
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
 
     # Get output path for tasks file
     tasks_output_path = get_output_paths(plan_path, "tasks", phase="tasks")

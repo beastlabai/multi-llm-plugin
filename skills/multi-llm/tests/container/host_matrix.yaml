@@ -1049,6 +1049,7 @@ hosts:
         command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick"
         expect: {run: none, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
         wall_clock_s: 600
+        cost_budget_usd: 0.03   # MEASURED-DERIVED: the one sample, $0.0204, rounded up; ceiling floors at $0.25
         measured:
           on: "2026-08-14"
           verdict: pass
@@ -1080,6 +1081,173 @@ hosts:
               (`subagent_stats.spawned: 0`, `origin: null` on every turn, green and
               red alike), so the Shape-B analysis does not apply to it; only
               Shape A has ever been measured here.
+          after_core_end_fix:
+            on: "2026-09-23"
+            image: "sha256:843e8cc8805a…"   # rebuilt from the working tree at b31893d+uncommitted, every run below
+            runs: ["20260923T121001Z", "20260923T122034Z", "20260923T123042Z",
+                   "20260923T123545Z", "20260923T123915Z", "20260923T124218Z",
+                   "20260923T124859Z", "20260923T125829Z", "20260923T130455Z",
+                   "20260923T131609Z", "20260923T132008Z", "20260923T132249Z",
+                   "20260923T133710Z"]
+            verdict: >
+              8 pass / 5 fail over 13 rows, and 8 of 16 HOST TURNS bad once the
+              three never-started retries are counted. WORSE THAN THE 1-in-4 THE
+              2026-09-22 RUNS SHOWED, AND NOT ATTRIBUTABLE TO b31893d EITHER WAY:
+              `util instructions ask` is 24,144 chars, under this host's ~30,000
+              Bash cap, so this row's core was never truncated and the fix does not
+              reach it — every session below that loaded the core says
+              `MULTI_LLM_CORE_END: ask` is present. EVERY BAD TURN IS ONE MECHANISM,
+              read out of `host-session-digest.jsonl`: the model emits an assistant
+              message with thinking and NO visible text or tool call (twice with
+              deepseek's `<｜DSML｜…>` tool-call markup leaking into the thinking),
+              claude-code injects `[Your previous response had no visible output.
+              Please continue and produce a user-visible response.]`, the model
+              answers empty again, and the turn ends `subtype: success`,
+              `stop_reason: end_turn`, `result: ""`. Every one of the nine
+              empty-result turns in this block carries that nudge; so does the green
+              `121001Z`, which recovered from it. WHERE IN THE TURN IT LANDS decides
+              the grade:
+              before any receipt it is Shape A (the harness's one-shot
+              never-started retry fires, `attempts: 2` in the census); after `util
+              instructions ask` it is a NEW SUB-SHAPE, A2, which the retry
+              deliberately does not catch (clause 5 of
+              `harness.never_started_signature` requires zero receipts) and the
+              receipt anchor grades red; after the dispatcher has finished it is
+              harmless — `123042Z` ended `result: ""` with the answers on disk and
+              graded green.
+            attempts:
+              - run: "20260923T121001Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.009634
+                dispatcher_receipts: 4
+                host_wall_s: 68.55
+                verdict: pass
+                detail: "Full report; one `no visible output` nudge mid-turn, recovered. Idle gap 11.5 s."
+              - run: "20260923T122034Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.002265
+                dispatcher_receipts: 1
+                host_wall_s: 31.37
+                verdict: "FAIL-A2 — stalled after the core loaded"
+                detail: >
+                  `util instructions ask` (exit 0, the core complete), then a
+                  plan-file check, a denied compound `cd … && grep` and a `Grep`
+                  for `orchestrator-run.log`; the reply to that was empty, the
+                  nudge fired twice, and the turn ended `result: ""` after 11
+                  turns and 1,989 output tokens. No `ask` receipt, zero stub
+                  requests. Not retried: one receipt.
+              - run: "20260923T123042Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.012239
+                dispatcher_receipts: 6
+                host_wall_s: 78.07
+                verdict: pass
+                detail: >
+                  Graded green with `result: ""`: the ask completed and was polled
+                  to terminal, then the final summary turn came back empty. The
+                  mechanism of A2, landing after the work — harmless here only
+                  because `ask` records itself before the summary.
+              - run: "20260923T123545Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.01204
+                dispatcher_receipts: 8
+                host_wall_s: 73.5
+                verdict: "pass on attempt 2 — attempt 1 was FAIL-A"
+                detail: >
+                  Attempt 1 (`attempt-1/`, 8.12 s, 152 output tokens, $0.0):
+                  Skill tool, `command -v uv`, then an empty reply, the nudge, and
+                  `result: ""` with ZERO receipts — Shape A, retried by the
+                  harness. Attempt 2 completed with a full report.
+              - run: "20260923T123915Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.0
+                dispatcher_receipts: 1
+                host_wall_s: 9.23
+                verdict: "FAIL-A2 — stalled after the core loaded"
+                detail: >
+                  The DSML leak, twice: the first reply after the Skill tool was
+                  `…</｜DSML｜parameter></｜DSML｜invoke></｜DSML｜tool_calls>`
+                  inside a thinking block, and a later visible text opened with
+                  `<｜DSML｜parameter name="Bash">`. Four nudges in eight turns;
+                  ended empty after `util instructions ask` and a plan-file `ls`.
+              - run: "20260923T124218Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.024549
+                dispatcher_receipts: 6
+                host_wall_s: 113.52
+                verdict: pass
+              - run: "20260923T124859Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.01957
+                dispatcher_receipts: 5
+                host_wall_s: 200.51
+                verdict: pass
+              - run: "20260923T125829Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.014742
+                dispatcher_receipts: 5
+                host_wall_s: 165.15
+                verdict: pass
+              - run: "20260923T130455Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.0
+                dispatcher_receipts: 1
+                host_wall_s: 34.8
+                verdict: "FAIL-A2 — stalled after the core loaded"
+                detail: "`util instructions ask`, then empty twice; 7 turns, 922 output tokens, `result: \"\"`."
+              - run: "20260923T131609Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.0
+                dispatcher_receipts: 2
+                host_wall_s: 10.05
+                verdict: "FAIL — attempt 1 FAIL-A (retried), attempt 2 FAIL-A2"
+                detail: >
+                  Both attempts empty. Attempt 1: zero receipts, 315 output
+                  tokens, retried. Attempt 2: `util instructions ask-quick` (exit
+                  3 — the model folded `--quick` into the mode word) then `util
+                  instructions ask`, then empty twice. The only row in the set
+                  whose retry was spent and still went red.
+              - run: "20260923T132008Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.007227
+                dispatcher_receipts: 2
+                host_wall_s: 27.95
+                verdict: "FAIL-A2 — stalled after launching the ask in the background"
+                detail: >
+                  The latest landing point of A2 that still graded red: the host
+                  launched the ask through its own background mechanism (no
+                  receipt — a receipt is written at completion and the container
+                  ended first), polled `status` once (exit 2, running), then went
+                  empty four times. cline/codex/muse/pi answered; goose and
+                  kilocode had not, so ONLY the partition assertion failed — the
+                  receipt anchor (2) and the phase name (from the `status`
+                  receipt) both passed.
+              - run: "20260923T132249Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.018824
+                dispatcher_receipts: 5
+                host_wall_s: 78.64
+                verdict: pass
+              - run: "20260923T133710Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.019053
+                dispatcher_receipts: 5
+                host_wall_s: 149.69
+                verdict: "pass on attempt 2 — attempt 1 was FAIL-A"
+                detail: "Attempt 1: zero receipts, 433 output tokens, one nudge, `result: \"\"`; retried."
         note: >
           The only claude-code row with no batch at all, hence the only cheap one.
           MEASURED: the host read the shim, ran `util instructions ask`, ran the
@@ -1102,6 +1270,7 @@ hosts:
         command: "review-plan plans/auth-feature.md --yes --quick"
         expect: {run: none, exit: 0, phases: [review-plan], receipts_min: 3}
         wall_clock_s: 900
+        cost_budget_usd: 0.24   # MEASURED-DERIVED: the worst of six samples, $0.2392, rounded up
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
         measured:
           on: "2026-08-14"
@@ -1235,6 +1404,159 @@ hosts:
                   receipt, exit 0); `phases_completed["review-plan"]` recorded.
                   The one turn in the set that spawned FOUR subagents, and the
                   only one carrying `requested.foreground: 1`. Idle gap 15.7 s.
+          after_core_end_fix:
+            on: "2026-09-23"
+            runs: "the thirteen listed on `claude-code-ask`'s `after_core_end_fix`"
+            verdict: >
+              10 pass / 3 fail over 13 rows, 4 of 14 host turns bad counting one
+              retried never-started attempt — and ZERO SHAPE B. This is the row
+              b31893d can reach: `util instructions review-plan` is 38,373 chars,
+              over the cap, and both sessions spot-checked (`121001Z`, `122034Z`)
+              name the `MULTI_LLM_CORE_END` line. Eleven turns entered the validation batch
+              loop; all eleven re-invoked `--reaggregate` and recorded
+              `phases_completed["review-plan"]`, seven of them after BACKGROUNDED
+              Task batches (`started_in_background: 3-4`, the exact envelope both
+              2026-09-22 Shape-B reds carried) and four with FOREGROUND ones
+              (`requested.foreground: 3-4`, which the 2026-09-22 set showed once).
+              End-of-turn idle gaps 6.4-50.8 s, none near the 136/190 s Shape-B
+              signature. The three reds are three different things: one Shape A
+              (retried) followed by a new Shape D, one new Shape E, and one A2 —
+              see `claude-code-apply-native`'s `after_core_end_fix.shapes`.
+            attempts:
+              - run: "20260923T121001Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.06031
+                dispatcher_receipts: 9
+                host_wall_s: 274.46
+                verdict: pass
+                detail: "4 foreground Task batches; `--reaggregate` re-invoked; phase recorded. Idle gap 32.3 s."
+              - run: "20260923T122034Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.03348
+                dispatcher_receipts: 10
+                host_wall_s: 199.61
+                verdict: pass
+                detail: "3 BACKGROUNDED batches (the Shape-B envelope), `--reaggregate` re-invoked, phase recorded. Idle gap 6.8 s."
+              - run: "20260923T123042Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.034963
+                dispatcher_receipts: 8
+                host_wall_s: 207.54
+                verdict: pass
+                detail: "4 foreground batches; phase recorded. Idle gap 9.4 s."
+              - run: "20260923T123545Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.021013
+                dispatcher_receipts: 6
+                host_wall_s: 110.83
+                verdict: pass
+                detail: "3 backgrounded batches; phase recorded. Idle gap 6.4 s."
+              - run: "20260923T123915Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.030295
+                dispatcher_receipts: 11
+                host_wall_s: 156.17
+                verdict: pass
+                detail: >
+                  3 backgrounded batches, `--reaggregate`, `util metrics finish`,
+                  phase recorded — and then `result: ""`: the final summary came
+                  back empty after the nudge. The A-family mechanism landing after
+                  the work, where it costs nothing. Idle gap 25.4 s.
+              - run: "20260923T124218Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.038369
+                dispatcher_receipts: 7
+                host_wall_s: 266.58
+                verdict: pass
+                detail: "3 foreground batches; phase recorded. Idle gap 14.5 s."
+              - run: "20260923T124859Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.0299
+                dispatcher_receipts: 10
+                host_wall_s: 352.74
+                verdict: pass
+                detail: "3 backgrounded batches; phase recorded. Idle gap 14.9 s."
+              - run: "20260923T125829Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.008952
+                dispatcher_receipts: 0
+                host_wall_s: 120.13
+                verdict: "FAIL — attempt 1 FAIL-A (retried), attempt 2 FAIL-D"
+                detail: >
+                  Attempt 1: 4 turns, 77 output tokens, one nudge, `result: ""`,
+                  zero receipts — Shape A, retried ($0.005788 per `retry.json`).
+                  Attempt 2 is SHAPE D, NEW: the model NEVER CALLED THE SKILL
+                  TOOL. Its first thinking block fabricated a skill-load
+                  system-reminder ("Skill "multi-llm" is now loaded … Skill for
+                  …"), then it went looking for `.claude/skills/multi-llm/SKILL.md`
+                  under the PROJECT, could not list `~/.claude/skills/` (Claude
+                  Code's working-directory guard), and ended with a non-empty
+                  4,497-char answer declaring the skill "could not run its actual
+                  workflow" and substituting its own single-model review. Zero
+                  dispatcher receipts, so every receipt assertion catches it; a
+                  NON-empty result, so the never-started retry does not.
+              - run: "20260923T130455Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.082205
+                dispatcher_receipts: 10
+                host_wall_s: 622.44
+                verdict: pass
+                detail: "4 backgrounded batches, 62 turns; phase recorded. The costliest and slowest pass in the set. Idle gap 15.7 s."
+              - run: "20260923T131609Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.051147
+                dispatcher_receipts: 11
+                host_wall_s: 201.46
+                verdict: "FAIL-E — completed the phase on a panel it invented"
+                detail: >
+                  SHAPE E, NEW, and the only red in the set that recorded
+                  `phases_completed["review-plan"]`. The host dispatched `review-plan
+                  --plan-file plans/auth-feature.md --models
+                  cursor-agent:grok-4.7-high codex:gpt-6-astra:xhigh
+                  claude-code:claude-fable-5-1:high` — dropping `--quick` and
+                  typing a three-model panel of model ids that exist nowhere —
+                  then ran the loop to completion (3 backgrounded batches,
+                  `--reaggregate`, `metrics finish`). The dispatcher accepted all
+                  three ids (they are unvalidated except on kilocode) and the stub
+                  answered codex and claude-code. Graded red only by the partition
+                  assertion: none of the row's `fan_out` members was invoked.
+              - run: "20260923T132008Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.033934
+                dispatcher_receipts: 10
+                host_wall_s: 116.38
+                verdict: pass
+                detail: "3 backgrounded batches, ended on `origin: task-notification` — the Shape-B envelope — and still continued and recorded the phase. Idle gap 9.9 s."
+              - run: "20260923T132249Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.040792
+                dispatcher_receipts: 11
+                host_wall_s: 765.32
+                verdict: pass
+                detail: "4 foreground batches; phase recorded. Idle gap 50.8 s, the longest green gap in the set."
+              - run: "20260923T133710Z"
+                on: "2026-09-23"
+                model: "~deepseek/deepseek-v4-flash-latest"
+                usd: 0.001426
+                dispatcher_receipts: 1
+                host_wall_s: 30.27
+                verdict: "FAIL-A2 — stalled after the core loaded"
+                detail: >
+                  `util instructions review-plan`, then empty twice (one DSML
+                  fragment in the thinking); 10 turns, 1,982 output tokens,
+                  `result: ""`. Not retried: one receipt.
         note: "carries a validation batch and a consolidation batch of its own — both real spend"
       - id: claude-code-apply-native
         # RETARGETED 2026-08-20 from `apply-suggestions` to `apply-code-fixes`.
@@ -1337,6 +1659,7 @@ hosts:
         # (`wall_clock_s + 500`, test_container_host_lane.py) and that budget now
         # has to cover the pre-command leg as well as the host turn.
         wall_clock_s: 900
+        cost_budget_usd: 1.71   # MEASURED-DERIVED: the worst of four samples at this pin, $1.700198, rounded up — the ~$1.20 typical figure would stop a passing run
         # -------------------------------------------------------------------
         # THE ONLY PER-ROW MODEL PIN IN THIS MATRIX — ADDED 2026-08-21.
         #
@@ -1453,12 +1776,19 @@ hosts:
         # for the worst case measured; the $0.586302 single sample above is now
         # the cheapest pass on record rather than the anchor.
         # WHAT `cost_budget_usd` IS, SINCE THE THREE `claude-code-phase-*` ROWS
-        # BELOW DERIVE THEIRS FROM THAT ANCHOR: documentation. The key appears in
-        # NO `.py` in this repository — grepped 2026-09-22, this file is the only
-        # place the string occurs — so nothing reads it and nothing enforces it.
-        # The only live ceiling on this lane is the dedicated key's own `limit`,
-        # recorded per row in `credential-census.json` (`limit=30` on all four
-        # runs). Those three rows' $0.60 cells are not re-derived here: they are
+        # BELOW DERIVE THEIRS FROM THAT ANCHOR: a row's EXPECTED spend, and —
+        # since 2026-09-23 — ENFORCED. It was documentation until then (grepped
+        # 2026-09-22, no `.py` read it). `tests/container/host_spend.py` now reads
+        # it off every credentialed row, polls the key's `usage` while the row
+        # runs, and `docker stop`s the row as `budget-exceeded` once its delta
+        # crosses `cost_budget_usd × MLLM_E2E_ROW_BUDGET_HEADROOM` (default 2x,
+        # floored at $0.25) or the lane's remaining `MLLM_E2E_BUDGET_USD`,
+        # whichever is lower. A row with no numeric cell fails plain CI
+        # (`tests/test_host_lane_budget.py`). NOT A HARD CAP: the stop lands a
+        # poll interval plus the endpoint's settling lag late, so the only limit
+        # that holds against one oversized request is still the dedicated key's
+        # own `limit`, recorded per row in `credential-census.json` (`limit=30` on
+        # all four runs). Those three rows' $0.60 cells are not re-derived here: they are
         # unmeasured rows whose first pass (T4b) is what replaces the number, and
         # inventing a second estimate from this row's four samples would put two
         # predictions in the file where there is one measurement.
@@ -1654,12 +1984,15 @@ hosts:
             so a mean over passes and failures understates a passing run (the
             three passes mean $1.35). The ~$0.60 the comment block above budgets
             from a single $0.586302 sample is low by about 2x; ~$1.20 typical and
-            ~$1.70 worst case is what four samples say. `cost_budget_usd` is
-            DOCUMENTATION, not a cap — the key appears in no `.py` in this
-            repository (grepped 2026-09-22; this file is the only place the
-            string occurs), so nothing reads it and nothing enforces it. The one
-            live ceiling is the dedicated key's own `limit`, recorded per row in
-            `credential-census.json` as `limit=30` on all four runs.
+            ~$1.70 worst case is what four samples say. `cost_budget_usd` was
+            DOCUMENTATION, not a cap, when this was written (grepped 2026-09-22:
+            no `.py` read it). Since 2026-09-23 it is enforced mid-row at 2x by
+            `tests/container/host_spend.py` — see the comment block above — and
+            this row's cell is the $1.71 worst case, not the ~$1.20 typical
+            figure, because a 2x ceiling on the typical run would stop the worst
+            passing one. The one ceiling that is HARD is still the dedicated
+            key's own `limit`, recorded per row in `credential-census.json` as
+            `limit=30` on all four runs.
           not_graded_by_the_census: >
             `matrix-census.json` records `outcome: pass` for EVERY claude-code
             row in all four runs, and that word is not the lane's verdict: it is
@@ -1746,6 +2079,157 @@ hosts:
             WORD BELOW IS UNCHANGED: B2's thirteen-row lane run. What this block
             changes is only what the file CLAIMS in the meantime — that a pin
             fixed a row it has now failed once in four.
+          # -----------------------------------------------------------------
+          # THE 2026-09-23 RE-MEASUREMENT, after b31893d ("Stop a truncated core
+          # reading like a whole one"). Same host, same pins, image rebuilt from
+          # the working tree. Two runs of all three rows, then eleven of the two
+          # cheap rows only — apply-native's ~$1.1-1.8 per sample was what the
+          # $5.00 authorisation could not repeat. Each row's own attempts are on
+          # that row; this block carries the cross-row reading.
+          after_core_end_fix:
+            on: "2026-09-23"
+            runs: ["20260923T121001Z", "20260923T122034Z"]   # this row; the cheap rows ran eleven more
+            verdict: >
+              UNCHANGED OVERALL, INCONCLUSIVE ON SHAPE B. 12 bad of 32 host turns
+              (37.5%) against 4 of 11 (36%) before; after the harness's one-shot
+              never-started retry, 8 red of 28 rows (29%). By row: ask 8 bad of
+              16 turns (5 red of 13 rows), review-plan 4 of 14 (3 of 13),
+              apply-native 0 of 2. SHAPE B — the one shape b31893d plausibly
+              targets — was NOT SEEN in 13 turns that entered a native Task batch
+              loop (11 review-plan, 2 apply-native; 7 of the 11 backgrounded their
+              batches exactly as both old Shape-B reds did), against 2 in 7 before.
+              That is suggestive and not significant: if B's rate had not moved,
+              the chance that both B events among these 20 batch-loop turns fall
+              in the earlier seven is about 0.11 (hypergeometric, 21/190).
+              What DID move is the mix: the failures are now dominated by one
+              model-level mechanism the fix cannot reach — see `shapes`.
+            table: |
+              run      row           verdict                       key $     receipts
+              121001Z  ask           pass                          0.009634   4
+              121001Z  review-plan   pass (fg 4)                   0.060310   9
+              121001Z  apply-native  pass                          1.141341  17
+              122034Z  ask           FAIL-A2                       0.002265   1
+              122034Z  review-plan   pass (bg 3)                   0.033480  10
+              122034Z  apply-native  pass (fg 3)                   1.386248  17   +$0.387 landed after the closing readback
+              123042Z  ask           pass (result "")              0.012239   6
+              123042Z  review-plan   pass (fg 4)                   0.034963   8
+              123545Z  ask           A → retry pass                0.012040   8
+              123545Z  review-plan   pass (bg 3)                   0.021013   6
+              123915Z  ask           FAIL-A2                       0.000000   1
+              123915Z  review-plan   pass (bg 3, result "")        0.030295  11
+              124218Z  ask           pass                          0.024549   6
+              124218Z  review-plan   pass (fg 3)                   0.038369   7
+              124859Z  ask           pass                          0.019570   5
+              124859Z  review-plan   pass (bg 3)                   0.029900  10
+              125829Z  ask           pass                          0.014742   5
+              125829Z  review-plan   A → retry FAIL-D              0.008952   0
+              130455Z  ask           FAIL-A2                       0.000000   1
+              130455Z  review-plan   pass (bg 4)                   0.082205  10
+              131609Z  ask           A → retry FAIL-A2             0.000000   2
+              131609Z  review-plan   FAIL-E                        0.051147  11
+              132008Z  ask           FAIL-A2 (after launch)        0.007227   2
+              132008Z  review-plan   pass (bg 3)                   0.033934  10
+              132249Z  ask           pass                          0.018824   5
+              132249Z  review-plan   pass (fg 4)                   0.040792  11
+              133710Z  ask           A → retry pass                0.019053   5
+              133710Z  review-plan   FAIL-A2                       0.001426   1
+              --
+              `key $` is each row's `usage.json` delta. They sum to $3.134518; the
+              key's own usage moved $3.581617 across the whole session
+              (43.064922 → 46.646539). The $0.447 difference is spend that settled
+              AFTER a row's closing readback and landed in no row's bracket — $0.387
+              of it after `122034Z/claude-code-apply-native`, which puts that turn
+              at ~$1.77, above the $1.700198 worst case the row's cell is derived
+              from (the 2x ceiling, $3.42, was nowhere near).
+            shapes: >
+              A — NEVER STARTED (known). Zero receipts, `result: ""`. Three
+              occurrences, all on first attempts, all retried by
+              `harness.never_started_signature`; two of the three retries went
+              green, one went red again (A2). A IS NOW DIAGNOSED, where the
+              2026-09-22 block said the bundles held no trace: the harness
+              captures `host-session-digest.jsonl` now, and every A turn shows the
+              model returning a message with no visible text or tool call, Claude
+              Code injecting `[Your previous response had no visible output. Please
+              continue and produce a user-visible response.]`, and the model
+              returning empty again. Several of those empty messages carry
+              deepseek's `<｜DSML｜…>` tool-call markup inside the thinking — the
+              same leak the 2026-08-14 attempt diagnosed.
+              A2 — STALLED AFTER THE CORE LOADED (new sub-shape of A). The same
+              double-empty mechanism, landing after one or two receipts (`util
+              instructions <mode>`, sometimes a `status` poll) instead of before
+              any. Six occurrences (five on ask, one on review-plan). The retry
+              does not fire (clause 5 wants zero receipts), so each is a graded
+              red. It is A by mechanism and deserves its own letter only because
+              the rig treats the two differently.
+              B — STOPPED ON RETURN FROM A BACKGROUNDED BATCH (known). Not
+              observed. Seven review-plan turns backgrounded their batches with
+              the old reds' exact envelope (and two ended on `origin:
+              task-notification`) and all continued to `--reaggregate`.
+              C — DISPATCHED, NEVER ENTERED THE LOOP (the phase-tier shape, known).
+              Not observed; these rows are not the phase tier.
+              D — HALLUCINATED SKILL LOAD (new, 1). The model never called the
+              Skill tool, fabricated the skill's loading notice in its own
+              thinking, searched the project for a SKILL.md that lives under
+              `~/.claude/skills/`, and answered in 4,497 chars that the skill could
+              not run. Zero receipts, non-empty result.
+              E — INVENTED ARGUMENTS (new, 1). The phase ran to completion on a
+              `--models` panel of three nonexistent ids the host typed itself,
+              without `--quick`. The dispatcher accepts unvalidated ids, so only the
+              partition assertion caught it.
+              ALL SIX SHAPES SHARE ONE PROPERTY: they are the host MODEL
+              (`~deepseek/deepseek-v4-flash-latest`, resolved to
+              `deepseek-v4-flash-0731`) misbehaving on inputs that are
+              byte-identical run to run. A and A2 occur on `ask` MORE often than on
+              review-plan, and `ask`'s 24,144-char core was never truncated, so
+              b31893d cannot be what moves them.
+            sample_size: >
+              Read as a direction, not a rate. 32 turns after against 11 before,
+              13 batch-loop turns after against 7 before, and 2 apply-native
+              samples. The overall rates are indistinguishable at this size; the
+              Shape-B difference would need roughly three times the sample to be
+              read as a reduction at conventional confidence.
+            spend_guard: >
+              FIRST LIVE EXERCISE of `tests/container/host_spend.py`, with
+              `MLLM_E2E_BUDGET_USD` set per invocation to the authorised remainder
+              less a margin ($4.60, $3.60, then $1.38 falling to $0.64). No row
+              tripped and no row came close: the largest row delta, $1.386248,
+              sat under apply-native's $3.42 row ceiling, and every cheap row under
+              its $0.25 floor / $0.48 ceiling. Every opening and closing readback
+              succeeded (a `usage.json` in every row, no `budget.json`, no
+              `spend-unobservable`), and the per-row deltas of round 1 summed to
+              the key's delta to the micro-dollar. ONE PROPERTY IS NOW MEASURED
+              RATHER THAN DOCUMENTED: the settling lag lands AFTER the closing
+              readback, so it is invisible to the row that caused it and — with no
+              later row in the same invocation — to the `Ledger` total too. $0.387
+              did so after the last row of `122034Z`; the Ledger for that
+              invocation therefore read $1.42 against a real $1.81. The mid-row
+              stop was never exercised by a trip; that remains untested live.
+            attempts:
+              - run: "20260923T121001Z"
+                on: "2026-09-23"
+                model: "anthropic/claude-haiku-4.5"
+                usd: 1.141341
+                dispatcher_receipts: 17
+                host_wall_s: 236.74
+                verdict: pass
+                detail: >
+                  Ended on `apply-code-fixes --plan-file plans/auth-feature.md
+                  --mark-completed`, exit 0; `phases_completed` holds
+                  `apply-code-fixes`. Three BACKGROUNDED Task batches and
+                  `origin: {kind: "task-notification"}` — the Shape-B envelope —
+                  with a 6.6 s idle gap. No `budget.json`.
+              - run: "20260923T122034Z"
+                on: "2026-09-23"
+                model: "anthropic/claude-haiku-4.5"
+                usd: 1.386248
+                usd_note: "row bracket; a further $0.387 settled after the closing readback, so ~$1.77 real — the costliest turn on record for this row"
+                dispatcher_receipts: 17
+                host_wall_s: 269.55
+                verdict: pass
+                detail: >
+                  Three FOREGROUND Task batches (`requested.foreground: 3`,
+                  `started_in_background: 0`), `origin: null`, 39 turns, ending on
+                  `--mark-completed`, phase recorded. Idle gap 6.3 s.
         # STILL `measured-red`, AND DELIBERATELY SO — the word is B2's to change,
         # not this row's. `runs/20260821T082250Z` re-measured the row ALONE
         # (`-k claude-code-apply-native`) after R1's per-row model pin below and
@@ -3010,6 +3494,7 @@ hosts:
         command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick --detach"
         expect: {run: done, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
         wall_clock_s: 600
+        cost_budget_usd: 0.02   # MEASURED-DERIVED: the one sample, $0.0115, rounded up; ceiling floors at $0.25
         measured:
           on: "2026-08-14"
           verdict: pass
@@ -3031,6 +3516,7 @@ hosts:
         command: "review-plan plans/auth-feature.md --yes --quick --detach"
         expect: {run: done, exit: 0, phases: [review-plan], receipts_min: 2}
         wall_clock_s: 900
+        cost_budget_usd: 0.04   # MEASURED-DERIVED: the one sample, $0.0361, rounded up; ceiling floors at $0.25
         # MEASURED: without this the worker really runs and really fails —
         # "JSON parsing failed from both file and stdout" — because a
         # scenario-less stub answers a bare "OK", which is not a suggestions
@@ -3109,6 +3595,7 @@ hosts:
           # run log and `.status.json` on the launcher's own receipt.
           receipts_min: 2
         wall_clock_s: 900
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         # The same scenario the review-plan row declares, for the same measured
         # reason: a scenario-less stub answers a bare "OK", which is not a
         # suggestions document. `full` needs strictly more of it — this scenario
@@ -3198,6 +3685,7 @@ hosts:
         # timeout from it (`wall_clock_s + 500`) and that budget now has to cover
         # the pre-command leg as well as the host turn.
         wall_clock_s: 900
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         expect:
           run: done
           exit: 0
@@ -3355,6 +3843,7 @@ hosts:
         # timeout and it now has to cover the pre-command leg too. It is NOT the
         # refusal's bound — `expect.within_s` is, and it is 30 s.
         wall_clock_s: 900
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         expect:
           exit: 3
           reason: not_authenticated
@@ -3712,6 +4201,7 @@ hosts:
         command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick --detach"
         expect: {run: done, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
         wall_clock_s: 600
+        cost_budget_usd: 0.01   # MEASURED-DERIVED: the one sample, $0.008, rounded up; ceiling floors at $0.25
         measured:
           on: "2026-08-14"
           verdict: pass
@@ -3735,6 +4225,7 @@ hosts:
         command: "review-plan plans/auth-feature.md --yes --quick --detach"
         expect: {run: done, exit: 0, phases: [review-plan], receipts_min: 2}
         wall_clock_s: 900
+        cost_budget_usd: 0.03   # MEASURED-DERIVED: the one sample, $0.0241, rounded up; ceiling floors at $0.25
         # MEASURED: without this the worker really runs and really fails —
         # "JSON parsing failed from both file and stdout" — because a
         # scenario-less stub answers a bare "OK", which is not a suggestions
@@ -3794,6 +4285,7 @@ hosts:
             - apply-code-fixes
           receipts_min: 2
         wall_clock_s: 900
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
         # RE-DATED 2026-09-22, FROM `verified` TO `unmeasured`, on exactly the
         # grounds written out at `codex-full` above and with the run id kept as
@@ -3843,6 +4335,7 @@ hosts:
         # Stated rather than defaulted: `wall_clock_s + 500` is the row's docker
         # timeout and it now has to cover the pre-command leg too.
         wall_clock_s: 900
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         expect:
           run: done
           exit: 0
@@ -3948,6 +4441,7 @@ hosts:
         # Stated rather than defaulted: `wall_clock_s + 500` is the row's docker
         # timeout and it now has to cover the pre-command leg too.
         wall_clock_s: 900
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         expect:
           # NOT not_authenticated — see the auth_check finding above. This row is
           # recorded so the difference from codex is asserted rather than assumed.
@@ -4037,6 +4531,7 @@ hosts:
         command: "ask plans/auth-feature.md 'What does this plan change?' --yes --quick --detach"
         expect: {run: done, exit: 0, phases: [ask], receipts_min: 2, artifacts_min: 0}
         wall_clock_s: 600
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         measured:
           on: "2026-09-19"
           verdict: pass
@@ -4063,6 +4558,7 @@ hosts:
         command: "review-plan plans/auth-feature.md --yes --quick --detach"
         expect: {run: done, exit: 0, phases: [review-plan], receipts_min: 2}
         wall_clock_s: 900
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         # Same scenario, and for the same measured reason as the file row: under
         # --exec-subagents this phase dispatches validation batches too, and the
         # narrower scenario answers those with something that is not a validation
@@ -4163,6 +4659,7 @@ hosts:
         # host by every figure the file has. T4 re-records it from this row's own
         # first pass rather than inheriting one.
         wall_clock_s: 900
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
         measured:
           on: null
@@ -4219,6 +4716,7 @@ hosts:
         # timeout and it has to cover the pre-command leg too. Copied from the
         # twin, which measured 82.23 s of host wall against it.
         wall_clock_s: 900
+        cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         expect:
           run: done
           exit: 0

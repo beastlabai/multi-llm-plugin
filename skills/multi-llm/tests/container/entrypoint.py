@@ -1412,9 +1412,10 @@ def credential_preflight(host: str, entry: dict, key: str,
 
     Two checks, in the order the plan puts them:
 
-    * **the key's own spend limit.** `MLLM_E2E_BUDGET_USD` is a pre-flight refusal
-      and cannot stop a runaway mid-run, so the only limit that holds is the one
-      enforced by the party doing the billing. A key reporting no `limit` is
+    * **the key's own spend limit.** `MLLM_E2E_BUDGET_USD` and each row's
+      `cost_budget_usd` are enforced by polling (`host_spend.py`), which stops a
+      runaway only a poll interval plus the endpoint's settling lag late, so the
+      only limit that holds is the one enforced by the party doing the billing. A key reporting no `limit` is
       refused — `MLLM_ALLOW_UNLIMITED_KEY=1` is the deliberate, recorded override
       for a bounded operator-supervised run, and it is never a default;
     * **the pinned model resolves.** A pin the catalog does not name aborts the

@@ -697,11 +697,17 @@ MCP definitions that routinely embed third-party keys — a minimal one is
 synthesized instead.
 
 > **Required, not recommended:** the host lane runs on a **dedicated OpenRouter key
-> carrying a key-level spend limit.** `MLLM_E2E_BUDGET_USD` is a pre-flight
-> *refusal*, not a ceiling: it is computed before a token is spent, so it cannot
-> stop one oversized request, a CLI's internal retries, or the reference host's
-> native subagent batches from overshooting mid-run. The only limit that actually
-> holds is enforced by the party doing the billing.
+> carrying a key-level spend limit.** Our own guard (`host_spend.py`) is two
+> limits: the lane total `MLLM_E2E_BUDGET_USD` and each row's
+> `cost_budget_usd × MLLM_E2E_ROW_BUDGET_HEADROOM` (default 2x, floored at $0.25).
+> Both are refused between rows, and a poller reading the key's `usage` every
+> `MLLM_E2E_SPEND_POLL_S` (default 20 s) `docker stop`s a row that crosses either
+> mid-run, filing it `budget-exceeded`; a `usage` readback that fails after three
+> attempts stops the lane (`spend-unobservable`) instead of crediting $0. It is
+> still not a ceiling: the endpoint settles after the fact, so the stop lands a
+> poll interval plus that lag late, and one oversized request, a CLI's internal
+> retries or a host's native subagent batches can overshoot inside that window.
+> The only limit that actually holds is enforced by the party doing the billing.
 
 ### Two install routes on `opencode`, and only one of them has ever been graded
 

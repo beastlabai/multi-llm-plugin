@@ -975,6 +975,16 @@ def spec_list(row: Row) -> list[str]:
     return [str(entry) for entry in row.spec if str(entry).strip()]
 
 
+#: The instant every container's product renders as "now" where it stamps a
+#: file (reproducible-builds' ``SOURCE_DATE_EPOCH``; 2026-01-01T00:00:00Z). The
+#: tasks file's `*Generated: …*` line is hashed into `tasks_sha256` and the
+#: write reports' `sha256_before`/`sha256_after`, so without a pinned value no
+#: two captures of a task-phase row agree on that file's digest (C8; see
+#: `tests/golden/container_bundle.py`). Changing it moves those digests in
+#: every baseline at once.
+SOURCE_DATE_EPOCH = "1767225600"
+
+
 def build_run_argv(row: Row, out_dir: Path, posture: dict,
                    image: str = DEFAULT_IMAGE) -> list[str]:
     """Assemble the run command from posture.yaml. No flag is written twice."""
@@ -1027,6 +1037,9 @@ def build_run_argv(row: Row, out_dir: Path, posture: dict,
     argv += ["-e", f"UV_CACHE_DIR={uv['cache_dir']}"]
     if uv.get("offline"):
         argv += ["-e", "UV_OFFLINE=1"]
+
+    # Every lane, every row: a determinism pin, not a credential or a policy.
+    argv += ["-e", f"SOURCE_DATE_EPOCH={SOURCE_DATE_EPOCH}"]
 
     # The host lane's ONE credential variable, and only ever on that lane.
     if row.lane == "host" and row.creds == "openrouter":

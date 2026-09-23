@@ -58,7 +58,9 @@ useDefault = true
 # Allowlist entries
 # ---------------------------------------------------------------------------
 #
-# There is exactly one, and it is at the bottom of this file. Measured, not
+# There are two, both at the bottom of this file and both hanging off
+# `generic-api-key`: the run-record manifest entry (2026-08-15) and its twin for
+# the container golden baselines (2026-09-23). Measured, not
 # assumed: on 2026-08-14, gitleaks 8.28.0 with the stock pack over
 # `git ls-files` reported zero findings on the tracked tree. The `uv.lock`
 # digests the plan predicted would fire do not — the stock `generic-api-key`
@@ -70,7 +72,7 @@ useDefault = true
 # directions: every entry present must be load-bearing (deleting it turns the
 # scanner red) and the set must be no larger than what actually fires.
 #
-# The one entry arrived with the first *committed* container run record
+# The first entry arrived with the first *committed* container run record
 # (2026-08-15). `tests/container/records/*.json` was always designed to be
 # tracked provenance — `record.schema.json` has been tracked since C10 and the
 # harness README calls records "tracked, committed with the promotion" — but no
@@ -227,3 +229,24 @@ paths       = ['''^skills/multi-llm/tests/container/records/[^/]+\.json$''']
 #   NOT exhaustive going forward, and that is the point: every future run commits
 #   more records with fresh digests, so this list is provenance for the day the
 #   exception was written, never the definition of what it covers.
+
+[[rules.allowlists]]
+description = "container golden baselines: SHA-256 rows of a write batch's per-file digest map, not credentials — `plans/auth-feature.md` and `src/auth.py` are fixture paths being digested, not keys being assigned; added 2026-09-23"
+condition   = "AND"      # value AND path; either alone is a blind spot
+regexTarget = "line"     # default is the secret alone, against which this regex is inert
+regexes     = ['''(?m)^[ \t]*"[A-Za-z0-9_./-]+\.[a-z0-9]{1,8}":[ \t]*"[a-f0-9]{64}",?[ \t]*\r?$''']
+paths       = ['''^skills/multi-llm/tests/golden/container/[^/]+/bundle\.json$''']
+# The same line-shaped regex as the run-record entry above, and for the same
+# reason: the stock rule reads the `auth` in a digested fixture path as an
+# identifier sitting next to a value. It became reachable on 2026-09-23, when
+# `container_bundle.ERASED_VALUE_KEYS` stopped erasing `sha256_before`,
+# `sha256_after` and `tasks_sha256` (the tasks file is now deterministic under
+# `SOURCE_DATE_EPOCH`), so a re-seeded baseline carries real digests where it
+# used to carry `"<str>"`. The four conditions spelled out above hold here
+# unchanged; only the path differs, and it is pinned to the committed baselines
+# rather than to `tests/golden/**`.
+# fingerprints: 340 the day it landed, all `generic-api-key`, 20 per re-seeded
+#   baseline across the 17 `tests/golden/container/*/bundle.json` files — 272
+#   `"plans/auth-feature.md": "<64 hex>"` rows and 68 `"src/auth.py": "<64 hex>"`
+#   rows. As above, provenance for the day it was written, not the definition of
+#   what it covers: every re-seed rewrites the digests.

@@ -3,7 +3,7 @@
 import re
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 
 # HTML comment markers for idempotent updates
@@ -383,73 +383,6 @@ See [{tasks_file}]({tasks_file}) for the detailed task breakdown.
 
     # Append new reference section at the end
     return content.rstrip() + "\n" + reference_section
-
-
-def tasks_json_to_markdown(tasks: List[Dict[str, Any]]) -> str:
-    """
-    Convert tasks JSON to markdown format.
-
-    Args:
-        tasks: List of task dictionaries with id, title, description, etc.
-
-    Returns:
-        Formatted markdown string for the tasks section
-    """
-    lines = [
-        "## Implementation Tasks",
-        "",
-        f"*Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}*",
-        "",
-        "---",
-        "",
-    ]
-
-    for task in tasks:
-        task_id = task.get("id", "T000")
-        title = task.get("title", "Untitled Task")
-        description = task.get("description", "")
-        depends_on = task.get("depends_on", [])
-        files_to_modify = task.get("files_to_modify", [])
-        files_to_create = task.get("files_to_create", [])
-        acceptance_criteria = task.get("acceptance_criteria", [])
-        complexity = task.get("estimated_complexity", "medium")
-
-        # Task header
-        lines.append(f"### Task {task_id}: {title}")
-
-        # Dependencies
-        if depends_on:
-            deps_str = ", ".join(depends_on)
-            lines.append(f"**Dependencies**: {deps_str}")
-        else:
-            lines.append("**Dependencies**: None")
-
-        # Files
-        if files_to_modify:
-            lines.append(f"**Files to modify**: {', '.join(files_to_modify)}")
-        if files_to_create:
-            lines.append(f"**Files to create**: {', '.join(files_to_create)}")
-
-        # Complexity
-        lines.append(f"**Complexity**: {complexity}")
-        lines.append("")
-
-        # Description
-        if description:
-            lines.append(description)
-            lines.append("")
-
-        # Acceptance criteria
-        if acceptance_criteria:
-            lines.append("**Acceptance Criteria**:")
-            for criterion in acceptance_criteria:
-                lines.append(f"- [ ] {criterion}")
-            lines.append("")
-
-        lines.append("---")
-        lines.append("")
-
-    return '\n'.join(lines)
 
 
 def insert_generated_tasks(content: str, tasks_markdown: str) -> str:

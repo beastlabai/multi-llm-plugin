@@ -60,8 +60,9 @@ HOST_PIN = "~deepseek/deepseek-v4-flash-latest"
 #:   delta per passing row, ~$1.80 for the three. That is why these rows carry
 #:   the `live_native_phase` marker, why `make e2e-container-host` excludes it,
 #:   and why `make e2e-container-host-phases` raises `MLLM_E2E_BUDGET_USD` to
-#:   $6.00 — the $2.00 default is a between-rows `pytest.exit` that a ~$3-5
-#:   tier crosses around its fourth row, stranding the rest.
+#:   $6.00 — the $2.00 default is the lane total, enforced between rows and
+#:   (since 2026-09-23) mid-row, that a ~$3-5 tier crosses inside its third
+#:   row, stranding the rest.
 #: * They are `unmeasured` until T4 runs them. If a cheaper pin turns out to
 #:   complete these phases, this list is where that measurement lands.
 PHASE_ROW_IDS = (
