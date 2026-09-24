@@ -333,11 +333,12 @@ _REGISTRY_FORMS: Dict[str, Dict[str, Any]] = {
         # The namespaced name the plugin's skill is advertised under — a worked
         # example of its own, because it is NOT the `install-host` paragraph's
         # bare name, and a reader copying that one would name the file shim.
+        # A `$` mention, which codex's own skill instructions name as the way a
+        # user invokes a skill ("with $SkillName or plain text"); observed live
+        # on 0.156.1, the arguments reaching the `multi_llm` tool intact.
         "examples": [
-            "Use the {name}:{name} skill with exactly these arguments: "
-            "plans/my-feature.md",
-            "Use the {name}:{name} skill with exactly these arguments: "
-            "--review-code plans/my-feature.md",
+            "${name}:{name} plans/my-feature.md",
+            "${name}:{name} --review-code plans/my-feature.md",
         ],
         # Once per repository, in the new session. The plugin's own copy of the
         # provider config lives in the version-keyed install, which the next
@@ -345,7 +346,7 @@ _REGISTRY_FORMS: Dict[str, Dict[str, Any]] = {
         # the installed file.
         "configure": (
             "Then configure providers once per repository, in the new session: "
-            "`Use the {name}:{name} skill with exactly these arguments: --init` "
+            "`${name}:{name} --init` "
             "writes `<git-root>/.multi-llm/providers.yaml`, outside "
             "`$CODEX_HOME`, where no reinstall or upgrade touches it."
         ),

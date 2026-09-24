@@ -329,9 +329,11 @@ hosts:
                                       # reports, since the schema's own wording is "the lowest actually RUN"
                                       # — and not bisected (Open question 5)
       invocation: >-
-        by name with its namespace — `Use the multi-llm:multi-llm skill with exactly
-        these arguments: <the same arguments the Claude Code skill takes>` — or by the
-        model calling the `multi_llm` tool directly.
+        with a `$` mention of the namespaced skill — `$multi-llm:multi-llm <the same
+        arguments the Claude Code skill takes>`; plugins add no slash command, so
+        `/multi-llm` stays unrecognized. If the model ever reworks the arguments,
+        spell it out — `Use the multi-llm:multi-llm skill with exactly these
+        arguments: <args>` — or let the model call the `multi_llm` tool directly.
     provenance:
       shim: documented
       installable: documented

@@ -66,12 +66,15 @@ codex plugin add multi-llm@beastlabai
 # then start a NEW Codex session
 ```
 
-Codex plugins have no slash commands, so ask for the skill by name. Once per repository, run `--init` first: it writes `<git-root>/.multi-llm/providers.yaml`, which no upgrade touches.
+Codex plugins cannot add slash commands, so `/multi-llm` is not available. Mention the skill with `$` instead, followed by the same arguments the Claude Code skill takes. Once per repository, run `--init` first: it writes `<git-root>/.multi-llm/providers.yaml`, which no upgrade touches.
 
 ```text
-Use the multi-llm:multi-llm skill with exactly these arguments: --init
-Use the multi-llm:multi-llm skill with exactly these arguments: plans/my-feature.md
+$multi-llm:multi-llm --init
+$multi-llm:multi-llm plans/my-feature.md
+$multi-llm:multi-llm --review-plan plans/my-feature.md --quick
 ```
+
+A `$` mention asks the model to use the skill, and the model then calls the `multi_llm` tool with your arguments. If it ever reworks them, spell the request out: `Use the multi-llm:multi-llm skill with exactly these arguments: plans/my-feature.md`.
 
 > **Before you install:** the plugin's tool runs outside Codex's exec sandbox, so in a read-only session it refuses the modes that edit your working tree unless `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is set. Provider API keys must be exported from `~/.profile` or `~/.bash_profile`, because Codex starts the tool with a stripped environment.
 

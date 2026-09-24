@@ -78,14 +78,14 @@ codex plugin marketplace add beastlabai/multi-llm-plugin --ref release --sparse 
 codex plugin add multi-llm@beastlabai
 ```
 
-Needs codex 0.156.1 or newer. It provides a skill and a model-callable tool, and you invoke it by name with its namespace — `Use the multi-llm:multi-llm skill with exactly these arguments: <the same arguments the Claude Code skill takes>` — or by the model calling the `multi_llm` tool directly.
+Needs codex 0.156.1 or newer. It provides a skill and a model-callable tool, and you invoke it with a `$` mention of the namespaced skill — `$multi-llm:multi-llm <the same arguments the Claude Code skill takes>`; plugins add no slash command, so `/multi-llm` stays unrecognized. If the model ever reworks the arguments, spell it out — `Use the multi-llm:multi-llm skill with exactly these arguments: <args>` — or let the model call the `multi_llm` tool directly.
 
 ```text
-Use the multi-llm:multi-llm skill with exactly these arguments: plans/my-feature.md
-Use the multi-llm:multi-llm skill with exactly these arguments: --review-code plans/my-feature.md
+$multi-llm:multi-llm plans/my-feature.md
+$multi-llm:multi-llm --review-code plans/my-feature.md
 ```
 
-Then configure providers once per repository, in the new session: `Use the multi-llm:multi-llm skill with exactly these arguments: --init` writes `<git-root>/.multi-llm/providers.yaml`, outside `$CODEX_HOME`, where no reinstall or upgrade touches it.
+Then configure providers once per repository, in the new session: `$multi-llm:multi-llm --init` writes `<git-root>/.multi-llm/providers.yaml`, outside `$CODEX_HOME`, where no reinstall or upgrade touches it.
 
 Upgrading is a different sequence from the install, because repeating the install is a no-op on a marketplace that is already registered: refresh the marketplace, re-add the plugin from it, then start a **new** codex session:
 
