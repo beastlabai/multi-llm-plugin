@@ -770,7 +770,7 @@ def build_implementation_record(plan_path: Path) -> str:
         )
         # Two lists, not one. "Must not be reported as missing" is a claim about
         # a *decision* — a task somebody chose not to run — and implement seeds
-        # every task `pending` at start (879f3b3), so a run that crashed, was
+        # every task `pending` at start (9e374b5), so a run that crashed, was
         # aborted, or whose batch failed used to hand the reviewers every task
         # it never finished under exactly the sentence that tells them to ignore
         # the gap. A task that failed is the one whose missing work a code
