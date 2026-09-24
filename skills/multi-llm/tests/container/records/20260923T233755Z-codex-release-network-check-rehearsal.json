@@ -1,0 +1,525 @@
+{
+  "rehearsal": true,
+  "source": "local bare clone over ssh://localhost, not GitHub",
+  "machine_kind": "fresh container from mllm-e2e:local",
+  "kind": "codex-release-network-check",
+  "plan": "plans/codex-native-plugin.md Phase 4 (the manual network check) / A6 step 6",
+  "stamp": "20260923T233755Z",
+  "tag": "codex-v0.1.0",
+  "sha": "79be0812e18b3ac13b2cb4fa9cf95f920cff24ef",
+  "tagged_tree": "throwaway commit snapshotting the host-harness-portability working tree (HEAD ce9732a + uncommitted changes) in a scratch clone; the sha exists nowhere else",
+  "source_url": "ssh://localhost/work/srv/multi-llm-plugin.git",
+  "transport": "GIT_SSH_COMMAND shim that drops ssh options and the host and runs git-upload-pack locally; no sshd, no ssh binary in the image",
+  "machine": {
+    "os": "Debian GNU/Linux 12 (bookworm)",
+    "kernel": "Linux 0571ca2ef29c 6.10.14-linuxkit #1 SMP PREEMPT_DYNAMIC Wed Sep  3 15:37:39 UTC 2025 x86_64 GNU/Linux",
+    "codex": "codex-cli 0.156.1",
+    "uv": "uv 0.11.28 (x86_64-unknown-linux-gnu)",
+    "python3": "Python 3.11.2",
+    "git": "git version 2.39.5",
+    "home": "/home/e2e",
+    "codex_home": "/home/e2e/.codex (CODEX_HOME unset, codex default)",
+    "path": "/opt/mllm/real:/usr/local/bin:/usr/bin:/bin"
+  },
+  "install_line": [
+    "codex plugin marketplace add <source> --ref codex-v0.1.0 --sparse .agents --sparse packaging/codex",
+    "codex plugin add multi-llm@beastlabai"
+  ],
+  "commands": [
+    {
+      "leg": "machine",
+      "argv": [
+        "uname",
+        "-a"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "codex",
+        "--version"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "uv",
+        "--version"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "python3",
+        "--version"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "git",
+        "--version"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "machine",
+      "argv": [
+        "sh",
+        "-c",
+        "for b in codex uv python3 git ssh; do command -v $b || echo \"$b: not found\"; done"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "tag",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "ssh://localhost/work/srv/multi-llm-plugin.git",
+        "--ref",
+        "codex-v0.1.0",
+        "--sparse",
+        ".agents",
+        "--sparse",
+        "packaging/codex"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "tag",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "list"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "tag",
+      "argv": [
+        "codex",
+        "plugin",
+        "add",
+        "multi-llm@beastlabai",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "tag",
+      "argv": [
+        "codex",
+        "plugin",
+        "list",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "tag",
+      "argv": [
+        "codex",
+        "plugin",
+        "list",
+        "--available",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "tag",
+      "argv": [
+        "codex",
+        "mcp",
+        "get",
+        "multi_llm",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "tag",
+      "argv": [
+        "codex",
+        "debug",
+        "prompt-input"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "release",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "ssh://localhost/work/srv/multi-llm-plugin.git",
+        "--ref",
+        "release",
+        "--sparse",
+        ".agents",
+        "--sparse",
+        "packaging/codex"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "release",
+      "argv": [
+        "codex",
+        "plugin",
+        "add",
+        "multi-llm@beastlabai",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "release",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "upgrade",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "release",
+      "argv": [
+        "codex",
+        "plugin",
+        "add",
+        "multi-llm@beastlabai",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "release",
+      "argv": [
+        "codex",
+        "plugin",
+        "list",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "probe-no_ref_default_branch",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "ssh://localhost/work/srv/multi-llm-plugin.git",
+        "--sparse",
+        ".agents",
+        "--sparse",
+        "packaging/codex"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "probe-no_ref_default_branch",
+      "argv": [
+        "codex",
+        "plugin",
+        "add",
+        "multi-llm@beastlabai",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "probe-no_sparse_tag",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "ssh://localhost/work/srv/multi-llm-plugin.git",
+        "--ref",
+        "codex-v0.1.0"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "probe-no_sparse_tag",
+      "argv": [
+        "codex",
+        "plugin",
+        "add",
+        "multi-llm@beastlabai",
+        "--json"
+      ],
+      "exit": 0
+    },
+    {
+      "leg": "probe-local_bare_path",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "/work/srv/multi-llm-plugin.git"
+      ],
+      "exit": 1
+    },
+    {
+      "leg": "probe-local_bare_path_with_ref",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "/work/srv/multi-llm-plugin.git",
+        "--ref",
+        "release"
+      ],
+      "exit": 1
+    },
+    {
+      "leg": "probe-file_url",
+      "argv": [
+        "codex",
+        "plugin",
+        "marketplace",
+        "add",
+        "file:///work/srv/multi-llm-plugin.git",
+        "--ref",
+        "codex-v0.1.0"
+      ],
+      "exit": 1
+    }
+  ],
+  "plugin_add": {
+    "pluginId": "multi-llm@beastlabai",
+    "name": "multi-llm",
+    "marketplaceName": "beastlabai",
+    "version": "0.1.0",
+    "installedPath": "/home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0",
+    "authPolicy": "ON_INSTALL"
+  },
+  "plugin_list": {
+    "installed": [
+      {
+        "pluginId": "multi-llm@beastlabai",
+        "name": "multi-llm",
+        "marketplaceName": "beastlabai",
+        "version": "0.1.0",
+        "installed": true,
+        "enabled": true,
+        "source": {
+          "source": "local",
+          "path": "/home/e2e/.codex/.tmp/marketplaces/beastlabai/packaging/codex/multi-llm"
+        },
+        "marketplaceSource": {
+          "sourceType": "git",
+          "source": "ssh://localhost/work/srv/multi-llm-plugin.git"
+        },
+        "installPolicy": "AVAILABLE",
+        "authPolicy": "ON_INSTALL"
+      }
+    ],
+    "available": []
+  },
+  "mcp_get": {
+    "name": "multi_llm",
+    "enabled": true,
+    "disabled_reason": null,
+    "transport": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "./mcp/server.py"
+      ],
+      "env": null,
+      "env_vars": [
+        "CODEX_HOME",
+        "MULTI_LLM_PROVIDERS_CONFIG",
+        "MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE",
+        "MULTI_LLM_GIT_CREDENTIAL_HELPER",
+        "MULTI_LLM_HOST",
+        "MULTI_LLM_UV",
+        "MULTI_LLM_UV_RUN_ARGS",
+        "MULTI_LLM_SKILL_DIR",
+        "MULTI_LLM_MAX_DETACHED",
+        "MULTI_LLM_HEARTBEAT_INTERVAL_S",
+        "MULTI_LLM_HANDSHAKE_TIMEOUT_S",
+        "MULTI_LLM_REPLAY_FLAGS",
+        "MULTI_LLM_LEGACY_INSTRUCTIONS",
+        "MULTI_LLM_CODEX_UNSANDBOXED_WRITES",
+        "UV_PROJECT_ENVIRONMENT",
+        "UV_CACHE_DIR",
+        "UV_OFFLINE",
+        "PWD"
+      ],
+      "cwd": "/home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/."
+    },
+    "enabled_tools": null,
+    "disabled_tools": null,
+    "startup_timeout_sec": null,
+    "tool_timeout_sec": 900.0
+  },
+  "locator_line": "- multi-llm:multi-llm: Orchestrate plan reviews, task generation, implementation and code reviews across several LLM CLIs in parallel, or ask every model one free-text question about a plan. Use when the user says: review my plan, multi-llm, run a code review, generate tasks from a plan, implement this plan, ask the models about my plan. (file: r1/multi-llm/0.1.0/skills/multi-llm/SKILL.md)",
+  "skill_roots": "### Skill roots\n- `r0` = `/home/e2e/.codex/skills/.system`\n- `r1` = `/home/e2e/.codex/plugins/cache/beastlabai`",
+  "locator_resolved": "/home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm/SKILL.md",
+  "criteria": [
+    {
+      "name": "marketplace_resolves_beastlabai",
+      "pass": true,
+      "evidence": "marketplace add exit 0: \"Added marketplace `beastlabai` from ...#codex-v0.1.0\", root /home/e2e/.codex/.tmp/marketplaces/beastlabai (under $CODEX_HOME/.tmp/marketplaces/)"
+    },
+    {
+      "name": "listed_with_manifest_version",
+      "pass": true,
+      "evidence": "plugin list --json: multi-llm@beastlabai version '0.1.0', installed=True, enabled=True (not null, not 'local')"
+    },
+    {
+      "name": "install_tree_matches_tag",
+      "pass": true,
+      "evidence": "installedPath /home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0; 170 files byte-equal to git archive codex-v0.1.0 packaging/codex/multi-llm/ (170), 0 extra/missing/differing; no .git/, plans/ or tests/ inside"
+    },
+    {
+      "name": "locator_resolves_inside_cache_dir",
+      "pass": true,
+      "evidence": "locator r1/multi-llm/0.1.0/skills/multi-llm/SKILL.md with roots-table r1 = /home/e2e/.codex/plugins/cache/beastlabai resolves to /home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm/SKILL.md (a file)"
+    },
+    {
+      "name": "server_runs_payload_from_cache_dir",
+      "pass": true,
+      "evidence": "server started per .mcp.json (python3 ./mcp/server.py, cwd install) lists [multi_llm]; zero-quota status call ok=true exit 2 state 'nothing-to-do', dispatcher argv --project /home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm"
+    },
+    {
+      "name": "mcp_get_echoes_server",
+      "pass": true,
+      "evidence": "codex mcp get multi_llm --json exit 0: enabled stdio python3 ./mcp/server.py, cwd /home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/., tool_timeout_sec 900.0"
+    }
+  ],
+  "observations": {
+    "ssh_route": "ssh://localhost<abs path> accepted; the shim saw `-G -o SendEnv=GIT_PROTOCOL localhost` (config probe) then `... git-upload-pack '<path>'` per clone",
+    "file_url": {
+      "exit": 1,
+      "stderr": "Error: invalid marketplace source format; expected owner/repo, a git URL, or a local marketplace path"
+    },
+    "local_bare_path": {
+      "exit": 1,
+      "stderr": "Error: invalid marketplace file `/work/srv/multi-llm-plugin.git`: marketplace root does not contain a supported manifest",
+      "reading": "a plain path is always a LOCAL source (read as a directory, never cloned), so a bare repo is not a usable git source"
+    },
+    "local_bare_path_with_ref": {
+      "exit": 1,
+      "stderr": "Error: --ref is only supported for git marketplace sources"
+    },
+    "config_toml_after_add": "[marketplaces.beastlabai]\nsource_type = \"git\"\nsource = \"ssh://localhost/work/srv/multi-llm-plugin.git\"\nref = \"codex-v0.1.0\"\nsparse_paths = [\".agents\", \"packaging/codex\"]\n\n[plugins.\"multi-llm@beastlabai\"]\nenabled = true\n",
+    "marketplace_snapshot": {
+      "root": "/home/e2e/.codex/.tmp/marketplaces/beastlabai",
+      "head": "79be0812e18b3ac13b2cb4fa9cf95f920cff24ef",
+      "top_level": [
+        ".agents",
+        ".dockerignore",
+        ".git",
+        ".gitattributes",
+        ".gitignore",
+        ".gitleaks.toml",
+        "LICENSE",
+        "Makefile",
+        "README.md",
+        "TODO.md",
+        "link-skill.sh",
+        "packaging",
+        "sync-skill.sh"
+      ],
+      "reading": "sparse (cone mode) keeps root-level files plus .agents/ and packaging/; the SNAPSHOT keeps its .git/ (the install does not); no plans/"
+    },
+    "no_sparse_snapshot_top_level": [
+      ".agents",
+      ".claude",
+      ".claude-plugin",
+      ".dockerignore",
+      ".git",
+      ".gitattributes",
+      ".github",
+      ".gitignore",
+      ".gitleaks.toml",
+      "LICENSE",
+      "Makefile",
+      "README.md",
+      "TODO.md",
+      "docs",
+      "hooks",
+      "link-skill.sh",
+      "packaging",
+      "plans",
+      "skills",
+      "sync-skill.sh"
+    ],
+    "no_sparse_install_forbidden": [],
+    "ref_release": {
+      "install_equals_tag_tree": true,
+      "markers_in_install": [],
+      "reading": "--ref release installs release's tree; the default branch carried a REHEARSAL_MASTER_ONLY marker that did not appear"
+    },
+    "no_ref": {
+      "markers_in_install": [
+        "REHEARSAL_MASTER_ONLY"
+      ],
+      "reading": "without --ref the default branch (HEAD) is installed; config.toml then records no ref"
+    },
+    "marketplace_upgrade": {
+      "release_moved_to": "70f5ccda5460873a961495250404d01c7137e105",
+      "exit": 0,
+      "output": {
+        "selectedMarketplaces": [
+          "beastlabai"
+        ],
+        "upgradedRoots": [
+          "/work/homes/release/.codex/.tmp/marketplaces/beastlabai"
+        ],
+        "errors": []
+      },
+      "snapshot_head_before": "79be0812e18b3ac13b2cb4fa9cf95f920cff24ef",
+      "snapshot_head_after": "70f5ccda5460873a961495250404d01c7137e105",
+      "install_dir": "plugins/cache/beastlabai/multi-llm/0.1.0 (version unchanged)",
+      "install_equals_new_release_tree_after_upgrade_alone": true,
+      "reading": "upgrade re-resolves the pinned ref (config keeps ref = \"release\") AND rewrites the installed 0.1.0 directory in place with the new tree, before any second `plugin add`: a same-version content change reaches an upgrading user"
+    },
+    "venv_location": [
+      ".codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm/.venv/pyvenv.cfg"
+    ],
+    "dispatcher_argv": [
+      "/opt/mllm/real/uv",
+      "run",
+      "--frozen",
+      "--no-dev",
+      "--project",
+      "/home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm",
+      "--",
+      "python",
+      "/home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm/multi_llm.py",
+      "status",
+      "/work/ws/plans/rehearsal.md",
+      "--host",
+      "codex",
+      "--yes",
+      "--exec-subagents"
+    ],
+    "status_stderr": "Using CPython 3.11.2 interpreter at: /usr/bin/python3\nCreating virtual environment at: /home/e2e/.codex/plugins/cache/beastlabai/multi-llm/0.1.0/skills/multi-llm/.venv\nInstalled 1 package in 4ms\n",
+    "harness_notes": [
+      "the image itself carries /opt/mllm/codex-marketplace and /opt/mllm/skill (the e2e lane's mirror and skill copy); neither was read: PATH was /opt/mllm/real first and every MLLM_*/UV_* image variable was dropped from the user environment",
+      "container ran on the default bridge network so uv could fetch the dispatcher's one dependency; codex made no model call and no API key was present",
+      "criterion 5 is revision 1's 'the SKILL.md resolution block exports the directory', restated because revision 2's SKILL.md is a pointer with no resolution block: the D2 assertion now lives in mcp/server.py (__file__), so it is graded on the server the install launches",
+      "the server was driven over stdio by the rehearsal driver, not by a codex session, to keep the rehearsal at zero quota"
+    ]
+  }
+}

@@ -1177,6 +1177,12 @@ class TestDiscoveryOnTheHostsWithNoFreeSurface:
                 f"its `ask` row — the only row with no subagent batch, so a "
                 f"failure here is about the shim being found rather than about "
                 f"anything a batch did")
+        if matrix_row.get("route") == "package":
+            pytest.skip(
+                f"{matrix_row.get('id')}: the package route stages no shim, so "
+                f"there is no step-3 `util instructions` to find; the plugin's "
+                f"discovery is the tool call, graded by "
+                f"TestTheCodexPackageAskUsedThePlugin")
         evidence = [receipt for receipt in _dispatcher_receipts(result)
                     if _mode_of(receipt) == "util instructions"]
         assert evidence, (
@@ -2521,10 +2527,18 @@ def _tool_envelope(value):
     inner JSON is escaped. ``None`` when no envelope is found.
     """
     if isinstance(value, str):
+        # Codex heads the text it hands back with `Wall time: <s>
+        # seconds\nOutput:\n` (measured at 0.156.1): retry from the first `{`.
+        text = value
         try:
-            value = json.loads(value)
+            value = json.loads(text)
         except ValueError:
-            return None
+            if "{" not in text:
+                return None
+            try:
+                value = json.loads(text[text.index("{"):])
+            except ValueError:
+                return None
     if isinstance(value, list):
         for item in value:
             found = _tool_envelope(item)
@@ -2713,6 +2727,101 @@ class TestTheRunnabilityRow:
         assert partial["removed"] in json.dumps(partial["stdio"]["calls"][0])
 
 
+class TestTheSeptember24FixesHoldInTheImage:
+    """The fixes of 2026-09-24 (plans/codex-native-plugin.md, "Fixes for the
+    issues rows 1b and 1-14 found"), each asserted on the row that found the
+    issue. These are the plan's own green branch, so a red here is a
+    regression of a fix, not a recorded answer."""
+
+    def test_the_cd_workspace_is_the_anchor_via_turn_metadata(self, package_probe):
+        _only(package_probe, "anchor")
+        reading = _probe_record(package_probe)["reverified"]["cd_flag"]
+        assert reading["anchor_source"] == "turn-metadata", reading
+        assert reading["anchor_is_expected"], reading
+        assert reading["child_cwd"]["shell"] == reading["expected_anchor"], reading
+        assert reading["pwd_at_launch"] != [reading["expected_anchor"]], (
+            "the leg must launch with PWD naming a DIFFERENT checkout", reading)
+
+    def test_a_pwd_less_launch_anchors_via_metadata(self, package_probe):
+        _only(package_probe, "anchor")
+        reading = _probe_record(package_probe)["reverified"]["without_pwd"]
+        assert reading["pwd_at_launch"] == [None], reading
+        assert reading["anchor_source"] == "turn-metadata", reading
+        assert reading["state"] != "needs-human", reading
+
+    def test_no_bytecode_lands_in_the_plugin_cache(self, package_probe):
+        _only(package_probe, "anchor")
+        record = _probe_record(package_probe)
+        assert record["plugin_pycache_writes"] == [], record["plugin_pycache_writes"]
+        assert record["init_exec_effects"]["plugins_subtree_changed"] == []
+
+    def test_sandboxed_sessions_reach_the_server_under_the_shipped_default(
+            self, package_probe):
+        _only(package_probe, "sandbox-posture")
+        record = _probe_record(package_probe)
+        for key in ("read_only", "workspace_write"):
+            leg = record[key]
+            assert leg["server_got_tools_call"], (key, leg.get("tool_call_item"))
+            assert not leg["requires_approval_refusal"], key
+
+    def test_read_only_refuses_an_apply_mode_before_any_spawn(self, package_probe):
+        _only(package_probe, "sandbox-posture")
+        leg = _probe_record(package_probe)["refusal_read_only"]
+        envelope = leg["envelope"]
+        assert leg["server_got_tools_call"], leg.get("tool_call_item")
+        assert envelope["state"] == "needs-human" and envelope["exit"] is None
+        assert "read-only" in envelope["message"], envelope["message"]
+        assert leg["dispatcher_processes"] == [], leg["dispatcher_processes"]
+        assert leg["porcelain_byte_identical"], (leg["porcelain_before"],
+                                                 leg["porcelain_after"])
+
+    def test_the_lever_dispatches_while_the_session_shell_stays_sandboxed(
+            self, package_probe):
+        _only(package_probe, "sandbox-posture")
+        leg = _probe_record(package_probe)["lift_read_only"]
+        assert leg["spawned_dispatcher"], leg["dispatcher_processes"]
+        assert "read-only" not in str(leg["envelope"].get("message") or ""), (
+            leg["envelope"])
+        # Recorded, not required: whether the session's own exec dies on bwrap.
+        assert "session_shell" in leg
+
+    def test_workspace_write_does_not_refuse_an_apply_mode(self, package_probe):
+        _only(package_probe, "sandbox-posture")
+        leg = _probe_record(package_probe)["apply_workspace_write"]
+        assert leg["spawned_dispatcher"], leg["dispatcher_processes"]
+        assert "sandbox posture" not in str(leg["envelope"].get("message") or "")
+
+    def test_the_shell_ladder_refuses_with_no_child(self, package_probe):
+        _only(package_probe, "environment")
+        leg = _probe_record(package_probe)["shell_ladder_refusal"]
+        assert leg["envelope"]["ok"] is False and leg["envelope"]["exit"] is None
+        assert leg["message_names_bash_and_path"], leg["envelope"]["message"]
+        assert leg["login_shell"] is False and leg["shell"] is None
+        assert leg["environment_keys"] == sorted(
+            ["platform", "shell", "login_shell", "profile_shell", "interpreter",
+             "missing"])
+        assert leg["dispatcher_processes"] == [], leg["dispatcher_processes"]
+
+    def test_a_missing_python3_is_named_by_the_check(self, package_probe):
+        _only(package_probe, "environment")
+        leg = _probe_record(package_probe)["interpreter_absent"]
+        assert leg["python3_resolves"] is None
+        assert leg["exec"]["declarations"] == [], "tools[] must carry no multi_llm"
+        assert not leg["exec"]["multi_llm_in_tools"]
+        checks = leg["install_host_check"]
+        assert checks, "install-host codex --check was not run"
+        for name, check in checks.items():
+            assert check["names_missing_interpreter"], (name, check["output"])
+
+    def test_every_leg_is_driven(self, package_probe):
+        _result, probe = package_probe
+        if probe["probe"] not in ("anchor", "environment", "progress-cancellation",
+                                  "plugin-data", "sandbox-posture", "timeout"):
+            pytest.skip(f"{probe['id']} names no leg list")
+        record = _probe_record(package_probe)
+        assert record["legs_not_driven"] == {}, record["legs_not_driven"]
+
+
 class TestTheRecordedProbes:
     """Items 7(a), 9, 10, 11, 12(a), 13, 14: done when RECORDED (item 15)."""
 
@@ -2740,6 +2849,11 @@ def codex_package_ask(graded):
 
 class TestTheCodexPackageAskUsedThePlugin:
     """Item 16's route-specific half; the workflow half is graded above."""
+
+    # `live`, like every other class graded off the credentialed fixture: the
+    # lane selects `-m "container and live"`, so without it these four never
+    # ran on the only invocation that can produce their evidence.
+    pytestmark = pytest.mark.live
 
     def test_the_plugin_was_installed_and_no_shim_staged(self, codex_package_ask):
         result, _row, _entry = codex_package_ask
@@ -2776,3 +2890,20 @@ class TestTheCodexPackageAskUsedThePlugin:
             "the codex session never emitted a multi_llm tool item — it "
             "narrated or ran a shell line instead, which is the route's red "
             "(measured-red, not unmeasured, per the matrix header)")
+
+    def test_the_servers_child_took_the_key_from_the_profile(
+            self, codex_package_ask):
+        """D3a: the login-shell child derives the key from `.profile`, never
+        from the session's environment. Presence booleans only
+        (`entrypoint.wrap_profile_with_read_probe`); no value is recorded."""
+        result, _row, _entry = codex_package_ask
+        path = result.out_dir / "profile-reads.jsonl"
+        assert path.is_file(), "no profile-reads.jsonl: no login shell read .profile"
+        reads = [json.loads(line) for line in
+                 path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        child = [r for r in reads if "mcp/server.py" in (r.get("parent") or "")]
+        assert child, (
+            f"no login shell whose parent is mcp/server.py read .profile: "
+            f"{[r.get('parent') for r in reads]}")
+        assert all(r["key_before_profile"] is False for r in child), child
+        assert all(r["key_after_profile"] is True for r in child), child

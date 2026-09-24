@@ -21,8 +21,10 @@ RULES EVERY LINE HERE KEEPS (plan D3):
   2. **No word of its own.** Every mode word, alias, flag, exit code, state word
      and message template is read from ``dist/cli-surface.json`` (schema v4). The
      only words held here are the JSON-RPC/MCP vocabulary, the envelope's key
-     names, the anchor_source spellings, the degraded definition (the tool name
-     and one sentence) and the login shell's constant ``-c`` string.
+     names, the anchor_source spellings (``roots``, ``turn-metadata``,
+     ``env:<NAME>``), codex's turn-metadata keys and posture words, the
+     degraded definition (the tool name and one sentence) and the login
+     shell's constant ``-c`` string.
   3. **Fd 1 carries JSON-RPC or nothing.** At start-up fd 1 is duplicated to a
      private descriptor only the locked writer uses, and fd 1 and ``sys.stdout``
      are pointed at stderr. Nothing here prints.
@@ -119,11 +121,36 @@ LOG_LEVELS = (
     "emergency",
 )
 
-#: D3f candidate 2: workspace names read from the environment codex handed us,
+#: D3f rung 2: the per-call turn metadata codex 0.156.1 attaches to every
+#: ``tools/call`` as ``params._meta["x-codex-turn-metadata"]`` (Phase 1 row 1b,
+#: row 7). An undocumented upstream field, so every read of it tolerates absence
+#: and any malformed shape. ``workspaces`` is an object keyed by absolute
+#: workspace path — under ``codex exec -C <dir>`` it names ``<dir>``, where the
+#: launching shell's ``PWD`` names the wrong checkout — and ``sandbox_mode`` is
+#: the session's posture word (D3b).
+TURN_METADATA_KEY = "x-codex-turn-metadata"
+TURN_METADATA_WORKSPACES = "workspaces"
+TURN_METADATA_SANDBOX_MODE = "sandbox_mode"
+
+#: D3b: the one posture word under which a write-capable mode is refused, and
+#: the posture words under which the session itself may write, so the tool may
+#: too. Codex's own vocabulary (``--sandbox``), not a surface word. Anything
+#: else — absent, not a string, a word not listed here — is unreadable, and the
+#: refusal fails closed exactly as it did before the posture could be read.
+POSTURE_READ_ONLY = "read-only"
+POSTURES_ALLOWING_WRITES = ("workspace-write", "danger-full-access")
+
+#: D3f rung 3: workspace names read from the environment codex handed us,
 #: only when present. Each one must be in A2b's ``env_vars`` (D9) — codex
-#: forwards nothing else (R12′) — so ``PWD``, codex's own launch directory, is
-#: allowlisted there. One spelling until Phase 1 row 7 measures what arrives.
+#: forwards nothing else (R12′) — so ``PWD``, the launching shell's directory,
+#: is allowlisted there. Row 7: it arrives only if that shell exported it, and
+#: under ``-C`` it names the shell's directory, not the session's workspace.
 WORKSPACE_ENV_NAMES = ("PWD",)
+
+#: D9 layer 2: set for the child unless the user's environment already sets it,
+#: so the payload's Python writes no ``__pycache__`` into the plugin cache (row 7
+#: saw ``init_config.cpython-311.pyc`` appear under ``$CODEX_HOME``).
+NO_BYTECODE_ENV = "PYTHONDONTWRITEBYTECODE"
 
 #: What this server exports for the child (D9 layer 2), beside the resolved uv.
 SKILL_DIR_ENV = "MULTI_LLM_SKILL_DIR"
@@ -865,10 +892,11 @@ def kill_tree(proc, drains) -> None:
 class Call:
     """Per-request state: the cancel event and everything the envelope echoes."""
 
-    def __init__(self, request_id, args, token):
+    def __init__(self, request_id, args, token, meta=None):
         self.id = request_id
         self.args = args
         self.token = token
+        self.meta = meta if isinstance(meta, dict) else {}
         self.cancel = threading.Event()
         self.anchor = None
         self.anchor_source = None
@@ -929,6 +957,11 @@ class Server:
             "jsonrpc": "2.0", "method": "notifications/message",
             "params": {"level": level, "logger": self.tool_name(), "data": text},
         })
+
+    def record_choice(self, text: str) -> None:
+        """A decision the server made on the user's behalf: fd 2 and an info log."""
+        _stderr(text)
+        self.notify_log("info", text)
 
     def warn(self, text: str) -> None:
         _stderr(text)
@@ -1108,7 +1141,7 @@ class Server:
         with self._call_lock:
             busy = self._inflight
             if busy is None:
-                call = Call(request_id, args, token)
+                call = Call(request_id, args, token, meta)
                 self._inflight = call
         if busy is not None:
             # Refused, never queued: a queued call spends its own budget waiting
@@ -1209,6 +1242,41 @@ class Server:
             self.roots_cache = roots
         return self.roots_cache
 
+    def _workspace_candidates(self, call: Call):
+        """Rung 2's paths, preferred first, and a note on the choice (D3f).
+
+        One key is the workspace. Several: the one equal to or containing the
+        ``PWD`` codex handed us (the most specific when more than one does) goes
+        first, else codex's own first; the rest follow in codex's order.
+        """
+        workspaces = turn_metadata(call.meta).get(TURN_METADATA_WORKSPACES)
+        if not isinstance(workspaces, dict):
+            return [], "absent" if workspaces is None else "not an object"
+        # A NUL cannot be in a path and makes os.path raise, so such a key is
+        # malformed metadata and dropped with the non-strings.
+        keys = [key for key in workspaces
+                if isinstance(key, str) and key and "\x00" not in key]
+        if not keys:
+            return [], "no workspaces"
+        if len(keys) == 1:
+            return keys, None
+        pwd = self.layer1.get("PWD")
+        pwd = os.path.realpath(pwd) if isinstance(pwd, str) and os.path.isabs(pwd) else None
+        best = None
+        for key in keys:
+            if not os.path.isabs(key) or pwd is None:
+                continue
+            real = os.path.realpath(key).rstrip(os.sep) or os.sep
+            if pwd == real or pwd.startswith(real.rstrip(os.sep) + os.sep):
+                if best is None or len(real) > len(os.path.realpath(best)):
+                    best = key
+        chosen = best if best is not None else keys[0]
+        ordered = [chosen] + [key for key in keys if key != chosen]
+        note = "{} workspaces; chose {} ({})".format(
+            len(keys), json.dumps(chosen),
+            "it holds PWD" if best is not None else "the first; none holds PWD")
+        return ordered, note
+
     def resolve_anchor(self, call: Call):
         """``(anchor, source, probed)``; the first green rung wins, never the process cwd."""
         probed = []
@@ -1228,6 +1296,25 @@ class Server:
             probed.append("roots ({})".format(note))
         else:
             probed.append("roots (not offered by the client)")
+        candidates, note = self._workspace_candidates(call)
+        skipped = []
+        for candidate in candidates:
+            path, problem = self._usable_dir(candidate)
+            if path:
+                if note or skipped:
+                    # Several workspaces, or the preferred one unusable: the
+                    # choice is recorded where the user and the host can see it.
+                    parts = ([note] if note else []) + skipped
+                    if skipped:
+                        parts.append("took {}".format(json.dumps(candidate)))
+                    self.record_choice(
+                        "anchor from turn-metadata: {}".format("; ".join(parts)))
+                return path, "turn-metadata", probed
+            skipped.append("skipped {} ({})".format(json.dumps(candidate), problem))
+        if candidates:
+            probed.append("turn-metadata ({})".format("; ".join(skipped)))
+        else:
+            probed.append("turn-metadata ({})".format(note))
         for name in WORKSPACE_ENV_NAMES:
             path, note = self._usable_dir(self.layer1.get(name))
             if path:
@@ -1255,14 +1342,18 @@ class Server:
                 surface["anchor_unresolved"], {"probed": ", ".join(probed)}))
         args = call.args
         posture = surface["write_posture_refusal"]
-        if row.get("writes_worktree") and self.layer1.get(
-                posture["lever_env"]) != posture["lever_value"]:
-            # D3b: whether the session's posture is readable is unmeasured, so
-            # it is treated as read-only until the user sets the lever. Read
-            # from layer 1 (what codex forwarded), never a login profile: the
-            # lever must be in codex's own environment, not ~/.profile.
+        session = session_posture(call.meta)
+        if row.get("writes_worktree") and session not in POSTURES_ALLOWING_WRITES \
+                and self.layer1.get(posture["lever_env"]) != posture["lever_value"]:
+            # D3b: the posture is read per call from codex's turn metadata. A
+            # read-only session refuses; a posture that is absent or not a word
+            # this server knows is treated as read-only (fail closed). Only a
+            # session that may itself write lets the tool write. The lever is
+            # read from layer 1 (what codex forwarded), never a login profile:
+            # it must be in codex's own environment, not ~/.profile.
             return self.refusal(call, "needs_human", fill(posture["template"], {
-                "mode": args["mode"], "posture": posture["posture_unreadable"]}))
+                "mode": args["mode"],
+                "posture": session or posture["posture_unreadable"]}))
         self.shell = self.find_shell()
         if self.shell is None:
             return self.refusal(call, "needs_human", fill(surface["shell_missing"], {
@@ -1281,6 +1372,8 @@ class Server:
         # skill dir. The child inherits os.environ whole; no env= is passed.
         os.environ[surface["uv"]["env"]] = uv
         os.environ[SKILL_DIR_ENV] = str(SKILL_DIR)
+        if NO_BYTECODE_ENV not in os.environ:
+            os.environ[NO_BYTECODE_ENV] = "1"
         values = {"word": args["mode"], "plan": self.normalize_plan(args["plan"], call),
                   "question": args["question"], "extra": list(args["extra_flags"])}
         outcome = self.run_workflow(call, row, values)
@@ -1871,6 +1964,29 @@ class Server:
                                     None, self.surface)
 
 
+def turn_metadata(meta) -> dict:
+    """``_meta["x-codex-turn-metadata"]`` as a dict, or ``{}``; never raises.
+
+    Seen as a JSON object on 0.156.1; a JSON-encoded string is accepted too,
+    since the field is undocumented and its encoding is not a contract.
+    """
+    value = meta.get(TURN_METADATA_KEY) if isinstance(meta, dict) else None
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            return {}
+    return value if isinstance(value, dict) else {}
+
+
+def session_posture(meta):
+    """D3b: the session's sandbox posture word, or ``None`` when unreadable."""
+    value = turn_metadata(meta).get(TURN_METADATA_SANDBOX_MODE)
+    if value == POSTURE_READ_ONLY or value in POSTURES_ALLOWING_WRITES:
+        return value
+    return None
+
+
 def _last_line(text):
     if not isinstance(text, str):
         return None
@@ -1886,9 +2002,36 @@ def _same_id(left, right) -> bool:
 def main() -> int:
     fd = _guard_protocol_fd()
     server = Server(Wire(fd))
+
+    def _terminate(_number, _frame):
+        # Measured (Phase 1 row 10, codex 0.156.1): on an interrupted session
+        # codex closes this server's stdin and sends SIGTERM in the same
+        # millisecond, and sends no `notifications/cancelled`. Python's default
+        # SIGTERM exit beat the EOF branch every time, so the in-flight child —
+        # its own session, by design — was orphaned. SIGTERM (and SIGHUP) now
+        # take the EOF branch: cancel, reap the group, then exit.
+        raise KeyboardInterrupt
+
+    for name in ("SIGTERM", "SIGHUP"):
+        number = getattr(signal, name, None)
+        if number is not None:
+            try:
+                signal.signal(number, _terminate)
+            except (OSError, ValueError):
+                pass
     try:
         server.serve(sys.stdin.buffer)
     except KeyboardInterrupt:
+        # Ctrl-C reaches this process too when it shares the terminal's process
+        # group, so SIGINT and codex's SIGTERM arrive together: the second one
+        # must not cut the reap short.
+        for name in ("SIGINT", "SIGTERM", "SIGHUP"):
+            number = getattr(signal, name, None)
+            if number is not None:
+                try:
+                    signal.signal(number, signal.SIG_IGN)
+                except (OSError, ValueError):
+                    pass
         server.shutdown()
     return 0
 

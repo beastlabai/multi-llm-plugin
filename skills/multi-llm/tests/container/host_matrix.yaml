@@ -3929,17 +3929,48 @@ hosts:
         wall_clock_s: 600
         cost_budget_usd: 1.00   # UNMEASURED: a provisional stand-in, not an estimate — copied from opencode-package-ask; 2x headroom makes its ceiling the $2.00 lane default, so the lane total is what binds until a first pass replaces it
         measured:
-          on: null
-          provenance: unmeasured
-          blocked_on: [codex-native-plugin Phase 1 items 2-5, codex-native-plugin Phase 1 item 16]
-          detail: >
-            NOTHING ABOUT THIS ROW HAS RUN — authored 2026-09-23, before the
-            plugin tree (`packaging/codex/multi-llm/`) it installs existed. It
-            needs the tree, the filled catalog entry, and §10c's image layer,
-            and its first pass is the plan's item 16. No per-row usd will be
-            claimed: the lane's spend is a key-usage delta across the whole
-            invocation (see `opencode-package-ask`'s own measured block).
-        provenance: unmeasured   # codex-native-plugin Phase 1 item 16 — authored 2026-09-23, never executed
+          on: "2026-09-24"
+          verdict: pass
+          host_wall_s: 33.39
+          turns: 2
+          stub_requests: 6
+          cli_version: "0.156.1"
+          # The row's own `model` cell resolved to the host pin
+          # `~deepseek/deepseek-v4-flash-latest`: no MLLM_HOST_MODEL override,
+          # no substitution. No per-row usd, as on the opencode twin: the
+          # lane's spend is the key-usage delta across the whole invocation —
+          # $0.000973 settled (46.846936245 -> 46.847909173; the row's own
+          # bracket read $0.000623 before the endpoint settled), one row ran,
+          # census `openrouter=1 skipped=0`.
+          note: >
+            FIRST RUN OF THE CODEX PACKAGE ROUTE against a real model
+            (plans/codex-native-plugin.md Phase 1 item 16), graded on
+            `runs/20260923T231950Z`, record
+            `records/20260923T231950Z-codex-package-ask.json`. The model's
+            first action was the tool — `mcp_tool_call` `multi_llm` with
+            `{"mode": "ask", "plan": "plans/auth-feature.md", "question":
+            "What does this plan change?", "extra_flags": ["--quick"]}`, the
+            four properties exactly as the schema declares, no shell line
+            narrated. The server dispatched (`ask … --host codex --yes
+            --exec-subagents --detach --quick`, then the worker and one
+            `status --wait`), and the result came back `ok: true, state:
+            done, exit: 0, next: null`, `anchor_source: turn-metadata`, 5/5
+            stub answers. D3a's second carrier is measured, by presence only:
+            both login shells whose parent was `python3 ./mcp/server.py`
+            entered `.profile` WITHOUT `OPENROUTER_API_KEY` and left it with
+            it (`profile-reads.jsonl`), while codex's own shell entered with
+            it — so the child took the key from the profile, never from the
+            session. THE FIRST ATTEMPT, `runs/20260923T231001Z`, reached the
+            same terminal result through the same call (after two shell
+            reads first) but graded red on HARNESS gaps, not the route: the
+            rig's `MLLM_RECEIPT_DIR`/`MLLM_CALL_LOG`/`MLLM_ROW_ID` never
+            reached the dispatcher through codex's `env_vars` allowlist (now
+            exported into the seeded `.profile`,
+            `entrypoint.export_harness_names_into_profile`), the shim-discovery
+            check asked a shim-less route for `util instructions`, and this
+            row's own class carried no `live` mark so it never ran. Its key
+            delta was $0.002400.
+        provenance: verified   # runs/20260923T231950Z — codex-native-plugin Phase 1 item 16, first executed 2026-09-24; every graded cell agreed, the profile-derived key included; one sample. The first attempt runs/20260923T231001Z was a harness red, not the route's
         note: >
           The zero-quota rows under `package_probes:` below are its
           prerequisites, not its substitutes, and a red here does not retract
@@ -4087,9 +4118,11 @@ hosts:
         note: >
           Two drivers, one grading: the stdio client is the CONTROL (it hands
           the server the harness environment), the scripted-call exec is the
-          graded reading. 9(b)'s shell-ladder refusal and 9(c)'s `--check` half
-          are blocking in the plan and are named in `legs_not_driven` until the
-          server-side knob they need exists.
+          graded reading. 9(b)'s shell-ladder refusal is driven through the
+          stdio client (PATH and `MLLM_TEST_FALLBACK_SHELL` pointed away — codex
+          forwards neither, and /bin/bash exists in-image) and 9(c) through a
+          PATH with every command but `python*`; both halves the plan calls
+          blocking are graded by `TestTheSeptember24FixesHoldInTheImage`.
       - id: codex-package-progress-cancellation
         probe: progress-cancellation
         item: "10"
@@ -4116,6 +4149,12 @@ hosts:
           wait around the call is a reading here rather than a timeout on the
           paid row. Landlock is ENOSYS in this image, so 12(d)'s expected rung is
           2 (`bypassed`); a rung-1 reading here would itself be a finding.
+          Since 2026-09-24 the shipped `.mcp.json` pre-approves the tool, so
+          12(a) asserts both postures REACH the server; 12(b)/(c) are custom
+          scripted calls (an apply mode, the lever, and a shell step through
+          the session's own `exec_command`), and the documented
+          `default_tools_approval_mode = "prompt"` opt-out is measured beside
+          them.
       - id: codex-package-overlay
         probe: overlay
         item: "13"
@@ -4133,7 +4172,8 @@ hosts:
         records: [probe-timeout.json]
         note: >
           Read through row 13's answer, so it runs after it. A2b's 900 is not
-          raised until this row is green.
+          raised until this row is green. The cap-fires half runs a detached
+          `ask` whose nested codex exec sleeps past a few-second cap.
 
   # ===========================================================================
   opencode:

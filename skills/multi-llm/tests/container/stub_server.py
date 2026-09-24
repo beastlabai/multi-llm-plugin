@@ -361,6 +361,16 @@ class ScriptedToolCall:
                 f"it is the tool's input object, JSON-encoded on the wire")
         self.arguments = arguments
         self.call_id = str(block.get("call_id") or "call_mllm_scripted_1")
+        # OPTIONAL: a shell command the model runs through the HOST's own shell
+        # tool once our call's output is back (row 12(c): the tool dispatches
+        # while the session's own sandboxed exec still dies on `bwrap:`). The
+        # spelling follows whichever shell tool the request advertises
+        # (`SHELL_TOOL_SPELLINGS`); a request advertising none gets the
+        # terminal message instead, recorded as `shell_unavailable`.
+        shell = block.get("then_shell")
+        self.then_shell = str(shell) if shell else None
+        self.shell_call_id = str(block.get("shell_call_id")
+                                 or "call_mllm_scripted_shell")
         self.terminal = str(block.get("terminal")
                             or "scripted tool call complete")
         surfaces = block.get("surfaces") or ["responses"]
@@ -386,14 +396,30 @@ class ScriptedToolCall:
                 return tool
         return None
 
-    def returned_output(self, body: dict) -> str | None:
+    def shell_tool(self, body: dict) -> str | None:
+        """The first advertised shell tool this stub knows how to spell."""
+        names = {tool.get("name") for tool in body.get("tools") or []
+                 if isinstance(tool, dict) and tool.get("type") == "function"}
+        return next((name for name in SHELL_TOOL_SPELLINGS if name in names),
+                    None)
+
+    def shell_item(self, tool: str, status: str = "completed",
+                   arguments: str | None = None) -> dict:
+        args = SHELL_TOOL_SPELLINGS[tool](self.then_shell or "")
+        return {"id": "fc_mllm_scripted_shell", "type": "function_call",
+                "status": status, "call_id": self.shell_call_id, "name": tool,
+                "arguments": (json.dumps(args, sort_keys=True)
+                              if arguments is None else arguments)}
+
+    def returned_output(self, body: dict, call_id: str | None = None) -> str | None:
         """The `function_call_output` for OUR call id, as text, or ``None``."""
+        call_id = call_id or self.call_id
         for item in body.get("input") or []:
             if not isinstance(item, dict):
                 continue
             if item.get("type") != "function_call_output":
                 continue
-            if item.get("call_id") != self.call_id:
+            if item.get("call_id") != call_id:
                 continue
             output = item.get("output")
             if isinstance(output, str):
@@ -434,18 +460,33 @@ class ScriptedToolCall:
         return item
 
 
+#: The host shell tools the scripted follow-up can drive, each with the
+#: argument object its schema takes. Preference order; the first one the
+#: request advertises wins.
+SHELL_TOOL_SPELLINGS = {
+    "exec_command": lambda cmd: {"cmd": cmd},
+    "shell_command": lambda cmd: {"command": cmd},
+    "shell": lambda cmd: {"command": ["bash", "-lc", cmd]},
+}
+
+
+def _tool_names(body: dict) -> list:
+    return [str(tool.get("name")) for tool in body.get("tools") or []
+            if isinstance(tool, dict) and tool.get("name")]
+
+
 def responses_call_body(model: str, script: ScriptedToolCall,
-                        flat: bool = False) -> dict:
+                        flat: bool = False, item: dict | None = None) -> dict:
     return {
         "id": "resp_stub_call", "object": "response", "created_at": 0,
         "status": "completed", "model": model,
-        "output": [script.call_item(flat=flat)],
+        "output": [item or script.call_item(flat=flat)],
         "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
     }
 
 
 def responses_call_stream(model: str, script: ScriptedToolCall,
-                          flat: bool = False):
+                          flat: bool = False, item: dict | None = None):
     """The Responses SSE sequence for ONE function_call output item.
 
     Same envelope as `responses_stream` — created, in_progress, the item's
@@ -453,8 +494,9 @@ def responses_call_stream(model: str, script: ScriptedToolCall,
     the text content parts, which is the shape the Responses API streams a
     function call in.
     """
-    resp = responses_call_body(model, script, flat=flat)
+    resp = responses_call_body(model, script, flat=flat, item=item)
     item = resp["output"][0]
+    started = dict(item, status="in_progress", arguments="")
     in_progress = dict(resp, status="in_progress", output=[])
     yield "response.created", {"type": "response.created", "sequence_number": 0,
                                "response": in_progress}
@@ -463,8 +505,7 @@ def responses_call_stream(model: str, script: ScriptedToolCall,
     yield "response.output_item.added", {
         "type": "response.output_item.added", "sequence_number": 2,
         "output_index": 0,
-        "item": script.call_item(status="in_progress", arguments="",
-                                 flat=flat)}
+        "item": started}
     yield "response.function_call_arguments.delta", {
         "type": "response.function_call_arguments.delta", "sequence_number": 3,
         "item_id": item["id"], "output_index": 0, "delta": item["arguments"]}
@@ -602,6 +643,10 @@ class Handler(BaseHTTPRequestHandler):
             "query": query,
             "prompt_sha": _sha(prompt), "prompt_len": len(prompt),
             "body_bytes": len(raw), "has_tools": bool(body.get("tools")),
+            # Tool NAMES only (a namespace entry by its own name), never a
+            # schema or description: which tools the host advertised is what
+            # the scripted shell follow-up picks its spelling from.
+            "tool_names": _tool_names(body),
             "unhandled": False, "unmatched": False, "fixture": None,
             "surface": None, "t": round(time.time(), 3),
         }
@@ -669,8 +714,31 @@ class Handler(BaseHTTPRequestHandler):
             "call_id": script.call_id,
             "declaration": declaration,
         }
-        if output is not None:
+        shell_output = (script.returned_output(body, script.shell_call_id)
+                        if script.then_shell else None)
+        shell_tool = script.shell_tool(body) if script.then_shell else None
+        if (output is not None and script.then_shell and shell_output is None
+                and shell_tool is not None):
+            # Our call came back and the follow-up shell step is owed.
+            record["phase"] = "shell-call"
+            record["output_sha"] = _sha(output)
+            record["output_len"] = len(output)
+            record["output"] = output[:SCRIPTED_OUTPUT_CAP]
+            record["output_truncated"] = len(output) > SCRIPTED_OUTPUT_CAP
+            record["shell_tool"] = shell_tool
+            record["shell_command"] = script.then_shell
+            item = script.shell_item(shell_tool)
+            if streamed:
+                frames = list(responses_call_stream(model, script, item=item))
+            else:
+                frames = [(None, responses_call_body(model, script, item=item))]
+        elif output is not None:
             record["phase"] = "terminal"
+            if script.then_shell:
+                record["shell_tool"] = shell_tool
+                record["shell_unavailable"] = shell_tool is None
+                record["shell_output"] = (shell_output[:SCRIPTED_OUTPUT_CAP]
+                                          if shell_output is not None else None)
             record["output_sha"] = _sha(output)
             record["output_len"] = len(output)
             record["output"] = output[:SCRIPTED_OUTPUT_CAP]

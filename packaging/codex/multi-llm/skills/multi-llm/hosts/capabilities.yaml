@@ -316,9 +316,13 @@ hosts:
                                       # The server runs outside the session's exec sandbox
                                       # (R46), so an install hands a `--sandbox read-only`
                                       # session a write path it had refused (R45).
-                                      # Write-capable modes are refused before the spawn
+                                      # The server reads the session's posture per call
+                                      # (`sandbox_mode` in codex's turn metadata, 0.156.1):
+                                      # under `read-only`, or a posture it cannot read,
+                                      # write-capable modes are refused before the spawn
                                       # unless MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1 is in the
-                                      # environment (D3b). The renderer reads this cell into
+                                      # environment (D3b); `workspace-write` and
+                                      # `danger-full-access` allow them. The renderer reads this cell into
                                       # the generated install paragraph, so a user meets it
                                       # before installing, not after.
       min_host_version: "0.156.1"     # the pin; replaced by the version the first green plugin row

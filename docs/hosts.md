@@ -69,7 +69,7 @@ Use the multi-llm skill with exactly these arguments: --review-code plans/my-fea
 
 A second route on `codex`, and the one this documentation will recommend once it is published. **It is not yet published**: the `release` ref the first command names does not exist until the publish workflow first moves it, so today `codex plugin marketplace add … --ref release` fails **loudly**, with a git error naming the missing ref — nothing is half-installed. Until then, the `install-host codex` route above is what works.
 
-**Read this before installing.** The plugin's tool runs the orchestrator from a server codex starts *outside* its own exec sandbox, so the session's `--sandbox` posture does not govern it: installing the plugin gives a codex session a write path it did not have. So under a read-only posture the tool **refuses write-capable modes** before it spawns anything, unless `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is in the environment that starts codex. Provider CLIs the orchestrator dispatches stay under their own sandboxes.
+**Read this before installing.** The plugin's tool runs the orchestrator from a server codex starts *outside* its own exec sandbox, so the session's `--sandbox` posture does not govern it: installing the plugin gives a codex session a write path it did not have. So under a read-only posture, or one it cannot read, the tool **refuses write-capable modes** before it spawns anything, unless `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is in the environment that starts codex. Provider CLIs the orchestrator dispatches stay under their own sandboxes.
 
 Install it from the marketplace — two commands, in this order, then start a **new** codex session:
 
