@@ -1,20 +1,6 @@
 {
   "installed": [
     {
-      "pluginId": "openai-templates@openai-curated-remote",
-      "name": "openai-templates",
-      "marketplaceName": "openai-curated-remote",
-      "version": "0.1.1",
-      "installed": true,
-      "enabled": true,
-      "source": {
-        "source": "remote",
-        "id": "plugin_connector_1p_2330815c823c8191941e5dc465bb899f"
-      },
-      "installPolicy": "INSTALLED_BY_DEFAULT",
-      "authPolicy": "ON_USE"
-    },
-    {
       "pluginId": "multi-llm@beastlabai",
       "name": "multi-llm",
       "marketplaceName": "beastlabai",
@@ -22,23 +8,16 @@
       "installed": true,
       "enabled": true,
       "source": {
-        "source": "git",
-        "id": "beastlabai/multi-llm-plugin"
+        "source": "local",
+        "path": "/opt/mllm/codex-marketplace/packaging/codex/multi-llm"
+      },
+      "marketplaceSource": {
+        "sourceType": "local",
+        "source": "/opt/mllm/codex-marketplace"
       },
       "installPolicy": "AVAILABLE",
       "authPolicy": "ON_INSTALL"
     }
   ],
-  "available": [
-    {
-      "pluginId": "multi-llm@some-other-marketplace",
-      "name": "multi-llm",
-      "marketplaceName": "some-other-marketplace",
-      "version": "0.0.9",
-      "installed": false,
-      "enabled": false,
-      "installPolicy": "AVAILABLE",
-      "authPolicy": "ON_INSTALL"
-    }
-  ]
+  "available": []
 }

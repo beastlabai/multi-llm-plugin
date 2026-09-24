@@ -293,7 +293,9 @@ class TestTheMatrix:
         for key in ("route", "args", "command", "expect", "wall_clock_s",
                     "cost_budget_usd"):
             assert ours[key] == twin[key], key
-        assert ours["provenance"] == "unmeasured"
+        # First executed 2026-09-24 (runs/20260923T231950Z, verified); any of
+        # the header's three words is legal, a free-text one is not.
+        assert ours["provenance"] in ("unmeasured", "verified", "measured-red")
 
     def test_the_package_ask_prompt_names_the_namespaced_skill(self):
         row = next(r for r in CODEX["rows"] if r["id"] == "codex-package-ask")

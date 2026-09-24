@@ -1,22 +1,26 @@
-# `codex plugin list --json` fixture — PROVISIONAL
+# `codex plugin list --json` fixture — recorded
 
 `plugin-list.json` is what `tests/test_codex_route.py` replays through a fake
 `codex` binary to drive `host_install._codex_route()`'s step 1 (D5).
 
-**Provenance, precisely.** The document's *shape* — the top-level
-`{"installed": [...], "available": [...]}` object and the per-entry keys
+**Provenance.** Recorded verbatim, not written by hand: it is the
+`codex plugin list --json` document Phase 1's zero-quota container row 5
+(`codex-package-seed`) captured on codex-cli 0.156.1 in the seeded home, run
+`20260923T191255Z` — `tests/container/runs/20260923T191255Z/codex-package-seed/codex-plugin-list.json`,
+graded by `tests/container/records/20260923T191255Z-codex-package-seed.json`.
+Nothing is normalised: the paths are the image's (`/opt/mllm/codex-marketplace`),
+and the resolver reads none of them.
+
+**What the shape says.** A top-level `{"installed": [...], "available": [...]}`
+object; `available` is empty. The `multi-llm@beastlabai` entry carries
 `pluginId`, `name`, `marketplaceName`, `version`, `installed`, `enabled`,
-`source`, `installPolicy`, `authPolicy` — was read off a real
-`codex plugin list --json` on codex-cli 0.156.1 (2026-09-23, a developer
-machine, the curated remote plugins it had installed by default; the first
-entry is one of them, verbatim). The `multi-llm@beastlabai` entry and the
-`available` row are **written by hand** in that shape: no `multi-llm` plugin
-was installed when it was captured.
+`installPolicy`, `authPolicy`, a `source` object (`{"source": "local", "path"}`
+on a local-marketplace install) **and** a `marketplaceSource` object
+(`{"sourceType": "local", "source"}`). There is **no `installedPath`** on a
+list entry (R25/R40): the resolver computes the cache directory from
+`marketplaceName` and `version` and stats it, and reads neither source object.
 
-Note that 0.156.1 spells the source object `source`, where R25/R40 (0.155.1)
-recorded `marketplaceSource`; the resolver reads neither.
-
-**Replace it** with the document Phase 1's container package row records
-(`codex plugin list --json` in the seeded home, beside its `plugin add
---json`) the day that row commits one — that capture is the authority, and
-this file is only a stand-in until it exists.
+It replaced a provisional stand-in (a hand-written `{source: "git", id}` entry
+beside a real curated-remote row) that predated the container capture. Rows
+that need another entry — a catalog-only `available` row, a second marketplace —
+add it to a copy of this document in the test, never to this file.

@@ -26,7 +26,8 @@
         "UV_OFFLINE",
         "PWD"
       ],
-      "tool_timeout_sec": 900
+      "tool_timeout_sec": 900,
+      "default_tools_approval_mode": "approve"
     }
   }
 }

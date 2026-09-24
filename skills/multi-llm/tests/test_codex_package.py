@@ -269,7 +269,13 @@ class TestManifest:
 
     def test_mcp_json_shape(self):
         """(src + tree) A2b exactly: one server, R39's contained forms, D9's
-        allowlist, ``tool_timeout_sec`` set — and the checked-in copy verbatim.
+        allowlist, ``tool_timeout_sec`` set, the tool pre-approved — and the
+        checked-in copy verbatim.
+
+        ``default_tools_approval_mode: approve`` is deliberate (the user's
+        decision, 2026-09-24): without it codex refuses the call outright under
+        ``approval_policy = "never"`` with a sandbox, measured on 0.156.1 by
+        rows 1b(a) and 12.
 
         The schema clause is not claimed (``test_schema_vendoring_state``).
         """
@@ -278,7 +284,11 @@ class TestManifest:
         assert set(source) == {"mcpServers"}
         assert list(source["mcpServers"]) == ["multi_llm"]
         server = source["mcpServers"]["multi_llm"]
-        assert set(server) == {"command", "args", "cwd", "env_vars", "tool_timeout_sec"}
+        assert set(server) == {
+            "command", "args", "cwd", "env_vars", "tool_timeout_sec",
+            "default_tools_approval_mode",
+        }
+        assert server["default_tools_approval_mode"] == "approve"
         assert server["command"] == "python3"
         assert "/" not in server["command"], "a bare executable name (R39)"
         assert server["args"] == ["./mcp/server.py"]
@@ -1342,6 +1352,114 @@ class TestMake:
         for use in re.findall(r"uses:\s*(\S+)", text):
             assert re.search(r"@[0-9a-f]{40}$", use), f"{use} is not pinned by SHA"
         assert "codex-release-network-check.json" in text
+
+
+# ===========================================================================
+# The promote job's record gate (Phase 4), exercised offline
+# ===========================================================================
+
+PUBLISH_WORKFLOW = REPO_ROOT / ".github" / "workflows" / "publish-codex-plugin.yml"
+RECORDS_DIR = SKILL_ROOT / "tests" / "container" / "records"
+REHEARSAL_GLOB = "*-codex-release-network-check-rehearsal.json"
+
+
+def _promote_validator() -> str:
+    """The Python the promote job feeds ``python3 -`` from its heredoc."""
+    import yaml
+
+    document = yaml.safe_load(PUBLISH_WORKFLOW.read_text(encoding="utf-8"))
+    for step in document["jobs"]["promote"]["steps"]:
+        match = re.search(r"<<'PY'\n(.*?)\nPY\b", step.get("run") or "", re.S)
+        if match:
+            return match.group(1)
+    raise AssertionError("the promote job has no python3 heredoc")
+
+
+def _promote_required(source: str) -> list:
+    tree = ast.parse(source)
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Assign) and len(node.targets) == 1
+                and getattr(node.targets[0], "id", None) == "REQUIRED"):
+            return ast.literal_eval(node.value)
+    raise AssertionError("the promote validator pins no REQUIRED list")
+
+
+def _rehearsal_record() -> tuple:
+    found = sorted(RECORDS_DIR.glob(REHEARSAL_GLOB))
+    assert found, f"no {REHEARSAL_GLOB} under {RECORDS_DIR}"
+    return found[-1], json.loads(found[-1].read_text(encoding="utf-8"))
+
+
+class TestPromoteGate:
+    """The promote job reads the network-check record; these run its own
+    validator (extracted from the workflow, never retyped) against files in a
+    temporary tree. Nothing here reaches GitHub."""
+
+    def _run(self, tmp_path, records: dict, tag: str, sha: str):
+        target = tmp_path / "skills" / "multi-llm" / "tests" / "container" / "records"
+        target.mkdir(parents=True)
+        for name, record in records.items():
+            (target / name).write_text(json.dumps(record), encoding="utf-8")
+        return subprocess.run([sys.executable, "-", tag, sha], input=_promote_validator(),
+                              cwd=tmp_path, capture_output=True, text=True, timeout=60)
+
+    def test_criterion_names_are_the_rehearsal_records(self):
+        _, record = _rehearsal_record()
+        names = [c["name"] for c in record["criteria"]]
+        assert len(names) == 6 == len(set(names))
+        assert _promote_required(_promote_validator()) == names
+        assert all(set(c) >= {"name", "pass", "evidence"} for c in record["criteria"])
+
+    def test_the_rehearsal_record_is_marked_as_one(self):
+        path, record = _rehearsal_record()
+        assert record["rehearsal"] is True
+        assert "not GitHub" in record["source"]
+        for key in ("tag", "sha", "machine", "commands", "plugin_list", "mcp_get",
+                    "locator_line"):
+            assert record.get(key), key
+
+    def test_a_genuine_record_promotes(self, tmp_path):
+        _, record = _rehearsal_record()
+        genuine = {k: v for k, v in record.items() if k != "rehearsal"}
+        done = self._run(tmp_path, {"20990101T000000Z-codex-release-network-check.json": genuine},
+                         record["tag"], record["sha"])
+        assert done.returncode == 0, done.stderr
+        assert "all six criteria pass" in done.stdout
+
+    @pytest.mark.parametrize("flag", [True, "true", 1, None])
+    def test_the_rehearsal_flag_is_refused(self, tmp_path, flag):
+        _, record = _rehearsal_record()
+        done = self._run(tmp_path, {"20990101T000000Z-codex-release-network-check.json":
+                                    {**record, "rehearsal": flag}}, record["tag"], record["sha"])
+        assert done.returncode != 0 and "rehearsal record" in done.stderr
+
+    def test_a_rehearsal_file_name_is_refused(self, tmp_path):
+        _, record = _rehearsal_record()
+        genuine = {k: v for k, v in record.items() if k != "rehearsal"}
+        done = self._run(tmp_path, {"20990101T000000Z-codex-release-network-check-rehearsal.json":
+                                    genuine}, record["tag"], record["sha"])
+        assert done.returncode != 0 and "-rehearsal.json" in done.stderr
+
+    def test_a_red_or_renamed_criterion_is_refused(self, tmp_path):
+        _, record = _rehearsal_record()
+        genuine = {k: v for k, v in record.items() if k != "rehearsal"}
+        red = json.loads(json.dumps(genuine))
+        red["criteria"][0]["pass"] = False
+        done = self._run(tmp_path, {"20990101T000000Z-codex-release-network-check.json": red},
+                         record["tag"], record["sha"])
+        assert done.returncode != 0 and "does not record a pass" in done.stderr
+        renamed = json.loads(json.dumps(genuine))
+        renamed["criteria"][0]["name"] = "marketplace_added"
+        done = self._run(tmp_path / "b", {"20990101T000000Z-codex-release-network-check.json": renamed},
+                         record["tag"], record["sha"])
+        assert done.returncode != 0 and "expected exactly" in done.stderr
+
+    def test_another_tag_or_sha_is_refused(self, tmp_path):
+        _, record = _rehearsal_record()
+        genuine = {k: v for k, v in record.items() if k != "rehearsal"}
+        done = self._run(tmp_path, {"20990101T000000Z-codex-release-network-check.json": genuine},
+                         record["tag"], "0" * 40)
+        assert done.returncode != 0 and "no committed" in done.stderr
 
 
 # ===========================================================================

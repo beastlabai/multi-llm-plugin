@@ -12,8 +12,8 @@ supervises the run to a terminal result. Do not reach the dispatcher any other w
 runs outside the exec sandbox, and on the modes that apply changes it writes to the workspace.
 
 Read the result's `exit` and `next` the way the dispatcher's own contract reads them.
+On this host `next` arrives as arguments for this same tool, not as a command: "running" it means calling the tool again with exactly those arguments, never a shell.
 Run `next` verbatim when it is not `null` on `0` and `2`. On `3` stop: report to the user what was being run, the last error line it printed, and the options its output names (`next` included); do not run a different mode. Do not perform the work this run was going to review, plan, or implement: doing it yourself is never a substitute for a failed run. Run an option only after the user has picked it.
-On this host `next` is the tool's arguments, not a command: running it means calling the tool again with `next` as its arguments, never a shell.
 
 If that tool is not listed, the plugin's server did not start: `codex mcp get multi_llm`
 names the command it tried, and `python3 >= 3.9` must be on `PATH`.

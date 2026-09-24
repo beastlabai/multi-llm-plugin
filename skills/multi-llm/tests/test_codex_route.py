@@ -4,8 +4,8 @@ Plain CI: nothing here needs the built plugin or a real ``codex``. The resolver
 rows run over fixture ``CODEX_HOME`` trees with ``PATH`` pinned — either to no
 ``codex`` at all (step 2, the ``config.toml`` scan) or to a fake ``codex`` that
 replays ``fixtures/codex/plugin-route/plugin-list.json`` (step 1). That fixture
-is provisional until Phase 1's container row commits the recorded document; see
-the README beside it.
+is the document Phase 1's container row 5 recorded on codex 0.156.1 (run
+``20260923T191255Z``); see the README beside it.
 """
 
 from __future__ import annotations
@@ -240,6 +240,23 @@ class TestCheckReportsPluginRoute:
         floor = ".".join(map(str, host_install.CODEX_SERVER_MIN_PYTHON))
         assert f">= {floor}" in second
 
+    def test_the_activated_venv_is_not_the_users_python3(self, tmp_path):
+        # `uv run` puts the skill venv's bin first on PATH and sets VIRTUAL_ENV;
+        # codex launches the server from the user's PATH, which has no such
+        # entry. Measured red in-container (Phase 1 row 9(c), 2026-09-24).
+        bare = Home(tmp_path)
+        bare.python3(None)
+        venv = tmp_path / "venv"
+        (venv / "bin").mkdir(parents=True)
+        _script(venv / "bin" / "python3", "print('Python 3.12.1')\n")
+        env = {**bare.env(), "VIRTUAL_ENV": str(venv),
+               "PATH": os.pathsep.join([str(venv / "bin"), str(bare.bin)])}
+        assert host_install._python3_problem(env) is not None
+        assert "python3" in host_install._python3_problem(env)
+        # Without the activation marker the same PATH entry is the user's own.
+        env.pop("VIRTUAL_ENV")
+        assert host_install._python3_problem(env) is None
+
     def test_python3_below_the_floor_is_named(self, tmp_path):
         old = Home(tmp_path)
         old.python3("3.8.10")
@@ -344,11 +361,23 @@ class TestCheckReportsPluginRoute:
         machine.codex_replaying(_recorded(enabled=False))
         assert "disabled" in machine.note(file_present=True)
 
+    def test_the_recorded_shape_carries_no_installed_path(self):
+        """Row 5's document: both source objects, no ``installedPath``."""
+        document = _recorded()
+        assert document["available"] == []
+        entry = next(e for e in document["installed"] if e["pluginId"] == PLUGIN_ID)
+        assert "installedPath" not in entry
+        assert entry["source"]["source"] == "local" and "path" in entry["source"]
+        assert set(entry["marketplaceSource"]) == {"sourceType", "source"}
+
     def test_an_available_row_is_not_an_install(self, machine):
         document = _recorded()
+        entry = next(e for e in document["installed"] if e["pluginId"] == PLUGIN_ID)
         document["installed"] = [
             e for e in document["installed"] if e["pluginId"] != PLUGIN_ID
         ]
+        # The recorded `available` is empty; a catalog row is added here.
+        document["available"].append(dict(entry, installed=False, enabled=False))
         machine.codex_replaying(document)
         # The table says enabled, but the host answered: nothing installed.
         machine.config.write_text(_table(PLUGIN_ID, True))

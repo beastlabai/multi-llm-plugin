@@ -527,9 +527,12 @@ WRITE_POSTURE_LEVER_ENV = "MULTI_LLM_CODEX_UNSANDBOXED_WRITES"
 WRITE_POSTURE_LEVER_VALUE = "1"
 
 #: The refusal a write-capable mode gets under a read-only (or unreadable)
-#: session posture. ``{mode}`` is the mode word as sent; ``{posture}`` is the
-#: posture word the server read, or :data:`WRITE_POSTURE_UNREADABLE` when it
-#: could not read one — the refusal fails closed.
+#: session posture. The codex server reads the posture per call from the
+#: ``sandbox_mode`` in its turn metadata: ``read-only`` refuses,
+#: ``workspace-write`` and ``danger-full-access`` allow. ``{mode}`` is the mode
+#: word as sent; ``{posture}`` is the posture word the server read, or
+#: :data:`WRITE_POSTURE_UNREADABLE` when it could not read one — absent, or a
+#: word it does not know — and then the refusal fails closed.
 WRITE_POSTURE_REFUSAL = (
     "Refused before anything ran: `{mode}` edits the working tree, and this "
     "session's sandbox posture is {posture}. This tool runs outside the "
@@ -582,8 +585,8 @@ SHELL_MISSING = (
 #: runs inside its host's own permission model and says nothing of the kind.
 TOOL_WRITE_CAPABLE_NOTE = (
     "This tool runs outside the session's exec sandbox. {modes} edit the "
-    "working tree through agent CLIs; under a read-only posture they are "
-    "refused unless the user has set "
+    "working tree through agent CLIs; under a read-only posture, or one this "
+    "tool cannot read, they are refused unless the user has set "
     + WRITE_POSTURE_LEVER_ENV + "=" + WRITE_POSTURE_LEVER_VALUE + "."
 )
 

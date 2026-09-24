@@ -83,7 +83,7 @@ jobs:
   # The one write this route needs. Reads the committed network-check record the
   # maintainer wrote after verifying the tag as a user would (A6 step 6), and
   # moves `release` only when that record names this tag, this sha, and each of
-  # the six pinned criteria as a pass — and only when this workflow's own gate
+  # the six pinned criteria as a pass — never a rehearsal record — and only when this workflow's own gate
   # job went green on that tag. `release`'s protection rule should admit this
   # workflow's actor and no other.
   promote:
@@ -127,26 +127,42 @@ jobs:
           import glob, json, sys
           tag, sha = sys.argv[1], sys.argv[2]
           # The six written pass criteria (plans/codex-native-plugin.md, Phase 4:
-          # revision 1's five, criterion 4 restated for R8', plus `codex mcp get`).
-          # Pinned by name: six unnamed passes, a duplicate, or a renamed
-          # criterion is not the check the plan wrote down.
+          # revision 1's five, criterion 4 restated for R8', criterion 5 moved
+          # from the pointer SKILL.md onto the server it launches, plus
+          # `codex mcp get`). Named as the Phase 4 rehearsal record carries them
+          # (records/*-codex-release-network-check-rehearsal.json, which
+          # test_codex_package.py compares against this list). Pinned by name:
+          # six unnamed passes, a duplicate, or a renamed criterion is not the
+          # check the plan wrote down.
           REQUIRED = [
-              "marketplace_added",
-              "plugin_listed_with_published_version",
-              "install_root_matches_tree",
-              "locator_inside_cache_dir",
-              "skill_resolution_exports_root",
+              "marketplace_resolves_beastlabai",
+              "listed_with_manifest_version",
+              "install_tree_matches_tag",
+              "locator_resolves_inside_cache_dir",
+              "server_runs_payload_from_cache_dir",
               "mcp_get_echoes_server",
           ]
-          pattern = "skills/multi-llm/tests/container/records/*-codex-release-network-check.json"
+          SUFFIX = "-codex-release-network-check.json"
+          records_dir = "skills/multi-llm/tests/container/records"
+          # Globbed wide on purpose, so a rehearsal naming this tag and sha is
+          # seen and refused by name rather than silently skipped.
+          pattern = f"{records_dir}/*-codex-release-network-check*.json"
           matches = []
           for path in sorted(glob.glob(pattern)):
               with open(path, encoding="utf-8") as handle:
                   record = json.load(handle)
-              if record.get("tag") == tag and record.get("sha") == sha:
+              if isinstance(record, dict) and record.get("tag") == tag and record.get("sha") == sha:
                   matches.append((path, record))
           if not matches:
-              sys.exit(f"REFUSING: no committed {pattern} names {tag} at {sha}.")
+              sys.exit(f"REFUSING: no committed {records_dir}/*{SUFFIX} names {tag} at {sha}.")
+          # A rehearsal (a local bare clone standing in for GitHub, a container
+          # standing in for a clean machine) measured the procedure, not this
+          # release: it can never promote, by flag or by file name.
+          for path, record in matches:
+              if "rehearsal" in record and record["rehearsal"] is not False:
+                  sys.exit(f"REFUSING: {path} is a rehearsal record (\"rehearsal\": {record['rehearsal']!r}).")
+              if path.endswith("-rehearsal.json") or not path.endswith(SUFFIX):
+                  sys.exit(f"REFUSING: {path} is not a *{SUFFIX} record (rehearsals end in -rehearsal.json).")
           path, record = matches[-1]
           criteria = record.get("criteria")
           if not isinstance(criteria, list) or not all(isinstance(c, dict) for c in criteria):

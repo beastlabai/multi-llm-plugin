@@ -26,6 +26,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -148,7 +149,8 @@ log = os.environ["STUB_LOG"]
 argv = sys.argv[1:]
 record = {{"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(),
           "env": {{k: os.environ.get(k) for k in (
-              "MULTI_LLM_UV", "MULTI_LLM_SKILL_DIR", "STUB_PROFILE_MARK")}}}}
+              "MULTI_LLM_UV", "MULTI_LLM_SKILL_DIR", "STUB_PROFILE_MARK",
+              "PYTHONDONTWRITEBYTECODE")}}}}
 dargv = argv[argv.index("--") + 3:] if "--" in argv else []
 if dargv[:2] == ["util", "instructions"]:
     with open(log + ".instructions", "a", encoding="utf-8") as handle:
@@ -246,6 +248,29 @@ REVIEW = {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": 
 def dispatcher_argv(call: dict) -> list:
     argv = call["argv"]
     return argv[argv.index("--") + 3:]
+
+
+_ABSENT = object()
+
+
+def turn_meta(workspaces=_ABSENT, sandbox_mode=_ABSENT) -> dict:
+    """A ``tools/call`` ``_meta`` shaped like codex 0.156.1's (row 7's tap).
+
+    ``workspaces`` is a list of paths (each becomes a key, in order) or any
+    raw value to put there as is; either argument left out is left out.
+    """
+    metadata = {"codex_version": "0.156.1", "model": "stub-model",
+                "sandbox": "none", "session_id": "s", "thread_id": "s",
+                "turn_id": "t", "turn_trigger": "exec"}
+    if sandbox_mode is not _ABSENT:
+        metadata["sandbox_mode"] = sandbox_mode
+    if workspaces is not _ABSENT:
+        if isinstance(workspaces, list):
+            workspaces = {str(path): {"has_changes": False,
+                                      "latest_git_commit_hash": "c42d568a"}
+                          for path in workspaces}
+        metadata["workspaces"] = workspaces
+    return {"plugin_id": "multi-llm@beastlabai", "x-codex-turn-metadata": metadata}
 
 
 # ===========================================================================
@@ -357,10 +382,12 @@ class Client:
         self.notify("notifications/initialized")
         return answer
 
-    def start_call(self, args, token=None, request_id=None):
+    def start_call(self, args, token=None, request_id=None, meta=None):
         params = {"name": SURFACE["tool_name"], "arguments": args}
+        if token is not None or meta is not None:
+            params["_meta"] = dict(meta or {})
         if token is not None:
-            params["_meta"] = {"progressToken": token}
+            params["_meta"]["progressToken"] = token
         return self.request("tools/call", params, request_id=request_id)
 
     def envelope(self, request_id, timeout=60):
@@ -407,7 +434,10 @@ def assert_envelope(envelope: dict, result: dict) -> None:
     else:
         assert os.path.isabs(envelope["anchor"])
         source = envelope["anchor_source"]
-        assert source == "roots" or source == "property" or source.startswith("env:")
+        # D3f's spellings: the MCP roots rung, codex's per-call turn metadata,
+        # and an environment name; `property` is the rung held in reserve.
+        assert source in ("roots", "turn-metadata", "property") or source.startswith(
+            "env:")
 
 
 # ===========================================================================
@@ -462,10 +492,10 @@ class Harness:
             client.initialize()
         return client
 
-    def run(self, args, script=(), **kwargs):
+    def run(self, args, script=(), *, meta=None, **kwargs):
         """One call on a fresh server: ``(envelope, result, calls, client)``."""
         client = self.client(script, **kwargs)
-        envelope, result = client.envelope(client.start_call(args))
+        envelope, result = client.envelope(client.start_call(args, meta=meta))
         assert client.close() == 0
         return envelope, result, self.calls(), client
 
@@ -878,6 +908,27 @@ class TestWireContract:
         aborts = [c for c in harness.calls() if DISPATCHER["abort"][1] in dispatcher_argv(c)]
         assert len(aborts) == 1
 
+    def test_sigterm_with_stdin_closed_cancels_the_call_in_flight(self, harness):
+        # Codex's own shape, measured by Phase 1 row 10 (codex 0.156.1): an
+        # interrupted session closes stdin and SIGTERMs the server in the same
+        # millisecond, with no notifications/cancelled. Before the handler the
+        # default SIGTERM exit won that race and orphaned the poll child's
+        # group; now it takes the EOF branch.
+        client = harness.client([launch_step(run_id="RID-T"),
+                                 {"exit": 2, "sleep": 60, "grandchild": True},
+                                 ABORT_CONFIRMED])
+        client.start_call(REVIEW)
+        _wait_for_calls(harness, 2)
+        poll_pid = harness.calls()[1]["pid"]
+        grandchild = int(Path(str(harness.log) + ".grandchild").read_text().split()[0])
+        started = time.monotonic()
+        client.proc.send_signal(signal.SIGTERM)
+        assert client.close(timeout=CANCEL_LATENCY_BOUND_S + 20) == 0
+        assert time.monotonic() - started < CANCEL_LATENCY_BOUND_S + 5
+        assert _pid_gone(poll_pid) and _pid_gone(grandchild)
+        aborts = [c for c in harness.calls() if DISPATCHER["abort"][1] in dispatcher_argv(c)]
+        assert len(aborts) == 1
+
     def test_the_login_shell_s_noise_never_reaches_fd_1(self, harness):
         (harness.home / ".profile").write_text(
             "echo PROFILE-STDOUT-NOISE\necho PROFILE-STDERR-NOISE >&2\n"
@@ -1220,6 +1271,18 @@ def test_server_resolves_its_skill_dir(harness, tmp_path):
 # Pre-spawn refusals: posture, shell
 # ===========================================================================
 
+class TestChildEnvironment:
+    def test_the_child_writes_no_bytecode(self, harness):
+        """D9 layer 2: no ``__pycache__`` in the plugin cache (row 7)."""
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)])
+        assert calls and {c["env"]["PYTHONDONTWRITEBYTECODE"] for c in calls} == {"1"}
+
+    def test_a_user_setting_is_left_alone(self, harness):
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
+                                     extra_env={"PYTHONDONTWRITEBYTECODE": "x"})
+        assert {c["env"]["PYTHONDONTWRITEBYTECODE"] for c in calls} == {"x"}
+
+
 class TestRefusals:
     def test_a_write_mode_is_refused_until_the_user_sets_the_lever(self, harness):
         lever = SURFACE["write_posture_refusal"]
@@ -1231,6 +1294,65 @@ class TestRefusals:
         envelope, _, calls, _ = harness.run(
             args, [launch_step(), poll_step(0)],
             extra_env={lever["lever_env"]: lever["lever_value"]})
+        assert envelope["ok"] is True and calls
+
+    WRITE = {"mode": "implement", "plan": "p.md", "question": "", "extra_flags": []}
+
+    def test_a_read_only_posture_refuses_and_names_it(self, harness):
+        lever = SURFACE["write_posture_refusal"]
+        envelope = _refused(harness, self.WRITE,
+                            meta=turn_meta(sandbox_mode="read-only"))
+        assert envelope["state"] == STATES["needs_human"]
+        assert envelope["message"] == lever["template"].replace(
+            "{mode}", "implement").replace("{posture}", "read-only")
+
+    @pytest.mark.parametrize("mode", ["workspace-write", "danger-full-access"])
+    def test_a_posture_that_may_write_allows_the_write_mode(self, harness, mode):
+        envelope, _, calls, _ = harness.run(
+            self.WRITE, [launch_step(), poll_step(0)],
+            meta=turn_meta(sandbox_mode=mode))
+        assert envelope["ok"] is True and calls
+
+    @pytest.mark.parametrize("value", [
+        _ABSENT, None, "", "READ-ONLY", "external-sandbox", ["read-only"], 1,
+    ], ids=["absent", "null", "empty", "case", "unknown-word", "list", "number"])
+    def test_an_unreadable_posture_fails_closed(self, harness, value):
+        lever = SURFACE["write_posture_refusal"]
+        envelope = _refused(harness, self.WRITE, meta=turn_meta(sandbox_mode=value))
+        assert envelope["message"] == lever["template"].replace(
+            "{mode}", "implement").replace("{posture}", lever["posture_unreadable"])
+
+    @pytest.mark.parametrize("raw", ["not json", "[1, 2]", 7, None, ["x"]],
+                             ids=["bad-json", "json-list", "number", "null", "list"])
+    def test_malformed_turn_metadata_fails_closed_and_never_crashes(self, harness, raw):
+        lever = SURFACE["write_posture_refusal"]
+        envelope = _refused(harness, self.WRITE, meta={"x-codex-turn-metadata": raw})
+        assert lever["posture_unreadable"] in envelope["message"]
+        # And a read-only mode still runs, anchored on the next rung.
+        envelope, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0)], meta={"x-codex-turn-metadata": raw})
+        assert envelope["ok"] is True and envelope["anchor_source"] == "env:PWD"
+
+    def test_a_json_string_turn_metadata_is_read(self, harness):
+        meta = turn_meta(sandbox_mode="read-only")
+        meta["x-codex-turn-metadata"] = json.dumps(meta["x-codex-turn-metadata"])
+        envelope = _refused(harness, self.WRITE, meta=meta)
+        assert "is read-only." in envelope["message"]
+
+    def test_the_lever_lifts_a_read_only_refusal(self, harness):
+        lever = SURFACE["write_posture_refusal"]
+        envelope, _, calls, _ = harness.run(
+            self.WRITE, [launch_step(), poll_step(0)],
+            meta=turn_meta(sandbox_mode="read-only"),
+            extra_env={lever["lever_env"]: lever["lever_value"]})
+        assert envelope["ok"] is True and calls
+        _refused(harness, self.WRITE, meta=turn_meta(sandbox_mode="read-only"),
+                 extra_env={lever["lever_env"]: "true"})
+
+    def test_a_read_only_posture_never_refuses_a_read_only_mode(self, harness):
+        envelope, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0)],
+            meta=turn_meta(sandbox_mode="read-only"))
         assert envelope["ok"] is True and calls
 
     def test_no_bash_is_a_named_refusal(self, harness, tmp_path):
@@ -1523,6 +1645,11 @@ class TestProgressRelay:
         assert [p["progress"] for p in progress] == [1, 2, 3]
         assert all(p["progressToken"] == "tok" for p in progress)
         assert [entry["data"] for entry in logs] == [p["message"] for p in progress]
+        # Codex 0.156.1 forwards no notifications/progress (row 10), so the log
+        # channel is the one that reaches it: `info`, under the default floor
+        # (this client never sends logging/setLevel).
+        assert {entry["level"] for entry in logs} == {"info"}
+        assert {entry["logger"] for entry in logs} == {SURFACE["tool_name"]}
         assert envelope["relays"] == {"attempted": 3, "delivered": 3, "rejected": 0,
                                       "unavailable": 0, "logged": 3}
         assert envelope["progress_lines"] == ["ROSTER", "just finished: b"]
@@ -1533,6 +1660,14 @@ class TestProgressRelay:
         envelope, _ = client.envelope(client.start_call(REVIEW))
         assert envelope["relays"] == {"attempted": 3, "delivered": 0, "rejected": 0,
                                       "unavailable": 3, "logged": 3}
+        # Without a token the log channel still fires at every relay point.
+        logs = [n["params"] for n in client.notifications
+                if n["method"] == "notifications/message"]
+        assert [(entry["level"], entry["data"]) for entry in logs] == [
+            ("info", "ROSTER"), ("info", "just finished: a"),
+            ("info", "just finished: b")]
+        assert not [n for n in client.notifications
+                    if n["method"] == "notifications/progress"]
         assert client.close() == 0
 
     def test_a_command_in_progress_is_redacted(self, harness):
@@ -1717,6 +1852,132 @@ class TestAnchor:
     def test_the_anchor_is_echoed_on_a_refusal_too(self, harness):
         envelope = _refused(harness, dict(REVIEW, mode="nope"))
         assert envelope["anchor"] == os.path.realpath(harness.workspace)
+
+    STATUS = {"mode": "status", "plan": "p.md", "question": "", "extra_flags": []}
+
+    def _dirs(self, tmp_path, *names):
+        made = []
+        for name in names:
+            path = tmp_path / name
+            path.mkdir(parents=True, exist_ok=True)
+            made.append(path)
+        return made
+
+    def test_turn_metadata_anchors_when_pwd_is_absent(self, harness, tmp_path):
+        (ws,) = self._dirs(tmp_path, "ws")
+        envelope, _, calls, _ = harness.run(
+            self.STATUS, [{"exit": 0, "stdout": [result_line()]}],
+            meta=turn_meta([ws]), pwd=False)
+        assert envelope["anchor"] == os.path.realpath(ws)
+        assert envelope["anchor_source"] == "turn-metadata"
+        assert calls[0]["cwd"] == os.path.realpath(ws)
+
+    def test_the_dash_c_case_turn_metadata_beats_pwd(self, harness, tmp_path):
+        """Row 7: under `codex exec -C <wt>` PWD still names the launching
+        shell's checkout, and the turn metadata names `<wt>`."""
+        (wt,) = self._dirs(tmp_path, "anchor-worktree")
+        envelope, _, calls, client = harness.run(
+            {"mode": "status", "plan": "plans/x.md", "question": "",
+             "extra_flags": []}, [{"exit": 0, "stdout": [result_line()]}],
+            meta=turn_meta([wt], sandbox_mode="danger-full-access"))
+        anchor = os.path.realpath(wt)
+        assert envelope["anchor"] == anchor != os.path.realpath(harness.workspace)
+        assert envelope["anchor_source"] == "turn-metadata"
+        assert calls[0]["cwd"] == anchor
+        assert dispatcher_argv(calls[0])[1] == os.path.join(anchor, "plans", "x.md")
+        assert "anchor from turn-metadata" not in client.stderr  # one key: no choice
+
+    def test_roots_still_win_over_turn_metadata(self, harness, tmp_path):
+        rooted, ws = self._dirs(tmp_path, "rooted", "ws")
+        envelope, _, _, _ = harness.run(
+            self.STATUS, [{"exit": 0, "stdout": [result_line()]}],
+            meta=turn_meta([ws]), roots=[str(rooted)])
+        assert envelope["anchor_source"] == "roots"
+        assert envelope["anchor"] == os.path.realpath(rooted)
+
+    def test_several_workspaces_prefer_the_one_holding_pwd(self, harness, tmp_path):
+        other, = self._dirs(tmp_path, "other")
+        parent = harness.workspace.parent
+        # Keys: an unrelated one first, then the workspace's parent (holds PWD),
+        # then the workspace itself (equals PWD, more specific: it wins).
+        envelope, _, calls, client = harness.run(
+            self.STATUS, [{"exit": 0, "stdout": [result_line()]}],
+            meta=turn_meta([other, parent, harness.workspace]))
+        anchor = os.path.realpath(harness.workspace)
+        assert envelope["anchor"] == anchor
+        assert envelope["anchor_source"] == "turn-metadata"
+        assert calls[0]["cwd"] == anchor
+        assert "3 workspaces; chose {}".format(json.dumps(str(harness.workspace))) \
+            in client.stderr and "it holds PWD" in client.stderr
+        logs = [n["params"] for n in client.notifications
+                if n["method"] == "notifications/message"]
+        assert any("anchor from turn-metadata" in entry["data"]
+                   and entry["level"] == "info" for entry in logs)
+
+    def test_several_workspaces_none_holding_pwd_take_the_first(self, harness, tmp_path):
+        first, second = self._dirs(tmp_path, "first", "second")
+        envelope, _, _, client = harness.run(
+            self.STATUS, [{"exit": 0, "stdout": [result_line()]}],
+            meta=turn_meta([first, second]))
+        assert envelope["anchor"] == os.path.realpath(first)
+        assert "none holds PWD" in client.stderr
+
+    def test_an_unusable_preferred_workspace_falls_to_the_next(self, harness, tmp_path):
+        good, = self._dirs(tmp_path, "good")
+        gone = tmp_path / "gone"
+        envelope, _, _, client = harness.run(
+            self.STATUS, [{"exit": 0, "stdout": [result_line()]}],
+            meta=turn_meta([gone, good]), pwd=False)
+        assert envelope["anchor"] == os.path.realpath(good)
+        assert "skipped {} (not a directory)".format(json.dumps(str(gone))) \
+            in client.stderr
+
+    @pytest.mark.parametrize("workspaces", [
+        "relative", "missing", "plugin-root", "a-file", "list", "string", "empty",
+        "null", "nul-byte", "non-dict-meta",
+    ])
+    def test_unusable_turn_metadata_falls_through_to_pwd(self, harness, tmp_path,
+                                                         workspaces):
+        afile = tmp_path / "a-file"
+        afile.write_text("x")
+        meta = turn_meta({
+            "relative": ["plans"], "missing": [tmp_path / "nope"],
+            "plugin-root": [harness.root / "skills"], "a-file": [afile],
+            "list": [], "string": "/tmp", "empty": {}, "null": None,
+            "nul-byte": ["/tmp/\x00x"], "non-dict-meta": None,
+        }[workspaces])
+        if workspaces == "list":
+            meta["x-codex-turn-metadata"]["workspaces"] = [str(tmp_path)]
+        if workspaces == "non-dict-meta":
+            meta = "not a dict"
+        client = harness.client([{"exit": 0, "stdout": [result_line()]}])
+        client.send({"jsonrpc": "2.0", "id": 9, "method": "tools/call", "params": {
+            "name": SURFACE["tool_name"], "arguments": self.STATUS, "_meta": meta}})
+        envelope, _ = client.envelope(9)
+        assert client.close() == 0
+        assert envelope["anchor"] == os.path.realpath(harness.workspace)
+        assert envelope["anchor_source"] == "env:PWD"
+
+    def test_no_rung_names_turn_metadata_in_the_refusal(self, harness, tmp_path):
+        envelope = _refused(harness, REVIEW, pwd=False)
+        assert "turn-metadata (absent)" in envelope["message"]
+        envelope = _refused(harness, REVIEW, pwd=False,
+                            meta=turn_meta([tmp_path / "nope"]))
+        assert "turn-metadata (skipped" in envelope["message"]
+        assert envelope["anchor_source"] is None
+
+    def test_the_anchor_is_resolved_per_call(self, harness, tmp_path):
+        first, second = self._dirs(tmp_path, "one", "two")
+        client = harness.client([{"exit": 0, "stdout": [result_line()]}])
+        envelope, _ = client.envelope(client.start_call(self.STATUS,
+                                                        meta=turn_meta([first])))
+        assert envelope["anchor"] == os.path.realpath(first)
+        envelope, _ = client.envelope(client.start_call(self.STATUS,
+                                                        meta=turn_meta([second])))
+        assert envelope["anchor"] == os.path.realpath(second)
+        envelope, _ = client.envelope(client.start_call(self.STATUS))
+        assert envelope["anchor_source"] == "env:PWD"
+        assert client.close() == 0
 
     def test_getcwd_is_never_a_fallback(self):
         src = SERVER_SRC.read_text(encoding="utf-8")

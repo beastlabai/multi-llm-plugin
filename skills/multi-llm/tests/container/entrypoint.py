@@ -1601,6 +1601,8 @@ def wire_credentials(host: str, home: Path, key: str, slug: str,
             # host environment stays byte-identical to every recorded run.
             _seed_codex_plugin(home, route)
             write_profile_credential(home, key)
+            export_harness_names_into_profile(home)
+            wrap_profile_with_read_probe(home)
 
     elif host == "opencode":
         # The baked cold-start tree (node_modules + the models.dev catalog) comes
@@ -2139,6 +2141,66 @@ def assert_profile_is_read(home: Path) -> None:
                 f"precedence trap). Remove it from the seed.")
 
 
+#: The rig's own instrumentation names `wrapper.py` reads at dispatch time.
+#: `main` sets them in the row's process environment, which a FILE-route host
+#: passes down whole; codex's `.mcp.json` `env_vars` allowlist does not, so on
+#: the package route the dispatcher ran with no receipt dir, no call log and no
+#: row id — measured on `runs/20260923T231001Z`: the ask reached `done`, 5/5
+#: stub answers, and zero receipts or call records to grade it by.
+HARNESS_PROFILE_NAMES = ("MLLM_ROW_ID", "MLLM_STUB_PORT", "MLLM_CALL_LOG",
+                         "MLLM_RECEIPT_DIR")
+
+
+def export_harness_names_into_profile(home: Path) -> None:
+    """Carry the rig's instrumentation to the MCP server's login-shell child.
+
+    The same second carrier the key uses (D3a): the child's `bash -l` reads
+    `.profile`. Harness plumbing only — no product name is exported here, so
+    what the server itself receives stays exactly what codex's allowlist gives it.
+    """
+    profile = home / ".profile"
+    body = profile.read_text(encoding="utf-8") if profile.is_file() else ""
+    lines = "".join(f"export {name}={shlex.quote(os.environ[name])}\n"
+                    for name in HARNESS_PROFILE_NAMES if os.environ.get(name))
+    profile.write_text(body + ("" if not body or body.endswith("\n") else "\n")
+                       + lines, encoding="utf-8")
+    os.chmod(profile, 0o600)
+
+
+#: Where every login shell that reads the seeded `.profile` files one line.
+PROFILE_READS = "profile-reads.jsonl"
+
+
+def wrap_profile_with_read_probe(home: Path) -> None:
+    """Bracket the `.profile` export with a presence probe (item 16, D3a).
+
+    Item 16 asks whether the MCP server's login-shell child derived the key
+    FROM THE PROFILE rather than from the session's environment. So every
+    shell that reads `.profile` records — as booleans, never the value —
+    whether `OPENROUTER_API_KEY` was already set before the file ran and
+    whether it is set after, plus its parent's argv, so the grader can pick
+    out the shell whose parent is `mcp/server.py`. Other login shells (codex's
+    own `exec_command`) land here too and are told apart by that parent.
+    A separate step from `write_profile_credential` so that function's file
+    stays exactly the one-line export its plain-CI tests pin.
+    """
+    profile = home / ".profile"
+    body = profile.read_text(encoding="utf-8") if profile.is_file() else ""
+    log_path = shlex.quote(str(OUT / PROFILE_READS))
+    pre = '_mllm_pre=false; [ -n "${OPENROUTER_API_KEY:-}" ] && _mllm_pre=true\n'
+    post = (
+        '_mllm_post=false; [ -n "${OPENROUTER_API_KEY:-}" ] && _mllm_post=true\n'
+        "_mllm_parent=$(tr '\\000' ' ' < /proc/$PPID/cmdline 2>/dev/null "
+        "| tr -d '\"\\\\[:cntrl:]' | cut -c1-200)\n"
+        "printf '{\"pid\":%s,\"ppid\":%s,\"key_before_profile\":%s,"
+        "\"key_after_profile\":%s,\"parent\":\"%s\"}\\n' "
+        '"$$" "$PPID" "$_mllm_pre" "$_mllm_post" "$_mllm_parent" '
+        f">> {log_path} 2>/dev/null\n"
+        "unset _mllm_pre _mllm_post _mllm_parent\n")
+    profile.write_text(pre + body + post, encoding="utf-8")
+    os.chmod(profile, 0o600)
+
+
 # -- the probes ------------------------------------------------------------- #
 
 #: A prompt for the stub-driven exec legs. Its words do not matter — the stub's
@@ -2161,8 +2223,9 @@ def _stub_entries(log_path: Path) -> list[dict]:
 
 def codex_exec_leg(home: Path, overlay: dict, stub_log: Path, label: str,
                    extra_args: tuple[str, ...] = (), env_extra: dict | None = None,
-                   interrupt_after_call: bool = False, timeout: float = 300.0
-                   ) -> dict:
+                   interrupt_after_call: bool = False, timeout: float = 300.0,
+                   cwd: Path | None = None, env_drop: tuple[str, ...] = (),
+                   tap: bool = False) -> dict:
     """One `codex exec --json` turn against the stub, bracketed in its log.
 
     The stub's scripted scenario (`scripted_codex_plugin_tool_call.yaml`) serves the
@@ -2173,11 +2236,24 @@ def codex_exec_leg(home: Path, overlay: dict, stub_log: Path, label: str,
     """
     mark = len(_stub_entries(stub_log))
     env = _codex_env(home, overlay)
+    # The launching shell's own `PWD`, as any interactive shell exports it: the
+    # entrypoint is exec'd by docker with no shell, so it has none to inherit,
+    # and D3f's env rung (measured: codex advertises no `roots`) reads exactly
+    # this name. `env_drop=("PWD",)` is the leg that measures its absence.
+    env["PWD"] = str(cwd or WORKSPACE)
     env.update(env_extra or {})
+    for name in env_drop:
+        env.pop(name, None)
+    tap_log = None
+    if tap:
+        tap_dir, tap_log = install_mcp_tap(home, label)
+        env["PATH"] = f"{tap_dir}:{env.get('PATH') or os.defpath}"
     argv = [str(REAL_DIR / "codex"), "exec", "--json", "--skip-git-repo-check",
             *extra_args, "--model", "stub-model", CODEX_PROBE_PROMPT]
+    installed = codex_installed_root(home)
+    pycache_before = _pycache_state(installed)
     started = time.time()
-    proc = subprocess.Popen(argv, env=env, cwd=str(WORKSPACE), text=True,
+    proc = subprocess.Popen(argv, env=env, cwd=str(cwd or WORKSPACE), text=True,
                             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, start_new_session=True)
     interrupted = None
@@ -2211,6 +2287,8 @@ def codex_exec_leg(home: Path, overlay: dict, stub_log: Path, label: str,
     return {
         "label": label,
         "argv": ["codex", *argv[1:]],
+        "cwd": str(cwd or WORKSPACE),
+        "env_dropped": list(env_drop),
         "exit": proc.returncode,
         "timed_out": timed_out,
         "interrupted_at_s": interrupted,
@@ -2226,7 +2304,219 @@ def codex_exec_leg(home: Path, overlay: dict, stub_log: Path, label: str,
                          if s.get("declaration") is not None][:1],
         "returned_output": next((s.get("output") for s in scripted
                                  if s.get("phase") == "terminal"), None),
+        "envelope": _envelope_summary(next((s.get("output") for s in scripted
+                                            if s.get("phase") == "terminal"),
+                                           None)),
+        "tap": summarize_mcp_tap(tap_log) if tap_log else None,
+        # PYTHONDONTWRITEBYTECODE (fix 4, 2026-09-24): every `__pycache__`
+        # entry under the installed plugin that this turn added or rewrote.
+        "plugin_pycache_writes": _pycache_writes(pycache_before,
+                                                 _pycache_state(installed)),
     }
+
+
+def _pycache_state(root: Path | None) -> dict:
+    """``{relative path: (size, mtime_ns)}`` for every file under a
+    ``__pycache__`` directory of the installed plugin tree."""
+    out: dict = {}
+    if not root or not root.is_dir():
+        return out
+    for path in root.rglob("__pycache__/*"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        out[path.relative_to(root).as_posix()] = (stat.st_size, stat.st_mtime_ns)
+    return out
+
+
+def _pycache_writes(before: dict, after: dict) -> list[str]:
+    return sorted(k for k in after if before.get(k) != after[k])
+
+
+# -- the stdio tap ----------------------------------------------------------- #
+#
+# The installed `.mcp.json` launches `python3 ./mcp/server.py`, resolved on
+# codex's PATH. A tap leg puts a `python3` shim first on that PATH: for the
+# server's own argv it records the server's launch cwd, environment NAMES (plus
+# the two path-valued names the anchor question is about, `PWD` and
+# `CODEX_HOME`), and every JSON-RPC line in each direction, then runs the real
+# interpreter as its child in the same cwd; for any other argv it `exec`s the
+# real interpreter untouched. So the installed tree stays byte-identical
+# (`divergence: null` holds) and what codex actually sent — its `initialize`
+# capabilities, its answer to `roots/list`, a `notifications/cancelled` or a
+# bare EOF — is read off the wire instead of inferred from the server's reply.
+
+_MCP_TAP = """\
+import json, os, signal, subprocess, sys, threading, time
+REAL = {real!r}
+LOG = {log!r}
+args = sys.argv[1:]
+if not (args and args[0].replace(os.sep, "/").endswith("mcp/server.py")):
+    os.execv(REAL, [REAL] + args)
+lock = threading.Lock()
+def rec(**row):
+    row["t"] = round(time.time(), 3)
+    with lock:
+        with open(LOG, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(row, sort_keys=True) + "\\n")
+def parse(line):
+    try:
+        return json.loads(line)
+    except ValueError:
+        return {{"unparsed": line[:500].decode("utf-8", "replace")}}
+rec(event="start", argv=args, cwd=os.getcwd(), env_names=sorted(os.environ),
+    PWD=os.environ.get("PWD"), CODEX_HOME=os.environ.get("CODEX_HOME"),
+    # Values only for the planted probe names (row 11(b)'s `MLLM_PD_*`) and for
+    # any name or value spelling PLUGIN_DATA: none of them is a credential.
+    env_values={{k: v for k, v in os.environ.items()
+                 if k.startswith("MLLM_PD") or "PLUGIN_DATA" in k
+                 or "PLUGIN_DATA" in v or k == "PYTHONDONTWRITEBYTECODE"}})
+child = subprocess.Popen([REAL] + args, stdin=subprocess.PIPE,
+                         stdout=subprocess.PIPE, bufsize=0)
+def on_signal(number, _frame):
+    rec(event="signal", signal=number)
+    try:
+        child.send_signal(number)
+    except OSError:
+        pass
+for number in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+    signal.signal(number, on_signal)
+def pump_in():
+    while True:
+        line = sys.stdin.buffer.readline()
+        if not line:
+            break
+        rec(event="c2s", msg=parse(line))
+        try:
+            child.stdin.write(line)
+            child.stdin.flush()
+        except OSError:
+            break
+    rec(event="stdin-eof")
+    try:
+        child.stdin.close()
+    except OSError:
+        pass
+def pump_out():
+    while True:
+        line = child.stdout.readline()
+        if not line:
+            break
+        rec(event="s2c", msg=parse(line))
+        sys.stdout.buffer.write(line)
+        sys.stdout.buffer.flush()
+threading.Thread(target=pump_in, daemon=True).start()
+out = threading.Thread(target=pump_out, daemon=True)
+out.start()
+code = child.wait()
+out.join(5)
+rec(event="exit", code=code)
+sys.exit(code)
+"""
+
+
+def install_mcp_tap(_home: Path, label: str) -> tuple[Path, Path]:
+    """Write the `python3` shim for one leg; return (its dir, its log)."""
+    real = shutil.which("python3") or sys.executable
+    # Under the bundle, not the home: the container's tmpfs mounts (the home
+    # included) are `noexec`, and a shim codex cannot execute is skipped for
+    # the next `python3` on PATH — measured: the server ran, the tap never did.
+    tap_dir = OUT / "mcp-tap" / label
+    tap_dir.mkdir(parents=True, exist_ok=True)
+    log_path = OUT / f"mcp-tap-{label}.jsonl"
+    shim = tap_dir / "python3"
+    shim.write_text(f"#!{real}\n" + _MCP_TAP.format(real=real, log=str(log_path)),
+                    encoding="utf-8")
+    shim.chmod(0o755)
+    return tap_dir, log_path
+
+
+def summarize_mcp_tap(log_path: Path) -> dict:
+    """What crossed the wire, read off one tap log."""
+    rows = _stub_entries(log_path)
+    starts = [r for r in rows if r.get("event") == "start"]
+    c2s = [r.get("msg") or {} for r in rows if r.get("event") == "c2s"]
+    s2c = [r.get("msg") or {} for r in rows if r.get("event") == "s2c"]
+    initialize = next((m for m in c2s if m.get("method") == "initialize"), None)
+    capabilities = ((initialize or {}).get("params") or {}).get("capabilities")
+    asked = [m for m in s2c if "method" in m and "id" in m]
+    answers = {m.get("id"): m for m in c2s if "id" in m and "method" not in m}
+    calls = [m for m in c2s if m.get("method") == "tools/call"]
+    eof = next((r for r in rows if r.get("event") == "stdin-eof"), None)
+    return {
+        "log": log_path.name,
+        "tapped": bool(starts),
+        "launches": [{k: s.get(k) for k in ("argv", "cwd", "PWD", "CODEX_HOME",
+                                            "env_names", "env_values")}
+                     for s in starts],
+        # What codex put in each `tools/call`'s `_meta["x-codex-turn-metadata"]`:
+        # the workspaces (D3f's rung 2) and the sandbox posture (D3b).
+        "turn_metadata": [
+            {k: (((m.get("params") or {}).get("_meta") or {})
+                 .get("x-codex-turn-metadata") or {}).get(k)
+             for k in ("workspaces", "sandbox_mode", "sandbox")}
+            for m in calls],
+        "progress_tokens": [((m.get("params") or {}).get("_meta") or {})
+                            .get("progressToken") for m in calls],
+        "log_notification_texts": [
+            ((m.get("params") or {}).get("data")) for m in s2c
+            if m.get("method") == "notifications/message"][:50],
+        "initialize_params": (initialize or {}).get("params"),
+        "roots_advertised": isinstance(capabilities, dict)
+        and isinstance(capabilities.get("roots"), dict),
+        "server_requests": [{"method": m.get("method"), "id": m.get("id"),
+                             "answer": answers.get(m.get("id"))} for m in asked],
+        "client_methods": [m.get("method") for m in c2s if m.get("method")],
+        "tool_call_ids": [m.get("id") for m in calls],
+        "cancelled": [m.get("params") for m in c2s
+                      if m.get("method") == "notifications/cancelled"],
+        "progress_notifications": sum(
+            1 for m in s2c if m.get("method") == "notifications/progress"),
+        "log_notifications": sum(
+            1 for m in s2c if m.get("method") == "notifications/message"),
+        "first_call_t": next((r.get("t") for r in rows if r.get("event") == "c2s"
+                              and (r.get("msg") or {}).get("method")
+                              == "tools/call"), None),
+        "stdin_eof_t": (eof or {}).get("t"),
+        "signals": [r.get("signal") for r in rows if r.get("event") == "signal"],
+        "exit": next((r.get("code") for r in rows if r.get("event") == "exit"),
+                     None),
+        "call_answered": any("method" not in m and m.get("id") in
+                             {c.get("id") for c in calls} for m in s2c),
+    }
+
+
+def _envelope_summary(output) -> dict | None:
+    envelope = _envelope_of(output)
+    if not envelope:
+        return None
+    return {k: envelope.get(k) for k in ("ok", "state", "exit", "anchor",
+                                         "anchor_source", "message",
+                                         "environment", "relays")}
+
+
+def _tree_hashes(root: Path) -> dict:
+    """``{relative path: sha256}`` for every regular file under ``root``."""
+    import hashlib
+    out = {}
+    if not root.is_dir():
+        return out
+    for path in sorted(root.rglob("*")):
+        if path.is_file() and not path.is_symlink():
+            try:
+                out[path.relative_to(root).as_posix()] = hashlib.sha256(
+                    path.read_bytes()).hexdigest()
+            except OSError:
+                continue
+    return out
+
+
+def _tree_diff(before: dict, after: dict) -> dict:
+    return {"added": sorted(set(after) - set(before)),
+            "removed": sorted(set(before) - set(after)),
+            "changed": sorted(k for k in set(before) & set(after)
+                              if before[k] != after[k])}
 
 
 class McpStdioClient:
@@ -2241,9 +2531,10 @@ class McpStdioClient:
     (`roots/list`, …) are recorded, never answered unless `roots` is given.
     """
 
-    def __init__(self, root: Path, env: dict, roots: list[str] | None = None):
+    def __init__(self, root: Path, env: dict, roots: list[str] | None = None,
+                 command: str | None = None):
         declared = _mcp_declaration(root) or {}
-        command = str(declared.get("command") or "python3")
+        command = command or str(declared.get("command") or "python3")
         args = [str(a) for a in (declared.get("args") or ["./mcp/server.py"])]
         cwd = root / str(declared.get("cwd") or ".")
         self.argv = [command, *args]
@@ -2344,9 +2635,14 @@ def _mcp_declaration(root: Path) -> dict | None:
 
 def stdio_session(root: Path, calls: list[dict], env: dict | None = None,
                   roots: list[str] | None = None,
-                  capabilities: dict | None = None) -> dict:
-    """initialize → initialized → tools/list → each `tools/call`, recorded."""
-    client = McpStdioClient(root, env or dict(os.environ), roots=roots)
+                  capabilities: dict | None = None,
+                  command: str | None = None) -> dict:
+    """initialize → initialized → tools/list → each `tools/call`, recorded.
+
+    ``command`` replaces the declared interpreter (row 9(b) launches the server
+    by absolute path because its PATH deliberately resolves nothing)."""
+    client = McpStdioClient(root, env or dict(os.environ), roots=roots,
+                            command=command)
     initialize = client.request("initialize", {
         "protocolVersion": "2025-06-18",
         "capabilities": capabilities or {},
@@ -2380,6 +2676,8 @@ PROBE_OVERRIDE_MARKER = "MULTI_LLM_PROBE_OVERRIDE"
 PROBE_PROFILE_CREDENTIAL = "MLLM_PROBE_DUMMY_API_KEY"
 PROBE_PROFILE_PATH = "/opt/mllm-probe-profile-marker/bin"
 PROBE_BASHRC_MARKER = "MLLM_PROBE_BASHRC_ONLY"
+#: How long the cancellation leg holds the tool call in flight (row 10(b)).
+PROBE_STALL_S = 30
 
 #: Every planted NAME the child observations report on (never a value). The
 #: profile's PATH entry is reported as the pseudo-name ``PATH``.
@@ -2415,6 +2713,20 @@ row = {{"target": target, "login_shell": login == "true",
 with open(out, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(row, sort_keys=True) + "\\n")
 """
+
+
+def _process_table() -> list[str]:
+    """`pid ppid pgid cmdline` for every process in /proc (no `ps` needed)."""
+    rows = []
+    for entry in sorted(Path("/proc").glob("[0-9]*"), key=lambda p: int(p.name)):
+        try:
+            stat = (entry / "stat").read_text().rsplit(")", 1)[1].split()
+            args = (entry / "cmdline").read_bytes().replace(b"\0", b" ").decode(
+                "utf-8", "replace").strip()
+        except (OSError, IndexError):
+            continue
+        rows.append(f"{entry.name} {stat[1]} {stat[2]} {args}")
+    return rows
 
 
 def _probe_profile_hook(observer: Path, python: str, out: Path) -> str:
@@ -2484,9 +2796,17 @@ def _child_observations() -> list[dict]:
 
 
 def _envelope_of(value):
-    """The server's envelope (``ok``/``state``/``exit``/…) under any wrapping."""
+    """The server's envelope (``ok``/``state``/``exit``/…) under any wrapping.
+
+    Codex hands a tool result back to the model as text headed
+    ``Wall time: <s> seconds\nOutput:\n`` (measured at 0.156.1), so a string
+    that is not JSON is retried from its first ``{``.
+    """
     if isinstance(value, str):
-        value = _json_or_none(value)
+        text = value
+        value = _json_or_none(text)
+        if value is None and "{" in text:
+            value = _json_or_none(text[text.index("{"):])
     if isinstance(value, list):
         for item in value:
             found = _envelope_of(item)
@@ -2572,7 +2892,29 @@ def _parse_features(text: str) -> dict:
 
 
 def _parse_prompt_input(text: str) -> dict:
-    """The `### Skill roots` table and the `multi-llm:multi-llm` locator (R8′)."""
+    """The `### Skill roots` table and the `multi-llm:multi-llm` locator (R8′).
+
+    At 0.156.1 `codex debug prompt-input` prints a JSON document whose `text`
+    fields carry the prompt, so every `text` string is joined back into lines
+    first; a plain-text printout is read as it is.
+    """
+    document = _json_or_none(text or "")
+    if document is not None:
+        texts: list[str] = []
+
+        def collect(node) -> None:
+            if isinstance(node, dict):
+                for key, value in node.items():
+                    if key == "text" and isinstance(value, str):
+                        texts.append(value)
+                    else:
+                        collect(value)
+            elif isinstance(node, list):
+                for value in node:
+                    collect(value)
+
+        collect(document)
+        text = "\n".join(texts)
     roots: dict[str, str] = {}
     in_roots = False
     for line in (text or "").splitlines():
@@ -2620,6 +2962,823 @@ def _tree_census(root: Path, limit: int = 5000) -> list[dict]:
         rows.append({"path": rel, "dir": path.is_dir(),
                      "size": path.stat().st_size if path.is_file() else None})
     return rows
+
+
+#: Port of the second stub the anchor row's `mode: init` leg talks to (the row's
+#: own stub serves the `status` scenario and cannot change its arguments).
+ANCHOR_INIT_STUB_PORT = 8098
+
+
+def _init_scenario(path: Path) -> Path:
+    """The scripted scenario with `mode: init` arguments (JSON is YAML)."""
+    path.write_text(json.dumps({
+        "name": "scripted_codex_plugin_init_call",
+        "description": "Phase 1 row 7(c): one scripted mode:init call",
+        "scripted_tool_call": {
+            "surfaces": ["responses"], "namespace": "mcp__multi_llm",
+            "name": CODEX_MCP_SERVER, "call_id": "call_mllm_scripted_init",
+            "arguments": {"mode": "init", "plan": "", "question": "",
+                          "extra_flags": []},
+            "terminal": "multi-llm init call returned."},
+        "prompts": [{"pattern": "call.*multi_llm tool", "content": "OK",
+                     "description": "turn without the tool"}],
+        "fallback": {"content": "OK"}}, indent=2), encoding="utf-8")
+    return path
+
+
+def _anchor_legs(home: Path, root: Path | None, overlay: dict,
+                 stub_log: Path) -> dict:
+    """Row 7 (D3f): which rung answers, whether the anchor holds, and init.
+
+    (a) tapped `codex exec` legs from the seeded workspace — with `PWD` set as
+        a launching shell would, and with `PWD` removed from codex's own
+        environment (does codex supply one itself?) — reading codex's
+        `initialize` capabilities, any `roots/list` exchange, the server's
+        launch cwd and the `PWD`/`CODEX_HOME` it received;
+    (b) the same from a `git worktree` checkout, with the login-shell child's
+        and its shell-less grandchild's cwd observed through the profile hook;
+    (c) `mode: init` from a fresh worktree through codex (a second stub
+        serving init arguments), then through the stdio client with a `roots`
+        answer: `.multi-llm/providers.yaml` lands under the workspace, and
+        `$CODEX_HOME` is diffed across each call.
+    """
+    out: dict = {}
+    plant_environment_markers(home)   # the child-cwd observer (profile hook)
+    codex_home = home / ".codex"
+
+    def leg(label, cwd, env_extra=None, env_drop=(), extra_args=(), log=None):
+        mark = len(_child_observations())
+        result = codex_exec_leg(home, overlay, log or stub_log, label,
+                                extra_args=extra_args, env_extra=env_extra,
+                                env_drop=env_drop, cwd=cwd, tap=True)
+        anchor = (result.get("envelope") or {}).get("anchor")
+        result["children"] = grade_child_observations(
+            _child_observations()[mark:], anchor)
+        return result
+
+    out["exec"] = leg("anchor", WORKSPACE, env_extra={"PWD": str(WORKSPACE)})
+    out["exec_without_pwd"] = leg("anchor-no-pwd", WORKSPACE, env_drop=("PWD",))
+
+    def worktree(name: str) -> tuple[Path, dict]:
+        path = home / name
+        done = subprocess.run(
+            ["git", "-C", str(WORKSPACE), "worktree", "add", "-q", "--detach",
+             str(path), "HEAD"], capture_output=True, text=True)
+        return path, {"path": str(path), "exit": done.returncode,
+                      "stderr": done.stderr[-2000:]}
+
+    wt, out["worktree_add"] = worktree("anchor-worktree")
+    out["exec_worktree"] = leg("anchor-worktree", wt, env_extra={"PWD": str(wt)})
+    # The session's workspace moved by codex's own `-C` while the launching
+    # shell's PWD still names the main checkout: which one does the anchor get?
+    out["exec_cd_flag"] = leg("anchor-cd", WORKSPACE,
+                              env_extra={"PWD": str(WORKSPACE)},
+                              extra_args=("-C", str(wt)))
+
+    init_wt, out["init_worktree_add"] = worktree("anchor-init-worktree")
+    before = _tree_hashes(codex_home)
+    scenario = _init_scenario(OUT / "scripted-init-scenario.yaml")
+    init_log = OUT / "stub-init.jsonl"
+    try:
+        with Stub(ANCHOR_INIT_STUB_PORT, init_log, scenario):
+            out["init_exec"] = leg(
+                "anchor-init", init_wt, env_extra={"PWD": str(init_wt)},
+                extra_args=("-c", "model_providers.stub.base_url="
+                            f'"http://127.0.0.1:{ANCHOR_INIT_STUB_PORT}/v1"'),
+                log=init_log)
+    except SystemExit as exc:   # a stub that never came up is a recorded leg
+        out["init_exec"] = {"error": str(exc)}
+    after = _tree_hashes(codex_home)
+    diff = _tree_diff(before, after)
+    out["init_exec_effects"] = {
+        "workspace_providers_yaml": (init_wt / ".multi-llm" /
+                                     "providers.yaml").is_file(),
+        "codex_home_diff": diff,
+        "codex_home_byte_identical": not any(diff.values()),
+        "plugins_subtree_changed": [p for v in diff.values() for p in v
+                                    if p.startswith("plugins/")],
+        "multi_llm_under_codex_home": sorted(
+            str(p) for p in codex_home.rglob(".multi-llm")),
+    }
+
+    stdio_wt, out["stdio_init_worktree_add"] = worktree("anchor-stdio-init")
+    if root:
+        before = _tree_hashes(codex_home)
+        out["init_stdio"] = stdio_session(
+            root, [{"mode": "init", "plan": "", "question": "",
+                    "extra_flags": []}],
+            env={**os.environ, **overlay, "HOME": str(home)},
+            roots=[str(stdio_wt)], capabilities={"roots": {"listChanged": False}})
+        diff = _tree_diff(before, _tree_hashes(codex_home))
+        out["init_stdio_effects"] = {
+            "workspace_providers_yaml": (stdio_wt / ".multi-llm" /
+                                         "providers.yaml").is_file(),
+            "codex_home_diff": diff,
+            "codex_home_byte_identical": not any(diff.values()),
+        }
+    def reading(key: str, expected: Path) -> dict:
+        leg_out = out.get(key) or {}
+        envelope = leg_out.get("envelope") or {}
+        tap = leg_out.get("tap") or {}
+        meta = (tap.get("turn_metadata") or [{}])[0] or {}
+        return {"anchor": envelope.get("anchor"),
+                "anchor_source": envelope.get("anchor_source"),
+                "state": envelope.get("state"),
+                "expected_anchor": os.path.realpath(str(expected)),
+                "anchor_is_expected": bool(envelope.get("anchor")) and (
+                    os.path.realpath(str(envelope.get("anchor")))
+                    == os.path.realpath(str(expected))),
+                "child_cwd": (leg_out.get("children") or {}).get("cwd"),
+                "turn_metadata_workspaces": sorted(
+                    (meta.get("workspaces") or {}).keys()),
+                "pwd_at_launch": [launch.get("PWD")
+                                  for launch in tap.get("launches") or []]}
+
+    # The 2026-09-24 fix (D3f rung 2): `-C` with PWD elsewhere anchors on the
+    # `-C` workspace via turn metadata, and a PWD-less launch anchors via the
+    # metadata instead of refusing.
+    out["reverified"] = {"cd_flag": reading("exec_cd_flag", wt),
+                         "without_pwd": reading("exec_without_pwd", WORKSPACE),
+                         "with_pwd": reading("exec", WORKSPACE),
+                         "worktree": reading("exec_worktree", wt)}
+    out["legs_not_driven"] = {}
+    return out
+
+
+def _tool_call_item(events_file: Path) -> dict | None:
+    """The last `mcp_tool_call` item codex reported, trimmed to its verdict."""
+    found = None
+    path = OUT / events_file
+    for line in (path.read_text(encoding="utf-8").splitlines()
+                 if path.is_file() else []):
+        event = _json_or_none(line)
+        item = (event or {}).get("item") if isinstance(event, dict) else None
+        if isinstance(item, dict) and item.get("type") == "mcp_tool_call":
+            found = {"status": item.get("status"), "error": item.get("error"),
+                     "has_result": item.get("result") is not None}
+    return found
+
+
+# -- the 2026-09-24 re-verification and the legs not driven before ---------- #
+#
+# Every leg below is zero quota: the host's model is a loopback stub serving a
+# scripted scenario, and the one provider any leg dispatches (a nested codex,
+# rows 10/12(d)/14) is the wrapper's redirected codex, answered by the row's own
+# stub on its text path. Harness instrumentation that reaches a login-shell
+# child (a PATH shim, the wrapper's call log) is written into `.profile` and
+# removed again, because codex's `env_vars` allowlist forwards neither.
+
+#: The secondary stub each custom scripted leg starts on its own port (the
+#: row's own stub keeps serving the nested providers on `MLLM_STUB_PORT`).
+SCRIPTED_LEG_STUB_PORT = 8097
+#: The apply-mode call rows 12(b)/(c) and the workspace-write leg send. Zero
+#: quota by construction: the seeded plan has no review, so a dispatch that is
+#: let through stops at the prerequisite gate before any provider runs.
+APPLY_MODE_CALL = {"mode": "apply-suggestions", "plan": "plans/auth-feature.md",
+                   "question": "", "extra_flags": []}
+#: The nested-codex model spec the ask legs fan out to. The wrapper redirects it
+#: to the row's stub, whose text path answers it.
+NESTED_CODEX_SPEC = "codex:gpt-5.5"
+#: What the 12(c) session runs through its OWN shell tool, beside the tool call.
+LIFT_SHELL_PROBE = ".mllm-12c-session-shell-probe"
+
+
+def _call_scenario(path: Path, name: str, arguments: dict,
+                   then_shell: str | None = None) -> Path:
+    """A one-call scripted scenario (JSON is YAML), like `_init_scenario`."""
+    block = {"surfaces": ["responses"], "namespace": "mcp__multi_llm",
+             "name": CODEX_MCP_SERVER, "call_id": f"call_mllm_{name}",
+             "arguments": arguments, "terminal": f"{name} returned."}
+    if then_shell:
+        block["then_shell"] = then_shell
+    path.write_text(json.dumps({
+        "name": name, "description": f"2026-09-24 re-verification leg {name}",
+        "scripted_tool_call": block,
+        "prompts": [{"pattern": "call.*multi_llm tool", "content": "OK",
+                     "description": "turn without the tool"}],
+        "fallback": {"content": "OK"}}, indent=2), encoding="utf-8")
+    return path
+
+
+class _ProcSampler:
+    """Samples /proc while a leg runs, keeping every dispatcher-shaped process.
+
+    What "no child on the process table" is asserted on: a refusal that
+    spawned nothing leaves this empty, a dispatch leaves its `uv run …
+    multi_llm.py` (and the login shell before its `exec`) here.
+    """
+
+    PATTERN = re.compile(r"multi_llm\.py|cd -- \"\$1\"|--internal-worker")
+
+    def __init__(self, interval: float = 0.05):
+        self.interval = interval
+        self.seen: dict[str, str] = {}
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            for row in _process_table():
+                if self.PATTERN.search(row):
+                    self.seen.setdefault(row.split(" ", 1)[0], row[:600])
+            self._stop.wait(self.interval)
+
+    def __enter__(self) -> "_ProcSampler":
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._stop.set()
+        self._thread.join(5)
+
+    def rows(self) -> list[str]:
+        return [self.seen[k] for k in sorted(self.seen, key=int)]
+
+
+def _porcelain(path: Path = WORKSPACE) -> str:
+    done = subprocess.run(["git", "status", "--porcelain"], cwd=str(path),
+                          capture_output=True, text=True)
+    return done.stdout
+
+
+class _ProfileExtra:
+    """Append to `$HOME/.profile` for one leg and restore it byte for byte."""
+
+    def __init__(self, home: Path, text: str):
+        self.profile = home / ".profile"
+        self.text = text
+        self.original: str | None = None
+
+    def __enter__(self) -> "_ProfileExtra":
+        self.original = (self.profile.read_text(encoding="utf-8")
+                         if self.profile.is_file() else None)
+        base = self.original or ""
+        if base and not base.endswith("\n"):
+            base += "\n"
+        self.profile.write_text(base + self.text, encoding="utf-8")
+        assert_profile_is_read(self.profile.parent)
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        if self.original is None:
+            self.profile.unlink(missing_ok=True)
+        else:
+            self.profile.write_text(self.original, encoding="utf-8")
+
+
+class _FileEdit:
+    """Replace one file's text for a leg and restore it byte for byte."""
+
+    def __init__(self, path: Path, text: str):
+        self.path, self.text, self.original = path, text, None
+
+    def __enter__(self) -> "_FileEdit":
+        self.original = (self.path.read_text(encoding="utf-8")
+                         if self.path.is_file() else None)
+        self.path.write_text(self.text, encoding="utf-8")
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        if self.original is None:
+            self.path.unlink(missing_ok=True)
+        else:
+            self.path.write_text(self.original, encoding="utf-8")
+
+
+def _slow_codex_profile(label: str, sleep_s: int, call_log: Path | None) -> str:
+    """`.profile` text putting a `codex` shim first on the login shell's PATH.
+
+    The shim sleeps before every nested `codex exec` (never before `codex
+    sandbox`, the D6 probe), so a detached ask run lives long enough for relay
+    points (row 10) or for a cap to fire (row 14). Under the bundle, not the
+    home: the tmpfs mounts are `noexec`. The wrapper's call log is exported
+    beside it when asked, since `env_vars` forwards no `MLLM_*` name.
+    """
+    shim_dir = OUT / "slow-bin" / label
+    shim_dir.mkdir(parents=True, exist_ok=True)
+    shim = shim_dir / "codex"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f'if [ "$1" = "exec" ]; then sleep {int(sleep_s)}; fi\n'
+        'exec /opt/mllm/bin/codex "$@"\n', encoding="utf-8")
+    shim.chmod(0o755)
+    text = f"export PATH={shlex.quote(str(shim_dir))}:$PATH\n" if sleep_s else ""
+    if call_log is not None:
+        text += f"export MLLM_CALL_LOG={shlex.quote(str(call_log))}\n"
+    return text
+
+
+def _workspace_config_with(extra: str) -> _FileEdit:
+    """The seeded `.multi-llm/providers.yaml` plus a top-level block."""
+    path = WORKSPACE / ".multi-llm" / "providers.yaml"
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if text and not text.endswith("\n"):
+        text += "\n"
+    return _FileEdit(path, text + extra)
+
+
+def scripted_leg(home: Path, overlay: dict, label: str, arguments: dict, *,
+                 extra_args: tuple[str, ...] = (), env_extra: dict | None = None,
+                 env_drop: tuple[str, ...] = (), then_shell: str | None = None,
+                 cwd: Path | None = None, timeout: float = 300.0,
+                 port: int = SCRIPTED_LEG_STUB_PORT) -> dict:
+    """One tapped `codex exec` turn whose scripted call carries ``arguments``.
+
+    A secondary stub on its own port serves the call (`-c
+    model_providers.stub.base_url=…` points this turn at it); the process table
+    is sampled for the whole turn; the porcelain of the workspace is taken on
+    both sides; and the call's verdict is read three ways — codex's own
+    `mcp_tool_call` item, whether the server received `tools/call` at all, and
+    the envelope the model was handed.
+    """
+    scenario = _call_scenario(OUT / f"scenario-{label}.json",
+                              label.replace("-", "_"), arguments, then_shell)
+    log_path = OUT / f"stub-{label}.jsonl"
+    porcelain_before = _porcelain()
+    try:
+        with Stub(port, log_path, scenario), _ProcSampler() as sampler:
+            result = codex_exec_leg(
+                home, overlay, log_path, label,
+                extra_args=("-c", "model_providers.stub.base_url="
+                            f'"http://127.0.0.1:{port}/v1"', *extra_args),
+                env_extra=env_extra, env_drop=env_drop, cwd=cwd, tap=True,
+                timeout=timeout)
+    except SystemExit as exc:   # a stub that never came up is a recorded leg
+        return {"label": label, "error": str(exc)}
+    porcelain_after = _porcelain()
+    tap = result.get("tap") or {}
+    entries = _stub_entries(log_path)
+    terminal = next((e.get("scripted") for e in entries
+                     if (e.get("scripted") or {}).get("phase") == "terminal"), {})
+    result.update({
+        "arguments": arguments,
+        "tool_call_item": _tool_call_item(Path(result["events_file"])),
+        "server_got_tools_call": "tools/call" in (tap.get("client_methods") or []),
+        "requires_approval_refusal": "requires approval" in (
+            (OUT / result["events_file"]).read_text(encoding="utf-8")
+            + result.get("stderr", "")),
+        "dispatcher_processes": sampler.rows(),
+        "spawned_dispatcher": any("multi_llm.py" in row for row in sampler.rows()),
+        "porcelain_byte_identical": porcelain_before == porcelain_after,
+        "porcelain_before": porcelain_before[-4000:],
+        "porcelain_after": porcelain_after[-4000:],
+        "advertised_tool_names": sorted({n for e in entries
+                                         for n in (e.get("tool_names") or [])}),
+    })
+    if then_shell:
+        result["session_shell"] = {
+            "command": then_shell,
+            "tool": terminal.get("shell_tool"),
+            "unavailable": terminal.get("shell_unavailable"),
+            "output": terminal.get("shell_output"),
+            "bwrap_in_output": "bwrap" in str(terminal.get("shell_output") or ""),
+        }
+    return result
+
+
+def _ask_runs() -> list[dict]:
+    """Every ask run dir under the workspace: its run record and log evidence."""
+    runs = []
+    for status in sorted(WORKSPACE.rglob("ask/*/.status.json")):
+        doc = _json_or_none(status.read_text(encoding="utf-8")) or {}
+        log_path = status.parent / "orchestrator-run.log"
+        lines = (log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+                 if log_path.is_file() else [])
+        runs.append({
+            "dir": str(status.parent),
+            "run": {k: (doc.get("run") or {}).get(k)
+                    for k in ("run_id", "state", "exit_code", "pid", "error",
+                              "started_at", "ended_at")},
+            "state": doc.get("state"),
+            "models_served": doc.get("models_served"),
+            "sandbox_lines": [line[:400] for line in lines
+                              if re.search(r"SANDBOX|sandbox_fallback|landlock"
+                                           r"|bypass", line)][:40],
+            "log_tail": lines[-15:],
+        })
+    return runs
+
+
+def _nested_codex_calls(call_log: Path) -> list[dict]:
+    """The wrapper's call records for nested codex, argv and sandbox tokens."""
+    rows = []
+    for row in _stub_entries(call_log):
+        if row.get("cli") != "codex":
+            continue
+        argv = [str(a) for a in (row.get("argv") or [])]
+        joined = " ".join(argv)
+        rows.append({"argv": argv[:40], "subcommand": argv[1] if len(argv) > 1 else None,
+                     "danger_full_access": "danger-full-access" in joined,
+                     "legacy_landlock": "use_legacy_landlock" in joined,
+                     "read_only": "read-only" in joined})
+    return rows
+
+
+def _worker_processes() -> list[str]:
+    return [row[:400] for row in _process_table() if "--internal-worker" in row]
+
+
+def _ask_call(question: str) -> dict:
+    return {"mode": "ask", "plan": "plans/auth-feature.md", "question": question,
+            "extra_flags": ["--models", NESTED_CODEX_SPEC]}
+
+
+def _nested_ask_leg(home: Path, overlay: dict, label: str, question: str, *,
+                    sleep_s: int = 0, poll_s: int | None = None,
+                    extra_args: tuple[str, ...] = (), timeout: float = 600.0,
+                    wait_worker_s: float = 0.0) -> dict:
+    """An `ask` call that fans out to ONE nested codex provider (zero quota).
+
+    Rows 10 (relay points: a slow nested exec plus a 5 s `poll_s`), 12(d)
+    (which sandbox rung the grandchild ran under, off the wrapper's call log
+    and the run log) and 14 (a cap firing on a detached run).
+    """
+    # The nested codex's provider identity: the wrapper copies
+    # `/work/homes/codex` into each invocation root, and a probe row names no
+    # `--cli`/`--helpers`, so nothing seeded it (codex then exits 1 on a
+    # CODEX_HOME that does not exist).
+    seed_homes(["codex"])
+    call_log = OUT / f"calls-{label}.jsonl"
+    profile = _slow_codex_profile(label, sleep_s, call_log)
+    config = (_workspace_config_with(f"progress:\n  poll_s: {int(poll_s)}\n")
+              if poll_s else None)
+    before_runs = {r["dir"] for r in _ask_runs()}
+    with _ProfileExtra(home, profile):
+        if config:
+            config.__enter__()
+        try:
+            leg = scripted_leg(home, overlay, label, _ask_call(question),
+                               extra_args=extra_args, timeout=timeout)
+            leg["workers_right_after"] = _worker_processes()
+            runs_after = [r for r in _ask_runs() if r["dir"] not in before_runs]
+            leg["ask_runs_right_after"] = runs_after
+            if wait_worker_s:
+                deadline = time.time() + wait_worker_s
+                while time.time() < deadline and _worker_processes():
+                    time.sleep(2)
+                leg["workers_after_wait"] = _worker_processes()
+                leg["ask_runs_after_wait"] = [r for r in _ask_runs()
+                                              if r["dir"] not in before_runs]
+        finally:
+            if config:
+                config.__exit__(None, None, None)
+    leg["nested_codex_calls"] = _nested_codex_calls(call_log)
+    leg["slow_codex_exec_s"] = sleep_s
+    leg["poll_s"] = poll_s
+    return leg
+
+
+def _nested_rung(leg: dict) -> dict:
+    """Which posture the nested codex exec ran under (row 12(d))."""
+    execs = [c for c in leg.get("nested_codex_calls") or []
+             if c.get("subcommand") == "exec"]
+    lines = [line for run in leg.get("ask_runs_after_wait")
+             or leg.get("ask_runs_right_after") or []
+             for line in run.get("sandbox_lines") or []]
+    if any(c["danger_full_access"] for c in execs):
+        rung = "bypassed"
+    elif any(c["legacy_landlock"] for c in execs):
+        rung = "fallback-landlock"
+    elif any(c["read_only"] for c in execs):
+        rung = "sandboxed (read-only, no fallback)"
+    else:
+        rung = None
+    return {"rung": rung, "nested_exec_argvs": [c["argv"] for c in execs],
+            "sandbox_lines": lines,
+            "session_posture": [(m or {}).get("sandbox_mode") for m in
+                                ((leg.get("tap") or {}).get("turn_metadata") or [])]}
+
+
+def _no_python_path_dir() -> Path:
+    """A PATH directory with every command of this PATH except `python*`.
+
+    Wrapped CLIs (`/opt/mllm/bin/*`, python scripts themselves) point at their
+    real binaries instead, so nothing on it needs an interpreter to start.
+    """
+    target = OUT / "nopy-bin"
+    target.mkdir(parents=True, exist_ok=True)
+    for entry in (os.environ.get("PATH") or "").split(":"):
+        base = Path(entry)
+        if not base.is_dir():
+            continue
+        for item in sorted(base.iterdir()):
+            name = item.name
+            if name.startswith("python") or (target / name).exists() \
+                    or (target / name).is_symlink():
+                continue
+            source = item
+            if str(base) == "/opt/mllm/bin":
+                real = REAL_DIR / name
+                if not real.exists():
+                    continue
+                source = real
+            try:
+                (target / name).symlink_to(source)
+            except OSError:
+                continue
+    return target
+
+
+def _codex_log_lines(codex_home: Path, pattern: str, limit: int = 30) -> list[str]:
+    """Rows of codex's own log stores (`*.sqlite`, `log/*.log`) matching
+    ``pattern``, newest last, each capped. Read-only; never a value we planted."""
+    import sqlite3
+    regex = re.compile(pattern, re.I)
+    found: list[str] = []
+    # The LOG stores only: the thread/state stores carry the probe's own
+    # prompt ("Call the multi_llm tool.") and would match every pattern.
+    for db in sorted(codex_home.glob("logs_*.sqlite")):
+        try:
+            conn = sqlite3.connect(str(db))
+            tables = [r[0] for r in conn.execute(
+                "select name from sqlite_master where type='table'")]
+            for table in tables:
+                for row in conn.execute(f'select * from "{table}"'):
+                    text = " | ".join(str(c) for c in row)
+                    if regex.search(text):
+                        found.append(f"{db.name}:{table}: {text[:700]}")
+            conn.close()
+        except sqlite3.Error as exc:
+            found.append(f"{db.name}: unreadable ({exc})")
+    for path in sorted((codex_home / "log").glob("*.log")) \
+            if (codex_home / "log").is_dir() else []:
+        for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+            if regex.search(line):
+                found.append(f"{path.name}: {line[:700]}")
+    return found[-limit:]
+
+
+def _interpreter_absent_legs(home: Path, root: Path | None, overlay: dict,
+                             stub_log: Path) -> dict:
+    """Row 9(c): a home whose PATH carries no `python3`, recorded whole."""
+    nopy = _no_python_path_dir()
+    env = _codex_env(home, overlay)
+    env["PATH"] = str(nopy)
+    out: dict = {"path": str(nopy),
+                 "python3_resolves": shutil.which("python3", path=str(nopy))}
+    listing = _run_codex(["plugin", "list", "--json"], env)
+    doc = _json_or_none(listing["_stdout_full"])
+    entry = next((p for p in ((doc or {}).get("installed") or [])
+                  if CODEX_PLUGIN_ID in json.dumps(p)), None)
+    out["plugin_list"] = {"command": _public(listing), "entry": entry}
+    prompt = _run_codex(["debug", "prompt-input"], env)
+    out["prompt_input"] = {"exit": prompt["exit"],
+                           "skill": _parse_prompt_input(prompt["_stdout_full"]),
+                           "stderr": prompt["stderr"][-2000:]}
+    mcp_get = _run_codex(["mcp", "get", CODEX_MCP_SERVER, "--json"], env)
+    out["mcp_get"] = {"exit": mcp_get["exit"],
+                      "document": _json_or_none(mcp_get["_stdout_full"]),
+                      "stderr": mcp_get["stderr"][-2000:]}
+    mark = len(_stub_entries(stub_log))
+    exec_leg = codex_exec_leg(home, overlay, stub_log, "interpreter-absent",
+                              env_extra={"PATH": str(nopy)})
+    events = (OUT / exec_leg["events_file"]).read_text(encoding="utf-8")
+    entries = _stub_entries(stub_log)[mark:]
+    out["exec"] = {
+        "exit": exec_leg["exit"],
+        "declarations": exec_leg["declarations"],
+        "scripted_phases": exec_leg["scripted_phases"],
+        "tool_names_advertised": sorted({n for e in entries
+                                         for n in (e.get("tool_names") or [])}),
+        "multi_llm_in_tools": any("multi_llm" in n for e in entries
+                                  for n in (e.get("tool_names") or [])),
+        # Codex's own words about the failed spawn, VERBATIM: that text is all
+        # a user gets.
+        "stderr": exec_leg["stderr"],
+        "error_events": [line for line in events.splitlines()
+                         if re.search(r"error|mcp|multi_llm|spawn|python",
+                                      line, re.I)][:20],
+        # `exec --json` prints nothing about the failed spawn on stdout or
+        # stderr, so codex's own log store is read for what it DID write.
+        "codex_log_lines": _codex_log_lines(home / ".codex",
+                                            r"mcp|python3|multi_llm"),
+    }
+    # The same turn once more with codex's own tracing on stderr
+    # (`RUST_LOG=info`), keeping only the lines about MCP servers.
+    verbose = codex_exec_leg(home, overlay, stub_log, "interpreter-absent-log",
+                             env_extra={"PATH": str(nopy), "RUST_LOG": "info"})
+    out["exec"]["rust_log_mcp_lines"] = [
+        (line[line.index("codex_mcp"):] if "codex_mcp" in line else line)[:600]
+        for line in verbose["stderr"].splitlines()
+        if re.search(r"codex_mcp|multi_llm|python3", line)][:30]
+    # The blocking half: `install-host codex --check` from this same PATH. Run
+    # twice — through `uv run` (which prepends the venv's bin, where a
+    # `python3` lives) and with the venv interpreter directly — so the answer
+    # does not depend on how the check was launched without saying so.
+    skill = (root / "skills" / "multi-llm") if root else None
+    uv = str(REAL_DIR / "uv") if (REAL_DIR / "uv").exists() else shutil.which("uv")
+    venv_python = Path(os.environ.get("UV_PROJECT_ENVIRONMENT", "")) / "bin" / "python"
+    checks = {}
+    if skill and skill.is_dir():
+        argv_tail = [str(skill / "multi_llm.py"), "install-host", "codex", "--check"]
+        variants = {"via_uv_run": [uv, "run", "--frozen", "--no-dev", "--project",
+                                   str(skill), "--", "python", *argv_tail]}
+        if venv_python.exists():
+            variants["venv_interpreter"] = [str(venv_python), *argv_tail]
+        for name, argv in variants.items():
+            done = subprocess.run(argv, env=env, cwd=str(WORKSPACE),
+                                  capture_output=True, text=True, timeout=300,
+                                  stdin=subprocess.DEVNULL)
+            text = done.stdout + done.stderr
+            checks[name] = {"argv": argv, "exit": done.returncode,
+                            "output": text[-6000:],
+                            "names_missing_interpreter":
+                                "`python3` is not on this PATH" in text}
+    out["install_host_check"] = checks
+    return out
+
+
+def _shell_ladder_refusal(home: Path, root: Path | None) -> dict:
+    """Row 9(b): the child-spawn lookup on a PATH where no `bash` resolves.
+
+    Driven through the stdio client, not codex: the server's fallback
+    (`/bin/bash`) exists in this image, and codex forwards no `MLLM_TEST_*`
+    name, so only the stdio launch can point both the PATH and the fallback
+    away. The server's interpreter is named absolutely for the same reason.
+    """
+    if not root:
+        return {"error": "no installed root"}
+    empty = OUT / "no-bash-bin"
+    empty.mkdir(parents=True, exist_ok=True)
+    python = shutil.which("python3") or sys.executable
+    env = {**os.environ, "HOME": str(home), "PWD": str(WORKSPACE),
+           "PATH": str(empty), "MLLM_TEST_FALLBACK_SHELL": "/nonexistent/bash"}
+    status_call = {"mode": "status", "plan": "plans/auth-feature.md",
+                   "question": "", "extra_flags": []}
+    with _ProcSampler() as sampler:
+        session = stdio_session(root, [status_call], env=env, command=python)
+    envelope = _envelope_of((session["calls"] or [{}])[0].get("response"))
+    environment = (envelope or {}).get("environment") or {}
+    return {
+        "path_searched": str(empty),
+        "fallback_pointed_at": "/nonexistent/bash",
+        "session": session,
+        "envelope": {k: (envelope or {}).get(k)
+                     for k in ("ok", "state", "exit", "message", "anchor",
+                               "anchor_source")},
+        "is_error": ((session["calls"] or [{}])[0].get("response") or {})
+                    .get("result", {}).get("isError"),
+        "environment": environment,
+        "environment_keys": sorted(environment),
+        "login_shell": environment.get("login_shell"),
+        "shell": environment.get("shell"),
+        "message_names_bash_and_path": bool(envelope) and "bash" in str(
+            envelope.get("message")) and str(empty) in str(envelope.get("message")),
+        "dispatcher_processes": sampler.rows(),
+    }
+
+
+def _plugin_data_delivery(home: Path, root: Path | None, overlay: dict,
+                          stub_log: Path) -> dict:
+    """Row 11(b): can a running server name `${PLUGIN_DATA}` at all?
+
+    Two edits of the INSTALLED `.mcp.json` (row 13 found no overlay, so the
+    installed copy is the only place to spell it; each is restored after its
+    leg and recorded as a divergence): (1) an `env` value and an `env_vars`
+    entry spelled `${PLUGIN_DATA}`, plus `${PLUGIN_ROOT}` beside it as a
+    control; (2) `cwd: "${PLUGIN_DATA}"`. The tap records the server's launch
+    cwd and the planted names' values; whether `./mcp/server.py` resolved is
+    read off the server's exit and whether `tools[]` carried the tool.
+    """
+    mcp = (root / ".mcp.json") if root else None
+    if not mcp or not mcp.is_file():
+        return {"error": "no installed .mcp.json"}
+    original = json.loads(mcp.read_text(encoding="utf-8"))
+    env = _codex_env(home, overlay)
+    out: dict = {"divergence": f"{mcp}: edited per leg, restored after each"}
+
+    def leg(label: str, mutate) -> dict:
+        doc = json.loads(json.dumps(original))
+        mutate(doc["mcpServers"][CODEX_MCP_SERVER])
+        with _FileEdit(mcp, json.dumps(doc, indent=2)):
+            mcp_get = _run_codex(["mcp", "get", CODEX_MCP_SERVER, "--json"], env)
+            result = codex_exec_leg(home, overlay, stub_log, label, tap=True,
+                                    env_extra={"MLLM_PD_FORWARDED": "${PLUGIN_DATA}"})
+        tap = result.get("tap") or {}
+        launches = tap.get("launches") or []
+        return {
+            "edit": doc["mcpServers"][CODEX_MCP_SERVER],
+            "mcp_get": _json_or_none(mcp_get["_stdout_full"]),
+            "mcp_get_stderr": mcp_get["stderr"][-1500:],
+            "server_launched": bool(launches),
+            "server_cwd": [launch.get("cwd") for launch in launches],
+            "server_env_values": [launch.get("env_values") for launch in launches],
+            "server_exit": tap.get("exit"),
+            "tool_advertised": bool(result.get("declarations")),
+            "scripted_phases": result.get("scripted_phases"),
+            "envelope_state": (result.get("envelope") or {}).get("state"),
+            "stderr_tail": (result.get("stderr") or "")[-3000:],
+            "plugin_data_dirs_after": sorted(
+                str(p) for p in (home / ".codex").rglob("*plugin*data*")),
+            "codex_log_lines": _codex_log_lines(
+                home / ".codex", r"multi_llm.*(fail|error|spawn|cwd|No such)"
+                                 r"|PLUGIN_DATA", limit=10),
+        }
+
+    def env_edit(server: dict) -> None:
+        server["env"] = {"MLLM_PD_ENV": "${PLUGIN_DATA}",
+                         "MLLM_PD_ROOT_CONTROL": "${PLUGIN_ROOT}"}
+        server["env_vars"] = list(server.get("env_vars") or []) + [
+            "${PLUGIN_DATA}", "MLLM_PD_FORWARDED"]
+
+    def cwd_edit(server: dict) -> None:
+        server["cwd"] = "${PLUGIN_DATA}"
+
+    out["env_and_env_vars"] = leg("plugin-data-env", env_edit)
+    out["cwd"] = leg("plugin-data-cwd", cwd_edit)
+    out["restored"] = json.loads(mcp.read_text(encoding="utf-8")) == original
+    return out
+
+
+#: The few-second cap row 14 fires, and how long the nested exec it cuts
+#: sleeps (long enough that the detached run is still alive when codex's turn
+#: and the session both end).
+CAP_FIRES_S = 8
+CAP_FIRES_NESTED_SLEEP_S = 45
+
+
+def _cap_leg_reading(leg: dict) -> dict:
+    envelope = leg.get("envelope") or {}
+    runs = leg.get("ask_runs_right_after") or []
+    after = leg.get("ask_runs_after_wait") or []
+    return {
+        "wall_clock_s": leg.get("wall_clock_s"),
+        "exit": leg.get("exit"),
+        "tool_call_item": leg.get("tool_call_item"),
+        # What the model was handed, verbatim (capped by the stub).
+        "model_received": leg.get("returned_output"),
+        "envelope_state": envelope.get("state"),
+        "envelope_message": envelope.get("message"),
+        "server_handoff": envelope.get("state") == "running"
+        and "time budget ran out" in str(envelope.get("message")),
+        "server_exit": (leg.get("tap") or {}).get("exit"),
+        "server_signals": (leg.get("tap") or {}).get("signals"),
+        "workers_right_after": leg.get("workers_right_after"),
+        "run_right_after": [r.get("run") for r in runs],
+        "workers_after_wait": leg.get("workers_after_wait"),
+        "run_after_wait": [r.get("run") for r in after],
+        "run_log_tail_after_wait": [r.get("log_tail") for r in after],
+    }
+
+
+def _cap_fires_legs(home: Path, root: Path | None, overlay: dict) -> dict:
+    """Row 14's cap-fires half.
+
+    The server sizes its own budget from the same installed `.mcp.json` codex
+    reads its cap from, so the host's cap can fire FIRST only if codex takes a
+    smaller cap from somewhere else. Two such routes are tried (each only
+    re-read through `codex mcp get` first, and driven only when codex reports
+    the smaller cap): (1) `tool_timeout_sec` in config.toml's plugin server
+    table; (2) a top-level `mcp_servers.multi_llm.tool_timeout_sec` passed as
+    `-c`. Then (3) the installed `.mcp.json` itself set to a few seconds, which
+    reads whether the server's own handoff beats codex's cap. Every driven leg
+    fires on a detached `ask` whose nested codex exec sleeps well past the cap;
+    the worker's liveness and its run record are read at once and again once
+    it has had time to finish.
+    """
+    out: dict = {"cap_s": CAP_FIRES_S, "nested_sleep_s": CAP_FIRES_NESTED_SLEEP_S}
+    config = home / ".codex" / "config.toml"
+    env = _codex_env(home, overlay)
+
+    def mcp_get(extra: tuple[str, ...] = ()) -> dict | None:
+        done = _run_codex([*extra, "mcp", "get", CODEX_MCP_SERVER, "--json"], env)
+        return _json_or_none(done["_stdout_full"]) or {
+            "exit": done["exit"], "stderr": done["stderr"][-1500:]}
+
+    def drive(label: str, question: str, extra: tuple[str, ...] = ()) -> dict:
+        leg = _nested_ask_leg(home, overlay, label, question,
+                              sleep_s=CAP_FIRES_NESTED_SLEEP_S, timeout=300,
+                              wait_worker_s=150, extra_args=extra)
+        return {"reading": _cap_leg_reading(leg), "leg": leg}
+
+    table = (f'\n[plugins."{CODEX_PLUGIN_ID}".mcp_servers.{CODEX_MCP_SERVER}]\n'
+             f"tool_timeout_sec = {CAP_FIRES_S}\n")
+    with _FileEdit(config, config.read_text(encoding="utf-8") + table):
+        seen = mcp_get()
+        out["config_plugin_table"] = {"edit": table.strip(), "mcp_get": seen,
+                                      "honored": (seen or {}).get(
+                                          "tool_timeout_sec") == CAP_FIRES_S}
+        if out["config_plugin_table"]["honored"]:
+            out["config_plugin_table"].update(
+                drive("cap-config", "How is auth tested?"))
+    flag = ("-c", f"mcp_servers.{CODEX_MCP_SERVER}.tool_timeout_sec={CAP_FIRES_S}")
+    seen = mcp_get(flag)
+    out["config_top_level_flag"] = {"flag": list(flag), "mcp_get": seen,
+                                    "honored": (seen or {}).get(
+                                        "tool_timeout_sec") == CAP_FIRES_S}
+    if out["config_top_level_flag"]["honored"]:
+        out["config_top_level_flag"].update(
+            drive("cap-flag", "Which tokens does auth issue?", flag))
+    mcp = (root / ".mcp.json") if root else None
+    if mcp and mcp.is_file():
+        doc = json.loads(mcp.read_text(encoding="utf-8"))
+        doc["mcpServers"][CODEX_MCP_SERVER]["tool_timeout_sec"] = CAP_FIRES_S
+        with _FileEdit(mcp, json.dumps(doc, indent=2)):
+            out["mcp_json"] = {"edit": f"{mcp}: tool_timeout_sec = {CAP_FIRES_S}",
+                               "mcp_get": mcp_get()}
+            out["mcp_json"].update(drive("cap-mcp-json",
+                                         "What does the login flow return?"))
+    return out
 
 
 def run_codex_package_probe(probe: str, home: Path, overlay: dict,
@@ -2671,29 +3830,34 @@ def run_codex_package_probe(probe: str, home: Path, overlay: dict,
     elif probe in ("scripted-call", "loader-tools"):
         record["exec"] = codex_exec_leg(home, overlay, stub_log, probe)
     elif probe == "runnability":
-        record["stdio"] = stdio_session(root, [status_call]) if root else None
+        # The anchor row 7 settled is `env:PWD` (codex advertises no `roots`),
+        # so the stdio driver hands the server the workspace as `PWD`, exactly
+        # as codex forwards it from the launching shell.
+        stdio_env = {**os.environ, "PWD": str(WORKSPACE)}
+        record["stdio_env_pwd"] = str(WORKSPACE)
+        record["stdio"] = (stdio_session(root, [status_call], env=stdio_env)
+                           if root else None)
         lock = (root / "skills" / "multi-llm" / "uv.lock") if root else None
         if lock and lock.is_file():
             lock.unlink()
             record["partial_payload"] = {
                 "removed": str(lock),
-                "stdio": stdio_session(root, [status_call])}
+                "stdio": stdio_session(root, [status_call], env=stdio_env)}
         else:
             record["legs_not_driven"]["partial_payload"] = (
                 "no installed uv.lock to remove")
     elif probe == "anchor":
+        pycache_start = _pycache_state(root)
         record["stdio_with_roots"] = (stdio_session(
             root, [status_call], roots=[str(WORKSPACE)],
             capabilities={"roots": {"listChanged": False}}) if root else None)
         record["stdio_without_roots"] = (stdio_session(root, [status_call])
                                          if root else None)
-        record["exec"] = codex_exec_leg(home, overlay, stub_log, "anchor")
-        record["legs_not_driven"]["git_worktree"] = (
-            "7(b)'s repeat from a `git worktree` checkout needs the tool's anchor "
-            "winner wired first (row 7(a)'s answer)")
-        record["legs_not_driven"]["init_leaves_cache_unchanged"] = (
-            "7(c)'s `mode: init` byte-identity of $CODEX_HOME is written against "
-            "the anchored server; not driven by this revision of the probe")
+        record.update(_anchor_legs(home, root, overlay, stub_log))
+        # Fix 4 across the whole row (seven codex turns, two stdio sessions):
+        # nothing under a `__pycache__` of the installed plugin was written.
+        record["plugin_pycache_writes"] = _pycache_writes(
+            pycache_start, _pycache_state(root))
     elif probe == "environment":
         launch = plant_environment_markers(home)
         record["planted"] = {"launch_only": sorted(launch),
@@ -2703,7 +3867,8 @@ def run_codex_package_probe(probe: str, home: Path, overlay: dict,
         mark = len(_child_observations())
         record["control_stdio"] = (stdio_session(
             root, [status_call], env={**os.environ, **launch,
-                                      "HOME": str(home)}) if root else None)
+                                      "HOME": str(home),
+                                      "PWD": str(WORKSPACE)}) if root else None)
         control_rows = _child_observations()[mark:]
         control_env = _envelope_of(
             ((record["control_stdio"] or {}).get("calls") or [{}])[0]
@@ -2712,26 +3877,87 @@ def run_codex_package_probe(probe: str, home: Path, overlay: dict,
             control_rows, (control_env or {}).get("anchor"))
         mark = len(_child_observations())
         record["graded_exec"] = codex_exec_leg(
-            home, overlay, stub_log, "environment", env_extra=launch)
+            home, overlay, stub_log, "environment", env_extra=launch, tap=True)
         graded_env = _envelope_of(record["graded_exec"].get("returned_output"))
         record["graded_children"] = grade_child_observations(
             _child_observations()[mark:], (graded_env or {}).get("anchor"))
-        record["legs_not_driven"]["shell_ladder_refusal"] = (
-            "9(b) needs the server's child-spawn lookup PATH pointed at a "
-            "bash-less directory — a server-side knob this driver does not set")
-        record["legs_not_driven"]["interpreter_absent"] = (
-            "9(c) needs a seeded PATH with no python3; the image's python3 sits "
-            "in /usr/bin beside every other tool")
+        record["shell_ladder_refusal"] = _shell_ladder_refusal(home, root)
+        record["interpreter_absent"] = _interpreter_absent_legs(
+            home, root, overlay, stub_log)
     elif probe == "progress-cancellation":
         record["progress_exec"] = codex_exec_leg(home, overlay, stub_log,
-                                                 "progress")
-        record["cancel_exec"] = codex_exec_leg(home, overlay, stub_log,
-                                               "cancel",
-                                               interrupt_after_call=True)
-        record["legs_not_driven"]["server_side_receipt"] = (
-            "what the SERVER received on interrupt (notifications/cancelled, "
-            "EOF, neither) is read from the server's own record, not the event "
-            "stream; this driver records the host side only")
+                                                 "progress", tap=True)
+        # Row 10(a)'s three-relay-point leg: a detached ask whose nested codex
+        # exec sleeps 20 s, polled every 5 s, so the launch and each exit-2
+        # poll are relay points. Counted on the wire and in what came back.
+        relay = _nested_ask_leg(home, overlay, "relay-points",
+                                "Which components does the plan add?",
+                                sleep_s=20, poll_s=5, timeout=400,
+                                wait_worker_s=60)
+        tap = relay.get("tap") or {}
+        events = [e for e in (_json_or_none(line) for line in (
+            (OUT / relay["events_file"]).read_text(encoding="utf-8").splitlines()
+            if relay.get("events_file") else [])) if isinstance(e, dict)]
+        # Everything codex emitted OTHER than the tool call's own item (whose
+        # completed result is the envelope, `progress_lines` included).
+        outside = json.dumps([e for e in events if ((e.get("item") or {})
+                              .get("type") != "mcp_tool_call")])
+        types = [f"{e.get('type')}:{(e.get('item') or {}).get('type')}"
+                 for e in events]
+        started = next((i for i, t in enumerate(types)
+                        if t == "item.started:mcp_tool_call"), None)
+        done = next((i for i, t in enumerate(types)
+                     if t == "item.completed:mcp_tool_call"), None)
+        texts = [t for t in tap.get("log_notification_texts") or []
+                 if isinstance(t, str) and t.strip()]
+        envelope = relay.get("envelope") or {}
+        relay["relay_reading"] = {
+            "relays": envelope.get("relays"),
+            "progress_token_sent": tap.get("progress_tokens"),
+            "server_sent_progress": tap.get("progress_notifications"),
+            "server_sent_log": tap.get("log_notifications"),
+            "notification_texts": texts,
+            # Did any notification surface on its own, outside the result?
+            "texts_outside_tool_result": sum(1 for t in texts
+                                             if t[:80] in outside),
+            "events_while_call_in_flight": (
+                types[started + 1:done] if started is not None
+                and done is not None else None),
+            # What the model was handed at the end: the envelope's own lines.
+            "result_progress_lines": envelope.get("progress_lines"),
+            "event_types": relay.get("event_types"),
+            "item_types": relay.get("item_types"),
+        }
+        record["relay_exec"] = relay
+        # `status` answers in ~0.2 s, so an interrupt would land after the
+        # reply. The call is held in flight instead by a flag-gated `sleep` in
+        # the login-shell child's `.profile`, and codex's process group is then
+        # sent SIGINT, a terminal's Ctrl-C. (Codex's own shell-snapshot
+        # `bash -lc` reads `.profile` too and stalls beside it — measured; it
+        # does not hold up the tool call.)
+        stall = home / ".mllm-probe-stall"
+        profile = home / ".profile"
+        existing = profile.read_text(encoding="utf-8") if profile.is_file() else ""
+        profile.write_text(existing + f"[ -f {shlex.quote(str(stall))} ] && "
+                           f"sleep {PROBE_STALL_S}\n", encoding="utf-8")
+        assert_profile_is_read(home)
+        stall.touch()
+        try:
+            record["cancel_exec"] = codex_exec_leg(home, overlay, stub_log,
+                                                   "cancel",
+                                                   interrupt_after_call=True,
+                                                   tap=True, timeout=120)
+        finally:
+            stall.unlink(missing_ok=True)
+        time.sleep(2)
+        record["cancel_exec"]["process_table_after_2s"] = [
+            line for line in _process_table()
+            if "sleep" in line or "server.py" in line or "multi_llm" in line
+            or "codex" in line]
+        record["cancel_exec"]["stall_s"] = PROBE_STALL_S
+        # The server-side receipt is read off the stdio tap: a
+        # `notifications/cancelled` naming the in-flight id, a bare stdin EOF,
+        # a signal, or neither (`cancel_exec.tap`).
     elif probe == "plugin-data":
         cache_home = home / ".codex"
         first = sorted(str(p) for p in cache_home.rglob("*plugin-data*"))
@@ -2741,22 +3967,72 @@ def run_codex_package_probe(probe: str, home: Path, overlay: dict,
                                "reinstall": _public(again),
                                "after_reinstall": second,
                                "moved": first != second}
-        record["legs_not_driven"]["delivery"] = (
-            "11(b) edits the installed .mcp.json to spell ${PLUGIN_DATA}; that "
-            "edit is a divergence D3a says is recorded, and it waits on row 13")
+        record["delivery"] = _plugin_data_delivery(home, root, overlay, stub_log)
     elif probe == "sandbox-posture":
+        # 12(a) re-verified under the SHIPPED approve default: both sandboxed
+        # postures must now reach the server with no "requires approval".
         record["read_only"] = codex_exec_leg(
             home, overlay, stub_log, "sandbox-read-only",
-            extra_args=("--sandbox", "read-only"))
+            extra_args=("--sandbox", "read-only"), tap=True)
         record["workspace_write"] = codex_exec_leg(
             home, overlay, stub_log, "sandbox-workspace-write",
+            extra_args=("--sandbox", "workspace-write"), tap=True)
+        for key in ("read_only", "workspace_write"):
+            leg = record[key]
+            leg["tool_call_item"] = _tool_call_item(Path(leg["events_file"]))
+            leg["server_got_tools_call"] = "tools/call" in (
+                (leg.get("tap") or {}).get("client_methods") or [])
+            leg["requires_approval_refusal"] = "requires approval" in (
+                (OUT / leg["events_file"]).read_text(encoding="utf-8")
+                + leg.get("stderr", ""))
+        # 12(b): read-only, an apply-mode call, the lever unset.
+        record["refusal_read_only"] = scripted_leg(
+            home, overlay, "refusal-read-only", APPLY_MODE_CALL,
+            extra_args=("--sandbox", "read-only"))
+        # 12(c): the same call with the lever set in codex's own environment,
+        # and the session's OWN shell tool driven in the same turn.
+        record["lift_read_only"] = scripted_leg(
+            home, overlay, "lift-read-only", APPLY_MODE_CALL,
+            extra_args=("--sandbox", "read-only"),
+            env_extra={"MULTI_LLM_CODEX_UNSANDBOXED_WRITES": "1"},
+            then_shell=f"touch {LIFT_SHELL_PROBE} && echo wrote-{LIFT_SHELL_PROBE}")
+        record["lift_read_only"].setdefault("session_shell", {})["file_written"] = (
+            WORKSPACE / LIFT_SHELL_PROBE).exists()
+        # Workspace-write: an apply-mode call is not refused.
+        record["apply_workspace_write"] = scripted_leg(
+            home, overlay, "apply-workspace-write", APPLY_MODE_CALL,
             extra_args=("--sandbox", "workspace-write"))
-        record["legs_not_driven"]["refusal_and_lift"] = (
-            "12(b)/(c) need an apply-mode call and the process table; written "
-            "against the server's refusal, not driven here")
-        record["legs_not_driven"]["nested_posture"] = (
-            "12(d) dispatches a codex provider from the tool; needs a scenario "
-            "whose scripted arguments name a codex fan-out")
+        # The documented opt-out, measured: `default_tools_approval_mode =
+        # "prompt"` in config.toml's plugin server table, approval_policy never.
+        config = home / ".codex" / "config.toml"
+        opt_out = (config.read_text(encoding="utf-8")
+                   + f'\n[plugins."{CODEX_PLUGIN_ID}".mcp_servers.'
+                     f'{CODEX_MCP_SERVER}]\n'
+                     'default_tools_approval_mode = "prompt"\n')
+        record["approval_opt_out"] = {"edit": opt_out.splitlines()[-2:]}
+        with _FileEdit(config, opt_out):
+            for posture in ("read-only", "workspace-write"):
+                leg = scripted_leg(
+                    home, overlay, f"opt-out-prompt-{posture}",
+                    {"mode": "status", "plan": "plans/auth-feature.md",
+                     "question": "", "extra_flags": []},
+                    extra_args=("--sandbox", posture), timeout=120)
+                record["approval_opt_out"][posture] = {
+                    k: leg.get(k) for k in (
+                        "exit", "timed_out", "wall_clock_s", "tool_call_item",
+                        "server_got_tools_call", "requires_approval_refusal",
+                        "stderr", "event_types", "item_types")}
+                record["approval_opt_out"][posture]["envelope_state"] = (
+                    leg.get("envelope") or {}).get("state")
+        # 12(d): the tool dispatches a nested codex provider against the stub
+        # from a workspace-write session; which posture did the grandchild run
+        # under? Landlock is ENOSYS in-image, so rung 2 is the expected reading.
+        nested = _nested_ask_leg(home, overlay, "nested-posture",
+                                 "What does the plan change?",
+                                 extra_args=("--sandbox", "workspace-write"),
+                                 wait_worker_s=120)
+        nested["posture_reading"] = _nested_rung(nested)
+        record["nested_posture"] = nested
     elif probe == "overlay":
         record["codex_home_census"] = _tree_census(home / ".codex")
         record["overlay_candidates"] = [
@@ -2776,9 +4052,13 @@ def run_codex_package_probe(probe: str, home: Path, overlay: dict,
                 f"(row 14's own edit; the shipped file is untouched)")
             record["after"] = _json_or_none(after["_stdout_full"])
             record["after_command"] = _public(after)
-        record["legs_not_driven"]["cap_fires"] = (
-            "row 14's second half (a few-second cap on a detaching mode) is not "
-            "driven by this revision of the probe")
+        # Row 14's second half: the cap FIRING on a detaching mode. Restore the
+        # installed copy first (the 3600 above was this row's own edit).
+        if mcp and mcp.is_file():
+            doc = json.loads(mcp.read_text(encoding="utf-8"))
+            doc["mcpServers"][CODEX_MCP_SERVER]["tool_timeout_sec"] = 900
+            mcp.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        record["cap_fires"] = _cap_fires_legs(home, root, overlay)
 
     path = OUT / f"probe-{probe}.json"
     path.write_text(json.dumps(record, indent=2, sort_keys=True, default=str),

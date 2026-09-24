@@ -988,10 +988,11 @@ def _codex_plugin_list(
         document = json.loads(completed.stdout)
     except (ValueError, TypeError):
         return None
-    # Observed on codex 0.156.1: `{"installed": [...], "available": [...]}`.
-    # Only the `installed` array is read — an `available` row is a catalog
-    # entry, never an install. A bare array is read as well (the shape Phase
-    # 1's container capture pins); anything else is "did not answer" rather
+    # Recorded on codex 0.156.1 (container row 5, run 20260923T191255Z):
+    # `{"installed": [...], "available": [...]}`, each entry with `source` and
+    # `marketplaceSource` objects and no `installedPath`. Only the `installed`
+    # array is read — an `available` row is a catalog entry, never an install.
+    # A bare array is tolerated too; anything else is "did not answer" rather
     # than "nothing installed".
     if isinstance(document, dict):
         document = document.get("installed")
@@ -1287,6 +1288,25 @@ def _python3_problem(env: Optional[Dict[str, str]]) -> Optional[str]:
     search = environment.get("PATH")
     if search is None:
         return None
+    # `uv run` (the documented way to run this check) activates the skill's
+    # own venv: it sets ``VIRTUAL_ENV`` and puts that venv's ``bin`` first on
+    # ``PATH``, and every venv carries a ``python3``. Codex never sees that
+    # entry — it launches the server from the user's own ``PATH`` — so it is
+    # dropped here, or a machine with no ``python3`` at all reads as green
+    # (measured 2026-09-24, Phase 1 row 9(c): the same home, the same PATH,
+    # named the missing interpreter under the venv's python directly and said
+    # nothing under ``uv run``).
+    venv = environment.get("VIRTUAL_ENV")
+    if venv:
+        activated = {
+            os.path.normcase(os.path.realpath(os.path.join(venv, name)))
+            for name in ("bin", "Scripts")
+        }
+        search = os.pathsep.join(
+            entry for entry in search.split(os.pathsep)
+            if not entry
+            or os.path.normcase(os.path.realpath(entry)) not in activated
+        )
     floor = ".".join(str(part) for part in CODEX_SERVER_MIN_PYTHON)
     interpreter = shutil.which("python3", path=search)
     if not interpreter:
