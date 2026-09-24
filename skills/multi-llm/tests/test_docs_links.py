@@ -173,7 +173,9 @@ def _documentation_table_rows() -> list[tuple[int, str, str]]:
     for number, line in _outside_fences(README.read_text(encoding="utf-8")):
         heading = HEADING_RE.match(line)
         if heading:
-            in_section = heading.group(2).strip() == "Documentation"
+            # The README numbers its headings: `## 8. Documentation`.
+            title = re.sub(r"^\d+(?:\.\d+)*\.?\s+", "", heading.group(2).strip())
+            in_section = title == "Documentation"
             in_body = False
             continue
         if not in_section or not line.lstrip().startswith("|"):

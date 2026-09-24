@@ -553,14 +553,24 @@ class TestGeneratedPagesSplitTheTwoRoutes:
 
 
 # ---------------------------------------------------------------------------
-# A3: the README and the plugin's own page
+# A3: the README, docs/hosts.md and the plugin's own page
 # ---------------------------------------------------------------------------
 
 def _readme_codex_section() -> str:
+    """The README's short install block: commands, floors, the one warning."""
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
-    start = readme.index("#### Codex plugin route")
-    end = readme.index("\n#### ", start + 1)
+    # `### 1.2 Codex`: the README numbers its headings, so match the title.
+    start = re.search(r"^### (?:[\d.]+\s+)?Codex$", readme, re.M).start()
+    end = readme.index("\n### ", start + 1)
     return readme[start:end]
+
+
+def _hosts_codex_section() -> str:
+    """The hand-written details the README links to, below the generated block."""
+    page = (REPO_ROOT / "docs" / "hosts.md").read_text(encoding="utf-8")
+    start = page.index("## Codex plugin route\n")
+    end = page.index("\n## ", start + 1)
+    return page[start:end]
 
 
 def _plugin_page() -> str:
@@ -570,6 +580,7 @@ def _plugin_page() -> str:
 def _codex_docs() -> dict:
     return {
         "README.md (codex section)": _readme_codex_section(),
+        "docs/hosts.md (codex plugin route)": _hosts_codex_section(),
         "packaging/codex/README.md": _plugin_page(),
         "docs/hosts.md (codex block)": _codex_block(
             (REPO_ROOT / "docs" / "hosts.md").read_text(encoding="utf-8")
@@ -620,8 +631,8 @@ class TestDocs:
                     f"{name} suggests the landlock flag: {sentence!r}"
                 )
 
-    def test_readme_declares_platform_support(self):
-        section = _readme_codex_section()
+    def test_docs_declare_platform_support(self):
+        section = _hosts_codex_section()
         rows = {
             line.split("|")[1].strip(): line
             for line in section.splitlines()
@@ -646,6 +657,7 @@ class TestDocs:
         python = ".".join(str(part) for part in python_floor)
         for name, text in (
             ("README.md", _readme_codex_section()),
+            ("docs/hosts.md", _hosts_codex_section()),
             ("packaging/codex/README.md", _plugin_page()),
         ):
             assert f"codex >= {codex_floor}" in text, name
@@ -658,11 +670,16 @@ class TestDocs:
         assert host_install.CODEX_SERVER_MIN_PYTHON == python_floor
         assert PACKAGE["min_host_version"] == codex_floor
 
-    def test_the_readme_publishes_the_disclaimer_and_the_file_route(self):
-        section = _readme_codex_section()
+    def test_the_docs_publish_the_disclaimer_and_the_file_route(self):
+        readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
+        section = _hosts_codex_section()
+        assert "--ref release" in _readme_codex_section()
+        assert "MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1" in _readme_codex_section()
+        assert "docs/hosts.md#codex-plugin-route" in _readme_codex_section()
         if caps.entry("codex")["provenance"]["package"] != "verified":
-            assert "not yet published" in section
-            assert "install-host codex" in section
+            for text in (readme, section):
+                assert "not yet published" in text
+                assert "install-host codex" in text
             assert "--ref release" in section
         assert "codex plugin marketplace upgrade" in section
         assert "uninstall-host codex --global" in section

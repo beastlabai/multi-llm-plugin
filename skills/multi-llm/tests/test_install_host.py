@@ -1465,10 +1465,22 @@ def host_doc_body() -> str:
     return renderer.host_doc_path().read_text(encoding="utf-8")
 
 
+#: The README numbers its headings (``## 1. Installation``, ``### 1.2 Codex``);
+#: the number is optional here so a renumbering never moves a guard.
+_HEADING_NUMBER = r"(?:\d+(?:\.\d+)*\.?\s+)?"
+
+
+def readme_heading_re(heading: str) -> "re.Pattern":
+    """``## Installation`` -> a pattern matching it with or without its number."""
+    hashes, _, title = heading.partition(" ")
+    return re.compile(rf"^{hashes} {_HEADING_NUMBER}{re.escape(title)}", re.M)
+
+
 def readme_section(body: str, heading: str) -> str:
     """One ``##`` section of the README, its heading line included."""
     lines = body.splitlines()
-    start = next(i for i, line in enumerate(lines) if line.startswith(heading))
+    pattern = readme_heading_re(heading)
+    start = next(i for i, line in enumerate(lines) if pattern.match(line))
     end = next(
         (
             i for i, line in enumerate(lines[start + 1:], start + 1)
@@ -2035,10 +2047,11 @@ class TestTheReadmeStatesEveryInstallableHostsFacts:
         return host_doc_body()
 
     # Row 1: the host ids.
-    def test_the_pointer_paragraph_and_the_heading_name_every_installable_host(
+    def test_the_pointer_paragraph_and_one_heading_per_installable_host(
         self
     ):
-        intro = readme_body().split("## Installation", 1)[0]
+        body = readme_body()
+        intro = body[:readme_heading_re("## Installation").search(body).start()]
         pointing = [
             paragraph for paragraph in intro.split("\n\n")
             if "install-host" in paragraph
@@ -2056,14 +2069,13 @@ class TestTheReadmeStatesEveryInstallableHostsFacts:
         headings = [
             line for line in self.section().splitlines() if line.startswith("### ")
         ]
-        naming = [
-            line for line in headings
-            if all(host_id in line.lower() for host_id in INSTALLABLE)
-        ]
-        assert len(naming) == 1, (
-            f"exactly one Installation subsection heading names every "
-            f"installable host {INSTALLABLE}; the headings are {headings}"
-        )
+        for host_id in INSTALLABLE:
+            naming = [line for line in headings if host_id in line.lower()]
+            assert len(naming) == 1, (
+                f"every installable host gets exactly one Installation "
+                f"subsection of its own; {host_id} is named by {naming} among "
+                f"the headings {headings}"
+            )
 
     # Row 2: `install-host <slug>` for every installable host, no extras.
     def test_one_install_host_command_line_per_installable_host(self):

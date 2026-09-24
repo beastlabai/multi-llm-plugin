@@ -15,7 +15,7 @@ multi-llm ships as a Claude Code plugin, and it runs unchanged inside `codex` an
 uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" install-host <host> [--global|--project]
 ```
 
-`SKILL` is either a git checkout of this repository or the plugin install `claude plugin list --json` reports. Set it once — the first of these three that applies to you, not all three. On Windows the shell must be **Git Bash** (see [Prerequisites](../README.md#prerequisites)):
+`SKILL` is either a git checkout of this repository or the plugin install `claude plugin list --json` reports. Set it once — the first of these three that applies to you, not all three. On Windows the shell must be **Git Bash** (see [Prerequisites](../README.md#15-prerequisites)):
 
 ```bash
 # Set SKILL once - the first of these three that applies to you, not all three.
@@ -163,6 +163,63 @@ uv run --frozen --no-dev --project "$SKILL" -- python "$SKILL/multi_llm.py" inst
 Repair is always re-render, never in-place patching, and a re-install with nothing changed is byte-identical and does nothing. A shim you edited by hand is **never** overwritten silently: the install stops and names the file, and `--force` keeps your version as `<shim>.local.bak`. The inverse is `uninstall-host <host> [--global|--project|--all] [--dry-run]`, which removes only files carrying our `multi_llm_shim` block — identified by that block, never by filename.
 
 <!-- END GENERATED: host-install -->
+
+## Codex plugin route
+
+The README has the two install commands. This section has what they don't cover. **The route is not yet published**: the `release` ref the install names does not exist until the first release is promoted, so `--ref release` does not resolve yet and `codex plugin marketplace add` fails with a git error. **What works today is `install-host codex`** (the file route above).
+
+**Floors.** These are published but not enforced, since nothing in the plugin checks them: **codex >= 0.156.1**, **python3 >= 3.9** on `PATH` under that exact name, and **uv** at any version. Neither install command installs dependencies. The first invocation builds the plugin's venv (`pyyaml` alone), which needs the network or a warm uv cache.
+
+```bash
+codex --version                     # 0.156.1 or newer
+python3 --version && uv --version   # python3 3.9 or newer, under these exact names
+```
+
+**Configuration.** Once per repository, in the new session, run *"Use the `multi-llm:multi-llm` skill with exactly these arguments: `--init`"*. It writes `<git-root>/.multi-llm/providers.yaml`, outside `$CODEX_HOME`, where no plugin reinstall or upgrade touches it. Configure through that file, never the copy installed inside the plugin.
+
+**What it runs and what it may write.** The tool starts the orchestrator from a server that Codex launches *outside* its own exec sandbox, so the session's `--sandbox` posture does not govern it. Installing the plugin therefore gives a Codex session a write path it did not have. Under a read-only posture, or one it cannot read, the tool **refuses write-capable modes** before it spawns anything, unless `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is in the environment that starts Codex. Provider CLIs the orchestrator dispatches stay under their own sandboxes. **The plugin pre-approves its own tool** (`"default_tools_approval_mode": "approve"` in its `.mcp.json`), so Codex calls it without asking. Without that, a headless `codex exec` under a sandbox refuses the call outright. To be asked before every call, set `default_tools_approval_mode = "prompt"` under `[plugins."multi-llm@beastlabai".mcp_servers.multi_llm]` in `$CODEX_HOME/config.toml` (measured on codex 0.156.1: the call then needs approval again). The install itself is a Git clone and a directory copy with no signature, so you are trusting whoever can move the `release` ref and the workflow that moves it.
+
+| Platform | Status | Prerequisites |
+| --- | --- | --- |
+| Linux | `verified` — the only platform this route claims | codex >= 0.156.1; `uv` and python3 >= 3.9 on `PATH` |
+| macOS | `unmeasured` | codex >= 0.156.1; `uv` and python3 >= 3.9 on `PATH` (the command-line-tools `python3` is 3.9). Caveat: the run starts through a `bash -lc` login shell, which reads `~/.bash_profile` / `~/.profile` and **not** `~/.zprofile` or `~/.zshrc` — keys and `PATH` edits that live only in the zsh files never reach it |
+| Windows | `unsupported for the tool route` — `python3` is usually absent under that name, so the plugin's server never starts and the tool never lists. Use `install-host codex` (the file route) instead | codex >= 0.156.1; `uv`; python3 >= 3.9 **under that exact name**; **plus Git Bash (or another POSIX `bash`) on `PATH` — a hard prerequisite**: without it the tool refuses with a missing-`bash` error naming the `PATH` it searched, rather than running without a login shell |
+
+**Provider keys go in the file your login shell reads.** Codex starts the plugin's server with a stripped environment, so a key exported only in the terminal you launched Codex from never reaches the run. Put `export OPENROUTER_API_KEY=…` (and whatever else your providers read) in `~/.profile` or `~/.bash_profile`, not `~/.bashrc`, and on macOS not `~/.zprofile`. Do not edit the installed `.mcp.json` to pass keys: the next `codex plugin add` replaces it wholesale. When a key does not arrive, the `environment` block in the tool result (`login_shell`, `profile_shell`) says which startup file was read.
+
+**When it does nothing.** Suppose the new session does not know the skill, or knows the skill but has no tool. Run these:
+
+```bash
+codex plugin list             # multi-llm@beastlabai — look at `enabled`; no entry means removed
+codex mcp get multi_llm       # the server codex tried to start; python3 must be on PATH
+python3 --version             # if this fails the server never started, and that is the whole story
+```
+
+`codex doctor` does not see plugin servers, so it cannot diagnose any of this.
+
+**Upgrade:** run `codex plugin marketplace upgrade`, then `codex plugin add multi-llm@beastlabai`, then start a new session. Re-running the install's first command does nothing on a marketplace that is already added. **Coming from the file route:** remove the shim with `uninstall-host codex --global`, the counterpart of `install-host`. Otherwise both skills stay advertised (`install-host codex --check` warns when they are). **Uninstall:** `codex plugin remove multi-llm@beastlabai`. Your `.multi-llm/providers.yaml` is not touched. The plugin's own page is [`packaging/codex/README.md`](../packaging/codex/README.md).
+
+## OpenCode npm route
+
+The README has the one config line. **No published install has been verified yet.** Until `opencode-multi-llm` is on npm, an `opencode.json` entry naming it resolves to nothing, and on OpenCode that failure is silent: the plugin stays listed, the exit code is 0, and the debug log is empty. Use `install-host opencode` until then, or run a local build.
+
+**Local build: name the directory, never the `.tgz`.** `make opencode-package` builds, packs and secret-sweeps the package into `packaging/opencode/`. Point `plugin[]` at that **directory** (or a `file://` URL of it) and restart:
+
+```json
+{ "plugin": ["/abs/path/to/packaging/opencode"] }
+```
+
+OpenCode never opens a tarball. A `.tgz` spec resolves to the directory that contains it, so it loads only when that directory happens to be an unpacked package.
+
+**Checking that it loaded.** Every failure on this route exits 0, so neither the `plugin[]` entry nor an exit code proves anything. Check for the key the plugin adds:
+
+```bash
+opencode debug config | jq '.command["multi-llm"] != null'   # true = loaded
+```
+
+**First run.** The first `/multi-llm` after an install or upgrade needs the network or a warm `~/.cache/uv`, because it builds the package's venv (`pyyaml` alone).
+
+**Upgrade and uninstall.** To upgrade, bump the pinned version and restart. There is no `opencode plugin update`, and an unpinned entry stays on the version it first resolved to. To uninstall, delete the `plugin` entry. The cache directory `~/.cache/opencode/packages/<spec>` stays on disk, and a later reinstall of the same spec silently reuses it, so `rm -rf` it first, while online. Coming from the file route, remove the old command with `uninstall-host opencode --global`. The package's own page, with cache and `MULTI_LLM_UV_RUN_ARGS` details, is [`packaging/opencode/README.md`](../packaging/opencode/README.md).
 
 ## Linux sandboxed CLIs
 
