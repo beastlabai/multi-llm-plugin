@@ -543,10 +543,12 @@ MUST_NOT_BE_IGNORED = [
     "skills/multi-llm/tests/container/expected_argv.yaml",
     "skills/multi-llm/tests/container/cli-surface.yaml",
     "skills/multi-llm/tests/container/cli-versions.lock",
-    # C10's provenance record: tracked, though it sits one directory from the
-    # ignored runs/ bundles. The trailing slash on that rule is what keeps them
-    # apart, and this row is what proves it.
-    "skills/multi-llm/tests/container/records/2026-08-14T09-31-07Z-codex.json",
+    # records/ is ignored except for what something reads: the schema harness.py
+    # validates against, and the codex release network-check records the publish
+    # workflow requires on the default branch. These rows prove the negations.
+    "skills/multi-llm/tests/container/records/record.schema.json",
+    "skills/multi-llm/tests/container/records/20260923T233755Z-codex-release-network-check-rehearsal.json",
+    "skills/multi-llm/tests/container/records/20261001T000000Z-codex-release-network-check.json",
 ]
 
 # Real credential locations: every one must be ignored, by a named rule.
@@ -866,7 +868,7 @@ class TestGitleaksAllowlistSemantics:
     upgrade that changes either behaviour fails on this test instead of quietly
     widening every exception the config carries.
 
-    The third is ``regexTarget``, which the run-record entry depends on: an
+    The third is ``regexTarget``, which the golden-baseline entry depends on: an
     allowlist regex is tested against the *secret* unless told otherwise, so a
     regex describing the context that makes a value benign matches nothing and
     the entry is a no-op — and ``"line"`` has to really mean one line, or an
@@ -936,15 +938,15 @@ class TestGitleaksAllowlistSemantics:
             "same value elsewhere must still be a finding, or the exception is global"
         )
 
-    # The shape the committed run-record entry uses, restated here so this test
+    # The shape the committed golden-baseline entry uses, restated here so this test
     # measures the *mechanism* rather than importing the entry it protects: a
     # config edit that widened the real regex would still have to pass this.
     _MANIFEST_LINE = r'''(?m)^[ \t]*"[A-Za-z0-9_./-]+\.[a-z0-9]{1,8}":[ \t]*"[a-f0-9]{64}",?[ \t]*\r?$'''
-    _RECORDS_PATH = r"""^skills/multi-llm/tests/container/records/[^/]+\.json$"""
+    _MANIFEST_PATH = r"""^skills/multi-llm/tests/golden/container/[^/]+/bundle\.json$"""
 
     @pytest.fixture
     def manifest_probe(self, tmp_path):
-        """A record-shaped file: a benign digest row, then a real key on the next line.
+        """A baseline-shaped file: a benign digest row, then a real key on the next line.
 
         The two lines are the whole point. A ``regexTarget`` that matched a
         *region* rather than a line would excuse the key along with the row it
@@ -953,7 +955,7 @@ class TestGitleaksAllowlistSemantics:
         """
         secret = _synthesize("anthropic-api-key", "regex-target")
         digest = hashlib.sha256(b"multi-llm manifest probe").hexdigest()
-        rel = "skills/multi-llm/tests/container/records/probe.json"
+        rel = "skills/multi-llm/tests/golden/container/probe/bundle.json"
         tree = tmp_path / "tree"
         (tree / rel).parent.mkdir(parents=True)
         (tree / rel).write_text(
@@ -990,7 +992,7 @@ class TestGitleaksAllowlistSemantics:
             tmp_path,
             "manifest-baseline",
             f"regexes     = ['''{re.escape('no-such-value')}''']\n"
-            f"paths       = ['''{self._RECORDS_PATH}''']\n",
+            f"paths       = ['''{self._MANIFEST_PATH}''']\n",
         )
         assert digest in secrets, (
             "the benign manifest digest does not fire unallowlisted, so nothing below "
@@ -1001,7 +1003,7 @@ class TestGitleaksAllowlistSemantics:
     def test_a_regex_without_regex_target_is_tested_against_the_secret(
         self, manifest_probe, tmp_path
     ):
-        """Why the run-record entry carries ``regexTarget``: without it, it is a no-op.
+        """Why the golden-baseline entry carries ``regexTarget``: without it, it is a no-op.
 
         This is the third silent-failure shape, alongside global ``paths`` and
         ``targetRules``. A regex describing the *line* a benign value sits on is
@@ -1015,11 +1017,11 @@ class TestGitleaksAllowlistSemantics:
             tmp_path,
             "manifest-no-target",
             f"regexes     = ['''{self._MANIFEST_LINE}''']\n"
-            f"paths       = ['''{self._RECORDS_PATH}''']\n",
+            f"paths       = ['''{self._MANIFEST_PATH}''']\n",
         )
         assert digest in secrets, (
             "gitleaks now applies an allowlist regex to the line by default. The "
-            "run-record entry's `regexTarget = \"line\"` was written because it did "
+            "golden-baseline entry's `regexTarget = \"line\"` was written because it did "
             "not — re-read 'How gitleaks really evaluates an allowlist' before "
             "trusting either spelling."
         )
@@ -1027,7 +1029,7 @@ class TestGitleaksAllowlistSemantics:
     def test_regex_target_line_excuses_one_line_and_not_its_neighbour(
         self, manifest_probe, tmp_path
     ):
-        """The property the run-record entry rests on: ``line`` is one line."""
+        """The property the golden-baseline entry rests on: ``line`` is one line."""
         _, _, digest, secret = manifest_probe
         secrets = self._manifest_scan(
             manifest_probe,
@@ -1035,17 +1037,17 @@ class TestGitleaksAllowlistSemantics:
             "manifest-line",
             'regexTarget = "line"\n'
             f"regexes     = ['''{self._MANIFEST_LINE}''']\n"
-            f"paths       = ['''{self._RECORDS_PATH}''']\n",
+            f"paths       = ['''{self._MANIFEST_PATH}''']\n",
         )
         assert digest not in secrets, (
             "a rule-level paths+regexes+AND entry with `regexTarget = \"line\"` did not "
-            "excuse the manifest row it describes; the shape .gitleaks.toml's run-record "
+            "excuse the manifest row it describes; the shape .gitleaks.toml's golden-baseline "
             "entry uses does not work on this gitleaks"
         )
         assert secret in secrets, (
             "the manifest-row exception swallowed a real key on the *adjacent* line, so "
             "`regexTarget = \"line\"` is matching a region rather than a line. That turns "
-            "the run-record entry into the blind spot it was written to avoid."
+            "the golden-baseline entry into the blind spot it was written to avoid."
         )
 
 
@@ -1078,6 +1080,21 @@ class TestGitignoreDirections:
             "this pattern set stands between a captured token and a public repository."
         )
         assert pattern and location, f"{rel_path}: ignored, but by no nameable rule"
+
+    @pytest.mark.parametrize(
+        "rel_path",
+        [
+            "skills/multi-llm/tests/container/records/20260815T172352Z-codex-ask.json",
+            "skills/multi-llm/tests/container/records/live-provider.jsonl",
+        ],
+    )
+    def test_container_run_records_are_local_only(self, ignore_repo, rel_path):
+        """Every harness run writes fresh records; only the negated exceptions are committed."""
+        ignored, location, pattern = _check_ignore(ignore_repo, rel_path)
+        assert ignored, f"{rel_path} is a local run record and must be gitignored"
+        assert pattern == "skills/multi-llm/tests/container/records/*", (
+            f"{rel_path} is ignored by {location}:{pattern}, not by the records/ rule"
+        )
 
     def test_the_seed_templates_are_re_included_by_a_negation(self, ignore_repo):
         """The one subtle rule: credential *paths* are ignored, seed templates negated back.

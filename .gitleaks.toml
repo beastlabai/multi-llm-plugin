@@ -58,9 +58,8 @@ useDefault = true
 # Allowlist entries
 # ---------------------------------------------------------------------------
 #
-# There are two, both at the bottom of this file and both hanging off
-# `generic-api-key`: the run-record manifest entry (2026-08-15) and its twin for
-# the container golden baselines (2026-09-23). Measured, not
+# There is one, at the bottom of this file, hanging off `generic-api-key`: the
+# digest-map entry for the container golden baselines (2026-09-23). Measured, not
 # assumed: on 2026-08-14, gitleaks 8.28.0 with the stock pack over
 # `git ls-files` reported zero findings on the tracked tree. The `uv.lock`
 # digests the plan predicted would fire do not — the stock `generic-api-key`
@@ -71,28 +70,6 @@ useDefault = true
 # `paths`-shaped exclusion sneaks back in later, so the test asserts both
 # directions: every entry present must be load-bearing (deleting it turns the
 # scanner red) and the set must be no larger than what actually fires.
-#
-# The first entry arrived with the first *committed* container run record
-# (2026-08-15). `tests/container/records/*.json` was always designed to be
-# tracked provenance — `record.schema.json` has been tracked since C10 and the
-# harness README calls records "tracked, committed with the promotion" — but no
-# record had ever actually been committed, so this scanner had never seen one.
-# A record's `bundle.files` is a digest manifest: a JSON object mapping each
-# file in the ephemeral `runs/<utc>/<row-id>/` bundle to its SHA-256, which is
-# what lets `make e2e-verify-record` re-hash a bundle the promotion cited after
-# `make e2e-clean` has deleted it. One of those filenames is
-# `credential-census.json` — Phase 1's count of which hosts found a working
-# credential path, a file of integers — and the stock `generic-api-key` rule
-# reads `credential… : <64 hex>` as identifier-next-to-value. The digest is not
-# a credential; the *name of the file it digests* is what fires.
-#
-# So the exception is written to the manifest's **shape**, never to today's
-# digests: `"<filename>.<ext>": "<64 lowercase hex>"` alone on its line, inside
-# a record. A fingerprint list would pin 2026-08-15's twenty-two matches and go
-# stale on the next `make e2e` run; a bare `[a-f0-9]{64}` on the default regex
-# target would excuse *any* 64-hex value anywhere in a record, including one
-# sitting under `"OPENROUTER_API_KEY"` — measured, and the reason this is a
-# line-shaped regex rather than a value-shaped one.
 #
 # ---------------------------------------------------------------------------
 # How gitleaks really evaluates an allowlist (measured, gitleaks 8.28.0)
@@ -129,8 +106,8 @@ useDefault = true
 #                                       elsewhere — or a different value there —
 #                                       is still a finding.
 #
-# And one more silent no-op, found writing the entry below and pinned by the
-# same test class:
+# And one more silent no-op, found writing the digest-manifest entries and
+# pinned by the same test class:
 #
 #   regexes, default regexTarget     -> the regex is matched against the SECRET
 #                                       (the rule's capture group) alone, not the
@@ -183,70 +160,41 @@ useDefault = true
 id = "generic-api-key"   # the stock rule; its regex is deliberately not restated
 
 [[rules.allowlists]]
-description = "container run records: SHA-256 rows of the bundle digest manifest, not credentials — `credential-census.json` is a filename being digested, not a key being assigned; added 2026-08-15"
-condition   = "AND"      # value AND path; either alone is a blind spot
-regexTarget = "line"     # default is the secret alone, against which this regex is inert
-regexes     = ['''(?m)^[ \t]*"[A-Za-z0-9_./-]+\.[a-z0-9]{1,8}":[ \t]*"[a-f0-9]{64}",?[ \t]*\r?$''']
-paths       = ['''^skills/multi-llm/tests/container/records/[^/]+\.json$''']
-# Read the regex as the four things that must ALL hold before a line is excused,
-# each one measured against a probe tree that also held a real-shape key:
-#   1. the line is nothing but one JSON member — `[ \t]` never `\s` (which spans
-#      newlines in Go), and `\r?$` so a CRLF checkout behaves the same. A real key
-#      appended after the digest on the same line is still a finding.
-#   2. its key is filename-shaped: a relative path ending in a lowercase
-#      extension. `"OPENROUTER_API_KEY": "<64 hex>"` is not, and is still caught.
-#   3. its value is a *bare* 64-char lowercase hex string, quote to quote. The
-#      quotes are load-bearing: `"credential-census.json": "sk-or-v1-<64 hex>"`
-#      is still caught, because an OpenRouter key is a 64-hex body behind a
-#      prefix and the prefix does not fit between them.
-#   4. it is in a committed run record. Same line in any other tracked file —
-#      including the ignored `runs/` bundles were they ever staged — is a finding.
-# What this deliberately does NOT do is name `credential-census.json`. The rule
-# fires on that key only because it carries one of the stock pack's identifier
-# words; a later bundle file called `auth*`, `secrets*`, `token-*`, `access-*`,
-# `api-key-*`, `creds-*`, `key-*`, `passwd*` or `password-*` would fire exactly
-# the same way. Measured, not assumed: a probe manifest of 26 filenames produced
-# eleven findings — those nine shapes plus `credential-census.json` itself —
-# while `host-run.json`, `stub.jsonl`, `usage.json`, `row-result.json`,
-# `openrouter.json`, `bearer-check.json`, `discovery.json`, the `receipts/…`
-# paths and the rest stayed quiet (a `/` between the identifier word and the
-# key's closing quote takes the line out of the rule's reach, which is why
-# `artifacts/auth-feature/…/.status.lock` never fired either). Pinning the entry
-# to one filename would buy a second exception commit for each of them; pinning
-# it to the manifest's shape covers them without widening what a "credential" is
-# allowed to look like.
-# fingerprints: 22 the day it landed — one per record carrying a
-#   `credential-census.json` row, all `generic-api-key`, all under
-#   skills/multi-llm/tests/container/records/. Listed by record and line, from
-#   `20260815T172352Z-*`: claude-code-apply-native:8, claude-code-ask:14,
-#   claude-code-review-plan:24, codex-apply-executor:8, codex-ask:15,
-#   codex-auth-negative:8, codex-review-plan:24, opencode-apply-executor:8,
-#   opencode-ask:15, opencode-auth-negative:8, opencode-review-plan:26; and from
-#   `20260815T231349Z-*`: claude-code-apply-native:8, claude-code-ask:13,
-#   claude-code-review-plan:16, codex-apply-executor:8, codex-ask:15,
-#   codex-auth-negative:8, codex-review-plan:26, opencode-apply-executor:8,
-#   opencode-ask:15, opencode-auth-negative:8, opencode-review-plan:24.
-#   NOT exhaustive going forward, and that is the point: every future run commits
-#   more records with fresh digests, so this list is provenance for the day the
-#   exception was written, never the definition of what it covers.
-
-[[rules.allowlists]]
 description = "container golden baselines: SHA-256 rows of a write batch's per-file digest map, not credentials — `plans/auth-feature.md` and `src/auth.py` are fixture paths being digested, not keys being assigned; added 2026-09-23"
 condition   = "AND"      # value AND path; either alone is a blind spot
 regexTarget = "line"     # default is the secret alone, against which this regex is inert
 regexes     = ['''(?m)^[ \t]*"[A-Za-z0-9_./-]+\.[a-z0-9]{1,8}":[ \t]*"[a-f0-9]{64}",?[ \t]*\r?$''']
 paths       = ['''^skills/multi-llm/tests/golden/container/[^/]+/bundle\.json$''']
-# The same line-shaped regex as the run-record entry above, and for the same
-# reason: the stock rule reads the `auth` in a digested fixture path as an
-# identifier sitting next to a value. It became reachable on 2026-09-23, when
+# The stock rule reads the `auth` in a digested fixture path as an identifier
+# sitting next to a value; the digest is not a credential, the *name of the file
+# it digests* is what fires. It became reachable on 2026-09-23, when
 # `container_bundle.ERASED_VALUE_KEYS` stopped erasing `sha256_before`,
 # `sha256_after` and `tasks_sha256` (the tasks file is now deterministic under
 # `SOURCE_DATE_EPOCH`), so a re-seeded baseline carries real digests where it
-# used to carry `"<str>"`. The four conditions spelled out above hold here
-# unchanged; only the path differs, and it is pinned to the committed baselines
-# rather than to `tests/golden/**`.
+# used to carry `"<str>"`. So the exception is written to the digest map's
+# **shape**, never to today's digests: a fingerprint list would go stale on the
+# next re-seed, and a bare `[a-f0-9]{64}` on the default regex target would
+# excuse *any* 64-hex value in a baseline, including one sitting under
+# `"OPENROUTER_API_KEY"`. Read the regex as the four things that must ALL hold
+# before a line is excused:
+#   1. the line is nothing but one JSON member — `[ \t]` never `\s` (which spans
+#      newlines in Go), and `\r?$` so a CRLF checkout behaves the same. A real key
+#      appended after the digest on the same line is still a finding.
+#   2. its key is filename-shaped: a relative path ending in a lowercase
+#      extension. `"OPENROUTER_API_KEY": "<64 hex>"` is not, and is still caught.
+#   3. its value is a *bare* 64-char lowercase hex string, quote to quote. An
+#      OpenRouter key is a 64-hex body behind a prefix, and the prefix does not
+#      fit between the quotes.
+#   4. it is in a committed baseline — pinned to those files rather than to
+#      `tests/golden/**`. The same line in any other tracked file is a finding.
+# It deliberately does not name `auth-feature.md` or `auth.py`: any digested
+# path carrying one of the stock pack's identifier words (`auth*`, `secrets*`,
+# `token-*`, `credential*`, ...) would fire the same way, and pinning the shape
+# covers them without widening what a "credential" is allowed to look like.
+# (A twin entry for the container run records under `tests/container/records/`,
+# added 2026-08-15, was removed when those records stopped being committed.)
 # fingerprints: 340 the day it landed, all `generic-api-key`, 20 per re-seeded
 #   baseline across the 17 `tests/golden/container/*/bundle.json` files — 272
 #   `"plans/auth-feature.md": "<64 hex>"` rows and 68 `"src/auth.py": "<64 hex>"`
-#   rows. As above, provenance for the day it was written, not the definition of
+#   rows. Provenance for the day it was written, not the definition of
 #   what it covers: every re-seed rewrites the digests.

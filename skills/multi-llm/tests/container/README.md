@@ -101,7 +101,7 @@ make e2e-container-latest-host     CLIs @latest; host lane; guarded, opt-in only
 make e2e-live-provider [CLI=x]     credentialed provider lane; SPENDS CREDITS on openrouter.ai
 make e2e-version-delta             print the pinned → installed versions of the @latest image
 make e2e-lock-update               move the pins the @latest image proves moved, then prove it
-make e2e-verify-record REC=<path>  re-hash a runs/ bundle against a committed record
+make e2e-verify-record REC=<path>  re-hash a runs/ bundle against its run record
 make e2e-clean                     prune the ephemeral runs/ bundles
 ```
 
@@ -587,8 +587,9 @@ is argument delivery, not model output.
 | `codex` 0.146.0 | **refused** — `• Unrecognized command '/multi-llm'.` and *zero* requests sent | 2026-08-24 |
 
 The two versions in that table are **what the row ran against**, not what the
-image ships. Re-confirmed unchanged on 2026-09-18 (`records/20260918T152856Z-documented-invocation-*`,
-both `pass`, `cli_version` 1.18.18 and 0.146.0); the pins then moved to **opencode
+image ships. Re-confirmed unchanged on 2026-09-18 (local run records
+`20260918T152856Z-documented-invocation-*`, not in the repo; both `pass`,
+`cli_version` 1.18.18 and 0.146.0); the pins then moved to **opencode
 1.18.31 and codex 0.155.1 on 2026-09-19**, along with fifteen of the other
 sixteen coding CLIs in the image (`aider` 0.86.2 alone is unchanged), and this
 row has not been re-run since. The verdicts above are therefore carried forward,
@@ -662,8 +663,8 @@ run this yourself:
   *read* under the same tree (`permission requested: external_directory`), which
   ends the run with no dispatch. The config now grants that path explicitly.
 
-**Re-run 2026-08-19** (`records/20260819T150929Z-*`, 13 rows, 21:51 wall,
-**$0.0726** total): all three `review-plan` rows passed, and a `full` row on
+**Re-run 2026-08-19** (local run records `20260819T150929Z-*`, not in the
+repo; 13 rows, 21:51 wall, **$0.0726** total): all three `review-plan` rows passed, and a `full` row on
 `codex` and on `opencode` each completed **all eight phases** against a real
 model in one process. Nothing above was fixed to make that happen — the recorded
 cause of the two earlier `review-plan` outcomes is model-following variance on a
@@ -915,8 +916,8 @@ opencode, and a green codex negative row proves nothing about it.
 | | `runs/<utc>/<row-id>/` | `records/<utc>-<host>.json` |
 | --- | --- | --- |
 | What | the raw bundle: stub log, call log, receipts, exported phase dirs | the sanitized summary the driver derives from it |
-| Git | **gitignored** (README kept) | **tracked**, committed with the promotion |
-| Lifetime | ephemeral; delete any time | permanent, reviewable in the diff |
+| Git | **gitignored** (README kept) | **gitignored** (local only), except `record.schema.json` and `*-codex-release-network-check*.json` |
+| Lifetime | ephemeral; delete any time | kept by prune/clean; yours to delete |
 | Role | local diagnostics | the cited provenance |
 
 **Nothing in the repo may cite a path under `runs/` as evidence.** A green host-lane
@@ -928,7 +929,7 @@ against the record that cited it, and reports it as *missing* rather than
 
 The harness **prints** the `capabilities.yaml` promotions a run justifies; it never
 applies them. Promoting a capability changes which code path ships to users, so it
-stays a human commit carrying the record and the edit in the same diff.
+stays a human commit (the record it rests on is a local file, not part of the diff).
 
 ### "Green" is two verdicts, and a promotion needs both
 

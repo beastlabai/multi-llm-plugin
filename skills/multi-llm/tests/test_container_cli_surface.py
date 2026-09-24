@@ -107,8 +107,8 @@ def _row_env(cli: str) -> dict:
 
 #: Written beside the run bundles, like `host-lane-census.json` and
 #: `matrix-census.json`. Ephemeral evidence (`make e2e-clean` prunes `runs/`);
-#: the tracked half of this rig's provenance is `records/`, whose schema is
-#: per-row and has no spelling for a surface comparison.
+#: the per-row run records in `records/` (gitignored, except the schema) have
+#: no spelling for a surface comparison.
 DRIFT_REPORT_NAME = "cli-surface-drift.json"
 
 #: What a reader does about a drifted row. Deliberately not a `make` target: the

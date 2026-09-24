@@ -127,7 +127,7 @@ help:
 	@echo "  make e2e-live-provider [CLI=x]    credentialed PROVIDER lane; SPENDS CREDITS on openrouter.ai"
 	@echo "  make e2e-version-delta            print the pinned → installed versions of the @latest image"
 	@echo "  make e2e-lock-update              move the pins the @latest image proves moved, then prove it"
-	@echo "  make e2e-verify-record REC=<path> re-hash a runs/ bundle against a committed record"
+	@echo "  make e2e-verify-record REC=<path> re-hash a runs/ bundle against its run record"
 	@echo "  make e2e-prune [KEEP=n]           keep the newest n runs/ bundles, delete the rest"
 	@echo "  make e2e-clean                    prune the ephemeral runs/ bundles"
 	@echo
@@ -572,7 +572,8 @@ e2e-verify-record:
 	uv run --project skills/multi-llm -- python $(CONTAINER_DIR)/verify_record.py "$(REC)"
 
 # runs/ is the raw evidence bundle: ephemeral, gitignored, safe to delete at any
-# time. The durable provenance lives in the tracked records/ beside it.
+# time. The run records in records/ beside it are gitignored too (local only),
+# except the schema and the codex release network-check records.
 #
 # Gitignored is not the same as absent, and that distinction is the reason the
 # retention target below exists: nothing that copies a WORKING TREE consults

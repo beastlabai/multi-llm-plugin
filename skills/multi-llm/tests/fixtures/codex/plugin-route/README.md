@@ -7,7 +7,8 @@
 `codex plugin list --json` document Phase 1's zero-quota container row 5
 (`codex-package-seed`) captured on codex-cli 0.156.1 in the seeded home, run
 `20260923T191255Z` — `tests/container/runs/20260923T191255Z/codex-package-seed/codex-plugin-list.json`,
-graded by `tests/container/records/20260923T191255Z-codex-package-seed.json`.
+graded by `tests/container/records/20260923T191255Z-codex-package-seed.json`
+(a local run record, not in the repo).
 Nothing is normalised: the paths are the image's (`/opt/mllm/codex-marketplace`),
 and the resolver reads none of them.
 

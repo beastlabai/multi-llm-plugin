@@ -106,7 +106,8 @@
 # Re-excluded from inside the allowed trees. Last match wins, so these have to
 # stay BELOW the negations above.
 **/__pycache__/**
-# raw evidence bundles; the sibling records/ (C10 provenance) stays in:
+# raw evidence bundles (the sibling records/ is not excluded here; it is
+# gitignored except for the schema and the codex network-check records):
 skills/multi-llm/tests/container/runs/**
 # Credential shapes that would otherwise ride in on an allowlisted tree. These
 # are the locations .gitignore anchors under C6b rule 3, restated here because

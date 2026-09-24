@@ -46,12 +46,18 @@ plan_review_output.json
 # credential filename, so a bare `*auth.json` would also shadow the value-free seed
 # templates we must commit.
 #
-# the raw evidence bundles only — note the trailing path: `records/`, the sibling
-# holding the committed run records (C10), is deliberately not matched:
+# the raw evidence bundles
 # (contents, not the directory itself: git cannot re-include a file whose parent
 # directory is excluded, and the README that explains the directory stays tracked)
 skills/multi-llm/tests/container/runs/*
 !skills/multi-llm/tests/container/runs/README.md
+# ...and the run records: every harness run writes fresh ones, so they are local
+# only. Two exceptions are read by something: the schema (harness.py validates
+# against it) and the codex release network-check records (the publish-codex-plugin
+# workflow requires one on the default branch).
+skills/multi-llm/tests/container/records/*
+!skills/multi-llm/tests/container/records/record.schema.json
+!skills/multi-llm/tests/container/records/*-codex-release-network-check*.json
 **/creds/
 *.credentials.json
 .env

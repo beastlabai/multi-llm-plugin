@@ -49,7 +49,7 @@ make e2e-container-latest-host     # CLIs @latest; host lane; guarded, opt-in, n
 make e2e-live-provider [CLI=x]     # credentialed PROVIDER lane; SPENDS CREDITS on openrouter.ai
 make e2e-version-delta             # print the pinned → installed versions of the @latest image
 make e2e-lock-update               # move the pins the @latest image proves moved, then prove it
-make e2e-verify-record REC=<path>  # re-hash a runs/ bundle against a committed record
+make e2e-verify-record REC=<path>  # re-hash a runs/ bundle against its run record
 make e2e-clean                     # prune the ephemeral runs/ bundles
 ```
 

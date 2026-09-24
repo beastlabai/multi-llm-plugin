@@ -3946,7 +3946,8 @@ hosts:
             FIRST RUN OF THE CODEX PACKAGE ROUTE against a real model
             (plans/codex-native-plugin.md Phase 1 item 16), graded on
             `runs/20260923T231950Z`, record
-            `records/20260923T231950Z-codex-package-ask.json`. The model's
+            `records/20260923T231950Z-codex-package-ask.json` (a local run
+            record, not in the repo). The model's
             first action was the tool — `mcp_tool_call` `multi_llm` with
             `{"mode": "ask", "plan": "plans/auth-feature.md", "question":
             "What does this plan change?", "extra_flags": ["--quick"]}`, the
