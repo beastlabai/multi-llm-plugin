@@ -76,7 +76,7 @@ def _expand_uncovered_directories(entries: Set[str]) -> Set[str]:
 
     Only the survivors are expanded, so a baseline-covered ``plans/`` with
     1 511 files under it is never listed — that expansion is the regression
-    4b3d14c reverted, and it must not come back. An entry git can no longer
+    6260c9e reverted, and it must not come back. An entry git can no longer
     list is kept as-is rather than silently dropped.
     """
     expanded: Set[str] = set()
