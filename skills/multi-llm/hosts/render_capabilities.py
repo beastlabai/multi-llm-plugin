@@ -643,7 +643,7 @@ def render_host_doc_section(base: Optional[str] = None) -> str:
         "`SKILL` is either a git checkout of this repository or the plugin "
         "install `claude plugin list --json` reports. Set it once — the first of "
         "these three that applies to you, not all three. On Windows the shell "
-        "must be **Git Bash** (see [Prerequisites](../README.md#prerequisites)):",
+        "must be **Git Bash** (see [Prerequisites](../README.md#15-prerequisites)):",
         "",
         "```bash",
         "# Set SKILL once - the first of these three that applies to you, not all three.",
