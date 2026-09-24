@@ -24,11 +24,14 @@ into a deleted directory is exactly the failure mode the split exists to prevent
 and a test asserts no tracked file contains a `runs/` path outside the two places
 that describe the directory itself.
 
-The durable half is the sibling **`records/`**: a sanitized, schema-pinned,
-**tracked** summary the host-side driver derives from these bundles — host id, CLI
-version, image digest, row outcomes, the credential census, cost actuals, and the
-sha256 of every file here. That is what a capability promotion cites, committed in
-the same diff as the `capabilities.yaml` edit it justifies.
+The longer-lived half is the sibling **`records/`**: a sanitized, schema-pinned
+summary the host-side driver derives from these bundles — host id, CLI version,
+image digest, row outcomes, the credential census, cost actuals, and the sha256 of
+every file here. Records are **local too**: every harness run writes fresh ones, so
+`records/` is gitignored except for `record.schema.json` and the codex release
+network-check records (`*-codex-release-network-check*.json`), which the publish
+workflow reads from the default branch. `make e2e-prune` and `make e2e-clean` never
+touch it.
 
 If you still have a bundle, `make e2e-verify-record REC=records/<utc>-<host>.json`
 re-hashes it and says whether it is the one the promotion cited. If you deleted it,

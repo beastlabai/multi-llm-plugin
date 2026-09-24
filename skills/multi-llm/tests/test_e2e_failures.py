@@ -1403,9 +1403,9 @@ class TestSalvageSiteAReadsTheAnswerTheProviderLeftOnStdout:
 
 #: `opencode run --format json` announcing its own death. The whole failure is
 #: one event object on **stdout**; stderr is empty (see the OpenCode
-#: event-schema notes, and `tests/container/records/`). Nothing in it is a
-#: damaged answer — the document opened, closed, and said only that the request
-#: was refused.
+#: event-schema notes, and the local run records in `tests/container/records/`).
+#: Nothing in it is a damaged answer — the document opened, closed, and said only
+#: that the request was refused.
 OPENCODE_ERROR_EVENT = (
     '{"type": "error", "message": "AI_APICallError: Unauthorized", "code": 401}'
 )

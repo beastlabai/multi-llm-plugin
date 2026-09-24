@@ -140,7 +140,7 @@ def pytest_sessionfinish(session, exitstatus):
         return
     if ledger.errors:
         # A record that cannot be written is a driver bug, and C10's whole point
-        # is that the tracked record is the evidence. Reported as a failed
+        # is that the record is the evidence. Reported as a failed
         # invocation rather than as a green run with a missing file.
         session.exitstatus = session.exitstatus or 1
 
