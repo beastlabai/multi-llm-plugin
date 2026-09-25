@@ -58,6 +58,7 @@ from .cli_common import (
     EXIT_NEEDS_HUMAN,
     EXIT_NOTHING_TO_DO,
     EXIT_OK,
+    STATE_PARTIAL,
     dispatcher_command,
     modes_table,
     record_artifact,
@@ -640,6 +641,12 @@ def classify_run(
         # `[CONSOLIDATION_RECOMMENDED]` site. A detached run's caller never saw
         # that stdout, so this view is the only route it reaches a host by.
         "consolidation_recommended": status.get("consolidation_recommended"),
+        # Plan §2.4: optional, top-level, written only by
+        # `validation.publish_validation_context` when a context document was
+        # over the inline limit. Same route as `consolidation_recommended`: the
+        # view is the only way a detached caller learns validation saw an
+        # excerpt (and, for `mode: truncated`, only part of a document).
+        "validation_context": status.get("validation_context"),
         # F4: optional, and present only on a finished code-review run —
         # `{count}`, written once by that phase's own `[HIGH_PRIORITY_ISSUES]`
         # site. Same reasoning as `consolidation_recommended` just above: a
@@ -1255,10 +1262,19 @@ class RunHandle:
         *,
         state: Optional[str] = None,
         error: Optional[str] = None,
+        result_state: Optional[str] = None,
     ) -> None:
         """Record the terminal state, and retire whatever the run left live.
 
         Idempotent; the first call wins.
+
+        *result_state* is the dispatcher's ``MULTI_LLM_RESULT.state`` word, and
+        it is recorded as ``run.result_state`` only when the exit code cannot
+        express it (:func:`carried_result_state`) — today exactly
+        ``cli_common.STATE_PARTIAL``. Anything else is recorded as ``null``:
+        ``run.state`` keeps its process meaning (``done`` for a partial run
+        that exited 0), and a crash's ``error`` word would only repeat the
+        exit code.
 
         **The per-model map is closed out here, not by a sweep** (F1,
         2026-09-20). On every other ending the fan-out's own ``finally`` (or the
@@ -1302,6 +1318,7 @@ class RunHandle:
                     "state": state,
                     "exit_code": exit_code,
                     "error": error,
+                    "result_state": carried_result_state(result_state),
                     "heartbeat_at": status_file.now_iso(),
                     "finished_at": status_file.now_iso(),
                 },
@@ -1386,13 +1403,38 @@ def state_for_exit(exit_code: Optional[int]) -> str:
     return RUN_STATE_FAILED
 
 
+#: The result words a detached run carries across the process boundary as
+#: ``run.result_state``: only those the exit code cannot express. ``partial``
+#: exits 0, which ``state_for_exit`` and ``cli_common.emit`` both read as
+#: ``done``; every other result word (``error``, ``needs-human``,
+#: ``nothing-to-do``) is already the exit code's own word.
+CARRIED_RESULT_STATES = (STATE_PARTIAL,)
+
+
+def carried_result_state(word: Optional[str]) -> Optional[str]:
+    """*word* if it is a result state the exit code cannot express, else ``None``.
+
+    Bounded on purpose: ``run.result_state`` is never the context's word
+    verbatim, so a crash (context state ``error``) records ``null`` and a
+    poll reports the exit code's word once, not twice.
+    """
+    return word if word in CARRIED_RESULT_STATES else None
+
+
 def finish_active_run(
-    exit_code: Optional[int], *, error: Optional[str] = None
+    exit_code: Optional[int],
+    *,
+    error: Optional[str] = None,
+    result_state: Optional[str] = None,
 ) -> None:
-    """Close out this process's run, if it owns one. Called by the dispatcher."""
+    """Close out this process's run, if it owns one. Called by the dispatcher.
+
+    *result_state* is the dispatcher's result-context state; see
+    :meth:`RunHandle.finish` for how it is bounded.
+    """
     handle = _ACTIVE
     if handle is not None:
-        handle.finish(exit_code, error=error)
+        handle.finish(exit_code, error=error, result_state=result_state)
 
 
 def report_progress(phase_dir: str, **updates: Any) -> None:

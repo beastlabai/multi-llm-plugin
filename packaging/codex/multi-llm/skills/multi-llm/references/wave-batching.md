@@ -13,6 +13,7 @@ When there are more than 4 batches, spawn them in waves to control context growt
 2. For each wave:
    - **Spawn subagents** for every batch in the wave at once, in one parallel group
    - Run each batch's task exactly as the calling instruction's contract says (the sidecar at `prompt_path`, or `task.prompt`), writing the reply to its `output_path`
+   - A validation batch whose context was too big to inline is `context_mode: workspace-read`: its prompt holds an excerpt and names a snapshot of the full plan (and, for review-tasks, of the task list) by path. Run it where the subagent can read that path, and never treat the excerpt as the whole document
    - Wait for all agents in the wave to complete
    - **Confirm every batch in the wave wrote its `output_path`** — the file is there and is not empty — before moving on. A missing file is not a batch that failed; it is a batch whose reply never reached you, and nothing else will write it
 3. Proceed to the next wave

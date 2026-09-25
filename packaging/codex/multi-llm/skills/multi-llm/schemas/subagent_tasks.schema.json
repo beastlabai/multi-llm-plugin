@@ -14,6 +14,11 @@
       "const": 2,
       "description": "Integer task-file format version. Missing means 1."
     },
+    "context_contract": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The validation context contract the file was materialized under (validation/revalidation files). 2 = over-limit documents named by hash-bound snapshot path; missing means 1, whose over-limit prompts were cut at the inline limit and are retired on resume/reaggregate."
+    },
     "kind": {
       "$ref": "#/$defs/kind",
       "description": "The kind every task in this file has."
@@ -160,6 +165,31 @@
           "enum": ["general-purpose", "human"],
           "description": "Optional Claude-Code-only metadata, demoted for one release. No reader branches on it. Must agree with executor_role."
         },
+        "context_sources": {
+          "type": "array",
+          "description": "Validation/revalidation only, and only when some context block is not inline (plans/validation-context-by-path-and-codex-0156-fallout.md \u00a72.3 step 7). One record per context document. A `path` record is the hash-bound snapshot the prompt names by `abs_path`; `path` is relative to the phase dir when the snapshot lives there, so a moved phase dir can rebind it after re-verifying `sha256` (raw bytes). A `truncated` record says why no file is named.",
+          "items": {
+            "type": "object",
+            "required": ["label", "mode"],
+            "properties": {
+              "label": {"enum": ["plan", "tasks", "reviewed-code", "diff"]},
+              "kind": {"enum": ["plan", "tasks", "reviewed-code", "diff"]},
+              "mode": {"enum": ["inline", "path", "truncated"]},
+              "path": {"type": ["string", "null"]},
+              "abs_path": {"type": ["string", "null"]},
+              "in_phase_dir": {"type": "boolean"},
+              "sha256": {"type": ["string", "null"]},
+              "bytes": {"type": "integer", "minimum": 0},
+              "chars_shown": {"type": "integer", "minimum": 0},
+              "truncated": {"type": "boolean"},
+              "sections_total": {"type": "integer", "minimum": 0},
+              "sections_shown": {"type": "integer", "minimum": 0},
+              "dropped_sections": {"type": "array", "items": {"type": "string"}},
+              "dropped_files": {"type": "array", "items": {"type": "string"}},
+              "reason": {"type": ["string", "null"]}
+            }
+          }
+        },
         "plan_file": {"type": "string", "description": "Provenance only."},
         "grouped_file": {"type": "string", "description": "Provenance only."},
         "batch_index": {"type": "integer", "minimum": 0},
@@ -223,10 +253,14 @@
             "required": ["batch_index", "group_ids", "capability_tier"],
             "properties": {
               "capability_tier": {"const": "full"},
-              "context_mode": {"const": "inline"},
+              "context_mode": {"enum": ["inline", "workspace-read"]},
               "inputs": {"required": ["plan_sha256", "grouped_sha256"]}
             }
           }
+        },
+        {
+          "if": {"required": ["kind"], "properties": {"kind": {"not": {"enum": ["validation", "revalidation"]}}}},
+          "then": {"not": {"required": ["context_sources"]}}
         },
         {
           "if": {"required": ["kind"], "properties": {"kind": {"const": "consolidation"}}},

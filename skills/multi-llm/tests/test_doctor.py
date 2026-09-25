@@ -401,7 +401,7 @@ class TestDoctorReportsTheLadder:
             "sandbox BROKEN: " + BWRAP_BROKEN_LINE + " (fallback: auto → landlock — "
             "codex runs read-only phases under a real sandbox; agent-write still refused"
         ) in line
-        # `retires_when` rides the row: the version it was measured at and the
+        # `deprecated_at` rides the row: the version it was measured at and the
         # sentence upstream prints.
         assert "measured at codex 0.155.1: " + LANDLOCK_SENTENCE in line
         assert "unsandboxed" not in line
@@ -413,7 +413,11 @@ class TestDoctorReportsTheLadder:
         sandbox = _row(json.loads(capsys.readouterr().out), "codex")["sandbox"]
         assert sandbox["state"] == "unavailable" and sandbox["ok"] is False
         assert sandbox["fallback_rung"] == "landlock"
-        assert sandbox["fallback_retires_when"] == ["0.155.1", LANDLOCK_SENTENCE]
+        # The split (plan §3.3): two keys, and the old one is gone.
+        assert sandbox["fallback_deprecated_at"] == ["0.155.1", LANDLOCK_SENTENCE]
+        removed_version, evidence = sandbox["fallback_removed_at"]
+        assert removed_version == "0.156.1" and "2026-09-24" in evidence
+        assert "fallback_retires_when" not in sandbox
 
     def test_no_row_names_a_rung_the_probe_did_not_return(
         self, clinic, monkeypatch, capsys
@@ -521,6 +525,140 @@ class TestDoctorReportsTheLadder:
         doctor._probe_sandbox(provider, 5.0, None)
         assert [profile for profile, _ in calls][-1] == PROFILE_GENERATE
         assert calls[-1][1] <= calls[0][1]
+
+
+class TestDoctorNamesTheRetiredRung:
+    """Plan §3.4 (2026-09-24): codex 0.156.1 measured the landlock rung
+    unavailable. The BROKEN row's *fallback clause* says so — and offers the
+    read-phase choice — while the write-profile repair block stays exactly
+    as it was."""
+
+    PANIC = (
+        "thread 'main' panicked at linux-sandbox/src/linux_run_main.rs:410:5: "
+        "filesystem-restricted execution requires bubblewrap to isolate "
+        "app-server sockets"
+    )
+
+    def _repair_is_unchanged(self, out, report):
+        assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
+        assert "Repair (yours to install, with sudo — the plugin only prints it):" in out
+        assert report["repair"] == doctor._repair_block()
+        assert report["repair"]["sysctl_alternative_recommended"] is False
+
+    def test_a_retired_rung_names_the_measured_version_and_the_choice(
+        self, clinic, monkeypatch, capsys
+    ):
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "unsandboxed",
+            (("landlock", "retired"), ("unsandboxed", "taken")),
+            (("landlock", self.PANIC),), "0.156.1",
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        out = capsys.readouterr().out
+        line = _codex_line(out)
+        assert "sandbox BROKEN: " + BWRAP_BROKEN_LINE in line
+        assert "(fallback: auto — codex runs unsandboxed for read-only phases" in line
+        assert "→ landlock unavailable: measured unavailable from codex 0.156.1" in line
+        assert "`sandbox_fallback: contained` refuses them like writes" in line
+        assert "`auto` runs them under --sandbox danger-full-access" in line
+        # The clause carries no AppArmor or /etc advice; the repair block does.
+        clause = line.split("(fallback:", 1)[1]
+        assert "apparmor" not in clause.lower() and "/etc" not in clause
+        assert "FAIL: codex: sandbox" in out
+
+        assert doctor.main(["--budget", "10", "--json"]) == 3
+        report = json.loads(capsys.readouterr().out)
+        sandbox = _row(report, "codex")["sandbox"]
+        lost = sandbox["fallback_lost"]
+        assert lost["rung"] == "landlock" and lost["outcome"] == "retired"
+        assert lost["deprecated_at"][0] == "0.155.1"
+        assert lost["removed_at"][0] == "0.156.1"
+        assert "retires_when" not in lost
+        self._repair_is_unchanged(
+            "\n".join(doctor.render_text(report, warn_only=False)), report,
+        )
+
+    @pytest.mark.parametrize("walk, shown", [
+        ((("landlock", "unprobed"),), "rung unprobed: the report budget was exhausted"),
+        ((("landlock", "unknown"),), "a rung probe gave no answer"),
+        ((("landlock", "unavailable"), ("unsandboxed", "taken")),
+         "rung landlock is not usable here (unavailable)"),
+    ])
+    def test_a_timeout_or_other_failure_is_shown_as_itself(
+        self, clinic, monkeypatch, capsys, walk, shown
+    ):
+        rung = "unsandboxed" if walk[-1] == ("unsandboxed", "taken") else None
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, rung, walk,
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        out = capsys.readouterr().out
+        line = _codex_line(out)
+        assert shown in line
+        assert "measured unavailable from" not in line
+        assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
+        assert doctor.main(["--budget", "10", "--json"]) == 3
+        assert json.loads(capsys.readouterr().out)["repair"] == doctor._repair_block()
+
+    def test_a_pass_at_or_above_removed_at_is_flagged_not_hidden(
+        self, clinic, monkeypatch, capsys
+    ):
+        """`removed_at` only skips the per-run probe; doctor still probes, so a
+        build that restored the rung is a visible mismatch."""
+        monkeypatch.setenv("MOCK_LLM_VERSION", "codex-cli 0.156.1")
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "landlock", (("landlock", "taken"),),
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        line = _codex_line(capsys.readouterr().out)
+        assert "(fallback: auto → landlock — " in line
+        assert (
+            "mismatch: removed_at says unavailable from codex 0.156.1, but the "
+            "probe passed on 0.156.1"
+        ) in line
+        assert doctor.main(["--budget", "10", "--json"]) == 3
+        sandbox = _row(json.loads(capsys.readouterr().out), "codex")["sandbox"]
+        assert sandbox["fallback_removed_mismatch"] is True
+
+    def test_doctor_never_skips_the_rung_probe_by_version(self, monkeypatch):
+        """Doctor hands `sandbox_verdict` no version, so the walk probes rung 1
+        whatever `removed_at` says."""
+        seen = []
+
+        def spy(provider, profile, **kwargs):
+            seen.append(kwargs)
+            return executor.SandboxProbeResult("unavailable", BWRAP_BROKEN_LINE)
+
+        monkeypatch.setattr(executor, "sandbox_verdict", spy)
+        from utils.provider_registry import get_provider
+        from utils.providers import codex as codex_module
+
+        monkeypatch.setattr(
+            codex_module, "sandbox_fallback_policy", lambda anchor=None: "auto"
+        )
+        doctor._probe_sandbox(get_provider("codex"), 5.0, None)
+        assert seen and all(kwargs.get("version") is None for kwargs in seen)
+
+    def test_a_rung_with_deprecated_at_but_no_removed_at(
+        self, clinic, monkeypatch, capsys
+    ):
+        from dataclasses import replace
+
+        from utils.providers import codex as codex_module
+
+        kept = replace(codex_module.LANDLOCK_RUNG, removed_at=None)
+        monkeypatch.setattr(
+            codex_module.CodexProvider, "sandbox_fallback_rungs",
+            lambda self, profile: (kept, codex_module.UNSANDBOXED_RUNG),
+        )
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "landlock", (("landlock", "taken"),),
+        ))
+        assert doctor.main(["--json", "--budget", "10"]) == 3
+        sandbox = _row(json.loads(capsys.readouterr().out), "codex")["sandbox"]
+        assert sandbox["fallback_deprecated_at"] == ["0.155.1", LANDLOCK_SENTENCE]
+        assert "fallback_removed_at" not in sandbox
+        assert "fallback_retires_when" not in sandbox
 
 
 class TestDoctorDetectsAGlobalLandlockFlag:

@@ -24,8 +24,15 @@ A BROKEN runner row also carries the fallback ladder (landlock rung,
 2026-09-22): a second probe, of the read-only ``generate`` profile, walks the
 adapter's rungs inside what is left of the sandbox job's budget, and the row
 names the ``sandbox_fallback`` key in force and the rung *that* probe selected
-— ``→ landlock`` (with its ``retires_when``), the unsandboxed sentence, a
-refusal, or ``rung unprobed`` when the budget ran out first. Rendered only:
+— ``→ landlock`` (with its ``deprecated_at``), the unsandboxed sentence, a
+refusal, or ``rung unprobed`` when the budget ran out first. A rung the probe
+found retired from this build (its ``removed_at``/panic text, 2026-09-24) is
+named ``measured unavailable from codex <removed_at>``, beside the read-phase
+choice that needs no change to the machine (``sandbox_fallback: contained``
+refuses read phases like writes; ``auto`` runs them under
+``danger-full-access``); a timeout or any other probe failure is shown as
+itself. Doctor always runs the real rung probe — it never skips by version —
+and flags a pass on a build at or above ``removed_at``. Rendered only:
 ``agent-write`` still drives the verdict and the exit code. Separately, a
 ``[features] use_legacy_landlock = true`` in codex's own ``config.toml`` is a
 WARN (a plain file read; never ``codex features``).
@@ -287,7 +294,8 @@ def _probe_fallback(
     """
     from .providers.base import PROFILE_GENERATE
     from .subagent_executor import (
-        RUNG_ABSENT, RUNG_REJECTED, RUNG_UNAVAILABLE, sandbox_verdict,
+        RUNG_ABSENT, RUNG_REJECTED, RUNG_RETIRED, RUNG_SKIPPED, RUNG_UNAVAILABLE,
+        sandbox_verdict,
     )
 
     remaining = deadline - time.monotonic()
@@ -304,19 +312,29 @@ def _probe_fallback(
     if rung is not None:
         row["fallback_rung"] = rung.name
         row["fallback_contained"] = bool(rung.contained)
-        if rung.retires_when:
-            row["fallback_retires_when"] = list(rung.retires_when)
+        if rung.deprecated_at:
+            row["fallback_deprecated_at"] = list(rung.deprecated_at)
+        if rung.removed_at:
+            row["fallback_removed_at"] = list(rung.removed_at)
     # A contained rung that expires upstream, measured here and found unusable:
-    # the doctor-side half of Open question 2. Named with its `retires_when`,
-    # because "the boundary you had is gone" is the one day the expiry matters.
+    # the doctor-side half of Open question 2. Named with its `deprecated_at`
+    # and `removed_at`, because "the boundary you had is gone" is the one day
+    # the expiry matters. `retired` (the probe printed the rung's removal
+    # panic) is what earns the "measured unavailable" clause; every other
+    # outcome is shown as itself.
     for name, outcome in verdict.walk:
-        if outcome not in (RUNG_REJECTED, RUNG_UNAVAILABLE, RUNG_ABSENT):
+        if outcome not in (
+            RUNG_REJECTED, RUNG_UNAVAILABLE, RUNG_ABSENT, RUNG_RETIRED, RUNG_SKIPPED,
+        ):
             continue
         declared = _declared_rung(provider, name)
-        if declared is not None and declared.contained and declared.retires_when:
+        if declared is not None and declared.contained and (
+            declared.deprecated_at or declared.removed_at
+        ):
             row["fallback_lost"] = {
                 "rung": name, "outcome": outcome,
-                "retires_when": list(declared.retires_when),
+                "deprecated_at": list(declared.deprecated_at) if declared.deprecated_at else None,
+                "removed_at": list(declared.removed_at) if declared.removed_at else None,
             }
             break
 
@@ -379,6 +397,27 @@ def _probe_sandbox(provider: Any, timeout: float, cwd: Optional[str]) -> Dict[st
     return row
 
 
+def _flag_removed_mismatch(sandbox: Dict[str, Any], version: Optional[str]) -> None:
+    """Mark a contained rung the probe *took* on a build at or above its
+    ``removed_at`` (plan §3.2/§3.4): ``removed_at`` only skips the per-run
+    probe, and doctor — which always probes — is where a build that restored
+    the rung shows up. Sets ``fallback_version`` and
+    ``fallback_removed_mismatch`` on the row; rendered by
+    :func:`_fallback_note`."""
+    from .providers.base import SandboxRung, rung_removed_for_version
+
+    removed = list(sandbox.get("fallback_removed_at") or ())
+    if not removed or not sandbox.get("fallback_rung") or not sandbox.get("fallback_contained"):
+        return
+    probe = SandboxRung(
+        name=str(sandbox["fallback_rung"]), probe_argv=None, argv_rewrite=(),
+        contained=True, removed_at=(str(removed[0]), ""),
+    )
+    if rung_removed_for_version(probe, version):
+        sandbox["fallback_version"] = version
+        sandbox["fallback_removed_mismatch"] = True
+
+
 def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
     """The ``(fallback: …)`` clause of a BROKEN row, or ``""``.
 
@@ -404,10 +443,24 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
     lost = sandbox.get("fallback_lost")
     lost_clause = ""
     if lost and lost.get("rung") != rung:
-        version, sentence = (list(lost.get("retires_when") or ()) + ["", ""])[:2]
-        lost_clause = (
-            f"; rung {lost['rung']} is not usable here ({lost['outcome']}) — "
-            f"measured at {provider_name} {version}: {sentence}"
+        removed = list(lost.get("removed_at") or ())
+        if lost.get("outcome") in ("retired", "skipped") and removed:
+            # Only the probe's own removal panic (or a skip by version) says
+            # this; a timeout or an unrelated failure never does.
+            lost_clause = (
+                f"; → {lost['rung']} unavailable: measured unavailable from "
+                f"{provider_name} {removed[0]}"
+            )
+        else:
+            dep_version, sentence = (list(lost.get("deprecated_at") or ()) + ["", ""])[:2]
+            lost_clause = f"; rung {lost['rung']} is not usable here ({lost['outcome']})"
+            if dep_version:
+                lost_clause += f" — measured at {provider_name} {dep_version}: {sentence}"
+        # The read-phase choice that exists without touching the machine.
+        lost_clause += (
+            f"; read phases: `sandbox_fallback: {SANDBOX_FALLBACK_CONTAINED}` "
+            f"refuses them like writes, `auto` runs them under --sandbox "
+            f"danger-full-access (the [SANDBOX_BYPASSED] line)"
         )
     if probe_state == "unprobed" or any(outcome == "unprobed" for _, outcome in walk):
         return f" (fallback: {policy} — rung unprobed: the report budget was exhausted)"
@@ -416,10 +469,19 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
             f" (fallback: {policy} → {rung} — {provider_name} runs read-only "
             f"phases under a real sandbox; agent-write still refused"
         )
-        retires = sandbox.get("fallback_retires_when")
-        if retires:
-            version, sentence = (list(retires) + ["", ""])[:2]
+        deprecated = sandbox.get("fallback_deprecated_at")
+        if deprecated:
+            version, sentence = (list(deprecated) + ["", ""])[:2]
             note += f"; measured at {provider_name} {version}: {sentence}"
+        removed = list(sandbox.get("fallback_removed_at") or ())
+        if removed and sandbox.get("fallback_removed_mismatch"):
+            # Doctor probes whatever `removed_at` says; a pass on a build at or
+            # above it is a mismatch to re-measure, never hidden.
+            note += (
+                f"; mismatch: removed_at says unavailable from {provider_name} "
+                f"{removed[0]}, but the probe passed on {sandbox.get('fallback_version') or '?'}"
+                f" — re-measure removed_at"
+            )
         return note + ")"
     if rung:
         return (
@@ -662,6 +724,7 @@ def collect(
         if not row["auth"]["ok"]:
             failures.append(f"{row['provider']}: auth — not logged in ({row['auth']['detail']})")
         sandbox = row["sandbox"]
+        _flag_removed_mismatch(sandbox, row["version"].get("version"))
         if sandbox["state"] == "unavailable":
             sandbox_broken = True
             if not sandbox["ok"]:

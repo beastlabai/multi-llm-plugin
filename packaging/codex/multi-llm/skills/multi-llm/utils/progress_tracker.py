@@ -1029,6 +1029,29 @@ class FanoutProgress:
         """
         self._freeze(spec, STATE_FAILED, error=error, source=source)
 
+    def warn(self, spec: str, warning: str) -> None:
+        """Record a non-fatal warning on this slot's entry (``warning`` key).
+
+        Plan §4.3: an uncontained slot whose porcelain check saw a change its
+        own audited stream could not have made keeps its findings, and the
+        ``[SANDBOX_BYPASSED] … not attributed`` line lands here. It does not
+        change the slot's state, and a terminal transition keeps it.
+        """
+        entry = self._entry(spec)
+        entry["warning"] = str(warning)
+        entry["updated_at"] = _now_iso()
+        self._write()
+
+    def record_readonly_audit(self, spec: str, verdict: Mapping[str, Any]) -> None:
+        """Record an uncontained slot's combined stream-audit verdict (plan §4.3).
+
+        The compact ``{clean, reason, actions}`` dict — never the stream. Kept
+        across the terminal transition like ``warning``.
+        """
+        entry = self._entry(spec)
+        entry["readonly_audit"] = dict(verdict)
+        self._write()
+
     def record_result(self, spec: str, result: Any) -> None:
         """The terminal transition derived from a lane's returned result dict.
 
@@ -1424,6 +1447,9 @@ class PhaseProgress:
         self._origin = _monotonic()
         self._ticker: Optional[asyncio.Task] = None
         self._warned: set = set()
+        #: Whether the teardown tick prints. Cleared by
+        #: ``stop_ticker(final_line=False)`` — see there.
+        self._final_line = True
 
     def elapsed_s(self) -> float:
         """Seconds since the ticker started. In-process on purpose.
@@ -1464,12 +1490,22 @@ class PhaseProgress:
         self._ticker = asyncio.ensure_future(self._tick_forever())
         return self._ticker
 
-    async def stop_ticker(self) -> None:
-        """Cancel and await, so the last line lands before the phase's report."""
+    async def stop_ticker(self, *, final_line: bool = True) -> None:
+        """Cancel and await, so the last line lands before the phase's report.
+
+        ``final_line=False`` drops the teardown line, for an invocation that
+        wrote no terminal ``progress.step`` of its own. The line reads the
+        checkpoint, so without this a ``--reaggregate`` that refused (exit 3 on
+        a changed snapshot) or returned having dispatched nothing re-printed
+        the *previous* run's ending — measured 2026-09-25 as
+        ``[PROGRESS] step: complete | subagents 16/16 done (16 ok)`` after a
+        refusal — a completion this process never reached.
+        """
         task = self._ticker
         self._ticker = None
         if task is None:
             return
+        self._final_line = bool(final_line)
         task.cancel()
         try:
             await task
@@ -1495,7 +1531,8 @@ class PhaseProgress:
                 await _tick_sleep(self.interval_s)
                 self._tick()
         finally:
-            self._tick()
+            if self._final_line:
+                self._tick()
 
     def _tick(self) -> None:
         """One line, swallowing anything it raises (see :meth:`FanoutProgress._tick`)."""

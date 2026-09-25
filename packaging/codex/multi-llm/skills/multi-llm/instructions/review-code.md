@@ -384,13 +384,19 @@ to bare `python`.
    `validation_tasks.json` carries `tasks_schema_version: 2` and one complete
    task per batch under `batches` — each with `prompt`, `output_name`, the
    derived `output_path`, `prompt_path` and `prompt_lines`,
-   `result_channel: file`, `context_mode: inline`, `capability_tier`,
+   `result_channel: file`, `context_mode`, `capability_tier`,
    `executor_role` and `task_id`. The sidecar at `prompt_path` holds exactly the
    bytes of `prompt` (`prompt_lines` is its line count), so the two are
    interchangeable and a host that would otherwise re-emit the whole prompt can
    point the subagent at the file instead. The plan excerpt, this batch's issue
    records (including each issue's `file` and `line_range`) and the
-   code-inspection guidance all travel **inside** `prompt`.
+   code-inspection guidance all travel **inside** `prompt`. A plan within the
+   inline limit is complete there, and the task is `context_mode: inline`. A
+   larger plan keeps a head excerpt and is also named once under
+   `## Plan file`: a hash-bound snapshot, `validation-snapshot.md` in this phase
+   dir, and the task is `context_mode: workspace-read`. The subagent must be able to read
+   that path, so do not run it where it cannot. Never treat such a batch as
+   having the full plan inline. The reviewed-code block is never named by path.
 
    **For each task in the file: when the task carries `prompt_path`, run a
    subagent that reads that file in full — through line `prompt_lines`, paging

@@ -70,10 +70,13 @@ from utils.llm_client import invoke_with_provider
 from utils.git_utils import get_project_root
 from utils.detach import record_output_files, report_progress
 from utils.progress_tracker import FanoutProgress, PhaseProgress
+from utils.readonly_audit import combine_audits
 from utils.review_orchestrator_base import (
     backfill_deadline_losses,
     bypass_ignore_prefixes,
     boundaryless_sibling_count,
+    bypass_stream_audit_clears,
+    bypass_write_not_attributed,
     bypass_write_violation,
     maybe_detach,
     porcelain_check_applies,
@@ -1018,7 +1021,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
         if sandbox.fallback:
             print(f"[{model_spec}] {sandbox.reason}")
         if porcelain_check_applies(sandbox):
-            tree_before = await asyncio.to_thread(porcelain_snapshot, project_root)
+            tree_before = await asyncio.to_thread(
+                porcelain_snapshot, project_root,
+                ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
+            )
 
         sanitized = sanitize_model_name(model_spec)
         # output_md_path MUST be absolute: provider subprocesses run with
@@ -1090,12 +1096,24 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # a slot that could not write anything else. The question dir itself
         # is the plugin's own tree and is excluded (`bypass_ignore_prefixes`).
         if porcelain_check_applies(sandbox):
-            tree_after = await asyncio.to_thread(porcelain_snapshot, project_root)
-            touched = unexpected_writes(
-                tree_before, tree_after,
-                ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
+            ignore_prefixes = bypass_ignore_prefixes(plan_path, project_root)
+            # Plan §4.3: ask is single-shot, so its one attempt's verdict is
+            # the whole window's.
+            audits = [(result.get("details") or {}).get("readonly_audit")]
+            tracker.record_readonly_audit(
+                model_spec, combine_audits(audits).to_dict()
             )
-            if touched:
+            tree_after = await asyncio.to_thread(
+                porcelain_snapshot, project_root, ignore_prefixes=ignore_prefixes
+            )
+            touched = unexpected_writes(
+                tree_before, tree_after, ignore_prefixes=ignore_prefixes,
+            )
+            if touched and bypass_stream_audit_clears(audits):
+                warning = bypass_write_not_attributed(provider_name, touched)
+                print(f"[{model_spec}] {warning}")
+                tracker.warn(model_spec, warning)
+            elif touched:
                 siblings = await asyncio.to_thread(
                     boundaryless_sibling_count, model_spec, project_root, plan_path
                 )

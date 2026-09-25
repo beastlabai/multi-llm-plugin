@@ -71,6 +71,7 @@ from utils.state_manager import (
 from utils.output_handler import get_phase_dir, output_dir_path, phase_dir_path
 from utils.detach import record_output_files, report_progress
 from utils.progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
+from utils.readonly_audit import combine_audits
 from utils.review_orchestrator_base import (
     RETIRE_SUPERSEDED,
     backfill_deadline_losses,
@@ -88,9 +89,14 @@ from utils.review_orchestrator_base import (
     retire_salvage_artifacts,
     retire_stale_validation,
     retire_stale_validation_round,
+    bind_plan_for_validation,
+    materialization_read_refusal,
+    verify_round_context,
     announce_retired_rungs,
     bypass_ignore_prefixes,
     boundaryless_sibling_count,
+    bypass_stream_audit_clears,
+    bypass_write_not_attributed,
     bypass_write_violation,
     porcelain_check_applies,
     porcelain_snapshot,
@@ -112,9 +118,15 @@ from utils.review_orchestrator_base import (
 # directly too. Its one use below is the read-back that turns a silently failed
 # checkpoint write into a warning.
 from utils.status_file import read_status
+from utils.validation_context import RECORD_CUT_REASON, report_header_lines
 from utils.validation import (
     VALIDATION_CONTEXT_LIMIT,
+    BoundDocument,
+    ValidationContextError,
+    bind_document_text,
+    decode_document,
     excerpt_context_reported,
+    legacy_context_round_reason,
     prepare_batched_validation_tasks,
     resolved_reaggregate_command,
 )
@@ -826,6 +838,7 @@ def build_validation_secondary_context(
     plan_path: Path,
     *,
     project_root: Optional[str] = None,
+    cut_report: Optional[Dict[str, Any]] = None,
 ) -> Tuple[str, str]:
     """``(secondary_context, reviewed_code)`` for a code-review validation batch.
 
@@ -849,9 +862,17 @@ def build_validation_secondary_context(
     own. The record is regenerated on every read, so hashing it would refuse a
     stored task file over a summary line rather than over the code a verdict was
     reached about.
+
+    ``cut_report``, when given, is filled with what was left out —
+    ``record_cut`` (the record went over ``IMPLEMENTATION_RECORD_CHARS``),
+    ``record_chars`` (the record's uncut length), ``dropped_files`` and ``files_total`` — so the caller can record the block
+    as a ``reviewed-code`` context source with ``mode: truncated`` (§2.6).
+    Neither half is ever named by path: the record has no file and the windows
+    are live working-tree bytes no snapshot binds.
     """
+    raw_record = build_implementation_record(plan_path)
     record = excerpt_context_reported(
-        build_implementation_record(plan_path),
+        raw_record,
         "implementation-record",
         IMPLEMENTATION_RECORD_CHARS,
     )
@@ -878,11 +899,54 @@ def build_validation_secondary_context(
             + ", ".join(dropped),
             file=sys.stderr,
         )
+    else:
+        dropped = []
+    if cut_report is not None:
+        cut_report["record_cut"] = len(raw_record) > IMPLEMENTATION_RECORD_CHARS
+        cut_report["record_chars"] = len(raw_record)
+        cut_report["dropped_files"] = list(dropped)
+        cut_report["files_total"] = len(sections)
 
     parts = [record_part]
     if embedded:
         parts.append(f"{code_heading}{embedded}")
     return "\n\n".join(parts), reviewed_code
+
+
+def reviewed_code_document(secondary: str, cut_report: Dict[str, Any]) -> BoundDocument:
+    """The ``reviewed-code`` context source for review-code's second block (§2.6).
+
+    Always inline, never a path. A record cut or any dropped window makes it
+    ``mode: truncated``, and its notice names the dropped files and the record
+    cut (with the record's uncut length, since the block is measured after it).
+    """
+    dropped = list(cut_report.get("dropped_files") or [])
+    record_cut = bool(cut_report.get("record_cut"))
+    if not dropped and not record_cut:
+        return bind_document_text(secondary, label="reviewed-code")
+    reasons = []
+    if dropped:
+        reasons.append(
+            f"windows for {len(dropped)} of {cut_report.get('files_total')} cited "
+            f"files not shown: {', '.join(dropped)}"
+        )
+    if record_cut:
+        # The raw length, not the cut one: the block's own size is measured
+        # after the cut, so this clause is the only place the notice and the
+        # report can say how much of the record went.
+        record_chars = cut_report.get("record_chars")
+        of_total = f" of {record_chars}" if isinstance(record_chars, int) else ""
+        reasons.append(
+            f"{RECORD_CUT_REASON} at {IMPLEMENTATION_RECORD_CHARS}{of_total} chars"
+        )
+    return bind_document_text(
+        secondary,
+        label="reviewed-code",
+        reason="; ".join(reasons),
+        forced_truncated=True,
+        dropped_files=dropped or None,
+        files_total=cut_report.get("files_total") if dropped else None,
+    )
 
 
 def prepare_fixes_for_subagents(
@@ -1196,7 +1260,10 @@ async def run_single_review(
     if sandbox.fallback:
         print(f"[{display_name}] {sandbox.reason}")
     if porcelain_check_applies(sandbox):
-        tree_before = await asyncio.to_thread(porcelain_snapshot, project_root)
+        tree_before = await asyncio.to_thread(
+            porcelain_snapshot, project_root,
+            ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
+        )
 
     # Generate log file path for debugging
     sanitized_model = sanitize_model_name(model_spec)
@@ -1339,12 +1406,26 @@ async def run_single_review(
     # invocation reported — nothing is restored, and nothing it returned is
     # parsed as a review. Skipped entirely (no git call) for a sandboxed slot.
     if porcelain_check_applies(sandbox):
-        tree_after = await asyncio.to_thread(porcelain_snapshot, project_root)
-        touched = unexpected_writes(
-            tree_before, tree_after,
-            ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
+        ignore_prefixes = bypass_ignore_prefixes(plan_path, project_root)
+        # Plan §4.3: one `invoke_with_file_output` call per slot, so its one
+        # attempt's verdict is the whole window's.
+        audits = [details.get("readonly_audit")]
+        if tracker is not None:
+            tracker.record_readonly_audit(
+                model_spec, combine_audits(audits).to_dict()
+            )
+        tree_after = await asyncio.to_thread(
+            porcelain_snapshot, project_root, ignore_prefixes=ignore_prefixes
         )
-        if touched:
+        touched = unexpected_writes(
+            tree_before, tree_after, ignore_prefixes=ignore_prefixes,
+        )
+        if touched and bypass_stream_audit_clears(audits):
+            warning = bypass_write_not_attributed(provider_name, touched)
+            print(f"[{display_name}] {warning}")
+            if tracker is not None:
+                tracker.warn(model_spec, warning)
+        elif touched:
             siblings = await asyncio.to_thread(
                 boundaryless_sibling_count, model_spec, project_root, plan_path
             )
@@ -1996,9 +2077,15 @@ def generate_review_report(
             f"**Validation:** {valid_count} valid, {invalid_count} invalid, "
             f"{needs_human} needs human review (of {len(validated_groups)} groups)"
         )
-        lines.append("")
-    else:
-        lines.append("")
+    # Plan §2.4: the published `validation_context`, read from `.status.json`
+    # and never recomputed; absent adds nothing, so the report is unchanged.
+    if phase_dir is not None:
+        lines.extend(
+            report_header_lines(
+                read_status(str(phase_dir)).get("validation_context")
+            )
+        )
+    lines.append("")
 
     lines.append("> **Note:** An interactive HTML report is also available at `report.html`.")
     lines.append("> If you export selections from the HTML report (`user_selections.json`),")
@@ -2587,6 +2674,19 @@ async def reaggregate_from_existing_files(
 
         validated_groups_for_report = None
 
+        # Task 2.10: a contract-1 round built from an over-limit plan is never
+        # reused — retired whole (renamed, kept) and rematerialized below.
+        legacy_round = (
+            None if args.skip_validation
+            else legacy_context_round_reason(str(phase_dir))
+        )
+        if legacy_round:
+            print(f"\n{legacy_round}")
+            retire_stale_validation_round(
+                str(phase_dir),
+                reason="validation built from truncated context (contract 1)",
+            )
+
         # Check if we're merging validation batch results
         if not grouped:
             validated_groups_for_report = []
@@ -2621,6 +2721,11 @@ async def reaggregate_from_existing_files(
                 # `return 3` here would surface to a polling host as exit 0 —
                 # "done" on a run that produced no report and needs --force.
                 sys.exit(task_file_error.exit_code)
+            # §2.3 step 5 / 2.9: re-hash the snapshots the stored prompts name,
+            # rebinding a moved phase dir; a changed or missing one is exit 3.
+            verify_round_context(
+                batch_metadata, str(phase_dir), str(validation_tasks_path)
+            )
 
             # The shared merge: batch files -> validation.json (with the
             # executor's own runner attribution, F3) -> groups. This branch
@@ -2632,17 +2737,25 @@ async def reaggregate_from_existing_files(
         elif not args.skip_validation:
             # No validation batches exist - need to prepare them
             print("\nPreparing batched validation for subagent execution...")
-            plan_content = plan_path.read_text(encoding="utf-8")
+            # One read of the plan, bound to this phase dir's own snapshot
+            # (§2.3 step 5): the plan block names it, never the live plan.
+            plan_document = bind_plan_for_validation(str(plan_path), str(phase_dir))
+            plan_content = plan_document.text
 
             # Same two contexts and the same single budget owner as the
             # fan-out's own prep above; the two sites must materialize the same
             # prompt or a reaggregate re-validates against a different one.
+            cut_report: Dict[str, Any] = {}
             secondary, reviewed_code = build_validation_secondary_context(
-                grouped, plan_path, project_root=project_root
+                grouped, plan_path, project_root=project_root,
+                cut_report=cut_report,
             )
             batched_tasks = prepare_batched_validation_tasks(
                 groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
-                context=f"Plan file: {plan_path}\n\nPlan content:\n{plan_content}",
+                # No `Plan file:` line: the block names the bound
+                # snapshot, and a second path — the live plan — would
+                # point a validator at bytes the snapshot hash does not cover.
+                context=plan_content,
                 output_dir=str(phase_dir),
                 plan_file=str(plan_path),
                 model=args.validation_model,
@@ -2652,6 +2765,10 @@ async def reaggregate_from_existing_files(
                 secondary_context_label=REVIEWED_CODE_CONTEXT_LABEL,
                 reviewed_code=reviewed_code,
                 extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
+                context_document=plan_document,
+                secondary_document=reviewed_code_document(secondary, cut_report),
+                runner_read_refusal=materialization_read_refusal(args, str(plan_path)),
+                phase="code-review",
             )
 
             # Save validation task instructions
@@ -2848,13 +2965,20 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # body, because `await`ing a coroutine is not itself a suspension point
         # and a never-scheduled task loses the teardown line.
         await asyncio.sleep(0)
+        # A refusal (`sys.exit` on a stale task file or changed snapshot) wrote
+        # no step of its own, so its teardown line would re-print the previous
+        # run's `step: complete` (dogfood 2026-09-25): dropped on that ending.
+        refused = False
         try:
             await reaggregate_from_existing_files(
                 prefix, out_dir, plan_path, args,
                 template_style=args.report_style,
             )
+        except SystemExit:
+            refused = True
+            raise
         finally:
-            await phase_ticker.stop_ticker()
+            await phase_ticker.stop_ticker(final_line=not refused)
         return
 
     # Guard against re-running already-completed phase (expensive LLM calls)
@@ -3039,6 +3163,22 @@ async def main(argv: Optional[List[str]] = None) -> int:
     print("Running code review in agent exploration mode...")
     print("")
 
+    # The plan the reviewers are pointed at, read once here and bound to this
+    # phase's `validation-snapshot.md` past the detach boundary (the same split
+    # review-plan and review-tasks make): binding at materialization, after the
+    # fan-out, let a plan edited during the review become the snapshot the
+    # validators are hash-bound to. Only the read and the UTF-8 check happen
+    # before the boundary, so an undecodable plan still fails in the foreground
+    # and a repeated `--detach` never replaces an active run's snapshot.
+    plan_bytes: Optional[bytes] = None
+    if not args.skip_validation:
+        try:
+            plan_bytes = plan_path.read_bytes()
+            decode_document(plan_bytes, str(plan_path))
+        except ValidationContextError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            sys.exit(exc.exit_code)
+
     # --- the detach boundary (see utils/review_orchestrator_base.maybe_detach) --
     # Late on purpose: everything above is pre-flight that must fail on the
     # caller's terminal — models resolved, base ref validated, changed files
@@ -3054,6 +3194,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
     )
     if detach_outcome is not None:
         sys.exit(detach_outcome)
+
+    # This process now owns the phase, so the snapshot may be replaced.
+    plan_document_at_load: Optional[BoundDocument] = None
+    if plan_bytes is not None:
+        plan_document_at_load = bind_plan_for_validation(
+            str(plan_path), str(detach_phase_dir), data=plan_bytes
+        )
 
     # Stage U: what an earlier attempt of this phase recorded, read *before* the
     # write below — `write_status` replaces every key but the two reserved
@@ -3465,8 +3612,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 # Validate grouped issues (unless skipped)
                 if not args.skip_validation:
                     print("\nPreparing batched validation for subagent execution...")
-                    # Read plan for validation context
-                    plan_content = plan_path.read_text(encoding="utf-8")
+                    # The plan bound at load, before the fan-out, to this
+                    # phase dir's own `validation-snapshot.md` (§2.3 step 5) —
+                    # never a re-read of a plan edited while the models ran.
+                    plan_document = plan_document_at_load or bind_plan_for_validation(
+                        str(plan_path), str(phase_dir)
+                    )
+                    plan_content = plan_document.text
 
                     # No `[:30000]` here: `excerpt_context` owns the per-context
                     # budget, and slicing first could only lose more. The plan this
@@ -3474,8 +3626,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     # mid-§4.6 and §4.7–§11 — the acceptance criteria and the whole
                     # tunable-config table — reached no validator, while four of the
                     # nine verdicts cited exactly those sections.
+                    cut_report: Dict[str, Any] = {}
                     secondary, reviewed_code = build_validation_secondary_context(
-                        grouped_list, plan_path, project_root=project_root
+                        grouped_list, plan_path, project_root=project_root,
+                        cut_report=cut_report,
                     )
                     # `grouped_list`, not `grouped`: it already carries the stable
                     # `group_hash`/`display_label` `stamp_stable_ids` stamped above
@@ -3487,7 +3641,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
                     # reports success anyway.
                     batched_tasks = prepare_batched_validation_tasks(
                         groups=grouped_list,
-                        context=f"Plan file: {plan_path}\n\nPlan content:\n{plan_content}",
+                        # No `Plan file:` line: the block names the bound
+                        # snapshot, and a second path — the live plan — would
+                        # point a validator at bytes the snapshot hash does
+                        # not cover.
+                        context=plan_content,
                         output_dir=str(phase_dir),
                         plan_file=str(plan_path),
                         model=args.validation_model,
@@ -3497,6 +3655,14 @@ async def main(argv: Optional[List[str]] = None) -> int:
                         secondary_context_label=REVIEWED_CODE_CONTEXT_LABEL,
                         reviewed_code=reviewed_code,
                         extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
+                        context_document=plan_document,
+                        secondary_document=reviewed_code_document(
+                            secondary, cut_report
+                        ),
+                        runner_read_refusal=materialization_read_refusal(
+                            args, str(plan_path)
+                        ),
+                        phase="code-review",
                     )
 
                     # Save validation task instructions

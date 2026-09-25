@@ -1009,6 +1009,31 @@ class TestTheHostFanOutPartition:
             f"so the entrypoint seeds it no home"
         )
 
+    def test_a_hand_built_host_row_seeds_its_runner_too(self):
+        """The credential-free fixtures build `Row` by hand, not from the matrix.
+
+        Discovery, documented-invocation and the codex package probes name
+        `runner="opencode:stub/stub-model"` and no helper. Before `row_helpers`
+        the entrypoint seeded no `/work/homes/opencode` for them, so row 5's
+        runner preflight read `opencode auth list` against an empty home, saw
+        `0 credentials`, and refused every one of those rows
+        `not_authenticated` (measured on opencode 1.18.32, 2026-09-25).
+        """
+        bare = harness.Row(row_id="discovery-codex", lane="host", host="codex",
+                           creds="none", spec=["opencode:stub/stub-model"],
+                           runner="opencode:stub/stub-model")
+        assert harness.row_helpers(bare) == ["opencode"]
+        # A matrix-built row's list already carries its runner: untouched, so
+        # its rendered argv stays byte-identical.
+        listed = harness.Row(row_id="r", lane="host", host="codex",
+                             creds="openrouter", runner="opencode:stub/stub-model",
+                             helpers=["pi", "opencode", "grok"])
+        assert harness.row_helpers(listed) == ["pi", "opencode", "grok"]
+        # The provider lane is not a host row: its helpers are its own business.
+        provider = harness.Row(row_id="p", lane="provider", cli="codex",
+                               runner="opencode:stub/stub-model")
+        assert harness.row_helpers(provider) == []
+
 
 # --------------------------------------------------------------------------- #
 # T3a: the fan-out list has to survive every layer between the matrix row and

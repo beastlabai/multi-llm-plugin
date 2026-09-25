@@ -656,6 +656,63 @@ def tasks_of(document: Dict[str, Any]) -> List[Dict[str, Any]]:
     return list(listed or [])
 
 
+def file_bytes_sha256(path: Optional[str]) -> str:
+    """Full sha256 hex digest of a file's **bytes**, or ``""`` when unreadable.
+
+    Unlike :func:`file_content_hash` (text-decoded, truncated to 16 hex for the
+    ``inputs`` block) this is the byte-exact identity a batch result file is
+    bound by (§7.1/§7.3): ``validation.json``'s ``metadata.batch_sha256`` and the
+    executor's ``batch_provenance`` rows. Content, never mtime — a ``cp -p``
+    restore keeps an old mtime and a ``git checkout`` sets a new one, and
+    neither changes what the file says.
+    """
+    if not path:
+        return ""
+    try:
+        return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
+def task_round(tasks: Sequence[Dict[str, Any]]) -> str:
+    """A fingerprint of one materialized round's task → output mapping (§7.1a).
+
+    Revalidation reuses the ``validation_batch_<n>.json`` names with a different
+    subset mapping, so a filename alone cannot say which round a batch file (or
+    a hash recorded against it) belongs to. The round is the sha256 of the
+    canonical ``(task_id, batch_index, output_name, group_ids, group_indices)``
+    list of every non-human task: the same materialization always yields the
+    same value, and a round that maps any name to different groups does not.
+    Prompts are deliberately excluded — which *groups* a file answers is what a
+    merge depends on.
+    """
+    rows = [
+        {
+            "task_id": task.get("task_id"),
+            "batch_index": task.get("batch_index"),
+            "output_name": task.get("output_name"),
+            "group_ids": task.get("group_ids"),
+            "group_indices": task.get("group_indices"),
+        }
+        for task in tasks
+        if isinstance(task, dict) and task.get("executor_role") != "human"
+    ]
+    canonical = json.dumps(rows, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def batch_manifest(document: Dict[str, Any]) -> Dict[str, str]:
+    """``{kind, round}`` for a batched task file (§7.1a/§7.3a).
+
+    ``kind`` defaults to ``validation`` — the kind every validation-family
+    reader already assumes for a document that omits it.
+    """
+    return {
+        "kind": str(document.get("kind") or "validation"),
+        "round": task_round(tasks_of(document)),
+    }
+
+
 def make_task_file(
     *,
     kind: str,
@@ -962,6 +1019,17 @@ def refuse_reason(
             f"was dispatched."
         )
     if task.get("context_mode") == "workspace-read" and not supports_workspace_reads:
+        if task.get("kind") in ("validation", "revalidation"):
+            # §2.3 step 4a, at dispatch: a batch materialized to name its
+            # snapshot by path is never re-materialized inline behind the
+            # operator's back — it fails with a named error instead.
+            return (
+                f"{task.get('kind')} batch {task.get('batch_index', task_id)} "
+                f"needs workspace reads; runner {runner} cannot read files; "
+                f"rematerialize with a capable runner (task {task_id}: "
+                f"context_mode 'workspace-read' names a hash-bound snapshot by "
+                f"path). Nothing was dispatched."
+            )
         return (
             f"Task {task_id}: context_mode is 'workspace-read', which requires a "
             f"runner declaring supports_workspace_reads; {runner} does not. "

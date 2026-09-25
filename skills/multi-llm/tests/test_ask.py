@@ -1159,7 +1159,7 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
         from utils.providers import codex as codex_module
         from utils.providers.base import PROFILE_GENERATE
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         broken = ["sh", "-c", f"echo '{self.BWRAP_LINE}' >&2; exit 1"]
         provider = registry.get_provider("codex")
         monkeypatch.setattr(
@@ -1274,9 +1274,10 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
         assert reason == (
 "[SANDBOX_BYPASSED] codex: the working tree changed during this "
             "unsandboxed slot's window (leak.md) while 0 other boundary-less "
-            "slots in this fan-out could also write to it; the check cannot "
-            "tell which slot made the change, so this slot fails closed and "
-            "its output is discarded"
+            "slots in this fan-out, or any other process writing to this "
+            "repository, could also have written it; the check cannot tell "
+            "who made the change, so this slot fails closed and its output is "
+            "discarded"
         )
         assert reason in read_answers(d)
         assert read_status(d)["models_completed"] == []
@@ -1284,6 +1285,48 @@ class TestTheAskFanoutGatesOnTheSandboxProbe:
         assert not os.path.exists(answer_file)
         assert os.path.exists(answer_file + ".violated")
         assert os.path.exists(os.path.join(root, "leak.md"))  # never restored
+
+    def test_a_clean_audited_ask_slot_keeps_its_answer_beside_a_foreign_change(
+        self, plan, monkeypatch, capsys
+    ):
+        """Plan §4.3 with option B's switch on: another process edits the tree
+        during the window, the slot's audited stream is clean, so the answer
+        counts and the change is reported as not attributed."""
+        import os
+        import subprocess
+
+        from utils import readonly_audit
+
+        monkeypatch.setattr(readonly_audit, "STREAM_AUDIT_EXEMPTION_ENABLED", True)
+        root = os.path.dirname(str(plan))
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+        subprocess.run(["git", "init", "-q"], cwd=root, check=True, env=env)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=root, check=True, env=env)
+        self._broken(monkeypatch)
+
+        class Invoker(FakeInvoker):
+            def __call__(self, prompt, model_spec, timeout=None, log_file=None,
+                         cwd=None, anchor=None, **kwargs):
+                with open(os.path.join(root, "someone-else.md"), "w",
+                          encoding="utf-8") as f:
+                    f.write("another session\n")
+                return {"success": True, "data": "An answer.", "details": {
+                    "sandbox": "bypassed",
+                    "readonly_audit": {"clean": True, "reason": "", "actions": 2},
+                }}
+
+        rc = run_ask(["--plan-file", str(plan), "--question", "Q",
+                      "--models", "codex:gpt-5.2-codex"], Invoker())
+        assert rc == 0
+        d = qdir(plan, "Q")
+        assert read_status(d)["models_completed"] == ["codex:gpt-5.2-codex"]
+        out = capsys.readouterr().out
+        assert "not attributed" in out and "(someone-else.md)" in out
+        entry = read_status(d)["progress"]["models"]["codex:gpt-5.2-codex"]
+        assert "not attributed" in entry["warning"]
+        assert entry["readonly_audit"]["clean"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -1383,7 +1426,7 @@ def break_the_codex_sandbox(monkeypatch, policy="off"):
     from utils.providers import codex as codex_module
     from utils.providers.base import PROFILE_GENERATE
 
-    monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
     line = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
     broken = ["sh", "-c", f"echo '{line}' >&2; exit 1"]
     provider = registry.get_provider("codex")

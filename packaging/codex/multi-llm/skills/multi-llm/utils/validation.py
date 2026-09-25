@@ -40,11 +40,15 @@ try:
     from .subagent_tasks import (
         PromptBudget,
         TaskFileError,
+        batch_manifest,
         build_inputs,
+        content_hash,
+        file_bytes_sha256,
         file_content_hash,
         make_task,
         make_task_file,
         split_indices,
+        tasks_of,
     )
 except ImportError:
     from utils.llm_client import invoke_for_json
@@ -71,11 +75,15 @@ except ImportError:
     from utils.subagent_tasks import (
         PromptBudget,
         TaskFileError,
+        batch_manifest,
         build_inputs,
+        content_hash,
+        file_bytes_sha256,
         file_content_hash,
         make_task,
         make_task_file,
         split_indices,
+        tasks_of,
     )
 
 
@@ -91,6 +99,13 @@ except ImportError:
 #: tunable — reached no validator, and four of the nine verdicts cited exactly
 #: those sections (they were right only because that runner could open the file
 #: itself, which ``context_mode: inline`` does not promise).
+#:
+#: Above the limit a plan or tasks document is no longer silently cut: the
+#: excerpt stays (so prompts are deterministic and the common case needs no
+#: read) and the round's hash-bound snapshot is named by path, the task
+#: materializing ``context_mode: workspace-read`` (§2.3 of
+#: ``plans/validation-context-by-path-and-codex-0156-fallout.md``). Only a
+#: document with no readable file keeps the bare cut, and that is surfaced.
 #:
 #: What the raise costs, checked both ways. The **runner**: a prompt never
 #: reaches a command line on a ``stdin``/``file`` transport and is unbounded on
@@ -110,11 +125,14 @@ VALIDATION_CONTEXT_LIMIT = 60000
 #: batch count (D2f's own worked example is ~300–400 KB for ten batches). The
 #: lever that shrinks it is a *larger* ``max_per_batch`` — fewer batches means
 #: fewer copies of the excerpt — bounded above by the D2d per-task budget.
-#: Crossing this ceiling is **reported, not resolved**: D2f's remedy is a
-#: downgrade to ``context_mode: workspace-read``, which no generator in this
-#: codebase emits (recorded as a deviation in
-#: ``plans/host-harness-portability.md``), and failing a phase outright would
-#: throw away a completed fan-out over a scratch file being large.
+#: Crossing this ceiling is **reported, not resolved**. Validation now emits
+#: ``context_mode: workspace-read`` for an over-limit document (§2.3 of
+#: ``plans/validation-context-by-path-and-codex-0156-fallout.md``), but that is
+#: decided per document by :data:`VALIDATION_CONTEXT_LIMIT`, never by this
+#: file total: the excerpt stays in every batch either way, so a path cannot
+#: shrink the file, and failing a phase outright would throw away a completed
+#: fan-out over a scratch file being large (the D2f deviation note in
+#: ``plans/host-harness-portability.md`` says the same).
 VALIDATION_TASKS_TOTAL_CHARS_CEILING = 2_000_000
 
 #: Sidecar beside ``validation_batch_{N}.json``, holding exactly the bytes of
@@ -167,6 +185,39 @@ def _markdown_headings(text: str) -> Dict[int, List[Tuple[int, str]]]:
     return by_level
 
 
+def context_cut_sections(context: str, limit: int) -> Optional[Dict[str, Any]]:
+    """The section arithmetic of a head-kept cut, or ``None`` (no cut, no headings).
+
+    ``{"total", "kept", "cut", "dropped"}``: how many sections there are at the
+    level :func:`describe_context_cut` counts, how many the excerpt keeps whole,
+    the title of the one it cuts mid-way (``None`` when the cut lands on a
+    boundary) and the titles it never shows. Shared by the stderr line, the
+    in-prompt marker of a ``mode: path`` source and the published
+    ``validation_context`` entry, so all three count the same sections.
+    """
+    if len(context) <= limit:
+        return None
+    by_level = _markdown_headings(context)
+    if not by_level:
+        return None
+    level = next(
+        (lvl for lvl in sorted(by_level) if len(by_level[lvl]) > 1),
+        min(by_level),
+    )
+    headings = by_level[level]
+    # A section is whole when the next one still starts inside the excerpt.
+    starts = [start for start, _ in headings] + [len(context)]
+    kept = sum(1 for nxt in starts[1:] if nxt <= limit)
+    dropped = [title for start, title in headings if start >= limit]
+    cut_mid = len(headings) - kept - len(dropped)
+    return {
+        "total": len(headings),
+        "kept": kept,
+        "cut": headings[kept][1] if cut_mid else None,
+        "dropped": dropped,
+    }
+
+
 def describe_context_cut(context: str, limit: int) -> str:
     """What a head-kept cut of ``context`` at ``limit`` leaves out, by section.
 
@@ -182,21 +233,12 @@ def describe_context_cut(context: str, limit: int) -> str:
     single ``#`` title does not; a document with no headings (a diff, plain
     text) gets the empty string and the line stays as it was.
     """
-    if len(context) <= limit:
+    cut = context_cut_sections(context, limit)
+    if cut is None:
         return ""
-    by_level = _markdown_headings(context)
-    if not by_level:
-        return ""
-    level = next(
-        (lvl for lvl in sorted(by_level) if len(by_level[lvl]) > 1),
-        min(by_level),
-    )
-    headings = by_level[level]
-    # A section is whole when the next one still starts inside the excerpt.
-    starts = [start for start, _ in headings] + [len(context)]
-    kept = sum(1 for nxt in starts[1:] if nxt <= limit)
-    dropped = [title for start, title in headings if start >= limit]
-    cut_mid = len(headings) - kept - len(dropped)
+    headings_total = cut["total"]
+    kept = cut["kept"]
+    dropped = cut["dropped"]
 
     def name(title: str) -> str:
         title = title.strip()
@@ -204,9 +246,9 @@ def describe_context_cut(context: str, limit: int) -> str:
             title = title[: _CUT_SECTION_TITLE_CHARS - 1] + "…"
         return f"'{title}'"
 
-    parts = [f"kept {kept} of {len(headings)} sections whole"]
-    if cut_mid:
-        parts.append(f"cut {name(headings[kept][1])} mid-section")
+    parts = [f"kept {kept} of {headings_total} sections whole"]
+    if cut["cut"]:
+        parts.append(f"cut {name(cut['cut'])} mid-section")
     if dropped:
         named = ", ".join(name(title) for title in dropped[:_CUT_SECTIONS_NAMED])
         more = len(dropped) - _CUT_SECTIONS_NAMED
@@ -237,6 +279,599 @@ def excerpt_context_reported(
             file=sys.stderr,
         )
     return excerpt_context(context, limit)
+
+
+# ---------------------------------------------------------------------------
+# Validation context by path (plans/validation-context-by-path-and-codex-0156-fallout.md §2)
+# ---------------------------------------------------------------------------
+
+#: The context contract a validation round is materialized under (task 2.10).
+#: Contract 1 (no stamp) cut an over-limit document at the inline limit and
+#: said so only inside the prompt; contract 2 keeps the excerpt and names a
+#: hash-bound snapshot of the whole document by path. Every task file and every
+#: merged ``validation.json`` carries the number, so a round built under the
+#: old contract from an over-limit document can be recognised and retired
+#: rather than reused.
+CONTEXT_CONTRACT = 2
+
+#: The round's hash-bound plan snapshot, written into *each* validating phase
+#: dir (review-plan, review-tasks, review-code) from the one in-memory read of
+#: the plan. Never ``backup.md``: that keeps its rollback/record meaning and is
+#: a byte copy of the live file taken at a different moment.
+PLAN_SNAPSHOT_NAME = "validation-snapshot.md"
+#: review-tasks' second document, when ``tasks-backup.md`` does not hash-match.
+TASKS_SNAPSHOT_NAME = "validation-tasks-snapshot.md"
+TASKS_BACKUP_NAME = "tasks-backup.md"
+#: A revalidation judges the *current* document (the one the apply step just
+#: wrote), bound to its own fresh snapshot — never overwriting the original
+#: round's ``validation-snapshot.md``, which the round's task file still binds.
+REVALIDATION_SNAPSHOT_NAME = "revalidation-snapshot.md"
+
+#: The bare cut :func:`excerpt_context` appends — what every contract-1 prompt
+#: over the limit ends its context block with, and the evidence 2.10 reads.
+LEGACY_TRUNCATION_MARKER = "[... truncated ...]"
+
+#: A verdict whose reason starts with this is a validator saying it could not
+#: read the document it was pointed at (§2.3 step 3a); the aggregate counts them
+#: into ``validation_context.insufficient``.
+INSUFFICIENT_CONTEXT_PREFIX = "insufficient-context:"
+
+#: The named refusal for a snapshot that moved or vanished under a round.
+SNAPSHOT_ERROR = "validation snapshot changed/missing; re-run validation"
+
+#: Labels a ``mode: path`` source may carry. A diff and review-code's
+#: reviewed-code block never get a path (2.1b, 2.6).
+PATH_CAPABLE_LABELS = ("plan", "tasks")
+
+_DOCUMENT_NOUN = {"plan": "plan", "tasks": "tasks file"}
+
+
+class ValidationContextError(TaskFileError):
+    """A validation round cannot bind its context; exit 3, nothing dispatched."""
+
+
+def _bytes_sha256(data: bytes) -> str:
+    import hashlib
+
+    return hashlib.sha256(data).hexdigest()
+
+
+def decode_document(data: bytes, path: str) -> str:
+    """Decode a document's bytes the way the round's excerpt is derived from them.
+
+    Strict UTF-8 plus universal-newline translation — what ``read_plan``'s
+    text-mode ``open`` did — so the excerpt a prompt carries is the text a
+    reader of the file sees. The hash is always taken over the **bytes**, never
+    over this. A document that does not decode refuses the round with a named
+    error instead of hashing to ``""`` (which ``file_content_hash`` does).
+    """
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValidationContextError(
+            f"{path} is not valid UTF-8 ({exc}); a validation round refuses a "
+            f"document it cannot excerpt and hash from the same bytes. Re-save "
+            f"it as UTF-8 and re-run. Nothing was dispatched."
+        ) from exc
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
+class BoundDocument:
+    """One context document bound for a validation round (§2.3 steps 5 and 7).
+
+    ``text`` is what the excerpt is cut from, ``sha256``/``size`` are over the
+    bytes the round read once, and ``path`` is the one absolute path a prompt
+    may name for it — a snapshot inside the phase dir (``in_phase_dir``), or,
+    only when the snapshot could not be written and the live file still
+    hash-matches, the live file. ``path is None`` means nothing readable is
+    bound and ``reason`` says why; an over-limit source then materializes
+    ``mode: truncated``. ``forced_truncated`` marks a block the caller already
+    cut on its own budget (review-code's reviewed-code windows), which is
+    truncated whatever its final length.
+    """
+
+    def __init__(
+        self,
+        *,
+        label: str,
+        text: str,
+        sha256: str,
+        size: int,
+        path: Optional[str] = None,
+        in_phase_dir: bool = False,
+        reason: Optional[str] = None,
+        forced_truncated: bool = False,
+        dropped_files: Optional[List[str]] = None,
+        source_path: Optional[str] = None,
+        files_total: Optional[int] = None,
+    ) -> None:
+        self.label = label
+        self.text = text
+        self.sha256 = sha256
+        self.size = size
+        self.path = path
+        self.in_phase_dir = in_phase_dir
+        self.reason = reason
+        self.forced_truncated = forced_truncated
+        self.dropped_files = list(dropped_files) if dropped_files else None
+        self.source_path = source_path
+        self.files_total = files_total
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"BoundDocument(label={self.label!r}, size={self.size}, "
+            f"path={self.path!r}, reason={self.reason!r})"
+        )
+
+
+def _atomic_write_bytes(target: str, data: bytes) -> None:
+    """temp file + ``os.replace``, so a reader never sees a half-written snapshot."""
+    tmp = os.path.join(
+        os.path.dirname(target), f".{os.path.basename(target)}.{os.getpid()}.tmp"
+    )
+    try:
+        with open(tmp, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp, target)
+    except OSError:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def bind_document_file(
+    source_path: str,
+    phase_dir: str,
+    *,
+    label: str = "plan",
+    snapshot_name: str = PLAN_SNAPSHOT_NAME,
+    reuse_names: Tuple[str, ...] = (),
+    data: Optional[bytes] = None,
+) -> BoundDocument:
+    """Read a document once, as bytes, and bind a snapshot of exactly those bytes.
+
+    One read, one snapshot, one hash domain (§2.3 step 5): the snapshot is
+    written from the bytes read here, never copied from the live path, so its
+    sha256 is the recorded one by construction. ``reuse_names`` are existing
+    phase-dir files that may stand in for the snapshot when their raw sha256
+    matches (review-tasks' ``tasks-backup.md``). When the snapshot cannot be
+    written, the live file is named instead only if it still hash-matches the
+    bytes read; otherwise nothing is bound and the source will be surfaced as
+    ``mode: truncated``.
+
+    Raises:
+        ValidationContextError: the document is not UTF-8.
+        OSError: the document itself cannot be read (the caller's existing
+            "cannot read the plan" handling applies).
+    """
+    if data is None:
+        data = Path(source_path).read_bytes()
+    text = decode_document(data, source_path)
+    digest = _bytes_sha256(data)
+    common = dict(label=label, text=text, sha256=digest, size=len(data),
+                  source_path=os.path.abspath(source_path))
+    for name in reuse_names:
+        candidate = os.path.join(phase_dir, name)
+        if file_bytes_sha256(candidate) == digest:
+            return BoundDocument(
+                path=os.path.abspath(candidate), in_phase_dir=True, **common
+            )
+    target = os.path.join(phase_dir, snapshot_name)
+    try:
+        os.makedirs(phase_dir, exist_ok=True)
+        _atomic_write_bytes(target, data)
+        return BoundDocument(path=os.path.abspath(target), in_phase_dir=True, **common)
+    except OSError as exc:
+        live = file_bytes_sha256(source_path)
+        if live and live == digest:
+            print(
+                f"Warning: could not write {target} ({exc}); the validation "
+                f"prompts name the live file, which still matches the content "
+                f"read.",
+                file=sys.stderr,
+            )
+            return BoundDocument(path=os.path.abspath(source_path), **common)
+        return BoundDocument(
+            reason=(
+                f"snapshot {snapshot_name} could not be written ({exc}) and "
+                f"{os.path.basename(source_path)} no longer matches the content "
+                f"read"
+            ),
+            **common,
+        )
+
+
+def bind_document_text(
+    text: str,
+    *,
+    label: str,
+    reason: Optional[str] = None,
+    forced_truncated: bool = False,
+    dropped_files: Optional[List[str]] = None,
+    files_total: Optional[int] = None,
+) -> BoundDocument:
+    """A document with no file to name (a diff, review-code's reviewed-code block)."""
+    data = text.encode("utf-8")
+    return BoundDocument(
+        label=label,
+        text=text,
+        sha256=_bytes_sha256(data),
+        size=len(data),
+        reason=reason or "the block has no file a validator could read",
+        forced_truncated=forced_truncated,
+        dropped_files=dropped_files,
+        files_total=files_total,
+    )
+
+
+def _marker_title(title: str) -> str:
+    title = title.lstrip("#").strip()
+    if len(title) > _CUT_SECTION_TITLE_CHARS:
+        title = title[: _CUT_SECTION_TITLE_CHARS - 1] + "…"
+    return title
+
+
+def path_marker(
+    context: str, *, label: str, path: str, limit: int = VALIDATION_CONTEXT_LIMIT
+) -> str:
+    """The ``[... … truncated at N of M chars; …]`` marker of a ``mode: path`` source.
+
+    Ask's marker (``ask_orchestrator.build_inline_plan``), extended with the
+    sections the excerpt does not show and a read rule that is **not** tied to
+    a citation: an absence claim ("the plan never defines retention") may cite
+    an early section or none while its answer sits after the cut.
+    """
+    noun = _DOCUMENT_NOUN.get(label, label)
+    cut = context_cut_sections(context, limit)
+    if cut is not None and (cut["cut"] or cut["dropped"]):
+        names = ([f"{_marker_title(cut['cut'])} (cut)"] if cut["cut"] else []) + [
+            _marker_title(title) for title in cut["dropped"]
+        ]
+        not_shown = f"sections not shown: {', '.join(names)}"
+    else:
+        not_shown = f"everything after char {limit} is not shown"
+    return (
+        f"[... {noun} truncated at {limit} of {len(context)} chars; {not_shown}. "
+        f"The file at {path} is the {noun} under review. Read it in full before "
+        f"judging any suggestion that cites these sections, and before judging "
+        f"any claim that the {noun} omits, never defines or never says "
+        f"something, whichever section it cites ...]"
+    )
+
+
+def build_context_source(
+    block_text: str,
+    document: Optional[BoundDocument],
+    *,
+    label: str,
+    block: str,
+    phase_dir: str,
+    limit: int = VALIDATION_CONTEXT_LIMIT,
+    read_refusal: Optional[str] = None,
+) -> Tuple[str, Dict[str, Any]]:
+    """``(excerpt, context source record)`` for one context block (§2.3 step 7).
+
+    ``block_text`` is what the prompt embeds (not always ``document.text``: a
+    caller may frame the document). The mode:
+
+    * ``inline`` — the block fits, and no caller cut it on its own budget;
+    * ``path`` — over the limit, a plan or tasks document with a readable bound
+      file, and a runner that can read it (``read_refusal is None``);
+    * ``truncated`` — every other over-limit case, with the reason.
+
+    The record is JSON-able and is what the task stores under
+    ``context_sources``: ``path`` relative to the phase dir when the file is a
+    snapshot there (so a moved phase dir can rebind it, 2.9), ``abs_path`` the
+    absolute path the prompt names.
+    """
+    size = document.size if document is not None else len(block_text.encode("utf-8"))
+    record: Dict[str, Any] = {
+        "label": label,
+        "kind": label,
+        "path": None,
+        "abs_path": None,
+        "sha256": document.sha256 if document is not None else None,
+        "bytes": size,
+        "chars_shown": len(block_text),
+        "truncated": False,
+        "mode": "inline",
+    }
+    forced = bool(document is not None and document.forced_truncated)
+    if forced and document.dropped_files:
+        record["dropped_files"] = list(document.dropped_files)
+    if forced and document.files_total:
+        # review-code's reviewed-code block counts cited FILES, not headings.
+        record["sections_total"] = document.files_total
+        record["sections_shown"] = document.files_total - len(document.dropped_files or [])
+    if len(block_text) <= limit and not forced:
+        return block_text, record
+
+    cut = context_cut_sections(block_text, limit)
+    if cut is not None and "sections_total" not in record:
+        record["sections_total"] = cut["total"]
+        record["sections_shown"] = cut["kept"]
+        record["dropped_sections"] = (
+            ([cut["cut"]] if cut["cut"] else []) + list(cut["dropped"])
+        )
+    over = len(block_text) > limit
+    record["chars_shown"] = min(len(block_text), limit)
+    record["truncated"] = True
+
+    readable = (
+        not forced
+        and over
+        and document is not None
+        and document.path
+        and label in PATH_CAPABLE_LABELS
+    )
+    if readable and read_refusal is None:
+        abs_path = str(document.path)
+        record["mode"] = "path"
+        record["abs_path"] = abs_path
+        record["path"] = (
+            os.path.relpath(abs_path, os.path.abspath(phase_dir))
+            if document.in_phase_dir else abs_path
+        )
+        record["in_phase_dir"] = bool(document.in_phase_dir)
+        excerpt = block_text[:limit] + "\n\n" + path_marker(
+            block_text, label=label, path=abs_path, limit=limit
+        )
+        detail = describe_context_cut(block_text, limit)
+        print(
+            f"[VALIDATION_CONTEXT_EXCERPTED] {label} {len(block_text) - limit} "
+            f"chars over" + (f"; {detail}" if detail else "")
+            + f"; full {_DOCUMENT_NOUN.get(label, label)} at {abs_path}",
+            file=sys.stderr,
+        )
+        return excerpt, record
+
+    record["mode"] = "truncated"
+    if forced:
+        reason = document.reason
+    elif readable:
+        reason = read_refusal
+    elif document is None:
+        reason = "no readable file is bound to this block"
+    elif label not in PATH_CAPABLE_LABELS:
+        reason = f"a {label} block is never named by path"
+    else:
+        reason = document.reason or "no readable file is bound to this block"
+    record["reason"] = reason
+    if over:
+        excerpt = excerpt_context_reported(block_text, block, limit)
+    else:
+        # Cut upstream on the caller's own budget (review-code's windows), and
+        # already reported there; the block itself fits.
+        excerpt = block_text
+    if reason:
+        print(f"  (reason: {reason})", file=sys.stderr)
+    return excerpt, record
+
+
+def context_sources_of(document: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Every task's ``context_sources`` records in a task file, flattened."""
+    records: List[Dict[str, Any]] = []
+    for task in tasks_of(document):
+        for record in task.get("context_sources") or []:
+            if isinstance(record, dict):
+                records.append(record)
+    return records
+
+
+def verify_context_sources(document: Dict[str, Any], phase_dir: str) -> bool:
+    """Re-hash every ``mode: path`` source; rebind a moved phase dir (2.3 step 5, 2.9).
+
+    Runs right before dispatch, on every resume and on every ``--reaggregate``
+    that reuses a materialized round. Each record's snapshot is resolved in the
+    *current* phase dir (its ``path`` is phase-dir-relative) and its raw sha256
+    compared with the recorded one. A missing file or a moved hash refuses the
+    round (:data:`SNAPSHOT_ERROR`); it never re-points at whatever is on disk.
+    When the phase dir was copied or moved, the prompt still names the old
+    absolute path, so it is rematerialized with the rebound one — a prompt that
+    names a path outside the current phase dir is never dispatched.
+
+    Returns:
+        Whether any task was rebound (the caller persists the document and its
+        prompt sidecars).
+
+    Raises:
+        ValidationContextError: a snapshot is missing or changed.
+    """
+    changed = False
+    here = os.path.abspath(phase_dir)
+    for task in tasks_of(document):
+        for record in task.get("context_sources") or []:
+            if not isinstance(record, dict) or record.get("mode") != "path":
+                continue
+            old_abs = str(record.get("abs_path") or "")
+            rel = record.get("path")
+            if record.get("in_phase_dir") and rel and not os.path.isabs(str(rel)):
+                expected = os.path.normpath(os.path.join(here, str(rel)))
+                task_id = task.get("task_id", "<unnamed>")
+                # 2.9: an in-phase-dir record rebinds only inside the current
+                # phase dir. A forged or hand-edited ``..`` path would otherwise
+                # rebind the prompt to a file outside it.
+                if os.path.commonpath([here, expected]) != here:
+                    raise ValidationContextError(
+                        f"{SNAPSHOT_ERROR}: {rel} resolves to {expected}, outside "
+                        f"the phase dir (task {task_id}, {record.get('label')}). "
+                        f"Phase dir: {here}. Re-run the phase with --force to "
+                        f"rematerialize it. Nothing was dispatched."
+                    )
+            else:
+                expected = old_abs
+            actual = file_bytes_sha256(expected)
+            task_id = task.get("task_id", "<unnamed>")
+            if not actual:
+                raise ValidationContextError(
+                    f"{SNAPSHOT_ERROR}: {expected} is missing (task {task_id}, "
+                    f"{record.get('label')}). Phase dir: {here}. Re-run the phase "
+                    f"with --force to rematerialize it. Nothing was dispatched."
+                )
+            if actual != record.get("sha256"):
+                raise ValidationContextError(
+                    f"{SNAPSHOT_ERROR}: {expected} changed (sha256 {actual[:12]} != "
+                    f"recorded {str(record.get('sha256'))[:12]}; task {task_id}, "
+                    f"{record.get('label')}). Phase dir: {here}. Re-run the phase "
+                    f"with --force to rematerialize it. Nothing was dispatched."
+                )
+            if old_abs and expected != old_abs:
+                task["prompt"] = str(task.get("prompt", "")).replace(old_abs, expected)
+                if task.get("prompt_lines"):
+                    task["prompt_lines"] = task["prompt"].count("\n") + 1
+                record["abs_path"] = expected
+                changed = True
+                print(
+                    f"[VALIDATION_CONTEXT_REBOUND] {task_id}: {old_abs} -> "
+                    f"{expected} (sha256 verified)",
+                    file=sys.stderr,
+                )
+    return changed
+
+
+def legacy_context_round_reason(
+    phase_dir: str,
+    tasks_name: str = "validation_tasks.json",
+) -> Optional[str]:
+    """Why a round in ``phase_dir`` was built under context contract 1, or ``None``.
+
+    A task file with no ``context_contract`` (or an older one) whose stored
+    prompts carry the contract-1 cut (:data:`LEGACY_TRUNCATION_MARKER`) judged
+    an over-limit document from its head alone. Its prompts, and every verdict
+    reached from them, must not be reused (task 2.10). A round under the limit
+    carries no marker and stays valid.
+    """
+    path = os.path.join(phase_dir, tasks_name)
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            document = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    try:
+        contract = int(document.get("context_contract") or 1)
+    except (TypeError, ValueError):
+        contract = 1
+    if contract >= CONTEXT_CONTRACT:
+        return None
+    truncated = [
+        str(task.get("task_id", "?"))
+        for task in tasks_of(document)
+        if LEGACY_TRUNCATION_MARKER in str(task.get("prompt", ""))
+    ]
+    if not truncated:
+        return None
+    return (
+        f"validation built from truncated context (contract {contract}); "
+        f"rematerializing — {tasks_name} batches {', '.join(truncated[:3])}"
+        + (" ..." if len(truncated) > 3 else "")
+        + f" cut the document at {VALIDATION_CONTEXT_LIMIT} chars"
+    )
+
+
+def count_insufficient(results: List[Dict[str, Any]]) -> int:
+    """Verdicts whose reason starts ``insufficient-context:`` (§2.3 step 3a)."""
+    return sum(
+        1
+        for result in results or []
+        if isinstance(result, dict)
+        and str(result.get("reason", "")).strip().lower().startswith(
+            INSUFFICIENT_CONTEXT_PREFIX
+        )
+    )
+
+
+def publish_validation_context(
+    phase_dir: str,
+    sources: List[Dict[str, Any]],
+    insufficient: Optional[int] = None,
+    *,
+    phase: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """The one writer of ``.status.json``'s ``validation_context`` (§2.4).
+
+    Aggregates the round's context source records (one entry per document
+    label, worst mode wins), writes the object wholesale with
+    ``update_status`` and records the same object on the dispatcher's result
+    line (``cli_common.record_validation_context``); a round with a
+    ``truncated`` source also sets the result ``notice`` (a round without one
+    clears it). When every source is inline the key is deleted
+    (``remove_status_keys``, never written ``null``) and nothing is recorded,
+    so a rerun whose context fits leaves no trace of an earlier round.
+
+    Returns:
+        The published object, or ``None`` when the round is all inline.
+    """
+    try:
+        from .validation_context import (
+            build_validation_context,
+            validation_context_notice,
+        )
+        from .status_file import read_status, remove_status_keys, update_status
+        from . import cli_common as _cli
+    except ImportError:  # pragma: no cover - flat-import fallback
+        from utils.validation_context import (  # type: ignore[no-redef]
+            build_validation_context,
+            validation_context_notice,
+        )
+        from utils.status_file import (  # type: ignore[no-redef]
+            read_status, remove_status_keys, update_status,
+        )
+        from utils import cli_common as _cli  # type: ignore[no-redef]
+
+    obj = build_validation_context(
+        phase=phase or os.path.basename(os.path.abspath(phase_dir)),
+        sources=sources,
+        limit=VALIDATION_CONTEXT_LIMIT,
+        insufficient=insufficient,
+    )
+    if obj is None:
+        # Remove an earlier round's key, but never create a checkpoint just to
+        # say "nothing": a phase with no .status.json keeps having none.
+        # ``update_status`` merges and cannot delete: ``{"k": None}`` would
+        # leave a ``"validation_context": null`` member behind (§7.2a).
+        if "validation_context" in read_status(phase_dir):
+            remove_status_keys(phase_dir, ["validation_context"])
+        recorder = getattr(_cli, "record_validation_context", None)
+        if recorder is not None:
+            recorder(None)
+        _cli.record_notice(None)
+        return None
+    update_status(phase_dir, {"validation_context": obj})
+    recorder = getattr(_cli, "record_validation_context", None)
+    if recorder is not None:
+        recorder(obj)
+    # A same-process republish must not keep an earlier round's sentence.
+    _cli.record_notice(validation_context_notice(obj) or None)
+    return obj
+
+
+def publish_from_task_document(
+    phase_dir: str,
+    document: Optional[Dict[str, Any]],
+    results: Optional[List[Dict[str, Any]]] = None,
+    *,
+    phase: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """Re-publish at aggregation from a task file's own recorded sources.
+
+    The aggregation callers (first run, ``--reaggregate``, the executor lane)
+    publish from the bound round's ``context_sources`` — never from the live
+    plan — plus the ``insufficient`` count of the merged verdicts.
+    """
+    if not isinstance(document, dict):
+        return None
+    return publish_validation_context(
+        phase_dir,
+        context_sources_of(document),
+        count_insufficient(results or []) if results is not None else None,
+        phase=phase,
+    )
 
 
 def materialized_total_chars(tasks: List[Dict[str, Any]]) -> int:
@@ -848,47 +1483,210 @@ def apply_validation_to_groups(
     return updated_groups
 
 
-def stale_validation_reason(
+def _short_hash(value: Optional[str]) -> str:
+    """The first 12 hex of a sha256 for a log line (``missing`` when empty)."""
+    return value[:12] if value else "missing"
+
+
+def _read_task_manifest(tasks_path: Optional[Path]) -> Tuple[Optional[Dict[str, str]], List[Dict[str, Any]]]:
+    """``(batch_manifest, tasks)`` of the task file at ``tasks_path``, or ``(None, [])``.
+
+    A plain read, not :func:`subagent_tasks.read_task_file`: this only asks
+    *which round* the file describes, and the caller that goes on to use the
+    file runs the full version/inputs guard itself.
+    """
+    if tasks_path is None:
+        return None, []
+    try:
+        with open(tasks_path, 'r', encoding='utf-8') as f:
+            document = json.load(f)
+    except (OSError, ValueError):
+        return None, []
+    if not isinstance(document, dict):
+        return None, []
+    return batch_manifest(document), tasks_of(document)
+
+
+def _batch_file_group_hashes(path: Path) -> set:
+    """The ``group_hash`` values a batch file's verdicts echo (empty when unreadable)."""
+    try:
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return set()
+    results = data.get("groups", []) if isinstance(data, dict) else data
+    if not isinstance(results, list):
+        return set()
+    return {
+        str(r.get("group_hash") or r.get("group_id"))
+        for r in results
+        if isinstance(r, dict) and (r.get("group_hash") or r.get("group_id"))
+    }
+
+
+def validation_source_decision(
     validation_path: Path,
     grouped_path: Path,
-) -> Optional[str]:
-    """Why a ``validation.json`` must not be trusted over the batch files, or ``None``.
+    tasks_path: Optional[Path] = None,
+) -> Tuple[Optional[str], str]:
+    """``(stale_reason, use_note)`` for a ``validation.json`` (D7, §7.1).
 
-    A ``validation.json`` belongs to the grouping it was produced for. Since D7
-    it records that grouping as ``metadata.grouped_sha256`` — the same value
-    ``validation_tasks.json`` binds under ``inputs`` — and is honoured only when
-    it matches the ``grouped.json`` sitting beside it now. A file without the
-    key is legacy: its grouping is unknowable, so it is honoured only if no
-    ``validation_batch_*.json`` in the same dir is newer than it (mtime), because
-    a batch written after it is evidence of a validation round it did not come
-    from.
+    ``stale_reason`` is ``None`` when the file may be used, else the one-line
+    reason it must be retired and the batch files re-merged. ``use_note`` is the
+    parenthetical the caller prints when it *does* use the file, naming what was
+    checked (§7.1b).
 
-    Returns:
-        ``None`` when the file may be used, else a one-line reason for the log.
+    The checks, in order:
+
+    1. **Grouping (D7).** ``metadata.grouped_sha256`` must match the
+       ``grouped.json`` beside it now.
+    2. **Batch bytes (§7.1a).** A file written by ``merge_validation_batches``
+       records ``metadata.batch_sha256 = {batch_index: sha256}`` over the bytes
+       of every batch it merged, plus ``metadata.batch_manifest = {kind,
+       round}`` of the task file those batches answered. It is retired when a
+       listed non-``.stale`` batch's bytes now hash differently, a listed batch
+       is missing, the recorded ``kind``/``round`` differs from the current
+       ``validation_tasks.json`` (revalidation reuses the
+       ``validation_batch_<n>.json`` names with a different subset mapping), or
+       the current round has a batch file on disk the file never merged.
+       Content, never mtime: a ``cp -p`` restore keeps an old mtime and a
+       ``git checkout`` sets every mtime to now, and neither says anything
+       about which verdicts the file holds.
+    3. **Legacy fallback only.** A file with no ``batch_sha256`` (written before
+       §7.1, or by a writer that merges no batches of this round) keeps the old
+       mtime test: it is honoured only if no ``validation_batch_*.json`` beside
+       it is newer. No merge writes a file without the binding any more.
+
+    Hook point: a further check on a bound, up-to-date file (the context
+    contract, task 2.10) belongs after check 2, before the use note is built.
+
+    Args:
+        validation_path: The ``validation.json`` to judge.
+        grouped_path: The ``grouped.json`` it must belong to.
+        tasks_path: The current task file; defaults to the
+            ``validation_tasks.json`` beside ``validation_path``.
     """
     try:
         with open(validation_path, 'r', encoding='utf-8') as f:
             data = json.load(f)
     except (OSError, ValueError) as exc:
-        return f"could not read {validation_path.name}: {exc}"
+        return f"could not read {validation_path.name}: {exc}", ""
 
     metadata = data.get("metadata", {}) if isinstance(data, dict) else {}
+    if not isinstance(metadata, dict):
+        metadata = {}
     bound_hash = metadata.get("grouped_sha256")
+    grouping_note = ""
     if bound_hash:
         current_hash = file_content_hash(str(grouped_path))
-        if bound_hash == current_hash:
-            return None
-        return (
-            f"{validation_path.name} belongs to grouping {bound_hash}, current "
-            f"{grouped_path.name} is {current_hash or 'missing'}"
-        )
+        if bound_hash != current_hash:
+            return (
+                f"{validation_path.name} belongs to grouping {bound_hash}, current "
+                f"{grouped_path.name} is {current_hash or 'missing'}"
+            ), ""
+        grouping_note = f"bound to grouping {bound_hash}"
 
-    # Legacy file: no binding to check, so fall back to what the phase dir says
-    # happened after it was written.
+    batch_hashes = metadata.get("batch_sha256")
+    if isinstance(batch_hashes, dict):
+        phase_dir = validation_path.parent
+        if tasks_path is None:
+            tasks_path = phase_dir / "validation_tasks.json"
+        current_manifest, current_tasks = _read_task_manifest(tasks_path)
+        recorded_manifest = metadata.get("batch_manifest")
+        problems: List[str] = []
+        # The round check needs both sides: a file that merged no batch round
+        # (an internal validation) records none, and a task file deleted by hand
+        # leaves no current mapping for the recorded hashes to disagree with.
+        if isinstance(recorded_manifest, dict) and current_manifest is not None:
+            if (
+                recorded_manifest.get("kind") != current_manifest["kind"]
+                or recorded_manifest.get("round") != current_manifest["round"]
+            ):
+                return (
+                    f"{validation_path.name} was merged from a "
+                    f"{recorded_manifest.get('kind')} round "
+                    f"({_short_hash(recorded_manifest.get('round'))}), current "
+                    f"{tasks_path.name} is a {current_manifest['kind']} round "
+                    f"({_short_hash(current_manifest['round'])}); re-merging its "
+                    f"batch files"
+                ), ""
+        # A batch whose bytes moved is either a rewrite for *this* round (its
+        # verdicts echo this batch's group_ids, so re-merging picks them up) or
+        # another round's file of the same name — a revalidation reuses the
+        # `validation_batch_<n>.json` names for a different subset. Re-merging
+        # the latter under this round's group_ids discards every verdict as a
+        # foreign group_hash and reverts the groups to validation_failed, so it
+        # never retires the still-correct bound file.
+        group_ids_by_index = {
+            str(task.get("batch_index")): task.get("group_ids") or []
+            for task in current_tasks
+            if task.get("batch_index") is not None
+        }
+        foreign: List[str] = []
+        for index in sorted(batch_hashes, key=lambda k: (len(str(k)), str(k))):
+            name = f"validation_batch_{index}.json"
+            current = file_bytes_sha256(str(phase_dir / name))
+            recorded = batch_hashes[index]
+            if not current:
+                problems.append(f"{name} missing")
+            elif current != recorded:
+                echoed = _batch_file_group_hashes(phase_dir / name)
+                expected_ids = {str(g) for g in group_ids_by_index.get(str(index), [])}
+                if echoed and expected_ids and echoed != expected_ids:
+                    outside = len(echoed - expected_ids)
+                    absent = len(expected_ids - echoed)
+                    foreign.append(
+                        f"{name} belongs to another round (sha256 "
+                        f"{_short_hash(current)} != recorded {_short_hash(recorded)}; "
+                        f"its group_hash set differs from this batch's group_ids: "
+                        f"{outside} foreign, {absent} absent)"
+                    )
+                else:
+                    problems.append(
+                        f"{name} changed (sha256 {_short_hash(current)} != recorded "
+                        f"{_short_hash(recorded)})"
+                    )
+        if isinstance(recorded_manifest, dict) and current_manifest is not None:
+            listed = {str(index) for index in batch_hashes}
+            for task in current_tasks:
+                index = task.get("batch_index")
+                if index is None or str(index) in listed:
+                    continue
+                name = f"validation_batch_{index}.json"
+                if (phase_dir / name).exists():
+                    problems.append(f"{name} was never merged into it")
+        if problems:
+            total = len(current_tasks) or len(batch_hashes)
+            return (
+                f"Re-merging {total} batch files: {', '.join(problems + foreign)}"
+            ), ""
+        # 7.1d / task 2.10: a bound, up-to-date file is still not reusable when
+        # it predates the context contract and its round's prompts carry the
+        # contract-1 cut of an over-limit document.
+        legacy = _legacy_contract_reason(metadata, phase_dir)
+        if legacy:
+            return legacy, ""
+        batch_note = (
+            f"{len(batch_hashes)} batch hashes match" if batch_hashes
+            else "merged from no batch files"
+        )
+        if foreign:
+            # Refuse the re-merge: the bound file still holds this round's
+            # verdicts, and the batch bytes on disk answer a different subset.
+            batch_note = f"not re-merging: {', '.join(foreign)}"
+        parts = [p for p in (grouping_note, batch_note) if p]
+        return None, ", ".join(parts)
+
+    # Legacy file: no binding to its batches, so fall back to what the phase dir
+    # says happened after it was written — after the 2.10 check, which retires
+    # it outright when its round cut an over-limit document.
+    legacy = _legacy_contract_reason(metadata, validation_path.parent)
+    if legacy:
+        return legacy, ""
     try:
         validation_mtime = validation_path.stat().st_mtime
     except OSError as exc:
-        return f"could not stat {validation_path.name}: {exc}"
+        return f"could not stat {validation_path.name}: {exc}", ""
     # A retired round's `validation_batch_<n>.<stamp>.stale.json` (D7) matches
     # the glob too; it keeps its mtime through the rename and belongs to no
     # round this file could have come from.
@@ -900,11 +1698,43 @@ def stale_validation_reason(
     )
     if newer:
         return (
-            f"{validation_path.name} carries no grouped_sha256 and "
+            f"{validation_path.name} carries no batch_sha256 and "
             f"{len(newer)} batch file(s) are newer than it "
-            f"({', '.join(newer[:3])}{', ...' if len(newer) > 3 else ''})"
-        )
-    return None
+            f"({', '.join(newer[:3])}{', ...' if len(newer) > 3 else ''}) "
+            f"(legacy: no batch_sha256, mtime test)"
+        ), ""
+    parts = [p for p in (grouping_note, "legacy: no batch_sha256, mtime test") if p]
+    return None, ", ".join(parts)
+
+
+def _legacy_contract_reason(metadata: Dict[str, Any], phase_dir: Path) -> Optional[str]:
+    """7.1d: a ``validation.json`` from before contract 2 over an over-limit round."""
+    try:
+        contract = int(metadata.get("context_contract") or 1)
+    except (TypeError, ValueError):
+        contract = 1
+    if contract >= CONTEXT_CONTRACT:
+        return None
+    return legacy_context_round_reason(str(phase_dir))
+
+
+def stale_validation_reason(
+    validation_path: Path,
+    grouped_path: Path,
+    tasks_path: Optional[Path] = None,
+) -> Optional[str]:
+    """Why a ``validation.json`` must not be trusted over the batch files, or ``None``.
+
+    The reason half of :func:`validation_source_decision`, which documents the
+    rules: the ``grouped_sha256`` binding (D7), the ``batch_sha256`` +
+    ``batch_manifest`` binding to the exact batch bytes it merged (§7.1), and —
+    for a file without ``batch_sha256`` only — the legacy "a batch file is
+    newer" mtime test.
+
+    Returns:
+        ``None`` when the file may be used, else a one-line reason for the log.
+    """
+    return validation_source_decision(validation_path, grouped_path, tasks_path)[0]
 
 
 def _derive_model_from_results(validation_results: List[Dict[str, Any]]) -> Optional[str]:
@@ -919,7 +1749,20 @@ def _derive_model_from_results(validation_results: List[Dict[str, Any]]) -> Opti
     models. Returns ``None`` when no result carries the tag at all (a legacy
     caller, or results that never went through the batched merge).
     """
-    models = {r["_source_model"] for r in validation_results if r.get("_source_model")}
+    return join_model_names(
+        r["_source_model"] for r in validation_results if r.get("_source_model")
+    )
+
+
+def join_model_names(names: Any) -> Optional[str]:
+    """One ``metadata.model`` value from several: the single name, or the sorted,
+    comma-joined list — never ``"mixed"`` (§7.3b).
+
+    Shared by :func:`_derive_model_from_results` and the per-batch attribution
+    in ``merge_validation_batches``, so both de-duplicate the same way. Returns
+    ``None`` for no names at all.
+    """
+    models = {str(m) for m in names if m}
     if not models:
         return None
     # A subagent reports its own model name free-hand, and the same runner
@@ -940,6 +1783,9 @@ def save_validation_results(
     groups: Optional[List[Dict[str, Any]]] = None,
     grouped_file: Optional[str] = None,
     runner: Optional[str] = None,
+    runners: Optional[Dict[Any, str]] = None,
+    batch_sha256: Optional[Dict[Any, str]] = None,
+    batch_manifest: Optional[Dict[str, Any]] = None,
 ) -> None:
     """
     Save validation results to a JSON file with metadata.
@@ -977,6 +1823,16 @@ def save_validation_results(
             tool) path has no executor record to attribute. Does not change
             how ``model`` is derived; a caller that wants the authoritative
             spec to also win ``metadata.model`` passes it as both.
+        runners: ``{batch_index: model}`` — who answered each batch (§7.3b),
+            stored as ``metadata.runners`` so the per-batch answer survives a
+            joined ``model``.
+        batch_sha256: ``{batch_index: sha256}`` over the bytes of every batch
+            merged into this file (§7.1a). An empty dict is still a binding
+            (a writer that merged no batches); ``None`` omits the key and leaves
+            the file on the legacy mtime test in ``stale_validation_reason``.
+        batch_manifest: ``{kind, round}`` of the task file those batches
+            answered (§7.1a), so a hash recorded under one round is never
+            matched against another round's file of the same name.
     """
     if not model:
         model = _derive_model_from_results(validation_results) or "unknown"
@@ -1028,6 +1884,16 @@ def save_validation_results(
             "schema_version": "2.1",
             **({"runner": runner} if runner else {}),
             **({"grouped_sha256": grouped_sha256} if grouped_sha256 else {}),
+            **({"runners": {str(k): v for k, v in runners.items()}}
+               if runners is not None else {}),
+            **({"batch_sha256": {str(k): v for k, v in batch_sha256.items()}}
+               if batch_sha256 is not None else {}),
+            **({"batch_manifest": dict(batch_manifest)}
+               if batch_manifest is not None else {}),
+            # Task 2.10: the context contract these verdicts were reached
+            # under. A file without it, from a round whose context exceeded
+            # the limit, judged a cut document and is never reused.
+            "context_contract": CONTEXT_CONTRACT,
         }
     }
 
@@ -1527,6 +2393,11 @@ def prepare_batched_validation_tasks(
     reviewed_code: Optional[str] = None,
     extra_instructions: str = "",
     prompt_budget: Optional[PromptBudget] = None,
+    context_document: Optional[BoundDocument] = None,
+    secondary_document: Optional[BoundDocument] = None,
+    runner_read_refusal: Optional[Any] = None,
+    phase: Optional[str] = None,
+    publish: bool = True,
 ) -> Dict[str, Any]:
     """
     Prepare batched validation tasks for sequential subagent processing.
@@ -1579,6 +2450,27 @@ def prepare_batched_validation_tasks(
         prompt_budget: Optional D2d budget. Over-budget batches are split; a
             single group that still does not fit fails loudly rather than being
             truncated.
+        context_document: The round's bound primary document (§2.3 step 5):
+            the plan read once as bytes, with its hash-bound snapshot. Its text
+            hash becomes ``inputs.plan_sha256`` (label ``plan``) instead of a
+            re-read of the live ``plan_file``, and over the limit its snapshot
+            is what the prompt names. ``None`` keeps the legacy behaviour: no
+            path, and an over-limit block is ``mode: truncated``.
+        secondary_document: The same for the second block (review-tasks'
+            tasks file, label ``tasks``; review-code's reviewed-code block,
+            label ``reviewed-code``, which is never named by path).
+        runner_read_refusal: Who will read a ``mode: path`` source (§2.3 step
+            4a, decided at materialization): ``None`` (assume a capable reader
+            — every ``agent-readonly`` adapter declares workspace reads, and a
+            native host reads), a string (the reason no source may be named by
+            path, e.g. "runner R cannot read files"), or a callable taking the
+            absolute path and returning ``None`` or such a reason (a runner
+            that cannot read outside its cwd). An explicit ``prompt_budget``
+            whose ``supports_workspace_reads`` is false counts as a refusal.
+        phase: The phase name the published ``validation_context`` carries
+            (defaults to the phase dir's basename).
+        publish: Publish ``validation_context`` for this round (the
+            materialization caller of :func:`publish_validation_context`).
 
     Returns:
         Dict with:
@@ -1592,16 +2484,34 @@ def prepare_batched_validation_tasks(
           :func:`resolved_reaggregate_command`, never persisted (D1c)
     """
     grouped_file = str(Path(output_dir) / "grouped.json")
+    bound_plan = context_document if (
+        context_document is not None and context_document.label == "plan"
+    ) else None
+    bound_tasks = secondary_document if (
+        secondary_document is not None and secondary_document.label == "tasks"
+    ) else None
     inputs = build_inputs(
-        plan_file=plan_file,
+        # One read, one hash domain (§2.3 step 5): a bound document's hash is
+        # taken over the bytes the round read, never over a second read of the
+        # live file, so the excerpt, the snapshot and `inputs` cannot come from
+        # two versions. The value keeps the 16-char text-hash domain the
+        # resume guard and `state.plan_hash` compare in.
+        plan_file=None if bound_plan is not None else plan_file,
         grouped_file=grouped_file,
-        tasks_file=tasks_file,
+        tasks_file=None if bound_tasks is not None else tasks_file,
         diff_base=base_ref,
         reviewed_code=reviewed_code,
     )
+    if bound_plan is not None:
+        inputs["plan_sha256"] = content_hash(bound_plan.text)
+    if bound_tasks is not None and tasks_file:
+        inputs["tasks_sha256"] = content_hash(bound_tasks.text)
 
     if not groups:
+        if publish:
+            publish_validation_context(output_dir, [], phase=phase)
         empty = make_task_file(kind=kind, tasks=[], inputs=inputs, task_list_key="batches", extra={
+            "context_contract": CONTEXT_CONTRACT,
             "total_batches": 0,
             "batching_stats": estimate_validation_batching_stats([]),
             "grouped_file": grouped_file,
@@ -1632,12 +2542,71 @@ def prepare_batched_validation_tasks(
     # document is excerpted on its own budget rather than appended to the first:
     # concatenating would let a plan at the limit truncate the artifact under
     # review down to nothing, which is the failure two contexts exist to fix.
-    shared_context = excerpt_context_reported(context, "context")
-    shared_secondary = (
-        excerpt_context_reported(secondary_context, "secondary-context")
-        if secondary_context
-        else ""
+    #
+    # Each block becomes one context source record (§2.3 step 7): inline when
+    # it fits, `path` when it is over the limit and a readable hash-bound
+    # snapshot names the whole document, `truncated` otherwise — decided here,
+    # at materialization, and reported one stderr line per non-inline source.
+    if (
+        runner_read_refusal is None
+        or getattr(runner_read_refusal, "advisory_only", False)
+    ) and prompt_budget is not None and not getattr(
+        prompt_budget, "supports_workspace_reads", True
+    ):
+        runner_read_refusal = "the configured runner cannot read files"
+
+    def refusal_for(document: Optional[BoundDocument]) -> Optional[str]:
+        if runner_read_refusal is None:
+            return None
+        if callable(runner_read_refusal):
+            return runner_read_refusal(document.path) if (
+                document is not None and document.path
+            ) else None
+        return str(runner_read_refusal)
+
+    # With no bound document the label names the block's kind explicitly
+    # (plan | tasks | diff) — a "Tasks file" block is a tasks document, not a
+    # diff, so its notice and recorded reason name the right document.
+    if context_document is not None:
+        primary_label = context_document.label
+    elif "Plan" in context_label:
+        primary_label = "plan"
+    elif "Tasks" in context_label:
+        primary_label = "tasks"
+    else:
+        primary_label = "diff"
+    shared_context, primary_source = build_context_source(
+        context, context_document, label=primary_label, block="context",
+        phase_dir=output_dir, read_refusal=refusal_for(context_document),
     )
+    sources: List[Dict[str, Any]] = [primary_source]
+    shared_secondary = ""
+    if secondary_context:
+        secondary_label = secondary_document.label if secondary_document is not None else (
+            "tasks" if tasks_file else "reviewed-code"
+        )
+        shared_secondary, secondary_source = build_context_source(
+            secondary_context, secondary_document, label=secondary_label,
+            block="secondary-context", phase_dir=output_dir,
+            read_refusal=refusal_for(secondary_document),
+        )
+        sources.append(secondary_source)
+    # A native host refuses nothing, but a `mode: path` source outside the
+    # project root is flagged (one printed notice, a recorded reason).
+    advisory = getattr(runner_read_refusal, "advisory", None)
+    if callable(advisory):
+        for source in sources:
+            if source["mode"] == "path":
+                note = advisory(source.get("abs_path"))
+                if note:
+                    source["reason"] = note
+    any_path = any(source["mode"] == "path" for source in sources)
+    context_mode = "workspace-read" if any_path else "inline"
+    # Only a round that is not wholly inline records its sources on the task:
+    # an under-limit task is byte-identical to what contract 1 wrote, so its
+    # goldens do not move.
+    task_sources = sources if any(s["mode"] != "inline" for s in sources) else None
+    prompt_sources = [s for s in sources if s["mode"] == "path"] or None
     budget = prompt_budget or PromptBudget(None)
 
     # Work list of (group_indices, is_high_priority). A batch whose materialized
@@ -1661,6 +2630,7 @@ def prepare_batched_validation_tasks(
             secondary_excerpt=shared_secondary,
             secondary_label=secondary_context_label,
             extra_instructions=extra_instructions,
+            context_sources=prompt_sources,
         )
         if not budget.fits(prompt):
             first, second = split_indices(indices)
@@ -1670,22 +2640,24 @@ def prepare_batched_validation_tasks(
                 continue
             # Unsplittable and over budget: fail loudly with the actionable fix.
             # `resolution` raises for a runner with no workspace-read capability,
-            # but *returns* "workspace-read" for one that has it — and this kind
-            # cannot take that downgrade: its tasks pin `context_mode: inline`
-            # (D2c), so materializing one any other way is schema-invalid.
-            # Acting on the return value is what keeps that from falling through
-            # into a silently over-budget inline prompt.
-            resolution = budget.resolution(prompt, splittable=False)
+            # but *returns* "workspace-read" for one that has it. That return is
+            # still not a further downgrade: each source's context mode is set
+            # by VALIDATION_CONTEXT_LIMIT (§2.3), not by the transport budget,
+            # and an unsplittable batch that is still over is over because of
+            # its INLINE part — the excerpt and its suggestion records — which
+            # naming a path cannot shrink.
+            budget.resolution(prompt, splittable=False)
             raise TaskFileError(
                 f"A {kind} batch holding a single group materializes a prompt of "
                 f"{budget.units(prompt)} UTF-16 code units against the runner's "
                 f"{budget.max_units}-unit {budget.transport} budget, so it can be "
-                f"neither split nor sent. The '{resolution}' resolution is not "
-                f"available to this kind — a materialized {kind} task pins "
-                f"context_mode: inline (D2c) and the schema rejects any other "
-                f"value — so configure a runner with a stdin/file prompt "
-                f"transport (driver.subagent_runner). The prompt is never "
-                f"truncated."
+                f"neither split nor sent. What is over is the inline part — the "
+                f"context excerpt and this group's suggestion records — which no "
+                f"workspace-read path can shrink (an over-limit document is "
+                f"already named by path and its excerpt is capped at "
+                f"{VALIDATION_CONTEXT_LIMIT} chars), so configure a runner with a "
+                f"stdin/file prompt transport (driver.subagent_runner). The "
+                f"prompt is never truncated."
             )
 
         output_name = f"validation_batch_{next_index}.json"
@@ -1699,6 +2671,7 @@ def prepare_batched_validation_tasks(
             model_hint=model,
             prompt_path=sidecar_path(output_dir, next_index),
             prompt_lines=prompt.count("\n") + 1,
+            context_mode=context_mode,
             extra={
                 "batch_index": next_index,
                 "group_indices": indices,
@@ -1707,6 +2680,10 @@ def prepare_batched_validation_tasks(
                 "is_high_priority": is_high,
                 "plan_file": plan_file,
                 "grouped_file": grouped_file,
+                **(
+                    {"context_sources": [dict(s) for s in task_sources]}
+                    if task_sources else {}
+                ),
             },
         ))
         next_index += 1
@@ -1738,6 +2715,7 @@ def prepare_batched_validation_tasks(
     # rebuilds it at print time from the *running* skill dir — the same split
     # `.status.json` already makes via `cli_common.durable_reaggregate_fields`.
     extra: Dict[str, Any] = {
+        "context_contract": CONTEXT_CONTRACT,
         "total_batches": len(batch_tasks),
         "batching_stats": stats,
         "grouped_file": grouped_file,
@@ -1748,13 +2726,16 @@ def prepare_batched_validation_tasks(
     }
     if tasks_file:
         extra["tasks_file"] = tasks_file
-    return make_task_file(
+    document = make_task_file(
         kind=kind,
         tasks=batch_tasks,
         inputs=inputs,
         task_list_key="batches",
         extra=extra,
     )
+    if publish:
+        publish_validation_context(output_dir, sources, phase=phase)
+    return document
 
 
 def merge_batched_validation_results(
@@ -1985,7 +2966,11 @@ def prepare_batched_revalidation_tasks(
     model: str = "auto",
     max_per_batch: int = 4,
     orchestrator: str = "review_plan_orchestrator.py",
-    base_ref: str = ""
+    base_ref: str = "",
+    context_document: Optional[BoundDocument] = None,
+    context_kind: Optional[str] = None,
+    runner_read_refusal: Optional[Any] = None,
+    phase: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Prepare batched revalidation tasks for items that failed validation.
@@ -2004,10 +2989,34 @@ def prepare_batched_revalidation_tasks(
         max_per_batch: Maximum groups per batch
         orchestrator: Name of the orchestrator script for reaggregate command
         base_ref: Git ref for code diff context (empty string for plan reviews)
+        context_document: The document this revalidation judges against,
+            bound when revalidation is materialized (2.1b): the **current**
+            document — the one the apply step just wrote — read once and
+            snapshotted as ``revalidation-snapshot.md``, never the original
+            round's snapshot (recorded alongside for provenance only). Its text
+            replaces ``context``.
+        context_kind: ``plan``, ``tasks`` or ``diff`` — which document the
+            context block carries. A ``diff`` is never named by path and never
+            gets the "read the full plan" marker; an oversized one stays
+            inline-truncated and is surfaced. Defaults to the document's label,
+            else ``plan``.
+        runner_read_refusal: As for :func:`prepare_batched_validation_tasks`.
+        phase: The phase name the published ``validation_context`` carries.
 
     Returns:
         Dict with batches and metadata, or empty batches if nothing to revalidate
     """
+    kind_of_context = context_kind or (
+        context_document.label if context_document is not None else "plan"
+    )
+    if context_document is not None:
+        context = context_document.text
+    original_sources: List[Dict[str, Any]] = []
+    try:
+        with open(os.path.join(output_dir, "validation_tasks.json"), "r", encoding="utf-8") as handle:
+            original_sources = context_sources_of(json.load(handle))
+    except (OSError, ValueError, AttributeError):
+        original_sources = []
     # Identify items needing revalidation
     items_to_revalidate = []
     item_indices = []
@@ -2041,6 +3050,7 @@ def prepare_batched_revalidation_tasks(
                 "total_batches": 0,
                 "items_to_revalidate": 0,
                 "item_indices": [],
+                "context_contract": CONTEXT_CONTRACT,
                 "original_validation": validation_results,
                 "batching_stats": estimate_validation_batching_stats([]),
                 "grouped_file": grouped_file,
@@ -2062,7 +3072,25 @@ def prepare_batched_revalidation_tasks(
         orchestrator=orchestrator,
         base_ref=base_ref,
         kind="revalidation",
+        # The block says which document it carries: the diff a code-fix
+        # revalidation judges is labelled a diff, and the plan fallback a plan.
+        context_label={
+            "diff": "Diff context",
+            "tasks": "Tasks file",
+        }.get(kind_of_context, "Plan content"),
+        context_document=context_document if context_document is not None else (
+            bind_document_text(context, label=kind_of_context)
+            if kind_of_context == "diff" else None
+        ),
+        runner_read_refusal=runner_read_refusal,
+        phase=phase,
     )
+
+    batched_tasks["context_kind"] = kind_of_context
+    if original_sources:
+        # Provenance only: the original round's snapshot is not the artifact
+        # under review — the current document is (2.1b).
+        batched_tasks["original_context_sources"] = original_sources
 
     # Add mapping info for merging back
     batched_tasks["items_to_revalidate"] = len(items_to_revalidate)

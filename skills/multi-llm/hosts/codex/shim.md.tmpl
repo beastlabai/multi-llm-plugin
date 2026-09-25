@@ -75,7 +75,7 @@ uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.p
 
 Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complete,
 `3` needs a human) and the last stdout line is always `MULTI_LLM_RESULT: {…}`: read
-`state`, `artifacts` and `next` from it rather than mining the transcript.
+`state`, `artifacts` and `next` from it rather than mining the transcript (on `state: partial`, name the failed models and their reasons from `progress.models`).
 {NEEDS_HUMAN_RULE}
 
 A fan-out mode outlives one shell call, so add `--detach`, then poll the command the launcher printed —

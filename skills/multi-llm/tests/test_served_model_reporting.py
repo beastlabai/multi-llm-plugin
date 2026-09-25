@@ -599,16 +599,21 @@ class TestTheBypassProvenanceRidesTheServedModelCarriage:
         argv = seen["argv"]
         assert argv[argv.index("--sandbox") + 1] == "workspace-write"
 
-    def test_a_failed_attempt_carries_no_provenance(self):
-        """Like `served_model`: the key belongs to an answer, and a slot that
-        failed is failed — its record does not need to say how it ran."""
+    def test_a_failed_attempt_still_carries_its_provenance(self):
+        """Reversed 2026-09-25. This used to pin the opposite ("a slot that
+        failed is failed — its record does not need to say how it ran"), and a
+        dogfood run showed what that cost: a bypassed codex slot failed by the
+        porcelain check vanished from `models_served`,
+        `progress.sandbox_bypassed` and the retired-rung line — the one slot
+        whose unsandboxed run an operator most needed to see. The child ran
+        without a sandbox whatever it returned, so the word rides the failure."""
         proc = _completed(CODEX_STREAM)
         proc.returncode = 1
         with patch("shutil.which", return_value="/usr/bin/codex"), \
              patch("utils.llm_client.subprocess.run", return_value=proc):
             result = invoke_with_provider("p", "codex:gpt-5.5", sandbox_fallback=True)
         assert result["success"] is False
-        assert "sandbox" not in result["details"]
+        assert result["details"]["sandbox"] == "bypassed"
 
     def test_the_file_output_wrapper_forwards_the_flag_and_the_provenance(self, tmp_path):
         seen = {}

@@ -1,0 +1,11 @@
+{"type":"thread.started","thread_id":"01a0d5b5-4d2c-7903-834a-74f1e0db5001"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll perform those three steps in order.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"file_change","changes":[{"path":"/work/tree/a.txt","kind":"add"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"file_change","changes":[{"path":"/work/tree/a.txt","kind":"add"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'echo hi > b.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'echo hi > b.txt'","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'cat a.txt b.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -lc 'cat a.txt b.txt'","aggregated_output":"hi\nhi\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"Done; cat output: hi, hi."}}
+{"type":"turn.completed","usage":{"input_tokens":29042,"cached_input_tokens":26368,"cache_write_input_tokens":0,"output_tokens":142,"reasoning_output_tokens":0}}

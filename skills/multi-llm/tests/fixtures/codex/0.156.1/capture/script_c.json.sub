@@ -1,0 +1,1 @@
+[[{"id": "fc_s1", "type": "function_call", "status": "completed", "call_id": "call_s1", "name": "exec_command", "arguments": "{\"cmd\": \"echo sub > sub.txt\"}"}]]

@@ -248,7 +248,8 @@
       "nothing_to_do": "nothing-to-do",
       "needs_human": "needs-human",
       "running": "running",
-      "died": "died"
+      "died": "died",
+      "partial": "partial"
     },
     "review_gate": {
       "mode": "review-code",

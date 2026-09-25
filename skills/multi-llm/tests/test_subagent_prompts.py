@@ -292,8 +292,12 @@ class TestNoPathsInPromptText:
                       "validation_tasks.json"):
             assert token not in prompt, f"{name} prompt names {token}"
 
-    def test_the_materialized_validation_task_never_leaks_its_paths(self, tmp_path):
-        """Same assertion at the producer level, where the paths actually exist."""
+    def test_the_materialized_validation_task_under_the_limit_never_leaks_its_paths(self, tmp_path):
+        """Same assertion at the producer level, where the paths actually exist.
+
+        Under ``VALIDATION_CONTEXT_LIMIT`` the task is ``inline`` and names no
+        path at all — the over-limit half is the next test (task 2.3).
+        """
         from utils.validation import prepare_batched_validation_tasks
 
         plan = tmp_path / "plan.md"
@@ -336,6 +340,55 @@ class TestNoPathsInPromptText:
             # the subagent ever being told a path.
             with open(task["prompt_path"], "r", encoding="utf-8", newline="") as fh:
                 assert fh.read() == task["prompt"]
+            assert task["context_mode"] == "inline"
+            assert "context_sources" not in task
+
+    def test_the_over_limit_validation_task_names_exactly_one_snapshot_per_document(
+        self, tmp_path
+    ):
+        """Over the limit (task 2.3): ``workspace-read``, and exactly one path per
+        externalized document — the phase dir's hash-bound snapshot, never the
+        live plan, ``grouped.json``, the output path or the sidecar."""
+        from utils.validation import (
+            PLAN_SNAPSHOT_NAME,
+            VALIDATION_CONTEXT_LIMIT,
+            bind_document_file,
+            prepare_batched_validation_tasks,
+        )
+
+        plan = tmp_path / "plan.md"
+        plan.write_text(
+            "# Plan\n\n" + "".join(
+                f"## S{i}\n" + "x" * 20000 + "\n" for i in range(5)
+            ),
+            encoding="utf-8",
+        )
+        phase = tmp_path / "review-plan"
+        document = bind_document_file(str(plan), str(phase))
+        assert len(document.text) > VALIDATION_CONTEXT_LIMIT
+        groups = [
+            {"theme": f"Theme {i}", "category": "x", "models": ["m"],
+             "suggestions": [{"title": "t", "desc": "d", "importance": "MEDIUM",
+                              "type": "addition"}]}
+            for i in range(6)
+        ]
+        result = prepare_batched_validation_tasks(
+            groups=groups, context=document.text, output_dir=str(phase),
+            plan_file=str(plan), context_document=document,
+        )
+        snapshot = str(phase / PLAN_SNAPSHOT_NAME)
+        for task in result["batches"]:
+            assert task["context_mode"] == "workspace-read"
+            prompt = task["prompt"]
+            # The snapshot: in the `## Plan file` section and in the marker.
+            assert "## Plan file" in prompt and snapshot in prompt
+            assert prompt.count(snapshot) == 2
+            assert [s["mode"] for s in task["context_sources"]] == ["path"]
+            # Nothing else by path.
+            assert str(plan) not in prompt
+            assert task["grouped_file"] not in prompt
+            assert task["output_path"] not in prompt
+            assert task["prompt_path"] not in prompt
 
     def test_the_materialized_consolidation_task_never_leaks_its_paths(self, tmp_path):
         from utils.consolidation import prepare_consolidation_tasks

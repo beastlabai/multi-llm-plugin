@@ -250,6 +250,42 @@ def phase_dir_path(plan_path: Path, phase: str) -> Path:
     return output_dir_path(plan_path) / PHASE_DIRECTORIES.get(phase, phase)
 
 
+def _mode_phase_names() -> tuple:
+    """``modes.phase_names()``, importable from ``utils/`` and from a script run."""
+    try:
+        import modes  # type: ignore
+    except ImportError:  # pragma: no cover - only when utils/ is sys.path[0]
+        import sys
+
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        import modes  # type: ignore
+    return tuple(modes.phase_names())
+
+
+def _phase_dir_names() -> tuple:
+    names: dict = {}
+    phases = _mode_phase_names()
+    # Every phase a mode owns, as its on-disk directory word
+    # (`apply-code-fixes` -> `apply-fixes`), `full` and `ask` included.
+    for phase in phases:
+        names.setdefault(PHASE_DIRECTORIES.get(phase, phase), None)
+    # Then the legacy directory words no mode owns any more (today `tasks`).
+    for key, directory in PHASE_DIRECTORIES.items():
+        if key not in phases:
+            names.setdefault(directory, None)
+    names.setdefault('ask', None)
+    return tuple(names)
+
+
+#: The single source of truth for "which child directories of a plan's output
+#: dir are phase dirs" (plan §7.4a). Built from the complete mode registry, not
+#: from ``PHASE_DIRECTORIES`` (which omits ``full`` and ``generate-tasks``), so a
+#: new phase cannot become invisible to ``status``. ``status``'s discovery and its
+#: ``--phase`` valid list both read it; any other child (a hand-made backup that
+#: copied a ``.status.json``, say) is not a phase.
+PHASE_DIR_NAMES: tuple = _phase_dir_names()
+
+
 def get_phase_dir(plan_path: Path, phase: str) -> Path:
     """Get the output directory for a specific phase.
 

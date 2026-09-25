@@ -974,6 +974,34 @@ def fan_out_correlation(fan_out: Iterable[str], *, invoked: Iterable[str],
     return missing
 
 
+def row_helpers(row: Row) -> list[str]:
+    """``row.helpers``, plus the host-lane runner's CLI when a row left it out.
+
+    `host_helpers` already unions the runner in for every matrix-built row,
+    for the reason its docstring gives: a runner with no seeded home fails
+    preflight for a reason that has nothing to do with the phase under test.
+    The three credential-free fixtures (discovery, documented-invocation, the
+    codex package probes) build their `Row` by hand and name a runner without
+    a helper, so `/work/homes/<runner>` was never seeded. That is not inert:
+    `install-host --check` row 5 preflights the configured runner, and on
+    opencode `auth list` against an empty home prints `0 credentials` — a
+    CORRECT refusal of a runner whose stub provider block and stored
+    credential were never placed. Measured 2026-09-25 on opencode 1.18.32:
+    every discovery and documented-invocation row failed row 5
+    `not_authenticated` for exactly this reason.
+
+    Applied here, where the argv is built, so a future hand-built row cannot
+    reintroduce it. Sorted and de-duplicated the way `host_helpers` returns
+    its list, so every matrix-built row's argv stays byte-identical.
+    """
+    helpers = list(row.helpers or [])
+    if row.lane == "host" and row.runner:
+        runner_cli = str(row.runner).split(":", 1)[0].strip()
+        if runner_cli and runner_cli not in helpers:
+            helpers = sorted(set(helpers) | {runner_cli})
+    return helpers
+
+
 def spec_list(row: Row) -> list[str]:
     """``row.spec`` as a list, whatever shape it was written in.
 
@@ -1106,8 +1134,9 @@ def build_run_argv(row: Row, out_dir: Path, posture: dict,
         argv += ["--spec", spec]
     if row.runner:
         argv += ["--runner", row.runner]
-    if row.helpers:
-        argv += ["--helpers", ",".join(row.helpers)]
+    helpers = row_helpers(row)
+    if helpers:
+        argv += ["--helpers", ",".join(helpers)]
     if row.scenario:
         argv += ["--scenario", row.scenario]
     if row.mock_runner:

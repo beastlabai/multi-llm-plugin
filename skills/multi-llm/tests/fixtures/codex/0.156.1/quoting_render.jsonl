@@ -1,0 +1,14 @@
+{"type":"thread.started","thread_id":"01a0d4b3-06d9-7791-9f1d-ba40036bb6cd"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc \"rg -n 'line\"'$'\"' AGENTS.md\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc \"rg -n 'line\"'$'\"' AGENTS.md\"","aggregated_output":"","exit_code":1,"status":"failed"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'cat $(echo AGENTS.md)'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'cat $(echo AGENTS.md)'","aggregated_output":"line one\nline two\nline three\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'echo `echo hi` \"a'\"\\\\\\\"b\\\"\"","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'echo `echo hi` \"a'\"\\\\\\\"b\\\"\"","aggregated_output":"hi a\"b\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -c 'grep -c line AGENTS.md'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_3","type":"command_execution","command":"/bin/bash -c 'grep -c line AGENTS.md'","aggregated_output":"3\n","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_4","type":"command_execution","command":"/usr/bin/sh -lc 'cat AGENTS.md'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_4","type":"command_execution","command":"/usr/bin/sh -lc 'cat AGENTS.md'","aggregated_output":"line one\nline two\nline three\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_5","type":"agent_message","text":"[]"}}
+{"type":"turn.completed","usage":{"input_tokens":6,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":6,"reasoning_output_tokens":0}}

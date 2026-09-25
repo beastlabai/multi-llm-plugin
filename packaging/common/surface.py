@@ -534,6 +534,10 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
                 # word it can be handed without spelling one in JS.
                 "running": cli_common.STATE_RUNNING,
                 "died": cli_common.STATE_DIED,
+                # The exit-0 override word: a finished run with at least one
+                # failed model slot (plan §5). Terminal, ``next: null``, so it
+                # owes no further instructions and is not an incomplete run.
+                "partial": cli_common.STATE_PARTIAL,
             },
             # The one exit 3 that is a *completed* run: a review held for a
             # decision. Read from the launch, because its result line carries

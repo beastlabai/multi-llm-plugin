@@ -43,11 +43,12 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Tuple,
+    Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple,
 )
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
@@ -91,8 +92,13 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         SandboxRung,
         StructuredOutputUnavailable,
         availability_from_failure,
+        sandbox_bypassed_notice_text,
         sandbox_fallback_notice_text,
         sandbox_rung_allowed,
+        sandbox_rung_retired_notice,
+        sandbox_walk_clause,
+        rung_probe_said_removed,
+        rung_removed_for_version,
         sandbox_rung_id,
         split_reasoning_effort,
         build_child_env,
@@ -177,8 +183,13 @@ except ImportError:  # pragma: no cover - direct-script import shim
         SandboxRung,
         StructuredOutputUnavailable,
         availability_from_failure,
+        sandbox_bypassed_notice_text,
         sandbox_fallback_notice_text,
         sandbox_rung_allowed,
+        sandbox_rung_retired_notice,
+        sandbox_walk_clause,
+        rung_probe_said_removed,
+        rung_removed_for_version,
         sandbox_rung_id,
         split_reasoning_effort,
         build_child_env,
@@ -781,6 +792,15 @@ class BatchReport:
     #: failed preflight and the batch fell through to the next rung (see
     #: :func:`_preflight_batch_runners`). ``None`` on every ordinary run.
     runner_fallback: Optional[Dict[str, str]] = None
+    #: §7.3a: per-output provenance, ``{task_id: {task_id, kind, round, runner,
+    #: sha256}}`` for every result file this batch (or, carried forward, an
+    #: earlier dispatch of the same round) persisted. ``sha256`` is over the
+    #: file's bytes at the moment the executor recorded it, and ``round`` is
+    #: :func:`subagent_tasks.task_round` of the batch's task list, so the merge
+    #: can tell a file the executor's runner wrote from one rewritten by hand or
+    #: by another host since — by content, never by mtime. Empty (and absent
+    #: from the report) when nothing was persisted.
+    batch_provenance: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     invoker: str = "executor"
 
     @property
@@ -829,6 +849,12 @@ class BatchReport:
             "runner_versions": dict(self.runner_versions),
             **({"runner_fallback": dict(self.runner_fallback)}
                if self.runner_fallback else {}),
+            # Always present, even empty: `_recorded_provenance` reads an absent
+            # key as a pre-§7.3a report and falls back to the legacy per-row
+            # runners, so `{}` (no provenance survives) must stay distinguishable.
+            "batch_provenance": {
+                task_id: dict(row) for task_id, row in self.batch_provenance.items()
+            },
             "counts": self.counts(),
             "usage": self.usage_totals(),
             "tasks": [o.to_dict() for o in self.outcomes],
@@ -1232,6 +1258,88 @@ def _is_session_model(
     return (session_provider, session_model) == (provider_name, model)
 
 
+def _registry_module() -> Any:
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from . import provider_registry
+    except ImportError:  # pragma: no cover - direct-script import shim
+        import utils.provider_registry as provider_registry  # type: ignore[no-redef]
+    return provider_registry
+
+
+def _effort_stripped(provider: Any, model: str) -> str:
+    """``model`` without a trailing ``:effort`` the adapter accepts."""
+    hook = getattr(provider, "_accepted_efforts", None)
+    try:
+        efforts = hook() if callable(hook) else ()
+    except Exception:  # noqa: BLE001 - an advisory read never ends a run
+        efforts = ()
+    base, _effort = split_reasoning_effort(str(model or ""), efforts or ())
+    return base.strip()
+
+
+def _in_operator_roster(
+    provider_name: str, provider: Any, model: str, *, anchor: Optional[str] = None
+) -> bool:
+    """Whether ``provider:model``, effort suffix stripped from both sides, is in
+    the operator's own roster or in ``<provider>.models`` (plan §6.1,
+    2026-09-24).
+
+    The roster is ``defaults.quick_models`` + ``defaults.models`` of the
+    **effective** config — the same project-layer-resolved ``providers.yaml``
+    ``is_model_valid(spec, anchor=anchor)`` reads the catalog from — so a
+    project that narrowed its roster and left the model out keeps the warning.
+    ``codex:gpt-6-astra`` matches the roster entry ``codex:gpt-6-astra:xhigh``;
+    a typo'd id, suffixed or not, matches neither and stays warned.
+    """
+    wanted = _effort_stripped(provider, model)
+    if not wanted:
+        return False
+    try:
+        config = _registry_module().load_config(anchor=anchor)
+    except Exception:  # noqa: BLE001 - an advisory read never ends a run
+        return False
+    defaults = config.get("defaults") or {}
+    roster: List[str] = []
+    for key in ("quick_models", "models"):
+        value = defaults.get(key) or []
+        if isinstance(value, list):
+            roster += [entry for entry in value if isinstance(entry, str)]
+    for entry in roster:
+        try:
+            entry_provider, entry_model = parse_model_spec(entry, anchor=anchor)
+        except Exception:  # noqa: BLE001
+            continue
+        if entry_provider == provider_name and _effort_stripped(provider, entry_model) == wanted:
+            return True
+    block = (config.get("providers") or {}).get(provider_name) or {}
+    catalog = block.get("models") if isinstance(block, dict) else None
+    if isinstance(catalog, list):
+        for entry in catalog:
+            name = entry.get("name") if isinstance(entry, dict) else entry
+            if isinstance(name, str) and _effort_stripped(provider, name) == wanted:
+                return True
+    return False
+
+
+def _catalog_file_for_warning(anchor: Optional[str] = None) -> str:
+    """The ``providers.yaml`` an operator edits to quiet the catalog warning:
+    the project layer's resolved path, else the env layer's, else the base
+    file — never ``hosts/capabilities.yaml``, whose pin follows the roster."""
+    registry = _registry_module()
+    try:
+        layers = dict(registry._override_paths(anchor))
+    except Exception:  # noqa: BLE001 - an advisory read never ends a run
+        layers = {}
+    for name in ("project", "env"):
+        path = layers.get(name)
+        if path is not None:
+            try:
+                return str(Path(path).resolve())
+            except OSError:
+                return str(path)
+    return str((Path(registry.__file__).parent.parent / "providers.yaml").resolve())
+
+
 def preflight_runner(
     spec: str,
     *,
@@ -1351,14 +1459,22 @@ def preflight_runner(
     # previous attempt)` on a re-invocation — and each of those printed the
     # warning the session rung had just been excused from (measured
     # 2026-09-14, twice per `generate-tasks` retry).
+    # Plan §6.1 (2026-09-24): the operator's own roster exempts too, under every
+    # key — the host-capabilities pin included, whose comment says it "follows
+    # the roster" — matched with the effort suffix stripped from both sides
+    # (`codex:gpt-6-astra` is `codex:gpt-6-astra:xhigh`'s model). The roster is
+    # the effective config's, never the base file's alone.
     if (
         not catalogued
         and layer != SESSION_LAYER
         and not _is_session_model(provider_name, model, anchor=anchor)
+        and not _in_operator_roster(provider_name, provider, model, anchor=anchor)
     ):
         print(
             f"multi-llm warning: {key} names model {model!r}, which is not in "
-            f"{provider_name}'s configured catalog — dispatching anyway.",
+            f"{provider_name}'s configured catalog — dispatching anyway. Add it "
+            f"to `{provider_name}.models` (or to `defaults.quick_models` / "
+            f"`defaults.models`) in {_catalog_file_for_warning(anchor)}.",
             file=sys.stderr,
         )
 
@@ -1434,26 +1550,64 @@ _NESTED_CACHE: Dict[str, str] = {}
 #: a verdict. A refusal is never cached — it raises.
 _MODEL_CACHE: Dict[str, str] = {}
 
-#: The same, for the D6 sandbox self-test: ``ok`` | ``unknown`` |
-#: ``not-required`` | a **rung id** per ``<host id>|<runner spec>|<profile>`` —
-#: the profile is part of the key because the adapter answers a different
-#: command (or none) per profile. A refusal is never cached — it raises.
-#: A rung id (``landlock``, ``unsandboxed`` — landlock rung, 2026-09-22) is the
-#: one ``unavailable`` that did not raise: an ``agent-readonly`` runner whose
-#: fallback ladder produced a rung the ``sandbox_fallback`` key permits. It is
-#: cached so the notice prints once per runner rather than once per batch, and
-#: so :func:`sandbox_rung` can hand the id to every dispatch of that runner
+#: The executor's per-runner sandbox **decision** for the D6 self-test: ``ok``
+#: | ``unknown`` | ``not-required`` | a **rung id** per ``<host id>|<runner
+#: spec>|<profile>``. Not a probe cache — the measurement lives in the one
+#: probe cache both lanes share (:data:`_SANDBOX_PROBE_CACHE`, 2026-09-24);
+#: this records only what the preflight *decided* from it, so
+#: :func:`sandbox_rung` can hand the rung id to every dispatch of that runner
 #: under that profile — the id, never a bool, because the dispatch must render
-#: *that* rung and a bool cannot say which.
-_SANDBOX_CACHE: Dict[str, str] = {}
+#: *that* rung and a bool cannot say which. A refusal is never recorded — it
+#: raises. A rung id (``landlock``, ``unsandboxed``) is the one
+#: ``unavailable`` that did not raise. Recorded so the notice prints once per
+#: runner rather than once per batch.
+_SANDBOX_DECISIONS: Dict[str, str] = {}
+
+#: The **one** per-process sandbox probe cache (plan §3.6, 2026-09-24),
+#: replacing the fan-out's ``_FANOUT_SANDBOX_CACHE`` and this module's old
+#: verdict-word cache, which cached separately and so could probe one codex
+#: version twice. Values are the whole :class:`SandboxProbeResult` — walk,
+#: per-rung probe tails and CLI version included — so a cache hit renders the
+#: same ``[SANDBOX_BYPASSED]`` line as the cold probe that filled it. Two key
+#: shapes, both tuples:
+#:
+#: * ``("verdict", host, provider, profile, cwd, version, policy)`` — one
+#:   profile's probe plus its walk, as :func:`cached_sandbox_verdict` returns it;
+#: * ``("walk", host, provider, cwd, version, rung ids)`` — the fallback walk
+#:   alone. The rung probes do not depend on the profile (``generate`` and
+#:   ``agent-readonly`` declare the same ladder), so the fan-out and the
+#:   executor share **one** rung probe per codex version; the profiles' own
+#:   probes differ (one writes a byte, the other does not) and stay per profile.
+_SANDBOX_PROBE_CACHE: Dict[Tuple[str, ...], "SandboxProbeResult"] = {}
+
+#: Guards :data:`_SANDBOX_PROBE_CACHE` for the dict read and write only; the
+#: probe itself runs under a per-key lock (:func:`_sandbox_probe_lock`), so one
+#: provider's slow probe never holds up another provider's slot (F5,
+#: 2026-09-17). A ``threading.Lock``: the fan-out runs the blocking probe in a
+#: worker thread, and one process may drive more than one event loop.
+_SANDBOX_PROBE_LOCK = threading.Lock()
+_SANDBOX_PROBE_KEY_LOCKS: Dict[Tuple[str, ...], threading.Lock] = {}
+
+#: The CLI version the sandbox probe keys on, per provider, when the version
+#: preflight (:data:`_VERSION_CACHE`) has not already read it. Read only for an
+#: adapter whose ladder declares a ``removed_at`` rung, so every other adapter
+#: spawns nothing extra.
+_PROBE_VERSION_CACHE: Dict[str, str] = {}
+#: One lock per provider around that version spawn, so two specs of one
+#: provider probed concurrently (``asyncio.to_thread``) spawn it once.
+_PROBE_VERSION_LOCKS: Dict[str, threading.Lock] = {}
+
+#: ``<provider>|<version>`` pairs whose retirement line (a contained rung
+#: measured unavailable from this build) this process already printed.
+_RETIREMENTS_ANNOUNCED: Set[str] = set()
 
 #: What :func:`_detect_sandbox` returns (and ``preflight_runner`` records as
 #: ``info["sandbox"]``) for the uncontained rung — the word it has always been.
-#: The cache itself stores the rung id; this word is derived from exactly
+#: The decision record (:data:`_SANDBOX_DECISIONS`) stores the rung id; this word is derived from exactly
 #: :data:`SANDBOX_RUNG_UNSANDBOXED` and nothing else.
 SANDBOX_STATE_BYPASSED = "bypassed"
 
-#: The cache states that are **not** a rung id.
+#: The recorded states that are **not** a rung id.
 _PLAIN_SANDBOX_STATES = frozenset({"ok", "unknown", "not-required"})
 
 
@@ -1468,7 +1622,7 @@ def sandbox_rung(spec: str, profile: str) -> Optional[str]:
     dispatch may only replay it. A runner the preflight never saw (or saw
     under another profile) is ``None`` and renders the argv it always did.
     """
-    recorded = _SANDBOX_CACHE.get(f"{_current_host_id()}|{spec}|{profile}")
+    recorded = _SANDBOX_DECISIONS.get(f"{_current_host_id()}|{spec}|{profile}")
     if not recorded or recorded in _PLAIN_SANDBOX_STATES:
         return None
     return recorded
@@ -1493,12 +1647,17 @@ def reset_version_cache() -> None:
     _AUTH_CACHE.clear()
     _NESTED_CACHE.clear()
     _MODEL_CACHE.clear()
-    _SANDBOX_CACHE.clear()
+    reset_sandbox_cache()
 
 
 def reset_sandbox_cache() -> None:
-    """Clear the per-process sandbox-probe cache (tests)."""
-    _SANDBOX_CACHE.clear()
+    """Clear the per-process sandbox probe cache and decisions (tests)."""
+    _SANDBOX_DECISIONS.clear()
+    _SANDBOX_PROBE_CACHE.clear()
+    _SANDBOX_PROBE_KEY_LOCKS.clear()
+    _PROBE_VERSION_CACHE.clear()
+    _PROBE_VERSION_LOCKS.clear()
+    _RETIREMENTS_ANNOUNCED.clear()
 
 
 def reset_auth_cache() -> None:
@@ -1599,6 +1758,32 @@ def _detect_version(
     return version
 
 
+#: A CSI or OSC terminal escape — enough to tell a stream that carries only
+#: colour resets from one that says something.
+_PROBE_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
+
+
+def _probe_verdict_stream(
+    completed: Optional["subprocess.CompletedProcess"],
+) -> str:
+    """The stream a ``not_authenticated`` refusal should quote.
+
+    stderr when it says anything, else stdout. "Says anything" is judged with
+    terminal escapes removed, because a bare ``stderr or stdout`` quoted
+    opencode 1.18.32's stderr — which is exactly ``"\\x1b[0m\\n"``, a colour
+    reset and nothing else — while the ``└  0 credentials`` line the verdict was
+    drawn from sat on stdout. The refusal then told its reader the probe had
+    printed nothing, which is how a correct refusal was first mis-diagnosed as
+    a parser break (measured in the container lane, 2026-09-25).
+    """
+    if completed is None:
+        return ""
+    stderr = completed.stderr or ""
+    if _PROBE_ESCAPE.sub("", stderr).strip():
+        return stderr
+    return completed.stdout or stderr
+
+
 def _detect_auth(
     provider_name: str, model: str = "", *, key: str, spec: str, profile: str
 ) -> str:
@@ -1653,9 +1838,7 @@ def _detect_auth(
         # `status --format json` carries `userEmail`/`terminalProgram`/`shell`
         # (M13), and this message is printed straight to a terminal and a log —
         # it reaches neither of §4.5.3's redacting write sinks.
-        tail = _redact_probe_tail(
-            (completed.stderr or completed.stdout) if completed else "", 500
-        )
+        tail = _redact_probe_tail(_probe_verdict_stream(completed), 500)
         raise RunnerRejected(
             f"Refusing to dispatch: {key} is {spec!r} (reason: not_authenticated) — "
             f"{_REASON_EXPLANATION['not_authenticated']}. "
@@ -1721,10 +1904,20 @@ RUNG_UNAVAILABLE = "unavailable"
 RUNG_ABSENT = "absent"
 RUNG_UNPROBED = "unprobed"
 RUNG_UNKNOWN = "unknown"
+#: 2026-09-24 (plan §3): ``skipped`` — not probed because the detected CLI
+#: version is at or above the rung's ``removed_at`` (the probe would only
+#: re-measure a known exit-101 panic); ``retired`` — probed, and its output
+#: carried the rung's ``removed_signature`` (codex 0.156.1's "requires
+#: bubblewrap" panic), classified by text and never by exit code. Both let the
+#: walk continue, like ``unavailable``; they are the two outcomes that earn the
+#: retirement line. A timeout, a canary-setup failure or any other error is
+#: never either of them.
+RUNG_SKIPPED = "skipped"
+RUNG_RETIRED = "retired"
 
 
 class SandboxProbeResult(NamedTuple):
-    """What :func:`sandbox_verdict` measured: ``(state, tail, rung, walk)``.
+    """What :func:`sandbox_verdict` measured: ``(state, tail, rung, walk, rung_tails, version)``.
 
     A NamedTuple, not a widened plain tuple, so a stale two-value unpack
     (``state, tail = sandbox_verdict(...)``) *raises* instead of silently
@@ -1741,12 +1934,20 @@ class SandboxProbeResult(NamedTuple):
       in order, outcomes from the ``RUNG_*`` constants. ``()`` when no walk
       ran. It is how a reader tells a rung that was measured and rejected from
       one the deadline never let anyone measure (``unprobed``).
+    * ``rung_tails`` — ``((rung id, redacted probe tail), …)`` for every rung
+      whose probe actually ran (2026-09-24), so the ``[SANDBOX_BYPASSED]`` line
+      can say why a contained rung was not taken — and say it identically on a
+      cache hit. A rung ``skipped`` by version has no tail.
+    * ``version`` — the CLI version the walk was judged against (``""`` when
+      unread): what the line and the retirement notice name.
     """
 
     state: str
     tail: str
     rung: Optional[str] = None
     walk: Tuple[Tuple[str, str], ...] = ()
+    rung_tails: Tuple[Tuple[str, str], ...] = ()
+    version: str = ""
 
 
 def _sandbox_probe_inconclusive(text: str) -> bool:
@@ -1819,8 +2020,32 @@ def _remove_created_dirs(created: Optional[Sequence[str]]) -> None:
             pass
 
 
+def _rung_probe_tail(rung: SandboxRung, completed: Any) -> str:
+    """The redacted line a rung's probe is remembered by: the line carrying
+    its ``removed_signature`` when present, else the last non-empty line of
+    stderr (stdout when stderr is empty)."""
+    text = f"{completed.stderr or ''}\n{completed.stdout or ''}"
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    signature = getattr(rung, "removed_signature", None)
+    if signature:
+        needle = " ".join(signature.split())
+        hit = next((line for line in lines if needle in " ".join(line.split())), None)
+        if hit is None and rung_probe_said_removed(rung, text):
+            hit = needle
+        if hit:
+            return _redact_probe_tail(hit, 500)
+    source = [line.strip() for line in (completed.stderr or completed.stdout or "").splitlines()
+              if line.strip()]
+    return _redact_probe_tail(source[-1] if source else "", 500)
+
+
 def _walk_fallback_rungs(
-    rungs: Sequence[SandboxRung], *, cwd: Optional[str], deadline: float
+    rungs: Sequence[SandboxRung],
+    *,
+    cwd: Optional[str],
+    deadline: float,
+    version: Optional[str] = None,
+    tails: Optional[List[Tuple[str, str]]] = None,
 ) -> Tuple[Optional[str], Tuple[Tuple[str, str], ...]]:
     """Walk ``rungs`` in order under one shared ``deadline`` (T3's walk table).
 
@@ -1829,9 +2054,17 @@ def _walk_fallback_rungs(
     and is recorded ``unprobed``, which — like a probe with no exit status —
     stops the walk with no rung, so the uncontained rung is never rendered on
     exhausted time.
+
+    ``version`` (2026-09-24): a rung whose ``removed_at`` the version reaches
+    is not probed at all — recorded ``skipped`` — and the walk moves on. An
+    unread version never skips. ``tails``, when given, receives ``(rung id,
+    probe tail)`` for every rung whose probe ran.
     """
     walk: List[Tuple[str, str]] = []
     for rung in rungs:
+        if rung.probe_argv and rung_removed_for_version(rung, version):
+            walk.append((rung.name, RUNG_SKIPPED))
+            continue
         if not rung.probe_argv:
             # Nothing to measure (the uncontained rung): reaching it is taking it.
             walk.append((rung.name, RUNG_TAKEN))
@@ -1861,6 +2094,8 @@ def _walk_fallback_rungs(
             walk.append((rung.name, RUNG_UNPROBED if ran_out else RUNG_UNKNOWN))
             return None, tuple(walk)
         said = f"{completed.stdout}\n{completed.stderr}"
+        if tails is not None:
+            tails.append((rung.name, _rung_probe_tail(rung, completed)))
         if SANDBOX_CANARY_NOT_DENIED in said:
             # Checked first: a write that landed rejects the rung whatever the
             # exit status says.
@@ -1877,6 +2112,11 @@ def _walk_fallback_rungs(
             # the rung is not usable here — read like a probe the CLI did not
             # understand.
             walk.append((rung.name, RUNG_ABSENT))
+        elif rung_probe_said_removed(rung, said):
+            # Classified by its text, before the generic branches: this build
+            # no longer supports the rung (codex 0.156.1's panic, exit 101 —
+            # the same exit as constraint 2's unrelated panic).
+            walk.append((rung.name, RUNG_RETIRED))
         elif _sandbox_probe_inconclusive(said):
             walk.append((rung.name, RUNG_ABSENT))
         else:
@@ -1890,6 +2130,8 @@ def sandbox_verdict(
     *,
     cwd: Optional[str] = None,
     timeout: Optional[float] = None,
+    version: Optional[str] = None,
+    walk_key: Optional[Tuple[str, ...]] = None,
 ) -> SandboxProbeResult:
     """One adapter's sandbox self-test (D6 step 3), plus its fallback walk.
 
@@ -1911,6 +2153,14 @@ def sandbox_verdict(
     call, not per probe: the deadline is taken once on entry and every rung
     probe gets only what is left of it, so a two-probe ladder never costs more
     than one ``SANDBOX_PROBE_TIMEOUT_S``.
+
+    ``version`` (2026-09-24) is the CLI version the walk is judged against: a
+    rung whose ``removed_at`` it reaches is recorded ``skipped`` without a
+    probe. ``None`` — what ``doctor`` passes — probes every rung, so a build
+    that restores a rung is measured rather than assumed. ``walk_key``, when
+    given, is the :data:`_SANDBOX_PROBE_CACHE` key the walk is shared under:
+    a walk already recorded there is reused rather than re-probed, and a fresh
+    one is stored there.
     """
     try:
         argv = provider.sandbox_probe_command(profile)
@@ -1935,8 +2185,29 @@ def sandbox_verdict(
     rungs = _fallback_rungs(provider, profile)
     if not rungs:
         return SandboxProbeResult("unavailable", tail)
-    rung, walk = _walk_fallback_rungs(rungs, cwd=cwd, deadline=deadline)
-    return SandboxProbeResult("unavailable", tail, rung, walk)
+    shared = None
+    if walk_key is not None:
+        with _SANDBOX_PROBE_LOCK:
+            shared = _SANDBOX_PROBE_CACHE.get(walk_key)
+    if shared is not None:
+        return SandboxProbeResult(
+            "unavailable", tail, shared.rung, shared.walk, shared.rung_tails,
+            version or "",
+        )
+    tails: List[Tuple[str, str]] = []
+    rung, walk = _walk_fallback_rungs(
+        rungs, cwd=cwd, deadline=deadline, version=version, tails=tails,
+    )
+    result = SandboxProbeResult(
+        "unavailable", tail, rung, walk, tuple(tails), version or "",
+    )
+    stopped = any(outcome in (RUNG_UNPROBED, RUNG_UNKNOWN) for _, outcome in walk)
+    if walk_key is not None and not stopped:
+        # A walk that stopped on "nothing learned" is not shared: another
+        # profile's probe, with its own budget, may yet get an answer.
+        with _SANDBOX_PROBE_LOCK:
+            _SANDBOX_PROBE_CACHE[walk_key] = result
+    return result
 
 
 def _probe_cwd(anchor: Optional[str]) -> Optional[str]:
@@ -2012,7 +2283,11 @@ def sandbox_fallback_rung(
 
 
 def sandbox_walk_note(
-    verdict: "SandboxProbeResult", policy: Optional[str]
+    verdict: "SandboxProbeResult",
+    policy: Optional[str],
+    *,
+    provider_name: Optional[str] = None,
+    rungs: Sequence[SandboxRung] = (),
 ) -> str:
     """One sentence on why an ``unavailable`` verdict took no rung, or ``""``.
 
@@ -2021,6 +2296,12 @@ def sandbox_walk_note(
     probe refuses where the old single probe would have bypassed), or
     ``contained`` refused the uncontained rung the walk reached. ``off`` and an
     adapter with no ladder say nothing new: that refusal is the old one.
+
+    Under ``contained``, given ``provider_name`` (and the declared ``rungs``
+    for ``removed_at``), the sentence carries the same rung clause the
+    ``[SANDBOX_BYPASSED]`` line does (:func:`sandbox_walk_clause`) — so a rung
+    ``skipped`` by version or ``retired`` by its probe's panic is named with
+    its version and probe tail, not hidden behind "no contained rung".
     """
     if policy in (None, SANDBOX_FALLBACK_OFF):
         return ""
@@ -2037,12 +2318,186 @@ def sandbox_walk_note(
             f"answer), so no fallback rung was taken"
         )
     if policy == SANDBOX_FALLBACK_CONTAINED and verdict.walk:
+        clause = ""
+        if provider_name:
+            try:
+                clause = sandbox_walk_clause(
+                    provider_name, verdict.walk, verdict.rung_tails,
+                    verdict.version or None, rungs,
+                )
+            except Exception:  # noqa: BLE001 - a note may never end a preflight
+                clause = ""
         return (
             f"sandbox_fallback={SANDBOX_FALLBACK_CONTAINED}: no contained "
-            f"fallback rung is usable here, and the uncontained one is never "
-            f"taken under that value"
+            f"fallback rung is usable here"
+            + (f" ({clause})" if clause else "")
+            + ", and the uncontained one is never taken under that value"
         )
     return ""
+
+
+def _sandbox_probe_lock(key: Tuple[str, ...]) -> threading.Lock:
+    """The probe lock for one :data:`_SANDBOX_PROBE_CACHE` key, created once."""
+    with _SANDBOX_PROBE_LOCK:
+        lock = _SANDBOX_PROBE_KEY_LOCKS.get(key)
+        if lock is None:
+            lock = _SANDBOX_PROBE_KEY_LOCKS[key] = threading.Lock()
+        return lock
+
+
+def _ladder_has_removed_at(provider: Any, profile: str) -> bool:
+    """Whether ``provider``'s ladder for ``profile`` declares a rung that a
+    version can retire — the only case the probe needs the CLI version."""
+    return any(getattr(rung, "removed_at", None) for rung in _fallback_rungs(provider, profile))
+
+
+def _sandbox_cli_version(provider_name: str, provider: Any) -> str:
+    """The CLI version the sandbox probe is keyed and judged on, or ``""``.
+
+    The version preflight's own read (:data:`_VERSION_CACHE`) when it ran;
+    otherwise one ``version_cmd`` spawn per provider per process, through the
+    sandbox probe's runner (so the suite's guard on real CLIs covers it) and
+    cached in :data:`_PROBE_VERSION_CACHE`. ``""`` when nothing could be read —
+    and an unread version never skips a rung.
+    """
+    if provider_name in _VERSION_CACHE:
+        # The preflight's read is settled either way: a recorded "unknown"
+        # already spawned `version_cmd` once, and a second spawn would only
+        # re-measure the same failure. It reads as an unread version here.
+        known = _VERSION_CACHE[provider_name]
+        return "" if known == "unknown" else (known or "")
+    with _SANDBOX_PROBE_LOCK:
+        if provider_name in _PROBE_VERSION_CACHE:
+            return _PROBE_VERSION_CACHE[provider_name]
+        lock = _PROBE_VERSION_LOCKS.get(provider_name)
+        if lock is None:
+            lock = _PROBE_VERSION_LOCKS[provider_name] = threading.Lock()
+    with lock:
+        # Double-checked: a sibling spec of this provider, probed concurrently
+        # in another thread, may have read the version while this one waited.
+        with _SANDBOX_PROBE_LOCK:
+            if provider_name in _PROBE_VERSION_CACHE:
+                return _PROBE_VERSION_CACHE[provider_name]
+        version = ""
+        argv = list(getattr(provider, "version_cmd", ()) or ())
+        if argv:
+            completed = _run_sandbox_probe(argv, cwd=None, timeout=SANDBOX_PROBE_TIMEOUT_S)
+            if completed is not None:
+                try:
+                    version = provider.parse_version(completed.stdout, completed.stderr) or ""
+                except Exception:  # noqa: BLE001 - a diagnostic may not break a preflight
+                    version = ""
+        with _SANDBOX_PROBE_LOCK:
+            _PROBE_VERSION_CACHE[provider_name] = version
+        return version
+
+
+def cached_sandbox_verdict(
+    provider_name: str,
+    provider: Any,
+    profile: str,
+    *,
+    cwd: Optional[str],
+    policy: Optional[str],
+) -> SandboxProbeResult:
+    """Run — or recall — ``provider``'s sandbox self-test for ``profile``: the
+    one per-process probe cache both lanes share (plan §3.6, 2026-09-24).
+
+    Keyed by host, provider, profile, ``cwd``, the CLI version and the
+    ``sandbox_fallback`` policy, and holding the whole
+    :class:`SandboxProbeResult` — walk, rung probe tails and version included
+    — so a cache hit prints the same line as the cold probe that filled it.
+    The fallback walk is shared across profiles under its own key, so the
+    fan-out (``generate``) and the executor (``agent-readonly``) in one process
+    spawn one rung probe per codex version, not two. The version is read only
+    for an adapter whose ladder declares a ``removed_at`` rung; at or above it
+    the rung is not probed at all. A probe that raises reads ``unknown`` and is
+    cached like any answer.
+
+    Blocking — the fan-out hands it to a thread. The cache lock is held for
+    the dict read and write only; the probe runs under a per-key lock, so two
+    slots of one provider share a probe and a slow provider never holds up
+    another (F5, 2026-09-17).
+    """
+    host = _current_host_id()
+    version = (
+        _sandbox_cli_version(provider_name, provider)
+        if _ladder_has_removed_at(provider, profile) else ""
+    )
+    key = ("verdict", host, provider_name, profile, cwd or "", version, policy or "")
+    with _SANDBOX_PROBE_LOCK:
+        cached = _SANDBOX_PROBE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    with _sandbox_probe_lock(key):
+        # Double-checked: a sibling slot on this key may have finished the
+        # probe while this thread waited for the lock.
+        with _SANDBOX_PROBE_LOCK:
+            cached = _SANDBOX_PROBE_CACHE.get(key)
+        if cached is not None:
+            return cached
+        rungs = _fallback_rungs(provider, profile)
+        walk_key = (
+            ("walk", host, provider_name, cwd or "", version,
+             ",".join(rung.name for rung in rungs))
+            if rungs else None
+        )
+        try:
+            if walk_key is not None or version:
+                verdict = sandbox_verdict(
+                    provider, profile, cwd=cwd, version=version or None,
+                    walk_key=walk_key,
+                )
+            else:
+                verdict = sandbox_verdict(provider, profile, cwd=cwd)
+        except Exception:  # noqa: BLE001 - a diagnostic may never end a run
+            verdict = SandboxProbeResult("unknown", "")
+        with _SANDBOX_PROBE_LOCK:
+            _SANDBOX_PROBE_CACHE[key] = verdict
+        return verdict
+
+
+def rung_retirements(verdict: SandboxProbeResult) -> List[str]:
+    """The rung ids ``verdict``'s walk found retired — ``skipped`` by version
+    or ``retired`` by the probe's own text. Never a timeout, a canary-setup
+    failure or any other outcome: those are reported as themselves."""
+    return [
+        name for name, outcome in (verdict.walk or ())
+        if outcome in (RUNG_SKIPPED, RUNG_RETIRED)
+    ]
+
+
+def recorded_rung_retirements(provider_name: str) -> List[Tuple[str, str]]:
+    """``[(rung id, version), …]`` this process's probe cache recorded as
+    retired for ``provider_name`` — what ``announce_retired_rungs`` prints the
+    once-per-run retirement line from, whatever the previous run recorded."""
+    found: List[Tuple[str, str]] = []
+    with _SANDBOX_PROBE_LOCK:
+        items = list(_SANDBOX_PROBE_CACHE.items())
+    for key, verdict in items:
+        if len(key) < 3 or key[0] != "verdict" or key[2] != provider_name:
+            continue
+        for name in rung_retirements(verdict):
+            pair = (name, verdict.version or "")
+            if pair not in found:
+                found.append(pair)
+    return found
+
+
+def sandbox_bypass_line(
+    provider_name: str, verdict: SandboxProbeResult,
+    rungs: Sequence[SandboxRung] = (),
+) -> str:
+    """The ``[SANDBOX_BYPASSED]`` line for ``verdict``: the fixed stem plus the
+    rung clause naming each rung tried with its outcome and probe tail
+    (``rungs`` — the adapter's declared ladder — supplies ``removed_at``)."""
+    return sandbox_bypassed_notice_text(
+        provider_name,
+        sandbox_walk_clause(
+            provider_name, verdict.walk, verdict.rung_tails,
+            verdict.version or None, rungs,
+        ),
+    )
 
 
 def _detect_sandbox(
@@ -2073,22 +2528,29 @@ def _detect_sandbox(
     in ``SANDBOX_FALLBACK_PROFILES``. Every WRITE kind runs ``agent-write``,
     which has no ladder whatever the config says, so a write batch under a
     broken sandbox is exit 3 exactly as before. The selected rung's **id** is
-    what gets cached — never the old constant — so :func:`sandbox_rung` hands
+    what gets recorded — never the old constant — so :func:`sandbox_rung` hands
     the dispatch the rung it must render.
+
+    The measurement comes from the probe cache the fan-out shares
+    (:func:`cached_sandbox_verdict`, 2026-09-24); the uncontained rung's line
+    names every rung tried first, and a rung retired from this CLI build
+    (skipped by version, or its probe's own panic text) gets the retirement
+    line once per process.
     """
     provider = get_provider(provider_name)
     cache_key = f"{_current_host_id()}|{spec}|{profile}"
-    if cache_key in _SANDBOX_CACHE:
-        return _sandbox_state_word(_SANDBOX_CACHE[cache_key])
+    if cache_key in _SANDBOX_DECISIONS:
+        return _sandbox_state_word(_SANDBOX_DECISIONS[cache_key])
 
-    verdict = sandbox_verdict(provider, profile, cwd=_probe_cwd(anchor))
+    policy: Optional[str] = (
+        _sandbox_fallback_policy(provider, profile, anchor=anchor)
+        if profile in SANDBOX_FALLBACK_PROFILES else None
+    )
+    verdict = cached_sandbox_verdict(
+        provider_name, provider, profile, cwd=_probe_cwd(anchor), policy=policy,
+    )
     state, tail = verdict.state, verdict.tail
-    policy: Optional[str] = None
     if state == "unavailable":
-        policy = (
-            _sandbox_fallback_policy(provider, profile, anchor=anchor)
-            if profile in SANDBOX_FALLBACK_PROFILES else None
-        )
         rung = sandbox_fallback_rung(provider, profile, verdict.rung, policy)
         if rung is not None:
             # One line per runner per process, on stdout beside the other
@@ -2102,16 +2564,26 @@ def _detect_sandbox(
                 )
             else:
                 print(
-                    f"[exec-subagents] {SANDBOX_BYPASSED_MARKER} {provider_name}: "
-                    f"bubblewrap cannot start; running --sandbox danger-full-access "
-                    f"under providers.{provider_name}.sandbox_fallback="
-                    f"{SANDBOX_FALLBACK_AUTO} (read-only phase; no OS boundary "
-                    f"between the model's shell and this machine)"
+                    "[exec-subagents] "
+                    + sandbox_bypass_line(
+                        provider_name, verdict, _fallback_rungs(provider, profile),
+                    )
                 )
-            _SANDBOX_CACHE[cache_key] = rung.name
+                _announce_executor_retirements(provider_name, provider, spec, profile, verdict)
+            _SANDBOX_DECISIONS[cache_key] = rung.name
             return _sandbox_state_word(rung.name)
     if state == "unavailable":
-        note = sandbox_walk_note(verdict, policy)
+        declared = _fallback_rungs(provider, profile)
+        if policy == SANDBOX_FALLBACK_CONTAINED:
+            # The operator who opted into containment is the one who sees this
+            # runner refused; a retired rung is named once per process here
+            # too, worded as the refusal it is (plan §3.2).
+            _announce_executor_retirements(
+                provider_name, provider, spec, profile, verdict, refused=True,
+            )
+        note = sandbox_walk_note(
+            verdict, policy, provider_name=provider_name, rungs=declared,
+        )
         raise RunnerRejected(
             f"Refusing to dispatch: {key} is {spec!r} (reason: "
             f"sandbox_unavailable) — "
@@ -2134,8 +2606,38 @@ def _detect_sandbox(
             f"the D3k ladder as sandbox_unavailable (rung 1).",
             file=sys.stderr,
         )
-    _SANDBOX_CACHE[cache_key] = state
+    _SANDBOX_DECISIONS[cache_key] = state
     return state
+
+
+def _announce_executor_retirements(
+    provider_name: str, provider: Any, spec: str, profile: str,
+    verdict: SandboxProbeResult,
+    *,
+    refused: bool = False,
+) -> None:
+    """Print the retirement line once per process per provider and version
+    for a rung ``verdict``'s walk found retired (plan §3.2). The fan-out's
+    twin is ``review_orchestrator_base.announce_retired_rungs``. ``refused``
+    words it for the ``contained`` refusal path, where the run did not fall
+    to the uncontained rung."""
+    for name in rung_retirements(verdict):
+        marker = f"{provider_name}|{name}|{verdict.version or ''}"
+        if marker in _RETIREMENTS_ANNOUNCED:
+            continue
+        declared = next(
+            (r for r in _fallback_rungs(provider, profile) if r.name == name), None,
+        )
+        if declared is None:
+            continue
+        _RETIREMENTS_ANNOUNCED.add(marker)
+        print(
+            "[exec-subagents] "
+            + sandbox_rung_retired_notice(
+                provider_name, spec, declared, measured=True,
+                version=verdict.version or None, refused=refused,
+            )
+        )
 
 
 def _model_cache_key(
@@ -3505,6 +4007,7 @@ def _spawn(
     schema: Optional[Any] = None,
     anchor: Optional[str] = None,
     sandbox_fallback: Optional[str] = None,
+    read_dirs: Sequence[str] = (),
 ) -> _Capture:
     """Run one dispatch, materializing ``schema`` for the CLIs that take a file.
 
@@ -3541,12 +4044,12 @@ def _spawn(
                 provider=provider, model=model, prompt=prompt, profile=profile,
                 transport=transport, timeout=timeout, cwd=cwd,
                 schema=materialized, anchor=anchor,
-                sandbox_fallback=sandbox_fallback,
+                sandbox_fallback=sandbox_fallback, read_dirs=read_dirs,
             )
     return _spawn_child(
         provider=provider, model=model, prompt=prompt, profile=profile,
         transport=transport, timeout=timeout, cwd=cwd, schema=schema,
-        anchor=anchor, sandbox_fallback=sandbox_fallback,
+        anchor=anchor, sandbox_fallback=sandbox_fallback, read_dirs=read_dirs,
     )
 
 
@@ -3562,6 +4065,7 @@ def _spawn_child(
     schema: Optional[Any] = None,
     anchor: Optional[str] = None,
     sandbox_fallback: Optional[str] = None,
+    read_dirs: Sequence[str] = (),
 ) -> _Capture:
     """Run one dispatch: build argv for the profile, spawn, capture everything.
 
@@ -3606,6 +4110,7 @@ def _spawn_child(
             provider=provider, model=model, prompt=prompt, profile=profile,
             transport=transport, timeout=timeout, cwd=cwd, schema=schema,
             anchor=anchor, sandbox_fallback=sandbox_fallback,
+            read_dirs=read_dirs,
         )
 
 
@@ -3621,6 +4126,7 @@ def _spawn_in_context(
     schema: Optional[Any] = None,
     anchor: Optional[str] = None,
     sandbox_fallback: Optional[str] = None,
+    read_dirs: Sequence[str] = (),
 ) -> _Capture:
     """:func:`_spawn_child`'s body, inside the adapter's dispatch context.
 
@@ -3635,6 +4141,10 @@ def _spawn_in_context(
         prompt, model, profile, transport, schema=schema,
         sandbox_fallback=sandbox_fallback,
     )
+    if read_dirs:
+        # The adapter's own read-scope flag (claude-code `--add-dir`), for the
+        # directories of path-named context snapshots outside cwd only.
+        argv = provider.widen_read_scope(list(argv), read_dirs)
     # The batch-shim flag is consumed pre-dispatch by `_prompt_over_budget`, which
     # resolves argv[0] the same way: it applies cmd.exe's 8,191-unit cap and
     # refuses a metacharacter-bearing prompt (rung 7, nothing spawned) before this
@@ -3789,6 +4299,24 @@ def _decode(value: Any) -> str:
     return value.decode("utf-8", errors="replace")
 
 
+def _context_read_dirs(task: Dict[str, Any], cwd: Optional[str]) -> List[str]:
+    """Directories of a task's ``mode: path`` context snapshots outside ``cwd``."""
+    root = os.path.realpath(cwd or os.getcwd())
+    dirs: List[str] = []
+    for record in task.get("context_sources") or []:
+        if not isinstance(record, dict) or record.get("mode") != "path":
+            continue
+        path = record.get("abs_path")
+        if not path:
+            continue
+        directory = os.path.dirname(os.path.realpath(str(path)))
+        if directory == root or directory.startswith(root.rstrip(os.sep) + os.sep):
+            continue
+        if directory not in dirs:
+            dirs.append(directory)
+    return dirs
+
+
 def dispatch_task(
     task: Dict[str, Any],
     *,
@@ -3880,6 +4408,22 @@ def dispatch_task(
             f"{provider_name} does not implement the {profile!r} profile; a "
             f"read/analyze task is never downgraded to a write-capable "
             f"invocation, so this fails dispatch"
+        )
+        return outcome
+    # §2.2 (validation context by path): a snapshot named by path may sit in a
+    # phase dir outside the runner's cwd. A runner that reads anywhere needs
+    # nothing; one that can widen its read scope gets the flag for exactly
+    # those directories; any other is refused here rather than handed a path
+    # it cannot open (which reads as a confident, blind verdict).
+    read_dirs = _context_read_dirs(task, cwd)
+    if read_dirs and getattr(provider, "reads_outside_cwd", False):
+        read_dirs = []
+    if read_dirs and not getattr(provider, "read_scope_flag", None):
+        outcome.reason = (
+            f"{kind} batch {task.get('batch_index', task_id)} names "
+            f"{', '.join(read_dirs)} outside the runner's working directory; "
+            f"runner {runner} cannot read files there; rematerialize with a "
+            f"capable runner. Nothing was dispatched."
         )
         return outcome
     try:
@@ -4057,6 +4601,9 @@ def dispatch_task(
                 schema=schema,
                 anchor=anchor,
                 sandbox_fallback=fallback,
+                # Only when there is something to widen, so a stand-in `_spawn`
+                # with the historical keyword set is called as it always was.
+                **({"read_dirs": read_dirs} if read_dirs else {}),
             )
         except (
             StructuredOutputUnavailable, structured_output.SchemaConfigError
@@ -4814,6 +5361,9 @@ def run_tasks(
         return report
 
     recorded = _recorded_runners(phase_dir, kind)
+    # §7.3a: read before this dispatch overwrites the report, so a resumed
+    # (skipped) task keeps the provenance its original dispatch recorded.
+    previous_provenance = _recorded_provenance(phase_dir, kind) or {}
     task_by_id: Dict[str, Dict[str, Any]] = {
         str(task.get("task_id", index)): task
         for index, task in enumerate(selected)
@@ -4899,10 +5449,76 @@ def run_tasks(
             ),
         ))
 
+    report.batch_provenance = _batch_provenance(
+        report.outcomes, tasks, kind=kind, previous=previous_provenance,
+    )
+
     if write_report:
         report.write()
     _mirror_status(phase_dir, report)
     return report
+
+
+def _batch_provenance(
+    outcomes: Sequence[TaskOutcome],
+    tasks: Sequence[Dict[str, Any]],
+    *,
+    kind: str,
+    previous: Dict[str, Dict[str, Any]],
+) -> Dict[str, Dict[str, Any]]:
+    """Per-output provenance for :attr:`BatchReport.batch_provenance` (§7.3a).
+
+    A task this dispatch ran to a persisted result file records its runner and
+    the sha256 of the file's bytes as they are now. A task it did *not* run —
+    skipped under ``--resume``, or outside ``only_task_ids`` — keeps the row an
+    earlier dispatch recorded, but only while that row is still true: same
+    round, and the file's bytes still hash to the recorded value. Anything else
+    records nothing, so the merge falls back to the batch's own
+    ``metadata.model`` rather than crediting this executor with a file it never
+    wrote.
+    """
+    try:
+        from .subagent_tasks import file_bytes_sha256, task_round
+    except ImportError:  # pragma: no cover
+        from utils.subagent_tasks import file_bytes_sha256, task_round
+    round_id = task_round(tasks)
+    task_kinds = {
+        str(task.get("task_id", index)): str(task.get("kind") or kind)
+        for index, task in enumerate(tasks)
+    }
+    output_by_id: Dict[str, str] = {}
+    provenance: Dict[str, Dict[str, Any]] = {}
+    for outcome in outcomes:
+        if outcome.ok and outcome.output_path:
+            output_by_id[outcome.task_id] = outcome.output_path
+        if not outcome.ok or outcome.skipped or not outcome.output_path:
+            continue
+        digest = file_bytes_sha256(outcome.output_path)
+        if not digest:
+            continue
+        provenance[outcome.task_id] = {
+            "task_id": outcome.task_id,
+            "kind": outcome.kind or task_kinds.get(outcome.task_id, kind),
+            "round": round_id,
+            "runner": outcome.runner,
+            "sha256": digest,
+        }
+    for task_id, row in previous.items():
+        if task_id in provenance or not isinstance(row, dict):
+            continue
+        if task_id not in task_kinds or row.get("round") != round_id:
+            continue
+        path = output_by_id.get(task_id)
+        if path is None:
+            task = next(
+                (t for i, t in enumerate(tasks)
+                 if str(t.get("task_id", i)) == task_id),
+                None,
+            )
+            path = task.get("output_path") if isinstance(task, dict) else None
+        if path and row.get("sha256") and file_bytes_sha256(path) == row["sha256"]:
+            provenance[task_id] = dict(row)
+    return provenance
 
 
 def _run_sync(coro):
@@ -5290,6 +5906,33 @@ def _recorded_runners(phase_dir: str, kind: str = "") -> Dict[str, str]:
             continue
         recorded[str(row["task_id"])] = spec
     return recorded
+
+
+def _recorded_provenance(
+    phase_dir: str, kind: str = ""
+) -> Optional[Dict[str, Dict[str, Any]]]:
+    """The ``batch_provenance`` block of ``kind``'s batch report (§7.3a).
+
+    ``None`` when there is no report, or the report predates the block (no
+    ``batch_provenance`` key at all) — the caller then falls back to the legacy
+    per-row ``runner`` (:func:`_recorded_runners`). ``{}`` is a report that
+    recorded provenance and has none to offer.
+    """
+    path = Path(phase_dir) / _batch_report_filename(kind)
+    if not path.exists():
+        return None
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(document, dict) or "batch_provenance" not in document:
+        return None
+    block = document.get("batch_provenance")
+    if not isinstance(block, dict):
+        return {}
+    return {
+        str(task_id): row for task_id, row in block.items() if isinstance(row, dict)
+    }
 
 
 def _mirror_status(

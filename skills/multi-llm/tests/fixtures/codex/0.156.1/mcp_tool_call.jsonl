@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a0d4b1-fa38-7ab1-b697-b21fae6295a6"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `stub-model` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"capfs","tool":"write_file","arguments":{"path":"m.txt","text":"x"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"capfs","tool":"write_file","arguments":{"path":"m.txt","text":"x"},"result":{"content":[{"type":"text","text":"wrote m.txt"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"[]"}}
+{"type":"turn.completed","usage":{"input_tokens":2,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":2,"reasoning_output_tokens":0}}

@@ -1,0 +1,98 @@
+{
+ "_note": "Raw Responses SSE output items for the hosted web_search tool, codex-cli 0.156.1 + gpt-5.5, live 2026-09-25 (capture/proxy.py). Verbatim except the final message text, replaced by []. 'added' is response.output_item.added (no action yet), 'done' is response.output_item.done.",
+ "web_search_call": [
+  {
+   "added": {
+    "id": "ws_0077ed8474a03dec016ab5ae82acc887d28f74ceeb395a8cb3",
+    "type": "web_search_call",
+    "status": "in_progress",
+    "internal_chat_message_metadata_passthrough": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    },
+    "metadata": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    }
+   },
+   "done": {
+    "id": "ws_0077ed8474a03dec016ab5ae82acc887d28f74ceeb395a8cb3",
+    "type": "web_search_call",
+    "status": "completed",
+    "action": {
+     "type": "search",
+     "queries": [
+      "current Python release python.org downloads"
+     ],
+     "query": "current Python release python.org downloads"
+    },
+    "internal_chat_message_metadata_passthrough": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    },
+    "metadata": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    }
+   }
+  },
+  {
+   "added": {
+    "id": "ws_0077ed8474a03dec016ab5ae8677f887d28d5d70dfe1362f7c",
+    "type": "web_search_call",
+    "status": "in_progress",
+    "internal_chat_message_metadata_passthrough": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    },
+    "metadata": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    }
+   },
+   "done": {
+    "id": "ws_0077ed8474a03dec016ab5ae8677f887d28d5d70dfe1362f7c",
+    "type": "web_search_call",
+    "status": "completed",
+    "action": {
+     "type": "open_page",
+     "url": "https://www.python.org/downloads/"
+    },
+    "internal_chat_message_metadata_passthrough": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    },
+    "metadata": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    }
+   }
+  },
+  {
+   "added": {
+    "id": "ws_0077ed8474a03dec016ab5ae87a24887d2ae782c9d45d187de",
+    "type": "web_search_call",
+    "status": "in_progress",
+    "internal_chat_message_metadata_passthrough": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    },
+    "metadata": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    }
+   },
+   "done": {
+    "id": "ws_0077ed8474a03dec016ab5ae87a24887d2ae782c9d45d187de",
+    "type": "web_search_call",
+    "status": "completed",
+    "action": {
+     "type": "find_in_page",
+     "pattern": "Release",
+     "url": "https://www.python.org/downloads/"
+    },
+    "internal_chat_message_metadata_passthrough": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    },
+    "metadata": {
+     "turn_id": "01a0d5b1-a585-7e02-b794-eed6c521ca7d"
+    }
+   }
+  }
+ ],
+ "progress_events": [
+  "response.web_search_call.in_progress",
+  "response.web_search_call.searching",
+  "response.web_search_call.completed"
+ ]
+}

@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from . import structured_output
+from . import readonly_audit as _readonly_audit_mod
 from .metrics import describe_usage as _describe_usage
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
 from .providers.base import (
@@ -65,6 +66,25 @@ SANDBOX_FALLBACK_WORD_PREFIX = "fallback-"
 #: nobody declared is dropped rather than recorded, exactly as an unknown word
 #: always was, so a stray string can never read as a sandbox.
 _CONTAINED_RUNG_IDS = frozenset({SANDBOX_RUNG_LANDLOCK})
+
+
+def _attach_sandbox_word(details: Dict[str, Any], sandbox_fallback: Any) -> None:
+    """Record the D6 override on ``details["sandbox"]`` for a child that ran.
+
+    ``bypassed`` for the uncontained rung, the rung id for a contained one, and
+    nothing when the override did not fire. Called on every path where the
+    child actually ran — exit 0, a non-zero exit, and a timeout kill — because
+    the slot ran without the runner's sandbox whatever it then returned: a
+    record that dropped the word on failure would hide exactly the slots an
+    operator most needs to audit (the dogfood run 2026-09-25 lost a bypassed
+    codex slot's provenance this way).
+    """
+    fallback_rung = sandbox_rung_id(sandbox_fallback)
+    if fallback_rung:
+        details["sandbox"] = (
+            SANDBOX_BYPASSED if fallback_rung == SANDBOX_RUNG_UNSANDBOXED
+            else fallback_rung
+        )
 
 
 def sandbox_record_word(value: Any) -> Optional[str]:
@@ -499,6 +519,56 @@ def _attach_stdout_excerpt(details: Dict[str, Any], stdout: Optional[str]) -> No
         details["stdout_excerpt"] = excerpt
 
 
+_READONLY_AUDIT_KEY = _readonly_audit_mod.DETAILS_KEY
+
+
+def _readonly_audit(
+    provider: Any, stdout: Optional[str], sandbox_fallback: Any = None
+) -> Optional[Dict[str, Any]]:
+    """The adapter's read-only verdict on this attempt's **full** stdout, compact.
+
+    Only for an attempt dispatched on the uncontained rung (``sandbox_fallback``
+    names ``unsandboxed``): that is the one slot the porcelain check brackets
+    and the one verdict anything reads, so a default or contained-rung run adds
+    no key — the same rule the D6 ``sandbox`` provenance key follows.
+
+    Plan §4.2 option B / 4.2: the audit must see the whole in-memory stream —
+    the persisted log and ``stdout_excerpt`` are both cut at
+    ``MAX_LOG_STREAM_BYTES``, and a cut stream has no ``turn.completed`` and
+    would fail every long slot. So it runs here, at parse time, on every
+    outcome that has a stream, before anything is bounded; only the compact
+    verdict dict leaves (never the stream). ``None`` when the adapter has no
+    opinion or the hook raised — a missing verdict, which
+    ``readonly_audit.combine_audits`` treats as not clean.
+    """
+    if sandbox_rung_id(sandbox_fallback) != SANDBOX_RUNG_UNSANDBOXED:
+        return None
+    hook = getattr(provider, "audit_readonly_stream", None)
+    if hook is None:
+        return None
+    try:
+        verdict = hook(stdout or "")
+    except Exception:  # noqa: BLE001 - an audit may never break a run
+        return None
+    if verdict is None:
+        return None
+    to_dict = getattr(verdict, "to_dict", None)
+    if callable(to_dict):
+        verdict = to_dict()
+    return dict(verdict) if isinstance(verdict, dict) else None
+
+
+def _attach_readonly_audit(
+    details: Dict[str, Any], provider: Any, stdout: Optional[str],
+    sandbox_fallback: Any = None,
+) -> Optional[Dict[str, Any]]:
+    """Put :func:`_readonly_audit`'s verdict on ``details['readonly_audit']``."""
+    verdict = _readonly_audit(provider, stdout, sandbox_fallback)
+    if verdict is not None:
+        details[_READONLY_AUDIT_KEY] = verdict
+    return verdict
+
+
 def _attach_usage(
     details: Dict[str, Any], provider: Any, stdout: Optional[str], stderr: Optional[str]
 ) -> None:
@@ -552,6 +622,7 @@ def _save_log(
     duration_seconds: Optional[float] = None,
     result_source: Optional[str] = None,
     stdout_parse_error: Optional[str] = None,
+    readonly_audit: Optional[Dict[str, Any]] = None,
 ) -> bool:
     """
     Save agent output to a log file for debugging.
@@ -582,6 +653,10 @@ def _save_log(
             told not to print JSON on stdout at all, so a failed stdout
             parse beside a file-channel success is expected, not a fault
             (F9.2).
+        readonly_audit: The attempt's compact read-only verdict (plan §4.2),
+            rendered as one ``Readonly audit:`` header line — the verdict,
+            never the stream it was computed on (which the ``STDOUT`` section
+            below carries bounded, like any other).
 
     Returns:
         True if log was saved successfully, False otherwise
@@ -638,6 +713,11 @@ def _save_log(
                 lines.append("Stdout: not used (file output)")
             else:
                 lines.append(f"Stdout parse: failed ({stdout_parse_error})")
+
+        if readonly_audit is not None:
+            lines.append(
+                f"Readonly audit: {_redact(_readonly_audit_mod.describe(readonly_audit))}"
+            )
 
         if error:
             lines.append(f"Error: {error}")
@@ -810,7 +890,8 @@ def invoke_with_provider(
             permits, and this is a ``generate`` dispatch (``True`` is the
             pre-rung spelling of the uncontained rung). It is forwarded to the
             adapter's ``build_command_for_transport`` (which every adapter but
-            codex ignores) and, on success, recorded as ``details["sandbox"]``
+            codex ignores) and, whenever the child ran (success, non-zero
+            exit or timeout kill), recorded as ``details["sandbox"]``
             — ``"bypassed"`` for the uncontained rung only, the rung id for a
             contained one — so the provenance rides the same dict
             ``served_model`` does. The default renders every argv
@@ -1083,6 +1164,11 @@ def invoke_with_provider(
             if unavailable is not None:
                 error_message = f"{error_message} [{unavailable.value}]"
 
+            # Plan §4.2: the read-only audit sees the FULL stream, here, before
+            # the excerpt below bounds it — a failed attempt of a bypassed slot
+            # could still have written, and 4.3 ANDs every attempt's verdict.
+            audit = _readonly_audit(provider, result.stdout, sandbox_fallback)
+
             # Save log on failure if requested
             if log_file:
                 _save_log(
@@ -1094,7 +1180,8 @@ def invoke_with_provider(
                     returncode=result.returncode,
                     success=False,
                     error=error_message,
-                    duration_seconds=duration
+                    duration_seconds=duration,
+                    readonly_audit=audit,
                 )
 
             details = {
@@ -1126,6 +1213,10 @@ def invoke_with_provider(
             # already read `result.stdout` for their own one-line verdicts; this
             # carries the text itself, under §4.5/§4.4, so a consumer can form a
             # different judgement from the same evidence.
+            if audit is not None:
+                details[_READONLY_AUDIT_KEY] = audit
+            # The child ran, so the D6 provenance rides a failure too.
+            _attach_sandbox_word(details, sandbox_fallback)
             _attach_stdout_excerpt(details, result.stdout)
             # A failed run still spent what its envelope records, and this lane
             # never read it: `parse_usage` was Lane B's (`subagent_executor`)
@@ -1187,18 +1278,19 @@ def invoke_with_provider(
         # `details` spreads `**parsed.get("details", {})`, so the key rides
         # across. An adapter that reports nothing still leaves it absent.
         _attach_usage(parsed["details"], provider, result.stdout, result.stderr)
+        # Plan §4.2: the read-only verdict on the full stream, on the same dict
+        # (the schema branch below spreads `details`, so it rides across), and
+        # always before `_attach_stdout_excerpt` bounds anything.
+        audit = _attach_readonly_audit(
+            parsed["details"], provider, result.stdout, sandbox_fallback
+        )
         # D6 override (2026-09-17): a slot that ran without the runner's own
         # sandbox says so on the same dict, so `served_model_fields` carries it
         # to the result record, `.status.json`'s `models_served` and the report
         # label. Only when the override fired — a default run adds no key —
         # and `bypassed` only for the uncontained rung: a contained rung is a
         # sandbox, and records its own id rather than a word it would contradict.
-        fallback_rung = sandbox_rung_id(sandbox_fallback)
-        if fallback_rung:
-            parsed["details"]["sandbox"] = (
-                SANDBOX_BYPASSED if fallback_rung == SANDBOX_RUNG_UNSANDBOXED
-                else fallback_rung
-            )
+        _attach_sandbox_word(parsed["details"], sandbox_fallback)
 
         # §3.6: a fallback that fired rides out on the same details dict the
         # provider/model pair travels on, so every downstream record that names
@@ -1304,7 +1396,8 @@ def invoke_with_provider(
                     returncode=result.returncode,
                     success=parsed.get("success", False),
                     error=parsed.get("error"),
-                    duration_seconds=duration
+                    duration_seconds=duration,
+                    readonly_audit=audit,
                 )
 
         return parsed
@@ -1326,6 +1419,11 @@ def invoke_with_provider(
         else:
             stderr = e.stderr.decode("utf-8", errors="replace")
 
+        # Plan §4.2: a killed attempt is audited too — on whatever it streamed
+        # before the kill, which has no `turn.completed`, so it can only come
+        # out not clean (an incomplete stream is "could have written").
+        audit = _readonly_audit(provider, stdout, sandbox_fallback)
+
         # Save log on timeout if requested
         if log_file:
             _save_log(
@@ -1337,7 +1435,8 @@ def invoke_with_provider(
                 returncode=-1,
                 success=False,
                 error=f"{provider_name} timed out after {effective_timeout}s",
-                duration_seconds=duration
+                duration_seconds=duration,
+                readonly_audit=audit,
             )
 
         details = {
@@ -1371,6 +1470,10 @@ def invoke_with_provider(
         # empty string rather than absent; the helper omits the key rather than
         # attaching `""`, so this path and the non-zero-exit path answer
         # `details.get("stdout_excerpt")` the same way.
+        if audit is not None:
+            details[_READONLY_AUDIT_KEY] = audit
+        # A killed child ran too, and ran under whatever rung it was given.
+        _attach_sandbox_word(details, sandbox_fallback)
         _attach_stdout_excerpt(details, stdout)
         # AND THE SAME PARTIAL STDOUT IS WHAT USAGE IS PARSED OUT OF. This is
         # the third of the three outcomes `_attach_usage` is documented to
@@ -1597,6 +1700,7 @@ def _finalize_file_output_log(
         duration_seconds=deferred_log.get("duration_seconds"),
         result_source=result_source,
         stdout_parse_error=stdout_parse_error,
+        readonly_audit=details.get(_READONLY_AUDIT_KEY),
     )
 
 

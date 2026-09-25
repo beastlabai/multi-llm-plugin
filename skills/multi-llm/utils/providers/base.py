@@ -20,6 +20,7 @@ from typing import (
     Mapping,
     Optional,
     Pattern,
+    Sequence,
     Set,
     Tuple,
 )
@@ -184,10 +185,26 @@ class SandboxRung:
     * ``contained`` — whether the rung is a real OS boundary. Decides which
       ``sandbox_fallback`` values may reach it (``auto``/``contained`` vs.
       ``auto`` alone) and whether any artifact may call the slot bypassed.
-    * ``retires_when`` — ``(measured_at_version, upstream_deprecation_sentence)``
+    * ``deprecated_at`` — ``(measured_at_version, upstream_deprecation_sentence)``
       for a rung that rides a feature upstream has announced it will remove, or
-      ``None``. Rendered for a human; nothing compares a running CLI's version
-      against it — the probe answers that question.
+      ``None``. **Render-only**: nothing compares a running CLI's version
+      against it.
+    * ``removed_at`` — ``(version, evidence)``: the first CLI version on which
+      the rung was **measured** unavailable (a measurement on this
+      configuration, not an upstream changelog entry), or ``None``. Unlike
+      ``deprecated_at`` it **is compared**: a run whose detected CLI version is
+      at or above it does not probe the rung at all — the walk records it
+      ``skipped`` and the run prints the retirement line once
+      (:func:`rung_removed_for_version`). ``multi_llm.py doctor`` alone still
+      runs the real probe whatever the version says, so a build that restores
+      the rung shows there as a mismatch; re-measuring moves or drops the
+      field. (Split from the old two-tuple ``retires_when``, 2026-09-24.)
+    * ``removed_signature`` — the sentence the rung's probe prints when this
+      CLI build no longer supports the rung (codex 0.156.1's panic), matched
+      whitespace-insensitively **by text, never by exit code**. The walk
+      records such a probe ``retired`` — its own outcome, distinct from a
+      generic ``unavailable`` — and only that outcome (or the version skip)
+      earns the retirement line.
     * ``probe_workdir`` — the cwd-relative directory a contained rung's canary
       writes into, or ``None``. The walk creates it and proves it writable
       **outside** the sandbox before the probe runs, so a denial the canary
@@ -200,8 +217,35 @@ class SandboxRung:
     probe_argv: Optional[Tuple[str, ...]]
     argv_rewrite: Tuple[str, ...]
     contained: bool
-    retires_when: Optional[Tuple[str, str]] = None
+    deprecated_at: Optional[Tuple[str, str]] = None
+    removed_at: Optional[Tuple[str, str]] = None
     probe_workdir: Optional[str] = None
+    removed_signature: Optional[str] = None
+
+
+def rung_removed_for_version(rung: "SandboxRung", version: Optional[str]) -> bool:
+    """Whether ``version`` is at or above ``rung.removed_at``'s version.
+
+    ``False`` for a rung with no ``removed_at`` and for an unknown or empty
+    ``version`` — an unread version never skips a probe: the probe runs and its
+    outcome is authoritative. Compared through :func:`version_tuple`, the one
+    ordering rule of the harness.
+    """
+    if not rung.removed_at or not version or version == "unknown":
+        return False
+    token = _version_token(str(version))
+    if not token:
+        return False
+    return version_tuple(token) >= version_tuple(rung.removed_at[0])
+
+
+def rung_probe_said_removed(rung: "SandboxRung", text: str) -> bool:
+    """Whether a rung probe's output carries the rung's ``removed_signature``
+    (whitespace-insensitive, since a panic message may wrap)."""
+    signature = getattr(rung, "removed_signature", None)
+    if not signature:
+        return False
+    return " ".join(signature.split()) in " ".join((text or "").split())
 
 
 def sandbox_rung_id(value: Any) -> Optional[str]:
@@ -229,7 +273,7 @@ def sandbox_fallback_notice_text(
     reader greps one sentence across a run the way ``[SANDBOX_BYPASSED]`` reads.
     It names the rung, what it renders, and the key value that permitted it; for
     a rung riding a feature upstream has announced it will remove
-    (``retires_when``) it names that too, and says in advance what a reader of
+    (``deprecated_at``) it names that too, and says in advance what a reader of
     the raw capture will find: the deprecation sentence arrives as an
     ``item.completed`` whose item is ``"type":"error"`` on **every** run of this
     rung, healthy ones included — the marker that the run took the rung, never
@@ -242,8 +286,8 @@ def sandbox_fallback_notice_text(
         f"providers.{provider_name}.sandbox_fallback={policy or SANDBOX_FALLBACK_AUTO} "
         f"(read-only phase; writes denied by the kernel)"
     )
-    if rung.retires_when:
-        version, sentence = rung.retires_when
+    if rung.deprecated_at:
+        version, sentence = rung.deprecated_at
         text += (
             f"; deprecated upstream (measured at {provider_name} {version}: "
             f"{sentence!r}) — every raw capture of this slot carries that "
@@ -254,26 +298,144 @@ def sandbox_fallback_notice_text(
 
 
 def sandbox_rung_retired_notice(
-    provider_name: str, spec: str, rung: "SandboxRung"
+    provider_name: str,
+    spec: str,
+    rung: "SandboxRung",
+    *,
+    measured: bool = False,
+    version: Optional[str] = None,
+    refused: bool = False,
 ) -> str:
     """The one line naming a contained rung this run could no longer take.
 
-    Open question 2 of the landlock-rung plan: when the previous run of this
-    phase recorded ``spec`` on ``rung`` and this run took the uncontained rung
-    instead, the boundary the operator had last time is gone — most likely
-    because upstream removed the feature. Said once, with ``retires_when``'s
-    version and sentence, and nothing else about the run changes.
+    Two causes, one marker. **Measured** (``measured=True``, 2026-09-24):
+    the detected CLI ``version`` is at or above the rung's ``removed_at``, or
+    the rung's probe printed its ``removed_signature`` — the rung was *measured*
+    unavailable from that build on this configuration (not an upstream
+    removal: no changelog says so yet), and the line says so whatever the
+    previous run recorded. **By transition** (open question 2 of the
+    landlock-rung plan): the previous run of this phase recorded ``spec`` on
+    ``rung`` and this run took the uncontained rung instead. Either way it is
+    said once per run, with ``deprecated_at``'s version and sentence, and
+    nothing else about the run changes. ``spec`` may name several slots,
+    comma-joined.
+
+    ``refused=True`` is the ``sandbox_fallback=contained`` refusal path: the
+    run did **not** fall to the uncontained rung — it refused the slot — so
+    the tail says that instead of offering ``contained`` as the fix.
     """
     said = ""
-    if rung.retires_when:
-        version, sentence = rung.retires_when
-        said = f" (measured at {provider_name} {version}; upstream said {sentence!r})"
+    if rung.deprecated_at:
+        dep_version, sentence = rung.deprecated_at
+        said = f" (deprecated at {provider_name} {dep_version}; upstream said {sentence!r})"
+    if measured:
+        if rung.removed_at:
+            removed = f"is measured unavailable from {provider_name} {rung.removed_at[0]}"
+            if rung.removed_at[1]:
+                removed += f" ({rung.removed_at[1]})"
+        else:
+            removed = f"is measured unavailable on this {provider_name} build"
+        this = f"; this is {provider_name} {version}" if version else ""
+        head = (
+            f"{SANDBOX_RUNG_RETIRED_MARKER} {spec}: the contained {rung.name!r} "
+            f"fallback rung {removed}{this}{said}"
+        )
+    else:
+        head = (
+            f"{SANDBOX_RUNG_RETIRED_MARKER} {spec}: the contained {rung.name!r} fallback "
+            f"rung the previous run used is no longer usable here{said}"
+        )
+    if refused:
+        return (
+            f"{head}; the uncontained rung is never taken under providers."
+            f"{provider_name}.sandbox_fallback={SANDBOX_FALLBACK_CONTAINED}, so "
+            f"this run refused {spec}"
+        )
     return (
-        f"{SANDBOX_RUNG_RETIRED_MARKER} {spec}: the contained {rung.name!r} fallback "
-        f"rung the previous run used is no longer usable here{said}; this run fell "
-        f"to the uncontained rung. Set providers.{provider_name}.sandbox_fallback="
-        f"{SANDBOX_FALLBACK_CONTAINED} to refuse instead"
+        f"{head}; this run fell to the uncontained rung. Set providers."
+        f"{provider_name}.sandbox_fallback={SANDBOX_FALLBACK_CONTAINED} to refuse "
+        f"instead"
     )
+
+
+#: The walk outcomes :func:`sandbox_walk_clause` renders (the executor's
+#: ``RUNG_*`` constants, spelled here so this module does not import it).
+_WALK_OUTCOME_SKIPPED = "skipped"
+_WALK_OUTCOME_RETIRED = "retired"
+
+
+def _quoted_tail(tail: str) -> str:
+    """A probe tail as the one quoted phrase a line can carry: the first line,
+    capped, with an ellipsis when anything was cut."""
+    text = " ".join((tail or "").split())
+    if len(text) > 160:
+        text = text[:157].rstrip() + " …"
+    return f'"{text}"'
+
+
+def sandbox_walk_clause(
+    provider_name: str,
+    walk: Sequence[Tuple[str, str]],
+    rung_tails: Sequence[Tuple[str, str]] = (),
+    version: Optional[str] = None,
+    rungs: Sequence["SandboxRung"] = (),
+) -> str:
+    """The rung clause appended to the ``[SANDBOX_BYPASSED]`` line (2026-09-24).
+
+    One phrase per rung the walk reached **before** the uncontained one, each
+    with its outcome and — when it was probed — its probe tail, so the line
+    says that a contained rung exists, was tried, and why it was not taken.
+    A rung skipped by version (``removed_at``) says that instead and has no
+    tail: nothing was probed; it names the ``removed_at`` version of its
+    declaration in ``rungs`` (the running ``version`` when none is given).
+    ``""`` when the walk reached no other rung.
+    """
+    tails = dict(rung_tails or ())
+    removed = {
+        rung.name: rung.removed_at[0] for rung in rungs or () if rung.removed_at
+    }
+    who = f"{provider_name} {version}" if version else "probe"
+    parts: List[str] = []
+    for name, outcome in walk or ():
+        if outcome == "taken":
+            continue
+        tail = tails.get(name, "")
+        if outcome == _WALK_OUTCOME_SKIPPED:
+            parts.append(
+                f"fallback rung {name!r} not tried: unavailable from "
+                f"{provider_name} {removed.get(name) or version or '?'}, measured"
+            )
+            continue
+        if outcome == _WALK_OUTCOME_RETIRED:
+            said = f"fallback rung {name!r} unavailable: requires bubblewrap in this {provider_name} build"
+        elif outcome == "rejected":
+            said = f"fallback rung {name!r} rejected: its canary write was not denied"
+        elif outcome == "absent":
+            said = f"fallback rung {name!r} absent: this build did not recognise the rung (probe ran, no boundary measured)"
+        else:
+            said = f"fallback rung {name!r} {outcome}"
+        if tail.strip():
+            said += f" ({who}: {_quoted_tail(tail)})"
+        parts.append(said)
+    return "; ".join(parts)
+
+
+def sandbox_bypassed_notice_text(provider_name: str, walk_clause: str = "") -> str:
+    """The ``[SANDBOX_BYPASSED]`` line both lanes print — the stem fixed on
+    2026-09-17 (see ``review_orchestrator_base.sandbox_bypassed_notice``),
+    with the rung clause (:func:`sandbox_walk_clause`) appended after it when
+    the walk tried a rung first. One builder, so the fan-out and the executor
+    cannot drift apart."""
+    text = (
+        f"{SANDBOX_BYPASSED_MARKER} {provider_name}: bubblewrap cannot start; "
+        f"running --sandbox danger-full-access under "
+        f"providers.{provider_name}.sandbox_fallback={SANDBOX_FALLBACK_AUTO} "
+        f"(read-only phase; no OS boundary between the model's shell and this "
+        f"machine)"
+    )
+    if walk_clause:
+        text += f"; {walk_clause}"
+    return text
 
 
 def sandbox_rung_allowed(rung: "SandboxRung", policy: Optional[str]) -> bool:
@@ -2537,6 +2699,20 @@ class LLMProvider(ABC):
     #: (``context_mode: workspace-read``, D2c).
     supports_workspace_reads: bool = False
 
+    #: True when the ``agent-readonly`` invocation can read files OUTSIDE its
+    #: working directory (the pinned repo root) with no extra flag — codex's
+    #: ``--sandbox read-only`` reads anywhere. A validation batch may name a
+    #: snapshot in a phase dir outside the repo (a plan kept elsewhere), so an
+    #: adapter that is neither this nor :attr:`read_scope_flag` is treated as
+    #: unable to read such a path (plans/validation-context-by-path-and-codex-0156-fallout.md §2.2).
+    reads_outside_cwd: bool = False
+
+    #: The flag that widens the ``agent-readonly`` read scope to one more
+    #: directory (claude-code's ``--add-dir``), or ``None``. The executor asks
+    #: for it only when a ``mode: path`` context source lies outside cwd, via
+    #: :meth:`widen_read_scope`.
+    read_scope_flag: Optional[str] = None
+
     #: Declared usage fidelity (D3j): ``none`` | ``partial`` | ``full``.
     usage_support: str = USAGE_NONE
 
@@ -3013,6 +3189,22 @@ class LLMProvider(ABC):
         """Whether this adapter declares ``profile`` (D3e)."""
         return profile in self.agent_profiles
 
+    def widen_read_scope(self, argv: List[str], dirs: Sequence[str]) -> List[str]:
+        """``argv`` with :attr:`read_scope_flag` added once per directory.
+
+        Inserted right after the executable, ahead of every other option, so a
+        variadic option later in the argv can never swallow it and a trailing
+        positional prompt is never displaced. An adapter with no flag returns
+        ``argv`` unchanged — the caller refuses rather than dispatching a path
+        the runner cannot open.
+        """
+        if not self.read_scope_flag or not dirs or not argv:
+            return list(argv)
+        extra: List[str] = []
+        for directory in dirs:
+            extra.extend([self.read_scope_flag, str(directory)])
+        return [argv[0], *extra, *argv[1:]]
+
     def build_agent_command(
         self,
         prompt: str,
@@ -3121,6 +3313,21 @@ class LLMProvider(ABC):
 
         Returns ``None`` by default: an adapter is duration-only until a captured
         fixture proves its extractor.
+        """
+        return None
+
+    def audit_readonly_stream(self, raw_stream: str) -> Optional[Any]:
+        """Could this attempt have written to the tree? (plan §4.2, option B.)
+
+        Called by ``llm_client.invoke_with_provider`` on the attempt's **full**
+        stdout, before ``_attach_stdout_excerpt`` bounds it, on every outcome
+        that has a stream; only the compact
+        :class:`~utils.readonly_audit.AuditVerdict` rides out, as
+        ``details['readonly_audit']``. ``None`` (the default) means *no opinion*:
+        an adapter without a structured action stream, whose uncontained slots
+        keep the porcelain check's fail-closed verdict unchanged. An override
+        must fail closed on anything it cannot classify, and must never raise
+        (the caller treats a raise as ``None``).
         """
         return None
 

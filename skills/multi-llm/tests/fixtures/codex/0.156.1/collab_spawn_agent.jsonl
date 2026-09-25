@@ -1,0 +1,9 @@
+{"type":"thread.started","thread_id":"01a0d4b2-4ec7-75f0-8e50-508030f38188"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5.1-codex` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"01a0d4b2-4ec7-75f0-8e50-508030f38188","receiver_thread_ids":[],"prompt":"SUBAGENT-TASK write a file","agents_states":{},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"01a0d4b2-4ec7-75f0-8e50-508030f38188","receiver_thread_ids":["01a0d4b2-4eff-70c2-89a2-68a1deb8520c"],"prompt":"SUBAGENT-TASK write a file","agents_states":{"01a0d4b2-4eff-70c2-89a2-68a1deb8520c":{"status":"pending_init","message":null}},"status":"completed"}}
+{"type":"item.started","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'sleep 6'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_2","type":"command_execution","command":"/bin/bash -lc 'sleep 6'","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"[]"}}
+{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":3,"reasoning_output_tokens":0}}

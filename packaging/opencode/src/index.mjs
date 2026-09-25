@@ -2044,6 +2044,8 @@ function needsHumanMessage({ payload, output, stderr, values, surface }) {
   } else if (launched && held) {
     phase = fill(text.review_completed, { phase: launched })
   } else if (launched) {
+    // Only the needs-human word is "did not complete"; every other word the
+    // surface names — `partial` included, a run that finished — is not.
     const incomplete = payload.state === surface.dispatcher.states.needs_human
     phase = fill(incomplete ? text.phase_incomplete : text.phase_known, {
       phase: launched,
@@ -2729,8 +2731,10 @@ async function execute(args, ctx, surface, client) {
  * every *other* word an `ok: true` result can carry, and exit 2 carries three
  * of them: "this phase has already been completed, use --force" comes back
  * `ok: true`, `state: "nothing-to-do"`, `next: null` and owes the model
- * nothing, as do the poll vocabulary's `running` and `died`. The words that do
- * mean work are the generated surface's, never spelled here.
+ * nothing, as do the poll vocabulary's `running` and `died`, and exit 0's
+ * `partial` (a finished run with a failed model slot: terminal, `next: null`;
+ * the model names the failures from `progress.models`, it runs nothing). The
+ * words that do mean work are the generated surface's, never spelled here.
  */
 function rowNeedsInstructions(row, outcome, surface) {
   if (!row.supports_detach) return false

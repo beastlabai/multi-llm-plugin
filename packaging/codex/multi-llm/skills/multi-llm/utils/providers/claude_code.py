@@ -725,6 +725,10 @@ class ClaudeCodeProvider(LLMProvider):
     agent_profiles = (PROFILE_GENERATE, PROFILE_AGENT_READONLY, PROFILE_AGENT_WRITE)
     supports_file_edits = True
     supports_workspace_reads = True
+    # Claude Code denies `Read` outside its working directory unless the
+    # directory is added: a validation batch naming a snapshot in a phase dir
+    # outside the repo gets `--add-dir <dir>` (validation-context-by-path §2.2).
+    read_scope_flag = "--add-dir"
     usage_support = USAGE_FULL
     # §4.2.2: this adapter really emits `--json-schema` when handed a schema (see
     # `build_command`), so the caller may mark an accepted result `native`.

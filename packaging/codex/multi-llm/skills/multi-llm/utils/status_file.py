@@ -53,7 +53,11 @@ writing a second file with a private shape — ``run`` only ever on a detached r
   ``models`` is the per-model map the fan-out keeps, keyed by model spec —
   ``{state: queued|staggering|running|retrying|done|failed, started_at,
   updated_at, ended_at, elapsed_s, timeout_s, attempt, retry_after_s,
-  stagger_until, error, source}`` — ``stagger_until`` is the stamp a
+  stagger_until, error, source, warning, readonly_audit}`` — ``warning`` is a
+  non-fatal note on a slot that still counts (plan §4.3's
+  ``[SANDBOX_BYPASSED] … not attributed``), ``readonly_audit`` the compact
+  combined verdict of an uncontained slot's stream audit (``{clean, reason,
+  actions}``, never the stream), and ``stagger_until`` is the stamp a
   ``staggering`` slot's launch sleep ends at, which ``status`` renders as
   ``starts in 4s`` and the slot drops the moment it moves on. ``models_done`` counts *finished* slots (``done`` + ``failed``,
   which is why it never walks backwards mid-run) and its sibling
@@ -121,7 +125,7 @@ import sys
 import tempfile
 import threading
 from datetime import datetime
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, Optional, Tuple
 
 from . import process_control
 
@@ -317,6 +321,36 @@ def update_status(phase_dir: str, updates: dict) -> None:
                 write_status(phase_dir, updates)
             except Exception:
                 pass
+
+
+def remove_status_keys(phase_dir: str, keys: Iterable[str]) -> None:
+    """Delete top-level ``keys`` from ``.status.json``. Best-effort (§7.2a).
+
+    The explicit deletion :func:`update_status` cannot express: its merge is
+    ``existing.update(updates)``, so ``update_status(d, {"k": None})`` writes
+    ``"k": null`` rather than removing ``k``. Read, ``pop`` and rewrite are one
+    critical section under :func:`checkpoint_lock`, exactly like
+    :func:`update_status`; the reserved ``run``/``progress`` objects and every
+    other sibling survive untouched. A no-op when the file or a key is absent
+    (nothing is written at all when no key was present).
+    """
+    keys = [str(key) for key in keys]
+    path = status_path(phase_dir)
+    with checkpoint_lock(phase_dir):
+        try:
+            if not os.path.exists(path):
+                return
+            with open(path, 'r', encoding='utf-8') as f:
+                existing = json.load(f)
+            if not isinstance(existing, dict):
+                return
+            if not any(key in existing for key in keys):
+                return
+            for key in keys:
+                existing.pop(key, None)
+            write_status(phase_dir, existing)
+        except Exception:
+            pass
 
 
 def read_status(phase_dir: str) -> Dict[str, Any]:
