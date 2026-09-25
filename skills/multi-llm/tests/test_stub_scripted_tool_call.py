@@ -21,7 +21,12 @@ What they pin:
 * the frames served, the declaration seen and the output returned are recorded
   in the log;
 * every other scenario, and a scenario-less stub, never emits a tool call even
-  to a request that advertises the tool — the text path is unchanged.
+  to a request that advertises the tool — the text path is unchanged;
+* the chat-completions leg (plans/opencode-validator-false-rate-limit-and-
+  denied-turn.md, T4.10), served only when ``surfaces:`` names ``chat``: one
+  assistant ``tool_calls`` message to a request advertising the tool, the
+  terminal message to the request carrying the matching ``role: "tool"``
+  message, and the call again for a tool message with another id.
 """
 
 from __future__ import annotations
@@ -44,6 +49,9 @@ STUB_SERVER = TESTS_DIR / "container" / "stub_server.py"
 SCENARIOS = TESTS_DIR / "fixtures" / "e2e" / "scenarios"
 SCRIPTED = SCENARIOS / "scripted_codex_plugin_tool_call.yaml"
 TEXT_ONLY = SCENARIOS / "container_full_chain.yaml"
+#: T4.9's deny rows (plans/opencode-validator-false-rate-limit-and-denied-
+#: turn.md): the chain's rules plus one chat-surface `read` of `/etc/hostname`.
+DENY = SCENARIOS / "scripted_opencode_read_deny.yaml"
 
 #: The tools[] entry codex 0.155.1 sent for a plugin MCP server (the plan's
 #: Appendix B capture), trimmed to the keys the stub reads plus the schema.
@@ -187,9 +195,10 @@ class TestTheScenarioFile:
             path.name for path in SCENARIOS.glob("*.yaml")
             if "scripted_tool_call" in (yaml.safe_load(
                 path.read_text(encoding="utf-8")) or {}))
-        assert carriers == [SCRIPTED.name], (
-            f"{carriers}: the scripted shape is reached only through ONE named "
-            f"scenario, so no existing row can start seeing tool calls")
+        assert carriers == sorted([SCRIPTED.name, DENY.name]), (
+            f"{carriers}: the scripted shape is reached only through these "
+            f"named scenarios (codex's plugin call; T4.9's opencode deny rows), "
+            f"so no existing row can start seeing tool calls")
 
 
 class TestTheCallIsServed:
@@ -324,3 +333,340 @@ class TestAMalformedScriptIsFatal:
         }), encoding="utf-8")
         with pytest.raises(AssertionError, match="stub exited"):
             _Stub(tmp_path, bad)
+
+
+# --------------------------------------------------------------------------- #
+# The chat-completions leg (T4.10). The script lives in a tmp scenario, not in
+# SCENARIOS, so `test_no_other_scenario_carries_a_script` still holds.
+# --------------------------------------------------------------------------- #
+
+#: opencode's `read` tool as an openai-compatible host advertises it.
+CHAT_READ_TOOL = {
+    "type": "function",
+    "function": {"name": "read", "description": "Read a file.",
+                 "parameters": {"type": "object",
+                                "properties": {"filePath": {"type": "string"}},
+                                "required": ["filePath"]}},
+}
+CHAT_BASH_TOOL = {"type": "function",
+                  "function": {"name": "bash", "parameters": {"type": "object"}}}
+CHAT_SCRIPT = {"surfaces": ["chat"], "name": "read",
+               "call_id": "call_mllm_chat_1",
+               "arguments": {"filePath": "/etc/hostname"},
+               "terminal": "chat scripted turn complete"}
+
+
+def _chat_scenario(tmp_path: Path, script: dict = CHAT_SCRIPT) -> Path:
+    path = tmp_path / "chat_scripted.yaml"
+    path.write_text(yaml.safe_dump({
+        "name": "chat_scripted", "description": "T4.10 chat leg",
+        "scripted_tool_call": script,
+        "prompts": [{"pattern": "read the file", "content": "OK"}],
+        "fallback": {"content": "OK"},
+    }), encoding="utf-8")
+    return path
+
+
+def _chat_request(*, tools=(), extra_messages=()) -> dict:
+    return {"model": "stub-model",
+            "messages": [{"role": "user", "content": "read the file"},
+                         *extra_messages],
+            "tools": list(tools)}
+
+
+def _chat_follow_up(call_id: str, content) -> list[dict]:
+    """The assistant turn that made the call, then the tool's result."""
+    return [
+        {"role": "assistant", "content": None,
+         "tool_calls": [{"id": call_id, "type": "function",
+                         "function": {"name": "read",
+                                      "arguments": json.dumps(
+                                          CHAT_SCRIPT["arguments"])}}]},
+        {"role": "tool", "tool_call_id": call_id, "content": content},
+    ]
+
+
+def _last_entry(server: "_Stub", surface: str, count: int = 1) -> dict:
+    """The newest log line for ``surface``, waiting for it to land.
+
+    The stub writes its log line after the response (`_dispatch`'s
+    ``finally``), so a JSON answer can reach the client before the line does.
+    """
+    deadline = time.time() + 5
+    while True:
+        lines = [e for e in server.entries() if e["surface"] == surface]
+        if len(lines) >= count or time.time() > deadline:
+            assert lines, f"no {surface} log line"
+            return lines[-1]
+        time.sleep(0.05)
+
+
+def _chat_stream_result(text: str) -> tuple[str, list[dict], str | None]:
+    """Reassemble a chat SSE body: (content, tool calls, finish_reason)."""
+    assert text.rstrip().endswith("data: [DONE]")
+    content, calls, finish = "", {}, None
+    for name, chunk in _sse_events(text):
+        assert name is None, "chat chunks carry no `event:` line"
+        choice = chunk["choices"][0]
+        delta = choice["delta"]
+        content += delta.get("content") or ""
+        for part in delta.get("tool_calls") or []:
+            call = calls.setdefault(part["index"],
+                                    {"function": {"name": "", "arguments": ""}})
+            for key in ("id", "type"):
+                if key in part:
+                    call[key] = part[key]
+            function = part.get("function") or {}
+            call["function"]["name"] += function.get("name") or ""
+            call["function"]["arguments"] += function.get("arguments") or ""
+        finish = choice["finish_reason"] or finish
+    return content, [calls[i] for i in sorted(calls)], finish
+
+
+class TestTheChatLeg:
+    @pytest.mark.parametrize("stream", [True, False], ids=["sse", "json"])
+    def test_an_advertising_request_gets_one_tool_call(
+            self, stub, tmp_path, stream):
+        server = stub(_chat_scenario(tmp_path))
+        status, text = server.post(
+            "/v1/chat/completions",
+            _chat_request(tools=[CHAT_BASH_TOOL, CHAT_READ_TOOL]), stream)
+        assert status == 200
+        if stream:
+            content, calls, finish = _chat_stream_result(text)
+            assert content == ""
+        else:
+            choice = json.loads(text)["choices"][0]
+            calls, finish = choice["message"]["tool_calls"], choice["finish_reason"]
+            assert choice["message"]["content"] is None
+        assert finish == "tool_calls"
+        assert len(calls) == 1, "exactly one tool call"
+        call = calls[0]
+        assert call["id"] == CHAT_SCRIPT["call_id"]
+        assert call["type"] == "function"
+        assert call["function"]["name"] == "read"
+        assert json.loads(call["function"]["arguments"]) == CHAT_SCRIPT["arguments"]
+        entry = _last_entry(server, "chat")
+        assert entry["scripted"]["phase"] == "call"
+        assert entry["scripted"]["declaration"] == CHAT_READ_TOOL
+        assert entry["fixture"] == "scripted_tool_call:call"
+
+    @pytest.mark.parametrize("stream", [True, False], ids=["sse", "json"])
+    @pytest.mark.parametrize("content", [
+        "error: permission denied for /etc/hostname",
+        [{"type": "text", "text": "error: permission denied for /etc/hostname"}],
+    ], ids=["string", "content-parts"])
+    def test_the_matching_tool_message_gets_the_terminal(
+            self, stub, tmp_path, stream, content):
+        server = stub(_chat_scenario(tmp_path))
+        status, text = server.post(
+            "/v1/chat/completions",
+            _chat_request(tools=[CHAT_READ_TOOL],
+                          extra_messages=_chat_follow_up(
+                              CHAT_SCRIPT["call_id"], content)),
+            stream)
+        assert status == 200
+        if stream:
+            answer, calls, finish = _chat_stream_result(text)
+        else:
+            choice = json.loads(text)["choices"][0]
+            answer = choice["message"]["content"]
+            calls = choice["message"].get("tool_calls") or []
+            finish = choice["finish_reason"]
+        assert answer == CHAT_SCRIPT["terminal"]
+        assert calls == []
+        assert finish == "stop"
+        entry = _last_entry(server, "chat")
+        assert entry["scripted"]["phase"] == "terminal"
+        assert "permission denied" in entry["scripted"]["output"]
+        assert entry["scripted"]["output_truncated"] is False
+        assert entry["fixture"] == "scripted_tool_call:terminal"
+
+    def test_a_tool_message_for_another_call_id_is_not_ours(
+            self, stub, tmp_path):
+        server = stub(_chat_scenario(tmp_path))
+        _status, text = server.post(
+            "/v1/chat/completions",
+            _chat_request(tools=[CHAT_READ_TOOL],
+                          extra_messages=_chat_follow_up(
+                              "call_somebody_else", "x")),
+            False)
+        # Not our output, and the tool is still advertised: the call again.
+        choice = json.loads(text)["choices"][0]
+        assert choice["finish_reason"] == "tool_calls"
+        assert choice["message"]["tool_calls"][0]["id"] == CHAT_SCRIPT["call_id"]
+        entry = _last_entry(server, "chat")
+        assert entry["scripted"]["phase"] == "call"
+
+    def test_a_request_that_does_not_advertise_the_tool_gets_text(
+            self, stub, tmp_path):
+        server = stub(_chat_scenario(tmp_path))
+        _status, text = server.post(
+            "/v1/chat/completions", _chat_request(tools=[CHAT_BASH_TOOL]), False)
+        message = json.loads(text)["choices"][0]["message"]
+        assert "tool_calls" not in message
+        assert message["content"] == "OK"
+        entry = _last_entry(server, "chat")
+        assert entry["scripted"]["phase"] == "not-advertised"
+
+    def test_a_chat_only_script_leaves_responses_untouched(
+            self, stub, tmp_path):
+        server = stub(_chat_scenario(tmp_path))
+        flat = {"type": "function", "name": "read",
+                "parameters": {"type": "object"}}
+        _status, text = server.post("/v1/responses", _request(tools=[flat]),
+                                    False)
+        output = json.loads(text)["output"]
+        assert [item["type"] for item in output] == ["message"]
+        entry = _last_entry(server, "responses")
+        assert "scripted" not in entry
+
+    def test_then_shell_on_the_chat_leg_refuses_to_start(self, tmp_path):
+        bad = _chat_scenario(tmp_path, dict(CHAT_SCRIPT, then_shell="true"))
+        with pytest.raises(AssertionError, match="stub exited"):
+            _Stub(tmp_path, bad)
+
+    def test_an_unknown_surface_refuses_to_start(self, tmp_path):
+        bad = _chat_scenario(tmp_path, dict(CHAT_SCRIPT, surfaces=["anthropic"]))
+        with pytest.raises(AssertionError, match="stub exited"):
+            _Stub(tmp_path, bad)
+
+    def test_an_unknown_after_output_refuses_to_start(self, tmp_path):
+        bad = _chat_scenario(tmp_path, dict(CHAT_SCRIPT, after_output="judge"))
+        with pytest.raises(AssertionError, match="stub exited"):
+            _Stub(tmp_path, bad)
+
+    def test_a_terminal_beside_after_output_text_refuses_to_start(self, tmp_path):
+        # `terminal` would never be served, so declaring both is a mistake.
+        bad = _chat_scenario(tmp_path, dict(CHAT_SCRIPT, after_output="text"))
+        with pytest.raises(AssertionError, match="stub exited"):
+            _Stub(tmp_path, bad)
+
+
+# --------------------------------------------------------------------------- #
+# `after_output: text` (T4.9): the output's turn goes back to the text path.
+# --------------------------------------------------------------------------- #
+
+TEXT_SCRIPT = {key: value for key, value in CHAT_SCRIPT.items()
+               if key != "terminal"}
+TEXT_SCRIPT["after_output"] = "text"
+
+#: What opencode 1.18.32 hands the model for a `deny` rule (T4.6 rig,
+#: `tests/fixtures/opencode/capture/SCHEMA.md`), trimmed.
+DENY_TEXT = ("The user has specified a rule which prevents you from using this "
+             "specific tool call. Here are some of the relevant rules "
+             '[{"permission":"external_directory","pattern":"*","action":"deny"}]')
+
+
+class TestAfterOutputText:
+    @pytest.mark.parametrize("stream", [True, False], ids=["sse", "json"])
+    def test_the_call_is_still_served_first(self, stub, tmp_path, stream):
+        server = stub(_chat_scenario(tmp_path, TEXT_SCRIPT))
+        _status, text = server.post(
+            "/v1/chat/completions", _chat_request(tools=[CHAT_READ_TOOL]),
+            stream)
+        if stream:
+            _content, calls, finish = _chat_stream_result(text)
+        else:
+            choice = json.loads(text)["choices"][0]
+            calls, finish = choice["message"]["tool_calls"], choice["finish_reason"]
+        assert finish == "tool_calls"
+        assert [c["function"]["name"] for c in calls] == ["read"]
+
+    @pytest.mark.parametrize("stream", [True, False], ids=["sse", "json"])
+    def test_the_output_turn_is_answered_by_the_scenario_rules(
+            self, stub, tmp_path, stream):
+        server = stub(_chat_scenario(tmp_path, TEXT_SCRIPT))
+        status, text = server.post(
+            "/v1/chat/completions",
+            _chat_request(tools=[CHAT_READ_TOOL],
+                          extra_messages=_chat_follow_up(
+                              TEXT_SCRIPT["call_id"], DENY_TEXT)),
+            stream)
+        assert status == 200
+        if stream:
+            answer, calls, finish = _chat_stream_result(text)
+        else:
+            choice = json.loads(text)["choices"][0]
+            answer = choice["message"]["content"]
+            calls = choice["message"].get("tool_calls") or []
+            finish = choice["finish_reason"]
+        # The `read the file` rule's answer, not a terminal string.
+        assert answer == "OK"
+        assert calls == []
+        assert finish == "stop"
+        entry = _last_entry(server, "chat")
+        assert entry["scripted"]["phase"] == "output-to-text"
+        assert entry["scripted"]["output"] == DENY_TEXT
+        assert entry["scripted"]["output_truncated"] is False
+        assert entry["fixture"] != "scripted_tool_call:terminal"
+
+    def test_the_responses_leg_hands_back_the_same_way(self, stub, tmp_path):
+        script = dict(TEXT_SCRIPT, surfaces=["responses"])
+        server = stub(_chat_scenario(tmp_path, script))
+        flat = {"type": "function", "name": "read",
+                "parameters": {"type": "object"}}
+        body = {"model": "stub-model", "tools": [flat],
+                "input": [{"type": "message", "role": "user",
+                           "content": [{"type": "input_text",
+                                        "text": "read the file"}]},
+                          _output_item(script["call_id"], DENY_TEXT)]}
+        _status, text = server.post("/v1/responses", body, False)
+        output = json.loads(text)["output"]
+        assert [item["type"] for item in output] == ["message"]
+        entry = _last_entry(server, "responses")
+        assert entry["scripted"]["phase"] == "output-to-text"
+
+    def test_then_shell_with_after_output_text_refuses_to_start(self, tmp_path):
+        bad = _chat_scenario(tmp_path, dict(TEXT_SCRIPT, surfaces=["responses"],
+                                            then_shell="true"))
+        with pytest.raises(AssertionError, match="stub exited"):
+            _Stub(tmp_path, bad)
+
+
+class TestTheDenyScenario:
+    """`scripted_opencode_read_deny.yaml`, the T4.9 rows' scenario."""
+
+    def _load(self, path: Path) -> dict:
+        return yaml.safe_load(path.read_text(encoding="utf-8"))
+
+    def test_it_scripts_one_out_of_workspace_read_on_chat_only(self):
+        script = self._load(DENY)["scripted_tool_call"]
+        assert script["surfaces"] == ["chat"]
+        assert script["name"] == "read"
+        assert not script.get("namespace")
+        assert script["arguments"] == {"filePath": "/etc/hostname"}
+        assert script["after_output"] == "text"
+        assert "terminal" not in script
+
+    def test_its_rules_are_the_chain_scenarios_verbatim(self):
+        deny, chain = self._load(DENY), self._load(TEXT_ONLY)
+        assert deny["prompts"] == chain["prompts"]
+        assert deny.get("on_unmatched") == chain.get("on_unmatched") == "fail"
+        assert set(deny) - set(chain) == {"scripted_tool_call"}
+
+    def test_a_follow_up_resolves_to_the_same_fixture_as_the_bare_turn(
+            self, stub):
+        """The refusal text leaves the rule choice alone: the nested-exec
+        probe's own fixture answers its follow-up, as it answers the bare turn."""
+        server = stub(DENY)
+        prompt = ("You are opencode, an interactive CLI tool.\n"
+                  "Reply with exactly this token and nothing else: "
+                  "MULTI_LLM_NESTED_EXEC_OK")
+        bare = {"model": "stub-model",
+                "messages": [{"role": "user", "content": prompt}],
+                "tools": [CHAT_READ_TOOL]}
+        _status, text = server.post("/v1/chat/completions", bare, False)
+        call = json.loads(text)["choices"][0]["message"]["tool_calls"][0]
+        assert call["id"] == "call_mllm_read_deny"
+        follow = dict(bare, messages=[
+            *bare["messages"],
+            {"role": "assistant", "content": None,
+             "tool_calls": [dict(call)]},
+            {"role": "tool", "tool_call_id": call["id"], "content": DENY_TEXT}])
+        _status, text = server.post("/v1/chat/completions", follow, False)
+        answer = json.loads(text)["choices"][0]["message"]["content"]
+        entry = _last_entry(server, "chat", count=2)
+        assert entry["scripted"]["phase"] == "output-to-text"
+        assert entry["fixture"].endswith("nested_exec/probe_not_measured.txt")
+        assert answer and not entry["unmatched"]

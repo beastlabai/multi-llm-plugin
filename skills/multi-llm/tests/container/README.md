@@ -878,7 +878,12 @@ arguments; the request carrying that call's `function_call_output` gets a plain
 terminal message; every served frame, the declaration codex advertised and the
 output it sent back land in `stub.jsonl` under `scripted`. It grades the
 mechanism and never a model choosing the tool. No other scenario, and no request
-that does not advertise the tool, ever sees a call.
+that does not advertise the tool, ever sees a call — with one sibling:
+`scripted_opencode_read_deny.yaml` (T4.9's deny rows,
+`tests/test_container_opencode_deny.py`) scripts opencode's `read` of
+`/etc/hostname` on the chat surface and, under `after_output: text`, hands the
+turn carrying the result back to `container_full_chain.yaml`'s rules, which it
+copies verbatim.
 
 **The credential, twice** (`codex-package-ask` only). The session keeps reading
 `OPENROUTER_API_KEY` from its own environment — the `sh -c` auth command in the

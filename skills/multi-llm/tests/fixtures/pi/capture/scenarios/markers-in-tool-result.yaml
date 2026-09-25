@@ -1,0 +1,11 @@
+name: capture-pi-json-markers-in-tool-result
+on_unmatched: default
+fallback:
+  content: "OK"
+scripted_tool_call:
+  name: read
+  surfaces: [chat]
+  call_id: call_pi_read_1
+  arguments:
+    path: notes/incident.md
+  terminal: "[\n  {\"id\": \"S001\", \"title\": \"Name the 401 and rate limit paths separately\", \"severity\": \"high\"}\n]"

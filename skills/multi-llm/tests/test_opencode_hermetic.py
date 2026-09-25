@@ -285,15 +285,23 @@ class TestGateBCustomProvider:
         for secret in ("apikey", "api_key", "token", "secret", "password"):
             assert secret not in blob
 
-    def test_a_built_in_provider_sets_the_variable_not_at_all(
+    def test_a_built_in_provider_carries_no_provider_block(
         self, provider, user_xdg, tmp_path, monkeypatch
     ):
+        """A built-in provider needs no `provider` block.
+
+        Before T4.1 the variable was not set at all for it. It is set now,
+        because every hermetic slot carries the permission rows (§4.2 step 1),
+        but it still holds no provider.
+        """
         _use_config(tmp_path, monkeypatch, self.CONFIG)
         with provider.hermetic_dispatch(PROFILE_AGENT_READONLY, "opencode/sonnet") as r:
             assert r is None
             env = _child_env(provider, "opencode/sonnet", PROFILE_AGENT_READONLY)
 
-        assert "OPENCODE_CONFIG_CONTENT" not in env
+        document = json.loads(env["OPENCODE_CONFIG_CONTENT"])
+        assert "provider" not in document
+        assert "permission" in document["agent"]["plan"]
 
     def test_an_inherited_config_carrier_is_stripped(
         self, provider, user_xdg, monkeypatch
@@ -308,7 +316,10 @@ class TestGateBCustomProvider:
         with provider.hermetic_dispatch(PROFILE_AGENT_READONLY, "opencode/sonnet"):
             env = _child_env(provider, "opencode/sonnet", PROFILE_AGENT_READONLY)
 
-        assert "OPENCODE_CONFIG_CONTENT" not in env
+        # The value the child sees is ours (the T4.1 permission rows), never
+        # the inherited one.
+        assert "smuggled" not in env["OPENCODE_CONFIG_CONTENT"]
+        assert "model" not in json.loads(env["OPENCODE_CONFIG_CONTENT"])
         assert "OPENCODE_CONFIG" not in env
 
     def test_a_provider_only_in_the_users_config_is_refused_before_spawn(
@@ -527,8 +538,171 @@ class TestGateCProjectConfigIsolation:
             )
         assert done.returncode == 0, done.stderr
         document = json.loads(done.stdout)
-        assert document.get("agent") == {}
+        # The workspace's agent never loads. The only agent entry left is the
+        # permission rows this adapter carries itself (T4.1, §4.2 step 1).
+        assert set(document.get("agent") or {}) <= {oc.READONLY_AGENT}
+        assert "zzz-marker" not in (document.get("agent") or {})
         assert "model" not in document
+
+    @pytest.mark.live
+    @pytest.mark.debug_config
+    def test_the_reader_on_the_real_binary_with_a_canary_config(self, provider, tmp_path):
+        """T8.7's live twin: the real `debug config`, reduced, on a scratch HOME.
+
+        No model call and no network (``OPENCODE_DISABLE_MODELS_FETCH=1``); the
+        only key anywhere is a canary, and it must not survive the reduction.
+        """
+        import shutil as _shutil
+
+        if not _shutil.which("opencode"):
+            pytest.skip("opencode is not installed")
+        home = tmp_path / "home"
+        (home / ".config" / "opencode").mkdir(parents=True)
+        (home / ".config" / "opencode" / "opencode.jsonc").write_text(
+            '{\n  // a comment\n  "provider": {"stub": {"npm": "@ai-sdk/openai-compatible",'
+            ' "options": {"baseURL": "http://127.0.0.1:9/v1",'
+            ' "apiKey": "sk-canary-not-a-key-live"},},},\n}\n',
+            encoding="utf-8",
+        )
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        env = {
+            "HOME": str(home), "PATH": os.environ.get("PATH", ""),
+            "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        }
+        declared = oc._read_declared_providers(env, str(workspace), False)
+        assert declared is not None
+        assert declared.providers["stub"] == oc.ProviderDecl(custom=True, has_key=True)
+        assert "sk-canary" not in repr(declared)
+
+
+# --------------------------------------------------------------------------- #
+# T8.5 — the user's own config, read through `opencode debug config`
+# --------------------------------------------------------------------------- #
+
+class TestUserConfigReader:
+    """`_user_defines_provider` onto the reader: jsonc fixed, memoised, and a
+    reader failure never changes today's verdict."""
+
+    #: `debug config` for a user whose only config is a commented
+    #: `opencode.jsonc` declaring `only-in-jsonc` (the 1.18.32 capture's
+    #: `jsonc_commented` shape: opencode parses what `json.load` cannot).
+    JSONC_RESOLVED = json.dumps({
+        "$schema": "https://opencode.ai/config.json",
+        "provider": {"only-in-jsonc": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "http://127.0.0.1:9/v1",
+                        "apiKey": "sk-canary-not-a-key-5"},
+            "models": {"m": {}},
+        }},
+    })
+
+    @pytest.fixture
+    def jsonc_user(self, tmp_path, monkeypatch):
+        home = tmp_path / "jsonc-config"
+        (home / "opencode").mkdir(parents=True)
+        (home / "opencode" / "opencode.jsonc").write_text(
+            '{\n  // a comment\n  "provider": {"only-in-jsonc": {\n'
+            '    "npm": "@ai-sdk/openai-compatible",\n'
+            '    "options": {"baseURL": "http://127.0.0.1:9/v1",},\n  },},\n}\n',
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+        monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+        return home
+
+    def _serve(self, monkeypatch, stdout, code=0):
+        calls = []
+
+        def spawn(argv, env, cwd, timeout):
+            calls.append({"argv": list(argv), "env": env})
+            if stdout is None:
+                return None
+            return subprocess.CompletedProcess(list(argv), code, stdout, "")
+
+        monkeypatch.setattr(oc, "_spawn_debug_config", spawn)
+        return calls
+
+    def test_a_commented_jsonc_provider_is_now_refused_before_spawn(
+        self, provider, jsonc_user, monkeypatch
+    ):
+        calls = self._serve(monkeypatch, self.JSONC_RESOLVED)
+        with provider.hermetic_dispatch(
+            PROFILE_AGENT_READONLY, "only-in-jsonc/m"
+        ) as refusal:
+            assert refusal and "only-in-jsonc" in refusal
+            assert "sk-canary" not in refusal
+        # The read is the user's own: no hermetic delta, no `--pure`.
+        assert calls == [{"argv": ["opencode", "debug", "config"], "env": None}]
+
+    def test_a_plain_json_config_is_answered_without_a_spawn(
+        self, provider, tmp_path, monkeypatch
+    ):
+        """Only a plain global `opencode.json`, no `OPENCODE_CONFIG*`, no
+        project config: the file read is conclusive and nothing is spawned."""
+        home = tmp_path / "plain-config"
+        (home / "opencode").mkdir(parents=True)
+        (home / "opencode" / "opencode.json").write_text(json.dumps({
+            "provider": {"only-in-json": {
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {"baseURL": "http://127.0.0.1:9/v1"},
+            }},
+        }), encoding="utf-8")
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+        for name in ("OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR", "OPENCODE_CONFIG_CONTENT"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("OPENCODE_DISABLE_PROJECT_CONFIG", "1")
+        calls = self._serve(monkeypatch, self.JSONC_RESOLVED)
+        assert oc._user_defines_provider("only-in-json")
+        assert not oc._user_defines_provider("openrouter")
+        with provider.hermetic_dispatch(PROFILE_AGENT_READONLY, "openrouter/m") as refusal:
+            assert refusal is None
+        assert calls == []
+
+    def test_the_file_read_alone_used_to_miss_it(self, jsonc_user):
+        """The pre-T8.5 reader, kept as the fallback, still cannot parse it."""
+        assert oc._user_defines_provider_from_files("only-in-jsonc") is False
+
+    @pytest.mark.parametrize(
+        "stdout, code",
+        [(None, 0), ("{not json", 0), ("{}", 1)],
+        ids=["spawn-failure", "non-json", "exit-1"],
+    )
+    def test_an_unreadable_reader_result_still_never_refuses(
+        self, provider, jsonc_user, monkeypatch, stdout, code
+    ):
+        """Reader failure → today's file read → an unparseable file → dispatch."""
+        self._serve(monkeypatch, stdout, code)
+        with provider.hermetic_dispatch(PROFILE_AGENT_READONLY, "only-in-jsonc/m") as refusal:
+            assert refusal is None
+
+    def test_the_read_is_memoised_per_process(self, provider, jsonc_user, monkeypatch):
+        calls = self._serve(monkeypatch, self.JSONC_RESOLVED)
+        for _ in range(3):
+            assert oc._user_defines_provider("only-in-jsonc")
+            assert not oc._user_defines_provider("openrouter")
+        assert len(calls) == 1
+        # A failed read is cached too.
+        oc.reset_hermetic_state()
+        calls = self._serve(monkeypatch, None)
+        oc._user_defines_provider("x")
+        oc._user_defines_provider("y")
+        assert len(calls) == 1
+
+    def test_a_bounded_read_never_poisons_the_memo(self, jsonc_user, monkeypatch):
+        calls = self._serve(monkeypatch, None)
+        assert oc.read_user_declared_config(timeout=0.5) is None
+        calls = self._serve(monkeypatch, self.JSONC_RESOLVED)
+        assert oc.read_user_declared_config() is not None
+        assert len(calls) == 1
+
+    def test_an_override_read_through_the_reader_is_not_a_definition(
+        self, provider, user_xdg, monkeypatch
+    ):
+        self._serve(monkeypatch, json.dumps(
+            {"provider": {"openrouter": {"options": {"apiKey": "sk-canary-not-a-key-4"}}}}
+        ))
+        assert oc._user_defines_provider("openrouter") is False
 
 
 # --------------------------------------------------------------------------- #

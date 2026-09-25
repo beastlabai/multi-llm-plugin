@@ -82,6 +82,9 @@ from utils.review_orchestrator_base import (
     maybe_detach,
     merge_validation_batches,
     record_high_priority_groups,
+    record_validation_counts,
+    validation_counts,
+    VALIDATION_COUNT_KEYS,
     record_models_present,
     record_models_salvaged,
     record_review_artifacts,
@@ -2068,15 +2071,22 @@ def generate_review_report(
             "(issues that report the same finding are one group)"
         )
 
-    # Add validation summary if available
+    # Add validation summary if available. §6 T6.1: the four counts come from
+    # the base's `validation_counts`, the same helper that records them on the
+    # result line below, so a `validation_failed` group shows here too and the
+    # header and payload agree.
     if validated_groups:
-        valid_count = sum(1 for g in validated_groups if g.get("validation_status") == "valid")
-        invalid_count = sum(1 for g in validated_groups if g.get("validation_status") == "invalid")
-        needs_human = sum(1 for g in validated_groups if g.get("validation_status") == "needs-human-decision")
+        counts = validation_counts(validated_groups) or {
+            key: 0 for key in VALIDATION_COUNT_KEYS.values()
+        }
         lines.append(
-            f"**Validation:** {valid_count} valid, {invalid_count} invalid, "
-            f"{needs_human} needs human review (of {len(validated_groups)} groups)"
+            f"**Validation:** {counts['valid']} valid, {counts['invalid']} invalid, "
+            f"{counts['needs_human_decision']} needs human review, "
+            f"{counts['validation_failed']} validation failed "
+            f"(of {len(validated_groups)} groups)"
         )
+    if phase_dir is not None:
+        record_validation_counts(str(phase_dir), validated_groups)
     # Plan §2.4: the published `validation_context`, read from `.status.json`
     # and never recomputed; absent adds nothing, so the report is unchanged.
     if phase_dir is not None:

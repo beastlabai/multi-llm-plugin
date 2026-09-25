@@ -593,6 +593,8 @@ After spawning subagents to apply fixes:
    - Summary of issues by severity
    - Summary of fixes applied (if --apply-fixes)
 
+   Report the verdict counts from `MULTI_LLM_RESULT.validation_counts` (`{valid, invalid, needs_human_decision, validation_failed}`, present only when validation ran, and carried by `status --view run` too). If `needs_human_decision` or `validation_failed` is non-zero, point at `report.md` for those groups; they are decided in apply-code-fixes.
+
 ---
 
 ## Example Executions

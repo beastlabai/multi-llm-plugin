@@ -1,0 +1,2 @@
+{"i": 0, "path": "/v1/chat/completions", "tools": false, "nmsgs": 3, "tool_results": []}
+{"i": 1, "path": "/v1/chat/completions", "tools": true, "nmsgs": 2, "tool_results": []}

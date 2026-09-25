@@ -547,6 +547,7 @@ class ResultContext:
         self.consolidation_recommended: Optional[Dict[str, Any]] = None
         self.high_priority_groups: Optional[Dict[str, Any]] = None
         self.validation_context: Optional[Dict[str, Any]] = None
+        self.validation_counts: Optional[Dict[str, int]] = None
         self.notice: Optional[str] = None
         self.progress: Optional[Dict[str, Any]] = None
         self.progress_lines: Optional[List[str]] = None
@@ -604,6 +605,19 @@ class ResultContext:
         line byte-for-byte what it was.
         """
         self.validation_context = dict(obj) if obj else None
+
+    def set_validation_counts(self, counts: Optional[Dict[str, int]]) -> None:
+        """Record the per-verdict group counts (§6 T6.1), if validation ran.
+
+        ``{valid, invalid, needs_human_decision, validation_failed}`` — one key
+        per group ``validation_status``, snake_case. Mirrors
+        ``set_high_priority_groups``: the counts lived only in ``report.md`` and
+        ``validation.json``, so a host summarising a finished run from the
+        result line alone left the needs-human-decision groups out (run
+        b38de8bb, 2026-09-24: 3 of 57 groups went unmentioned). ``None`` (no
+        validation ran) leaves the line byte-for-byte what it was.
+        """
+        self.validation_counts = dict(counts) if counts else None
 
     def set_notice(self, text: Optional[str]) -> None:
         """Record the workflow-level notice a terminal ``status`` run carries.
@@ -701,6 +715,8 @@ class ResultContext:
             payload["high_priority_groups"] = dict(self.high_priority_groups)
         if self.validation_context:
             payload["validation_context"] = dict(self.validation_context)
+        if self.validation_counts:
+            payload["validation_counts"] = dict(self.validation_counts)
         if self.notice:
             payload["notice"] = self.notice
         if self.progress:
@@ -815,6 +831,12 @@ def record_validation_context(obj: Optional[Dict[str, Any]]) -> None:
     """Record the ``validation_context`` object, if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_validation_context(obj)
+
+
+def record_validation_counts(counts: Optional[Dict[str, int]]) -> None:
+    """Record the per-verdict group counts, if a dispatcher run is active."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_validation_counts(counts)
 
 
 def record_notice(text: Optional[str]) -> None:

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import (
     Any,
+    Callable,
     Collection,
     Dict,
     FrozenSet,
@@ -1176,6 +1177,18 @@ USAGE_NONE = "none"
 USAGE_PARTIAL = "partial"
 USAGE_FULL = "full"
 
+#: The two answers :meth:`LLMProvider.config_credential_source` may give (plan
+#: opencode-validator-false-rate-limit-and-denied-turn §8.2). ``declared``: the
+#: dispatch's own resolved config supplies the provider, so a ``False`` auth
+#: probe is not a refusal and the auth state reads :data:`AUTH_STATE_CONFIG`.
+#: ``unknown``: today's refusal stands. There is deliberately no third value.
+CONFIG_AUTH_DECLARED = "declared"
+CONFIG_AUTH_UNKNOWN = "unknown"
+
+#: The preflight auth state for a provider admitted by its config declaration
+#: rather than by a stored or environment credential.
+AUTH_STATE_CONFIG = "config"
+
 
 @dataclass(frozen=True)
 class InternalRetryEnvelope:
@@ -2242,6 +2255,154 @@ def classify_streams(
     return None
 
 
+@dataclass(frozen=True)
+class StreamMatch:
+    """Where :func:`match_streams` found the text that decided a verdict.
+
+    ``channel`` is ``"stdout"`` or ``"stderr"`` and ``offset`` indexes that
+    channel's own **lowered** text (never the joined haystack). All three are
+    ``None`` for the two steps that decide without a pattern: exit 127 and the
+    adapter's ``exit_zero_markers``.
+    """
+
+    status: str
+    pattern: Optional[str] = None
+    channel: Optional[str] = None
+    offset: Optional[int] = None
+
+
+def _first_pattern_match(
+    patterns: Collection[str], haystack: str
+) -> Optional[Tuple[str, int]]:
+    """:func:`matches_any`'s walk, returning the pattern and offset it accepted.
+
+    The same order, the same boundary regex and the same bare-token context
+    rule; only the return value differs, so the two cannot disagree about
+    *whether* a haystack matches.
+    """
+    for pattern in patterns:
+        token = (pattern or "").strip().lower()
+        if not token:
+            continue
+        regex = stream_pattern(token)
+        bare = _needs_context(token)
+        for match in regex.finditer(haystack):
+            if not bare:
+                return token, match.start()
+            window = "\n".join((
+                haystack[max(0, match.start() - _CONTEXT_WINDOW):match.start()],
+                haystack[match.end():match.end() + _CONTEXT_WINDOW],
+            ))
+            if _ERROR_CONTEXT.search(window):
+                return token, match.start()
+    return None
+
+
+def _first_marker_match(
+    markers: Collection["Pattern[str]"], haystack: str
+) -> Optional[Tuple[str, int]]:
+    """:func:`_matches_marker`'s walk, returning the regex source and offset."""
+    for marker in markers:
+        found = marker.search(haystack)
+        if found:
+            return marker.pattern, found.start()
+    return None
+
+
+def match_streams(
+    stdout: str,
+    stderr: str,
+    exit_code: int = 0,
+    *,
+    auth_patterns: Optional[Collection[str]] = None,
+    rate_limit_patterns: Optional[Collection[str]] = None,
+    exit_zero_markers: Collection["Pattern[str]"] = (),
+) -> Optional[StreamMatch]:
+    """:func:`classify_streams`'s verdict **plus where it matched**. Quote-only.
+
+    Additive beside :func:`classify_streams`, which is untouched: the same
+    parameters, the same steps in the same order, and ``match.status`` always
+    equals what :func:`classify_streams` returns for the same arguments
+    (``tests/test_providers.py::TestMatchStreams`` pins it over every
+    ``classify_streams`` case in the suite). What it adds is the pattern that
+    fired and its position, so ``subagent_executor._classify_failed_run`` can
+    quote the text that actually decided a verdict instead of a stream tail
+    that may not contain it (the b38de8bb run quoted a stderr line with no
+    rate limit in it).
+
+    **Nothing classifies through this.** Not ``validation.py``, not
+    ``_format_failure_details``, not any adapter's ``classify_failure`` — the
+    verdict is always :func:`classify_streams`' (through
+    :meth:`LLMProvider.classify_failure`), and this is re-run afterwards for
+    the quote alone. Like :func:`classify_streams` it is adapter-free: it never
+    applies :meth:`LLMProvider.vendor_text`; the caller hands it text that is
+    already reduced.
+
+    ``offset`` is into the matched channel's own lowered text. The joined
+    haystack is ``stdout + "\\n" + stderr``, so an offset below
+    ``len(stdout)`` is on stdout and anything past the joiner is rebased onto
+    stderr.
+    """
+    out_lower = (stdout or "").lower()
+    haystack = f"{stdout or ''}\n{stderr or ''}".lower()
+
+    if exit_code == MISSING_BINARY_EXIT_CODE:
+        return StreamMatch(STATUS_SPAWN_FAILED)
+
+    if not haystack.strip():
+        return None
+
+    def _found(status: str, hit: Tuple[str, int]) -> StreamMatch:
+        pattern, offset = hit
+        if offset < len(out_lower):
+            return StreamMatch(status, pattern, "stdout", offset)
+        return StreamMatch(
+            status, pattern, "stderr", max(0, offset - len(out_lower) - 1)
+        )
+
+    for category, markers in LAUNCH_FAILURE_MARKERS:
+        hit = _first_marker_match(markers, haystack)
+        if hit is not None:
+            return _found(category, hit)
+
+    hit = _first_marker_match(CONTEXT_OVERFLOW_MARKERS, haystack)
+    if hit is not None:
+        return _found(STATUS_CONTEXT_LENGTH_EXCEEDED, hit)
+
+    auth = (
+        LLMProvider.auth_error_patterns if auth_patterns is None else auth_patterns
+    )
+    hit = _first_pattern_match(auth, haystack)
+    if hit is not None:
+        return _found(STATUS_AUTH_FAILED, hit)
+
+    rate = (
+        LLMProvider.rate_limit_patterns
+        if rate_limit_patterns is None
+        else rate_limit_patterns
+    )
+    hit = _first_pattern_match(rate, haystack) or _first_marker_match(
+        SHARED_RATE_LIMIT_MARKERS, haystack
+    )
+    if hit is not None:
+        return _found(STATUS_RATE_LIMITED, hit)
+
+    for status, markers in (
+        (STATUS_TIMEOUT, TIMEOUT_MARKERS),
+        (CATEGORY_CONNECTION_ERROR, CONNECTION_ERROR_MARKERS),
+        (CATEGORY_INVALID_MODEL, INVALID_MODEL_MARKERS),
+        (CATEGORY_SERVER_ERROR, SERVER_ERROR_MARKERS),
+    ):
+        hit = _first_marker_match(markers, haystack)
+        if hit is not None:
+            return _found(status, hit)
+
+    if _matches_marker(exit_zero_markers, haystack):
+        return StreamMatch(STATUS_RUNNER_ERROR)
+
+    return None
+
+
 def context_length_message(model: str) -> str:
     """The §7.6(a) sentence a slot fails with, recorded verbatim in the report.
 
@@ -3043,6 +3204,18 @@ class LLMProvider(ABC):
         ``auth_failed`` and ``rate_limited``, the two classes that change the
         whole batch's fate.
 
+        **The class is wider than prompt echo: it is "echo our prompt or the
+        repository".** A runner whose stdout carries *tool output* hands the
+        classifier whatever the model read, and a validator reads the plan and
+        the repo. opencode's ``--format json`` stream carried a validator's
+        grep of a plan that discusses rate limiting, and the attempt was
+        recorded ``rate_limited`` (run b38de8bb). The adapters that reduce for
+        that reason are omp and pi (whose json streams echo the prompt *and*
+        carry tool results), opencode (``tool_use``/``text`` events) and codex
+        (``command_execution`` output and ``agent_message`` prose), and
+        claude-code (a clean envelope's ``result`` is the model's own prose);
+        each keeps only what the vendor itself wrote.
+
         A caller-supplied ``vendor_text=`` argument could not fix it: every
         existing call site would have to opt in, and the §6.2 fixture rig calls
         ``adapter.classify_failure(stdout, stderr, exit_code)`` with no extra
@@ -3065,8 +3238,15 @@ class LLMProvider(ABC):
           the structured stdout envelope, and the diagnosis a real failure
           carries must reach the tables untouched.
 
-        Applied by :meth:`classify_failure` and by nothing else. The
-        module-level :func:`classify_streams` deliberately does **not** grow it:
+        Applied in exactly two places. :meth:`classify_failure` applies it **to
+        classify**. ``subagent_executor._classify_failed_run`` applies it a
+        second time **to quote, never to classify**: once the verdict is in, it
+        re-runs :func:`match_streams` over the reduced capture so the failure
+        reason quotes the text that decided the verdict rather than a stream
+        tail that may not contain it, and the re-scan's result never changes
+        the verdict. Nothing else applies it. The module-level
+        :func:`classify_streams` (and its quote-only twin
+        :func:`match_streams`) deliberately does **not** grow it:
         ``validation.py`` and ``_format_failure_details`` call that function with
         no adapter in hand, and §7.2 depends on it staying the one rule both
         lanes share. :meth:`classify_auth_probe`'s haystack — the second place
@@ -3120,6 +3300,27 @@ class LLMProvider(ABC):
             rate_limit_patterns=self.rate_limit_patterns,
             exit_zero_markers=self.exit_zero_failure_markers,
         )
+
+    def classify_structural(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[Tuple[str, str]]:
+        """A structural failure verdict **with its own reason**, or ``None``.
+
+        :meth:`classify_failure` returns a category and nothing else, and
+        ``subagent_executor._classify_failed_run`` forwards only the pattern
+        verdicts that change a batch's fate (auth, rate limit, invalid model,
+        sandbox, context length); a ``runner_error`` from it is dropped and the
+        attempt keeps its parse failure's status and text. An adapter that can
+        recognize a failure from the *shape* of its stream — opencode's turn
+        ended by an auto-rejected permission (``OpenCodeProvider``) — returns
+        ``(status, reason)`` here, and the executor records both. It is
+        consulted only after :meth:`classify_failure`'s verdict was not one of
+        the forwarded ones, so a genuine vendor error still wins.
+
+        Base: ``None``, so every adapter that does not override it is exactly
+        what it was.
+        """
+        return None
 
     def classify_auth_probe(
         self, stdout: str, stderr: str, exit_code: int = 0
@@ -3641,6 +3842,29 @@ class LLMProvider(ABC):
         dispatch it vets will.
         """
         return ModelVerdict(known=None, detail="", suggestions=())
+
+    def config_credential_source(
+        self,
+        model: str,
+        *,
+        profile: str = PROFILE_AGENT_READONLY,
+        anchor: Optional[str] = None,
+        cwd: Optional[str] = None,
+        env_builder: Optional[Callable[[], Optional[Mapping[str, str]]]] = None,
+    ) -> str:
+        """Does the dispatch's own config supply this model's credential? (§8)
+
+        Asked by the executor's auth leg only when ``auth_check`` said ``False``
+        for a model that needs a credential. Two answers, never a third:
+        :data:`CONFIG_AUTH_DECLARED` (the resolved config declares the
+        provider, so the refusal is skipped and the auth state reads
+        ``config``) or :data:`CONFIG_AUTH_UNKNOWN` (today's
+        ``not_authenticated`` refusal stands). This default answers
+        ``unknown``, so every adapter that does not override it is exactly
+        what it was. Only opencode, whose ``auth list`` cannot see a
+        config-declared provider, overrides it.
+        """
+        return CONFIG_AUTH_UNKNOWN
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """Extract a human-readable reason from a failed invocation.

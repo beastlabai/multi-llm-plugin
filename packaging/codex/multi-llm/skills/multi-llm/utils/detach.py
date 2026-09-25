@@ -647,6 +647,14 @@ def classify_run(
         # view is the only way a detached caller learns validation saw an
         # excerpt (and, for `mode: truncated`, only part of a document).
         "validation_context": status.get("validation_context"),
+        # §6 T6.1: optional, present only when validation ran —
+        # `{valid, invalid, needs_human_decision, validation_failed}`, written
+        # by the review base's `record_validation_counts` wherever a report is
+        # rebuilt. Same route as `consolidation_recommended`: without this
+        # entry a detached run lost the counts between `.status.json` and the
+        # poll's result line, and a host's summary left out the groups the
+        # user still has to decide.
+        "validation_counts": status.get("validation_counts"),
         # F4: optional, and present only on a finished code-review run —
         # `{count}`, written once by that phase's own `[HIGH_PRIORITY_ISSUES]`
         # site. Same reasoning as `consolidation_recommended` just above: a

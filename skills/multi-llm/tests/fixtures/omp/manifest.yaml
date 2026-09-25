@@ -369,7 +369,7 @@ rows:
       marker, and this row is what pins the structural read instead.
     expect:
       success: false
-      error_contains: ["run ended inside a tool call", "bash", "Command aborted"]
+      error_contains: ["run ended inside a tool call: bash"]
       raw_contains:
         - '"isError":true'
         - "[Command cancelled]"
@@ -1064,3 +1064,46 @@ rows:
         - '"type":"tool_execution_end"'
         - '"isError":false'
       classify_failure: "rate_limited"
+
+  compaction-summarized:
+    stdout: compaction-summarized.stdout.txt
+    stderr: compaction-summarized.stderr.txt
+    exit_code: 0
+    wall_s: 0.89
+    requests: 8
+    notes: >-
+      T7.15 step 1 of plans/opencode-validator-false-rate-limit-and-denied-turn.md,
+      captured 2026-09-25 in the CONTAINER (omp **18.2.11**, the
+      cli-versions.lock pin — not the host 18.2.2 the rest of this set came from),
+      `--network none`, no credential, in the same session as pi's json-mode set
+      and by its rig (tests/fixtures/pi/capture/: `PART_BYTES=2000 run_row.sh omp
+      compaction-summarized script overflow-compact`). The argv is
+      `build_command_for_transport(..., "argv")` with the overlay copied to
+      /work/out and `--cwd /work/sample-project`; stdin /dev/null. Raw bytes; the
+      three `raw-http-request=/tmp/mllm-inv/omp-<exec>/…` paths inside
+      `errorMessage` are container paths and were left as written. A throwaway
+      chat server scripts four `read` tool turns, then failserver's `ctx` 400, then
+      answers every no-tools request (a summarization) with a summary carrying
+      `usage` 900 in / 40 out, then answers the retried turn. MEASURED: omp tried
+      `shake` first (skipped: "Auto-shake found nothing eligible to drop"), then
+      `context-full`, which made **two** summarization requests (`max_tokens`
+      8192, then 512 — the history summary and the short summary) and emitted
+      `auto_compaction_end{action: "context-full", result: {summary,
+      shortSummary, firstKeptEntryId, tokensBefore, details}}` — **no `usage`
+      in `result`**, as the 18.3.0 pre-flight read predicted. The retried turn
+      answered. Requests: 4 tool + 1 overflow + 2 summarization + 1 answer = 8.
+      So `parse_usage` under-counts this run by exactly the two summarization
+      calls (here 1800 in / 80 out); omp's dialect keeps the compaction leg OFF
+      and `USAGE_FULL` stands (omp.py's `parse_usage` docstring). Wider stubs
+      (40 KB per tool result) made omp `shake` successfully instead, with NO
+      model call — so whether an omp overflow costs summarization calls depends
+      on what `shake` can drop.
+    expect:
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      raw_contains:
+        - '"type":"auto_compaction_end","action":"context-full"'
+        - '"shortSummary"'
+      classify_failure: null

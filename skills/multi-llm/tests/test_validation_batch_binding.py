@@ -202,7 +202,7 @@ class TestARewrittenBatchIsReMerged:
         flipped = len(rewritten["group_indices"])
         assert _summary(phase_dir) == (
             f"**Validation:** {len(NAMES) - flipped} valid, {flipped} invalid, "
-            f"0 needs human review"
+            f"0 needs human review, 0 validation failed"
         )
 
     def test_a_rewrite_whose_mtime_was_set_back_is_still_re_merged(
@@ -672,6 +672,130 @@ class TestTheRecommendationIsRecomputed:
         _complete(phase_dir, lambda gi: "valid")
         _reaggregate(plan, out_dir, phase_dir, supports_consolidation=False)
         assert "consolidation_recommended" not in _read_checkpoint(phase_dir)
+
+
+# ---------------------------------------------------------------------------
+# §6 T6.1: validation_counts are recorded, and recomputed, on every completion path
+# ---------------------------------------------------------------------------
+
+def _verdicts(n_valid, n_invalid, n_human, n_failed):
+    """A `verdict_for_group` that hands out the four statuses in blocks."""
+    bounds = [
+        (n_valid, "valid"),
+        (n_valid + n_invalid, "invalid"),
+        (n_valid + n_invalid + n_human, "needs-human-decision"),
+        (n_valid + n_invalid + n_human + n_failed, "validation_failed"),
+    ]
+
+    def verdict(gi):
+        return next(status for bound, status in bounds if gi < bound)
+
+    return verdict
+
+
+class TestTheValidationCountsAreRecorded:
+    def test_the_merge_writes_all_four_counts_and_the_header_agrees(self, tmp_path):
+        plan, out_dir, phase_dir = _consolidation_phase(tmp_path, [None] * 8)
+        _complete(phase_dir, _verdicts(3, 2, 2, 1))
+        payload = _reaggregate_with_result(plan, out_dir, phase_dir)
+
+        expected = {
+            "valid": 3, "invalid": 2,
+            "needs_human_decision": 2, "validation_failed": 1,
+        }
+        assert _read_checkpoint(phase_dir)["validation_counts"] == expected
+        assert payload["validation_counts"] == expected
+        assert _summary(phase_dir) == (
+            "**Validation:** 3 valid, 2 invalid, 2 needs human review, "
+            "1 validation failed"
+        )
+
+    def test_a_reaggregate_after_a_revalidation_recounts_downward(self, tmp_path):
+        plan, out_dir, phase_dir = _consolidation_phase(tmp_path, [None] * 8)
+        _complete(phase_dir, _verdicts(2, 1, 3, 2))
+        payload = _reaggregate_with_result(plan, out_dir, phase_dir)
+        assert payload["validation_counts"]["needs_human_decision"] == 3
+        assert payload["validation_counts"]["validation_failed"] == 2
+
+        _complete(phase_dir, _verdicts(6, 2, 0, 0))
+        payload = _reaggregate_with_result(plan, out_dir, phase_dir)
+
+        expected = {
+            "valid": 6, "invalid": 2,
+            "needs_human_decision": 0, "validation_failed": 0,
+        }
+        assert _read_checkpoint(phase_dir)["validation_counts"] == expected
+        assert payload["validation_counts"] == expected
+        assert _summary(phase_dir) == (
+            "**Validation:** 6 valid, 2 invalid, 0 needs human review, "
+            "0 validation failed"
+        )
+
+    def test_a_reaggregate_with_no_suggestions_left_removes_the_key(self, tmp_path):
+        plan, out_dir, phase_dir = _consolidation_phase(tmp_path, [None] * 4)
+        _complete(phase_dir, _verdicts(4, 0, 0, 0))
+        _reaggregate_with_result(plan, out_dir, phase_dir)
+        assert "validation_counts" in _read_checkpoint(phase_dir)
+
+        (phase_dir / "claude-code_sonnet.json").write_text("[]", encoding="utf-8")
+        payload = _reaggregate_with_result(plan, out_dir, phase_dir)
+
+        assert "validation_counts" not in _read_checkpoint(phase_dir)
+        assert "validation_counts" not in payload
+
+    def test_groups_without_a_verdict_record_nothing(self, tmp_path):
+        context = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            assert rob.record_validation_counts(
+                str(tmp_path), [{"title": "a"}, {"title": "b"}]
+            ) is None
+            payload = context.payload(0)
+        finally:
+            cli_common.deactivate_result()
+        assert "validation_counts" not in payload
+        assert "validation_counts" not in status_file.read_status(str(tmp_path))
+        assert rob.validation_counts_line(rob.validation_counts(None)) is None
+
+    def test_status_view_run_carries_the_counts(self, tmp_path, capsys):
+        plan = tmp_path / "auth-feature.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        phase_dir = rob.get_phase_dir(plan, "review-plan")
+        counts = {
+            "valid": 53, "invalid": 1,
+            "needs_human_decision": 3, "validation_failed": 0,
+        }
+        status_file.write_status(str(phase_dir), {
+            "phase": "review-plan",
+            "state": "complete",
+            "validation_counts": counts,
+        })
+
+        context = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            run_status.main([
+                "--plan-file", str(plan), "--view", "run",
+                "--phase", "review-plan",
+            ])
+            payload = context.payload(0)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert payload["validation_counts"] == counts
+
+        # Unselected, `mode`/`phase` stay `status`/null, so the counts would
+        # read as whichever run the host was watching: none are recorded.
+        context = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            run_status.main(["--plan-file", str(plan), "--view", "run"])
+            payload = context.payload(0)
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert "validation_counts" not in payload
+
+        run_status.main(["--plan-file", str(plan), "--view", "run", "--json"])
+        views = json.loads(capsys.readouterr().out)["runs"]
+        assert views[0]["validation_counts"] == counts
 
 
 class TestALegacyNullRecommendation:

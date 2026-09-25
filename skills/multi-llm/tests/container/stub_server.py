@@ -24,6 +24,21 @@ evidence a model choosing the tool. A scenario without the block, and a request
 that does not advertise the named tool, take the text path byte-for-byte as
 before. See `ScriptedToolCall`.
 
+The same two frames have a **chat-completions spelling**, served only when the
+scenario's `surfaces:` names `chat` (opencode's stub provider and pi's seeded
+provider speak chat-completions, not Responses): one assistant `tool_calls`
+message, then the plain terminal message for the request carrying the matching
+`role: "tool"` message (by `tool_call_id`). A script that names only
+`responses` — the default — leaves the chat surface byte-for-byte as before.
+
+**`after_output: text`** swaps the second frame for the scenario's own text
+path: the request carrying the matching output is answered exactly as it would
+have been with no script at all, by the same rules. That is what lets one script
+ride a whole workflow row (plans/opencode-validator-false-rate-limit-and-denied-
+turn.md, T4.9's deny rows): every agent turn is first handed one tool call, and
+whatever the turn was really for is still answered by its own fixture once the
+tool's result is back. The default, `terminal`, is unchanged.
+
 **Response selection reuses the existing matcher** rather than inventing a second
 one, so the fake binary (`tests/mocks/mock_llm.py`) and this server can never
 disagree about what a scenario means.
@@ -330,6 +345,13 @@ def messages_stream(model: str, answer: str):
 SCRIPTED_OUTPUT_CAP = 16384
 
 
+def _output_record(record: dict, output: str, *, phase: str) -> dict:
+    """``record`` plus the returned output, capped, for the log line."""
+    return dict(record, phase=phase, output_sha=_sha(output),
+                output_len=len(output), output=output[:SCRIPTED_OUTPUT_CAP],
+                output_truncated=len(output) > SCRIPTED_OUTPUT_CAP)
+
+
 class ScriptedToolCall:
     """A scenario's `scripted_tool_call:` block.
 
@@ -373,12 +395,42 @@ class ScriptedToolCall:
                                  or "call_mllm_scripted_shell")
         self.terminal = str(block.get("terminal")
                             or "scripted tool call complete")
+        # What answers the request carrying our output: the fixed `terminal`
+        # string (the default), or `text` — the scenario's own rules, as if no
+        # script were armed. The output is logged either way.
+        self.after_output = str(block.get("after_output") or "terminal")
+        if self.after_output not in ("terminal", "text"):
+            raise ValueError(
+                f"{source}: `scripted_tool_call.after_output` must be "
+                f"`terminal` or `text`, not {self.after_output!r}")
+        if self.after_output == "text" and block.get("terminal"):
+            raise ValueError(
+                f"{source}: `scripted_tool_call.terminal` is never served under "
+                f"`after_output: text` — drop one of them")
         surfaces = block.get("surfaces") or ["responses"]
         self.surfaces = tuple(str(s) for s in surfaces)
-        if set(self.surfaces) - {"responses"}:
+        if set(self.surfaces) - {"responses", "chat"}:
             raise ValueError(
                 f"{source}: `scripted_tool_call.surfaces` may only name "
-                f"`responses` — the one surface this shape is rendered for")
+                f"`responses` or `chat` — the surfaces this shape is rendered "
+                f"for")
+        if self.then_shell and self.after_output == "text":
+            raise ValueError(
+                f"{source}: `scripted_tool_call.then_shell` needs the terminal "
+                f"frame it follows — drop `after_output: text` or `then_shell`")
+        if self.then_shell and "chat" in self.surfaces:
+            # The shell follow-up's spellings (`SHELL_TOOL_SPELLINGS`) are the
+            # Responses hosts' tools; a chat host's shell tool has none here, so
+            # refuse rather than silently answer terminal on the chat leg.
+            raise ValueError(
+                f"{source}: `scripted_tool_call.then_shell` is rendered for the "
+                f"`responses` surface only — drop `chat` from `surfaces` or "
+                f"drop `then_shell`")
+
+    @property
+    def flat_name(self) -> str:
+        """The tool's name as a host without namespaces spells it."""
+        return f"{self.namespace}__{self.name}" if self.namespace else self.name
 
     # -- what the request carries ------------------------------------------ #
     def declaration(self, body: dict) -> dict | None:
@@ -442,6 +494,56 @@ class ScriptedToolCall:
             walk(output)
             return "\n".join(parts) if parts else json.dumps(output)
         return None
+
+    # -- the chat-completions spelling -------------------------------------- #
+    def chat_declaration(self, body: dict) -> dict | None:
+        """The advertised chat `tools[]` entry matching this script, or ``None``.
+
+        Chat has no namespace entry: a tool is ``{"type": "function",
+        "function": {"name": …}}``, matched on the flat spelling."""
+        for tool in body.get("tools") or []:
+            if not isinstance(tool, dict) or tool.get("type") != "function":
+                continue
+            function = tool.get("function")
+            if isinstance(function, dict) and \
+                    function.get("name") == self.flat_name:
+                return tool
+        return None
+
+    def chat_returned_output(self, body: dict) -> str | None:
+        """The `role: "tool"` message for OUR call id, as text, or ``None``."""
+        for message in body.get("messages") or []:
+            if not isinstance(message, dict) or message.get("role") != "tool":
+                continue
+            if message.get("tool_call_id") != self.call_id:
+                continue
+            content = message.get("content")
+            if isinstance(content, str):
+                return content
+            # A content-part list (`[{"type": "text", "text": …}]`).
+            parts: list[str] = []
+
+            def walk(value):
+                if isinstance(value, str):
+                    parts.append(value)
+                elif isinstance(value, list):
+                    for entry in value:
+                        walk(entry)
+                elif isinstance(value, dict):
+                    for key in ("text", "content"):
+                        if key in value:
+                            walk(value[key])
+
+            walk(content)
+            return "\n".join(parts) if parts else json.dumps(content)
+        return None
+
+    def chat_tool_call(self) -> dict:
+        """The one `tool_calls[]` entry, in the flat spelling."""
+        return {"id": self.call_id, "type": "function",
+                "function": {"name": self.flat_name,
+                             "arguments": json.dumps(self.arguments,
+                                                     sort_keys=True)}}
 
     # -- what it answers ---------------------------------------------------- #
     def call_item(self, status: str = "completed", arguments: str | None = None,
@@ -518,6 +620,42 @@ def responses_call_stream(model: str, script: ScriptedToolCall,
         "output_index": 0, "item": item}
     yield "response.completed", {"type": "response.completed",
                                  "sequence_number": 6, "response": resp}
+
+
+def chat_call_body(model: str, script: ScriptedToolCall) -> dict:
+    """The chat-completions message carrying the ONE scripted tool call."""
+    return {
+        "id": "chatcmpl-stub-call", "object": "chat.completion", "created": 0,
+        "model": model,
+        "choices": [{"index": 0, "finish_reason": "tool_calls",
+                     "message": {"role": "assistant", "content": None,
+                                 "tool_calls": [script.chat_tool_call()]}}],
+        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+    }
+
+
+def chat_call_stream(model: str, script: ScriptedToolCall):
+    """The chat-completions chunks for ONE tool call.
+
+    Same envelope as `chat_stream`. The call opens with its id, type and name
+    and an empty argument string, and the arguments follow in one delta: the
+    shape OpenAI streams a call in, and the one an accumulating client
+    (`@ai-sdk/openai-compatible`) completes only when the arguments parse.
+    """
+    call = script.chat_tool_call()
+    base = {"id": "chatcmpl-stub-call", "object": "chat.completion.chunk",
+            "created": 0, "model": model}
+    yield None, dict(base, choices=[{"index": 0, "delta": {"role": "assistant"},
+                                     "finish_reason": None}])
+    yield None, dict(base, choices=[{"index": 0, "delta": {"tool_calls": [{
+        "index": 0, "id": call["id"], "type": "function",
+        "function": {"name": call["function"]["name"], "arguments": ""}}]},
+        "finish_reason": None}])
+    yield None, dict(base, choices=[{"index": 0, "delta": {"tool_calls": [{
+        "index": 0, "function": {"arguments": call["function"]["arguments"]}}]},
+        "finish_reason": None}])
+    yield None, dict(base, choices=[{"index": 0, "delta": {},
+                                     "finish_reason": "tool_calls"}])
 
 
 def catalog(surface: str) -> dict:
@@ -686,6 +824,60 @@ class Handler(BaseHTTPRequestHandler):
         entry["fixture"] = getattr(resolve, "last_fixture", None)
         return True, answer
 
+    def _scripted_chat_tool_call(self, body, model, streamed, entry) -> bool:
+        """The chat-completions leg of `_scripted_tool_call`, same rules.
+
+        The matching `role: "tool"` message → the terminal message; else the
+        tool advertised (flat spelling) → the one `tool_calls` message; else
+        ``False`` and the text path answers. No shell follow-up here — the
+        script refuses `then_shell` with `chat` at load.
+        """
+        script = _tool_script
+        assert script is not None
+        declaration = script.chat_declaration(body)
+        output = script.chat_returned_output(body)
+        record: dict = {
+            "tool": {"namespace": script.namespace or None, "name": script.name},
+            "call_id": script.call_id,
+            "declaration": declaration,
+        }
+        if output is not None and script.after_output == "text":
+            # Our output came back; the scenario's text path answers the turn.
+            entry["scripted"] = _output_record(record, output,
+                                               phase="output-to-text")
+            return False
+        if output is not None:
+            record["phase"] = "terminal"
+            record["output_sha"] = _sha(output)
+            record["output_len"] = len(output)
+            record["output"] = output[:SCRIPTED_OUTPUT_CAP]
+            record["output_truncated"] = len(output) > SCRIPTED_OUTPUT_CAP
+            if streamed:
+                frames = list(chat_stream(model, script.terminal))
+            else:
+                frames = [(None, chat_body(model, script.terminal))]
+        elif declaration is not None:
+            record["phase"] = "call"
+            record["flat"] = True
+            record["arguments"] = script.arguments
+            if streamed:
+                frames = list(chat_call_stream(model, script))
+            else:
+                frames = [(None, chat_call_body(model, script))]
+        else:
+            entry["scripted"] = dict(record, phase="not-advertised")
+            return False
+
+        record["frames"] = [{"event": name, "data": data}
+                            for name, data in frames]
+        entry["scripted"] = record
+        entry["fixture"] = f"scripted_tool_call:{record['phase']}"
+        if streamed:
+            self._send_sse(iter(frames))
+        else:
+            self._send_json(frames[0][1])
+        return True
+
     def _scripted_tool_call(self, body, model, streamed, entry) -> bool:
         """Answer from the scenario's `scripted_tool_call:` block, or decline.
 
@@ -732,6 +924,10 @@ class Handler(BaseHTTPRequestHandler):
                 frames = list(responses_call_stream(model, script, item=item))
             else:
                 frames = [(None, responses_call_body(model, script, item=item))]
+        elif output is not None and script.after_output == "text":
+            entry["scripted"] = _output_record(record, output,
+                                               phase="output-to-text")
+            return False
         elif output is not None:
             record["phase"] = "terminal"
             if script.then_shell:
@@ -801,12 +997,18 @@ class Handler(BaseHTTPRequestHandler):
         elif method == "POST" and path.endswith("/messages"):
             surface = "anthropic"
 
-        if surface == "responses" and _tool_script is not None:
+        # Only on a surface the script names (`surfaces:`, default
+        # `[responses]`), so a Responses-only script leaves chat untouched.
+        if (surface in ("responses", "chat") and _tool_script is not None
+                and surface in _tool_script.surfaces):
             entry["surface"] = surface
-            if self._scripted_tool_call(body, model, streamed, entry):
+            handler = (self._scripted_tool_call if surface == "responses"
+                       else self._scripted_chat_tool_call)
+            if handler(body, model, streamed, entry):
                 return None
             # The script did not own this request (the tool is not advertised
-            # on it): the text path below answers it, unchanged.
+            # on it, or `after_output: text` hands our output's turn back): the
+            # text path below answers it, unchanged.
 
         if surface:
             entry["surface"] = surface

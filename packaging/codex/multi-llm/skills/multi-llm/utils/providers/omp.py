@@ -44,7 +44,6 @@ one this adapter is responsible for: :meth:`OmpProvider.get_env` re-emits
 ``OPENROUTER_API_KEY`` explicitly so it survives a filtered run, because
 nothing in omp's allowlist profile admits it.
 """
-import json
 import os
 import re
 import shutil
@@ -66,9 +65,28 @@ from .base import (
     StructuredSchema,
     VERSION_TOO_LOW,
     split_reasoning_effort,
-    warn_gate_once,
 )
-from .pi import _cap, _one_line, parse_answer_text
+from .pi import parse_answer_text
+from .pi_family_stream import (
+    _ASSISTANT_MESSAGE_REQUIRED_KEYS,  # noqa: F401 - re-exported; the docstrings cite it
+    StreamDialect,
+    _answer_text,
+    _assistant_ends,
+    _cap,
+    _events,
+    _first_line,
+    _one_line,
+    _result_text,
+    _retry_give_up,
+    _stream_version,
+    _tool_ends,
+    _unclosed_container,
+    shape_fault,
+    sum_usage,
+    unrecognized_stop_reason,
+    version_clause,
+    warn_stream_version,
+)
 
 # --------------------------------------------------------------------------- #
 # Terminal codes. Imported by name from the runner rather than re-spelled: the
@@ -189,16 +207,30 @@ OMP_APPROVAL_MODE = "yolo"
 #: is never reported as garbage.
 OMP_STREAM_VERSION = 3
 
-#: What every assistant ``message_end`` must carry before anything reads it.
-#: A release that renames one of these fails by name at the first parse, with a
-#: hard error code, rather than handing :func:`parse_answer_text` a message whose
-#: shape is not the measured one.
-_ASSISTANT_MESSAGE_REQUIRED_KEYS = ("role", "content", "stopReason")
+#: What every assistant ``message_end`` must carry before anything reads it is
+#: ``pi_family_stream._ASSISTANT_MESSAGE_REQUIRED_KEYS``, imported above. A
+#: release that renames one of those fails by name at the first parse.
 
 #: The closed ``stopReason`` set, all four observed at 18.2.2. Anything else
 #: fails closed (§2.6 step 4): an unobserved enum may be a cut (``maxTokens``), a
 #: refusal or a rename, and the parser cannot tell which.
 _KNOWN_STOP_REASONS = ("stop", "toolUse", "error", "aborted")
+
+#: omp's words for the shared pi-family reader (``pi_family_stream``). Every
+#: sentence the reader builds for omp reads "omp 18.2.2" and version 3 from here,
+#: so they stay byte-identical to the ones this module built before the lift.
+#: ``compaction_event`` is omp's spelling, ``auto_compaction_end``; its usage leg
+#: stays **off**: T7.15 measured (container, omp 18.2.11,
+#: ``tests/fixtures/omp/compaction-summarized``) that a compaction which really
+#: summarizes carries no ``usage`` in ``result`` — see :meth:`OmpProvider.parse_usage`.
+OMP_DIALECT = StreamDialect(
+    product="omp",
+    verified_version="18.2.2",
+    stream_version=OMP_STREAM_VERSION,
+    stop_reasons=_KNOWN_STOP_REASONS,
+    compaction_event="auto_compaction_end",
+    compaction_usage=False,
+)
 
 #: The headless approval denial, verbatim. Matched on a tool **result's** text
 #: only, never on assistant text — the model may quote it.
@@ -411,101 +443,21 @@ def max_time_value(timeout_s: Optional[int]) -> Optional[str]:
 # --------------------------------------------------------------------------- #
 # The stream reader. One implementation, read by `parse_output`,
 # `describe_failure`, `classify_failure` and `parse_usage` alike — so the
-# report's `Reason:` line and the log's error string cannot drift apart.
+# report's `Reason:` line and the log's error string cannot drift apart. The
+# event-level reader (`_events`, `_assistant_ends`, `_tool_ends`, the shape
+# check, `sum_usage`, …) is `pi_family_stream`'s, shared with pi and run here
+# under `OMP_DIALECT`; what follows is what only omp has (the approval denial,
+# the Bun stderr, `errorStatus`, the ladder names) and omp's thin wrappers.
 # --------------------------------------------------------------------------- #
-
-def _events(stdout: str) -> Tuple[List[Dict[str, Any]], List[str]]:
-    """``(parsed JSONL events, the lines that were not JSON)``.
-
-    A non-JSON line is kept rather than dropped: a banner a future release grows
-    would land here, and naming it in the error is what turns "this stream made
-    no sense" into something actionable.
-    """
-    events: List[Dict[str, Any]] = []
-    junk: List[str] = []
-    for line in (stdout or "").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except ValueError:
-            junk.append(line)
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-        else:
-            junk.append(line)
-    return events, junk
-
-
-def _stream_version(events: List[Dict[str, Any]]) -> Optional[int]:
-    """The ``session`` event's ``version``, or ``None`` when there was none."""
-    for event in events:
-        if event.get("type") == "session":
-            version = event.get("version")
-            return version if isinstance(version, int) else None
-    return None
-
 
 def _version_clause(version: Optional[int]) -> str:
     """The parenthetical every shape error carries, naming what the parser knows."""
-    seen = OMP_STREAM_VERSION if version is None else version
-    return (
-        f"stream version {seen}; the parser was written against omp 18.2.2's "
-        f"version {OMP_STREAM_VERSION} stream"
-    )
+    return version_clause(version, OMP_DIALECT)
 
 
 def _warn_stream_version(version: Optional[int]) -> None:
     """One WARN per process for a ``session.version`` that is not the measured 3."""
-    if version is None or version == OMP_STREAM_VERSION:
-        return
-    warn_gate_once(
-        ("omp-stream-version", version),
-        f"WARNING: omp stream version {version}; the parser was written against "
-        f"{OMP_STREAM_VERSION} (omp 18.2.2).",
-    )
-
-
-def _assistant_ends(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Every assistant ``message_end`` message object, in stream order.
-
-    The assistant ``message_start`` already carries the final message — content,
-    ``stopReason``, ``errorMessage`` — so it is not a placeholder and therefore
-    not a marker. Only ``message_end`` is collected, and ``turn_end`` /
-    ``agent_end`` (which repeat the same message, and in ``agent_end``'s case the
-    whole conversation including our own prompt) are ignored.
-    """
-    out = []
-    for event in events:
-        if event.get("type") != "message_end":
-            continue
-        message = event.get("message")
-        if isinstance(message, dict) and message.get("role") == "assistant":
-            out.append(message)
-    return out
-
-
-def _tool_ends(events: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Every ``tool_execution_end`` event, in stream order."""
-    return [e for e in events if e.get("type") == "tool_execution_end"]
-
-
-def _result_text(event: Dict[str, Any]) -> str:
-    """A ``tool_execution_end``'s own result text — never assistant text.
-
-    The denial marker is matched here and nowhere else: the model may quote the
-    sentence in its answer, and a quoted denial is prose, not a denial.
-    """
-    result = event.get("result")
-    if not isinstance(result, dict):
-        return ""
-    parts = []
-    for item in result.get("content") or []:
-        if isinstance(item, dict) and isinstance(item.get("text"), str):
-            parts.append(item["text"])
-    return "\n".join(parts)
+    warn_stream_version(version, OMP_DIALECT)
 
 
 def _denied(events: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
@@ -533,86 +485,9 @@ def _shape_fault(
     Checked **by name, before anything reads the stream**, because nothing else
     guards the JSONL surface: the help-text gate covers the argv, and a daily
     release can change the event shape under an unchanged help text with no
-    marker at all.
+    marker at all. The check is the shared reader's, in omp's words.
     """
-    for message in messages:
-        for key in _ASSISTANT_MESSAGE_REQUIRED_KEYS:
-            if key not in message:
-                return (
-                    f"assistant message_end without {key} "
-                    f"({_version_clause(version)})"
-                )
-        if not isinstance(message.get("content"), list):
-            return (
-                f"assistant message_end whose content is not a list "
-                f"({_version_clause(version)})"
-            )
-        if not isinstance(message.get("stopReason"), str):
-            return (
-                f"assistant message_end whose stopReason is not a string "
-                f"({_version_clause(version)})"
-            )
-    return None
-
-
-def _answer_text(message: Dict[str, Any]) -> str:
-    """The concatenated ``text`` content parts of a message — **and only those**.
-
-    A ``thinking`` part is the model's reasoning, not its answer, and a
-    ``toolCall`` part has no text; neither is ever concatenated in, so a fenced
-    array inside a thinking block cannot become the findings.
-    """
-    parts = []
-    for item in message.get("content") or []:
-        if isinstance(item, dict) and item.get("type") == "text":
-            text = item.get("text")
-            if isinstance(text, str):
-                parts.append(text)
-    return "".join(parts)
-
-
-def _unclosed_container(text: str) -> Optional[str]:
-    """The opening bracket of a JSON document the answer **never closes**.
-
-    ``None`` when the answer does not begin a JSON document at all, and ``None``
-    when the document it begins is balanced — a complete findings array followed
-    by a closing sentence is exactly what the shared extractor exists to
-    recover, and refusing it here would cost every honest run that says a word
-    after its answer.
-
-    **Why the question is the leading container rather than ``json.loads``**:
-    both a cut answer and a complete array with a trailing sentence fail
-    ``json.loads``, and only one of the two is a truncation. What separates them
-    is whether the document the answer *opened* was ever closed, which is a
-    bracket walk and not a parse.
-
-    Nesting is counted in the leading container's own brackets only, so
-    ``[{"file": "a.py", "line_range": [10, 15]}`` is unclosed (one ``[`` still
-    open) while ``[{"line_range": [10, 15]}]`` is not.
-    """
-    text = (text or "").strip()
-    if not text or text[0] not in "[{":
-        return None
-    opener = text[0]
-    closer = "]" if opener == "[" else "}"
-    depth = 0
-    in_string = False
-    escape_next = False
-    for char in text:
-        if escape_next:
-            escape_next = False
-        elif in_string and char == "\\":
-            escape_next = True
-        elif char == '"':
-            in_string = not in_string
-        elif not in_string:
-            if char == opener:
-                depth += 1
-            elif char == closer:
-                depth -= 1
-                if depth == 0:
-                    return None
-    return opener
+    return shape_fault(messages, version, dialect=OMP_DIALECT)
 
 
 def _error_sentence(message: Dict[str, Any]) -> str:
@@ -624,33 +499,10 @@ def _error_sentence(message: Dict[str, Any]) -> str:
     return detail or (f"{status}" if status is not None else "")
 
 
-def _retry_give_up(events: List[Dict[str, Any]]) -> Optional[str]:
-    """The last failed ``auto_retry_end``'s ``finalError``, or ``None``.
-
-    omp's empty-stop retry gives up with an event rather than an exit code, and
-    the sentence it carries is the only thing on either channel that says why a
-    run that exited 0 produced no text.
-    """
-    for event in reversed(events):
-        if event.get("type") != "auto_retry_end" or event.get("success"):
-            continue
-        detail = _one_line(str(event.get("finalError") or ""))
-        if detail:
-            return _cap(detail)
-    return None
-
-
 def _tool_name(event: Optional[Dict[str, Any]]) -> str:
     if not event:
         return "?"
     return str(event.get("toolName") or "?")
-
-
-def _first_line(text: str) -> str:
-    for line in (text or "").splitlines():
-        if line.strip():
-            return _cap(_one_line(line))
-    return ""
 
 
 def stderr_diagnosis(stderr: str) -> str:
@@ -732,6 +584,20 @@ def _named_for_the_ladder(token: str, sentence: str) -> str:
     return f"{token}: {sentence}"
 
 
+def _tool_use_diagnostics(events: List[Dict[str, Any]]) -> Tuple[str, str]:
+    """``(tool name, first line of its result)`` for a ``toolUse``-final stream.
+
+    The last errored ``tool_execution_end``, else the last one. The result line
+    is diagnostics only and must never be composed into a classifier-facing
+    error string (see :func:`terminal_verdict`).
+    """
+    tools = _tool_ends(events)
+    errored = [e for e in tools if e.get("isError")]
+    tool = errored[-1] if errored else (tools[-1] if tools else None)
+    detail = _first_line(_result_text(tool)) if tool else ""
+    return _tool_name(tool), detail
+
+
 def terminal_verdict(stdout: str, stderr: str) -> Optional[str]:
     """What the **stream** says went wrong, or ``None``.
 
@@ -763,11 +629,13 @@ def terminal_verdict(stdout: str, stderr: str) -> Optional[str]:
 
     denial = _denied(_tool_ends(events))
     if denial is not None:
+        # The tool's *name* only, as on the toolUse deadline below: the result
+        # line is tool-channel text, and this sentence is what Lane A classifies.
+        # It travels as parse_output's diagnostic `tool_result` field instead.
         return _named_for_the_ladder(
             "Permission denied",
-            f"tool {_tool_name(denial)} was denied approval: "
-            f"{_first_line(_result_text(denial))}; the answer that followed is "
-            "not trusted",
+            f"tool {_tool_name(denial)} was denied approval; the answer that "
+            "followed is not trusted",
         )
 
     if not messages:
@@ -806,21 +674,18 @@ def terminal_verdict(stdout: str, stderr: str) -> Optional[str]:
             return _named_for_the_ladder("Server error", sentence)
         return sentence
     if reason == "toolUse":
-        errored = [e for e in _tool_ends(events) if e.get("isError")]
-        tool = errored[-1] if errored else (_tool_ends(events) or [None])[-1]
-        detail = _first_line(_result_text(tool)) if tool else ""
-        sentence = f"run ended inside a tool call: {_tool_name(tool)}"
+        # The tool's *name* only. Its result is content the run read (a file, a
+        # command's output), never omp's verdict, and Lane A classifies this
+        # sentence through the shared tables: a read that quoted "rate limit
+        # exceeded" or "invalid api key" would turn this deadline into
+        # rate_limited/auth_failed. The result text travels separately, as
+        # parse_output's diagnostic `tool_result` field (_tool_use_diagnostics).
+        name, _detail = _tool_use_diagnostics(events)
         return _named_for_the_ladder(
-            "Deadline exceeded", f"{sentence}: {detail}" if detail else sentence
+            "Deadline exceeded", f"run ended inside a tool call: {name}"
         )
 
-    sentence = (
-        f"unrecognized stopReason {reason!r} on the last assistant message "
-        f"(omp 18.2.2 emits {'/'.join(_KNOWN_STOP_REASONS)}; "
-        f"{_version_clause(version)})"
-    )
-    detail = _one_line(str(final.get("errorMessage") or ""))
-    return f"{sentence}; {detail}" if detail else sentence
+    return unrecognized_stop_reason(final, version, OMP_DIALECT)
 
 
 def _never_started(stdout: str) -> bool:
@@ -1285,14 +1150,21 @@ class OmpProvider(LLMProvider):
                 "data": None,
             }
 
-        if _denied(_tool_ends(events)) is not None:
-            return {
+        denial = _denied(_tool_ends(events))
+        if denial is not None:
+            out = {
                 "success": False,
                 "error": with_junk(terminal_verdict(raw, "")),
                 "error_code": ERROR_SUBPROCESS_FAILED,
                 "raw": raw,
                 "data": None,
             }
+            # Diagnostics beside the error, never inside it (terminal_verdict).
+            out["tool_name"] = _tool_name(denial)
+            detail = _first_line(_result_text(denial))
+            if detail:
+                out["tool_result"] = detail
+            return out
 
         if not messages:
             sentence = with_junk(
@@ -1396,13 +1268,20 @@ class OmpProvider(LLMProvider):
             }
 
         if reason == "toolUse":
-            return {
+            out = {
                 "success": False,
                 "error": with_junk(terminal_verdict(raw, "")),
                 "error_code": ERROR_TIMEOUT,
                 "raw": raw,
                 "data": None,
             }
+            # Diagnostics beside the error, never inside it: the error string is
+            # what Lane A classifies (see `terminal_verdict`).
+            name, detail = _tool_use_diagnostics(events)
+            out["tool_name"] = name
+            if detail:
+                out["tool_result"] = detail
+            return out
 
         return {
             "success": False,
@@ -1491,7 +1370,10 @@ class OmpProvider(LLMProvider):
         not classification**: ``_attach_stdout_excerpt`` puts the raw stdout on
         ``details.stdout_excerpt``, ``_save_log`` writes it in full, and
         ``_format_failure_details``' stdout tail is cut from the raw stream. This
-        hook is applied inside :meth:`classify_failure` and nowhere else, so
+        hook is applied inside :meth:`classify_failure` (to classify) and, for
+        the failure reason's quote only, by the executor's
+        ``_classify_failed_run`` (see the base docstring); neither writes the
+        reduced text anywhere a human reads instead of the raw stream, so
         narrowing it removes no byte from anything a human reads.
         """
         events, _junk = _events(stdout)
@@ -1587,38 +1469,25 @@ class OmpProvider(LLMProvider):
 
         ``cost_usd`` is priced from omp's own model catalog, not read back from
         the vendor — it is an estimate, and every renderer labels it "est.".
+
+        **An overflowed run under-counts by its summarization calls.** MEASURED
+        (T7.15, 2026-09-25, container omp 18.2.11,
+        ``tests/fixtures/omp/compaction-summarized``): after a 400 context-length
+        omp tries ``shake`` (drops tool output, no model call) and, when that
+        finds nothing, ``context-full`` — which made **two** summarization
+        requests (``max_tokens`` 8192 and 512) whose usage omp drops:
+        ``auto_compaction_end.result`` is ``{summary, shortSummary,
+        firstKeptEntryId, tokensBefore, details}`` and no assistant
+        ``message_end`` carries them. So that row reports 8 requests' worth of
+        work minus 2 (here 1800 input / 80 output tokens short). Nothing else is
+        missing, so ``USAGE_FULL`` stands, and :data:`OMP_DIALECT` keeps its
+        compaction leg off — there is no ``result.usage`` to add. (pi's
+        ``compaction_end.result.usage`` does exist and pi's dialect counts it.)
         """
         events, _junk = _events(stdout)
         if not events:
             return None
-        messages = _assistant_ends(events)
-        totals: Dict[str, Any] = {}
-        seen = False
-
-        def _add(key: str, value: Any) -> None:
-            nonlocal seen
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
-                return
-            seen = True
-            totals[key] = totals.get(key, 0) + value
-
-        for message in messages:
-            usage = message.get("usage")
-            if not isinstance(usage, dict):
-                continue
-            _add("input_tokens", usage.get("input"))
-            _add("output_tokens", usage.get("output"))
-            _add("cached_input_tokens", usage.get("cacheRead"))
-            _add("total_tokens", usage.get("totalTokens"))
-            cost = usage.get("cost")
-            if isinstance(cost, dict):
-                _add("cost_usd", cost.get("total"))
-
-        tool_uses = len(_tool_ends(events))
-        if tool_uses:
-            totals["tool_uses"] = tool_uses
-            seen = True
-        return totals if seen else None
+        return sum_usage(events, OMP_DIALECT)
 
     # ── environment ──────────────────────────────────────────────────────
     def get_env(self, model: str) -> Dict[str, str]:

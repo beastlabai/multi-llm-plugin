@@ -2468,7 +2468,10 @@ class TestTheReportReconcilesItsIssueCountWithItsGroupCount:
         assert "**Total Issues:** 3" in report
         assert "**Groups:** 2" in report
         # The validation line has always counted groups; now it says so.
-        assert "1 valid, 0 invalid, 1 needs human review (of 2 groups)" in report
+        assert (
+            "1 valid, 0 invalid, 1 needs human review, 0 validation failed "
+            "(of 2 groups)"
+        ) in report
 
     def test_a_consensus_finding_names_its_siblings_once_per_member(self, tmp_path):
         report = self._render(tmp_path)

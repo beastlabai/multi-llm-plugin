@@ -1,0 +1,343 @@
+# The §6.2 fixture manifest for pi. Graded by tests/test_provider_fixture_rows.py,
+# which owns the format (its module docstring is the spec).
+#
+# Every byte under this directory is raw pi stdout/stderr as the CLI wrote it.
+# No row here is synthesized. Several stdout files are ZERO BYTES and several
+# stderr files are too; both are committed rather than omitted, because "pi
+# wrote nothing on this channel" is the measurement this set exists to record.
+schema_version: 1
+provider: pi
+cli_version: "0.80.6"
+captured: "2026-08-19"
+method: >-
+  §6 step 5, in the committed image mllm-e2e:local with `--network none`, the rig
+  mounted read-only at /rig, and NO credential — the only key anywhere is the
+  wrapper's per-exec `mllm-stub-<id>` string in `STUB_API_KEY`, meaningful on
+  127.0.0.1 and nowhere else. The probe drove the PATH wrapper
+  (`/opt/mllm/bin/pi` IS wrapper.py) rather than hand-building an environment, so
+  redirect.yaml's pi row applied itself: `PI_CODING_AGENT_DIR` pointed at a fresh
+  per-invocation `.pi/agent` (pi reads it AHEAD of $HOME) seeded from
+  home_seed/pi with `models.json` — the ONLY carrier of the base URL, and the
+  file whose `apiKey` must be present even as a dummy or the model is filtered
+  out of the selectable set entirely. argv is `PiProvider.build_command`'s output
+  verbatim (`pi --no-session -p --model stub/stub-model <prompt>`), the prompt a
+  4844-byte review-shaped request that demands the JSON on **stdout** — pi
+  declares `supports_file_output = True`, and a file-output prompt makes it print
+  only `JSON written to …`, which is not what a parser fixture should pin.
+  Servers run INSIDE the container: `python3 /rig/stub_server.py --port 8099`
+  with an inline-answer scenario for the answering rows, `python3
+  /rig/failserver.py --port 8099 --mode <mode>` for the rest. One container per
+  row; never wrapped in `timeout(1)`, which is the zero-byte-hang artifact.
+notes: >-
+  ONE FACT DOMINATES THIS WHOLE SET, and it is the opposite of the opencode trap:
+  **pi writes ZERO bytes to stdout on every failure.** The diagnosis is on
+  stderr, prefixed with the HTTP status and carrying the vendor's JSON error
+  object verbatim, and the exit code is 1 — exactly what `PiProvider`'s docstring
+  claims, now measured rather than asserted. The consequence for the parser used
+  to be blunt: `parse_output` never sees anything but an empty string on a failed
+  run, so its answer was `Empty output` on all nine failure rows and every
+  distinction between them lived in `classify_failure`, which reads stderr.
+  **C4 fixed that half.** `parse_output` now names the stderr text in its error
+  branch and `describe_failure` returns the same one-line summary to both lanes,
+  so the seven rows that HAVE stderr each carry the vendor's own words below —
+  four behind pi's `NNN: ` prefix as a JSON error object, three as a bare
+  sentence. No `classify_failure` cell moved with it: `describe_failure` is
+  diagnostics, never classification. The second fact
+  is the one that costs: on a **400 context-length** pi writes nothing to EITHER
+  channel and exits **0** (`context-overflow`), which is byte-identical to a run
+  whose model legitimately answered with the empty string (`empty`) — so at pi
+  0.80.6 a swallowed overflow and a valid empty answer are the same event.
+
+rows:
+  success:
+    stdout: success.stdout.txt
+    stderr: success.stderr.txt
+    exit_code: 0
+    wall_s: 0.52
+    requests: 1
+    notes: >-
+      The whole shape: 151 bytes of stdout that ARE the answer, with no envelope,
+      no banner, no marker and no trailing accounting line, and an empty stderr.
+      `parse_output`'s `stdout.startswith('[')` fast path is what a normal pi run
+      takes. One HTTP request; pi fetches no catalog.
+    expect:
+      success: true
+      data:
+        - {id: "S001", title: "Bound the retry ladder", severity: "high"}
+        - {id: "S002", title: "Strip the vendor token", severity: "medium"}
+      classify_failure: null
+
+  truncated:
+    stdout: truncated.stdout.txt
+    stderr: truncated.stderr.txt
+    exit_code: 1
+    wall_s: 14.63
+    requests: 4
+    notes: >-
+      failserver `--mode trunc`: 200 headers promising a full Content-Length, a
+      60-byte prefix, then the socket closes. pi retries **four** times over
+      14.6 s — §6.1.1's envelope for this CLI — and reports the whole thing in
+      five words on stderr, `Stream ended without finish_reason`, with stdout
+      empty. Neither the status line nor the partial frame is written anywhere,
+      so the classifier has five words to work with and recognises none of them.
+      Since C4 the PARSER has those five words too — tier 2's non-JSON branch,
+      reported verbatim because the sentence is already the whole diagnosis.
+    expect:
+      success: false
+      error_contains: ["Empty output", "Stream ended without finish_reason"]
+      raw_contains: ["Stream ended without finish_reason"]
+      # Nothing matches: not the connection table (pi never says "connection"),
+      # not the timeout table, not the server table. Transport-shaped, so the
+      # executor spends its whole bounded-retry budget re-running a CLI that
+      # already retried four times. Recorded, not fixed -- see the README.
+      classify_failure: null
+
+  ephemeral-only:
+    not_applicable: >-
+      pi has no noise channel to be all of. Its stdout is the final assistant
+      text and nothing else — no event records, no progress lines, no thinking
+      block, no accounting footer — so there is no class of record `parse_output`
+      filters and therefore no run that can consist only of filtered records.
+      Measured directly: driven against a stub whose answer is the EMPTY string,
+      pi wrote 0 bytes to stdout, 0 bytes to stderr and exited 0
+      (plans/harness-expansion/probe-out/pi/ephemeral-only.*), i.e. the all-noise
+      shape degenerates into the `empty` row, which IS committed here.
+
+  multi-assistant:
+    not_applicable: >-
+      There is no envelope to hold a second message. pi print mode emits the
+      FINAL assistant text as bare bytes, so a selection rule has nothing to
+      select between and first/last/concatenate are the same operation.
+      Measured on a multi-turn run rather than assumed: the live-lane capture in
+      tests/container/runs/20260819T145308Z/live-pi/live-provider.json is a run
+      in which pi called its write tool and then answered, and its entire stdout
+      is the one line `JSON written to /work/live/pi/declared-channel.json` — the
+      tool turn leaves no trace on the stream the parser reads.
+
+  error-envelope:
+    stdout: error-envelope.stdout.txt
+    stderr: error-envelope.stderr.txt
+    exit_code: 1
+    wall_s: 14.58
+    requests: 4
+    notes: >-
+      failserver `--mode errbody`: HTTP **200** whose body is a provider error
+      object carrying the 401 wording. pi never delivers that text anywhere. It
+      reads the 200 as a stream that stopped early, retries four times over
+      14.6 s and prints the same five words as the truncated row — so an error
+      served on the success channel is indistinguishable from a cut connection,
+      and the provider's own sentence reaches no pattern table at all. C4 does
+      not change that: the two rows stay indistinguishable in the error as well,
+      because pi genuinely never writes the provider's text anywhere. What it
+      changes is that the five words now reach the operator instead of `Empty
+      output`.
+    expect:
+      success: false
+      error_contains: ["Empty output", "Stream ended without finish_reason"]
+      raw_contains: ["Stream ended without finish_reason"]
+      classify_failure: null
+
+  exit-zero-failure:
+    stdout: exit-zero-failure.stdout.txt
+    stderr: exit-zero-failure.stderr.txt
+    exit_code: 0
+    wall_s: 0.53
+    requests: 1
+    notes: >-
+      failserver `--mode ctx` — the ONE exit-0 failure pi has, and the worst
+      possible version of it: exit **0**, stdout 0 bytes, stderr 0 bytes, one
+      request, 0.5 s. There is no marker, because there are no bytes; `PiProvider`
+      declares no `exit_zero_failure_markers` and could not declare one that
+      would fire here. The run is indistinguishable, on every signal available to
+      the executor, from a model that answered with the empty string. Committed
+      as its own capture rather than as a note, because a row this shape is the
+      reason §6.2 asks for it.
+      **C4's rung 5, and this row keeps `Empty output` unembellished**:
+      `describe_failure` returns `None` because there is nothing on either
+      channel to summarize. That is the measurement — pi wrote no diagnosis —
+      and not a gap in the hook. Nothing is invented from an exit code, which
+      here is 0 anyway.
+    expect:
+      success: false
+      error_contains: ["Empty output"]
+      classify_failure: null
+
+  stdout-error:
+    not_applicable: >-
+      Inverted at pi, and measured that way: the row wants the diagnosis on
+      stdout with stderr empty, and pi does the exact opposite on all nine
+      failure modes — stdout is **0 bytes** every time (401, 404, 400
+      context-length, 500-forever, 429-forever, truncated body, zero-byte
+      response, 200-with-error-object, empty completion) and the diagnosis, where
+      there is one, is on stderr. The `nonzero exit` half holds on eight of the
+      nine; the `on stdout` half has no producer at 0.80.6. What the row exists
+      to prevent — a diagnosis being read as an answer — cannot happen at pi,
+      because the parser is never handed one.
+
+  empty:
+    stdout: empty.stdout.txt
+    stderr: empty.stderr.txt
+    exit_code: 0
+    wall_s: 0.55
+    requests: 1
+    notes: >-
+      Zero bytes on both channels, exit 0 — REAL, not manufactured, and produced
+      without a `timeout(1)` anywhere: failserver `--mode ctx` answers the one
+      request with a 400 and pi exits silently. §6.2 asks this row to be
+      "distinguishable from a valid empty answer, and classified". At pi 0.80.6
+      it is neither: the same bytes come out of a legitimate empty completion
+      (probe-out/pi/ephemeral-only.*), and `classify_failure` returns None
+      because `classify_streams` short-circuits on an empty haystack. The row
+      pins that `parse_output` at least calls it a failure rather than an
+      empty-string success.
+      **C4's rung 5**: `describe_failure` returns `None` and the error stays
+      `Empty output`, unembellished. With zero bytes on both channels there is
+      nothing to summarize, and inventing a reason from the exit code is exactly
+      what the rung forbids. The measurement, not a gap.
+    expect:
+      success: false
+      error_contains: ["Empty output"]
+      classify_failure: null
+
+  auth-error:
+    stdout: auth-error.stdout.txt
+    stderr: auth-error.stderr.txt
+    exit_code: 1
+    wall_s: 0.59
+    requests: 1
+    notes: >-
+      failserver `--mode 401`. **One** request — terminal, no retry — and pi
+      forwards the vendor's error object verbatim on stderr behind a bare
+      `401: ` prefix. What classifies it is the machine-readable
+      `"code":"invalid_api_key"` rather than the English sentence: OpenAI's
+      "Incorrect API key provided: …" matches none of base.auth_error_patterns'
+      ten entries. Worth knowing before anyone reformats that JSON out.
+      C4's tier 2 in one row: the `401: ` prefix is stripped to reach the JSON,
+      the object's `message` and `code` are reported, and the **401 is put back**
+      because the prefix is the only place the status survives.
+    expect:
+      success: false
+      error_contains:
+        - "Empty output"
+        - "401: Incorrect API key provided"
+        - "(invalid_api_key)"
+      raw_contains:
+        - "401: "
+        - '"code":"invalid_api_key"'
+      classify_failure: "auth_failed"
+
+  rate-limit:
+    stdout: rate-limit.stdout.txt
+    stderr: rate-limit.stderr.txt
+    exit_code: 1
+    wall_s: 14.56
+    requests: 4
+    notes: >-
+      failserver `--mode 429`, fail-forever. pi **does** retry a 429 internally —
+      four requests over 14.6 s, the same envelope as every other retryable
+      condition — so an executor-level re-dispatch of a rate-limited pi slot
+      doubles a wait the CLI already served (§7.6(b)'s rule 6b). The upstream
+      text survives, so the classification is reached from the vendor's own
+      words — and since C4 so is the parser's error (tier 2).
+    expect:
+      success: false
+      error_contains: ["Empty output", "429: Rate limit reached for stub-model"]
+      raw_contains: ["Rate limit reached for stub-model"]
+      classify_failure: "rate_limited"
+
+  invalid-model:
+    stdout: invalid-model.stdout.txt
+    stderr: invalid-model.stderr.txt
+    exit_code: 1
+    wall_s: 0.52
+    requests: 1
+    notes: >-
+      failserver `--mode 404`. One request, terminal, 0.5 s. The failure NAMES
+      the model — `stub-model`, the id half of the `stub/stub-model` spec, since
+      pi resolves the provider segment against models.json before dispatch — and
+      an unnamed model is what makes a stray `:effort` suffix unfindable — and
+      since C4 the name reaches the operator's error, not just the classifier.
+    expect:
+      success: false
+      error_contains:
+        - "Empty output"
+        - "404: The model `stub-model` does not exist"
+        - "(model_not_found)"
+      raw_contains:
+        - "The model `stub-model` does not exist or you do not have access to it."
+        - '"code":"model_not_found"'
+      classify_failure: "invalid_model"
+
+  context-overflow:
+    stdout: context-overflow.stdout.txt
+    stderr: context-overflow.stderr.txt
+    exit_code: 0
+    wall_s: 0.54
+    requests: 1
+    notes: >-
+      failserver `--mode ctx` (400, `context_length_exceeded`, the verbatim
+      OpenAI wording). pi SWALLOWS it whole: not one byte of the provider's
+      message reaches either channel, the exit code is **0**, and the run is
+      over in 0.5 s. The terminal classification §7.2 requires is therefore
+      unreachable — `classify_failure` returns None on an empty haystack — so the
+      executor treats the one condition no retry can fix as transport-shaped and
+      spends its whole bounded-retry budget on it. This is the same capture shape
+      as `empty` and `exit-zero-failure`; each row records a different thing the
+      absence of bytes costs.
+      **C4's rung 5, and the one that costs most**: this is C11's recorded
+      non-fix, so `describe_failure` returns `None` and the error stays `Empty
+      output`. C4 could only have "improved" this row by inventing a reason from
+      the exit code, which is precisely what the rung forbids. Recorded as the
+      measurement rather than as a gap.
+    expect:
+      success: false
+      error_contains: ["Empty output"]
+      classify_failure: null
+
+  # ----- beyond §6.2's twelve, graded the same way -------------------------- #
+
+  zero-body:
+    stdout: zero-body.stdout.txt
+    stderr: zero-body.stderr.txt
+    exit_code: 1
+    wall_s: 14.56
+    requests: 4
+    notes: >-
+      failserver `--mode empty`: the request is accepted and the socket closed
+      after **zero** body bytes. pi separates this from a truncated body — the
+      only failure mode where it does — and says `Connection error.`, which is
+      the one failure text in this set that lands on a shared marker table
+      (base.CONNECTION_ERROR_MARKERS) rather than on the vendor's own JSON. Four
+      requests over 14.6 s. C4 tier 2's non-JSON branch: two words, verbatim.
+    expect:
+      success: false
+      error_contains: ["Empty output", "Connection error."]
+      raw_contains: ["Connection error."]
+      classify_failure: "connection_error"
+
+  server-error:
+    stdout: server-error.stdout.txt
+    stderr: server-error.stderr.txt
+    exit_code: 1
+    wall_s: 14.64
+    requests: 4
+    notes: >-
+      failserver `--mode 500`, fail-forever — §6.1.1's experiment 2, and pi's
+      internal-retry envelope in one capture: **4 requests over 14.6 s**, then
+      exit 1. It classifies as NOTHING: OpenAI's 500 sentence ("The server had an
+      error while processing your request") matches no member of
+      base.SERVER_ERROR_MARKERS, whose entries all want the literal "server
+      error", "internal server error" or "api error", and the bare `500: ` prefix
+      pi adds is not a status-code pattern either. That cell is unchanged by C4
+      — still `null` — while the operator now gets the sentence: C4 makes the
+      diagnosis visible without touching a pattern table. Note the vendor JSON's
+      `code` is `null` here, so tier 2 reports the status and message alone.
+    expect:
+      success: false
+      error_contains:
+        - "Empty output"
+        - "500: The server had an error while processing your request"
+      raw_contains:
+        - "500: "
+        - "The server had an error while processing your request. Sorry about that!"
+      classify_failure: null

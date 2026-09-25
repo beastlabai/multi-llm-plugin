@@ -131,9 +131,15 @@ def _render_repair() -> List[str]:
 # Probes. Each returns a small dict; none calls a model.
 # ---------------------------------------------------------------------------
 
-def _run(argv: Sequence[str], *, timeout: float, cwd: Optional[str] = None) -> Optional[Tuple[int, str, str]]:
+def _run(
+    argv: Sequence[str],
+    *,
+    timeout: float,
+    cwd: Optional[str] = None,
+    env: Optional[Dict[str, str]] = None,
+) -> Optional[Tuple[int, str, str]]:
     """``(returncode, stdout, stderr)`` or ``None`` when the probe could not run
-    or did not finish inside ``timeout``."""
+    or did not finish inside ``timeout``. ``env`` of ``None`` inherits."""
     if timeout <= 0:
         return None
     from .llm_client import _resolve_executable
@@ -149,6 +155,7 @@ def _run(argv: Sequence[str], *, timeout: float, cwd: Optional[str] = None) -> O
             timeout=max(timeout, 0.01),
             stdin=subprocess.DEVNULL,
             cwd=cwd,
+            **({"env": env} if env is not None else {}),
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -200,13 +207,77 @@ def _probe_version(provider: Any, name: str, timeout: float) -> Dict[str, Any]:
     return row
 
 
-def _probe_auth(provider: Any, timeout: float) -> Dict[str, Any]:
+#: The credential leg's scope, said once (plan §8 T8.13): the stored-credential
+#: verdict is taken under the env a validator (`agent-readonly`) dispatch would
+#: get, so it is discovery of what such a child can see — never a readiness
+#: claim for a model/profile, which is `install-host --check`'s job.
+AUTH_SCOPE_NOTE = "as a validator dispatch would see it"
+
+
+def _auth_probe_env(
+    provider: Any, cwd: Optional[str], anchor: Optional[str]
+) -> Tuple[Optional[Dict[str, str]], bool]:
+    """``(env, built)``: the executor's shared dispatch env, for an empty model
+    under ``agent-readonly`` (T8.13). ``env`` is ``None`` (inherit) both when
+    the builder leaves the env unchanged and when it cannot be built; ``built``
+    is False only in the latter case, where :data:`AUTH_SCOPE_NOTE` would be
+    untrue."""
+    try:
+        from .providers.base import PROFILE_AGENT_READONLY
+        from .subagent_executor import dispatch_child_env
+
+        return dispatch_child_env(
+            provider, "", PROFILE_AGENT_READONLY, anchor=anchor, cwd=cwd
+        ), True
+    except Exception:  # noqa: BLE001 - a diagnostic must not crash the report
+        return None, False
+
+
+def _config_only_detail(provider: Any, ids: Sequence[str], anchor: Optional[str]) -> str:
+    """The ``config-only`` row's detail (§8.2 "What `doctor` reports").
+
+    Discovery, not readiness: ids only (never a key), split by whether a
+    hermetic validator can reach them, and never the credential leg's
+    :data:`AUTH_SCOPE_NOTE` wording.
+    """
+    try:
+        rebuilt = set(provider.hermetic_config_providers(anchor))
+    except Exception:  # noqa: BLE001
+        rebuilt = set()
+    reachable = [i for i in ids if i in rebuilt]
+    user_only = [i for i in ids if i not in rebuilt]
+    parts = [
+        f"no stored credential; opencode.json declares {', '.join(ids)}; only "
+        f"runners on those providers can dispatch (config-only means a provider "
+        f"is declared, not that every runner is cleared)"
+    ]
+    if reachable:
+        parts.append(f"reachable by hermetic validators: {', '.join(reachable)}")
+    if user_only:
+        parts.append(
+            f"user config only: {', '.join(user_only)} (`agent-write` and "
+            f"`hermetic: off` only; hermetic validators refuse these, add them to "
+            f"`config_providers`)"
+        )
+    parts.append("`install-host --check` answers for a concrete runner")
+    return "; ".join(parts)
+
+
+def _probe_auth(
+    provider: Any,
+    timeout: float,
+    cwd: Optional[str] = None,
+    anchor: Optional[str] = None,
+) -> Dict[str, Any]:
     argv = list(getattr(provider, "auth_check", ()) or ())
     row: Dict[str, Any] = {"state": "unprobed", "detail": "", "ok": True}
     if not argv:
         row["detail"] = "no auth_check declared"
         return row
-    result = _run(argv, timeout=timeout)
+    # The env build is charged to this probe's share of the budget.
+    started = time.monotonic()
+    env, env_built = _auth_probe_env(provider, cwd, anchor)
+    result = _run(argv, timeout=timeout, cwd=cwd, env=env)
     if result is None:
         row["detail"] = "slow: the probe did not answer within the budget"
         return row
@@ -217,9 +288,35 @@ def _probe_auth(provider: Any, timeout: float) -> Dict[str, Any]:
         verdict = None
     if verdict is True:
         row["state"] = "ok"
+        # A fallback to the inherited env is not what a validator would see.
+        row["detail"] = AUTH_SCOPE_NOTE if env_built else ""
     elif verdict is False:
         login = getattr(provider, "login_cmd", "") or f"{argv[0]} login"
-        row.update(state="not-logged-in", ok=False, detail=f"run `{login}`")
+        # T8.6: a config that declares a provider is not a login, and not a
+        # dispatch clearance either — `doctor` has no model. The reader gets
+        # what is left of this probe's share of the budget, and an exhausted
+        # or failed read keeps `not-logged-in`.
+        remaining = timeout - (time.monotonic() - started)
+        declared: Optional[Sequence[str]] = None
+        reader = getattr(provider, "config_declared_providers", None)
+        if callable(reader) and remaining > 0:
+            try:
+                declared = reader(cwd=cwd, timeout=remaining)
+            except Exception:  # noqa: BLE001
+                declared = None
+        if declared:
+            row.update(
+                state="config-only", ok=False,
+                detail=_config_only_detail(provider, list(declared), anchor),
+            )
+        else:
+            row.update(
+                state="not-logged-in", ok=False,
+                detail=(
+                    f"run `{login}` (stored credentials {AUTH_SCOPE_NOTE})"
+                    if env_built else f"run `{login}`"
+                ),
+            )
     else:
         row["state"] = "unknown"
         row["detail"] = f"`{' '.join(argv)}` exited {code} without a recognised verdict"
@@ -694,7 +791,7 @@ def collect(
         if kind == "version":
             result = _probe_version(provider, name, remaining)
         elif kind == "auth":
-            result = _probe_auth(provider, remaining)
+            result = _probe_auth(provider, remaining, cwd, anchor)
         else:
             result = _probe_sandbox(provider, remaining, cwd)
         return name, kind, result
@@ -722,7 +819,10 @@ def collect(
         if not row["version"]["ok"]:
             failures.append(f"{row['provider']}: version — {row['version']['detail']}")
         if not row["auth"]["ok"]:
-            failures.append(f"{row['provider']}: auth — not logged in ({row['auth']['detail']})")
+            if row["auth"]["state"] == "config-only":
+                failures.append(f"{row['provider']}: auth — config-only ({row['auth']['detail']})")
+            else:
+                failures.append(f"{row['provider']}: auth — not logged in ({row['auth']['detail']})")
         sandbox = row["sandbox"]
         _flag_removed_mismatch(sandbox, row["version"].get("version"))
         if sandbox["state"] == "unavailable":
@@ -775,7 +875,7 @@ def render_text(report: Dict[str, Any], *, warn_only: bool) -> List[str]:
         a = auth["state"]
         if a in ("unprobed", "unknown") and auth["detail"]:
             a += f" ({auth['detail']})"
-        elif a == "not-logged-in":
+        elif a in ("not-logged-in", "config-only"):
             a += f" ({auth['detail']})"
         sandbox = row["sandbox"]
         s = sandbox["state"]

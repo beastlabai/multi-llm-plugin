@@ -62,6 +62,20 @@ a diagnosis that changes with the terminal's colour support is not one.
 ``plans/reaggregate-identity-and-salvage-gating.md`` residual item 4 is the
 entry that asked for these rows.
 
+**pi moved onto ``--mode json`` on 2026-09-25** (plans/opencode-validator-false-
+rate-limit-and-denied-turn.md §7, T7.6), and its half of this module was
+re-derived from the recaptured 0.87.1 set rather than edited cell by cell. The
+vendor's words now arrive on **stdout**, as the terminal assistant message's
+``errorMessage`` — the same ``NNN: {json}`` string 0.80.6 wrote to stderr — with
+stderr empty and exit 0, so pi's precedence is "stream verdict, else stderr"
+(``STDOUT_ELSE_STDERR``, omp's). ``TIER_VENDOR_JSON``/``TIER_VERBATIM`` stay and
+now apply to ``errorMessage``; ``TIER_STREAM`` names a structural verdict (a
+``length`` cut); stderr answers only for a header-only pre-flight. The 0.80.6
+text-mode set is kept in ``tests/fixtures/pi/text-mode-0.80.6/``, read here by
+explicit path twice: :data:`PI_CLASSIFY_0_80_6` is the floor no recaptured row
+may fall below (:class:`TestNoPiClassifyCellWorsened`), and its ``auth-error``
+stderr is still the vendor-JSON sample omp's table borrows.
+
 C4's and C3's tests live here rather than in ``test_providers.py`` on purpose:
 they are one subject read end to end, and the hand-written per-adapter classes
 in that module grade parsing. The channel each override declares is pinned
@@ -122,27 +136,49 @@ def _manifest(provider):
     )
 
 
+#: pi's historical 0.80.6 text-mode set, moved aside by T7.2. Never globbed: it
+#: is read by explicit path only, as the floor and as omp's borrowed sample.
+PI_TEXT_MODE = FIXTURES / "pi" / "text-mode-0.80.6"
+
+
+def _pi_text_mode_streams(row):
+    """``(stdout, stderr)`` of one 0.80.6 text-mode capture, by explicit path."""
+    out = []
+    for key in ("stdout", "stderr"):
+        path = PI_TEXT_MODE / f"{row}.{key}.txt"
+        out.append(path.read_text(encoding="utf-8") if path.is_file() else "")
+    return out[0], out[1]
+
+
 # --------------------------------------------------------------------------- #
 # The tier tables. Every committed capture is named, with the rung that must
 # answer it — so the precedence is GRADED rather than the text alone, and a new
 # capture cannot be added without deciding which rung owns it.
 # --------------------------------------------------------------------------- #
 
-#: pi's seven stderr-bearing rows split **4 / 3**: vendor JSON behind an
-#: ``NNN: `` prefix, then a bare sentence that is already the whole diagnosis.
-#: ``None`` is rung 5 — nothing on either channel, or a success.
+#: pi's twelve failure rows under ``--mode json`` split **6 / 4 / 2**: vendor
+#: JSON behind an ``NNN: `` prefix in the terminal ``errorMessage``, a bare
+#: sentence (three ``errorMessage``s and the pre-flight's stderr), and two
+#: structural ``length`` verdicts. ``None`` is a success, or ``empty`` — a
+#: complete stream whose model answered nothing, which names no failure.
 PI_TIERS = {
     "auth-error": PiProvider.TIER_VENDOR_JSON,
     "invalid-model": PiProvider.TIER_VENDOR_JSON,
     "rate-limit": PiProvider.TIER_VENDOR_JSON,
     "server-error": PiProvider.TIER_VENDOR_JSON,
+    "exit-zero-failure": PiProvider.TIER_VENDOR_JSON,
+    "context-overflow": PiProvider.TIER_VENDOR_JSON,
     "error-envelope": PiProvider.TIER_VERBATIM,
     "truncated": PiProvider.TIER_VERBATIM,
     "zero-body": PiProvider.TIER_VERBATIM,
-    "context-overflow": None,
+    "preflight-no-key": PiProvider.TIER_VERBATIM,
+    "length": PiProvider.TIER_STREAM,
+    "length-recovery": PiProvider.TIER_STREAM,
     "empty": None,
-    "exit-zero-failure": None,
     "success": None,
+    "multi-assistant": None,
+    "markers-in-tool-result": None,
+    "context-overflow-compacted": None,
 }
 
 #: gemini's nine failure rows split **4 / 4 / 1**: the last ``ApiError`` blob,
@@ -174,9 +210,15 @@ PI_WORDS = {
     # The vendor JSON's `code` is null on a 500, so the status and message
     # stand alone — the tier reports what is there, never a placeholder.
     "server-error": ("500: The server had an error while processing your request",),
+    "exit-zero-failure": ("500: The server had an error while processing your request",),
+    "context-overflow": ("400: This model's maximum context length is 8192 tokens",
+                         "(context_length_exceeded)"),
     "error-envelope": ("Stream ended without finish_reason",),
     "truncated": ("Stream ended without finish_reason",),
     "zero-body": ("Connection error.",),
+    "preflight-no-key": ("No API key found for stub.",),
+    "length": ("Truncated output (stopReason length",),
+    "length-recovery": ("Truncated output (stopReason length",),
 }
 
 GEMINI_WORDS = {
@@ -191,17 +233,41 @@ GEMINI_WORDS = {
     "exit-zero-failure": ('Tool "write_file" not found in registry',),
 }
 
-#: Rung 5, and the three rows that make it a rule rather than an accident:
-#: ``context-overflow`` is C11's silent 400 and ``empty`` and
-#: ``exit-zero-failure`` are byte-identical to it. All three keep ``Empty
-#: output`` exactly, with ``describe_failure`` returning ``None``.
-PI_SILENT_ROWS = ("context-overflow", "empty", "exit-zero-failure")
+#: Rung 5 under ``--mode json``: the one failure row that names no failure on
+#: either channel. At 0.80.6 there were three byte-identical 0-byte rows
+#: (``context-overflow``, ``empty``, ``exit-zero-failure``); at 0.87.1 only a
+#: model that really answered the empty string is left — the overflow and the
+#: 5xx carry the vendor's words (:class:`TestRungFiveKeepsTodaysString`).
+PI_SILENT_ROWS = ("empty",)
 
-#: The C4 acceptance snapshot: every graded row's ``classify_failure``, as it
-#: stands after C3's gemini row and before nothing else. Written as a literal so
-#: a future edit to either adapter's *prose* that moved a *category* fails here
-#: by name, which is the one thing C4 was not allowed to do.
+#: Every graded json-mode row's ``classify_failure`` (0.87.1), as a literal so a
+#: future edit to the adapter's *prose* that moved a *category* fails here by
+#: name, which is the one thing C4 was not allowed to do.
 PI_CLASSIFY = {
+    "success": None,
+    "multi-assistant": None,
+    "markers-in-tool-result": None,
+    "context-overflow-compacted": None,
+    "truncated": None,
+    "error-envelope": None,
+    "exit-zero-failure": "server_error",
+    "empty": None,
+    "auth-error": "auth_failed",
+    "rate-limit": "rate_limited",
+    "invalid-model": "invalid_model",
+    "context-overflow": "context_length_exceeded",
+    "zero-body": "connection_error",
+    "server-error": "server_error",
+    "preflight-no-key": "auth_failed",
+    "length": None,
+    "length-recovery": None,
+}
+
+#: The 0.80.6 text-mode cells, verbatim from before the move (T7.6's floor):
+#: :class:`TestNoPiClassifyCellWorsened` asserts no recaptured row classifies
+#: worse. ``None`` is the least specific verdict, so a row may only stay put or
+#: move off ``None``.
+PI_CLASSIFY_0_80_6 = {
     "success": None,
     "truncated": None,
     "error-envelope": None,
@@ -424,11 +490,12 @@ def _omp_stderr(row):
     """One omp capture's stderr; its stdout is 0 bytes on every pre-flight row.
 
     ``vendor-json`` is the exception and is not omp's own output at all: it is
-    ``pi``'s committed ``auth-error`` capture, borrowed to state the negative
-    (see :data:`OMP_TIERS`).
+    ``pi``'s 0.80.6 ``auth-error`` stderr (the text-mode set, by explicit path —
+    at 0.87.1 the same line is on stdout), borrowed to state the negative (see
+    :data:`OMP_TIERS`).
     """
     if row == "vendor-json":
-        return _streams("pi", "auth-error")[1]
+        return _pi_text_mode_streams("auth-error")[1]
     return {
         "model-not-found": OMP_MODEL_NOT_FOUND,
         "no-api-key": OMP_NO_API_KEY,
@@ -525,8 +592,9 @@ class TestEveryCaptureLandsOnItsDeclaredTier:
 
     @pytest.mark.parametrize("row", sorted(PI_TIERS))
     def test_pi(self, row):
+        """"Stream verdict, else stderr" (``_diagnose_failure``), graded per row."""
         stdout, stderr = _streams("pi", row)
-        diagnosis = PI._diagnose(stdout, stderr)
+        diagnosis = PI._diagnose_failure(stdout, stderr)
         tier = None if diagnosis is None else diagnosis[0]
 
         assert tier == PI_TIERS[row]
@@ -558,13 +626,20 @@ class TestEveryCaptureLandsOnItsDeclaredTier:
             f"capture must be given the rung that answers it"
         )
 
-    def test_pi_splits_four_three(self):
-        """The plan's prediction, measured: vendor JSON / bare sentence."""
+    def test_pi_splits_six_four_two(self):
+        """Measured at 0.87.1: vendor JSON / bare sentence / structural verdict.
+
+        0.80.6 split 4 / 3 over seven stderr lines; json mode adds the 5xx
+        ``exit-zero-failure`` twin and the no-longer-silent 400 to the first
+        tier, the pre-flight's stderr to the second, and the two ``length``
+        rows as a third.
+        """
         tiers = [tier for tier in PI_TIERS.values() if tier is not None]
 
-        assert tiers.count(PiProvider.TIER_VENDOR_JSON) == 4
-        assert tiers.count(PiProvider.TIER_VERBATIM) == 3
-        assert len(tiers) == 7, "pi has seven stderr-bearing captures"
+        assert tiers.count(PiProvider.TIER_VENDOR_JSON) == 6
+        assert tiers.count(PiProvider.TIER_VERBATIM) == 4
+        assert tiers.count(PiProvider.TIER_STREAM) == 2
+        assert len(tiers) == 12, "pi has twelve json-mode failure captures that name a reason"
 
     def test_gemini_splits_four_four_one(self):
         """The plan's prediction, measured: blob / post-path prose / first line."""
@@ -625,12 +700,14 @@ class TestTheMessageCarriesTheVendorsWords:
             assert needle in reason
 
     def test_every_pi_failure_row_gets_a_distinct_message(self):
-        """The point of C4 for pi: nine rows that used to be one string.
+        """The point of C4 for pi: rows that used to be one string.
 
-        The two rows that stay identical are ``truncated`` and
-        ``error-envelope``, whose stderr really is byte-identical — pi never
-        writes the 200-with-error-object's text anywhere, which is that row's
-        own recorded defect and not something a parser can fix.
+        Three pairs stay identical, each for a measured reason and none a
+        parser could fix: ``truncated``/``error-envelope`` (pi never writes the
+        200-with-error-object's text anywhere), ``server-error``/
+        ``exit-zero-failure`` (the same failserver ``500``, two containers) and
+        ``length``/``length-recovery`` (a recoverable length with nothing to
+        compact ends exactly like a full one).
         """
         messages = {
             row: PI.describe_failure(*_streams("pi", row))
@@ -638,8 +715,10 @@ class TestTheMessageCarriesTheVendorsWords:
             if PI_TIERS[row] is not None
         }
 
-        assert len(set(messages.values())) == 6
+        assert len(set(messages.values())) == 9
         assert messages["truncated"] == messages["error-envelope"]
+        assert messages["server-error"] == messages["exit-zero-failure"]
+        assert messages["length"] == messages["length-recovery"]
 
     def test_every_gemini_failure_row_gets_a_distinct_message(self):
         """Same for gemini, with the same one honest collision."""
@@ -742,7 +821,7 @@ class TestRungOneChannel:
 
     @pytest.mark.parametrize(
         "provider,adapter",
-        [("pi", PI), ("gemini", GEMINI)],
+        [("gemini", GEMINI)],
     )
     def test_stdout_never_becomes_the_reason(self, provider, adapter):
         """``describe_failure`` reads stderr and nothing else, on every capture."""
@@ -752,6 +831,26 @@ class TestRungOneChannel:
             assert adapter.describe_failure(stdout, stderr) == \
                 adapter.describe_failure("", stderr)
             assert adapter.describe_failure(stdout, "") is None
+
+    def test_pi_reads_the_stream_first_and_stderr_only_when_it_is_silent(self):
+        """pi under ``--mode json`` is ``STDOUT_ELSE_STDERR``, graded per capture.
+
+        Where the stream answers, stderr may not change the text; where it is
+        silent (the header-only pre-flight, a clean ``stop``), stderr answers
+        alone. The one capture with bytes on stderr is ``preflight-no-key``.
+        """
+        for row in _capture_rows("pi"):
+            stdout, stderr = _streams("pi", row)
+            from_stream = PI.describe_failure(stdout, "")
+            if from_stream is not None:
+                assert PI.describe_failure(stdout, stderr) == from_stream, row
+            else:
+                assert PI.describe_failure(stdout, stderr) == \
+                    PI.describe_failure("", stderr), row
+
+        stdout, stderr = _streams("pi", "preflight-no-key")
+        assert PI.describe_failure(stdout, "") is None
+        assert PI.describe_failure(stdout, stderr) == "No API key found for stub."
 
     @pytest.mark.parametrize(
         "provider,adapter",
@@ -781,23 +880,30 @@ class TestRungOneChannel:
 class TestRungFiveKeepsTodaysString:
 
     @pytest.mark.parametrize("row", PI_SILENT_ROWS)
-    def test_pis_three_silent_rows_are_unembellished(self, row):
+    def test_pis_silent_row_is_unembellished(self, row):
+        """A whole stream whose model answered nothing: no reason is invented."""
         stdout, stderr = _streams("pi", row)
-        assert (stdout, stderr) == ("", ""), "this row is 0 bytes on both channels"
+        assert stderr == "", "this row is 0 bytes on stderr"
+        assert '"stopReason":"stop"' in stdout and '"errorMessage"' not in stdout
 
         assert PI.describe_failure(stdout, stderr) is None
         assert PI.parse_output(stdout, stderr)["error"] == "Empty output"
 
-    def test_the_three_are_byte_identical_to_each_other(self):
-        """``context-overflow`` is C11's silent 400; the other two are its twins.
-
-        The whole reason C4 cannot improve them: at pi 0.80.6 a swallowed
-        overflow, a legitimate empty answer and an exit-0 failure are the same
-        event, and inventing a reason from the exit code is what rung 5 forbids.
+    def test_the_0806_three_are_no_longer_one_event(self):
+        """At 0.80.6 ``context-overflow``, ``empty`` and ``exit-zero-failure``
+        were byte-identical (0 bytes, exit 0) — a swallowed overflow, a real
+        empty answer and an exit-0 failure were the same event. The 0.80.6
+        captures still are; the 0.87.1 ones differ, and so do their verdicts.
         """
-        captures = {row: _streams("pi", row) for row in PI_SILENT_ROWS}
+        rows = ("context-overflow", "empty", "exit-zero-failure")
+        old = {row: _pi_text_mode_streams(row) for row in rows}
+        assert set(old.values()) == {("", "")}
 
-        assert len(set(captures.values())) == 1
+        new = {row: _streams("pi", row) for row in rows}
+        assert len(set(new.values())) == 3
+        assert [PI.classify_failure(*new[row]) for row in rows] == [
+            "context_length_exceeded", None, "server_error",
+        ]
 
     @pytest.mark.parametrize("row", PI_SILENT_ROWS)
     def test_the_manifest_records_that_as_the_measurement(self, row):
@@ -839,9 +945,29 @@ class TestParseOutputNamesTheStderr:
                 f"{provider}/{row}: parse_output dropped the stderr diagnosis"
             )
 
+    def test_pis_text_mode_leg_keeps_todays_string_as_the_prefix(self):
+        """The 0.80.6 rule, on the back-compat leg that still serves it.
+
+        A pi that ignores ``--mode`` writes text-mode bytes; ``parse_output``
+        reads them as 0.80.6's parser did — the stderr is *added*, never
+        *substituted*. Graded over the moved-aside 0.80.6 captures, by path.
+        """
+        rows = sorted({p.name.split(".")[0] for p in PI_TEXT_MODE.glob("*.txt")})
+        assert len(rows) == 11
+        for row in rows:
+            stdout, stderr = _pi_text_mode_streams(row)
+            result = PI.parse_output(stdout, stderr)
+            if result.get("success"):
+                continue
+            bare = PI._parse_stdout(stdout)
+
+            assert result["error"].startswith(str(bare["error"])), row
+            assert result["raw"] == bare["raw"]
+            assert result["data"] == bare["data"]
+
     @pytest.mark.parametrize(
         "provider,adapter",
-        [("pi", PI), ("gemini", GEMINI)],
+        [("gemini", GEMINI)],
     )
     def test_todays_string_is_kept_as_the_prefix(self, provider, adapter):
         """The stderr is *added*, never *substituted*.
@@ -979,6 +1105,50 @@ class TestNoClassifyCellMoved:
 
         assert 'not found in registry' in GEMINI.describe_failure(stdout, stderr)
         assert GEMINI.classify_failure(stdout, stderr, 0) is None
+
+
+class TestNoPiClassifyCellWorsened:
+    """T7.6: after the json-mode recapture no row classifies worse than 0.80.6.
+
+    "Grade every capture before and after" (§13.1) applied to pi. Specificity
+    is one-directional: a verdict may stay what it was or move off ``None``;
+    it may never change from one class to another or fall back to ``None``.
+    """
+
+    def test_the_floor_is_the_moved_aside_0806_manifest(self):
+        """The literal is the text-mode manifest's own cells, not a memory."""
+        rows = yaml.safe_load(
+            (PI_TEXT_MODE / "manifest.yaml").read_text(encoding="utf-8")
+        )["rows"]
+        declared = {
+            name: row["expect"].get("classify_failure")
+            for name, row in rows.items()
+            if "not_applicable" not in row
+        }
+        assert declared == PI_CLASSIFY_0_80_6
+
+    @pytest.mark.parametrize("row", sorted(PI_CLASSIFY_0_80_6))
+    def test_no_recaptured_row_is_less_specific(self, row):
+        before = PI_CLASSIFY_0_80_6[row]
+        stdout, stderr = _streams("pi", row)
+        exit_code = _manifest("pi")["rows"][row]["exit_code"]
+        after = PI.classify_failure(stdout, stderr, exit_code)
+
+        if before is not None:
+            assert after == before, f"{row}: {before} -> {after}"
+
+    def test_context_overflow_is_no_longer_none(self):
+        """The row that was silent at 0.80.6 (C11's recorded non-fix)."""
+        stdout, stderr = _streams("pi", "context-overflow")
+
+        assert PI.classify_failure(stdout, stderr, 0) == "context_length_exceeded"
+
+    def test_exactly_the_expected_cells_improved(self):
+        improved = {
+            row for row, before in PI_CLASSIFY_0_80_6.items()
+            if before is None and PI_CLASSIFY[row] is not None
+        }
+        assert improved == {"context-overflow", "server-error", "exit-zero-failure"}
 
 
 # --------------------------------------------------------------------------- #

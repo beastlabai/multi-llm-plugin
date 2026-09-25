@@ -217,6 +217,10 @@ trade-off), never for a claim you could have checked but did not look at. If
 you cannot read the repository, judge from the records and the context above
 alone.
 
+Do not probe system paths, services or databases (anything outside the
+repository, a database client, a service status): the repository and the
+context above are the evidence.
+
 A claim that the plan or the tasks omit something — "the plan does not specify
 X", "the tasks never say to reset X" — is judged against the plan or tasks text
 above, not against the working tree: the plan is what an implementer follows,
@@ -264,6 +268,10 @@ line number, current behaviour — and you can read the repository you are
 running in, open it and check the claim before answering. Reserve
 "needs-human-decision" for genuine judgment calls, never for a claim you could
 have checked but did not look at.
+
+Do not probe system paths, services or databases (anything outside the
+repository, a database client, a service status): the repository and the
+documents named above are the evidence.
 
 A claim that the plan or the tasks omit something — "the plan does not specify
 X", "the tasks never say to reset X" — and any claim that something is never

@@ -1782,7 +1782,8 @@ class TestAStaleValidationFileYieldsToTheBatches:
         first = _validated_round(plan, out_dir, phase_dir, status="valid")
         assert first["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
         assert _validation_summary(phase_dir) == (
-            "**Validation:** 3 valid, 0 invalid, 0 needs human review"
+            "**Validation:** 3 valid, 0 invalid, 0 needs human review, "
+            "0 validation failed"
         )
 
         stale_bytes = _regrouped_after_a_second_model(plan, out_dir, phase_dir, first)
@@ -1811,7 +1812,8 @@ class TestAStaleValidationFileYieldsToTheBatches:
         assert merged["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
         assert [g["status"] for g in merged["groups"]] == ["invalid"] * 5
         assert _validation_summary(phase_dir) == (
-            "**Validation:** 0 valid, 5 invalid, 0 needs human review"
+            "**Validation:** 0 valid, 5 invalid, 0 needs human review, "
+            "0 validation failed"
         )
 
     def test_a_hashed_file_applied_to_a_regrouped_set_yields_exactly_the_unmatched_default(
@@ -1989,7 +1991,8 @@ class TestALegacyFileIsHonouredOnlyIfNoBatchIsNewer:
         data = json.loads((phase_dir / "validation.json").read_text(encoding="utf-8"))
         assert "grouped_sha256" not in data["metadata"]
         assert _validation_summary(phase_dir) == (
-            "**Validation:** 3 valid, 0 invalid, 0 needs human review"
+            "**Validation:** 3 valid, 0 invalid, 0 needs human review, "
+            "0 validation failed"
         )
 
     def test_not_honoured_when_a_batch_is_newer(self, tmp_path, capsys):
@@ -2016,7 +2019,8 @@ class TestALegacyFileIsHonouredOnlyIfNoBatchIsNewer:
         assert data["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
         assert [g["status"] for g in data["groups"]] == ["invalid"] * 3
         assert _validation_summary(phase_dir) == (
-            "**Validation:** 0 valid, 3 invalid, 0 needs human review"
+            "**Validation:** 0 valid, 3 invalid, 0 needs human review, "
+            "0 validation failed"
         )
 
 
@@ -2227,7 +2231,8 @@ class TestAResultFileThatLandedAfterGroupingIsFoldedIn:
         assert "**Total Issues:** 9" in report
         assert "**Groups:** 7 " in report
         assert (
-            "**Validation:** 7 valid, 0 invalid, 0 needs human review (of 7 groups)"
+            "**Validation:** 7 valid, 0 invalid, 0 needs human review, "
+            "0 validation failed (of 7 groups)"
         ) in report
         data = json.loads((phase_dir / "validation.json").read_text(encoding="utf-8"))
         assert data["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
@@ -2293,7 +2298,8 @@ class TestAResultFileThatLandedAfterGroupingIsFoldedIn:
         assert merged["metadata"]["grouped_sha256"] == _grouped_hash(phase_dir)
         assert [g["status"] for g in merged["groups"]] == ["invalid"] * 5
         assert _validation_summary(phase_dir) == (
-            "**Validation:** 0 valid, 5 invalid, 0 needs human review"
+            "**Validation:** 0 valid, 5 invalid, 0 needs human review, "
+            "0 validation failed"
         )
 
 

@@ -1,0 +1,33 @@
+{
+  "pi": [
+    "pi",
+    "--no-session",
+    "-p",
+    "--mode",
+    "json",
+    "--model",
+    "stub/stub-model",
+    "PROMPT_PLACEHOLDER"
+  ],
+  "omp": [
+    "omp",
+    "--no-session",
+    "-p",
+    "--mode",
+    "json",
+    "--config",
+    "/work/out/overlay.yml",
+    "--approval-mode",
+    "yolo",
+    "--tools",
+    "read,grep,glob,bash,edit,write",
+    "--max-time",
+    "595",
+    "--cwd",
+    "/work/sample-project",
+    "--model",
+    "stub/stub-model",
+    "--",
+    "PROMPT_PLACEHOLDER"
+  ]
+}

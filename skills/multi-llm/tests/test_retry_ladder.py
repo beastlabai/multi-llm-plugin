@@ -266,6 +266,13 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
             ("utils.providers.muse", "MuseProvider", 40),
             ("utils.providers.gemini", "GeminiProvider", 10),
             ("utils.providers.goose", "GooseProvider", 8),
+            # T7.14: pi 0.87.1, 4 requests of 429 over 14.4 s
+            # (tests/fixtures/pi/'s ``rate-limit`` row, three auto_retry_start
+            # events). omp declared its envelope before this table grew it a
+            # row; six attempts against a 429 (tests/fixtures/omp/'s
+            # ``rate-limit-responses``).
+            ("utils.providers.pi", "PiProvider", 4),
+            ("utils.providers.omp", "OmpProvider", 6),
         ],
     )
     def test_the_real_declared_envelopes_get_no_second_dispatch(

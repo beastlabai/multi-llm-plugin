@@ -73,6 +73,7 @@ from .cli_common import (
     record_consolidation_recommended,
     record_mode_phase,
     record_validation_context,
+    record_validation_counts,
     record_next,
     record_notice,
     record_progress,
@@ -2387,6 +2388,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     if validation_context:
         record_validation_context(validation_context)
+    # §6 T6.1: the worker's verdict counts, re-recorded for the same reason as
+    # `consolidation_recommended` above — a detached caller never saw the
+    # worker's own result line. Recorded only when the caller pinned exactly
+    # one run — the condition `record_mode_phase` uses above: an unselected
+    # `--view run` lists every phase alphabetically while `mode`/`phase` stay
+    # `status`/null, so the first view's counts would read as whichever run the
+    # host was watching.
+    counts = (
+        views[0].get("validation_counts")
+        if len(views) == 1 and (args.phase or args.question or args.run_id)
+        else None
+    )
+    if counts:
+        record_validation_counts(counts)
     if exit_code == EXIT_NOTHING_TO_DO and views:
         # `views[0]` is `discover_phase_dirs`' alphabetical order, not "the run
         # that made the exit code 2" — with several phases listed, a finished

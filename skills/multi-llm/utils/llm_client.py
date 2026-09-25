@@ -282,6 +282,7 @@ def provider_dispatch_context(
     profile: str,
     *,
     anchor: Optional[str] = None,
+    runner_version: Optional[str] = None,
 ):
     """Enter an adapter's run-scoped dispatch context, if it declares one.
 
@@ -293,12 +294,19 @@ def provider_dispatch_context(
     method because exactly one adapter needs it — opencode, whose config layering
     is the thing being contained. Every other adapter yields an empty context and
     renders byte-identical argv and env.
+
+    ``runner_version`` is the CLI version a caller's preflight already read
+    (the executor's ``_VERSION_CACHE``), handed through so the adapter can gate
+    a version-dependent config key without spawning ``--version`` per dispatch
+    (opencode's ``continue_loop_on_deny``, plan T4.2). It is forwarded only when
+    the caller has one; ``None`` means "no read on this path".
     """
     enter = getattr(provider, "hermetic_dispatch", None)
     if not callable(enter):
         yield DispatchContext()
         return
-    with enter(profile, model, anchor=anchor) as refusal:
+    extra = {"runner_version": runner_version} if runner_version is not None else {}
+    with enter(profile, model, anchor=anchor, **extra) as refusal:
         yield DispatchContext(refusal)
 
 

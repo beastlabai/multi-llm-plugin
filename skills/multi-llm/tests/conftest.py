@@ -227,6 +227,35 @@ def _pin_opencode_model_catalog(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _pin_opencode_debug_config(request, monkeypatch):
+    """Keep the default suite from spawning `opencode debug config` (plan §8).
+
+    The reader behind `_user_defines_provider` (T8.5), the auth leg's config
+    source (T8.3) and doctor's `config-only` row (T8.6) spawns the real binary
+    and would read the developer's own opencode config. Pinned to a failed read
+    (``None``, i.e. "unknown": every caller keeps its pre-existing verdict, and
+    `_user_defines_provider` falls back to its file read) for every test that
+    does not opt out with ``@pytest.mark.debug_config``. The per-process memo
+    is cleared around every test so one read never leaks into the next.
+    """
+    try:
+        from utils.providers import opencode as oc
+    except Exception:
+        yield
+        return
+    memo = getattr(oc, "_USER_CONFIG_MEMO", None)
+    if memo is not None:
+        memo.clear()
+    if "debug_config" not in request.keywords and hasattr(oc, "_spawn_debug_config"):
+        monkeypatch.setattr(
+            oc, "_spawn_debug_config", lambda argv, env, cwd, timeout: None
+        )
+    yield
+    if memo is not None:
+        memo.clear()
+
+
+@pytest.fixture(autouse=True)
 def _pin_real_sandbox_probes(request, monkeypatch):
     """Keep the default suite from probing a developer's real provider CLI (D6).
 

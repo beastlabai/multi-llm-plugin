@@ -1,8 +1,13 @@
 # The scripted-call stub's one scenario (plans/codex-native-plugin.md, Phase 1
-# item 1a). It is the ONLY scenario in this directory that makes
-# tests/container/stub_server.py emit a tool call, and the stub emits one only
-# because this file carries a `scripted_tool_call:` block — no other scenario,
-# and no request that does not advertise the tool, ever sees one.
+# item 1a). It makes tests/container/stub_server.py emit a tool call only
+# because this file carries a `scripted_tool_call:` block, and only on the
+# Responses surface (`surfaces: [responses]`) — no scenario without such a
+# block, and no request that does not advertise the tool, ever sees one. It is
+# no longer the only possible carrier: the stub also renders the block on the
+# chat-completions surface for a scenario whose `surfaces:` names `chat`
+# (plans/opencode-validator-false-rate-limit-and-denied-turn.md, T4.10, for
+# opencode's and pi's stub providers). `scripted_opencode_read_deny.yaml` is
+# that chat carrier (T4.9's opencode deny rows).
 #
 # THE SHAPE, two fixed answers keyed on what each Responses request carries:
 #

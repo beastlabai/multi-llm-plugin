@@ -1331,6 +1331,15 @@ class WriteBatchScheduler:
                 # unlabelled.
                 if outcome.status in (STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE):
                     outcome.write_outcome = WRITE_SCHEMA_REJECTED
+                elif outcome.status == STATUS_PARTIAL:
+                    # T4.8: `dispatch_task`'s pre-retry check found bytes moved
+                    # under a turn a denial ended — the same outcome, and the
+                    # same stop, as `_classify`'s partial-application branch.
+                    outcome.write_outcome = WRITE_PARTIAL
+                    outcome.reason = (
+                        f"{outcome.reason} The pre-batch snapshot is kept at "
+                        f"{snapshot.directory}."
+                    )
 
             self._audit_terminal(outcome, snapshot, profile)
         finally:
@@ -1742,6 +1751,36 @@ class WriteBatchScheduler:
             snapshot.save()
         return observed
 
+    def _moved_since_dispatch(
+        self, task_id: str, snapshot: TaskSnapshot
+    ) -> List[str]:
+        """Every path this dispatch moved so far, declared or not. Read-only.
+
+        ``snapshot.changed()`` (the declared set, by byte comparison) plus the
+        paths the pre-run census says moved outside it — the same two sources
+        :meth:`_classify` decides on, but **peeked**, not consumed: the census
+        and its retained bytes stay registered for the terminal
+        :meth:`_undeclared_writes` that still has to adopt them into the
+        rollback snapshot. Siblings' declared paths are ignored exactly as
+        there. Raises nothing it can avoid; a raise is read by the caller as
+        "could not tell", which fails closed.
+        """
+        moved = set(snapshot.changed())
+        with self._sweep_lock:
+            before = self._census_before.get(task_id)
+            ignored = set(self._sweep_ignored.get(task_id, ()))
+            after = self._census() if before is not None else None
+        if before is not None and after is not None:
+            moved.update(
+                relative for relative, stamp in after.items()
+                if relative not in ignored and before.get(relative) != stamp
+            )
+            moved.update(
+                relative for relative in before
+                if relative not in after and relative not in ignored
+            )
+        return sorted(moved)
+
     def _observed_with_undeclared(
         self, snapshot: TaskSnapshot, undeclared: UndeclaredWrites
     ) -> Dict[str, Any]:
@@ -1817,6 +1856,14 @@ class WriteBatchScheduler:
                            exit_code=context["exit_code"],
                            duration=context["duration_seconds"])
 
+        def changed_files(context: Dict[str, Any]) -> List[str]:
+            # T4.8 (plan opencode-validator-false-rate-limit-and-denied-turn
+            # §4.4 step 4): a turn a denial ended has no result, so `_classify`
+            # never runs and `dispatch_task` would retry on top of whatever it
+            # half-applied. Asked before that retry decision, against the same
+            # pre-batch snapshot and pre-run census `_classify` reads.
+            return self._moved_since_dispatch(context["task_id"], snapshot)
+
         return dispatch_task(
             task,
             phase_dir=self.phase_dir,
@@ -1826,6 +1873,7 @@ class WriteBatchScheduler:
             prompt=prompt,
             before_attempt=before_attempt,
             after_result=after_result,
+            changed_files=changed_files,
         )
 
     def _dispatch_native(

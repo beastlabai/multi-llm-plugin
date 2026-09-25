@@ -598,3 +598,102 @@ class TestOmpStreamReading:
 
         provider.parse_output(bumped, stderr)
         assert capsys.readouterr().err == "", "the WARN is once per process"
+
+
+class TestAToolUseDeadlineKeepsToolContentsOutOfTheError:
+    """A ``toolUse``-final stream is a deadline, whatever the tool read.
+
+    Lane A classifies the invocation's ``error`` string with
+    ``classify_streams(error, "")`` (``review_orchestrator_base``), and the
+    non-zero-exit path composes ``describe_failure`` into that string
+    (``llm_client``). A tool result quoting 401/429 must not reach either —
+    the same rule pi's adapter keeps. The stream is the committed
+    ``exit-zero-failure`` row with its tool result swapped for the markers.
+    """
+
+    MARKERS = (
+        "401 Unauthorized: invalid api key. 429 Too Many Requests: rate limit "
+        "exceeded. This model's maximum context length is 8192 tokens."
+    )
+
+    @pytest.fixture
+    def provider(self):
+        return OmpProvider()
+
+    @classmethod
+    def _stream(cls):
+        stdout = (
+            Path(__file__).parent / "fixtures" / "omp" / "exit-zero-failure.stdout.txt"
+        ).read_text(encoding="utf-8")
+        assert "Command aborted" in stdout
+        return stdout.replace("Command aborted", cls.MARKERS)
+
+    def test_the_structural_classifier_says_timeout(self, provider):
+        assert provider.classify_failure(self._stream(), "", 0) == STATUS_TIMEOUT
+
+    def test_lane_a_classifies_the_parse_error_as_timeout(self, provider):
+        result = provider.parse_output(self._stream(), "")
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_TIMEOUT
+        assert "run ended inside a tool call: bash" in result["error"]
+        assert "rate limit" not in result["error"].lower()
+        assert "invalid api key" not in result["error"].lower()
+        assert classify_streams(str(result["error"]), "") == STATUS_TIMEOUT
+        # The contents survive as a diagnostic beside the error.
+        assert result["tool_name"] == "bash"
+        assert "rate limit exceeded" in result["tool_result"]
+
+    def test_lane_a_classifies_the_nonzero_exit_sentence_as_timeout(self, provider):
+        reason = provider.describe_failure(self._stream(), "")
+        composed = f"omp exited with code 1: {reason}"
+
+        assert "rate limit" not in composed.lower()
+        assert classify_streams(composed, "") == STATUS_TIMEOUT
+
+
+class TestAnApprovalDenialKeepsToolContentsOutOfTheError:
+    """The denial's result line is tool-channel text, like the deadline's.
+
+    The committed ``approval-denied`` row with its denial notice suffixed by the
+    markers: the notice still matches the denial marker, and none of the
+    markers may reach the classifier-facing error.
+    """
+
+    MARKERS = TestAToolUseDeadlineKeepsToolContentsOutOfTheError.MARKERS
+
+    @pytest.fixture
+    def provider(self):
+        return OmpProvider()
+
+    @classmethod
+    def _stream(cls):
+        stdout = (
+            Path(__file__).parent / "fixtures" / "omp" / "approval-denied.stdout.txt"
+        ).read_text(encoding="utf-8")
+        notice = "no interactive UI available"
+        assert notice in stdout
+        return stdout.replace(notice, f"{notice}. {cls.MARKERS}")
+
+    def test_the_error_names_the_tool_and_nothing_it_returned(self, provider):
+        result = provider.parse_output(self._stream(), "")
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert "tool write was denied approval" in result["error"]
+        assert "requires approval" not in result["error"]
+        assert "rate limit" not in result["error"].lower()
+        assert "invalid api key" not in result["error"].lower()
+        # The notice survives as a diagnostic beside the error.
+        assert result["tool_name"] == "write"
+        assert "requires approval" in result["tool_result"]
+
+    def test_the_structural_classifier_still_says_permission_denied(self, provider):
+        assert provider.classify_failure(self._stream(), "", 0) == \
+            CATEGORY_PERMISSION_DENIED
+
+    def test_the_nonzero_exit_sentence_carries_no_tool_text(self, provider):
+        reason = provider.describe_failure(self._stream(), "")
+
+        assert "was denied approval" in reason
+        assert "rate limit" not in reason.lower()
