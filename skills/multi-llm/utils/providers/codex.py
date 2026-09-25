@@ -459,6 +459,97 @@ OUTPUT_SCHEMA_FLAG = "--output-schema"
 CODEX_STREAM_MAX_RETRIES = 4
 CODEX_REQUEST_MAX_RETRIES = 5
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Plan T3.1 — the classifier's haystack is what *codex* wrote.
+#
+# A codex subagent's stdout carries the repository back to us: every
+# `command_execution` item holds the `aggregated_output` of the `rg`/`cat`/`sed`
+# it ran over the plan and the tree, and `agent_message`/`reasoning` hold the
+# model's prose about them. A plan that discusses rate limits or model names is
+# then one grep away from a `rate_limited` or `invalid_model` verdict (the
+# opencode run b38de8bb is the measured case of the same class). codex's own
+# verdicts are never inside those items: the 401 and the 429 terminal arrive as
+# top-level `error` / `turn.failed` events and on stderr (see
+# `auth_error_patterns` / `rate_limit_patterns` below).
+#
+# Vocabulary: `tests/fixtures/codex/0.156.1/SCHEMA.md`. This is deliberately
+# separate from `codex_stream_audit`, which audits the *commands* and must keep
+# seeing every item; this reduction only narrows what `classify_failure` reads.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: `item.*` payload types whose text is the model's or the repository's, never
+#: codex's own verdict. Everything else is kept: the nested `error` item (codex's
+#: "Model metadata … not found" notice), `todo_list` (never captured — 0.156.1
+#: does not advertise the plan tool, and an uncaptured shape is kept, the
+#: conservative direction), and any item type a later codex adds.
+_NON_VENDOR_ITEM_TYPES = frozenset({
+    "command_execution",
+    "agent_message",
+    "reasoning",
+    "file_change",
+    "mcp_tool_call",
+    "web_search",
+    "collab_tool_call",
+})
+
+#: How far into a cut final line the end-cut rule looks for the two `type`
+#: keys. A codex item line opens `{"type":"item.completed","item":{"id":"item_N",
+#: "type":"command_execution"` — about 75 bytes; the window leaves room for a
+#: long item id without reaching into `aggregated_output`.
+_CUT_LINE_WINDOW = 128
+
+
+def _is_non_vendor_item(event: Dict[str, Any]) -> bool:
+    """Whether a parsed event is an ``item.*`` event of a dropped type."""
+    if not str(event.get("type", "")).startswith("item."):
+        return False
+    item = event.get("item")
+    return isinstance(item, dict) and item.get("type") in _NON_VENDOR_ITEM_TYPES
+
+
+def _is_cut_non_vendor_item(line: str) -> bool:
+    """A final line cut mid-event that opened as a dropped ``item.*`` event.
+
+    A stream killed mid-write (the slot timeout) ends on a line that cannot be
+    parsed, so this rule is textual by necessity. It is order-tolerant — it does
+    not assume ``type`` is the first key — and needs both the ``item.`` event
+    type and a dropped item type inside the window, so a cut ``error`` or
+    ``turn.failed`` line is never dropped.
+    """
+    head = line[:_CUT_LINE_WINDOW].replace(" ", "")
+    if '"type":"item.' not in head:
+        return False
+    return any(f'"type":"{kind}"' in head for kind in _NON_VENDOR_ITEM_TYPES)
+
+
+def _vendor_stdout(stdout: str) -> str:
+    """``stdout`` with the model's and the repository's items taken out.
+
+    Whole lines are removed and nothing is re-rendered, so the result is always
+    a subsequence of the input. A stream in which no line parses as JSON is not
+    a codex event stream at all (a banner, a bare stderr-style sentence), so it
+    comes back unchanged — the end-cut rule included.
+    """
+    lines = stdout.splitlines(keepends=True)
+    kept: List[str] = []
+    parsed_any = False
+    last = len(lines) - 1
+    for index, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped:
+            try:
+                event = json.loads(stripped)
+            except ValueError:
+                if index == last and parsed_any \
+                        and _is_cut_non_vendor_item(stripped):
+                    continue
+            else:
+                parsed_any = True
+                if isinstance(event, dict) and _is_non_vendor_item(event):
+                    continue
+        kept.append(line)
+    return "".join(kept) if parsed_any else stdout
+
 
 class CodexProvider(LLMProvider):
     """Provider for OpenAI Codex CLI tool.
@@ -969,6 +1060,38 @@ class CodexProvider(LLMProvider):
         if is_landlock_needs_bwrap_panic(stderr):
             return LANDLOCK_NEEDS_BWRAP_REASON
         return super().describe_failure(stdout, stderr)
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """codex's own events, without the model's or the repository's text.
+
+        codex does not echo our prompt, but it echoes the **repository**: a
+        ``command_execution`` item's ``aggregated_output`` is the output of the
+        ``rg``/``cat`` the model ran over the plan, and ``agent_message`` /
+        ``reasoning`` are the model's prose about it. Classified whole, a plan
+        that discusses rate limits reads as ``rate_limited`` and one that
+        discusses model names as the batch-fatal ``invalid_model``.
+
+        Dropped: ``item.*`` events whose item is one of
+        :data:`_NON_VENDOR_ITEM_TYPES`, plus a **final** line cut mid-event
+        that opened as one (:func:`_is_cut_non_vendor_item`). Kept whole:
+        ``error``, ``turn.failed`` (where the 401 and the 429 terminal live),
+        ``thread.started``, ``turn.started``, ``turn.completed``, the nested
+        ``error`` item, unknown event and item types, and non-JSON lines (the
+        bare ``stream error: exceeded retry limit…`` sentence).
+
+        The base contract holds in all three parts: whole lines are removed and
+        nothing is added; a stream with no parseable line, or any exception in
+        the walk, returns the input unchanged; stderr is never reduced.
+
+        Separate from :meth:`audit_readonly_stream` on purpose: that audit
+        judges the *commands* and must keep seeing every item. This hook is
+        applied inside :meth:`classify_failure` only, so the raw stream every
+        human-facing excerpt is cut from is untouched.
+        """
+        try:
+            return _vendor_stdout(stdout), stderr
+        except Exception:
+            return stdout, stderr
 
     def audit_readonly_stream(self, raw_stream: str) -> Optional[Any]:
         """Plan §4.2 option B: classify every tool item on the full stream.

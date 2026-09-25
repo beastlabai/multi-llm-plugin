@@ -11,20 +11,38 @@ import subprocess
 import sys
 import tempfile
 import threading
-from typing import Any, Dict, FrozenSet, Iterator, List, Optional, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    FrozenSet,
+    Iterator,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Tuple,
+)
 
 from ..json_extractor import extract_json_from_text
 from .base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
+    CATEGORY_INVALID_MODEL,
+    CATEGORY_SANDBOX_UNAVAILABLE,
     REASONING_LADDER,
+    STATUS_AUTH_FAILED,
+    STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_RATE_LIMITED,
+    STATUS_RUNNER_ERROR,
     USAGE_FULL,
     LLMProvider,
     ModelVerdict,
     ReasoningLadder,
     StructuredSchema,
     split_reasoning_effort,
+    version_tuple,
 )
 
 # OpenCode ships a built-in `plan` agent whose permission set denies every edit
@@ -146,10 +164,320 @@ HERMETIC_DIR_PREFIX = "multi-llm-opencode-"
 
 #: Config-carrying variables an inherited environment may hold. Stripped while
 #: hermetic — except the one this adapter emits itself, when it emits it.
-CONFIG_ENV_NAMES = ("OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR")
+#:
+#: ``OPENCODE_PERMISSION`` is opencode's own permission override, and it merges
+#: **after** ``OPENCODE_CONFIG_CONTENT`` (read from the 1.18.32 binary: the
+#: config layers are the files, then the content, then the account org config,
+#: the managed file and this variable). It lands in the top-level
+#: ``permission``, which the agent-layer rows the hermetic content carries
+#: already beat (T4.6 rig ``envperm_plan``), but it is a config carrier the
+#: redirect does not reach, so a hermetic slot strips it like the three above
+#: (plans/opencode-validator-false-rate-limit-and-denied-turn.md §4.2 step 1).
+#: A non-hermetic slot leaves it alone: there it is the user's own override.
+CONFIG_ENV_NAMES = (
+    "OPENCODE_CONFIG",
+    "OPENCODE_CONFIG_CONTENT",
+    "OPENCODE_CONFIG_DIR",
+    "OPENCODE_PERMISSION",
+)
 
 #: Closes the workspace-`opencode.json` layer the redirect does not reach.
 PROJECT_CONFIG_ENV = "OPENCODE_DISABLE_PROJECT_CONFIG"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The denied turn (plans/opencode-validator-false-rate-limit-and-denied-turn.md
+# §4.2, T4.1/T4.2).
+#
+# `opencode run` answers every permission `ask` with an auto-reject, and on
+# 1.18.32 a rejected permission ENDS the agent loop: the process exits 0 with no
+# final answer (run b38de8bb, a validator that probed a path outside cwd). A
+# `deny` rule is a different error class that goes back to the model, and the
+# loop continues. The built-in `plan` and `build` agents both carry `ask` for
+# three rows — any path outside cwd (`external_directory`), a `.env` read, and
+# the doom-loop trigger — so every one of them is a turn-ender under `run`.
+#
+# The rows below turn those three `ask`s into `deny`. They add denies only, so
+# they grant no profile anything it lacked. `deny` is chosen over `--auto`,
+# which would *approve* the `.env` reads.
+#
+# **Where they go: `agent.<name>.permission`, never top-level `permission`.**
+# Measured on 1.18.32: a user's top-level `{"external_directory": "ask", "*":
+# "allow"}` beat the same rows delivered top-level, because a merged key keeps
+# its earlier position and opencode's ruleset is `findLast`. The agent layer is
+# evaluated after every top-level layer (T4.6 rig, `q2_ustar_agentlayer_*`: the
+# deny returns to the model and the turn finishes `stop`). A user's own
+# `agent.<name>.permission.external_directory` in a config *file* is beaten too
+# (rig `useragent_*`): only a layer merged after `OPENCODE_CONFIG_CONTENT` can
+# shadow ours.
+#
+# **Known limitations of the hermetic delivery** (T4.6 rig, `SCHEMA.md`,
+# "Layers after OPENCODE_CONFIG_CONTENT"). Three sources merge after the
+# content, and neither `--pure` nor the `XDG_CONFIG_HOME` redirect gates them:
+#   * `OPENCODE_PERMISSION` merges into the top-level `permission`, which our
+#     agent layer beats (rig `envperm_plan`). It is stripped while hermetic
+#     anyway (`CONFIG_ENV_NAMES`).
+#   * The **managed** system config file. One that sets
+#     `agent.<name>.permission.external_directory` itself shadows our deny (rig
+#     `managed_agent_plan`: the read completed). The only env lever is an
+#     opencode test hook, so it is not overridden: it is administrator policy.
+#   * The **active-org account config**, fetched when `<data>/opencode.db` holds
+#     a logged-in org account. The hermetic env passes `XDG_DATA_HOME` through,
+#     so it loads in a hermetic slot, and an org config that sets the same agent
+#     row shadows our deny (rig `org_agent_plan`). `OPENCODE_DB` pointed away
+#     disables it but also stops session persistence; not done here, it is
+#     organisation policy.
+# A shadowing layer of either kind is a silent allow, which the structural
+# denied-turn check (`classify_structural`) cannot catch.
+#
+# **The non-hermetic delivery (T4.7, §4.4).** `agent-write` (always) and
+# `agent-readonly` under `hermetic: off` keep the user's own config, so they get
+# no rebuild, no `--pure`, no `XDG_CONFIG_HOME` redirect and no stripping. Their
+# rows are merged **over** the inherited `OPENCODE_CONFIG_CONTENT` instead
+# (:func:`merge_permission_content`), under `agent.build` / `agent.plan`, and the
+# user's own `external_directory` rules, read through `debug config`
+# (:func:`read_user_declared_config`), are re-listed after our `"*": "deny"`
+# (:func:`relisted_external_rules`) — a user allow before our deny is shadowed
+# by it (rig `t47_shared_toplevel_*`), one re-listed after it survives (rig
+# `t47_shared_*`). The `generate` profile under `hermetic: off` gets nothing:
+# a user's `default_agent` can move it off `build` anyway, so it stays a
+# recorded limitation rather than a guess at which agent to target.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The three rows, in the order opencode evaluates them. Every rule map is
+#: serialized in insertion order (see :func:`_dump_config`): the ruleset is
+#: `findLast`, so `"*": "deny"` must stay first in `external_directory`, and the
+#: `*.env.example` allow must follow the `*.env.*` deny it narrows.
+PERMISSION_ROWS: Tuple[Tuple[str, Any], ...] = (
+    ("external_directory", (("*", "deny"),)),
+    ("read", (("*.env", "deny"), ("*.env.*", "deny"), ("*.env.example", "allow"))),
+    ("doom_loop", "deny"),
+)
+
+#: The opencode agent each profile runs, and therefore the `agent.<name>` key its
+#: permission rows go under. `generate` passes no `--agent`, so it runs
+#: opencode's default agent, `build` (the same value as :data:`WRITE_AGENT`);
+#: the profile stays read-intent because the rows only add denies.
+PERMISSION_AGENT_BY_PROFILE: Dict[str, str] = {
+    PROFILE_AGENT_READONLY: READONLY_AGENT,
+    PROFILE_GENERATE: WRITE_AGENT,
+    PROFILE_AGENT_WRITE: WRITE_AGENT,
+}
+
+#: The key the permission-rule maps sit under. Every map below a `permission`
+#: key is an ordered rule list, never a set, so it is dumped as inserted.
+_PERMISSION_KEY = "permission"
+
+
+def _node_tmpdir(env: Mapping[str, str]) -> str:
+    """The directory Node's ``os.tmpdir()`` returns for ``env`` (POSIX rule).
+
+    ``TMPDIR``, then ``TMP``, then ``TEMP``, else the root ``tmp`` directory,
+    with a trailing separator dropped — the order Node reads them in, which is
+    not Python's ``tempfile`` order (and Node checks nothing for writability).
+    """
+    for name in ("TMPDIR", "TMP", "TEMP"):
+        value = env.get(name)
+        if value:
+            stripped = value.rstrip("/\\")
+            return stripped or value
+    return os.path.join(os.sep, "tmp")
+
+
+def _xdg_data_home(env: Mapping[str, str]) -> str:
+    """``XDG_DATA_HOME``, else ``~/.local/share`` — what opencode's data dir
+    (``<data>/opencode``) is rooted at. A hermetic slot passes it through."""
+    value = env.get("XDG_DATA_HOME")
+    if value:
+        return value
+    home = env.get("HOME") or os.path.expanduser("~")
+    return os.path.join(home, ".local", "share")
+
+
+def builtin_external_allows(
+    agent: str, env: Optional[Mapping[str, str]] = None
+) -> List[str]:
+    """The built-in ``external_directory`` allows our ``"*": "deny"`` shadows.
+
+    MEASURED on 1.17.15 and 1.18.32 (the T4.6 rig, cases ``builtin_tmp_{plan,build}`` and
+    ``builtin_plansdir_{plan,build}`` against their ``_ctrl`` twins): the
+    shared defaults and the agents' own overrides carry these allows *before*
+    the agent layer, so by ``findLast`` our deny shadows them and a read the
+    built-in agent allowed came back denied. Only ``<data>/opencode/tool-output/*``
+    is appended after the agent layer and survives, so it is not re-listed.
+
+    * ``<tmp>/opencode/*`` — both agents;
+    * ``<data>/opencode/plans/*`` — ``plan`` only (absent from ``build``'s
+      resolved rules).
+
+    The globs cannot be read from ``opencode debug config`` (it does not print
+    the per-agent built-in defaults), so they are hard-coded here from the deny
+    error's resolved rule list and resolved the way opencode resolves them,
+    from ``env`` (default this process's environment, which is the dispatch
+    env for every name read here: ``TMPDIR``/``TMP``/``TEMP``, ``HOME`` and the
+    ``XDG_`` family all pass the env allowlist and the hermetic delta unchanged).
+    Re-measure them when the rig moves past 1.18.32.
+
+    **Known limitation, not re-listed:** the directory of each *discovered
+    skill* (the rig's ``builtin_skilldir_*`` case, e.g. a skill under
+    ``$HOME/.claude/skills/<name>/``) and each config-reference path are
+    shadowed too, but which ones opencode discovers depends on the machine and
+    cannot be enumerated here. A read under one now returns a deny to the
+    model, which continues the turn rather than ending it.
+    """
+    source = os.environ if env is None else env
+    allows = [os.path.join(_node_tmpdir(source), "opencode", "*")]
+    if agent == READONLY_AGENT:
+        allows.append(os.path.join(_xdg_data_home(source), "opencode", "plans", "*"))
+    return allows
+
+
+def permission_block(
+    agent: Optional[str] = None, env: Optional[Mapping[str, str]] = None
+) -> Dict[str, Any]:
+    """A fresh copy of the §4.2 step 1 rows, as ordered dicts.
+
+    With ``agent``, the built-in allows the deny shadows
+    (:func:`builtin_external_allows`) are re-listed right after ``"*": "deny"``,
+    so the block takes away only the ``ask`` rows and nothing the built-in agent
+    already allowed. A caller that appends its own patterns (T4.7: the user's)
+    appends them after these.
+
+    Fresh on every call so a caller (T4.7's merge over an inherited value, say)
+    can extend `external_directory` without mutating a shared constant.
+    """
+    block: Dict[str, Any] = {}
+    for name, rule in PERMISSION_ROWS:
+        block[name] = dict(rule) if isinstance(rule, tuple) else rule
+    if agent is not None:
+        for pattern in builtin_external_allows(agent, env):
+            block["external_directory"][pattern] = "allow"
+    return block
+
+
+def _ordered_for_dump(value: Any, *, in_permission: bool = False) -> Any:
+    """``value`` with every mapping key-sorted, except the permission rule maps.
+
+    ``json.dumps(sort_keys=True)`` was right for the old provider-only content
+    by accident, and it is wrong for a rule map: opencode evaluates rules
+    `findLast`, so their order is their meaning, and a pattern that sorts before
+    `"*"` (``"!x/*"``) would land ahead of the deny and be shadowed by it. So a
+    mapping *below* a ``permission`` key keeps its insertion order, and every
+    other mapping is sorted here, so the rest of the output stays deterministic.
+    """
+    if isinstance(value, dict):
+        keys = list(value) if in_permission else sorted(value)
+        return {
+            key: _ordered_for_dump(
+                value[key], in_permission=in_permission or key == _PERMISSION_KEY
+            )
+            for key in keys
+        }
+    if isinstance(value, list):
+        return [_ordered_for_dump(item, in_permission=in_permission) for item in value]
+    return value
+
+
+def _dump_config(document: Dict[str, Any]) -> str:
+    """The one serializer for an emitted ``OPENCODE_CONFIG_CONTENT``."""
+    return json.dumps(_ordered_for_dump(document), sort_keys=False)
+
+
+#: Versions this process has no read for: the executor's preflight records
+#: ``"unknown"`` when `--version` failed, and a caller with no preflight read
+#: at all passes ``None``.
+_UNREAD_VERSIONS = frozenset({"", "unknown", "unread"})
+
+
+def continue_loop_on_deny_allowed(
+    version: Optional[str],
+    version_range: Optional[Tuple[str, str]] = None,
+) -> bool:
+    """Whether ``experimental.continue_loop_on_deny`` may be emitted (T4.2).
+
+    The key is experimental, so it is emitted only for a running opencode inside
+    the measured :attr:`OpenCodeProvider.CONTINUE_LOOP_ON_DENY_RANGE` (inclusive
+    both ends). It is the belt-and-braces half: the deny rows are the primary
+    mechanism, and every branch that omits the key keeps them.
+
+    * in range → ``True``;
+    * below the floor → ``False``, silently (not the above-range case);
+    * above the ceiling → ``False``, with one WARN per process naming the
+      version and both bounds;
+    * unread (``None``, ``""``, ``"unknown"``) → ``False``, fail-safe, with one
+      WARN per process.
+
+    ``version`` is the preflight's cached read, handed in by the caller; this
+    never spawns ``opencode --version``. Shared by every profile that carries
+    the key, so the write profile's delivery (T4.7) calls it too.
+    """
+    floor, ceiling = version_range or OpenCodeProvider.CONTINUE_LOOP_ON_DENY_RANGE
+    token = (version or "").strip()
+    if token.lower() in _UNREAD_VERSIONS:
+        _warn_once(
+            "continue-loop-unread",
+            "multi-llm warning: the opencode version was not read on this path, "
+            "so experimental.continue_loop_on_deny is omitted (fail-safe; the "
+            "permission deny rows still apply).",
+        )
+        return False
+    current = version_tuple(token)
+    if current < version_tuple(floor):
+        return False
+    if current > version_tuple(ceiling):
+        _warn_once(
+            "continue-loop-above",
+            f"multi-llm warning: opencode {token} is above the measured "
+            f"continue_loop_on_deny range {floor}-{ceiling}; the key is omitted",
+        )
+        return False
+    return True
+
+#: Lane A's own ``opencode --version`` read, one per process. Lane A
+#: (``llm_client``'s ``generate`` fan-out and ``--ask``) has no executor
+#: preflight to hand a version in, so without this every such dispatch would
+#: land on the unread branch above: the key never emitted on ``generate`` and
+#: the "not read on this path" WARN printed on an ordinary run.
+_LANE_A_VERSION: Dict[str, str] = {}
+_LANE_A_VERSION_LOCK = threading.Lock()
+
+
+def _lane_a_runner_version(provider: Any) -> str:
+    """The running opencode version for a dispatch whose caller passed none.
+
+    Read once per process (concurrent first callers share it) from the
+    adapter's ``version_cmd`` and ``parse_version``, the same pair the
+    executor's preflight uses. Any failure caches ``"unknown"``, which
+    :func:`continue_loop_on_deny_allowed` treats as unread: the key is omitted
+    and the WARN names a genuinely failed read.
+    """
+    with _LANE_A_VERSION_LOCK:
+        cached = _LANE_A_VERSION.get("opencode")
+        if cached is not None:
+            return cached
+        version = "unknown"
+        argv = list(getattr(provider, "version_cmd", ()) or ())
+        try:
+            if argv:
+                completed = subprocess.run(
+                    argv,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=5,
+                )
+                if completed.returncode == 0:
+                    parsed = provider.parse_version(
+                        completed.stdout or "", completed.stderr or ""
+                    )
+                    if parsed:
+                        version = parsed
+        except Exception:  # noqa: BLE001 - a failed read is "unknown", never a raise
+            version = "unknown"
+        _LANE_A_VERSION["opencode"] = version
+        return version
+
 
 _CONFIG_HOME_LOCK = threading.RLock()
 _CONFIG_HOME: Optional[str] = None
@@ -167,17 +495,21 @@ _ATEXIT_REGISTERED = False
 #: `XDG_CONFIG_HOME` redirect is meaningless, so the two halves are rendered from
 #: one piece of state and cannot drift apart. Outside a dispatch context the
 #: adapter renders exactly the argv and env it rendered before M4.
-_ACTIVE: contextvars.ContextVar[Optional[Dict[str, Optional[str]]]] = (
+_ACTIVE: contextvars.ContextVar[Optional[Dict[str, Any]]] = (
     contextvars.ContextVar("multi_llm_opencode_hermetic", default=None)
 )
 
 _WARNED: set = set()
+_WARNED_LOCK = threading.Lock()
 
 
 def _warn_once(key: str, message: str) -> None:
-    if key in _WARNED:
-        return
-    _WARNED.add(key)
+    # Check-and-add under a lock: the write scheduler dispatches disjoint
+    # batches on threads, so concurrent first callers must not all print.
+    with _WARNED_LOCK:
+        if key in _WARNED:
+            return
+        _WARNED.add(key)
     print(message, file=sys.stderr)
 
 
@@ -458,8 +790,660 @@ def _user_config_paths() -> List[str]:
     return paths
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# §8 (plans/opencode-validator-false-rate-limit-and-denied-turn.md) — the
+# resolved config, read through `opencode debug config`.
+#
+# `auth list` is structurally blind to a provider declared only in config (a
+# custom `stub` with an inline key prints `0 credentials`, measured 1.18.32), and
+# a Python read of the config files would have to re-implement opencode's whole
+# layering: global json *and* jsonc, the project walk-up, `OPENCODE_CONFIG`,
+# `OPENCODE_CONFIG_CONTENT`, `{env:}` substitution. `debug config` resolves every
+# one of those layers the way the dispatch will, including the container
+# wrapper, because it is spawned through the same PATH binary with the same env.
+#
+# It also **prints secrets in plaintext** (an inline `options.apiKey`, a
+# substituted `{env:}` value). So its stdout is reduced in memory, inside
+# :func:`_read_declared_providers`, to booleans and rule lists, and the raw
+# text never leaves that function — not in a return value, not in a log line,
+# not in an exception message.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: `opencode [--pure] debug config` — "show resolved configuration". A `debug`
+#: subcommand, so its shape is not a contract: every failure reads as "unknown"
+#: and keeps the caller's pre-existing verdict. **Measured at 1.17.15** (the
+#: ``min_version`` floor; pre-flight 2026-09-25, the npm-cache tarball run on a
+#: scratch HOME) and at 1.18.32: `debug config` and `--pure debug config` both
+#: exit 0 there with the same `provider` shape and the inline `apiKey` in
+#: plaintext, so the floor does not need the unknown-fallback — it stays as
+#: defence. `--pure` means only "no external plugins"; it does not stop the
+#: global config loading (the isolation is the hermetic redirect's).
+DEBUG_CONFIG_ARGV: Tuple[str, ...] = ("opencode", "debug", "config")
+
+#: The executor's probe ceiling (`subagent_executor._run_probe`), unchanged.
+DEBUG_CONFIG_TIMEOUT_S = 30.0
+
+#: The three permission actions opencode accepts.
+PERMISSION_ACTIONS = ("allow", "deny", "ask")
+
+#: The `external_directory` layers the reduction returns, in merge order: the
+#: top-level `permission`, then `agent.plan.permission`, then
+#: `agent.build.permission`.
+EXTERNAL_DIR_TOP = "top"
+EXTERNAL_DIR_LAYERS: Tuple[str, ...] = (EXTERNAL_DIR_TOP, READONLY_AGENT, WRITE_AGENT)
+
+
+class ProviderDecl(NamedTuple):
+    """One ``provider.<id>`` block, reduced to what the auth verdict reads.
+
+    ``custom`` is :func:`_defines_an_implementation` (an ``npm`` package or an
+    ``options.baseURL``); ``has_key`` is a non-empty string ``options.apiKey``
+    after opencode's own ``{env:}`` substitution. Never the key itself.
+    """
+
+    custom: bool
+    has_key: bool
+
+
+class ExternalDirLayer(NamedTuple):
+    """One layer's ``external_directory`` rules, normalized (T8.2).
+
+    ``rules`` are ``(pattern, action)`` pairs in the config's own insertion
+    order, catch-alls included (removing them is T4.7's job). A string value is
+    one catch-all pair. ``malformed`` marks a shape opencode's rules cannot
+    have; the whole layer is then dropped (``rules=()``), because dropping one
+    deny exception while keeping the allow it narrows would broaden the user's
+    rules. Path globs, not secrets.
+    """
+
+    rules: Tuple[Tuple[str, str], ...] = ()
+    malformed: bool = False
+
+
+class DeclaredConfig(NamedTuple):
+    """What :func:`_read_declared_providers` keeps of a ``debug config`` run.
+
+    ``providers`` is ``None`` when the ``provider`` value is not a mapping
+    ("unknown"); an absent ``provider`` key is ``{}`` (nothing declared), which
+    reaches the same auth verdict. ``external_directory`` holds one
+    :class:`ExternalDirLayer` per :data:`EXTERNAL_DIR_LAYERS` name.
+    """
+
+    providers: Optional[Dict[str, ProviderDecl]]
+    external_directory: Dict[str, ExternalDirLayer]
+
+
+def _opencode_launcher(binary: str) -> List[str]:
+    """``binary`` resolved the way ``_list_models`` and the executor resolve it."""
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from ..llm_client import _resolve_executable
+    except ImportError:  # pragma: no cover - direct-script import shim
+        try:
+            from utils.llm_client import _resolve_executable  # type: ignore
+        except ImportError:
+            return [binary]
+    try:
+        launcher, _ = _resolve_executable(binary)
+        return list(launcher)
+    except Exception:  # noqa: BLE001 - fall back to the bare name
+        return [binary]
+
+
+def _spawn_debug_config(
+    argv: List[str],
+    env: Optional[Mapping[str, str]],
+    cwd: Optional[str],
+    timeout: float,
+) -> Optional["subprocess.CompletedProcess"]:
+    """Run ``debug config`` with the executor's probe pins, or ``None``.
+
+    ``stdin=DEVNULL``, captured text, a hard timeout, and ``None`` on any
+    ``OSError``/``SubprocessError`` (a ``TimeoutExpired`` is one). ``env`` of
+    ``None`` inherits this process's environment. The one seam tests patch.
+    """
+    try:
+        return subprocess.run(
+            [*_opencode_launcher(argv[0]), *argv[1:]],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+            env=dict(env) if env is not None else None,
+            cwd=cwd,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _provider_decl(block: Dict[str, Any]) -> ProviderDecl:
+    options = block.get("options")
+    key = options.get("apiKey") if isinstance(options, dict) else None
+    return ProviderDecl(
+        custom=_defines_an_implementation(block),
+        has_key=isinstance(key, str) and bool(key.strip()),
+    )
+
+
+def _action_or_none(value: Any) -> Optional[str]:
+    return value if isinstance(value, str) and value in PERMISSION_ACTIONS else None
+
+
+def _external_dir_layer(permission: Any) -> ExternalDirLayer:
+    """Normalize one layer's ``permission`` value to its ``external_directory``.
+
+    * absent (``None``, or no ``external_directory`` key): ``rules=()``;
+    * the whole ``permission`` a valid action string (it applies to every
+      tool): one catch-all pair ``("*", action)``;
+    * ``external_directory`` a valid action string: the same catch-all pair;
+    * ``external_directory`` a map of pattern → valid action: its pairs, in
+      insertion order;
+    * anything else: ``rules=()``, ``malformed=True``.
+
+    Permission-level keys other than ``external_directory`` (a permission-level
+    ``"*"`` included) are ignored.
+    """
+    if permission is None:
+        return ExternalDirLayer()
+    if isinstance(permission, str):
+        action = _action_or_none(permission)
+        if action is None:
+            return ExternalDirLayer(malformed=True)
+        return ExternalDirLayer(rules=(("*", action),))
+    if not isinstance(permission, dict):
+        return ExternalDirLayer(malformed=True)
+    if "external_directory" not in permission:
+        return ExternalDirLayer()
+    value = permission["external_directory"]
+    if isinstance(value, str):
+        action = _action_or_none(value)
+        if action is None:
+            return ExternalDirLayer(malformed=True)
+        return ExternalDirLayer(rules=(("*", action),))
+    if isinstance(value, dict):
+        rules: List[Tuple[str, str]] = []
+        for pattern, rule in value.items():
+            action = _action_or_none(rule)
+            if not isinstance(pattern, str) or action is None:
+                return ExternalDirLayer(malformed=True)
+            rules.append((pattern, action))
+        return ExternalDirLayer(rules=tuple(rules))
+    return ExternalDirLayer(malformed=True)
+
+
+def _reduce_debug_config(text: str) -> Optional[DeclaredConfig]:
+    """``debug config`` stdout → :class:`DeclaredConfig`, or ``None``.
+
+    ``None`` for anything that is not one JSON object. The parse error is
+    caught **without** its message: a ``JSONDecodeError`` quotes the document
+    it failed on, and this document carries plaintext keys. ``json.loads``
+    keeps insertion order and nothing here sorts, so the rule order opencode
+    printed (merge order, measured) survives.
+    """
+    try:
+        document = json.loads(text or "")
+    except (ValueError, RecursionError):
+        return None
+    if not isinstance(document, dict):
+        return None
+    raw_providers = document.get("provider", {})
+    providers: Optional[Dict[str, ProviderDecl]] = None
+    if isinstance(raw_providers, dict):
+        providers = {
+            str(provider_id): _provider_decl(block)
+            for provider_id, block in raw_providers.items()
+            if isinstance(block, dict)
+        }
+    agents = document.get("agent")
+    agents = agents if isinstance(agents, dict) else {}
+    layers: Dict[str, ExternalDirLayer] = {
+        EXTERNAL_DIR_TOP: _external_dir_layer(document.get("permission")),
+    }
+    for name in (READONLY_AGENT, WRITE_AGENT):
+        agent = agents.get(name)
+        permission = agent.get("permission") if isinstance(agent, dict) else None
+        layers[name] = _external_dir_layer(permission)
+    return DeclaredConfig(providers=providers, external_directory=layers)
+
+
+def _read_declared_providers(
+    env: Optional[Mapping[str, str]],
+    cwd: Optional[str],
+    pure: bool,
+    *,
+    timeout: Optional[float] = None,
+) -> Optional[DeclaredConfig]:
+    """Run ``opencode [--pure] debug config`` and reduce it in memory (T8.2).
+
+    ``env``/``cwd``/``pure`` are the dispatch's own (the caller builds them);
+    ``env=None`` inherits this process's environment. ``timeout`` is what is
+    left of a caller's deadline: it replaces the 30 s ceiling with
+    ``min(30, timeout)``, and at ``<= 0`` nothing is spawned.
+
+    ``None`` on **any** failure — spawn error, timeout, non-zero exit, non-JSON
+    — which every caller reads as "unknown" and which therefore keeps that
+    caller's pre-existing verdict: a debug-config problem can never turn a
+    refusal into a pass. The raw stdout never leaves this function.
+    """
+    if timeout is None:
+        budget = DEBUG_CONFIG_TIMEOUT_S
+    else:
+        if timeout <= 0:
+            return None
+        budget = min(DEBUG_CONFIG_TIMEOUT_S, float(timeout))
+    argv = [DEBUG_CONFIG_ARGV[0], *([PURE_FLAG] if pure else []), *DEBUG_CONFIG_ARGV[1:]]
+    try:
+        completed = _spawn_debug_config(argv, env, cwd, budget)
+    except (OSError, ValueError, TypeError, subprocess.SubprocessError):
+        # `_spawn_debug_config` already maps OSError/SubprocessError to None;
+        # this only covers a bad env/cwd value. Deliberately narrow: a test
+        # tripwire raising AssertionError must surface, not read as a failure.
+        return None
+    if completed is None or completed.returncode != 0:
+        return None
+    return _reduce_debug_config(completed.stdout or "")
+
+
+_USER_CONFIG_LOCK = threading.Lock()
+_USER_CONFIG_MEMO: Dict[str, Optional[DeclaredConfig]] = {}
+
+
+def _user_config_memo_key(cwd: Optional[str]) -> str:
+    """The memo key: the variables that change what the user's resolved config
+    is, plus ``cwd`` (the project layer). Hashed, because an inherited
+    ``OPENCODE_CONFIG_CONTENT`` may hold a key. Literal reads, one per name, so
+    the packaging's environment-read walk can resolve each."""
+    import hashlib
+
+    try:
+        where = os.path.abspath(cwd or os.getcwd())
+    except OSError:
+        where = ""
+    material = json.dumps([
+        os.environ.get("HOME"),
+        os.environ.get("XDG_CONFIG_HOME"),
+        os.environ.get("OPENCODE_CONFIG"),
+        os.environ.get("OPENCODE_CONFIG_DIR"),
+        os.environ.get("OPENCODE_CONFIG_CONTENT"),
+        os.environ.get("OPENCODE_DISABLE_PROJECT_CONFIG"),
+        os.environ.get("OPENCODE_PERMISSION"),
+        where,
+    ])
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def read_user_declared_config(
+    *, cwd: Optional[str] = None, timeout: Optional[float] = None
+) -> Optional[DeclaredConfig]:
+    """The **user's own** resolved config: ``debug config`` with no hermetic delta.
+
+    What "the user's config" means to :func:`_user_defines_provider` (T8.5),
+    to ``doctor``'s ``config-only`` leg (T8.6) and to the write profile's
+    allow-pattern preservation (T4.7): this process's inherited environment,
+    no ``--pure``, ``cwd`` for the project layer (``None`` = this process's).
+
+    Memoised per process, keyed on the config-locating variables and ``cwd``:
+    the spawn costs ~0.5 s and prints secrets, so it must not run per dispatch.
+    Concurrent first callers share one read (the fill runs under a lock). A
+    failed read is cached too. A read bounded by an explicit ``timeout`` (a
+    caller's shrinking deadline) is served from the memo when there is one and
+    is never itself cached, so a budget-starved miss cannot poison a later
+    unbounded read. A mid-run edit of ``opencode.json`` stays unseen for the
+    rest of the process; that is accepted.
+    """
+    key = _user_config_memo_key(cwd)
+    with _USER_CONFIG_LOCK:
+        if key in _USER_CONFIG_MEMO:
+            return _USER_CONFIG_MEMO[key]
+        result = _read_declared_providers(None, cwd, False, timeout=timeout)
+        if timeout is None:
+            _USER_CONFIG_MEMO[key] = result
+        return result
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T4.7 — the rows over the user's own config (plan §4.4 steps 2-3).
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: `external_directory` patterns that match every path. Never re-listed after
+#: our `"*": "deny"`: a catch-all allow there would re-open every external
+#: read, and a catch-all deny/ask is our leading deny already.
+CATCH_ALL_PATTERNS = frozenset({"*", "**", "/*", "/**"})
+
+#: The layers each agent's rules are read from, in the order opencode evaluates
+#: them: the top-level `permission`, then `agent.<agent>.permission`.
+_LAYERS_BY_AGENT: Dict[str, Tuple[str, str]] = {
+    READONLY_AGENT: (EXTERNAL_DIR_TOP, READONLY_AGENT),
+    WRITE_AGENT: (EXTERNAL_DIR_TOP, WRITE_AGENT),
+}
+
+
+def relisted_external_rules(
+    declared: Optional[DeclaredConfig], agent: str
+) -> List[Tuple[str, str]]:
+    """The user's ``external_directory`` rules to re-list after our deny (§4.4 step 3).
+
+    ``declared`` is :func:`read_user_declared_config`'s result (the user's own
+    resolved config, no hermetic delta). The effective ordered list is the
+    top-level rules, then ``agent.<agent>.permission``'s (``agent.build`` is never
+    read into the ``plan`` list, nor the reverse); a pattern in both keeps only
+    its later occurrence, at that later position, because opencode's ruleset is
+    ``findLast``. Then, walking that list in order:
+
+    * a **catch-all** (:data:`CATCH_ALL_PATTERNS`) is never re-listed. A
+      catch-all ``deny``/``ask`` shadows every entry before it, so those are
+      dropped too (re-listing an earlier allow would broaden the user's rules).
+      A catch-all ``allow`` is overridden by design — it is the row ours win on
+      — and WARNs once, naming the row but no path;
+    * every other entry is kept in order, ``ask`` turned into ``deny`` (a
+      ``deny`` returns to the model; an ``ask`` ends the turn under ``run``), so
+      a user deny exception still follows the allow it narrows.
+
+    A malformed layer contributes nothing and WARNs once. ``declared`` of
+    ``None`` (the read failed) returns ``[]`` with one WARN: the fail-safe is
+    our deny alone. Path globs, never secrets, so none of this is sensitive —
+    but the WARNs still quote no path.
+    """
+    if declared is None:
+        _warn_once(
+            "external-rules-unread",
+            "multi-llm warning: opencode's resolved config could not be read "
+            "(`opencode debug config` failed), so your own external_directory "
+            "rules are not preserved on this run: every path outside the "
+            "working directory is denied to the model (fail-safe).",
+        )
+        return []
+    effective: Dict[str, str] = {}
+    for layer_name in _LAYERS_BY_AGENT.get(agent, (EXTERNAL_DIR_TOP,)):
+        layer = declared.external_directory.get(layer_name) or ExternalDirLayer()
+        if layer.malformed:
+            where = "top-level permission" if layer_name == EXTERNAL_DIR_TOP else (
+                f"agent.{layer_name}.permission"
+            )
+            _warn_once(
+                f"external-rules-malformed:{layer_name}",
+                f"multi-llm warning: the external_directory rule in your opencode "
+                f"config's {where} has a shape multi-llm cannot re-list, so that "
+                f"layer's rules are not preserved (fail-safe: denied to the model).",
+            )
+            continue
+        for pattern, action in layer.rules:
+            effective.pop(pattern, None)
+            effective[pattern] = action
+    kept: Dict[str, str] = {}
+    for pattern, action in effective.items():
+        if pattern in CATCH_ALL_PATTERNS:
+            if action == "allow":
+                _warn_once(
+                    "external-rules-catch-all",
+                    "multi-llm warning: your opencode config allows every "
+                    "external directory (a catch-all external_directory allow); "
+                    "multi-llm's deny row overrides it on this dispatch, and only "
+                    "your specific directory rules are kept.",
+                )
+            else:
+                kept.clear()
+            continue
+        kept[pattern] = "deny" if action == "ask" else action
+    return list(kept.items())
+
+
+def _external_directory_map(
+    agent: str,
+    user_rules: List[Tuple[str, str]],
+    env: Optional[Mapping[str, str]],
+) -> Dict[str, str]:
+    """``{"*": "deny"}``, the built-in allows it shadows, then the user's rules.
+
+    Built-in first, then the user's (§4.2 step 1): a user pattern equal to a
+    built-in one is moved to its own position with its own action.
+    """
+    rules = dict(permission_block(agent, env)["external_directory"])
+    for pattern, action in user_rules:
+        rules.pop(pattern, None)
+        rules[pattern] = action
+    return rules
+
+
+#: A second permission key our ``external_directory`` list is repeated under,
+#: last in the agent's ``permission`` map (T4.7, non-hermetic delivery only).
+#:
+#: Re-ordering the map we emit does not re-order the merged one: opencode
+#: deep-merges ``OPENCODE_CONFIG_CONTENT`` over the user's config *files*, and a
+#: key a file already holds keeps the file's position (§4.1). So with a file's
+#: own ``agent.<name>.permission`` in force, the real ``external_directory`` key
+#: can lose twice: its user patterns (``"/shared/*": "allow"``) stay ahead of
+#: our appended ``"*": "deny"`` and are shadowed by it (rig
+#: ``useragent_relist_ctrl_*``), and a file's permission-level ``"*": "allow"``
+#: after the key stays after it and beats our deny (rig
+#: ``useragent_ustar_ctrl_*``). opencode matches a rule's *permission* as a
+#: wildcard too (``Permission.evaluate``: ``Wildcard.match(permission,
+#: rule.permission)``, read from the 1.18.32 binary), so this key matches every
+#: ``external_directory`` request, and because no config file has it, it is a
+#: new key that lands after every file key, with its patterns in our order
+#: (rigs ``useragent_relist_*`` and ``useragent_ustar_*``). The rows stay under
+#: the real key as well, where the hermetic delivery and every earlier rig case
+#: put them. A config file that itself uses this key is not handled.
+TRAILING_EXTERNAL_KEY = "external_directory*"
+
+#: The non-catch-all ``read`` patterns that match an ``.env.example`` file, for
+#: :func:`_merge_rows_into`'s decision on our ``*.env.example`` allow.
+_ENV_EXAMPLE_MATCHES = frozenset({"*.env.example", "*.env.*"})
+
+
+def _merge_rows_into(
+    permission: Dict[str, Any], agent: str, external: Dict[str, str]
+) -> None:
+    """Put our three rows at the END of one agent's ``permission`` map, in place.
+
+    At the end, because a permission-level ``"*"`` key in the same layer (the
+    q2_ustar shape one level down) would otherwise follow our rows and beat
+    them. ``external_directory`` and ``doom_loop`` are replaced outright (ours
+    win on those rows). ``read`` keeps the user's own rules: ours are appended
+    after them, the ``.env`` denies and then our ``*.env.example`` allow — the
+    same rows a user with no read rules gets, so an unrelated user rule (say
+    ``{"/secret/*": "deny"}``) does not leave our ``*.env.*`` deny as the last
+    match for ``.env.example``. The allow is left out only when the user's own
+    rules already deny (or ask for) the example file — the last of their
+    ``*.env.example``, ``*.env.*`` or catch-all rules is not an allow — since
+    appending an allow after that would broaden it.
+
+    The ``external_directory`` list is then repeated under
+    :data:`TRAILING_EXTERNAL_KEY`, the last key, so that its precedence holds
+    in the *merged* config too, where a config file's own keys keep their
+    earlier positions.
+    """
+    rows = permission_block(agent)
+    permission.pop("external_directory", None)
+    permission.pop(TRAILING_EXTERNAL_KEY, None)
+    existing_read = permission.pop("read", None)
+    permission.pop("doom_loop", None)
+    permission["external_directory"] = external
+    if existing_read is None:
+        permission["read"] = rows["read"]
+    else:
+        if isinstance(existing_read, dict):
+            read = dict(existing_read)
+        elif isinstance(existing_read, str):
+            read = {"*": existing_read}
+        else:
+            read = {}
+        # What the user's own rules decide for `.env.example` (findLast over
+        # the patterns that match it), read before ours are appended.
+        example_rule = None
+        for pattern, action in read.items():
+            if pattern in _ENV_EXAMPLE_MATCHES or pattern in CATCH_ALL_PATTERNS:
+                example_rule = action
+        keep_example_allow = example_rule is None or example_rule == "allow"
+        for pattern, action in rows["read"].items():
+            if action == "allow" and not keep_example_allow:
+                continue
+            read.pop(pattern, None)
+            read[pattern] = action
+        permission["read"] = read
+    permission["doom_loop"] = rows["doom_loop"]
+    permission[TRAILING_EXTERNAL_KEY] = dict(external)
+
+
+def _parse_inherited_content(value: Optional[str]) -> Tuple[Optional[Dict[str, Any]], str]:
+    """``(document, "")`` or ``(None, <failure kind>)``; ``({}, "")`` when unset.
+
+    The failure kind is a fixed phrase. The value's bytes are never quoted —
+    an inherited ``OPENCODE_CONFIG_CONTENT`` can carry an inline ``apiKey`` —
+    and neither is a ``JSONDecodeError``'s message, which quotes the document.
+    """
+    if value is None or not value.strip():
+        return {}, ""
+    try:
+        document = json.loads(value)
+    except (ValueError, RecursionError):
+        return None, "it is not valid JSON"
+    if not isinstance(document, dict):
+        return None, "it is not a JSON object"
+    return document, ""
+
+
+def merge_permission_content(
+    inherited: Optional[str],
+    agent: str,
+    external: Dict[str, str],
+    *,
+    continue_loop: bool = False,
+) -> Optional[str]:
+    """Our rows deep-merged **over** the inherited ``OPENCODE_CONFIG_CONTENT`` (T4.7).
+
+    The user's keys are kept; ours win only on the three rows under
+    ``agent.<agent>.permission`` (plus ``experimental.continue_loop_on_deny``
+    when ``continue_loop``). ``None`` means "emit nothing": the inherited value
+    is not a JSON object (or its ``agent`` section is not a mapping) and is
+    passed through untouched, with one WARN naming the variable and the failure
+    kind only.
+    """
+    document, failure = _parse_inherited_content(inherited)
+    agents = document.get("agent", {}) if document is not None else None
+    if document is not None and not isinstance(agents, dict):
+        document, failure = None, "its `agent` value is not an object"
+    if document is None:
+        _warn_once(
+            "inherited-content-unparseable",
+            f"multi-llm warning: the inherited OPENCODE_CONFIG_CONTENT is passed "
+            f"through untouched because {failure}; the opencode permission deny "
+            f"rows are not added to it, so a refused permission can still end a "
+            f"turn early.",
+        )
+        return None
+    document.setdefault("$schema", "https://opencode.ai/config.json")
+    agents = document.setdefault("agent", {})
+    section = agents.get(agent)
+    if not isinstance(section, dict):
+        section = {}
+        agents[agent] = section
+    permission = section.get(_PERMISSION_KEY)
+    if isinstance(permission, str):
+        permission = {"*": permission}
+    elif not isinstance(permission, dict):
+        permission = {}
+    section[_PERMISSION_KEY] = permission
+    _merge_rows_into(permission, agent, external)
+    if continue_loop:
+        experimental = document.get("experimental")
+        if not isinstance(experimental, dict):
+            experimental = {}
+        experimental["continue_loop_on_deny"] = True
+        document["experimental"] = experimental
+    return _dump_config(document)
+
+
+#: Project-layer config names opencode picks up while walking up from ``cwd``.
+_PROJECT_CONFIG_NAMES = (
+    "opencode.json",
+    "opencode.jsonc",
+    os.path.join(".opencode", "opencode.json"),
+    os.path.join(".opencode", "opencode.jsonc"),
+)
+
+
+def _user_config_files_conclusive() -> bool:
+    """True when :func:`_user_defines_provider_from_files` sees every layer.
+
+    The file read is exact only for the plain case: no ``OPENCODE_CONFIG*``
+    variable (an explicit file, dir or inline content opencode layers in), no
+    global ``opencode.jsonc`` or ``config.json`` (``json.load`` cannot read the
+    first and the file read does not look at the second), every global
+    ``opencode.json`` that exists parses as JSON, and no project config on the
+    walk up from this process's ``cwd`` (unless opencode is told to skip that
+    layer). Anything else is inconclusive and needs ``debug config``.
+    """
+    # Literal reads, one per name, so the packaging's env-read walk resolves each.
+    if (
+        os.environ.get("OPENCODE_CONFIG")
+        or os.environ.get("OPENCODE_CONFIG_DIR")
+        or os.environ.get("OPENCODE_CONFIG_CONTENT")
+    ):
+        return False
+    home = os.environ.get("XDG_CONFIG_HOME") or os.path.join(
+        os.path.expanduser("~"), ".config"
+    )
+    base = os.path.join(home, "opencode")
+    for name in ("opencode.jsonc", "config.json"):
+        if os.path.exists(os.path.join(base, name)):
+            return False
+    plain = os.path.join(base, "opencode.json")
+    if os.path.exists(plain):
+        try:
+            with open(plain, "r", encoding="utf-8") as handle:
+                json.load(handle)
+        except (OSError, ValueError, RecursionError):
+            return False
+    if os.environ.get("OPENCODE_DISABLE_PROJECT_CONFIG"):
+        return True
+    try:
+        where = os.path.abspath(os.getcwd())
+    except OSError:
+        return False
+    while True:
+        for name in _PROJECT_CONFIG_NAMES:
+            if os.path.exists(os.path.join(where, name)):
+                return False
+        parent = os.path.dirname(where)
+        if parent == where:
+            return True
+        where = parent
+
+
 def _user_defines_provider(prefix: str) -> bool:
     """True when the user's own opencode config *defines* this provider.
+
+    When the config files alone answer it (:func:`_user_config_files_conclusive`:
+    only a plain global ``opencode.json``, no ``OPENCODE_CONFIG*``, no project
+    config), the answer is the file read and **nothing is spawned** — this is
+    reached by §8's structural leg, Lane A ``generate`` slots and the
+    ``--dry-run-subagents`` renderer, none of which should pay for a spawn.
+
+    Otherwise it is read through ``opencode debug config``
+    (:func:`read_user_declared_config`, T8.5), which parses a commented
+    ``opencode.jsonc`` and every other layer exactly as opencode does; the
+    ``json.load`` this used to rely on raised on one, read it as "not
+    defined", and let a hermetic slot dispatch into the silent
+    model-resolution failure the refusal exists to prevent.
+
+    When that read fails (no binary, a timeout, a shape it cannot reduce), the
+    answer falls back to the previous file read, :func:`_user_defines_provider_from_files`
+    — so a reader failure never changes today's verdict, and an unreadable or
+    unparseable config still answers ``False`` (dispatch, don't refuse).
+    """
+    if _user_config_files_conclusive():
+        return _user_defines_provider_from_files(prefix)
+    declared = read_user_declared_config()
+    if declared is not None and declared.providers is not None:
+        decl = declared.providers.get(prefix)
+        return bool(decl is not None and decl.custom)
+    return _user_defines_provider_from_files(prefix)
+
+
+def _user_defines_provider_from_files(prefix: str) -> bool:
+    """The file-based fallback of :func:`_user_defines_provider`.
 
     Deliberately narrow. An unreadable or unparseable config answers ``False``
     (dispatch, don't refuse) — a config problem may never become a refusal, the
@@ -485,9 +1469,15 @@ def _user_defines_provider(prefix: str) -> bool:
 
 
 def reset_hermetic_state() -> None:
-    """Forget the memoised help read and the warn-once set (tests only)."""
+    """Forget the memoised help read, Lane A's version read, the user-config
+    read and the warn-once set (tests only)."""
     _HELP_TOKENS.clear()
-    _WARNED.clear()
+    with _WARNED_LOCK:
+        _WARNED.clear()
+    with _LANE_A_VERSION_LOCK:
+        _LANE_A_VERSION.clear()
+    with _USER_CONFIG_LOCK:
+        _USER_CONFIG_MEMO.clear()
 
 
 class OpenCodeProvider(LLMProvider):
@@ -518,7 +1508,13 @@ class OpenCodeProvider(LLMProvider):
     usage_support = USAGE_FULL
     # `opencode auth list` prints the credentials it has stored (and nothing
     # else): no model call, no session, so it is the cheap non-generating probe
-    # the once-per-run auth preflight needs (D3c).
+    # the once-per-run auth preflight needs (D3c). It is blind to a provider
+    # declared only in config (measured 1.18.32: `0 credentials`), so on its
+    # `False` the preflight asks `config_credential_source`, which reads the
+    # dispatch's own resolved config: a provider declared there (custom, or a
+    # built-in override carrying a key) passes whether its key is in auth.json
+    # under the custom id, in an `{env:}` reference, or absent (keyless). A
+    # built-in with no key anywhere is still refused (plan §8).
     auth_check = ("opencode", "auth", "list")
     login_cmd = "opencode auth login"
     #: D3 step 2 — the model tokens opencode serves with NO credential present,
@@ -546,6 +1542,18 @@ class OpenCodeProvider(LLMProvider):
     # this constant, `engines.opencode`, the packaging README, the container
     # pin and lockfile, cli-versions.lock, host_matrix.yaml, re-recorded rows).
     verified_version = "1.18.12"
+    #: T4.2 — the inclusive (floor, ceiling) opencode range in which
+    #: `experimental.continue_loop_on_deny: true` is emitted
+    #: (:func:`continue_loop_on_deny_allowed`). Its own constant, not
+    #: `verified_version`: the key was measured above that pin, so using it as
+    #: the ceiling would omit the key on builds shown to honour it. MEASURED
+    #: (T4.0, offline against a stub provider, the T4.6 rig under
+    #: `tests/fixtures/opencode/capture/`) on 1.17.15, 1.18.18, 1.18.23, 1.18.30
+    #: and 1.18.32: accepted silently, and a rejected permission no longer ends
+    #: the turn on any of them. The deny rows themselves were accepted on all
+    #: five too, so they carry no version gate and `min_version` stays. Widen
+    #: either bound only on a new rig measurement.
+    CONTINUE_LOOP_ON_DENY_RANGE = ("1.17.15", "1.18.32")
 
     # §7.2 — per-adapter pattern overrides, EXTENDING the base sets (never
     # replacing them: the base entries are audited-clean and shared).
@@ -563,6 +1571,12 @@ class OpenCodeProvider(LLMProvider):
     # retry internally while writing to **neither** stream until the timeout
     # fires, so there is no captured text to declare. Declaring a guessed one
     # would be worse than declaring none — this is the honest "unmeasured".
+    #
+    # The haystack these patterns see is **vendor-only** (`vendor_text` below):
+    # opencode's `--format json` stdout carries tool output, and a validator
+    # that grepped a plan discussing rate limits was recorded `rate_limited`
+    # (run b38de8bb, 2026-09-24). Only `error` events, unknown event types and
+    # stderr reach the tables now.
     rate_limit_patterns = LLMProvider.rate_limit_patterns
 
     #: `opencode auth list` exits 0 whether or not anything is stored (§5.3), so
@@ -586,8 +1600,26 @@ class OpenCodeProvider(LLMProvider):
 
     # ── R3 — structural model-spec refusal ────────────────────────────────
 
-    def describe_unresolvable_model(self, model: str) -> Optional[str]:
+    def describe_unresolvable_model(
+        self,
+        model: str,
+        *,
+        profile: Optional[str] = None,
+        anchor: Optional[str] = None,
+    ) -> Optional[str]:
         """Why opencode's *addressing scheme* cannot express this model, or None.
+
+        With ``profile`` (the executor's preflight passes it, plan §8 T8.3), a
+        slot that runs hermetically is also asked the hermetic
+        reconstructibility question here, **before** the auth leg: a provider
+        defined only in the user's own opencode config is refused with the
+        ``config_providers`` sentence instead of reaching ``auth list`` and
+        being told to run ``opencode auth login``, which cannot fix it. That
+        check builds the hermetic content from config reads only (no catalog
+        call, no auth probe, no dispatch). Its only possible spawn is the
+        per-process user-config read of :func:`read_user_declared_config`, and
+        only when the config files alone cannot answer
+        (:func:`_user_config_files_conclusive`).
 
         Structural and nothing else: after any ``:effort`` suffix is stripped, a
         model token with no ``/`` cannot be addressed at all, because opencode
@@ -610,6 +1642,16 @@ class OpenCodeProvider(LLMProvider):
         base_model, _effort = split_reasoning_effort(model, REASONING_EFFORTS)
         token = base_model.strip()
         if "/" in token:
+            if profile is None or not hermetic_enabled(profile, anchor):
+                return None
+            try:
+                self._hermetic_config_content(
+                    token, anchor=anchor, profile=profile, continue_gate=False
+                )
+            except _UnreconstructibleProvider as exc:
+                return str(exc)
+            except Exception:  # noqa: BLE001 - a diagnostic may never refuse
+                return None
             return None
         return (
             f"opencode models resolve as 'provider/model' (`opencode run --help`: "
@@ -669,7 +1711,9 @@ class OpenCodeProvider(LLMProvider):
             # Structural — `describe_unresolvable_model` refuses it first.
             return ModelVerdict(known=None)
         try:
-            with self.hermetic_dispatch(profile, token, anchor=anchor) as refusal:
+            with self.hermetic_dispatch(
+                profile, token, anchor=anchor, continue_gate=False
+            ) as refusal:
                 if refusal:
                     # The slot itself is refused before spawn; a listing taken
                     # here would describe a configuration no dispatch will use.
@@ -711,6 +1755,133 @@ class OpenCodeProvider(LLMProvider):
             )
         return ModelVerdict(known=False, detail=detail, suggestions=nearest)
 
+    # ── §8 — config-declared providers (T8.3, T8.6) ────────────────────────
+
+    def config_credential_source(
+        self,
+        model: str,
+        *,
+        profile: str = PROFILE_AGENT_READONLY,
+        anchor: Optional[str] = None,
+        cwd: Optional[str] = None,
+        env_builder: Optional[Callable[[], Optional[Mapping[str, str]]]] = None,
+    ) -> str:
+        """``declared`` when the dispatch's own config supplies this provider.
+
+        Asked by the executor's auth leg only after ``auth list`` said ``False``
+        for a model that needs a credential (lazy: the common path spawns
+        nothing new). It enters the same :meth:`hermetic_dispatch` context the
+        dispatch will, builds the child env **inside** it with ``env_builder``
+        (the executor's shared ``resolve_env`` + ``build_child_env`` helper, so
+        the ``env_allowlist`` and host guards apply exactly as at dispatch), and
+        runs ``debug config`` with the dispatch's ``cwd`` and with ``--pure``
+        exactly when the dispatch argv carries it. The verdict (§8.2):
+
+        * the prefix is declared **custom** (``npm``/``baseURL``) → ``declared``,
+          with or without a key: ``auth list`` is blind to it and a keyless
+          local server is a legitimate shape;
+        * a declared **built-in override** with a non-empty ``options.apiKey``
+          (after ``{env:}`` substitution in the child's env) → ``declared``;
+        * anything else — a keyless built-in override, an undeclared prefix, a
+          refused hermetic slot, a reader failure, a builder that raises or
+          yields ``None`` inside a hermetic slot → ``unknown``, which keeps
+          today's ``not_authenticated`` refusal.
+
+        ``env_builder`` of ``None`` composes ``resolve_env`` + ``build_child_env``
+        here with no host guards (a caller outside the executor). Never raises.
+        """
+        try:
+            from .base import CONFIG_AUTH_DECLARED, CONFIG_AUTH_UNKNOWN
+        except ImportError:  # pragma: no cover - direct-script import shim
+            CONFIG_AUTH_DECLARED, CONFIG_AUTH_UNKNOWN = "declared", "unknown"
+        base_model, _effort = split_reasoning_effort(model or "", REASONING_EFFORTS)
+        token = base_model.strip()
+        prefix = token.split("/", 1)[0].strip() if "/" in token else ""
+        if not prefix:
+            return CONFIG_AUTH_UNKNOWN
+        try:
+            with self.hermetic_dispatch(
+                profile, token, anchor=anchor, continue_gate=False
+            ) as refusal:
+                if refusal:
+                    return CONFIG_AUTH_UNKNOWN
+                if env_builder is not None:
+                    env = env_builder()
+                    slot = _ACTIVE.get()
+                    if env is None and slot is not None and slot.get("config_home"):
+                        # A hermetic slot always yields an `XDG_CONFIG_HOME`
+                        # delta, so `None` here is a builder that lost it:
+                        # `debug config` would run with neither the delta nor
+                        # the allowlist. Only a non-hermetic, unfiltered
+                        # dispatch legitimately inherits unchanged.
+                        return CONFIG_AUTH_UNKNOWN
+                else:
+                    env = self._plain_child_env(token, profile, anchor=anchor, cwd=cwd)
+                pure = PURE_FLAG in self._hermetic_argv()
+                declared = _read_declared_providers(env, cwd, pure)
+        except Exception:  # noqa: BLE001 - a diagnostic read may never end a preflight
+            return CONFIG_AUTH_UNKNOWN
+        if declared is None or declared.providers is None:
+            return CONFIG_AUTH_UNKNOWN
+        decl = declared.providers.get(prefix)
+        if decl is not None and (decl.custom or decl.has_key):
+            return CONFIG_AUTH_DECLARED
+        return CONFIG_AUTH_UNKNOWN
+
+    def _plain_child_env(
+        self,
+        model: str,
+        profile: str,
+        *,
+        anchor: Optional[str] = None,
+        cwd: Optional[str] = None,
+    ) -> Optional[Dict[str, str]]:
+        """``resolve_env`` + ``build_child_env`` with no host guards.
+
+        The fallback for :meth:`config_credential_source` when no executor
+        builder is handed in. ``None`` means "inherit this process's env".
+        """
+        from .base import build_child_env
+
+        delta = {
+            key: (os.path.expanduser(value) if isinstance(value, str) else value)
+            for key, value in (
+                self.resolve_env(model, profile, anchor=anchor, cwd=cwd) or {}
+            ).items()
+        }
+        return build_child_env(self, provider_env=delta, anchor=anchor)
+
+    def config_declared_providers(
+        self, *, cwd: Optional[str] = None, timeout: Optional[float] = None
+    ) -> Optional[Tuple[str, ...]]:
+        """The ids the **user's own** resolved config declares, for ``doctor``.
+
+        A provider counts when it is custom (``npm``/``baseURL``) or a built-in
+        override carrying a key, the two shapes the auth leg admits. Read with
+        no hermetic delta (:func:`read_user_declared_config`) under ``timeout``
+        (``doctor``'s remaining budget). ``None`` when the read failed or ran
+        out of budget. Ids only, never a key.
+        """
+        declared = read_user_declared_config(cwd=cwd, timeout=timeout)
+        if declared is None or declared.providers is None:
+            return None
+        return tuple(
+            provider_id
+            for provider_id, decl in declared.providers.items()
+            if decl.custom or decl.has_key
+        )
+
+    def hermetic_config_providers(self, anchor: Optional[str] = None) -> Tuple[str, ...]:
+        """``providers.opencode.config_providers`` ids: what a hermetic slot rebuilds."""
+        declared = _opencode_block(anchor).get("config_providers")
+        if not isinstance(declared, dict):
+            return ()
+        return tuple(str(key) for key in declared)
+
+    def dispatch_is_hermetic(self, profile: str, anchor: Optional[str] = None) -> bool:
+        """Whether a dispatch under ``profile`` runs hermetically (duck-typed)."""
+        return hermetic_enabled(profile, anchor)
+
     # ── M4 — hermetic dispatch ────────────────────────────────────────────
 
     @contextlib.contextmanager
@@ -720,6 +1891,8 @@ class OpenCodeProvider(LLMProvider):
         model: str = "",
         *,
         anchor: Optional[str] = None,
+        runner_version: Optional[str] = None,
+        continue_gate: bool = True,
     ) -> Iterator[Optional[str]]:
         """Scope one dispatch to the run's empty config home (donor §2.3).
 
@@ -733,12 +1906,57 @@ class OpenCodeProvider(LLMProvider):
         removed when the last slot leaves — on normal exit, on exception, on a
         per-slot timeout and on ``KeyboardInterrupt`` alike, with the ``atexit``
         sweep as the idempotent backstop.
+
+        ``runner_version`` is the opencode version the caller's preflight
+        already read (the executor's ``_VERSION_CACHE``), or ``None`` when the
+        caller holds no read. It only gates T4.2's experimental key
+        (:func:`continue_loop_on_deny_allowed`). A hermetic ``generate`` slot
+        with no version (Lane A, which has no preflight) reads it once per
+        process (:func:`_lane_a_runner_version`); no other path spawns
+        ``opencode --version``. ``continue_gate=False`` is for a caller that
+        spawns no model turn at all (the ``opencode models`` catalog probe, the
+        auth leg's ``debug config`` read), which neither needs the key nor
+        should warn about its absence.
+
+        **Non-hermetic slots (T4.7).** ``agent-write``, and ``agent-readonly``
+        under ``hermetic: off``, get a slot with **no** config home: no
+        ``--pure``, no redirect, nothing stripped. It only records which agent
+        the rows go under; :meth:`resolve_env` merges them over the inherited
+        ``OPENCODE_CONFIG_CONTENT``. A ``continue_gate=False`` caller gets no
+        such slot, so it never triggers the user-config read.
         """
         if not hermetic_enabled(profile, anchor):
-            yield None
+            agent = self._merge_agent(profile)
+            if agent is None or not continue_gate:
+                # No rows to merge: a profile that runs no named agent, or a
+                # caller that spawns no model turn (the catalog probe, the auth
+                # leg's `debug config` read), which a permission row cannot
+                # affect and which must not pay for the user-config read.
+                yield None
+                return
+            # T4.7: a slot with NO config home. `--pure`, the XDG redirect and
+            # the stripped carriers all key off `config_home`, so none of them
+            # is rendered; the rows are merged over the inherited content later,
+            # lazily, in `resolve_env` — never here, because this context is
+            # also entered by argv-only renderers (`--dry-run-subagents`) that
+            # must not spawn `opencode debug config`.
+            token = _ACTIVE.set({
+                "config_home": None,
+                "config_content": None,
+                "merge_agent": agent,
+                "runner_version": runner_version,
+                "continue_gate": continue_gate,
+            })
+            try:
+                yield None
+            finally:
+                _ACTIVE.reset(token)
             return
         try:
-            content = self._hermetic_config_content(model, anchor=anchor)
+            content = self._hermetic_config_content(
+                model, anchor=anchor, profile=profile,
+                runner_version=runner_version, continue_gate=continue_gate,
+            )
         except _UnreconstructibleProvider as exc:
             # Raised BEFORE the directory is claimed, so a refusal leaks nothing.
             yield str(exc)
@@ -751,9 +1969,85 @@ class OpenCodeProvider(LLMProvider):
             _ACTIVE.reset(token)
             release_config_home()
 
+    @staticmethod
+    def _merge_agent(profile: str) -> Optional[str]:
+        """The agent a **non-hermetic** slot merges its rows under, or ``None``.
+
+        ``agent-write`` always (it is never hermetic, §4.4) and ``agent-readonly``
+        when ``hermetic: off`` put its dispatch here. ``generate`` does not: it
+        passes no ``--agent``, and under ``hermetic: off`` a user's
+        ``default_agent`` decides which agent it runs.
+        """
+        if profile == PROFILE_AGENT_WRITE:
+            return WRITE_AGENT
+        if profile == PROFILE_AGENT_READONLY:
+            return READONLY_AGENT
+        return None
+
+    def resolve_env(
+        self, model: str, profile: str = PROFILE_GENERATE, **options: Any
+    ) -> Dict[str, str]:
+        """The base composition, plus T4.7's merged content in a non-hermetic slot.
+
+        The merge lives here and not in :meth:`get_env` because it needs the
+        dispatch's ``cwd`` (the project layer of the user's config) and because
+        :meth:`get_env` must stay a pure call: nothing but a real spawn's env
+        composition may run ``opencode debug config``.
+        """
+        env = super().resolve_env(model, profile, **options)
+        slot = _ACTIVE.get()
+        if slot is None or slot.get("config_home") or not slot.get("merge_agent"):
+            return env
+        base = options.get("base_env")
+        source: Mapping[str, str] = os.environ if base is None else base
+        content = self._merged_config_content(slot, source, cwd=options.get("cwd"))
+        if content is not None:
+            env["OPENCODE_CONFIG_CONTENT"] = content
+        return env
+
+    def _merged_config_content(
+        self,
+        slot: Mapping[str, Any],
+        source: Mapping[str, str],
+        *,
+        cwd: Optional[str] = None,
+    ) -> Optional[str]:
+        """T4.7's ``OPENCODE_CONFIG_CONTENT`` for one non-hermetic slot, or ``None``.
+
+        The user's own rules come from :func:`read_user_declared_config`: one
+        ``debug config`` spawn per process per (config-locating env, ``cwd``),
+        concurrent first callers sharing it, a failed read cached as well.
+        ``None`` passes an unparseable inherited value through untouched.
+        """
+        agent = str(slot["merge_agent"])
+        inherited = source.get("OPENCODE_CONFIG_CONTENT")
+        parsed = _parse_inherited_content(inherited)[0]
+        if parsed is None or not isinstance(parsed.get("agent", {}), dict):
+            # Decided before the reader runs: nothing will be emitted (not a
+            # JSON object, or an `agent` value that is not an object), so there
+            # is no reason to spawn it, nor to WARN about a failed read of it.
+            # `merge_permission_content` WARNs the pass-through.
+            return merge_permission_content(inherited, agent, {})
+        declared = read_user_declared_config(cwd=cwd)
+        external = _external_directory_map(
+            agent, relisted_external_rules(declared, agent), source
+        )
+        continue_loop = bool(slot.get("continue_gate", True)) and (
+            continue_loop_on_deny_allowed(
+                slot.get("runner_version"), self.CONTINUE_LOOP_ON_DENY_RANGE
+            )
+        )
+        return merge_permission_content(
+            inherited, agent, external, continue_loop=continue_loop
+        )
+
     def _hermetic_argv(self) -> List[str]:
-        """``[--pure]`` inside an active hermetic dispatch, else ``[]``."""
-        if _ACTIVE.get() is None:
+        """``[--pure]`` inside an active hermetic dispatch, else ``[]``.
+
+        A non-hermetic slot (T4.7: no ``config_home``) never gets ``--pure``.
+        """
+        slot = _ACTIVE.get()
+        if slot is None or not slot.get("config_home"):
             return []
         binary = shutil.which("opencode")
         if binary and PURE_FLAG in _read_help_tokens(binary):
@@ -767,47 +2061,74 @@ class OpenCodeProvider(LLMProvider):
         return []
 
     def _hermetic_config_content(
-        self, model: str, *, anchor: Optional[str] = None
+        self,
+        model: str,
+        *,
+        anchor: Optional[str] = None,
+        profile: str = PROFILE_AGENT_READONLY,
+        runner_version: Optional[str] = None,
+        continue_gate: bool = True,
     ) -> Optional[str]:
-        """The minimal ``OPENCODE_CONFIG_CONTENT`` this slot needs, or None.
+        """The ``OPENCODE_CONFIG_CONTENT`` this hermetic slot needs, or None.
 
-        Built from **multi-llm's own** resolved provider config
-        (``providers.opencode.config_providers``) and from no other source —
-        never copied out of the user's file, which is the config the redirect
-        exists to neutralize. Credentials are never carried here; auth stays in
-        ``auth.json`` under the retained ``XDG_DATA_HOME``.
+        Two halves, merged into one document:
 
-        A slot whose model resolves to a built-in provider sets the variable not
-        at all. A slot whose provider is defined **only** in the user's own
-        opencode config raises :class:`_UnreconstructibleProvider`, because after
-        the redirect there is nothing left for it to resolve against.
+        * **provider** — built from **multi-llm's own** resolved provider config
+          (``providers.opencode.config_providers``) and from no other source,
+          never copied out of the user's file, which is the config the redirect
+          exists to neutralize. Credentials are never carried here; auth stays
+          in ``auth.json`` under the retained ``XDG_DATA_HOME``. A built-in
+          provider needs no block. A provider defined **only** in the user's own
+          opencode config raises :class:`_UnreconstructibleProvider`, because
+          after the redirect there is nothing left for it to resolve against.
+        * **permission** (T4.1) — the §4.2 step 1 deny rows under
+          ``agent.<name>.permission`` for every profile in
+          :data:`PERMISSION_AGENT_BY_PROFILE`, whatever the provider, plus
+          ``experimental.continue_loop_on_deny`` when the version gate allows it
+          (T4.2).
+
+        **The refusal fires first.** The provider half is resolved, and may
+        raise, before any permission row is merged, so a refused slot produces
+        no content at all and claims no config home (§9 item 4; §8's structural
+        leg relies on this raise).
         """
+        provider_block: Optional[Dict[str, Any]] = None
         base_model, _effort = split_reasoning_effort(model or "", REASONING_EFFORTS)
-        if "/" not in base_model:
+        prefix = base_model.split("/", 1)[0].strip() if "/" in base_model else ""
+        if prefix:
+            declared = _opencode_block(anchor).get("config_providers")
+            if isinstance(declared, dict) and isinstance(declared.get(prefix), dict):
+                provider_block = {prefix: declared[prefix]}
+            elif _user_defines_provider(prefix):
+                raise _UnreconstructibleProvider(
+                    f"opencode provider {prefix!r} (from model {base_model!r}) is "
+                    f"defined only in your own opencode config, which a hermetic run "
+                    f"replaces — it would not resolve, so this slot is refused rather "
+                    f"than dispatched into a silent model-resolution failure. Declare "
+                    f"it under providers.opencode.config_providers (credentials "
+                    f"excluded — they stay in auth.json), or set "
+                    f"providers.opencode.hermetic: off to keep today's inheritance."
+                )
+
+        document: Dict[str, Any] = {}
+        if provider_block is not None:
+            document["provider"] = provider_block
+        agent = PERMISSION_AGENT_BY_PROFILE.get(profile)
+        if agent is not None:
+            document["agent"] = {agent: {"permission": permission_block(agent)}}
+            if runner_version is None and continue_gate and profile == PROFILE_GENERATE:
+                # Lane A passes no version (it has no preflight); read it once
+                # per process so `generate` gets the key rather than an unread
+                # WARN. After the refusal above, so a refused slot spawns nothing.
+                runner_version = _lane_a_runner_version(self)
+            if continue_gate and continue_loop_on_deny_allowed(
+                runner_version, self.CONTINUE_LOOP_ON_DENY_RANGE
+            ):
+                document["experimental"] = {"continue_loop_on_deny": True}
+        if not document:
             return None
-        prefix = base_model.split("/", 1)[0].strip()
-        if not prefix:
-            return None
-        declared = _opencode_block(anchor).get("config_providers")
-        if isinstance(declared, dict) and isinstance(declared.get(prefix), dict):
-            return json.dumps(
-                {
-                    "$schema": "https://opencode.ai/config.json",
-                    "provider": {prefix: declared[prefix]},
-                },
-                sort_keys=True,
-            )
-        if _user_defines_provider(prefix):
-            raise _UnreconstructibleProvider(
-                f"opencode provider {prefix!r} (from model {base_model!r}) is "
-                f"defined only in your own opencode config, which a hermetic run "
-                f"replaces — it would not resolve, so this slot is refused rather "
-                f"than dispatched into a silent model-resolution failure. Declare "
-                f"it under providers.opencode.config_providers (credentials "
-                f"excluded — they stay in auth.json), or set "
-                f"providers.opencode.hermetic: off to keep today's inheritance."
-            )
-        return None
+        document["$schema"] = "https://opencode.ai/config.json"
+        return _dump_config(document)
 
     # ── env / argv ────────────────────────────────────────────────────────
 
@@ -815,7 +2136,8 @@ class OpenCodeProvider(LLMProvider):
         """Adapter env delta; hermetic keys only inside a dispatch context."""
         env = dict(super().get_env(model) or {})
         slot = _ACTIVE.get()
-        if slot is None:
+        if slot is None or not slot.get("config_home"):
+            # Outside a dispatch, or a non-hermetic slot (T4.7): no redirect.
             return env
         # Exactly one XDG variable changes. XDG_DATA_HOME (auth.json),
         # XDG_CACHE_HOME (models.json), XDG_STATE_HOME and XDG_RUNTIME_DIR are
@@ -831,7 +2153,9 @@ class OpenCodeProvider(LLMProvider):
         """Inherited config carriers, stripped only while hermetic."""
         names = list(super().get_remove_env() or ())
         slot = _ACTIVE.get()
-        if slot is None:
+        if slot is None or not slot.get("config_home"):
+            # A non-hermetic slot (T4.7) strips nothing: the user's config is in
+            # force, and its merged content replaces the inherited value.
             return names
         emitted = {"OPENCODE_CONFIG_CONTENT"} if slot.get("config_content") else set()
         names.extend(name for name in CONFIG_ENV_NAMES if name not in emitted)
@@ -1059,6 +2383,218 @@ class OpenCodeProvider(LLMProvider):
         ):
             return False
         return super().classify_auth_probe(stdout, stderr, exit_code)
+
+    #: The ``run --format json`` event types that carry the model's words or
+    #: the repo's, never the vendor's verdict: prose, reasoning, tool output
+    #: (a ``grep`` of a plan that discusses rate limits), tool errors ("The user
+    #: rejected permission…") and per-step token/cost numbers.
+    _NON_VENDOR_EVENT_TYPES = frozenset({
+        "text", "tool_use", "reasoning", "step_start", "step_finish",
+    })
+
+    #: A final line the kill cut mid-event cannot be parsed, so whether it is
+    #: droppable is read off its text: one of the droppable openers inside the
+    #: first ~64 characters. Written without assuming ``type`` is the first key
+    #: (a capture may lead with ``timestamp``), because key order is not
+    #: guaranteed.
+    _CUT_LINE_OPENER = re.compile(r'"type"\s*:\s*"(?:tool_use|text|reasoning)"')
+    _CUT_LINE_WINDOW = 64
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """The events opencode itself wrote as a verdict, and nothing the model
+        or the repo said.
+
+        opencode does not echo our prompt, but it echoes the **repository**:
+        ``--format json`` stdout carries every tool call's output. Run b38de8bb
+        (2026-09-24) was a validator that grepped a plan discussing rate
+        limiting, died on an auto-rejected permission with exit 0, and was
+        recorded ``rate_limited`` off ``bypasses the record rate limiter`` in a
+        ``tool_use`` event — then halved opencode's concurrency for the rest of
+        the batch. omp drops its tool results for the same reason.
+
+        So ``text``, ``tool_use``, ``reasoning``, ``step_start`` and
+        ``step_finish`` events are dropped. ``error`` events are kept whole
+        (``ProviderAuthError``, ``UnknownError``/``err_…``, a ``statusCode``
+        429), and so are unknown event types and non-JSON lines — the
+        conservative direction, since keeping text can only preserve a verdict
+        the unreduced haystack already reached.
+
+        * **An end-cut final line** (a stream killed mid-event) is dropped when
+          a droppable ``"type"`` opener sits in its first ~64 characters, in any
+          key position. A line cut at its *start* — the first line of a stored
+          64 KB ``stdout_tail`` — carries no opener and is kept, by design: the
+          live executor classifies the whole stream and never sees one.
+        * **No line parses as an event** → the input, unchanged.
+        * **Any exception** → the input, unchanged (the base contract).
+        * **stderr is never reduced**: a real opencode quota failure is a
+          ``--print-logs`` line there, and it reaches the tables untouched.
+
+        The dropped events stay available for diagnostics — the executor's
+        failure capture and ``describe_failure`` read the raw stream — and the
+        structural denied-turn check (:meth:`classify_structural`) reads the
+        raw stream too, never this reduction.
+
+        kilocode is an opencode fork with the same event shape. It is fan-out
+        only today, so no raw kilocode stdout reaches ``classify_failure``; give
+        it this override when a kilocode agent profile appears.
+        """
+        try:
+            text = stdout or ""
+            lines = text.split("\n")
+            last = max(
+                (i for i, line in enumerate(lines) if line.strip()), default=-1
+            )
+            kept: List[str] = []
+            events = 0
+            for index, line in enumerate(lines):
+                stripped = line.strip()
+                if not stripped:
+                    kept.append(line)
+                    continue
+                try:
+                    event = json.loads(stripped)
+                except ValueError:
+                    if index == last:
+                        opener = self._CUT_LINE_OPENER.search(stripped)
+                        if opener is not None and opener.start() < self._CUT_LINE_WINDOW:
+                            continue
+                    kept.append(line)
+                    continue
+                if not isinstance(event, dict):
+                    kept.append(line)
+                    continue
+                events += 1
+                if event.get("type") in self._NON_VENDOR_EVENT_TYPES:
+                    continue
+                kept.append(line)
+            if not events:
+                return stdout, stderr
+            return "\n".join(line for line in kept if line.strip()), stderr
+        except Exception:  # noqa: BLE001 - a failed reduction is the identity
+            return stdout, stderr
+
+    #: The pattern verdicts that outrank a denied turn: the ones
+    #: ``subagent_executor._classify_failed_run`` forwards. A stream that carries
+    #: a rejected ``tool_use`` *and* a genuine vendor 429 / auth / model error is
+    #: that error — reporting it as ``runner_error`` would hide it from
+    #: backpressure and the ladder.
+    _VERDICTS_THAT_OUTRANK_A_DENIED_TURN = frozenset({
+        STATUS_AUTH_FAILED,
+        STATUS_RATE_LIMITED,
+        CATEGORY_INVALID_MODEL,
+        CATEGORY_SANDBOX_UNAVAILABLE,
+        STATUS_CONTEXT_LENGTH_EXCEEDED,
+    })
+
+    #: The ``PermissionRejectedError`` (and ``PermissionCorrectedError``) text
+    #: of 1.18.32, the error a ``tool_use`` carries when ``run`` auto-rejected
+    #: an ``ask``. A ``deny`` rule raises ``PermissionDeniedError`` instead,
+    #: whose words differ and whose turn continues.
+    _REJECTED_PERMISSION = "rejected permission to use this specific tool call"
+
+    #: ``run``'s stderr line for an auto-rejected ``ask``, measured on 1.18.32:
+    #: ``! permission requested: external_directory (<dir>/*); auto-rejecting``
+    #: (behind ANSI colour codes, stripped first).
+    _AUTO_REJECTING = re.compile(
+        r"permission requested: (?P<permission>[^\s()]+) \((?P<pattern>[^\n]*?)\); "
+        r"auto-rejecting"
+    )
+    _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+    def classify_structural(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[Tuple[str, str]]:
+        """A turn ``run`` ended on an auto-rejected permission → ``runner_error``.
+
+        In 1.18.32 ``run`` answers every ``permission.asked`` with ``reject``,
+        and a rejected permission **ends the agent loop** unless
+        ``experimental.continue_loop_on_deny`` is set: the session goes idle
+        and the process exits 0 with no answer. The b38de8bb validator did
+        exactly that on a bash probe of a system path outside the repo.
+
+        Read structurally off the **raw** stream (never :meth:`vendor_text`,
+        which drops these very events), from the fields nested under ``part``
+        — a top-level ``reason`` is absent on every turn, a healthy one
+        included. All three must hold:
+
+        * exit 0;
+        * the last ``step_finish`` has a ``part.reason`` and it is not
+          ``stop``;
+        * a ``tool_use`` with ``part.state.status == "error"`` carries the
+          rejected-permission text in ``part.state.error``, **or** stderr has
+          the ``auto-rejecting`` line.
+
+        The ``stop`` condition is required: with ``continue_loop_on_deny`` on,
+        stderr still says ``auto-rejecting`` while the turn goes on to a final
+        answer and a ``stop`` (measured; pinned as a negative).
+
+        The ``(<permission> <pattern>)`` parenthetical comes from the stderr
+        line, else from the same shape inside the rejected ``tool_use``'s
+        ``part.state.error``; 1.18.32's ``PermissionRejectedError`` carries no
+        fields (read from the binary), so without the stderr line the sentence
+        omits the parenthetical rather than inventing one.
+        """
+        try:
+            return self._denied_turn(stdout or "", stderr or "", exit_code)
+        except Exception:  # noqa: BLE001 - classification must not raise
+            return None
+
+    def _denied_turn(
+        self, stdout: str, stderr: str, exit_code: Optional[int]
+    ) -> Optional[Tuple[str, str]]:
+        if exit_code not in (0, None):
+            return None
+        last_reason: Optional[str] = None
+        rejected_error: Optional[str] = None
+        for event in self._iter_events(stdout):
+            part = event.get("part")
+            if not isinstance(part, dict):
+                continue
+            event_type = event.get("type")
+            if event_type == "step_finish" and part.get("type") == "step-finish":
+                reason = part.get("reason")
+                last_reason = reason if isinstance(reason, str) else None
+            elif event_type == "tool_use":
+                state = part.get("state")
+                if not isinstance(state, dict) or state.get("status") != "error":
+                    continue
+                error = state.get("error")
+                if isinstance(error, str) and self._REJECTED_PERMISSION in error.lower():
+                    rejected_error = error
+        if not last_reason or last_reason == "stop":
+            return None
+        auto_rejects = list(self._AUTO_REJECTING.finditer(self._ANSI.sub("", stderr)))
+        if rejected_error is None and not auto_rejects:
+            return None
+        found = auto_rejects[-1] if auto_rejects else (
+            self._AUTO_REJECTING.search(rejected_error or "")
+        )
+        detail = ""
+        if found is not None:
+            detail = f" ({found.group('permission')} {found.group('pattern')})"
+        return STATUS_RUNNER_ERROR, (
+            f"opencode ended the turn after an auto-rejected permission{detail}; "
+            f"no final answer"
+        )
+
+    def classify_failure(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[str]:
+        """The declared tables over :meth:`vendor_text`, then the denied turn.
+
+        A genuine vendor verdict the executor forwards (auth, rate limit,
+        invalid model, sandbox, context length) wins; only otherwise does the
+        structural denied-turn check (:meth:`classify_structural`) answer
+        ``runner_error``. The executor reads the reason sentence from
+        :meth:`classify_structural` itself, since this method returns a
+        category and nothing else.
+        """
+        verdict = super().classify_failure(stdout, stderr, exit_code)
+        if verdict in self._VERDICTS_THAT_OUTRANK_A_DENIED_TURN:
+            return verdict
+        if self.classify_structural(stdout, stderr, exit_code) is not None:
+            return STATUS_RUNNER_ERROR
+        return verdict
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """Recover the reason for a non-zero exit from the event stream.

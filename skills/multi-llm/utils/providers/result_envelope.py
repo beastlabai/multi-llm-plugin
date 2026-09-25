@@ -210,6 +210,25 @@ def envelope_api_error_status(stdout: str) -> Any:
     return wrapper.get("api_error_status")
 
 
+def is_clean_envelope(stdout: str) -> bool:
+    """Whether stdout is one envelope the CLI itself reports as a clean run.
+
+    True only when all three verdict fields agree there was no error: the
+    whole of stdout parses as one envelope, :func:`envelope_verdict` raises no
+    objection (``is_error`` false, ``terminal_reason`` completed or absent), and
+    ``api_error_status`` is absent or ``null``. Such an envelope's ``result`` is
+    the model's own prose — a validator that read a plan discussing rate limits
+    says so there — so a classifier must not read it as the vendor's verdict
+    (plan ``opencode-validator-false-rate-limit-and-denied-turn`` T3.2). Anything
+    else — no envelope, a refusing one, one carrying a status — is ``False``,
+    which leaves the caller's existing routes exactly as they were.
+    """
+    wrapper = _whole_envelope(stdout)
+    if wrapper is None or envelope_verdict(wrapper):
+        return False
+    return wrapper.get("api_error_status") is None
+
+
 def category_for_api_error_status(status: Any) -> Optional[str]:
     """The classifier category an ``api_error_status`` names, or ``None``.
 

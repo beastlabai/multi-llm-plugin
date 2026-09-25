@@ -12,3 +12,7 @@ Do not reach the dispatcher any other way.
 
 Read the result's `exit` and `next` the way the dispatcher's own contract reads
 them. {NEEDS_HUMAN_RULE}
+
+On exit 0, report `validation_counts`, and if `needs_human_decision` or
+`validation_failed` is non-zero point at `report.md` for those groups; they are
+decided later, when the suggestions are applied.

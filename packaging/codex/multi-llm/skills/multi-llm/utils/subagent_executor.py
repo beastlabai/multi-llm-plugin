@@ -37,6 +37,7 @@ The write path (``agent-write``, D3f/D3g/D3h/D3l/D3n) is deliberately not here:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import re
@@ -48,7 +49,8 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import (
-    Any, Callable, Dict, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple,
+    Any, Callable, Dict, Iterable, List, Mapping, NamedTuple, Optional, Sequence,
+    Set, Tuple,
 )
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
@@ -102,8 +104,12 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         sandbox_rung_id,
         split_reasoning_effort,
         build_child_env,
+        env_allowlist_enabled,
         matches_any,
         version_verdict,
+        AUTH_STATE_CONFIG,
+        CONFIG_AUTH_DECLARED,
+        CONFIG_AUTH_UNKNOWN,
     )
     from .retry_ladder import (  # noqa: F401 - re-exported, see below
         BACKOFF_STATUSES,
@@ -193,8 +199,12 @@ except ImportError:  # pragma: no cover - direct-script import shim
         sandbox_rung_id,
         split_reasoning_effort,
         build_child_env,
+        env_allowlist_enabled,
         matches_any,
         version_verdict,
+        AUTH_STATE_CONFIG,
+        CONFIG_AUTH_DECLARED,
+        CONFIG_AUTH_UNKNOWN,
     )
     from utils.retry_ladder import (  # noqa: F401 - re-exported, see below
         BACKOFF_STATUSES,
@@ -1432,8 +1442,18 @@ def preflight_runner(
     # silence — it can never produce an exit.
     describe_unresolvable = getattr(provider, "describe_unresolvable_model", None)
     if callable(describe_unresolvable):
+        # Plan §8 T8.3: `profile` and `anchor` let opencode answer the hermetic
+        # reconstructibility question here, ahead of the auth leg, so a
+        # user-config-only provider gets the `config_providers` sentence rather
+        # than "run `opencode auth login`". A narrow double declaring only
+        # `(model)` keeps working through the TypeError fallback.
         try:
-            unresolvable = describe_unresolvable(model)
+            try:
+                unresolvable = describe_unresolvable(
+                    model, profile=profile, anchor=anchor
+                )
+            except TypeError:
+                unresolvable = describe_unresolvable(model)
         except Exception:  # noqa: BLE001 - a diagnostic may not break a preflight
             unresolvable = None
         if unresolvable:
@@ -1492,7 +1512,8 @@ def preflight_runner(
         info["version"] = _detect_version(provider_name, key=key, spec=spec, profile=profile)
     if check_auth:
         info["auth"] = _detect_auth(
-            provider_name, model, key=key, spec=spec, profile=profile
+            provider_name, model, key=key, spec=spec, profile=profile,
+            anchor=anchor,
         )
     # D3 step 3 — the CLI's own catalog, after version and auth and before
     # nested-exec: a too-old CLI, or a logged-out one running a model that needs
@@ -1530,11 +1551,15 @@ def preflight_runner(
 #: dispatch (D3m).
 _VERSION_CACHE: Dict[str, str] = {}
 
-#: The same, for the D3c auth probe: ``ok`` | ``unknown`` | ``not-required``,
-#: keyed ``<provider>|<needs-credentials 0/1>`` — NOT by bare provider name
-#: (D3 step 2): one process holding both ``opencode/big-pickle`` and
-#: ``openrouter/deepseek/…`` would otherwise serve one's verdict to the other.
-#: A failed probe is never cached — it raises, and the run ends.
+#: The same, for the D3c auth probe: ``ok`` | ``unknown`` | ``not-required`` |
+#: ``config``, keyed ``<provider>|<needs-credentials 0/1>|<profile>|<model
+#: prefix>|<hermetic/plain>`` — NOT by bare provider name (D3 step 2): one
+#: process holding both ``opencode/big-pickle`` and ``openrouter/deepseek/…``
+#: would otherwise serve one's verdict to the other. The profile joined the key
+#: with T8.13 (the probe runs under that profile's dispatch env), and the model
+#: prefix and hermeticity with T8.4 (whether a config declares the provider
+#: depends on both). A failed probe is never cached — it raises, and the run
+#: ends.
 _AUTH_CACHE: Dict[str, str] = {}
 
 #: The same, for the D3c nested-exec verdict, keyed by ``<host id>|<runner spec>``
@@ -1682,14 +1707,41 @@ def reset_nested_exec_cache() -> None:
 # `version_verdict`, which is imported above.
 
 
-def _run_probe(argv: Sequence[str]) -> Optional["subprocess.CompletedProcess"]:
+def _preflight_version(provider: Any) -> Optional[str]:
+    """The version :func:`_detect_version` already read for this provider, or None.
+
+    Strictly the cache (:data:`_VERSION_CACHE`), never a spawn: it is read on
+    the dispatch path, once per dispatch, and handed to the adapter's dispatch
+    context so a version-gated config key (opencode's
+    ``continue_loop_on_deny``, plan T4.2) costs nothing beyond the preflight's
+    one ``version_cmd`` per process. A recorded ``"unknown"`` is passed through
+    as itself, so the adapter can tell "the read failed" from "no read here".
+    """
+    try:
+        name = provider.name
+    except Exception:  # noqa: BLE001 - a lookup may never end a dispatch
+        return None
+    return _VERSION_CACHE.get(name) if isinstance(name, str) else None
+
+
+def _run_probe(
+    argv: Sequence[str], env: Optional[Mapping[str, str]] = None
+) -> Optional["subprocess.CompletedProcess"]:
     """Run one cheap preflight argv (``version_cmd`` / ``auth_check``).
 
     Returns ``None`` when the probe could not be run at all, which every caller
     reads as "unknown": a preflight probe reports, it never blocks on its own
     failure.
+
+    ``env`` (plan §8 T8.13) is the environment the probe runs under; ``None``
+    inherits this process's, which is what every caller but the auth leg
+    passes. The auth leg hands in :func:`dispatch_child_env`'s result, so the
+    probe sees what a dispatch would.
     """
     launcher, _ = _resolve_executable(argv[0])
+    kwargs: Dict[str, Any] = {}
+    if env is not None:
+        kwargs["env"] = dict(env)
     try:
         return subprocess.run(
             [*launcher, *argv[1:]],
@@ -1699,9 +1751,46 @@ def _run_probe(argv: Sequence[str]) -> Optional["subprocess.CompletedProcess"]:
             errors="replace",
             timeout=30,
             stdin=subprocess.DEVNULL,
+            **kwargs,
         )
     except (OSError, subprocess.SubprocessError):
         return None
+
+
+def dispatch_child_env(
+    provider: Any,
+    model: str,
+    profile: str,
+    *,
+    anchor: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> Optional[Dict[str, str]]:
+    """The child environment one spawn of ``provider`` gets (plan §8 T8.13).
+
+    ``resolve_env`` + ``build_child_env`` and nothing else: the two calls
+    :func:`_spawn_in_context` makes, factored out so the auth probe and
+    opencode's ``debug config`` reader (T8.3) see what a dispatch sees — the
+    adapter's delta, the ``env_allowlist`` filter and the running host's
+    ``env_guards``. ``None`` means "inherit this process's environment
+    unchanged", exactly as :func:`build_child_env` returns it.
+
+    Not pure for every adapter: cursor-agent's ``resolve_env`` creates its
+    run-scoped profile directory (or arms its side-effect guard), both bounded
+    and idempotent per process. Callers outside a dispatch therefore build it
+    at most once per cache key and never hand one call's result to another
+    spawn.
+    """
+    provider_env = expand_env_home(
+        provider.resolve_env(model, profile, anchor=anchor, cwd=cwd)
+    )
+    host_guards, passthrough = _host_env_guards()
+    return build_child_env(
+        provider,
+        provider_env=provider_env,
+        host_guards=host_guards,
+        host_passthrough=passthrough,
+        anchor=anchor,
+    )
 
 
 def _detect_version(
@@ -1784,17 +1873,103 @@ def _probe_verdict_stream(
     return completed.stdout or stderr
 
 
-def _detect_auth(
-    provider_name: str, model: str = "", *, key: str, spec: str, profile: str
-) -> str:
-    """Run ``auth_check`` once per provider and refuse a logged-out CLI (D3c).
+#: A variable name shaped like a credential, for the one sentence that names
+#: what ``env_allowlist`` (or a host guard) dropped from the probe's env. Names
+#: only, never values.
+_CREDENTIAL_NAME = re.compile(
+    r"(?:API_KEY|_TOKEN|_SECRET|ACCESS_KEY|_KEY)$", re.IGNORECASE
+)
 
-    Returns ``"ok"``, ``"unknown"`` or ``"not-required"``; a recognized
-    login/credential notice raises instead, because every sibling task in the
-    batch would fail identically and no retry can fix a missing credential.
-    ``unknown`` is the honest answer for a CLI that declares no probe
-    (claude-code has no non-interactive status subcommand) or whose probe could
-    not be read — never an assumption of success.
+
+def _accepts_keyword(func: Callable[..., Any], name: str) -> bool:
+    """Does ``func`` take ``name`` as a keyword (explicitly or via ``**kwargs``)?
+
+    The F6 rule, applied to an optional hook or argument: a stand-in patched
+    over :func:`_run_probe` (a narrow ``(argv)`` test double) or
+    ``dispatch_task`` is never handed a keyword it does not accept. A callable
+    whose signature cannot be read is treated as not accepting it.
+    """
+    try:
+        params = inspect.signature(func).parameters.values()
+    except (TypeError, ValueError):
+        return False
+    return any(
+        param.kind is inspect.Parameter.VAR_KEYWORD
+        or (param.name == name and param.kind in (
+            inspect.Parameter.KEYWORD_ONLY,
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        ))
+        for param in params
+    )
+
+
+def _auth_cache_key(
+    provider: Any,
+    provider_name: str,
+    model: str,
+    *,
+    needs_auth: bool,
+    profile: str,
+    anchor: Optional[str],
+) -> str:
+    """``<provider>|<needs 0/1>|<profile>|<model prefix>|<hermetic/plain>``.
+
+    The prefix is the model's ``provider/`` half after the ``:effort`` split
+    (empty for a bare token); hermeticity is asked of the adapter's module the
+    way :func:`_model_cache_key` asks it. Every leg degrades to a constant: a
+    cache key may never be what ends a preflight.
+    """
+    normalized = model or ""
+    try:
+        normalized, _ = split_reasoning_effort(
+            normalized, provider._accepted_efforts()  # noqa: SLF001 - the base's hook
+        )
+    except Exception:  # noqa: BLE001
+        normalized = model or ""
+    normalized = normalized.strip()
+    prefix = normalized.split("/", 1)[0] if "/" in normalized else ""
+    hermetic = "plain"
+    try:
+        module = sys.modules.get(type(provider).__module__)
+        enabled = getattr(module, "hermetic_enabled", None)
+        if callable(enabled) and enabled(profile, anchor):
+            hermetic = "hermetic"
+    except Exception:  # noqa: BLE001
+        hermetic = "plain"
+    return (
+        f"{provider_name}|{1 if needs_auth else 0}|{profile}|{prefix}|"
+        f"{hermetic}"
+    )
+
+
+def _dropped_credential_names(child_env: Optional[Mapping[str, str]]) -> List[str]:
+    """Credential-shaped names this process carries that the probe env lacks."""
+    if child_env is None:
+        return []
+    return sorted(
+        name for name in os.environ
+        if name not in child_env and _CREDENTIAL_NAME.search(name)
+    )
+
+
+def _detect_auth(
+    provider_name: str,
+    model: str = "",
+    *,
+    key: str,
+    spec: str,
+    profile: str,
+    anchor: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> str:
+    """Run ``auth_check`` once per cache key and refuse a logged-out CLI (D3c).
+
+    Returns ``"ok"``, ``"unknown"``, ``"not-required"`` or ``"config"``; a
+    recognized login/credential notice raises instead, because every sibling
+    task in the batch would fail identically and no retry can fix a missing
+    credential. ``unknown`` is the honest answer for a CLI that declares no
+    probe (claude-code has no non-interactive status subcommand) or whose probe
+    could not be read — never an assumption of success.
 
     ``model`` is what decides whether a ``False`` verdict is *allowed to refuse*
     (D3 step 2). On a CLI that fronts several vendors "needs a credential" is a
@@ -1805,10 +1980,38 @@ def _detect_auth(
     ``True``/``None`` verdict is untouched either way, and a credential-requiring
     spec on the same provider in the same process still refuses — the cache is
     keyed on the answer, not on the provider alone.
+
+    **The probe runs under the dispatch's env (plan §8 T8.13).** On a cache
+    miss, and only then, :func:`dispatch_child_env` builds what a dispatch of
+    this model under ``profile`` would get — the adapter's delta, the
+    ``env_allowlist`` filter, the host's ``env_guards`` — and ``auth_check``
+    runs under it; ``cwd`` (default: the repo root the dispatch pins) is what
+    ``resolve_env`` and the config hook see, not the probe's working directory
+    (every probe adapter's status command reads a fixed store). A key the
+    allowlist drops is therefore not counted as a login, and the refusal says
+    so by name. An env that cannot be built never turns a refusal into a pass:
+    the probe runs under the inherited environment, but only its ``False`` is
+    kept (a ``True`` reads ``unknown``) and the config leg is not asked. The probe deliberately runs **outside**
+    ``hermetic_dispatch``: the slot's delta redirects only ``XDG_CONFIG_HOME``
+    and cannot hide ``auth.json`` (``XDG_DATA_HOME`` passes through), and
+    entering it would turn a user-config-only provider into a skipped probe
+    instead of the structural leg's ``unresolvable_model`` sentence.
+
+    **The config leg (T8.4).** When the verdict is ``False`` for a model that
+    needs a credential, the adapter's ``config_credential_source`` is asked
+    whether the dispatch's own resolved config declares the provider (opencode:
+    a custom provider, or a built-in override carrying a key). ``declared``
+    records ``config`` and refuses nothing; ``unknown`` is today's refusal.
+    Lazy: a ``True`` verdict never spawns it.
     """
     provider = get_provider(provider_name)
     needs_credentials = _model_needs_credentials(provider, model)
-    cache_key = f"{provider_name}|{1 if needs_credentials else 0}"
+    cache_key = _auth_cache_key(
+        provider, provider_name, model,
+        # Keyword named `needs_auth`: the same-name credentials keyword form
+        # trips the redaction-looseness tripwire in test_redaction.py.
+        needs_auth=needs_credentials, profile=profile, anchor=anchor,
+    )
     if cache_key in _AUTH_CACHE:
         return _AUTH_CACHE[cache_key]
 
@@ -1817,7 +2020,35 @@ def _detect_auth(
         _AUTH_CACHE[cache_key] = "unknown"
         return "unknown"
 
-    completed = _run_probe(argv)
+    probe_cwd = cwd if cwd is not None else _probe_cwd(anchor)
+
+    def build_env() -> Optional[Dict[str, str]]:
+        # Built only on this cache miss, immediately before its spawn, and never
+        # handed to a dispatch: cursor-agent's `resolve_env` has a bounded side
+        # effect, and a hermetic delta belongs to one spawn. A failure raises:
+        # `None` already means "inherit this process's env", so swallowing it
+        # into `None` would run the probe (or the config hook's `debug config`)
+        # with neither the delta nor the `env_allowlist`, counting a key the
+        # dispatch will never see as a login. The config hook's own catch-all
+        # turns the raise into `unknown`.
+        return dispatch_child_env(
+            provider, model, profile, anchor=anchor, cwd=probe_cwd
+        )
+
+    env_build_failed = False
+    try:
+        probe_env = build_env()
+    except Exception:  # noqa: BLE001 - an env build may never end a preflight
+        # Fail closed, never open: the probe still runs (inheriting this
+        # process's env) so a logged-out CLI is still refused, but a `True`
+        # it returns is demoted to "unknown" below and the config leg is not
+        # asked — an env we could not build cannot vouch for a credential.
+        probe_env = None
+        env_build_failed = True
+    if _accepts_keyword(_run_probe, "env"):
+        completed = _run_probe(argv, env=probe_env)
+    else:  # a narrow `(argv)` test double
+        completed = _run_probe(argv)
     verdict: Optional[bool] = None
     if completed is not None:
         try:
@@ -1826,6 +2057,10 @@ def _detect_auth(
             )
         except Exception:  # noqa: BLE001 - a probe must never break a preflight
             verdict = None
+    if verdict is True and env_build_failed:
+        # The inherited env may carry a key the dispatch env would drop
+        # (`env_allowlist`, a host guard), so this login is not evidence.
+        verdict = None
     if verdict is False and not needs_credentials:
         # Measured, not assumed: the adapter declared this model answers with no
         # credential present, so a logged-out probe is evidence about *other*
@@ -1833,17 +2068,56 @@ def _detect_auth(
         _AUTH_CACHE[cache_key] = "not-required"
         return "not-required"
     if verdict is False:
+        source = CONFIG_AUTH_UNKNOWN
+        hook = getattr(provider, "config_credential_source", None)
+        if callable(hook) and not env_build_failed:
+            try:
+                source = hook(
+                    model, profile=profile, anchor=anchor, cwd=probe_cwd,
+                    env_builder=build_env,
+                )
+            except Exception:  # noqa: BLE001 - a diagnostic read may never end a preflight
+                source = CONFIG_AUTH_UNKNOWN
+        if source == CONFIG_AUTH_DECLARED:
+            _AUTH_CACHE[cache_key] = AUTH_STATE_CONFIG
+            return AUTH_STATE_CONFIG
         login = getattr(provider, "login_cmd", "") or f"{argv[0]} login"
         # The probe's own envelope, redacted at this boundary: cursor-agent's
         # `status --format json` carries `userEmail`/`terminalProgram`/`shell`
         # (M13), and this message is printed straight to a terminal and a log —
         # it reaches neither of §4.5.3's redacting write sinks.
         tail = _redact_probe_tail(_probe_verdict_stream(completed), 500)
+        dropped = _dropped_credential_names(probe_env)
+        dropped_note = ""
+        if dropped:
+            # T8.13: this case used to pass preflight and fail at dispatch with
+            # a vendor auth error, so the behaviour change is named. Names only.
+            cause = (
+                "`env_allowlist: on` does not admit "
+                + ("it" if len(dropped) == 1 else "them")
+                + " for this runner"
+                if env_allowlist_enabled(anchor)
+                else "a host env guard strips "
+                + ("it" if len(dropped) == 1 else "them")
+            )
+            dropped_note = (
+                f" This process's environment sets {', '.join(dropped)}, but the "
+                f"runner's environment does not carry "
+                f"{'it' if len(dropped) == 1 else 'them'} ({cause}), so the probe "
+                f"ran without {'it' if len(dropped) == 1 else 'them'}, as a "
+                f"dispatch would."
+            )
         raise RunnerRejected(
             f"Refusing to dispatch: {key} is {spec!r} (reason: not_authenticated) — "
             f"{_REASON_EXPLANATION['not_authenticated']}. "
-            f"`{' '.join(argv)}` reported: {tail!r}. "
-            f"Fix: run `{login}`, then re-run this phase. Nothing was dispatched.",
+            f"`{' '.join(argv)}` reported: {tail!r}.{dropped_note} "
+            f"Fix: run `{login}`"
+            + (
+                " (a stored credential is not filtered by env_allowlist)"
+                if dropped and env_allowlist_enabled(anchor)
+                else ""
+            )
+            + ", then re-run this phase. Nothing was dispatched.",
             key=key,
             spec=spec,
             reason_code="not_authenticated",
@@ -4097,7 +4371,8 @@ def _spawn_child(
     ``KeyboardInterrupt`` and on the §8 process-group teardown alike.
     """
     with provider_dispatch_context(
-        provider, model, profile, anchor=anchor
+        provider, model, profile, anchor=anchor,
+        runner_version=_preflight_version(provider),
     ) as dispatch:
         if dispatch.refusal:
             # Nothing has been spawned and nothing has been claimed. The refusal
@@ -4164,10 +4439,6 @@ def _spawn_in_context(
     # dispatch runs in an explicit directory, and an adapter whose delta carries
     # a workspace-scoped side effect (cursor's trust-marker guard) must scope it
     # to *that* directory rather than to the orchestrator's.
-    provider_env = expand_env_home(
-        provider.resolve_env(model, profile, anchor=anchor, cwd=cwd)
-    )
-    host_guards, passthrough = _host_env_guards()
     # M3/M17 (A6): the union of the adapter's list and the host's guards, minus
     # the host's `passthrough`, is computed inside `build_child_env` — the one
     # builder Lane A goes through too. Before it existed the two lanes composed
@@ -4175,13 +4446,9 @@ def _spawn_in_context(
     # credential strip on this lane alone. The host entry still declares what
     # *this* host injects into every child; what it may no longer do is sanction
     # a vendor credential back into a runner the adapter just stripped it from.
-    env = build_child_env(
-        provider,
-        provider_env=provider_env,
-        host_guards=host_guards,
-        host_passthrough=passthrough,
-        anchor=anchor,
-    )
+    # Both calls live in `dispatch_child_env` (plan §8 T8.13), which the auth
+    # preflight shares, so the probe and the dispatch cannot compose it apart.
+    env = dispatch_child_env(provider, model, profile, anchor=anchor, cwd=cwd)
 
     start = time.time()
     # `Popen`, not `subprocess.run`: the timeout has to kill the child *with its
@@ -4330,6 +4597,8 @@ def dispatch_task(
     prompt: Optional[str] = None,
     before_attempt: Optional[Callable[[Dict[str, Any]], None]] = None,
     after_result: Optional[Callable[[Dict[str, Any]], None]] = None,
+    after_attempt: Optional[Callable[[Attempt], None]] = None,
+    changed_files: Optional[Callable[[Dict[str, Any]], Sequence[str]]] = None,
 ) -> TaskOutcome:
     """Dispatch one task and return its :class:`TaskOutcome` (D3k classified).
 
@@ -4378,6 +4647,25 @@ def dispatch_task(
             recomputation and the ``completed`` audit line. It mutates
             ``outcome`` (``write_outcome``, ``files_touched``, ``summary``,
             ``status``) — the model's claim is never the verdict.
+        after_attempt: Called with each :class:`Attempt` the moment it is
+            recorded — before ``after_result``, ``ladder.record`` and any backoff
+            sleep — so a caller can react to one attempt while the task is still
+            retrying (§5: rate-limit backpressure narrows on the attempt, not on
+            the finished task). It runs on the dispatching thread. It is an
+            observer: an exception it raises is reported on stderr and
+            swallowed, never allowed to fail the attempt.
+        changed_files: The write lane's pre-retry check (plan
+            opencode-validator-false-rate-limit-and-denied-turn §4.4 step 4,
+            T4.8). Called only for an ``agent-write`` attempt that the adapter's
+            structural check classified ``runner_error`` (a turn ended by an
+            auto-rejected permission, so no result exists and ``after_result``
+            never runs), with ``{task, task_id, kind, attempt, cwd, outcome}``;
+            it returns the paths whose bytes moved against the task's pre-batch
+            snapshot. Any → the attempt is recorded ``partial_application`` and
+            no further attempt starts: a retry on top of a half-applied edit is
+            the unsafe case. None → it stays ``runner_error`` and is retried like
+            any other. A hook that raises is read as "could not tell", which
+            fails closed the same way as a non-empty answer.
     """
     task_id = str(task.get("task_id", ""))
     kind = str(task.get("kind", ""))
@@ -4641,6 +4929,7 @@ def dispatch_task(
                         duration_seconds=capture.duration,
                         usage=usage,
                     ))
+                    _notify_after_attempt(after_attempt, outcome.attempts[-1])
                     outcome.status = STATUS_OK
                     outcome.duration_seconds = elapsed()
                     _accumulate_usage(outcome, usage)
@@ -4699,6 +4988,25 @@ def dispatch_task(
                 reclassified = _classify_failed_run(provider, capture, model)
                 if reclassified is not None:
                     status, error = reclassified
+                    # `_classify_failed_run` returns `runner_error` from the
+                    # adapter's structural hook and from nowhere else, so this is
+                    # exactly "the structural check fired" (§4.4 step 4).
+                    if (
+                        status == STATUS_RUNNER_ERROR
+                        and profile == PROFILE_AGENT_WRITE
+                        and changed_files is not None
+                    ):
+                        status, error = _denied_write_turn(
+                            changed_files, error,
+                            {
+                                "task": task,
+                                "task_id": task_id,
+                                "kind": kind,
+                                "attempt": attempt_index,
+                                "cwd": cwd,
+                                "outcome": outcome,
+                            },
+                        )
 
         capture_path = _write_failure_capture(
             phase_dir=phase_dir,
@@ -4723,6 +5031,9 @@ def dispatch_task(
             capture_path=capture_path,
         ))
         _accumulate_usage(outcome, usage)
+        # Before the ladder decides and before any backoff sleep: a caller that
+        # narrows on a rate limit (§5) reacts while this task is still retrying.
+        _notify_after_attempt(after_attempt, outcome.attempts[-1])
 
         # One `record` call is the whole decision (D3k, §7.5 rules 2/3/6): rung 1
         # is fatal to the batch; rung 3 backs off with jitter, at most three
@@ -4757,6 +5068,39 @@ def dispatch_task(
     outcome.reason = error
     outcome.duration_seconds = elapsed()
     return outcome
+
+
+def _denied_write_turn(
+    changed_files: Callable[[Dict[str, Any]], Sequence[str]],
+    error: str,
+    context: Dict[str, Any],
+) -> Tuple[str, str]:
+    """``(status, reason)`` for a write attempt whose turn a denial ended (T4.8).
+
+    With changed files, ``partial_application`` in the scheduler's own words
+    (``PARTIAL APPLICATION: …``, stop the loop, keep the snapshot, do not
+    complete the phase), never retried because the status is on no rung. With
+    none, ``runner_error`` unchanged, retried from the transport budget.
+    """
+    try:
+        changed = [str(path) for path in (changed_files(context) or ())]
+    except Exception as exc:  # noqa: BLE001 - fail closed, never retry blind
+        return STATUS_PARTIAL, (
+            f"PARTIAL APPLICATION (unverified): {error}, and the working tree "
+            f"could not be compared with the pre-batch snapshot "
+            f"({type(exc).__name__}), so no further attempt is started — a "
+            f"retry on top of a half-applied edit is unsafe. The batch loop "
+            f"stops here and the phase is NOT marked completed."
+        )
+    if not changed:
+        return STATUS_RUNNER_ERROR, error
+    shown = ", ".join(changed[:5]) + (", …" if len(changed) > 5 else "")
+    return STATUS_PARTIAL, (
+        f"PARTIAL APPLICATION: {len(changed)} file(s) changed ({shown}) but "
+        f"{error}. No further attempt is started — a retry on top of a "
+        f"half-applied edit is unsafe. The batch loop stops here and the phase "
+        f"is NOT marked completed."
+    )
 
 
 def _prompt_over_budget(
@@ -4865,6 +5209,27 @@ def _safe_parse_usage(provider: Any, capture: _Capture) -> Optional[Dict[str, An
     if not isinstance(usage, dict) or not usage:
         return None
     return usage
+
+
+def _notify_after_attempt(
+    callback: Optional[Callable[[Attempt], None]], attempt: Attempt
+) -> None:
+    """Hand one recorded attempt to ``dispatch_task``'s observer (§5).
+
+    An observer can never fail the attempt it observes: whatever it raises is
+    reported on stderr and dropped, and the attempt loop carries on exactly as
+    if no callback had been passed.
+    """
+    if callback is None:
+        return
+    try:
+        callback(attempt)
+    except Exception as exc:  # noqa: BLE001 - an observer never fails a dispatch
+        print(
+            f"multi-llm warning: after_attempt callback failed on attempt "
+            f"{attempt.index} ({type(exc).__name__}: {exc})",
+            file=sys.stderr,
+        )
 
 
 def _accumulate_usage(outcome: TaskOutcome, usage: Optional[Dict[str, Any]]) -> None:
@@ -5060,6 +5425,143 @@ def _parse_with_schema_policy(
     return status, error, data, None
 
 
+#: The cap on the text a forwarded verdict quotes (§4.5.3's exit-3 sink).
+_VERDICT_QUOTE_CHARS = 2000
+#: How much of that window sits before the matched text: enough to show what
+#: led up to it, with the rest of the window after it.
+_VERDICT_QUOTE_LEAD = 400
+
+
+def _redact_tracking(text: str, offset: int) -> Tuple[str, int]:
+    """``_redact(text)`` plus where ``offset`` lands in the redacted text.
+
+    The redacted text is always :func:`_redact` of the **unmodified** stream:
+    nothing is inserted into it to carry the position, because any inserted
+    character can split a credential so that no redaction pattern recognizes it
+    (a marker inserted into the middle of a bearer-token credential left the
+    part after the marker unredacted). The position is carried alongside instead, by
+    replaying ``write_safety``'s own passes and shifting it by each
+    replacement's length change; an offset inside a redacted span moves to the
+    span's start. Should the replay ever disagree with :func:`_redact`, the
+    position falls back to the redacted length of the prefix — the returned
+    text is still the canonical redaction, so only the window's placement can
+    be off, never what it contains.
+    """
+    redacted = _redact(text)
+    offset = min(max(0, offset), len(text))
+    try:
+        try:  # pragma: no cover - import shim mirrors the rest of utils/
+            from .write_safety import _REDACTIONS, _replace_group
+        except ImportError:  # pragma: no cover - direct-script import shim
+            from utils.write_safety import _REDACTIONS, _replace_group
+        out, pos = text or "", offset
+        if out:
+            for _name, pattern, group, predicate in _REDACTIONS:
+                pieces: List[str] = []
+                last = 0
+                new_pos = pos
+                for m in pattern.finditer(out):
+                    if predicate is not None and not predicate(m.group(group)):
+                        continue
+                    repl = _replace_group(m, group, _name)
+                    start, end = m.span()
+                    pieces.append(out[last:start])
+                    pieces.append(repl)
+                    last = end
+                    if end <= pos:
+                        new_pos += len(repl) - (end - start)
+                    elif start < pos:
+                        new_pos -= pos - start
+                pieces.append(out[last:])
+                out, pos = "".join(pieces), new_pos
+        if out == redacted:
+            return redacted, min(max(0, pos), len(redacted))
+    except Exception:  # noqa: BLE001 - the quote must never raise
+        pass
+    return redacted, min(len(_redact(text[:offset])), len(redacted))
+
+
+def _unlowered_offset(text: str, lowered_offset: int) -> int:
+    """Map an index into ``text.lower()`` back to an index into ``text``.
+
+    :func:`match_streams` reports offsets into the channel's lowered text, and
+    ``str.lower()`` is not length-preserving for every character (U+0130
+    lowers to two code points), so the raw offset can drift from the original
+    stream. Lowering is applied per character here, which sums to the same
+    length as lowering the whole string; an offset that lands inside one
+    character's expansion maps to that character.
+    """
+    lowered_offset = max(0, lowered_offset)
+    if len(text.lower()) == len(text):
+        return min(lowered_offset, len(text))
+    consumed = 0
+    for index, char in enumerate(text):
+        width = len(char.lower())
+        if consumed + width > lowered_offset:
+            return index
+        consumed += width
+    return len(text)
+
+
+def _quote_verdict(
+    provider: Any, stdout: str, stderr: str, exit_code: int, classified: str
+) -> str:
+    """The redacted text around what decided ``classified`` (T2.5).
+
+    The verdict is ``provider.classify_failure``'s and nothing here changes it.
+    ``stdout``/``stderr`` arrive already reduced by the adapter's own
+    ``vendor_text`` — applied by :func:`_classify_failed_run`, the one
+    permitted second application of that hook, see its docstring — and
+    :func:`match_streams` re-scans the reduced text with the adapter's
+    declared tables, for the quote only. When the re-scan lands on the same status
+    with a pattern, the quote is the window around that match on the channel
+    it matched; otherwise (an adapter's structural override decided a verdict
+    no pattern produced, or the re-scan found another status) it is the head of
+    the reduced ``stdout + "\n" + stderr``, never a pattern match that did not
+    decide the verdict.
+
+    Before this, the quote was ``stderr or stdout``: run b38de8bb recorded
+    ``rate_limited`` off a ``rate limit`` in opencode's stdout and quoted a
+    stderr line that said nothing of the kind.
+
+    Redaction runs on the whole reduced channel **before** the window is cut,
+    for the reason ``_redact`` gives; the match position is carried beside it by
+    :func:`_redact_tracking`, never by a character inserted into the stream.
+    """
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .providers.base import match_streams
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.providers.base import match_streams
+
+    match = None
+    try:
+        match = match_streams(
+            stdout or "",
+            stderr or "",
+            exit_code or 0,
+            auth_patterns=getattr(provider, "auth_error_patterns", None),
+            rate_limit_patterns=getattr(provider, "rate_limit_patterns", None),
+            exit_zero_markers=getattr(provider, "exit_zero_failure_markers", ()),
+        )
+    except Exception:  # noqa: BLE001 - the quote must never raise
+        match = None
+    stdout, stderr = stdout or "", stderr or ""
+    if (
+        match is not None and match.status == classified
+        and match.pattern is not None and match.offset is not None
+    ):
+        text = stdout if match.channel == "stdout" else stderr
+        offset = _unlowered_offset(text, match.offset)
+        redacted, at = _redact_tracking(text, offset)
+        if len(redacted) <= _VERDICT_QUOTE_CHARS:
+            return redacted
+        start = max(0, at - _VERDICT_QUOTE_LEAD)
+        start = min(start, len(redacted) - _VERDICT_QUOTE_CHARS)
+        return redacted[start:start + _VERDICT_QUOTE_CHARS]
+    head = stdout if not stderr else (f"{stdout}\n{stderr}" if stdout else stderr)
+    return _redact(head)[:_VERDICT_QUOTE_CHARS]
+
+
 def _classify_failed_run(
     provider: Any, capture: _Capture, model: str = ""
 ) -> Optional[Tuple[str, str]]:
@@ -5082,6 +5584,14 @@ def _classify_failed_run(
     table asks for; ``permission_denied`` can fail one task and not its
     neighbour, so a fatal mapping would be this function's complaint pointed
     the other way. They return ``None`` on purpose.
+
+    One more verdict is forwarded, and it is not a pattern verdict: an
+    adapter's ``classify_structural`` ``runner_error`` (opencode's turn ended
+    by an auto-rejected permission, §4.2 step 4), with the adapter's own reason
+    sentence. It is asked only when the pattern verdict is none of the above.
+
+    The forwarded pattern verdicts quote the text that decided them
+    (:func:`_quote_verdict`), not ``stderr or stdout``.
     """
     # §7.6(a)'s terminal status is the ladder's, imported here rather than
     # redeclared: `retry_ladder` owns the status vocabulary and this module
@@ -5120,8 +5630,46 @@ def _classify_failed_run(
         STATUS_AUTH_FAILED, STATUS_RATE_LIMITED, STATUS_INVALID_MODEL,
         STATUS_SANDBOX_UNAVAILABLE,
     ):
+        # §4.2 step 4 (T4.3): a verdict the adapter reads off the stream's
+        # SHAPE, with its own reason — opencode's turn ended by an auto-rejected
+        # permission. It is consulted only here, after every forwarded pattern
+        # verdict above had its chance, so a genuine vendor 429 or auth error
+        # in the same stream still wins; and ahead of everything else, so the
+        # attempt is recorded `runner_error` with the permission sentence rather
+        # than `unparseable` with "No text events found in output". Its reason
+        # is the adapter's own sentence, so the matched-pattern quote below
+        # never applies to it.
+        structural = getattr(provider, "classify_structural", None)
+        if structural is None:
+            return None
+        try:
+            found = structural(
+                capture.stdout, capture.stderr, capture.exit_code or 0
+            )
+        except Exception:  # noqa: BLE001 - classification must not raise
+            return None
+        if (
+            isinstance(found, tuple) and len(found) == 2
+            and found[0] == STATUS_RUNNER_ERROR and found[1]
+        ):
+            return STATUS_RUNNER_ERROR, _redact(str(found[1]))
         return None
-    tail = _tail(_redact(capture.stderr or capture.stdout), 2000)
+    # T2.5: the quote is cut from the VENDOR-reduced capture, around the text
+    # that decided the verdict. This is the one application of `vendor_text`
+    # outside `classify_failure` (its docstring names both), and it is for the
+    # quote only: the verdict above is already decided and nothing below moves
+    # it. A reduction that raises quotes the capture as it came.
+    reduced_out, reduced_err = capture.stdout or "", capture.stderr or ""
+    if getattr(provider, "vendor_text", None) is not None:
+        try:
+            reduced_out, reduced_err = provider.vendor_text(
+                reduced_out, reduced_err
+            )
+        except Exception:  # noqa: BLE001 - the quote must never raise
+            reduced_out, reduced_err = capture.stdout or "", capture.stderr or ""
+    tail = _quote_verdict(
+        provider, reduced_out, reduced_err, capture.exit_code or 0, classified
+    )
     if classified == STATUS_SANDBOX_UNAVAILABLE:
         # D6 step 4. `STATUS_SANDBOX_UNAVAILABLE` *is* the classifier's
         # `CATEGORY_SANDBOX_UNAVAILABLE` string, on D4's pattern. The stream
@@ -5586,6 +6134,17 @@ class _ProviderBackpressure:
             self._in_flight[provider] = max(0, self._in_flight.get(provider, 0) - 1)
             self._condition.notify_all()
 
+    def can_narrow(self, provider: str) -> bool:
+        """Would :meth:`narrow` still change ``provider``'s slots right now?
+
+        A snapshot for the event-loop thread (the only one that mutates the
+        limits): it decides whether a dispatch needs the per-attempt narrowing
+        hook at all, never whether a narrowing happens — :meth:`narrow` re-checks
+        under the condition.
+        """
+        current = self._limits.get(provider)
+        return current is not None and current > self.MIN_SLOTS
+
     async def narrow(self, provider: str) -> Optional[int]:
         """Halve ``provider``'s slots. Returns the new count, or ``None`` at the floor."""
         async with self._condition:
@@ -5606,6 +6165,80 @@ def _saw_rate_limit(outcome: TaskOutcome) -> bool:
     if outcome.status == STATUS_RATE_LIMITED:
         return True
     return any(attempt.status == STATUS_RATE_LIMITED for attempt in outcome.attempts)
+
+
+def _narrow_on_rate_limited_attempt(
+    backpressure: _ProviderBackpressure,
+    provider: str,
+    loop: asyncio.AbstractEventLoop,
+    task_id: str,
+    state: Dict[str, bool],
+) -> Callable[[Attempt], None]:
+    """The ``after_attempt`` hook that narrows ``provider`` on a 429 attempt (§5).
+
+    ``dispatch_task`` runs under ``asyncio.to_thread``, so this fires on that
+    worker thread, never on the event loop: ``loop`` is captured on the loop
+    thread beforehand, and the narrowing is submitted to it with
+    ``run_coroutine_threadsafe``. The hook never waits on that future — blocking
+    here would stall the attempt loop, backoff sleep included — so the outcome
+    is reported from the future's done-callback: the exception if ``narrow()``
+    raised, otherwise the usual log line with the attempt number added.
+
+    At most one narrowing per task: ``state["done"]`` is set before the
+    submission, so it holds even when ``narrow()`` later fails, and the task
+    wrapper's post-return check skips a task that already narrowed. Nothing in
+    here may propagate into ``dispatch_task`` — every failure is logged and the
+    attempt stands as recorded.
+    """
+
+    def report(future: Any, attempt_index: int) -> None:
+        try:
+            exc = future.exception()
+            if exc is not None:
+                print(
+                    f"multi-llm warning: narrowing {provider} after a rate limit "
+                    f"on {task_id} attempt {attempt_index} failed "
+                    f"({type(exc).__name__}: {exc})",
+                    file=sys.stderr,
+                )
+                return
+            narrowed = future.result()
+            if narrowed is not None:
+                print(
+                    f"[exec-subagents] {provider} reported a rate limit "
+                    f"({task_id}, attempt {attempt_index}) — narrowing it to "
+                    f"{narrowed} in-flight slot(s) for the rest of the batch"
+                )
+        except Exception as report_exc:  # noqa: BLE001 - reporting never raises
+            print(
+                f"multi-llm warning: narrowing {provider} after a rate limit on "
+                f"{task_id}: {type(report_exc).__name__}: {report_exc}",
+                file=sys.stderr,
+            )
+
+    def on_attempt(attempt: Attempt) -> None:
+        try:
+            if state["done"] or attempt.status != STATUS_RATE_LIMITED:
+                return
+            state["done"] = True
+            coro = backpressure.narrow(provider)
+            try:
+                future = asyncio.run_coroutine_threadsafe(coro, loop)
+            except BaseException:
+                coro.close()  # never scheduled: no "never awaited" warning
+                raise
+            future.add_done_callback(
+                lambda done, index=attempt.index: report(done, index)
+            )
+        except Exception as exc:  # noqa: BLE001 - an observer never fails a dispatch
+            print(
+                f"multi-llm warning: could not narrow {provider} after a rate "
+                f"limit on {task_id} attempt {attempt.index} "
+                f"({type(exc).__name__}: {exc})",
+                file=sys.stderr,
+            )
+
+    return on_attempt
 
 
 def _judge_dispatch_argv_preview(
@@ -5807,6 +6440,24 @@ async def _gather(
             {"before_attempt": _judge_audit_before_attempt(phase_dir, anchor)}
             if is_judge else {}
         )
+        # §5: narrow on the rate-limited *attempt*, not on the finished task —
+        # a task that backs off and retries can hold its verdict for many
+        # minutes, and every sibling acquiring meanwhile should already see the
+        # narrower gate. Passed under the same F6 rule as `before_attempt`: only
+        # when narrowing can still change something, and only to a
+        # `dispatch_task` that takes the keyword, so a stand-in double keeps
+        # the exact kwargs it always received. A dispatch without it still
+        # narrows below, after it returns.
+        narrowing = {"done": False}
+        attempt_kwargs: Dict[str, Any] = (
+            {"after_attempt": _narrow_on_rate_limited_attempt(
+                backpressure, provider_name, asyncio.get_running_loop(),
+                str(task.get("task_id", index)), narrowing,
+            )}
+            if backpressure.can_narrow(provider_name)
+            and _accepts_keyword(dispatch_task, "after_attempt")
+            else {}
+        )
         try:
             outcome = await asyncio.to_thread(
                 dispatch_task,
@@ -5816,6 +6467,7 @@ async def _gather(
                 anchor=anchor,
                 cwd=cwd,
                 **judge_kwargs,
+                **attempt_kwargs,
             )
         finally:
             await backpressure.release(provider_name)
@@ -5824,7 +6476,9 @@ async def _gather(
         if outcome.fatal and not fatal["hit"]:
             fatal["hit"] = True
             fatal["spec"] = runner
-        if _saw_rate_limit(outcome):
+        # At most once per task: a task whose attempt already narrowed (or
+        # tried to — the flag is set before `narrow()` is submitted) is skipped.
+        if not narrowing["done"] and _saw_rate_limit(outcome):
             narrowed = await backpressure.narrow(provider_name)
             if narrowed is not None:
                 print(
@@ -6254,7 +6908,8 @@ def _preview_argv(
         return argv
 
     with provider_dispatch_context(
-        provider, model, profile, anchor=anchor
+        provider, model, profile, anchor=anchor,
+        runner_version=_preflight_version(provider),
     ) as dispatch:
         if dispatch.refusal:
             return None, dispatch.refusal

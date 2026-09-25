@@ -1,0 +1,113 @@
+# The T4.9 deny rows' scenario
+# (plans/opencode-validator-false-rate-limit-and-denied-turn.md §4.5, T4.9;
+# tests/test_container_opencode_deny.py).
+#
+# WHAT IT ADDS TO `container_full_chain.yaml`: one `scripted_tool_call:` block,
+# on the chat-completions surface only. Every opencode request that advertises
+# opencode's own `read` tool, and does not yet carry our call's result, is
+# answered with ONE `tool_calls` message: `read` of `/etc/hostname`, a path
+# outside every workspace this lane runs in. What happens next is the thing
+# under test:
+#
+#   * with the agent-layer `external_directory: {"*": "deny"}` row that
+#     `OpenCodeProvider` delivers through `OPENCODE_CONFIG_CONTENT` (T4.1 on
+#     `agent-readonly` and `generate`, T4.7 on `agent-write`; carried into the
+#     child by the container wrapper since T4.9), opencode reports the refusal
+#     BACK TO THE MODEL: a second request reaches the stub carrying a
+#     `role: "tool"` message that starts "The user has specified a rule which
+#     prevents you from using this specific tool call", and the turn goes on;
+#   * without it, `opencode run` auto-rejects the built-in `ask`, prints
+#     `! permission requested: external_directory (/etc/*); auto-rejecting` on
+#     stderr and ENDS THE TURN (1.18.32): no second request, no answer.
+#
+# `after_output: text` is what lets one script ride a whole workflow row: the
+# request carrying our call's result is answered by the SAME rules below, as if
+# no script were armed, so every phase still gets its own schema-valid fixture
+# and the row can be graded to exit 0. The follow-up's extracted prompt is the
+# original prompt plus the refusal text, and none of the words the negative
+# lookaheads below exclude appears in opencode's refusal, so each turn resolves
+# to the rule it would have without the call.
+#
+# THE RULES BELOW ARE `container_full_chain.yaml`'s, VERBATIM (comments
+# dropped). `tests/test_scenario_matcher_parity.py` asserts the two `prompts:`
+# lists and `on_unmatched` are equal, so the recorded-turn sweep that file runs
+# over the chain scenario covers this one too. Edit the chain scenario and copy
+# the list here; never diverge them.
+#
+# Surfaces: `[chat]` only. opencode's seeded `stub` provider is
+# `@ai-sdk/openai-compatible`, so every opencode turn is chat. A Responses or
+# Anthropic surface is untouched, and no other CLI runs on these rows.
+name: scripted_opencode_read_deny
+description: "T4.9 deny rows — one out-of-workspace `read` per opencode turn, then the chain's own answer"
+
+scripted_tool_call:
+  surfaces: [chat]
+  name: read
+  call_id: call_mllm_read_deny
+  arguments:
+    filePath: /etc/hostname
+  after_output: text
+
+# Every turn must be answered by a rule, exactly as on the chain rows.
+on_unmatched: fail
+
+prompts:
+  - pattern: "Generate a concise, sentence-case title|You are a title generator\\. You output ONLY a thread title|Generate a short title \\(four words or less\\)|You are tasked with generating the session title"
+    fixture: "../responses/session_title/plain_title.txt"
+    description: "session-title generator (claude-code, opencode, kilocode, goose, grok)"
+
+  - pattern: "You are a reminder observer for the main agent"
+    fixture: "../responses/muse_reminder/no_reminder.md"
+    description: "muse background reminder observer"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Reply with exactly this token and nothing else: MULTI_LLM_NESTED_EXEC_OK"
+    fixture: "../responses/nested_exec/probe_not_measured.txt"
+    description: "nested-exec preflight probe: utils/subagent_executor.NESTED_PROBE_PROMPT"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing an implementation plan for completeness, correctness, and clarity\\."
+    fixture: "../responses/review_plan/raw_suggestions.json"
+    description: "review-plan fan-out: prompts/plan_review.txt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are validating review suggestions for accuracy\\..*Each issue record carries `file` and `line_range`"
+    fixture: "../responses/validation/code_review_valid.json"
+    description: "code-review issue validation (the guidance paragraph is the discriminator)"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent))(?!.*Each issue record carries `file` and `line_range`).*You are validating review suggestions for accuracy\\..*(?:\\n## Context \\(Tasks file|\\n## Implementation Tasks)"
+    fixture: "../responses/validation/task_suggestions_valid.json"
+    description: "review-tasks suggestion validation (the task list is in the prompt: its own context block, or the plan's task section)"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent))(?!.*Each issue record carries `file` and `line_range`)(?!.*(?:\\n## Context \\(Tasks file|\\n## Implementation Tasks)).*You are validating review suggestions for accuracy\\."
+    fixture: "../responses/validation/plan_suggestions_valid.json"
+    description: "review-plan suggestion validation (the only one whose prompt predates decomposition)"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Apply the following (?:\\d+ related )?suggestions? to the plan file"
+    fixture: "../responses/write_batches/apply_suggestions.json"
+    description: "apply-suggestions batch: utils/suggestion_batcher.format_batch_for_prompt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Apply the following (?:\\d+ related )?task suggestions? to the tasks file"
+    fixture: "../responses/write_batches/apply_task_suggestions.json"
+    description: "apply-task-suggestions batch"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are implementing a specific task from a larger plan\\."
+    fixture: "../responses/write_batches/implement.json"
+    description: "implement batch: prompts/implementation_task.txt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*Fix the following (?:\\d+ related issues in|code issue)"
+    fixture: "../responses/write_batches/apply_code_fixes.json"
+    description: "apply-code-fixes batch: utils/code_fix_batcher.format_fix_batch_prompt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are decomposing the plan `[^`]+` into implementation tasks\\."
+    fixture: "../responses/generate_tasks/tasks_v1.json"
+    description: "task generation: tests/golden/prompts/task_generation.txt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing implementation tasks that were generated from a feature plan\\."
+    fixture: "../responses/review_tasks/coverage_suggestions.json"
+    description: "review-tasks fan-out: prompts/task_review.txt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are reviewing code changes that implement a feature plan\\."
+    fixture: "../responses/code_review/container_issues.json"
+    description: "review-code fan-out: prompts/code_review.txt"
+
+  - pattern: "(?s)^(?!.*(?:title generator|sentence-case title|short title \\(four words|generating the session title|reminder observer for the main agent)).*You are answering a question about an implementation plan\\."
+    fixture: "../responses/ask/plan_question.md"
+    description: "standalone ask: prompts/ask.txt"

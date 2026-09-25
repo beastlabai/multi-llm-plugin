@@ -48,7 +48,12 @@ Environment Variables (New - for scenario-based testing):
         fallback). The fake binary has no session of its own, so the caller
         declares it; the HTTP stub derives the same number from the per-exec id
         in its base URL. Ignored by any scenario that declares no ``turns:``.
-    MOCK_LLM_CONFIG: JSON string with dynamic configuration
+    MOCK_LLM_CONFIG: JSON string with dynamic configuration. ``"response"`` is
+        the answer text. ``"error"`` (with an optional ``"exit_code"``, default
+        1) makes the run FAIL the way the provider's real CLI reports a failure
+        (``format_failure``) instead of answering with the error text: a
+        classifier that reads only what the vendor wrote (``vendor_text``) must
+        find it where the vendor puts it, never in the model's answer.
     MOCK_LLM_CALL_LOG: Path to JSONL file for logging all invocations
     MOCK_LLM_PLUGIN: Path to a **throwaway** one-off fake adapter (M22). See
         ``load_mock_plugin``/``install_mock_plugin`` at the bottom of this file:
@@ -959,6 +964,41 @@ def format_codex_output(content: str) -> str:
     return "\n".join(json.dumps(event) for event in events)
 
 
+def configured_failure() -> Optional[tuple]:
+    """``(message, exit_code)`` from ``MOCK_LLM_CONFIG``'s ``"error"``, or ``None``."""
+    config_json = os.environ.get("MOCK_LLM_CONFIG")
+    if not config_json:
+        return None
+    try:
+        config = json.loads(config_json)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(config, dict) or not isinstance(config.get("error"), str):
+        return None
+    exit_code = config.get("exit_code", 1)
+    return config["error"], exit_code if isinstance(exit_code, int) else 1
+
+
+def format_failure(provider: str, message: str) -> tuple:
+    """``(stdout, stderr)`` of a failed run, in the provider's real shape.
+
+    codex reports a failed turn on stdout as a top-level ``error`` event and a
+    ``turn.failed`` event, stderr empty — the codex-cli 0.146.0 invalid-key
+    capture (``tests/test_failure_classifier.py``'s ``CODEX_TURN_FAILED_401``)
+    and ``tests/fixtures/codex/0.156.1/SCHEMA.md``'s top-level events. Every
+    other identity puts the sentence on stderr, with nothing on stdout.
+    """
+    if provider == "codex":
+        events = [
+            {"type": "thread.started", "thread_id": "mock-thread-1"},
+            {"type": "turn.started"},
+            {"type": "error", "message": message},
+            {"type": "turn.failed", "error": {"message": message}},
+        ]
+        return "\n".join(json.dumps(event) for event in events), ""
+    return "", message
+
+
 def format_kilocode_output(content: str) -> str:
     """Format output for kilocode provider.
 
@@ -1840,6 +1880,17 @@ def main() -> int:
         time.sleep(0.05)  # 50ms
         print("ERROR: Simulated timeout - operation timed out", file=sys.stderr)
         return 124  # Standard timeout exit code
+
+    # MOCK_LLM_CONFIG's "error": the run fails in the provider's own shape.
+    failure = configured_failure()
+    if failure is not None:
+        message, exit_code = failure
+        stdout, stderr = format_failure(provider, message)
+        if stdout:
+            print(stdout)
+        if stderr:
+            print(stderr, file=sys.stderr)
+        return exit_code
 
     # L5 (§9.6.e): the two agy stubs that decide whether a child outlives the
     # outer deadline. Placed after the call log so the argv is recorded either

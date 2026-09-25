@@ -3369,7 +3369,9 @@ class TestOmpFileRecoveryHonoursTheTerminalCode:
         assert result["success"] is False
         assert result["error_code"] == ERROR_TIMEOUT
         assert "run ended inside a tool call" in result["error"]
-        assert "bash" in result["error"] and "Command aborted" in result["error"]
+        assert "bash" in result["error"]
+        # The tool's result is content, not a verdict: never in the error.
+        assert "Command aborted" not in result["error"]
         assert result.get("data") in (None, {}, [])
         assert result["output_file"] == str(path)
         assert json.loads(path.read_text()) == findings, "the file was rewritten"
@@ -3392,6 +3394,8 @@ class TestOmpFileRecoveryHonoursTheTerminalCode:
         assert result["success"] is False
         assert result["error_code"] == ERROR_SUBPROCESS_FAILED
         assert "was denied approval" in result["error"]
+        # The denial notice is tool-channel text: never in the error.
+        assert "requires approval" not in result["error"]
         assert json.loads(path.read_text()) == findings
 
     def test_an_ordinary_tool_error_the_model_recovered_from_is_not_a_denial(self, tmp_path):

@@ -6218,6 +6218,76 @@ class TestNeedsHumanOptions:
         assert result[-1] == {"human": mode_table.NEEDS_HUMAN_OPTION}
 
 
+class TestTheToolResultCarriesTheValidationCounts:
+    """§6 T6.1, end to end on a detached run: the worker's checkpoint →
+    `.status.json` → `classify_run`'s view → `run_status`'s result line → the
+    tool result the opencode host receives. Run b38de8bb's summary left out
+    its 3 needs-human-decision groups because no hop carried the counts."""
+
+    VALUES = {
+        "word": "review-plan", "plan": "/p.md", "question": "", "extraFlags": [],
+    }
+
+    def test_a_finished_detached_run_hands_the_host_its_counts(
+        self, built_package, tmp_path, capsys
+    ):
+        from utils import review_orchestrator_base as rob
+        from utils import status_file
+
+        plan = tmp_path / "p.md"
+        plan.write_text("# p\n", encoding="utf-8")
+        phase = tmp_path / "p" / "review-plan"
+        phase.mkdir(parents=True)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+        })
+        groups = (
+            [{"validation_status": "valid"}] * 53
+            + [{"validation_status": "invalid"}]
+            + [{"validation_status": "needs-human-decision"}] * 3
+        )
+        # The worker's own write, through the one recorder.
+        counts = rob.record_validation_counts(str(phase), groups)
+        assert counts == {
+            "valid": 53, "invalid": 1,
+            "needs_human_decision": 3, "validation_failed": 0,
+        }
+        status_file.claim_run(str(phase), {
+            "run_id": "run-counts-js-01", "state": "done", "exit_code": 0,
+            "detached": True, "mode": "review-plan",
+        })
+
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            # Pinned by run id, as the plugin's supervised poll pins it: an
+            # unselected listing carries no single run's counts.
+            assert run_status.main([
+                "--plan-file", str(plan), "--view", "run",
+                "--run-id", "run-counts-js-01",
+            ]) == 0
+            poll_line = ctx.payload(0)
+        finally:
+            cli_common.deactivate_result()
+        stdout = capsys.readouterr().out
+        assert poll_line["validation_counts"] == counts
+
+        result = node_json(
+            f"""
+            const child = {json.dumps({
+                "code": 0, "argv": ["uv", "run"], "stdout": stdout,
+                "stderr": "", "result": poll_line, "resultRaw": None,
+                "truncated": False, "banner": {}, "aborted": False,
+                "timedOut": False, "spawnError": None,
+            })}
+            emit(T.terminalResult(
+              child, {{ anchor: "/anchor", surface, values: {json.dumps(self.VALUES)} }},
+            ))
+            """,
+            built_package,
+        )
+        assert result["result"]["validation_counts"] == counts
+
+
 # ===========================================================================
 # The session model
 # ===========================================================================

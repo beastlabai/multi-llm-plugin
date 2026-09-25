@@ -3440,3 +3440,62 @@ def _stop_container(name: str) -> None:
                            capture_output=True, text=True)
     if alive.returncode == 0 and alive.stdout.strip() == "true":
         subprocess.run(["docker", "kill", name], capture_output=True, timeout=30)
+
+
+# --------------------------------------------------------------------------- #
+# a2's structured model echo (plan opencode-validator-false-rate-limit-and-
+# denied-turn.md T7.12). A substring search of the pinned slug over the whole
+# stream cannot grade pi: pi's `message.model` is always the REQUESTED id
+# (copied from the model config, pi-ai openai-completions.js:159-160), so the
+# requested slug is present even when the vendor served another model — the
+# substitution a2 exists to catch. The served model is `responseModel` (set only
+# when the vendor's chunk names a different model, docs/message-types.md) else
+# `model`, exactly as pi's own cache-warmer.js:249 computes it, read off the
+# TERMINAL assistant `message_end` with the shipped pi-family reader.
+# --------------------------------------------------------------------------- #
+
+def pi_served_model(stdout: str) -> tuple[str, str, str] | None:
+    """``(provider, served model, field)`` off pi's terminal assistant message.
+
+    ``field`` names what supplied the id (``responseModel`` or ``model``).
+    ``None`` when the stream holds no assistant ``message_end``.
+    """
+    from utils.providers.pi_family_stream import _assistant_ends, _events
+
+    events, _junk = _events(stdout or "")
+    messages = _assistant_ends(events)
+    if not messages:
+        return None
+    final = messages[-1]
+    response_model = final.get("responseModel")
+    if isinstance(response_model, str) and response_model.strip():
+        return str(final.get("provider") or ""), response_model, "responseModel"
+    return str(final.get("provider") or ""), str(final.get("model") or ""), "model"
+
+
+#: CLIs whose a2 grade is a per-CLI structural comparison rather than the
+#: substring search, keyed to the extractor. No other row's grade changes.
+MODEL_ECHO_STRUCTURED = {"pi": pi_served_model}
+
+
+def grade_structured_model_echo(cli: str, pinned: str, stdout: str) -> tuple[bool, str]:
+    """``(passed, outcome)`` for a :data:`MODEL_ECHO_STRUCTURED` row.
+
+    The pinned ``model_arg`` is normalised the way
+    ``MODEL_ECHO_DROPS_FIRST_SEGMENT`` documents (``openrouter/deepseek/x`` →
+    route ``openrouter``, id ``deepseek/x``): the served id must equal the id and
+    the message's ``provider`` must equal the route. The outcome names the field
+    that supplied the served id.
+    """
+    route, _sep, want = pinned.partition("/")
+    found = MODEL_ECHO_STRUCTURED[cli](stdout)
+    if found is None:
+        return False, f"{cli}: no terminal assistant message_end to read a model from"
+    provider, served, field = found
+    if provider != route:
+        return False, (f"{cli}: provider {provider!r} on the terminal message, "
+                       f"pinned route {route!r} (from {pinned!r})")
+    if served != want:
+        return False, (f"{cli}: served {served!r} (from {field}), "
+                       f"pinned {want!r} (from {pinned!r})")
+    return True, f"served {served!r} via {provider!r} (from {field})"

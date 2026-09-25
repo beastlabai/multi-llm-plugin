@@ -599,8 +599,10 @@ class TestFailureLadder:
 
     def test_rung_1_auth_failed_is_not_retried(self, tmp_path, runner_env, monkeypatch):
         runner_env.use("codex:gpt-5.5")
+        # The failure arrives where codex writes it (`error` + `turn.failed`
+        # events), never as the model's answer — `vendor_text` drops that.
         monkeypatch.setenv("MOCK_LLM_CONFIG", json.dumps(
-            {"response": "Not logged in. Please log in with `codex login`."}
+            {"error": "Not logged in. Please log in with `codex login`."}
         ))
         outcome = self._dispatch(tmp_path, runner_env, retries=3)
         assert outcome.status == executor.STATUS_AUTH_FAILED
@@ -721,7 +723,7 @@ class TestFailureLadder:
     ):
         runner_env.use("codex:gpt-5.5")
         monkeypatch.setenv("MOCK_LLM_CONFIG", json.dumps(
-            {"response": "Error 429: rate limit exceeded, try again"}
+            {"error": "Error 429: rate limit exceeded, try again"}
         ))
         outcome = self._dispatch(tmp_path, runner_env, retries=0)
         assert outcome.status == executor.STATUS_RATE_LIMITED
@@ -949,7 +951,7 @@ class TestBatchOutcome:
         """An unauthenticated runner fails the batch; siblings are not dispatched."""
         runner_env.use("codex:gpt-5.5", max_concurrent_subagents=1)
         monkeypatch.setenv("MOCK_LLM_CONFIG", json.dumps(
-            {"response": "Not logged in. Please log in."}
+            {"error": "Not logged in. Please log in."}
         ))
         tasks = [_validation_batch(tmp_path, i) for i in range(3)]
         report = executor.run_tasks(
@@ -2405,7 +2407,7 @@ class TestUsageMetrics:
 
     @pytest.mark.parametrize("name", [
         "agy", "aider", "cline", "copilot", "gemini", "goose", "grok",
-        "kilocode", "kimi", "muse", "pi", "qwen-code", "vibe",
+        "kilocode", "kimi", "muse", "qwen-code", "vibe",
     ])
     def test_every_other_adapter_declares_usage_none(self, name):
         """Duration-only runners say so rather than promising token counts."""
@@ -3834,7 +3836,7 @@ class TestInvalidModelIsFatal:
     ):
         runner_env.use("codex:gpt-5.5", max_concurrent_subagents=1)
         monkeypatch.setenv("MOCK_LLM_CONFIG", json.dumps(
-            {"response": "Not logged in. Please log in."}
+            {"error": "Not logged in. Please log in."}
         ))
         report = executor.run_tasks(
             self._tasks(tmp_path, 2), phase_dir=str(tmp_path), kind="validation",
@@ -4370,7 +4372,10 @@ class TestCredentialFreeModels:
                 profile="agent-readonly",
             )
         assert excinfo.value.reason_code == "not_authenticated"
-        assert set(executor._AUTH_CACHE) == {"opencode|0"}
+        # Only the credential-free verdict is cached; the refusal is not. The
+        # key also carries profile, model prefix and hermeticity (plan §8
+        # T8.4/T8.13), and its needs-credentials bit is still the second field.
+        assert set(executor._AUTH_CACHE) == {"opencode|0|agent-readonly|opencode|hermetic"}
 
     def test_the_refusal_quotes_the_stream_the_verdict_came_from(
         self, monkeypatch
@@ -5826,3 +5831,238 @@ class TestFailureCaptureRotation:
     def test_a_first_capture_is_written_as_before(self, tmp_path):
         path = Path(self._write(tmp_path, "only"))
         assert [p.name for p in path.parent.iterdir()] == ["task_generation.attempt1.json"]
+
+
+# ---------------------------------------------------------------------------
+# T2.5 — a forwarded verdict quotes the text that decided it
+# T4.3 — opencode's denied turn is recorded `runner_error` with its reason
+# (plans/opencode-validator-false-rate-limit-and-denied-turn.md)
+# ---------------------------------------------------------------------------
+
+_OPENCODE_1_18_32 = _OPENCODE_FIXTURES / "1.18.32"
+_DENIED_STDOUT = (_OPENCODE_1_18_32 / "denied_permission_turn_end.jsonl").read_text(
+    encoding="utf-8"
+)
+_DENIED_STDERR = (
+    _OPENCODE_1_18_32 / "denied_permission_turn_end.stderr.txt"
+).read_text(encoding="utf-8")
+_DENIED_SENTENCE = (
+    "opencode ended the turn after an auto-rejected permission "
+    "(external_directory /etc/*); no final answer"
+)
+_OC_429_EVENT = json.dumps({
+    "type": "error", "timestamp": 1, "sessionID": "ses_0",
+    "error": {"name": "APIError", "data": {
+        "message": "Rate limit exceeded", "statusCode": 429,
+    }},
+}, separators=(",", ":"))
+
+
+class TestTheVerdictQuotesWhatMatched:
+    """T2.5: not `stderr or stdout` — the reduced text around the match."""
+
+    class _Capture:
+        def __init__(self, stdout, stderr, exit_code=1):
+            self.stdout = stdout
+            self.stderr = stderr
+            self.exit_code = exit_code
+
+    def test_a_stdout_error_event_is_quoted_even_beside_stderr(self):
+        provider = registry.get_provider("opencode")
+        stdout = _DENIED_STDOUT + _OC_429_EVENT + "\n"
+        verdict = executor._classify_failed_run(
+            provider, self._Capture(stdout, _DENIED_STDERR, 0), "m"
+        )
+        assert verdict is not None
+        status, reason = verdict
+        assert status == executor.STATUS_RATE_LIMITED
+        assert "Rate limit exceeded" in reason and "statusCode" in reason
+        # Plan text quoted by a tool_use never reaches the quote: the reduction
+        # dropped it, and the stderr line did not decide the verdict.
+        assert "rate_limit_hit" not in reason
+        assert "auto-rejecting" not in reason
+
+    def test_a_match_on_stderr_quotes_the_right_slice(self):
+        provider = registry.get_provider("claude-code")
+        filler = "x" * 3000
+        stderr = f"{filler}\nError: 429 Too Many Requests\n{filler}"
+        verdict = executor._classify_failed_run(
+            provider, self._Capture("stdout says nothing", stderr), "m"
+        )
+        status, reason = verdict
+        assert status == executor.STATUS_RATE_LIMITED
+        assert "Error: 429 Too Many Requests" in reason
+        assert len(reason) < 2000 + 200
+        assert "stdout says nothing" not in reason
+
+    def test_the_offset_is_rebased_onto_stderr(self):
+        """The joined haystack's offset is not the channel's own."""
+        from utils.providers.base import match_streams
+
+        stdout = "a" * 500
+        stderr = "b" * 100 + " rate limit exceeded"
+        match = match_streams(stdout, stderr, 1)
+        assert match.channel == "stderr"
+        assert stderr[match.offset:].startswith("rate limit")
+
+    @pytest.mark.parametrize("rescan", ["none", "other"])
+    def test_a_structural_verdict_the_rescan_cannot_see_quotes_the_head(
+        self, monkeypatch, rescan
+    ):
+        """An override's verdict no pattern produced: the reduced head, never a
+        pattern match that did not decide the verdict."""
+        class _Structural:
+            name = "fake"
+            auth_error_patterns = ("not logged in",)
+            rate_limit_patterns = ("rate limit",)
+            exit_zero_failure_markers = ()
+
+            def vendor_text(self, stdout, stderr):
+                return "VENDOR HEAD " + stdout[-20:], stderr
+
+            def classify_failure(self, stdout, stderr, exit_code):
+                return executor.STATUS_AUTH_FAILED
+
+        stdout = "prose " * 50 + ("rate limit" if rescan == "other" else "")
+        verdict = executor._classify_failed_run(
+            _Structural(), self._Capture(stdout, "")
+        )
+        status, reason = verdict
+        assert status == executor.STATUS_AUTH_FAILED
+        assert "VENDOR HEAD" in reason
+        assert "prose prose prose prose" not in reason
+
+    def test_a_secret_beside_the_match_is_redacted(self):
+        secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        stderr = f"aws_secret_access_key={secret} then 429 too many requests"
+        verdict = executor._classify_failed_run(
+            registry.get_provider("claude-code"), self._Capture("", stderr)
+        )
+        assert verdict[0] == executor.STATUS_RATE_LIMITED
+        assert secret not in verdict[1]
+
+
+class TestHostSinksNeverSeeTheReadonlyChildsConfigContent:
+    """T4.7: `agent-readonly` under `hermetic: off` merges its rows over the
+    inherited `OPENCODE_CONFIG_CONTENT`, which may hold an inline `apiKey`.
+    The child receives it; no host sink (`failed/*.attemptN.json`,
+    `subagent_batch_report.json`, `.status.json`, the run's stdout/stderr that
+    `orchestrator-run.log` is under `--detach`) records it."""
+
+    SENTINEL = "sk-canary-not-a-key-t47ro"
+    MARKERS = ("OPENCODE_CONFIG_CONTENT", SENTINEL, "doom_loop",
+               "*.env.example", "continue_loop_on_deny")
+
+    def test_the_read_lane(self, tmp_path, runner_env, monkeypatch, capsys):
+        path = runner_env.use("opencode:opencode/big-pickle", subagent_retries=1)
+        path.write_text(
+            path.read_text() + "providers:\n  opencode:\n    hermetic: 'off'\n",
+            encoding="utf-8",
+        )
+        registry._config = None
+        registry._config_key = None
+        _install_opencode_capture(
+            runner_env.bin_dir, _DENIED_STDOUT, _DENIED_STDERR, exit_code=0
+        )
+        dump = tmp_path.parent / f"{tmp_path.name}-child-env.txt"
+        script = runner_env.bin_dir / "opencode"
+        script.write_text(
+            script.read_text().replace(
+                "cat >/dev/null\n", f'cat >/dev/null\nenv > "{dump}"\n', 1
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps(
+            {"provider": {"mine": {"options": {"apiKey": self.SENTINEL}}}}
+        ))
+        phase_dir = tmp_path / "phase"
+        phase_dir.mkdir()
+        task_file = _write_validation_task_file(
+            phase_dir, [_validation_batch(phase_dir)]
+        )
+        report = executor.run_task_file(str(task_file), phase_dir=str(phase_dir))
+        assert not report.ok
+        captured = capsys.readouterr()
+
+        child = dict(
+            line.split("=", 1) for line in dump.read_text().splitlines() if "=" in line
+        )
+        document = json.loads(child["OPENCODE_CONFIG_CONTENT"])
+        assert document["provider"]["mine"]["options"]["apiKey"] == self.SENTINEL
+        assert document["agent"]["plan"]["permission"]["doom_loop"] == "deny"
+        assert "XDG_CONFIG_HOME" not in child or "multi-llm-opencode-" not in child[
+            "XDG_CONFIG_HOME"]
+
+        texts = {"<stdout+stderr>": captured.out + captured.err}
+        for found in phase_dir.rglob("*"):
+            if found.is_file():
+                texts[str(found)] = found.read_text(encoding="utf-8", errors="replace")
+        assert any("/failed/" in name for name in texts)
+        assert any(name.endswith(".status.json") for name in texts)
+        for name, text in texts.items():
+            for marker in self.MARKERS:
+                assert marker not in text, f"{marker!r} recorded in {name}"
+
+
+class TestOpenCodeDeniedTurnIsRecorded:
+    """T4.3: the executor forwards the structural verdict and its sentence."""
+
+    class _Capture(TestTheVerdictQuotesWhatMatched._Capture):
+        pass
+
+    def test_classify_failed_run_forwards_runner_error_with_the_sentence(self):
+        verdict = executor._classify_failed_run(
+            registry.get_provider("opencode"),
+            self._Capture(_DENIED_STDOUT, _DENIED_STDERR, 0), "m",
+        )
+        assert verdict == (executor.STATUS_RUNNER_ERROR, _DENIED_SENTENCE)
+
+    def test_a_genuine_vendor_error_still_wins(self):
+        verdict = executor._classify_failed_run(
+            registry.get_provider("opencode"),
+            self._Capture(_DENIED_STDOUT + _OC_429_EVENT + "\n", _DENIED_STDERR, 0),
+            "m",
+        )
+        assert verdict[0] == executor.STATUS_RATE_LIMITED
+
+    def test_an_adapter_without_the_hook_is_unchanged(self):
+        class _NoHook:
+            def classify_failure(self, stdout, stderr, exit_code):
+                return executor.STATUS_RUNNER_ERROR
+
+        assert executor._classify_failed_run(
+            _NoHook(), self._Capture(_DENIED_STDOUT, _DENIED_STDERR, 0)
+        ) is None
+
+    def test_dispatch_records_runner_error_and_spends_the_transport_budget(
+        self, tmp_path, runner_env
+    ):
+        """The whole path: dispatch → unparseable → reclassified → recorded."""
+        runner_env.use("opencode:opencode/big-pickle", subagent_retries=1)
+        _install_opencode_capture(
+            runner_env.bin_dir, _DENIED_STDOUT, _DENIED_STDERR, exit_code=0
+        )
+        sleeps = []
+        outcome = executor.dispatch_task(
+            _validation_batch(tmp_path),
+            phase_dir=str(tmp_path),
+            runner="opencode:opencode/big-pickle",
+            sleep=sleeps.append,
+        )
+        assert outcome.status == executor.STATUS_RUNNER_ERROR
+        assert outcome.rung == 4
+        assert executor.RUNG_BY_STATUS[executor.STATUS_RUNNER_ERROR] == 4
+        assert not outcome.fatal
+        # subagent_retries=1 → two attempts, both on rung 4, and no backoff
+        # sleep: rung 3's ladder (rate_limited) was never entered.
+        assert [a.status for a in outcome.attempts] == [
+            executor.STATUS_RUNNER_ERROR, executor.STATUS_RUNNER_ERROR,
+        ]
+        assert sleeps == []
+        assert outcome.reason == _DENIED_SENTENCE
+        for attempt in outcome.attempts:
+            assert attempt.error == _DENIED_SENTENCE
+            assert "No text events found in output" not in attempt.error
+            capture = json.loads(Path(attempt.capture_path).read_text(encoding="utf-8"))
+            assert capture["status"] == executor.STATUS_RUNNER_ERROR
+            assert capture["error"] == _DENIED_SENTENCE

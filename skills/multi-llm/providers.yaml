@@ -299,6 +299,13 @@ providers:
     # a slot naming such a provider is refused before spawn rather than
     # dispatched into a silent model-resolution failure. Built-in providers need
     # nothing here.
+    # A provider declared here passes the auth preflight wherever its key lives:
+    # in auth.json under the custom id, in an {env:VAR} reference (resolved in
+    # the dispatch's own environment, so env_allowlist applies), or nowhere at
+    # all (a keyless local server). `opencode auth list` cannot see a provider
+    # declared only in config, so the preflight reads the dispatch's resolved
+    # config (`opencode debug config`) before refusing. A built-in provider
+    # overridden without a key is still refused.
     #
     # config_providers:
     #   my-gateway:
@@ -611,6 +618,7 @@ providers:
     # high, xhigh, max. The suffix is stripped before --model, so pi's own
     # native ":level" model-suffix parsing never sees it; unknown suffixes
     # (e.g. ":free" ids, bedrock "...-v1:0") stay part of the model name.
+    # Runs "pi --mode json" and reports token usage and pi's estimated cost.
     models:
       - openrouter/z-ai/glm-5.2
       - openrouter/moonshotai/kimi-k2.7-code

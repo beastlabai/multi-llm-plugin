@@ -2521,6 +2521,55 @@ class TestStatusSurface:
         out = capsys.readouterr().out
         assert "consolidation recommended: 29 valid groups >= 15 — run --consolidate" in out
 
+    def test_validation_counts_survive_the_detach_boundary(self, tmp_path, capsys):
+        """§6 T6.1: `classify_run` copies only named status fields, so the
+        verdict counts need their own entry or a detached run loses them
+        between `.status.json` and the poll's result line — and the host's
+        summary leaves out the groups the user still has to decide."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        counts = {
+            "valid": 53, "invalid": 1,
+            "needs_human_decision": 3, "validation_failed": 0,
+        }
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+            "validation_counts": counts,
+        })
+        status_file.claim_run(str(phase), {
+            "run_id": "run-counts-001", "state": "done", "exit_code": 0,
+            "detached": True,
+        })
+        assert detach.classify_run(str(phase))["validation_counts"] == counts
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            assert run_status.main([
+                "--plan-file", str(plan), "--view", "run",
+                "--phase", "review-plan",
+            ]) == 0
+            assert ctx.payload(0)["validation_counts"] == counts
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+
+    def test_a_status_without_validation_counts_leaves_them_out(self, tmp_path):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "complete",
+        })
+        status_file.claim_run(str(phase), {
+            "run_id": "run-counts-002", "state": "done", "exit_code": 0,
+            "detached": True,
+        })
+        assert detach.classify_run(str(phase))["validation_counts"] is None
+        ctx = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            run_status.main(["--plan-file", str(plan), "--view", "run"])
+            assert "validation_counts" not in ctx.payload(0)
+        finally:
+            cli_common.deactivate_result()
+
     def test_high_priority_groups_renders_for_a_terminal_code_review_run(
         self, tmp_path, capsys
     ):

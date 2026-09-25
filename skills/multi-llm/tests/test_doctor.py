@@ -750,3 +750,172 @@ class TestDoctorDetectsAGlobalLandlockFlag:
         target = self._write(Path(os.environ["CODEX_HOME"]), text)
         out = self._run(monkeypatch, capsys)
         assert ("WARN: codex: " + str(target) in out) is warns
+
+
+# ---------------------------------------------------------------------------
+# Plan §8 T8.6 / T8.13 — `config-only`, the reader's budget, and the scope
+# ---------------------------------------------------------------------------
+
+_OC_DEBUG = json.loads(
+    (Path(__file__).parent / "fixtures" / "opencode" / "debug_config.1.18.32.json")
+    .read_text(encoding="utf-8")
+)["cases"]
+_OC_AUTH = json.loads(
+    (Path(__file__).parent / "fixtures" / "opencode" / "auth_list.1.18.32.json")
+    .read_text(encoding="utf-8")
+)["cases"]
+
+
+class TestDoctorConfigOnly:
+    """`doctor` reports discovery, never readiness: a declared provider is
+    `config-only` with `ok: False`, never a clearance."""
+
+    @pytest.fixture(autouse=True)
+    def _opencode(self, tmp_path, monkeypatch):
+        from utils.providers import opencode as oc
+
+        self.oc = oc
+        home = tmp_path / "user-config"
+        (home / "opencode").mkdir(parents=True)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+        oc.reset_hermetic_state()
+        self.provider = registry.get_provider("opencode")
+        self.reads = []
+        monkeypatch.setattr(
+            doctor, "_run",
+            lambda argv, **kw: (0, _OC_AUTH["empty"]["stdout"], _OC_AUTH["empty"]["stderr"]),
+        )
+        yield
+        oc.reset_hermetic_state()
+
+    def _serve(self, monkeypatch, case):
+        import subprocess as _sp
+
+        def spawn(argv, env, cwd, timeout):
+            self.reads.append({"argv": list(argv), "env": env, "timeout": timeout})
+            if case is None:
+                return None
+            return _sp.CompletedProcess(list(argv), 0, _OC_DEBUG[case]["stdout"], "")
+
+        monkeypatch.setattr(self.oc, "_spawn_debug_config", spawn)
+
+    def test_a_keyless_custom_provider_is_config_only_and_named(self, monkeypatch, tmp_path):
+        self._serve(monkeypatch, "custom_keyless")
+        row = doctor._probe_auth(self.provider, 5.0, str(tmp_path), None)
+        assert row["state"] == "config-only"
+        assert row["ok"] is False
+        assert "keyless" in row["detail"]
+        assert "not that every runner is cleared" in row["detail"]
+        # The user-config read: no hermetic delta, no `--pure`.
+        assert self.reads[0]["argv"] == ["opencode", "debug", "config"]
+        assert self.reads[0]["env"] is None
+
+    def test_user_config_only_vs_reachable_by_hermetic_validators(
+        self, monkeypatch, tmp_path
+    ):
+        self._serve(monkeypatch, "custom_keyless")
+        row = doctor._probe_auth(self.provider, 5.0, str(tmp_path), None)
+        assert "user config only: keyless" in row["detail"]
+        assert "hermetic validators refuse these" in row["detail"]
+        assert doctor.AUTH_SCOPE_NOTE not in row["detail"]
+
+        path = tmp_path / "cfg.yaml"
+        path.write_text(
+            "providers:\n  opencode:\n    config_providers:\n      keyless:\n"
+            "        npm: '@ai-sdk/openai-compatible'\n", encoding="utf-8",
+        )
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
+        registry._config = None
+        registry._config_key = None
+        self.oc.reset_hermetic_state()
+        row = doctor._probe_auth(self.provider, 5.0, str(tmp_path), None)
+        assert row["state"] == "config-only" and row["ok"] is False
+        assert "reachable by hermetic validators: keyless" in row["detail"]
+        assert "user config only" not in row["detail"]
+        assert doctor.AUTH_SCOPE_NOTE not in row["detail"]
+
+    def test_a_keyless_builtin_override_stays_not_logged_in(self, monkeypatch, tmp_path):
+        self._serve(monkeypatch, "builtin_override_keyless")
+        row = doctor._probe_auth(self.provider, 5.0, str(tmp_path), None)
+        assert row["state"] == "not-logged-in"
+        assert "opencode auth login" in row["detail"]
+        assert doctor.AUTH_SCOPE_NOTE in row["detail"]
+
+    def test_a_failed_read_stays_not_logged_in(self, monkeypatch, tmp_path):
+        self._serve(monkeypatch, None)
+        row = doctor._probe_auth(self.provider, 5.0, str(tmp_path), None)
+        assert row["state"] == "not-logged-in"
+
+    def test_the_detail_carries_no_key(self, monkeypatch, tmp_path):
+        for case in _OC_DEBUG:
+            self.oc.reset_hermetic_state()
+            self._serve(monkeypatch, case)
+            row = doctor._probe_auth(self.provider, 5.0, str(tmp_path), None)
+            assert "sk-canary" not in json.dumps(row), case
+
+    def test_the_reader_gets_what_is_left_of_the_budget(self, monkeypatch, tmp_path):
+        self._serve(monkeypatch, "custom_keyless")
+        doctor._probe_auth(self.provider, 2.0, str(tmp_path), None)
+        assert 0 < self.reads[0]["timeout"] <= 2.0
+
+    def test_an_exhausted_budget_spawns_no_reader(self, monkeypatch, tmp_path):
+        import time as _time
+
+        self._serve(monkeypatch, "custom_keyless")
+
+        def slow_run(argv, **kw):
+            _time.sleep(0.05)
+            return 0, _OC_AUTH["empty"]["stdout"], ""
+
+        monkeypatch.setattr(doctor, "_run", slow_run)
+        row = doctor._probe_auth(self.provider, 0.01, str(tmp_path), None)
+        assert row["state"] == "not-logged-in"
+        assert self.reads == []
+
+    def test_the_credential_leg_runs_under_the_validator_env(self, monkeypatch, tmp_path):
+        seen = {}
+
+        def run(argv, **kw):
+            seen.update(kw)
+            return 0, _OC_AUTH["stored"]["stdout"], ""
+
+        monkeypatch.setattr(doctor, "_run", run)
+        row = doctor._probe_auth(self.provider, 5.0, str(tmp_path), None)
+        assert row["state"] == "ok"
+        assert row["detail"] == doctor.AUTH_SCOPE_NOTE
+        assert seen["cwd"] == str(tmp_path)
+        # `resolve_env` always composes the git block, so the env is built.
+        assert isinstance(seen["env"], dict)
+
+
+@pytest.mark.debug_config
+class TestDoctorStalledDebugConfig:
+    """A `debug config` that hangs cannot blow `doctor`'s budget."""
+
+    def test_a_sleeping_reader_returns_within_budget_as_not_logged_in(
+        self, clinic, monkeypatch, capsys
+    ):
+        import time as _time
+
+        from utils.providers import opencode as oc
+
+        oc.reset_hermetic_state()
+        monkeypatch.setattr(doctor, "_bwrap_self_test", lambda timeout: ("ok", ""))
+        auth = _OC_AUTH["empty"]["stdout"].replace("'", "'\\''")
+        _script(clinic, "opencode", (
+            'case "$1 $2" in\n'
+            '  "--version ") echo 1.18.32 ;;\n'
+            f"  \"auth list\") printf '%s' '{auth}' ;;\n"
+            '  "debug config") exec sleep 5 ;;\n'
+            'esac'
+        ))
+        xdg = clinic.parent / "oc-xdg"
+        (xdg / "opencode").mkdir(parents=True)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
+        started = _time.monotonic()
+        report = doctor.collect(budget_s=1.5)
+        assert _time.monotonic() - started < 4.0
+        row = _row(report, "opencode")
+        assert row["present"] is True
+        assert row["auth"]["state"] == "not-logged-in", row["auth"]
+        oc.reset_hermetic_state()

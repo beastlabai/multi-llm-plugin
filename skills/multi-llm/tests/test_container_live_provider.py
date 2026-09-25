@@ -906,15 +906,6 @@ NO_MODEL_ECHO: dict[str, str] = {
         "slug is a string goose never sees. The route half is asserted by a1 "
         "off the DNS log and the spend by a6."
     ),
-    "pi": (
-        "pi -p (print mode) writes the final assistant TEXT to stdout and "
-        "nothing else — no envelope, no banner, no metadata line, and stderr "
-        "empty (measured 0.80.6 on the 2026-08-19 live row: 52 bytes of stdout, "
-        "0 of stderr). With supports_file_output = True the answer goes to the "
-        "file and stdout is the confirmation line alone, so there is no channel "
-        "on which a model name could appear. Its usage_support is none for the "
-        "same reason."
-    ),
     "opencode": (
         "MEASURED ON THE 2026-08-20 LIVE ROW, on the green run rather than on a "
         "failing one: the SUBSTRING 'model' does not occur anywhere in "
@@ -926,7 +917,7 @@ NO_MODEL_ECHO: dict[str, str] = {
         "model id (`modelID=deepseek/deepseek-v4-flash-0731`) appears only in "
         "those ERROR-level log lines, i.e. only on a run that FAILED — which is "
         "why MODEL_ECHO_ON_STDERR would not help this row and is not used for "
-        "it. Unlike the five entries above, opencode's `usage_support` is FULL: "
+        "it. Unlike the four entries above, opencode's `usage_support` is FULL: "
         "the row still records real input/output/cache token counts and the "
         "vendor's own per-step `cost`, so a6 has hard numbers where a2 has "
         "nothing to read, and a1 grades the route off the DNS log."
@@ -1662,6 +1653,18 @@ class TestTheSmokeReachedTheRealEndpoint:
         # therefore no other row's grade — changes.
         if cli in MODEL_ECHO_ON_STDERR:
             blob += smoke["evidence"].get("stderr", "")
+        # A STRUCTURAL grade for the rows whose stream always names the
+        # REQUESTED id (pi: `message.model` is copied from the config, the
+        # served one is `responseModel`), where a substring search would pass
+        # on exactly the substitution a2 exists to catch. Per-CLI
+        # (harness.MODEL_ECHO_STRUCTURED), so no other row's grade changes.
+        if cli in harness.MODEL_ECHO_STRUCTURED:
+            ok, outcome = harness.grade_structured_model_echo(
+                cli, pinned, smoke["evidence"].get("stdout", ""))
+            _record(kind="assertion", cli=cli, assertion="a2_model",
+                    outcome=outcome if ok else f"failed — {outcome}")
+            assert ok, outcome
+            return
         if cli in NO_MODEL_ECHO:
             _record(kind="assertion", cli=cli, assertion="a2_model",
                     outcome=f"unread — {NO_MODEL_ECHO[cli]}")

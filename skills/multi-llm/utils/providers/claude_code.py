@@ -34,6 +34,7 @@ from .base import (
 from .result_envelope import (
     classify_api_error_status,
     describe_refused_envelope,
+    is_clean_envelope,
     parse_result_envelope,
 )
 
@@ -1555,11 +1556,53 @@ class ClaudeCodeProvider(LLMProvider):
         ``The model `X` does not exist`` with its own *"There's an issue with the
         selected model (X). It may not exist…"*, which no
         ``INVALID_MODEL_MARKERS`` entry matches at any ladder order.
+
+        **A clean envelope's ``result`` is never scanned** (plan
+        ``opencode-validator-false-rate-limit-and-denied-turn`` T3.2). When the
+        CLI reports the run clean — ``is_error`` false, ``terminal_reason``
+        completed, no ``api_error_status`` (:func:`result_envelope.
+        is_clean_envelope`) — ``result`` is the model's own prose, and a
+        validator that read a plan discussing rate limits or model names says
+        so there. Handed to the ladder whole, that prose classified a green
+        run ``rate_limited`` (a backoff for the batch) or ``invalid_model``
+        (fatal to it). So the ladder runs over stderr and the exit code alone;
+        the envelope's other fields are bookkeeping and ``permission_denials``,
+        which quotes tool input, so none of stdout is kept. The audit that set
+        this rule found no committed failure capture that needs the prose: all
+        eight refusing rows carry ``is_error: true`` and the real 429
+        (``rate-limit``) carries ``api_error_status: 429``, so every one of
+        them still reaches the ladder or the status rung exactly as before.
+
+        The exclusion itself lives in :meth:`vendor_text`, so the failure
+        reason's quote (``subagent_executor._classify_failed_run``) is cut from
+        the same reduced capture the verdict was decided on; the status rung
+        above still reads the raw stdout.
         """
         category = classify_api_error_status(stdout)
         if category is not None:
             return category
         return super().classify_failure(stdout, stderr, exit_code)
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """``("", stderr)`` for a clean envelope; the capture unchanged otherwise.
+
+        A clean envelope's ``result`` is the model's own prose (see
+        :meth:`classify_failure`), and the rest of stdout is bookkeeping and
+        ``permission_denials`` quoting tool input, so none of it is the
+        vendor's verdict. Living here rather than inline in
+        :meth:`classify_failure` is what keeps the verdict and its quote on one
+        haystack: ``_classify_failed_run`` re-reduces through this hook to cut
+        the quote, and an identity hook let it quote the prose the verdict
+        excluded (plan T2.5). Any other stdout, including one that fails to
+        parse, is returned unchanged, per the base contract; stderr is never
+        reduced.
+        """
+        try:
+            if is_clean_envelope(stdout):
+                return "", stderr
+        except Exception:  # noqa: BLE001 - a failed reduction returns its input
+            pass
+        return stdout, stderr
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """The refusing envelope's own line, tagged when it names a usage cap.

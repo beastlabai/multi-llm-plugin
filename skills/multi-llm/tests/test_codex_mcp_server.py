@@ -1473,6 +1473,15 @@ class TestExecuteStateMachine:
         assert envelope["result"]["consolidation_recommended"] is True
         assert RUNNABLE_MARKER in envelope["result"]["notice"]
 
+    def test_validation_counts_reach_the_tool_result(self, harness):
+        """§6 T6.1: the host's summary reports these, so the envelope must
+        carry the poll line's counts through untouched."""
+        counts = {"valid": 53, "invalid": 1,
+                  "needs_human_decision": 3, "validation_failed": 0}
+        done = poll_step(0, validation_counts=counts)
+        envelope, _, _, _ = harness.run(REVIEW, [launch_step(), done])
+        assert envelope["result"]["validation_counts"] == counts
+
     def test_a_launch_failing_after_its_banner_aborts_the_claimed_run(self, harness):
         launch = launch_step(run_id="RID-F", exit=1)
         envelope, _, calls, _ = harness.run(REVIEW, [launch, ABORT_CONFIRMED])

@@ -1,0 +1,11 @@
+name: capture-pi-json-multi-assistant
+on_unmatched: default
+fallback:
+  content: "OK"
+scripted_tool_call:
+  name: read
+  surfaces: [chat]
+  call_id: call_pi_read_1
+  arguments:
+    path: plans/auth-feature.md
+  terminal: "[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]"

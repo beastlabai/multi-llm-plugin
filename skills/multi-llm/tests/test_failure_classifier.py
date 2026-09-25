@@ -24,6 +24,8 @@ from __future__ import annotations
 import ast
 import asyncio
 import json
+import os
+import subprocess
 import sys
 import tempfile
 from pathlib import Path
@@ -495,16 +497,232 @@ class TestOpencodeAuthList_1_18_32:
 
         A custom provider declared in ``opencode.json`` — even one carrying its
         own ``options.apiKey`` — is not listed by ``auth list``: the envelope is
-        byte-identical to the empty home's. The probe therefore reads it as
-        logged out. That is a known limit of this probe, not a verdict about the
-        provider; the container lane's stub runner passes because its seeded
-        home also stores a credential, not because of the config block.
+        byte-identical to the empty home's, and this probe still reads it as
+        logged out. What now **admits** such a provider is the next leg (plan
+        §8, T8.3/T8.4): on this ``False`` verdict the executor asks
+        ``OpenCodeProvider.config_credential_source``, which reads the
+        dispatch's own resolved config through ``opencode debug config`` and
+        records the auth state ``config`` — see
+        ``TestConfigDeclaredProviders_1_18_32`` below. The container lane's
+        stub runner still passes on its seeded stored credential in stage 1.
         """
         assert (
             self.CASES["config_provider_only"]["stdout"]
             == self.CASES["empty"]["stdout"]
         )
         assert self._classify("config_provider_only") is False
+
+
+#: `opencode debug config` on 1.18.32, one case per §8.2 verdict-table row
+#: plus jsonc, project layer, `OPENCODE_CONFIG`, and the hermetic
+#: content/`--pure` cases (plan §8 T8.1). Every `apiKey` is a canary.
+OPENCODE_DEBUG_CONFIG_1_18_32 = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "opencode" / "debug_config.1.18.32.json"
+    ).read_text(encoding="utf-8")
+)
+CANARY = "sk-canary-not-a-key-"
+
+
+class TestConfigDeclaredProviders_1_18_32:
+    """Plan §8 T8.7: `auth list` says `0 credentials`; the config leg decides.
+
+    Every case drives ``subagent_executor._detect_auth`` end to end with the
+    committed ``auth list`` envelope (``empty``) and the committed ``debug
+    config`` capture served through the patched spawn seam. The non-hermetic
+    ``agent-write`` profile is used for the verdict-table rows, because that is
+    where the user's own resolved config is the dispatch's config.
+    """
+
+    DEBUG = OPENCODE_DEBUG_CONFIG_1_18_32["cases"]
+    AUTH = OPENCODE_AUTH_LIST_1_18_32["cases"]
+
+    @pytest.fixture(autouse=True)
+    def _setup(self, tmp_path, monkeypatch):
+        from utils.providers import opencode as oc
+
+        self.oc = oc
+        home = tmp_path / "user-config"
+        (home / "opencode").mkdir(parents=True)
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+        monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+        monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
+        monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
+        monkeypatch.setattr(
+            oc, "_read_help_tokens", lambda binary: frozenset({oc.PURE_FLAG})
+        )
+        oc.reset_hermetic_state()
+        executor.reset_auth_cache()
+        self.probes = []
+        self.reads = []
+        self.auth_case = "empty"
+        self.debug_stdout = None
+        self.debug_code = 0
+
+        def run_probe(argv, env=None):
+            self.probes.append(list(argv))
+            run = self.AUTH[self.auth_case]
+            return subprocess.CompletedProcess(
+                list(argv), run["exit"], run["stdout"], run["stderr"]
+            )
+
+        def spawn(argv, env, cwd, timeout):
+            self.reads.append(list(argv))
+            if self.debug_stdout is None:
+                return None
+            return subprocess.CompletedProcess(
+                list(argv), self.debug_code, self.debug_stdout, ""
+            )
+
+        monkeypatch.setattr(executor, "_run_probe", run_probe)
+        monkeypatch.setattr(oc, "_spawn_debug_config", spawn)
+        yield
+        oc.reset_hermetic_state()
+        executor.reset_auth_cache()
+
+    def _detect(self, model, profile="agent-write"):
+        return executor._detect_auth(
+            "opencode", model, key="driver.subagent_runner",
+            spec=f"opencode:{model}", profile=profile, cwd="/repo",
+        )
+
+    def _use(self, case):
+        self.debug_stdout = self.DEBUG[case]["stdout"]
+
+    @pytest.mark.parametrize(
+        "case, model",
+        [
+            ("custom_inline_key", "stub/stub-model"),
+            ("custom_keyless", "keyless/m1"),
+            ("custom_envkey_unset", "envkey/m2"),
+            ("custom_envkey_set", "envkey/m2"),
+            ("builtin_override_keyed", "openrouter/some/model"),
+            ("jsonc_commented", "stub/stub-model"),
+            ("project_layer", "stub/stub-model"),
+            ("opencode_config_file", "stub/stub-model"),
+        ],
+    )
+    def test_a_declared_row_is_admitted_as_config(self, case, model):
+        self._use(case)
+        assert self._detect(model) == "config"
+
+    @pytest.mark.parametrize(
+        "case", ["builtin_override_keyless", "nothing_declared", "project_layer_disabled"]
+    )
+    def test_a_keyless_or_absent_builtin_is_still_refused(self, case):
+        self._use(case)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            self._detect("openrouter/some/model")
+        assert excinfo.value.reason_code == "not_authenticated"
+
+    @pytest.mark.parametrize(
+        "stdout, code",
+        [
+            (None, 0),
+            ("{not json " + CANARY + "1", 0),
+            ('{"provider": ' + '{"stub": {"npm": "x"}}' + "}", 1),
+            ('{"agent": {}}', 0),
+        ],
+        ids=["spawn-failure-or-timeout", "non-json", "exit-1", "missing-provider"],
+    )
+    def test_a_reader_failure_keeps_todays_refusal(self, stdout, code):
+        self.debug_stdout, self.debug_code = stdout, code
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            self._detect("stub/stub-model")
+        assert excinfo.value.reason_code == "not_authenticated"
+        assert CANARY not in str(excinfo.value)
+
+    def test_the_lazy_path_never_spawns_debug_config(self):
+        self.auth_case = "stored"
+        self._use("custom_inline_key")
+        assert self._detect("stub/stub-model") == "ok"
+        assert self._detect("stub/stub-model") == "ok"
+        assert len(self.probes) == 1
+        assert self.reads == []
+
+    def test_a_config_providers_prefix_is_admitted_in_hermetic_mode(
+        self, tmp_path, monkeypatch
+    ):
+        from utils import provider_registry as registry
+
+        path = tmp_path / "cfg.yaml"
+        path.write_text(
+            "providers:\n  opencode:\n    config_providers:\n      stub:\n"
+            "        npm: '@ai-sdk/openai-compatible'\n"
+            "        options: {baseURL: 'http://127.0.0.1:9/v1'}\n",
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
+        registry._config = None
+        registry._config_key = None
+        self._use("hermetic_pure_config_content")
+        assert self._detect("stub/stub-model", "agent-readonly") == "config"
+        assert ["opencode", "--pure", "debug", "config"] in self.reads
+
+    def test_the_hermetic_user_config_only_prefix_is_unresolvable_not_unauthenticated(self):
+        from utils.provider_registry import get_provider as _get
+
+        self._use("custom_inline_key")  # the user's own config declares `stub`
+        # ...in a commented `opencode.jsonc`: the file read cannot answer, so
+        # `_user_defines_provider` asks `debug config` (a plain `opencode.json`
+        # would be answered from the file alone, with no spawn).
+        jsonc = os.path.join(os.environ["XDG_CONFIG_HOME"], "opencode", "opencode.jsonc")
+        with open(jsonc, "w", encoding="utf-8") as handle:
+            handle.write("// served by debug config\n{}\n")
+        provider = _get("opencode")
+        with patch.object(provider, "is_available", lambda: True):
+            with pytest.raises(executor.RunnerRejected) as excinfo:
+                executor.preflight_runner(
+                    "opencode:stub/stub-model", profile="agent-readonly",
+                    key="driver.subagent_runner",
+                )
+        assert excinfo.value.reason_code == "unresolvable_model"
+        assert "config_providers" in str(excinfo.value)
+        assert self.probes == []
+
+    @pytest.mark.parametrize("profile", ["agent-write", "hermetic-off"])
+    def test_the_same_prefix_under_write_or_hermetic_off_is_admitted(
+        self, profile, tmp_path, monkeypatch
+    ):
+        self._use("custom_inline_key")
+        if profile == "hermetic-off":
+            from utils import provider_registry as registry
+
+            path = tmp_path / "cfg.yaml"
+            path.write_text("providers:\n  opencode:\n    hermetic: off\n", encoding="utf-8")
+            monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
+            registry._config = None
+            registry._config_key = None
+            profile = "agent-readonly"
+        assert self._detect("stub/stub-model", profile) == "config"
+
+    def test_secret_hygiene_across_every_surface(self, capsys, tmp_path, monkeypatch):
+        """No canary in a refusal, a doctor detail, a status row or a log line."""
+        from utils import doctor
+        from utils.provider_registry import get_provider as _get
+
+        surfaces = []
+        for case in self.DEBUG:
+            executor.reset_auth_cache()
+            self.oc.reset_hermetic_state()
+            self._use(case)
+            for model in ("stub/stub-model", "openrouter/some/model", "envkey/m2"):
+                for profile in ("agent-write", "agent-readonly"):
+                    try:
+                        surfaces.append(self._detect(model, profile))
+                    except executor.RunnerRejected as exc:
+                        surfaces.append(str(exc))
+            provider = _get("opencode")
+            monkeypatch.setattr(
+                doctor, "_run",
+                lambda argv, **kw: (0, self.AUTH["empty"]["stdout"], self.AUTH["empty"]["stderr"]),
+            )
+            surfaces.append(json.dumps(doctor._probe_auth(provider, 5.0, str(tmp_path), None)))
+            surfaces.append(repr(dict(executor._AUTH_CACHE)))
+        captured = capsys.readouterr()
+        surfaces += [captured.out, captured.err]
+        for text in surfaces:
+            assert CANARY not in text
 
 
 # ---------------------------------------------------------------------------

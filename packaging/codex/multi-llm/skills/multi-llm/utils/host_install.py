@@ -2610,7 +2610,9 @@ def _runner_state(provider: str, facts: Dict[str, str]) -> str:
             return ""
         if "not_authenticated" in str(facts.get("problem") or ""):
             auth: Optional[bool] = False
-        elif str(facts.get("auth") or "") == "ok":
+        elif str(facts.get("auth") or "") in ("ok", "config"):
+            # `config` (plan §8 T8.4): the model-aware preflight found the
+            # runner's provider declared in the config its dispatch resolves.
             auth = True
         else:
             auth = None

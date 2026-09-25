@@ -25,6 +25,8 @@ comment, in the same declaration-vs-implementation spirit as
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
 
@@ -174,3 +176,156 @@ class TestTheAllowlistStaysCredentialFree:
             "the scrub a denylist again — a guess about which variable next "
             "month's CLI release reads its key from"
         )
+
+
+# --------------------------------------------------------------------------- #
+# T4.9 (plans/opencode-validator-false-rate-limit-and-denied-turn.md): the one
+# structured value the carry-over admits, and the guard that keeps it keyless.
+# --------------------------------------------------------------------------- #
+
+from .container import wrapper as wrapper_module  # noqa: E402
+
+#: What `OpenCodeProvider` emits on a hermetic `agent-readonly` slot with a
+#: built-in provider: the permission rows under the agent layer, no key.
+PERMISSION_CONTENT = json.dumps({
+    "$schema": "https://opencode.ai/config.json",
+    "agent": {"plan": {"permission": {
+        "external_directory": {"*": "deny"},
+        "read": {"*.env": "deny", "*.env.*": "deny", "*.env.example": "allow"},
+        "doom_loop": "deny"}}},
+    "experimental": {"continue_loop_on_deny": True},
+})
+SENTINEL = "SENTINEL-not-a-real-key-7f3a"
+
+
+def _child_env(monkeypatch, tmp_path, **env):
+    for key in [k for k in os.environ if k.startswith("OPENCODE_")]:
+        monkeypatch.delenv(key, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    root = tmp_path / "inv"
+    root.mkdir(exist_ok=True)
+    return wrapper_module.build_child_env("opencode", "abc123", {}, root)
+
+
+class TestTheOpencodeConfigContentIsCarried:
+    def test_it_is_an_exact_name_carry(self):
+        assert "OPENCODE_CONFIG_CONTENT" in ENV_CARRY_EXACT
+        assert "OPENCODE_CONFIG_CONTENT" in wrapper_module.CARRY_GUARDED_JSON
+
+    def test_the_permission_block_reaches_the_child_byte_identical(
+            self, monkeypatch, tmp_path):
+        env = _child_env(monkeypatch, tmp_path,
+                         OPENCODE_CONFIG_CONTENT=PERMISSION_CONTENT)
+        assert env["OPENCODE_CONFIG_CONTENT"] == PERMISSION_CONTENT
+
+    def test_its_siblings_are_still_scrubbed(self, monkeypatch, tmp_path):
+        # Only the exact name: `OPENCODE_CONFIG` / `_DIR` / `OPENCODE_PERMISSION`
+        # would point the child at a config the rig does not own.
+        env = _child_env(monkeypatch, tmp_path,
+                         OPENCODE_CONFIG_CONTENT=PERMISSION_CONTENT,
+                         OPENCODE_CONFIG="/host/opencode.json",
+                         OPENCODE_CONFIG_DIR="/host/opencode",
+                         OPENCODE_PERMISSION='{"*": "allow"}')
+        assert not {"OPENCODE_CONFIG", "OPENCODE_CONFIG_DIR",
+                    "OPENCODE_PERMISSION"} & set(env)
+
+    def test_absent_stays_absent(self, monkeypatch, tmp_path):
+        assert "OPENCODE_CONFIG_CONTENT" not in _child_env(monkeypatch, tmp_path)
+
+
+class TestTheCarriedConfigHoldsNoKey:
+    @pytest.mark.parametrize("document,where", [
+        ({"provider": {"stub": {"options": {"apiKey": SENTINEL}}}},
+         "$.provider.stub.options.apiKey"),
+        ({"apiKey": SENTINEL}, "$.apiKey"),
+        ({"provider": {"x": {"options": {"api_key": SENTINEL}}}},
+         "$.provider.x.options.api_key"),
+        ({"mcp": [{"env": {"APIKEY": SENTINEL}}]}, "$.mcp[0].env.APIKEY"),
+    ], ids=["nested", "top-level", "snake-case", "inside-a-list"])
+    def test_a_key_anywhere_is_a_violation_named_by_path(self, document, where):
+        reason = wrapper_module.carried_config_violation(
+            "OPENCODE_CONFIG_CONTENT", json.dumps(document))
+        assert reason and where in reason
+        assert SENTINEL not in reason
+
+    def test_the_shipped_shapes_pass(self):
+        assert wrapper_module.carried_config_violation(
+            "OPENCODE_CONFIG_CONTENT", PERMISSION_CONTENT) is None
+        # A `config_providers` block (credentials excluded by design) passes.
+        provider = json.dumps({"provider": {"local": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "http://127.0.0.1:1234/v1"}}}})
+        assert wrapper_module.carried_config_violation(
+            "OPENCODE_CONFIG_CONTENT", provider) is None
+
+    def test_a_key_value_that_is_merely_mentioned_is_not_a_key(self):
+        # Only a key NAMED apiKey is a credential slot; the word inside a
+        # permission pattern or a value (T4.7 re-lists a user's patterns as
+        # keys) is not.
+        doc = json.dumps({"agent": {"plan": {"permission": {
+            "read": {"*apiKey*": "deny"}}}}, "note": "apiKey"})
+        assert wrapper_module.carried_config_violation(
+            "OPENCODE_CONFIG_CONTENT", doc) is None
+
+    def test_unparseable_fails_closed_without_quoting_the_value(self):
+        reason = wrapper_module.carried_config_violation(
+            "OPENCODE_CONFIG_CONTENT", '{"apiKey": "' + SENTINEL)
+        assert reason and "not valid JSON" in reason
+        assert SENTINEL not in reason
+
+    @pytest.mark.parametrize("value", [
+        json.dumps({"provider": {"s": {"options": {"apiKey": SENTINEL}}}}),
+        "{not json " + SENTINEL,
+    ], ids=["nested-key", "unparseable"])
+    def test_the_invocation_is_refused_loudly_and_leaves_nothing(
+            self, monkeypatch, tmp_path, capsys, value):
+        root = tmp_path / "inv"
+        with pytest.raises(SystemExit) as refused:
+            _child_env(monkeypatch, tmp_path, OPENCODE_CONFIG_CONTENT=value)
+        assert refused.value.code == wrapper_module.CARRY_GUARD_EXIT
+        err = capsys.readouterr().err
+        assert "mllm-wrapper: opencode:" in err
+        assert "OPENCODE_CONFIG_CONTENT" in err
+        assert SENTINEL not in err
+        assert not root.exists(), "the per-invocation root outlived the refusal"
+
+    def test_main_refuses_before_the_call_record_is_written(
+            self, monkeypatch, tmp_path):
+        """The guard runs inside `build_child_env`, which `main` calls before
+        `write_call_record`, so a key never reaches the call log's capture."""
+        real = tmp_path / "real"
+        real.mkdir()
+        (real / "opencode").write_text("#!/bin/sh\nexit 0\n")
+        log = tmp_path / "calls.jsonl"
+        monkeypatch.setattr(wrapper_module, "REAL_DIR", real)
+        monkeypatch.setattr(wrapper_module, "HOMES_ROOT", tmp_path / "homes")
+        monkeypatch.setattr(wrapper_module, "REDIRECT_YAML",
+                            tmp_path / "absent.yaml")
+        monkeypatch.setattr(wrapper_module.sys, "argv", [str(real / "opencode")])
+        monkeypatch.setenv("MLLM_CALL_LOG", str(log))
+        monkeypatch.setenv("MLLM_INVOCATION_ROOT", str(tmp_path / "inv"))
+        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps(
+            {"provider": {"s": {"options": {"apiKey": SENTINEL}}}}))
+        monkeypatch.delenv("MLLM_STUB_BASE_URL", raising=False)
+        with pytest.raises(SystemExit) as refused:
+            wrapper_module.main(["run", "hello"])
+        assert refused.value.code == wrapper_module.CARRY_GUARD_EXIT
+        assert not log.exists()
+
+
+class TestTheCallLogCapturesTheBlock:
+    def test_the_carried_content_is_captured(self, monkeypatch, tmp_path):
+        env = _child_env(monkeypatch, tmp_path,
+                         OPENCODE_CONFIG_CONTENT=PERMISSION_CONTENT)
+        log = tmp_path / "calls.jsonl"
+        monkeypatch.setenv("MLLM_CALL_LOG", str(log))
+        wrapper_module.write_call_record(
+            "opencode", ["opencode", "run"], env, "abc123", tmp_path / "inv")
+        record = json.loads(log.read_text(encoding="utf-8"))
+        assert record["captured_env"]["OPENCODE_CONFIG_CONTENT"] == \
+            PERMISSION_CONTENT
+        assert "OPENCODE_CONFIG_CONTENT" in record["child_env_names"]
+
+    def test_the_capture_allowlist_names_it(self):
+        assert "OPENCODE_CONFIG_CONTENT" in wrapper_module.ENV_CAPTURE_ALLOW

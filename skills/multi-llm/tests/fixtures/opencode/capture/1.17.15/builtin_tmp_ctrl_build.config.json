@@ -1,0 +1,60 @@
+{
+ "opencode_version": "1.17.15",
+ "note": "control: built-in tmp allow, no content",
+ "argv": [
+  "opencode",
+  "run",
+  "--pure",
+  "--agent",
+  "build",
+  "--format",
+  "json",
+  "--print-logs",
+  "--log-level",
+  "ERROR",
+  "--model",
+  "stub/m",
+  "please read /rig/tmp/opencode/f.txt"
+ ],
+ "env": {
+  "HOME": "/rig/home",
+  "XDG_CONFIG_HOME": "/rig/cfg",
+  "XDG_DATA_HOME": "/rig/data",
+  "XDG_CACHE_HOME": "/rig/cache",
+  "XDG_STATE_HOME": "/rig/state",
+  "TMPDIR": "/rig/tmp",
+  "OPENCODE_DISABLE_MODELS_FETCH": "1",
+  "OPENCODE_DISABLE_AUTOUPDATE": "1",
+  "OPENCODE_DISABLE_PROJECT_CONFIG": "1"
+ },
+ "OPENCODE_CONFIG_CONTENT": null,
+ "global_opencode_json": {
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+   "stub": {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "stub",
+    "options": {
+     "baseURL": "http://127.0.0.1:PORT/v1",
+     "apiKey": "x"
+    },
+    "models": {
+     "m": {
+      "name": "m",
+      "tool_call": true
+     }
+    }
+   }
+  },
+  "model": "stub/m",
+  "small_model": "stub/m"
+ },
+ "managed_opencode_json": null,
+ "org_config": null,
+ "stub_tool_call": {
+  "tool": "read",
+  "args": {
+   "filePath": "/rig/tmp/opencode/f.txt"
+  }
+ }
+}

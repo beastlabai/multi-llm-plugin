@@ -87,7 +87,13 @@ CRED_SHAPES = (
 
 # The env capture is an ALLOWLIST rather than a denylist. A denylist here would be
 # a guess about which variable a future CLI release reads its key from.
-ENV_CAPTURE_ALLOW = ("MLLM_", "HOME", "PATH")
+#
+# `OPENCODE_CONFIG_CONTENT` is captured so the goldens pin the permission block
+# each opencode dispatch actually received (T4.9). It is safe to log for the
+# same reason it is safe to carry, and `build_child_env` refuses a value that
+# holds a key BEFORE this capture runs. Capture is prefix matching, so like
+# `HOME` it also admits any longer name that starts with it.
+ENV_CAPTURE_ALLOW = ("MLLM_", "HOME", "PATH", "OPENCODE_CONFIG_CONTENT")
 ENV_CAPTURE_SUFFIX = ("_BASE_URL",)
 
 # What the CHILD is allowed to inherit. Same reasoning, applied to execution
@@ -126,8 +132,80 @@ ENV_CARRY_EXACT = (
     # CLI's default of five model calls per invocation while the product ships
     # one.
     "MAX_STRUCTURED_OUTPUT_RETRIES",
+    # opencode's last-applied config layer, and the ONLY route by which
+    # `OpenCodeProvider` delivers the permission block that turns `run`'s
+    # auto-rejected `ask` into a `deny` the model is told about
+    # (plans/opencode-validator-false-rate-limit-and-denied-turn.md §4.2, T4.9).
+    # Scrubbed, every container row tested an opencode that ends its turn on the
+    # first out-of-cwd read — a configuration the product stopped shipping.
+    # It holds no credential BY CONSTRUCTION: in a hermetic slot it is built
+    # from `providers.opencode.config_providers`, which carries no key (auth
+    # stays in `auth.json`), plus the permission rows; for `agent-write` it is
+    # the permission block merged over the inherited value, and this rig sets
+    # no inherited value. A structured value can still hide a key where a
+    # scalar knob cannot, so the argument is ENFORCED rather than trusted:
+    # `carried_config_violation` fails the invocation before anything is
+    # logged or executed if the carried JSON has an `apiKey` anywhere.
+    "OPENCODE_CONFIG_CONTENT",
 )
 ENV_CARRY_PREFIX = ("MLLM_",)
+
+#: The carried variables whose VALUE is a JSON document that must hold no key,
+#: and the exit status a violation produces. 126 ("found but cannot execute")
+#: rather than `main`'s 127 ("no real binary"), so the two refusals stay apart
+#: in a row's evidence.
+CARRY_GUARDED_JSON = ("OPENCODE_CONFIG_CONTENT",)
+CARRY_GUARD_EXIT = 126
+
+
+def _is_key_name(name: str) -> bool:
+    """``apiKey`` in any spelling: ``api_key``, ``APIKEY``, ``api-key``."""
+    return re.sub(r"[_\-]", "", name.lower()) == "apikey"
+
+
+def carried_config_violation(name: str, value: str) -> str | None:
+    """Why a carried JSON config must not reach the child, or ``None``.
+
+    Walks the whole document, so a key nested under ``provider.<id>.options``
+    (where opencode reads it) is found as surely as a top-level one. The reason
+    names the variable and the JSON PATH of the offending key, never a value:
+    it is printed to the child's stderr, which the executor's attempt records
+    keep.
+
+    **An unparseable value is a violation too** (decided for T4.9). The adapter
+    only ever emits ``json.dumps`` output, so a value that does not parse came
+    from somewhere this argument does not cover — and "we could not look" is not
+    "there is no key". Failing closed costs a red row that names the cause;
+    passing it through would carry a value nobody inspected into a child whose
+    network, on the host lane, can reach a real endpoint.
+    """
+    try:
+        document = json.loads(value)
+    except ValueError as exc:
+        return (f"{name} is not valid JSON ({type(exc).__name__} at char "
+                f"{getattr(exc, 'pos', '?')}), so it cannot be checked for a "
+                f"credential")
+
+    def walk(node, path: str) -> str | None:
+        if isinstance(node, dict):
+            for key, child in node.items():
+                here = f"{path}.{key}"
+                if _is_key_name(str(key)):
+                    return here
+                found = walk(child, here)
+                if found:
+                    return found
+        elif isinstance(node, list):
+            for index, child in enumerate(node):
+                found = walk(child, f"{path}[{index}]")
+                if found:
+                    return found
+        return None
+
+    found = walk(document, "$")
+    if found:
+        return f"{name} carries a credential key at {found}"
+    return None
 
 
 def _redact(token: str) -> str:
@@ -236,6 +314,23 @@ def build_child_env(cli: str, exec_id: str, row: dict, invocation_root: Path) ->
     for key, value in os.environ.items():
         if key in ENV_CARRY_EXACT or key.startswith(ENV_CARRY_PREFIX):
             env[key] = value
+
+    # 1a. The carried config documents must hold no credential. Checked here,
+    #     before the call record is written, so a violating value never reaches
+    #     the call log's env capture either.
+    for key in CARRY_GUARDED_JSON:
+        if key not in env:
+            continue
+        reason = carried_config_violation(key, env[key])
+        if reason:
+            sys.stderr.write(
+                f"mllm-wrapper: {cli}: {reason}. Refusing to run the child: the "
+                f"carry-over allowlist admits {key} only because it holds no "
+                f"credential (ENV_CARRY_EXACT, tests/container/wrapper.py).\n")
+            # `run_child` is what removes the per-invocation root, and it never
+            # runs on this path.
+            shutil.rmtree(invocation_root, ignore_errors=True)
+            raise SystemExit(CARRY_GUARD_EXIT)
 
     # 3. Point every config root at a fresh per-invocation directory. Done before
     #    rule 2 so a mechanism that writes a config file lands inside it.

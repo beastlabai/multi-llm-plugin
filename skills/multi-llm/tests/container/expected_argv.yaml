@@ -704,7 +704,10 @@ entries:
     transport: argv
     binary: pi
     subcommands: []
+    # `--mode json` since plan §7 (T7.9, by hand — never `seed_expected_argv.py`
+    # bare): the JSONL stream PiProvider.parse_output reads. Not timeout-derived.
     options:
+      "--mode": "json"
       "--model": "<model>"
       "--no-session": null
       "-p": null

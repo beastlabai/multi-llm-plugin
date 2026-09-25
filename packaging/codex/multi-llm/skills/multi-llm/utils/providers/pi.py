@@ -6,11 +6,49 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
+    CATEGORY_SERVER_ERROR,
+    STATUS_AUTH_FAILED,
+    STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_RATE_LIMITED,
+    STATUS_TIMEOUT,
+    USAGE_FULL,
+    InternalRetryEnvelope,
     LLMProvider,
     ReasoningLadder,
     StructuredSchema,
+    classify_streams,
     split_reasoning_effort,
+    warn_gate_once,
 )
+from .pi_family_stream import (  # noqa: F401 - _MAX_DIAGNOSIS_CHARS re-exported
+    _MAX_DIAGNOSIS_CHARS,
+    StreamDialect,
+    _answer_text,
+    _assistant_ends,
+    _cap,
+    _events,
+    _first_line,
+    _one_line,
+    _result_text,
+    _retry_give_up,
+    _stream_version,
+    _tool_ends,
+    _unclosed_container,
+    has_stream_envelope,
+    shape_fault,
+    sum_usage,
+    unrecognized_stop_reason,
+    warn_stream_version,
+)
+
+# Terminal codes, imported by name from the runner as omp.py does: a parse that
+# sets one tells `invoke_with_file_output` whether a findings file beside a
+# failed parse may still be recovered.
+try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from ..llm_client import ERROR_SUBPROCESS_FAILED, ERROR_TIMEOUT
+except ImportError:  # pragma: no cover - direct-script import shim
+    ERROR_SUBPROCESS_FAILED = "SUBPROCESS_FAILED"
+    ERROR_TIMEOUT = "TIMEOUT"
 
 # Thinking levels accepted by `pi --thinking` (per pi.dev docs). pi also
 # parses the same levels as a native ":level" suffix on --model; the adapter
@@ -26,30 +64,51 @@ EFFORT_LADDER = ReasoningLadder(
 )
 REASONING_EFFORTS = EFFORT_LADDER.accepted
 
-#: The bare HTTP-status prefix pi writes ahead of the vendor's JSON error object
-#: on stderr (``401: {"message": …}``). It is the **only** place the status
-#: survives — the JSON payload carries `type` and `code` but never the number —
-#: so the prefix is stripped to reach the JSON and then put back in the message.
+#: The bare HTTP-status prefix pi puts ahead of the vendor's JSON error object
+#: (``401: {"message": …}``). At 0.80.6 that line was stderr; under ``--mode
+#: json`` (0.87.1) the same string is the terminal assistant message's
+#: ``errorMessage``. It is the **only** place the status survives — pi's
+#: ``AssistantMessage`` has no ``errorStatus`` field, and the JSON payload carries
+#: `type` and `code` but never the number — so the prefix is stripped to reach
+#: the JSON and then put back in the message.
 _STATUS_PREFIX = re.compile(r"^(\d{3})\s*:\s*")
 
-#: ``describe_failure`` is a SUMMARY, not a second copy of the stream. The
-#: caller keeps the full text — Lane A in ``details["stderr"]`` and in the log
-#: file — so a long stderr is capped here rather than promoted into an error
-#: string. pi's longest committed stderr is 218 bytes, so nothing measured is
-#: actually cut; the cap exists so a future release cannot make it one.
-_MAX_DIAGNOSIS_CHARS = 300
+#: The ``session.version`` the json-mode parser was written against (pi 0.87.1,
+#: the same value as omp's). A different value is WARNed once, never refused.
+PI_STREAM_VERSION = 3
 
+#: pi's closed ``stopReason`` set, as far as this parser handles it. pi's
+#: ``docs/message-types.md`` lists ``pending`` (streaming only, never on a
+#: ``message_end``) and ``deferred`` too; both fail closed, naming the enum.
+#: ``length`` is pi's and not omp's: a max-output cut.
+_KNOWN_STOP_REASONS = ("stop", "length", "toolUse", "error", "aborted")
 
-def _one_line(text: str) -> str:
-    """Collapse a captured fragment to a single line, whitespace normalized."""
-    return " ".join((text or "").split())
+#: pi's words for the shared pi-family reader. pi ends a compaction with
+#: ``compaction_end`` and its successful ``result.usage`` is a paid
+#: summarization call no assistant ``message_end`` carries, so the usage leg is
+#: **on** (measured: ``tests/fixtures/pi/context-overflow-compacted``).
+PI_DIALECT = StreamDialect(
+    product="pi",
+    verified_version="0.87.1",
+    stream_version=PI_STREAM_VERSION,
+    stop_reasons=_KNOWN_STOP_REASONS,
+    compaction_event="compaction_end",
+    compaction_usage=True,
+)
 
+#: The sentence pi 0.87.1 ends a failed truncated-response recovery with
+#: (``agent-session.js``). It rides a ``compaction_end`` whose ``reason`` is
+#: ``overflow`` — the same reason a real context overflow carries — so the text,
+#: not the reason, is what separates a cut answer from an overflow (§7.3 step 5).
+_TRUNCATED_RECOVERY = "truncated response recovery failed"
 
-def _cap(text: str) -> str:
-    """One short line (:data:`_MAX_DIAGNOSIS_CHARS`), with an explicit ellipsis."""
-    if len(text) <= _MAX_DIAGNOSIS_CHARS:
-        return text
-    return text[:_MAX_DIAGNOSIS_CHARS - 1].rstrip() + "…"
+#: The sentence pi ends a failed context-overflow compact-and-retry with ("Context
+#: overflow recovery failed after one compact-and-retry attempt"). UNMEASURED:
+#: §7.3 step 5 names the shape (compaction succeeds — ``result`` present,
+#: ``aborted: false`` — and the retried turn fails again); no live capture has
+#: produced it yet. The sentence need not embed the vendor's 400 text, so it is
+#: a positive overflow signal of its own on the terminal ``errorMessage``.
+_OVERFLOW_RECOVERY = "context overflow recovery failed"
 
 
 def parse_answer_text(text: str) -> Dict[str, Any]:
@@ -59,17 +118,13 @@ def parse_answer_text(text: str) -> Dict[str, Any]:
     shared extractor over code blocks and JSON embedded in prose, arrays
     preferred.
 
-    Module-level because it has **two** callers now. :meth:`PiProvider._parse_stdout`
-    is one — pi's stdout *is* the answer — and :class:`~utils.providers.omp.OmpProvider`
-    is the other, which reaches the same text by a different road: omp renders
-    ``--mode json`` and the answer is the concatenated ``text`` content of the
-    last assistant ``message_end``, so what arrives here is an answer either way.
-    Lifting it is the whole of what those two adapters share; everything else
-    about them — the channel model, the failure taxonomy, the tool policy, the
-    transports, usage — diverges, which is why omp does not subclass pi.
-
-    Behaviour is unchanged from when this was a method body, and pi's own tests
-    are untouched.
+    Module-level because it has **two** callers: :class:`PiProvider` (on the
+    terminal assistant message's text under ``--mode json``, and on a bare
+    text-mode stdout on the back-compat leg) and
+    :class:`~utils.providers.omp.OmpProvider`, which reaches the same text by the
+    same road. Everything else about the two adapters' products — argv, env,
+    tool policy, transports — diverges, which is why omp does not subclass pi;
+    the stream reader they now share lives in ``pi_family_stream``.
     """
     text = (text or "").strip()
 
@@ -85,34 +140,254 @@ def parse_answer_text(text: str) -> Dict[str, Any]:
     return extract_json_from_text(text, prefer_arrays=True)
 
 
+# --------------------------------------------------------------------------- #
+# The json-mode stream, read through the shared pi-family reader under
+# `PI_DIALECT`. What follows is only what pi has and omp does not: the status
+# lives in the `errorMessage` prefix, `length` is a stop reason, and an overflow
+# can end in a failed `compaction_end`.
+# --------------------------------------------------------------------------- #
+
+def _vendor_json_line(text: str) -> Optional[str]:
+    """``"NNN: message (code)"`` from a ``NNN: {vendor json}`` line, or ``None``."""
+    match = _STATUS_PREFIX.match(text)
+    if not match:
+        return None
+    try:
+        payload = json.loads(text[match.end():])
+    except ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    message = payload.get("message")
+    if not (isinstance(message, str) and message.strip()):
+        return None
+    line = f"{match.group(1)}: {_one_line(message)}"
+    code = payload.get("code")
+    if isinstance(code, str) and code.strip():
+        line = f"{line} ({code.strip()})"
+    return line
+
+
+def _error_status(message: Dict[str, Any]) -> Optional[int]:
+    """The HTTP status in a terminal message's ``errorMessage`` prefix, if any."""
+    match = _STATUS_PREFIX.match(_one_line(str(message.get("errorMessage") or "")))
+    return int(match.group(1)) if match else None
+
+
+def _error_sentence(message: Dict[str, Any]) -> str:
+    """An ``error``/``aborted`` message's ``errorMessage`` through the vendor-JSON tier.
+
+    The same reduction :meth:`PiProvider._diagnose` applies to a 0.80.6 stderr
+    line, because it is the same string: ``401: {…}`` becomes *401: Incorrect API
+    key provided: … (invalid_api_key)*, and a non-JSON sentence (``Connection
+    error.``, ``Stream ended without finish_reason``) is reported verbatim.
+    """
+    detail = _one_line(str(message.get("errorMessage") or ""))
+    return _cap(_vendor_json_line(detail) or detail)
+
+
+def _overflow_failure(events: List[Dict[str, Any]]) -> Optional[str]:
+    """The last failed overflow ``compaction_end``'s sentence, or ``None``.
+
+    A compaction that failed carries ``errorMessage`` (or ``aborted: true``) and
+    no ``result``; a successful one carries ``result`` and neither. Only
+    ``reason: "overflow"`` counts: a threshold compaction failing is not a
+    failure of the run.
+    """
+    for event in reversed(events):
+        if event.get("type") != PI_DIALECT.compaction_event:
+            continue
+        if event.get("reason") != "overflow":
+            continue
+        detail = _one_line(str(event.get("errorMessage") or ""))
+        if detail:
+            return _cap(detail)
+        if event.get("aborted"):
+            return "overflow compaction aborted"
+        return None
+    return None
+
+
+def _is_overflow(final: Dict[str, Any], events: List[Dict[str, Any]]) -> bool:
+    """True for a real context overflow — never for a truncated-response recovery.
+
+    Either the terminal ``error``'s own ``errorMessage`` carries a shared
+    :data:`~utils.providers.base.CONTEXT_OVERFLOW_MARKERS` row (measured: the
+    vendor's ``400: … maximum context length …`` arrives verbatim), or the stream
+    holds a failed overflow ``compaction_end`` whose sentence is **not** pi's
+    truncated-recovery one (§7.3 step 5's pre-flight correction: both share
+    ``reason: "overflow"``), or the terminal ``errorMessage`` is pi's own
+    overflow-recovery-failed sentence (:data:`_OVERFLOW_RECOVERY`) — the shape
+    where the compaction itself succeeded and the retried turn overflowed again.
+    """
+    if final.get("stopReason") == "error":
+        text = _one_line(str(final.get("errorMessage") or ""))
+        if classify_streams(text, "") == STATUS_CONTEXT_LENGTH_EXCEEDED:
+            return True
+        if _OVERFLOW_RECOVERY in text.lower():
+            return True
+    failure = _overflow_failure(events)
+    return bool(failure) and _TRUNCATED_RECOVERY not in failure.lower()
+
+
+def _named_for_the_ladder(status: str, token: str, sentence: str) -> str:
+    """``sentence``, with ``token`` in front when the shared tables would miss it.
+
+    Lane A classifies the composed error *string* through ``classify_streams``
+    with no adapter in hand, so a structural verdict reaches its ladder only if
+    the sentence carries a table word. omp's helper of the same name checks for
+    the token as a substring; this one asks the table itself, so a sentence that
+    already classifies (the measured ``400: … maximum context length …``) is
+    returned untouched.
+    """
+    if classify_streams(sentence, "") == status:
+        return sentence
+    return f"{token}: {sentence}" if sentence else token
+
+
+def _never_started(events: List[Dict[str, Any]]) -> bool:
+    """A pre-flight corpse: the ``session`` header and no run.
+
+    MEASURED at 0.87.1 (``tests/fixtures/pi/preflight-no-key``): pi writes the
+    header before it resolves the credential, then throws — exit 1, a 143-byte
+    one-line stdout, and ``No API key found for stub.`` on stderr. That is omp's
+    ``_never_started`` shape exactly, and it is silent for ``STDOUT_ELSE_STDERR``.
+    """
+    if not events:
+        return False
+    if any(str(event.get("type")) == "agent_start" for event in events):
+        return False
+    return not _assistant_ends(events)
+
+
+def _tool_use_diagnostics(events: List[Dict[str, Any]]) -> Tuple[str, str]:
+    """``(tool name, first line of its result)`` for a ``toolUse``-final stream.
+
+    The last errored ``tool_execution_end``, else the last one. The result line
+    is diagnostics only and must never be composed into a classifier-facing
+    error string (see :func:`terminal_verdict`).
+    """
+    tools = _tool_ends(events)
+    errored = [e for e in tools if e.get("isError")]
+    tool = errored[-1] if errored else (tools[-1] if tools else None)
+    detail = _first_line(_result_text(tool)) if tool else ""
+    return str((tool or {}).get("toolName") or "?"), detail
+
+
+def terminal_verdict(stdout: str) -> Optional[str]:
+    """What pi's json **stream** says went wrong, or ``None``.
+
+    One reader for :meth:`PiProvider.parse_output` and
+    :meth:`PiProvider.describe_failure`, so the report's ``Reason:`` line and the
+    log's error string cannot say different things about the same bytes. stderr
+    is never read here; precedence is the caller's.
+
+    ``None`` for a stdout that is not a pi stream, and for a ``stop`` that
+    carries text (a success).
+    """
+    if not has_stream_envelope(stdout, PI_DIALECT):
+        return None
+    events, _junk = _events(stdout)
+    version = _stream_version(events)
+    messages = _assistant_ends(events)
+
+    fault = shape_fault(messages, version, dialect=PI_DIALECT)
+    if fault is not None:
+        return fault
+
+    if not messages:
+        last = events[-1] if events else {}
+        kind = str(last.get("type") or "?")
+        message = last.get("message")
+        if isinstance(message, dict) and message.get("role"):
+            kind = f"{kind}/{message['role']}"
+        return (
+            f"run ended before any assistant message (last event: {kind}, "
+            f"{len(events)} events)"
+        )
+
+    final = messages[-1]
+    reason = final.get("stopReason")
+    if reason == "stop":
+        if _answer_text(final).strip():
+            return None
+        return _retry_give_up(events)
+    if reason == "length":
+        answer = _answer_text(final)
+        return (
+            f"Truncated output (stopReason length: the model hit its output "
+            f"limit after {len(answer)} characters)"
+        )
+    if reason == "error":
+        sentence = _error_sentence(final) or "pi reported stopReason 'error'"
+        if _is_overflow(final, events):
+            failure = _overflow_failure(events)
+            if failure and failure not in sentence:
+                sentence = f"{sentence}; {failure}"
+            return _named_for_the_ladder(
+                STATUS_CONTEXT_LENGTH_EXCEEDED, "Context length exceeded", sentence
+            )
+        status = _error_status(final)
+        if status is not None and 500 <= status < 600:
+            return _named_for_the_ladder(CATEGORY_SERVER_ERROR, "Server error", sentence)
+        return sentence
+    if reason == "aborted":
+        sentence = _error_sentence(final) or "pi reported stopReason 'aborted'"
+        return _named_for_the_ladder(STATUS_TIMEOUT, "Deadline exceeded", sentence)
+    if reason == "toolUse":
+        # The tool's *name* only. Its result is content the run read (a file, a
+        # command's output), never pi's verdict, and Lane A classifies this
+        # sentence through the shared tables: a read that quoted "rate limit
+        # exceeded" or "invalid api key" would turn this deadline into
+        # rate_limited/auth_failed. The result text travels separately, as
+        # parse_output's diagnostic `tool_result` field (_tool_use_diagnostics).
+        name, _detail = _tool_use_diagnostics(events)
+        return _named_for_the_ladder(
+            STATUS_TIMEOUT,
+            "Deadline exceeded",
+            f"run ended inside a tool call: {name}",
+        )
+    return unrecognized_stop_reason(final, version, PI_DIALECT)
+
+
 class PiProvider(LLMProvider):
     """Provider for the Pi coding agent CLI (https://pi.dev).
 
-    pi -p (print mode) runs one-shot headless and writes the final assistant
-    text to stdout as plain text; --no-session keeps runs ephemeral (no
-    session files written). On error pi exits non-zero with the message on
-    stderr — the runner turns that into a failure before parse_output runs,
-    so parse_output only ever sees exit-0 plain text.
+    ``pi --no-session -p --mode json`` runs one-shot headless and writes a JSONL
+    event stream to stdout — omp's event family (``session`` header,
+    ``message_start``/``message_update``/``message_end``, ``tool_execution_*``,
+    ``auto_retry_*``, ``compaction_*``, ``agent_end``, ``agent_settled``) — read
+    by the shared reader in ``pi_family_stream`` under :data:`PI_DIALECT`. The
+    answer is the text of the **last assistant ``message_end``**; usage is summed
+    over every assistant ``message_end`` plus each successful
+    ``compaction_end.result.usage`` (:meth:`parse_usage`).
 
-    That last sentence is now MEASURED rather than claimed, across nine
-    failure modes at 0.80.6 (tests/fixtures/pi/manifest.yaml), and it holds
-    with one exception that matters. stdout is **zero bytes** on every
-    failure and the diagnosis is on stderr behind a bare HTTP-status prefix
-    (`401: {...}`), carrying the vendor's JSON error object verbatim — but a
-    **400 context-length** is swallowed whole: nothing on either channel and
-    exit **0**. That run is byte-identical to a model answering with the
-    empty string, so on the one condition §7.2 declares terminal there is
-    no signal at all for parse_output or classify_failure to read.
+    **The channel model, measured at 0.87.1** (``tests/fixtures/pi/``, 2026-09-25,
+    in the container, ``--network none``, no credential):
 
-    **C4 reads that stderr** (2026-08-20). It used to be accepted by
-    :meth:`parse_output` and never mentioned again, so all nine failure rows
-    reported the same contentless ``Empty output`` while the vendor's JSON error
-    object sat unused. :meth:`describe_failure` now summarizes it for both lanes
-    and :meth:`parse_output` names it in its error branch; the precedence, and
-    the 4 / 3 split it produces over the seven stderr-bearing captures, are in
-    :meth:`_diagnose` and pinned by ``tests/test_stderr_diagnosis.py``. The three
-    rows with nothing on either channel keep ``Empty output`` unembellished —
-    nothing is invented from an exit code — and no classification moved.
+    * **Every in-stream failure exits 0.** pi sets a non-zero exit only in text
+      mode; under ``--mode json`` a 401, a 429, a 5xx, a 404, a cut stream and a
+      400 context-length all end in an assistant ``message_end`` with
+      ``stopReason: "error"`` and the vendor's own words in ``errorMessage``
+      (``401: {…json…}``, the same string 0.80.6 printed to stderr), with stderr
+      **empty**. Success is therefore structural (:meth:`parse_output`), never
+      the exit code.
+    * **A thrown pre-flight exits 1** with a one-line stdout (the ``session``
+      header, written before the throw) and the diagnosis on stderr — ``No API
+      key found for stub.`` measured. That is omp's ``_never_started`` shape.
+    * **The 400 context-length is no longer silent.** At 0.80.6 it wrote nothing
+      on either channel; at 0.87.1 it is an ``error`` whose ``errorMessage`` is
+      the vendor's ``maximum context length`` sentence, classified
+      ``context_length_exceeded``. With nothing compactable (a one-message
+      conversation) pi does not compact; with history it compacts (a paid
+      summarization call), retries once, and says "Context overflow recovery
+      failed …" if that fails too.
+    * **The stream echoes our prompt** (user ``message_start``/``message_end``,
+      ``agent_end.messages``), carries pi's whole system prompt twice and every
+      tool result, which is why :meth:`vendor_text` reduces it.
+
+    **Back-compat.** A non-empty stdout with no pi stream envelope (a pi that
+    ignored ``--mode``) is read as today's bare answer, with one WARN.
 
     Model names are pi model patterns passed VERBATIM to --model — pi
     resolves "provider/id" forms itself (e.g. "openrouter/z-ai/glm-5.2",
@@ -136,39 +411,74 @@ class PiProvider(LLMProvider):
     """
 
     version_cmd = ("pi", "--version")
-    #: 0.80.6 is where every fixture in ``tests/fixtures/pi/`` was captured — the
-    #: §6 step-5 probe, ``--network none``, the stub and the failserver both
-    #: running inside the container, no credential — and the release
-    #: ``tests/container/cli-versions.lock`` pins. It is a pin to re-confirm
-    #: rather than a range to trust, and what the parser depends on is not a
-    #: string it can grep for but the ABSENCE of one: pi print mode writes the
-    #: answer to stdout bare, and on a failure writes **zero bytes** there and
-    #: puts the diagnosis on stderr behind an HTTP-status prefix; the class
-    #: docstring's claim to that effect is measured across nine failure modes in
-    #: ``tests/fixtures/pi/manifest.yaml``. A release that started printing a
-    #: banner, a spinner or a `Tokens:` footer would break :meth:`parse_output`
-    #: with no marker to warn on.
+    #: 0.87.1 is where the json-mode fixture set in ``tests/fixtures/pi/`` was
+    #: captured (the container pin, ``tests/container/cli-versions.lock``), and
+    #: it is the version :data:`PI_DIALECT` names in every shape error. It is
+    #: not 0.80.6: no json-mode byte was captured there (that text-mode set is
+    #: kept, ungraded, in ``tests/fixtures/pi/text-mode-0.80.6/``).
     #:
-    #: **There is deliberately no ``min_version``.** A draft declared
-    #: ``min_version = "0.80.6"`` — the version the capture happened to run on —
-    #: which is `harness-invocation-improvements.md` §5.4.1(a)'s error exactly: a
-    #: measured-at version is an upper bound on the true floor, never the floor.
-    #: pi is a **pre-existing** adapter, nothing measured says 0.79 fails, and
-    #: the hazard above is a *future* release growing a banner, which a floor
-    #: cannot catch and a ``verified_version`` warning names. ``min_version`` is
-    #: a hard exit-3 refusal in ``subagent_executor._detect_version`` and
-    #: ``verified_version`` is a one-line warning; only the warning is earned.
+    #: **There is deliberately no ``min_version``.** A measured-at version is an
+    #: upper bound on the true floor, never the floor
+    #: (`harness-invocation-improvements.md` §5.4.1(a)). json mode with the
+    #: ``session`` header dates from 0.45.0, and a pi that ignores ``--mode``
+    #: (every release before 0.87.1 silently ignored an invalid one) is read by
+    #: :meth:`parse_output`'s back-compat leg rather than refused.
+    #: ``min_version`` is a hard exit-3 refusal in
+    #: ``subagent_executor._detect_version``; ``verified_version`` is a one-line
+    #: warning, and only the warning is earned.
     #:
     #: ``version_cmd`` stays, because it is the only thing that can ever make
-    #: ``verified_version`` speak: with no probe the detected version is
-    #: ``unknown`` and the warning is skipped. Confirmed against the pinned
-    #: binary 2026-08-20 (``docker run --rm --network none --entrypoint
-    #: /opt/mllm/real/pi mllm-e2e:local --version``): a bare ``0.80.6`` on
-    #: stdout, which the base :meth:`parse_version` reads without an override.
-    verified_version = "0.80.6"
+    #: ``verified_version`` speak. Confirmed against the pinned binary 2026-09-25
+    #: (``docker run --rm --network none --entrypoint /opt/mllm/real/pi
+    #: mllm-e2e:local --version``): pi prints a bare ``0.87.1`` on stdout, which
+    #: the base :meth:`parse_version` reads without an override.
+    verified_version = "0.87.1"
 
-    # Usage (§6.3 probe, pi 0.87.1, 2026-09-25): `--mode json` carries omp's usage shape
-    # (tests/fixtures/pi/json-mode/); moving pi onto it + USAGE_FULL is a follow-up plan.
+    #: USAGE_FULL: ``--mode json`` carries omp's usage shape on every assistant
+    #: ``message_end`` (probe: ``tests/fixtures/pi/json-mode/``; recaptured in
+    #: the fixture set), summed by :meth:`parse_usage`.
+    usage_support = USAGE_FULL
+
+    #: pi's own retry chain (decision 12.7). MEASURED at 0.87.1
+    #: (``tests/fixtures/pi/manifest.yaml``: ``rate-limit``, ``server-error``,
+    #: ``truncated``, ``error-envelope``, ``zero-body``): **4 requests over
+    #: ~14.4 s**, three ``auto_retry_start`` events at 2/4/8 s and one
+    #: ``auto_retry_end{success: false}``. 401 and 404 are one request, and a
+    #: context overflow goes to compaction instead of the retry chain.
+    #:
+    #: * ``max_requests=4`` is 1 + ``retry.maxRetries`` (default 3) **per failing
+    #:   model call** — the counter resets on every non-error assistant message
+    #:   (``agent-session.js:606-615``), the per-call convention omp.py uses too.
+    #:   Provider-level retries default to 0 and multiply the chain only when
+    #:   ``retry.provider.maxRetries`` is set; each summarization call a
+    #:   compaction makes has its own 4-request budget.
+    #: * ``retries_rate_limit=True``: pi's retry test is a regex over
+    #:   ``errorMessage`` (``429|rate.?limit|too many requests``, 5xx, connection
+    #:   errors, ``ended without``) unless a quota/billing word matches first —
+    #:   and the ``rate-limit`` row is 4 requests of 429.
+    #: * ``max_wall_s=None``: no outer bound (sleeps cap at ``maxAgentDelayMs``
+    #:   60 s, each request only at ``httpIdleTimeoutMs`` 300 s).
+    #: * ``configurable_by``: ``retry.maxRetries`` and ``retry.provider.maxRetries``
+    #:   in ``<PI_CODING_AGENT_DIR>/settings.json`` **and** a trusted project's
+    #:   ``<cwd>/.pi/settings.json`` — so a reviewed repo's ``.pi/settings.json``
+    #:   can change pi's retry count. That is not a new exposure: the same file
+    #:   can change anything else pi reads. No CLI flag or env var controls them.
+    internal_retries = InternalRetryEnvelope(
+        max_requests=4,
+        max_wall_s=None,
+        retries_rate_limit=True,
+        configurable_by=("retry.maxRetries", "retry.provider.maxRetries"),
+    )
+
+    #: pi's two pre-flight credential sentences. ``No API key found for`` is
+    #: MEASURED (``preflight-no-key``: the model registry's refusal, stderr, exit
+    #: 1); ``No API key for`` is the session's own throw
+    #: (``agent-session.js:1647``, read, not captured). omp's precedent is the
+    #: first of the two (``omp.py``'s ``auth_error_patterns``).
+    auth_error_patterns = LLMProvider.auth_error_patterns + (
+        "No API key found for",
+        "No API key for",
+    )
 
     @property
     def name(self) -> str:
@@ -189,11 +499,13 @@ class PiProvider(LLMProvider):
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
     ) -> List[str]:
-        # pi --no-session -p [--thinking <effort>] --model <model> "<prompt>"
-        # -p prints the final answer and exits; the prompt goes last as a
-        # positional argument.
+        # pi --no-session -p --mode json [--thinking <effort>] --model <model> "<prompt>"
+        # -p prints and exits; `--mode json` right after it (omp's order) makes
+        # stdout the JSONL event stream parse_output reads. The prompt goes last
+        # as a bare positional (adding `--` is a separate change: `@file`
+        # expansion is a real pi feature).
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
-        cmd = ["pi", "--no-session", "-p"]
+        cmd = ["pi", "--no-session", "-p", "--mode", "json"]
         if effort is not None:
             cmd += ["--thinking", effort]
         cmd += ["--model", base_model, prompt]
@@ -201,104 +513,355 @@ class PiProvider(LLMProvider):
 
     #: The two tiers :meth:`_diagnose` can answer from, in precedence order.
     #: Named so a test can grade WHICH rung produced an answer rather than only
-    #: the text, and so the split itself (4 / 3 over the seven stderr-bearing
-    #: captures) is an assertion instead of a claim.
+    #: the text. They apply to a stderr line and, under ``--mode json``, to the
+    #: terminal message's ``errorMessage`` — the same string.
     TIER_VENDOR_JSON = "vendor-json"
     TIER_VERBATIM = "verbatim"
+    #: A json-mode verdict read off the stream's *structure* rather than out of
+    #: a vendor sentence: a ``length`` cut, a ``toolUse``-final deadline, a
+    #: shape fault, a stream with no assistant message.
+    TIER_STREAM = "stream"
 
     def _diagnose(self, stdout: str, stderr: str) -> Optional[Tuple[str, str]]:
-        """``(tier, one-line message)`` for a failed pi run, or ``None``.
+        """``(tier, one-line message)`` for pi's **stderr**, or ``None``.
 
-        The stderr precedence, in the fixed order every caller inherits:
+        ``stdout`` is accepted and deliberately unread: under ``--mode json`` the
+        stream's own verdict is :func:`terminal_verdict`'s, and what reaches
+        stderr is a pre-flight throw (``No API key found for stub.``).
 
-        1. **Channel.** stderr is the diagnosis, stdout is the answer. ``stdout``
-           is accepted and deliberately unread: pi writes **0 bytes to stdout on
-           all ten** of its committed failure captures, and on the runs where it
-           writes something that something is the answer, which belongs on
-           ``raw`` and never in an error string.
-        2. **Within stderr.** Strip the bare ``NNN: `` status prefix, parse the
-           remainder as the vendor's JSON error object, and report its
-           ``message`` with its ``code`` and the stripped status — ``auth-error``
-           becomes *401: Incorrect API key provided: sk-stub***… (invalid_api_key)*.
-           The status is kept because the prefix is the only place it survives.
-           If the remainder does not parse, the stderr text is reported
-           verbatim: ``truncated``'s *Stream ended without finish_reason* and
-           ``zero-body``'s *Connection error.* are already the whole diagnosis.
-        5. **Both channels empty is ``None``.** Three captures are 0 bytes on
-           both — ``context-overflow`` (the silent 400), ``empty`` and
-           ``exit-zero-failure``, byte-identical to each other — and they keep
-           today's ``Empty output`` unembellished. Nothing is invented from an
-           exit code: a status is text pi wrote or it is not reported.
-
-        (Rungs 3 and 4 of the shared precedence are gemini's: pi has no
-        three-layer envelope and writes no Node stack or temp-file path.)
+        Within stderr: strip the bare ``NNN: `` status prefix, parse the
+        remainder as the vendor's JSON error object, and report its ``message``
+        with its ``code`` and the stripped status. If the remainder does not
+        parse, the stderr text is reported verbatim. Both channels empty is
+        ``None``: nothing is invented from an exit code.
         """
-        text = _one_line(stderr)
+        # The first paragraph only: pi's pre-flight throw appends its login help
+        # and two absolute doc paths under a blank line (`preflight-no-key`),
+        # none of which is the diagnosis. Every 0.80.6 stderr is one paragraph.
+        text = _one_line(re.split(r"\n\s*\n", (stderr or "").strip(), maxsplit=1)[0])
         if not text:
             return None
-
-        match = _STATUS_PREFIX.match(text)
-        if match:
-            payload = None
-            try:
-                payload = json.loads(text[match.end():])
-            except ValueError:
-                payload = None
-            if isinstance(payload, dict):
-                message = payload.get("message")
-                if isinstance(message, str) and message.strip():
-                    line = f"{match.group(1)}: {_one_line(message)}"
-                    code = payload.get("code")
-                    if isinstance(code, str) and code.strip():
-                        line = f"{line} ({code.strip()})"
-                    return (self.TIER_VENDOR_JSON, _cap(line))
-
+        line = _vendor_json_line(text)
+        if line is not None:
+            return (self.TIER_VENDOR_JSON, _cap(line))
         return (self.TIER_VERBATIM, _cap(text))
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
-        """pi's half of C4: the vendor's own words instead of a bare exit code.
+        """The stream's verdict, else stderr's — **precedence**, never composed.
 
-        Lane A calls this on every non-zero exit and appends the answer to the
-        slot's error; Lane B calls it when ``parse_output`` failed and recovered
-        no text. pi exits non-zero on all but the silent 400, so this is the
-        path that reaches a user. See :meth:`_diagnose` for the precedence.
+        ``_DESCRIBE_FAILURE_CHANNELS["pi"]`` is ``STDOUT_ELSE_STDERR``, omp's:
+        under ``--mode json`` every in-stream failure is on stdout with stderr
+        empty, and a thrown pre-flight is a header-only stdout with the
+        diagnosis on stderr. A header-only stream is silent here
+        (:func:`_never_started`), so the missing key is described by its stderr
+        sentence rather than by "run ended before any assistant message".
 
-        **Diagnostics, never classification.** Nothing here moves any run's
-        ``classify_failure`` verdict — that reads the raw streams through the
-        declared pattern tables and never consults this method.
+        A stdout that is not a pi stream (text mode) keeps 0.80.6's rule: stderr
+        is the diagnosis, stdout is the answer.
+
+        **Diagnostics first — but the words are load-bearing**: Lane A
+        classifies the string this sentence is composed into, so the overflow,
+        5xx and deadline sentences carry the shared tables' words
+        (:func:`_named_for_the_ladder`).
         """
-        diagnosis = self._diagnose(stdout, stderr)
+        diagnosis = self._diagnose_failure(stdout, stderr)
         return None if diagnosis is None else diagnosis[1]
 
-    def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
-        """Parse plain-text output from pi print mode, and NAME the stderr.
+    def _diagnose_failure(
+        self, stdout: str, stderr: str
+    ) -> Optional[Tuple[str, str]]:
+        """``(tier, line)`` for :meth:`describe_failure`: the stream, else stderr.
 
-        Attempts direct JSON parsing first, then falls back to extraction
-        from code blocks or JSON embedded in prose.
-
-        The rig calls this on failure rows regardless of exit code and Lane B
-        calls it before anything else, so naming the stderr text in the error
-        branch is what makes pi's nine failure rows distinguishable from each
-        other at all — before C4 every one of them collapsed to the same
-        contentless ``Empty output``. Only the ``error`` string grows: the
-        parsed document, ``raw`` and ``success`` are untouched, so no caller's
-        view of a *successful* run moves and stderr never enters ``data``.
+        The tier says which rung answered, so ``tests/test_stderr_diagnosis.py``
+        grades the precedence per capture: :data:`TIER_VENDOR_JSON` /
+        :data:`TIER_VERBATIM` for a terminal ``error``/``aborted`` message (the
+        same two tiers 0.80.6's stderr line took, now applied to
+        ``errorMessage``), :data:`TIER_STREAM` for a structural verdict, and
+        stderr's own tier for a silent or non-json stdout.
         """
+        if has_stream_envelope(stdout, PI_DIALECT):
+            events, _junk = _events(stdout)
+            if not _never_started(events):
+                verdict = terminal_verdict(stdout)
+                if verdict:
+                    messages = _assistant_ends(events)
+                    final = messages[-1] if messages else {}
+                    if (
+                        shape_fault(messages, _stream_version(events), dialect=PI_DIALECT)
+                        is None
+                        and final.get("stopReason") in ("error", "aborted")
+                        and _one_line(str(final.get("errorMessage") or ""))
+                    ):
+                        detail = _one_line(str(final.get("errorMessage") or ""))
+                        tier = (
+                            self.TIER_VENDOR_JSON
+                            if _vendor_json_line(detail) is not None
+                            else self.TIER_VERBATIM
+                        )
+                        return (tier, verdict)
+                    return (self.TIER_STREAM, verdict)
+        return self._diagnose(stdout, stderr)
+
+    def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
+        """Read pi's ``--mode json`` stream. **Success is never the exit code.**
+
+        In order (§7.3 of the plan, mirroring ``OmpProvider.parse_output``):
+
+        1. **Empty stdout** is ``Empty output (stderr: …)``, as in text mode.
+           **A non-empty stdout with no pi stream envelope** is a pi that ignored
+           ``--mode``: it is read as a bare answer (the back-compat leg) and WARNed
+           once. The test is the envelope (``has_stream_envelope``), never "any
+           JSON line": a text-mode answer that is one JSON object must not be
+           read as a stream with no assistant message, and a stream that starts
+           with the ``session`` header but is cut or has junk lines stays here
+           and fails by name — it is never handed to ``parse_answer_text``.
+        2. **Shape.** A malformed assistant ``message_end`` fails by name, with a
+           hard ``error_code``.
+        3. **No assistant message** — including the header-only stdout of a thrown
+           pre-flight — is omp's sentence plus ``; stderr: …``.
+        4. **The last assistant ``message_end``**, on pi's closed set: ``stop``
+           with text is the answer (``raw`` set to the answer on every outcome,
+           and a JSON document the answer never closes is refused);  ``stop``
+           with none is ``Empty output`` (plus pi's retry give-up sentence);
+           ``length`` is ``Truncated output`` with no ``error_code`` (a findings
+           file written before the cut may still be recovered); ``error`` is the
+           ``errorMessage`` through the vendor-JSON tier, hard-coded, with the
+           overflow and 5xx shapes named for the ladder; ``aborted`` and a
+           ``toolUse``-final stream are ``Deadline exceeded``, ``ERROR_TIMEOUT``
+           (the tool's name in the error, its result only in the diagnostic
+           ``tool_result`` field — never where Lane A classifies it);
+           anything else fails closed.
+        5. **Overflow.** A real overflow — the vendor's context-length sentence on
+           the terminal ``error``, or a failed overflow compaction that is not
+           pi's truncated-recovery one — is named in the shared tables' words so
+           it classifies ``context_length_exceeded``. A successful run that
+           compacted after its answer is still a success.
+        """
+        raw = stdout or ""
+        if not raw.strip() or not has_stream_envelope(raw, PI_DIALECT):
+            if raw.strip():
+                warn_gate_once(
+                    ("pi-text-mode-stdout",),
+                    f"WARNING: pi wrote no --mode json event stream; reading its "
+                    f"stdout as a bare text-mode answer (the parser was written "
+                    f"against pi {PI_DIALECT.verified_version}'s json mode).",
+                )
+            return self._parse_text_mode(raw, stderr)
+
+        events, junk = _events(raw)
+        version = _stream_version(events)
+        warn_stream_version(version, PI_DIALECT)
+        messages = _assistant_ends(events)
+
+        def with_junk(sentence: Optional[str]) -> Optional[str]:
+            if sentence and junk:
+                return f"{sentence}; non-JSON output: {_first_line(junk[0])}"
+            return sentence
+
+        def failed(code: Optional[str]) -> Dict[str, Any]:
+            out = {
+                "success": False,
+                "error": with_junk(terminal_verdict(raw)),
+                "raw": raw,
+                "data": None,
+            }
+            if code is not None:
+                out["error_code"] = code
+            return out
+
+        if shape_fault(messages, version, dialect=PI_DIALECT) is not None:
+            return failed(ERROR_SUBPROCESS_FAILED)
+
+        if not messages:
+            sentence = with_junk(terminal_verdict(raw))
+            diagnosis = self._diagnose(raw, stderr)
+            if diagnosis:
+                sentence = f"{sentence}; stderr: {diagnosis[1]}"
+            # No `error_code`: the model produced nothing, so the file channel is
+            # welcome to look (and will find nothing).
+            return {"success": False, "error": sentence, "raw": raw, "data": None}
+
+        final = messages[-1]
+        reason = final.get("stopReason")
+
+        if reason == "stop":
+            answer = _answer_text(final)
+            if not answer.strip():
+                gave_up = terminal_verdict(raw)
+                return {
+                    "success": False,
+                    "error": f"Empty output ({gave_up})" if gave_up else "Empty output",
+                    "raw": answer,
+                    "data": None,
+                }
+            cut = _unclosed_container(answer)
+            if cut is not None:
+                closing = "]" if cut == "[" else "}"
+                return {
+                    "success": False,
+                    "error": (
+                        f"Truncated output (the answer opens a JSON document "
+                        f"with '{cut}' and never closes it: no matching "
+                        f"'{closing}' in {len(answer)} characters)"
+                    ),
+                    "raw": answer,
+                    "data": None,
+                }
+            result = dict(parse_answer_text(answer))
+            # `raw` carries the answer on every outcome: `ask`'s
+            # `recover_answer_text` falls back to it, and without it would fall
+            # back to the log's stdout — JSONL here, which it rejects.
+            result.setdefault("raw", answer)
+            return result
+
+        if reason == "length":
+            # No `error_code`: omp's unclosed-container disposition — a findings
+            # file the model wrote before the cut may still be recovered.
+            return {
+                "success": False,
+                "error": with_junk(terminal_verdict(raw)),
+                "raw": _answer_text(final),
+                "data": None,
+            }
+
+        if reason == "toolUse":
+            out = failed(ERROR_TIMEOUT)
+            # Diagnostics beside the error, never inside it: the error string is
+            # what Lane A classifies (see `terminal_verdict`).
+            name, detail = _tool_use_diagnostics(events)
+            out["tool_name"] = name
+            if detail:
+                out["tool_result"] = detail
+            return out
+
+        if reason == "aborted":
+            return failed(ERROR_TIMEOUT)
+
+        return failed(ERROR_SUBPROCESS_FAILED)
+
+    def vendor_text(self, stdout: str, stderr: str) -> Tuple[str, str]:
+        """The terminal message's own ``errorMessage``, and **nothing earlier**.
+
+        pi's json stream echoes our prompt three times (the user
+        ``message_start``/``message_end`` and ``agent_end.messages``), carries
+        pi's whole system prompt twice (the system message's ``sections``) and
+        every tool result. Handed to the shared tables unreduced, a plan that
+        discusses rate limits classifies a clean run ``rate_limited`` (measured:
+        ``markers-in-tool-result``). So this is omp's reduction: the terminal
+        assistant message's ``errorMessage`` when its ``stopReason`` is
+        ``error``, ``aborted`` or unrecognized; ``""`` for ``stop``,
+        ``toolUse`` and ``length`` (decided structurally, or not a failure); and
+        ``""`` when there is no assistant message at all (a header-only
+        pre-flight, whose diagnosis is stderr's).
+
+        A stdout that is not a pi stream (prose, a bare JSON answer, empty) is
+        returned unchanged, and so is anything when the reduction raises.
+        stderr is never reduced.
+        """
+        try:
+            if not has_stream_envelope(stdout, PI_DIALECT):
+                return stdout, stderr
+            events, _junk = _events(stdout)
+            messages = _assistant_ends(events)
+            if not messages:
+                return "", stderr
+            final = messages[-1]
+            if final.get("stopReason") in ("stop", "toolUse", "length"):
+                return "", stderr
+            return _one_line(str(final.get("errorMessage") or "")), stderr
+        except Exception:  # noqa: BLE001 - a failed reduction is identity
+            return stdout, stderr
+
+    def classify_failure(
+        self, stdout: str, stderr: str, exit_code: int = 0
+    ) -> Optional[str]:
+        """Structural first, then the declared tables over :meth:`vendor_text`.
+
+        On the terminal assistant message: ``aborted``/``toolUse`` →
+        ``timeout``; ``error`` that is a real context overflow
+        (:func:`_is_overflow`) → ``context_length_exceeded`` — tested first, the
+        order :func:`terminal_verdict` uses — then a ``401``/``403`` prefix →
+        ``auth_failed``, ``429`` → ``rate_limited``, ``5xx`` → ``server_error``.
+        Everything else — a 404 naming the model, ``Connection error.``, a
+        pre-flight on stderr — reaches the shared tables through the reduced
+        haystack.
+        """
+        try:
+            envelope = has_stream_envelope(stdout, PI_DIALECT)
+        except Exception:  # noqa: BLE001
+            envelope = False
+        if envelope:
+            events, _junk = _events(stdout)
+            messages = _assistant_ends(events)
+            if messages:
+                final = messages[-1]
+                reason = final.get("stopReason")
+                if reason in ("aborted", "toolUse"):
+                    return STATUS_TIMEOUT
+                if reason == "error":
+                    # Overflow before the status ladder, as `terminal_verdict`
+                    # (Lane A) and `classify_streams` (context before auth)
+                    # order it: one message carrying both must not split lanes.
+                    if _is_overflow(final, events):
+                        return STATUS_CONTEXT_LENGTH_EXCEEDED
+                    status = _error_status(final)
+                    if status in (401, 403):
+                        return STATUS_AUTH_FAILED
+                    if status == 429:
+                        return STATUS_RATE_LIMITED
+                    if status is not None and 500 <= status < 600:
+                        return CATEGORY_SERVER_ERROR
+        return super().classify_failure(stdout, stderr, exit_code)
+
+    def parse_usage(self, stdout: str, stderr: str) -> Optional[Dict[str, Any]]:
+        """Sum ``usage`` over every assistant ``message_end``, plus compactions.
+
+        The shared :func:`~utils.providers.pi_family_stream.sum_usage`: ``input``,
+        ``output``, ``cacheRead``, ``totalTokens`` and ``cost.total`` over every
+        assistant ``message_end`` (one per API call), ``tool_uses`` from the
+        ``tool_execution_end`` count, and — pi's leg, on in :data:`PI_DIALECT` —
+        each successful ``compaction_end.result.usage``, because a compaction is
+        a paid summarization call no assistant message carries (measured:
+        ``context-overflow-compacted``). An absent key stays absent, never 0.
+
+        Three gaps, all pi's:
+
+        * a summarization attempt that errored and was retried
+          (``summarization_retry_*``) is not counted;
+        * a failed or aborted compaction has ``result: undefined``, so its spend
+          is invisible;
+        * ``input`` excludes cached tokens (probe: 1704 = 1445 + 3 + 256).
+
+        pi writes a **zeroed** usage block on an ``error`` message and on a
+        provider that streams no usage (the container stub), so those keys are
+        present and 0 — pi's number, not an invented one.
+
+        Cost: ``cost_usd`` is pi's own catalog price, an **estimate**. A custom
+        ``models.json`` provider with no ``cost`` block (the container's ``stub``)
+        prices every call at 0, which ``describe_usage`` suppresses in the
+        rendered clause while ``usage.json`` keeps the zero. Price a live run off
+        the OpenRouter key's own usage, never off this self-report.
+        """
+        if not has_stream_envelope(stdout, PI_DIALECT):
+            return None
+        events, _junk = _events(stdout)
+        return sum_usage(events, PI_DIALECT)
+
+    def _parse_text_mode(self, stdout: str, stderr: str) -> Dict[str, Any]:
+        """The 0.80.6 text-mode reader: stdout is the answer, stderr is named."""
         result = self._parse_stdout(stdout)
         if result.get("success"):
             return result
 
-        detail = self.describe_failure(stdout, stderr)
+        detail = self._diagnose(stdout, stderr)
         if not detail:
             return result
         result = dict(result)
-        result["error"] = f"{result.get('error') or 'parse failed'} (stderr: {detail})"
+        result["error"] = (
+            f"{result.get('error') or 'parse failed'} (stderr: {detail[1]})"
+        )
         return result
 
     def _parse_stdout(self, stdout: str) -> Dict[str, Any]:
-        """Today's parser, unchanged — the answer channel, read on its own.
-
-        The body now lives in the module-level :func:`parse_answer_text`, which
-        omp calls too; this method is the name pi's own call sites and tests use.
-        """
+        """The bare-answer reader, read on its own (:func:`parse_answer_text`)."""
         return parse_answer_text(stdout)

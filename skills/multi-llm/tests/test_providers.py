@@ -635,7 +635,7 @@ class TestInternalRetryEnvelopeDeclarations:
             n for n in _envelope_sweep_names()
             if n not in ("claude-code", "codex", "copilot", "gemini",
                          "goose", "kimi",
-                         "muse", "omp", "qwen-code", "vibe")
+                         "muse", "omp", "pi", "qwen-code", "vibe")
         ],
     )
     def test_every_unmeasured_adapter_declares_none(self, registry, name):
@@ -6158,6 +6158,55 @@ class TestDeclaredOutputChannel:
         assert "/out/result.json" not in block
 
 
+#: `TestClassifyFailure`'s case tables, lifted to module scope so
+#: `TestMatchStreams` twins every row through `match_streams` too: a case added
+#: here is graded by both tests without anyone copying it.
+CLASSIFY_FAILURE_BARE_429_NOT_RATE_LIMIT = [
+    '{"type":"step_finish","cost":0.0429,"tokens":{"output":14290}}',
+    "total cost 1.0429 for 4290 tokens",
+    "429 things were reviewed",
+]
+CLASSIFY_FAILURE_REAL_429 = [
+    "HTTP 429 Too Many Requests",
+    '{"error":{"status":429,"message":"slow down"}}',
+    "Error: 429",
+    "Requests are throttled: status code 429",
+]
+CLASSIFY_FAILURE_TEXTUAL_RATE = [
+    "rate limit exceeded",
+    "the provider reported rate limits",
+    "API rate-limited, retry later",
+    "quota exceeded for this model",
+    '{"type":"overloaded_error"}',
+]
+CLASSIFY_FAILURE_PROSE_AUTH_WORD = [
+    "the unauthorized branch in review.py returns early",
+    "T004 adds a test for unauthorized callers",
+]
+CLASSIFY_FAILURE_REAL_LOGIN_NOTICE = [
+    "Not logged in. Please log in with `codex login`.",
+    "401 Unauthorized",
+    "Error: unauthorized",
+    "authentication required",
+    "invalid api key",
+    "invalid_api_key",
+    "no credentials found for provider",
+]
+#: `(stdout, stderr)` pairs `TestClassifyFailure` pins outside a parametrize.
+CLASSIFY_FAILURE_PAIRS = [
+    ("", ""),
+    ("   \n ", ""),
+    ("429 too many requests\nnot logged in", ""),
+]
+CLASSIFY_FAILURE_STREAMS = (
+    CLASSIFY_FAILURE_BARE_429_NOT_RATE_LIMIT
+    + CLASSIFY_FAILURE_REAL_429
+    + CLASSIFY_FAILURE_TEXTUAL_RATE
+    + CLASSIFY_FAILURE_PROSE_AUTH_WORD
+    + CLASSIFY_FAILURE_REAL_LOGIN_NOTICE
+)
+
+
 class TestClassifyFailure:
     """D3i/D3k: the classifier must read a stream, not find digits in one."""
 
@@ -6167,62 +6216,35 @@ class TestClassifyFailure:
 
         return get_provider("opencode")
 
-    @pytest.mark.parametrize("stream", [
-        '{"type":"step_finish","cost":0.0429,"tokens":{"output":14290}}',
-        "total cost 1.0429 for 4290 tokens",
-        "429 things were reviewed",
-    ])
+    @pytest.mark.parametrize("stream", CLASSIFY_FAILURE_BARE_429_NOT_RATE_LIMIT)
     def test_a_bare_429_inside_a_number_is_not_a_rate_limit(self, provider, stream):
         """A misread here is retried WITHOUT consuming the retry budget."""
         assert provider.classify_failure(stream, "") is None
 
-    @pytest.mark.parametrize("stream", [
-        "HTTP 429 Too Many Requests",
-        '{"error":{"status":429,"message":"slow down"}}',
-        "Error: 429",
-        "Requests are throttled: status code 429",
-    ])
+    @pytest.mark.parametrize("stream", CLASSIFY_FAILURE_REAL_429)
     def test_a_real_429_is_still_a_rate_limit(self, provider, stream):
         assert provider.classify_failure("", stream) == "rate_limited"
 
-    @pytest.mark.parametrize("stream", [
-        "rate limit exceeded",
-        "the provider reported rate limits",
-        "API rate-limited, retry later",
-        "quota exceeded for this model",
-        '{"type":"overloaded_error"}',
-    ])
+    @pytest.mark.parametrize("stream", CLASSIFY_FAILURE_TEXTUAL_RATE)
     def test_the_textual_rate_patterns_keep_matching(self, provider, stream):
         assert provider.classify_failure("", stream) == "rate_limited"
 
-    @pytest.mark.parametrize("stream", [
-        "the unauthorized branch in review.py returns early",
-        "T004 adds a test for unauthorized callers",
-    ])
+    @pytest.mark.parametrize("stream", CLASSIFY_FAILURE_PROSE_AUTH_WORD)
     def test_prose_quoting_an_auth_word_is_not_an_auth_failure(self, provider, stream):
         """auth_failed is batch-fatal, so a quoted word must never trigger it."""
         assert provider.classify_failure(stream, "") is None
 
-    @pytest.mark.parametrize("stream", [
-        "Not logged in. Please log in with `codex login`.",
-        "401 Unauthorized",
-        "Error: unauthorized",
-        "authentication required",
-        "invalid api key",
-        "invalid_api_key",
-        "no credentials found for provider",
-    ])
+    @pytest.mark.parametrize("stream", CLASSIFY_FAILURE_REAL_LOGIN_NOTICE)
     def test_a_real_login_notice_is_still_auth_failed(self, provider, stream):
         assert provider.classify_failure("", stream) == "auth_failed"
 
     def test_an_empty_stream_classifies_nothing(self, provider):
-        assert provider.classify_failure("", "") is None
-        assert provider.classify_failure("   \n ", "") is None
+        for stdout, stderr in CLASSIFY_FAILURE_PAIRS[:2]:
+            assert provider.classify_failure(stdout, stderr) is None
 
     def test_auth_wins_over_a_rate_limit_in_the_same_stream(self, provider):
-        assert provider.classify_failure(
-            "429 too many requests\nnot logged in", ""
-        ) == "auth_failed"
+        stdout, stderr = CLASSIFY_FAILURE_PAIRS[2]
+        assert provider.classify_failure(stdout, stderr) == "auth_failed"
 
 
 #: The adapters that override ``describe_failure``, each with **the channel its
@@ -6279,7 +6301,14 @@ STDOUT_ELSE_STDERR = "stdout-else-stderr"
 _DESCRIBE_FAILURE_CHANNELS = {
     "opencode": STDOUT_THEN_STDERR,
     "muse": "stdout",
-    "pi": "stderr",
+    # pi moved from "stderr" with `--mode json` (plan §7, T7.6), to omp's shape
+    # and for omp's reason, measured at 0.87.1 (tests/fixtures/pi/manifest.yaml):
+    # every in-stream failure is an assistant `message_end` on stdout carrying
+    # the vendor's `errorMessage` with ZERO bytes on stderr and exit 0, while a
+    # thrown pre-flight (`preflight-no-key`) is a one-line `session` header on
+    # stdout — silent — with the diagnosis on stderr and exit 1. Precedence, not
+    # enrichment: stderr may never edit an answer the stream already gave.
+    "pi": STDOUT_ELSE_STDERR,
     "gemini": "stderr",
     "kilocode": "stderr",
     "claude-code": "stdout",
@@ -7819,6 +7848,8 @@ class TestPiProvider:
             "pi",
             "--no-session",
             "-p",
+            "--mode",
+            "json",
             "--model",
             "openrouter/z-ai/glm-5.2",
             "Review this code",
@@ -7828,7 +7859,43 @@ class TestPiProvider:
         """A bare model pattern without a provider prefix passes through."""
         cmd = provider.build_command("Analyze this", "sonnet")
 
-        assert cmd == ["pi", "--no-session", "-p", "--model", "sonnet", "Analyze this"]
+        assert cmd == [
+            "pi", "--no-session", "-p", "--mode", "json", "--model", "sonnet",
+            "Analyze this",
+        ]
+
+    def test_internal_retry_envelope_is_the_measured_chain(self, provider):
+        """T7.14 (decision 12.7), pinned the way copilot's envelope is.
+
+        MEASURED at 0.87.1 (tests/fixtures/pi/manifest.yaml: rate-limit,
+        server-error, truncated, error-envelope, zero-body): 4 requests per
+        failing model call = 1 + ``retry.maxRetries`` (3), a 429 among the
+        retried errors, no outer wall bound, and the two settings keys that
+        change it.
+        """
+        envelope = provider.internal_retries
+
+        assert envelope.max_requests == 4
+        assert envelope.retries_rate_limit is True
+        assert envelope.max_wall_s is None
+        assert envelope.configurable_by == (
+            "retry.maxRetries", "retry.provider.maxRetries",
+        )
+
+    @pytest.mark.parametrize("model", [
+        "openrouter/z-ai/glm-5.2",
+        "openrouter/z-ai/glm-5.2:high",
+        "openrouter/z-ai/glm-5.2:off",
+        "openrouter/deepseek/deepseek-r1:free",
+    ])
+    def test_mode_json_is_always_rendered_right_after_print(self, provider, model):
+        """``--mode json`` on every argv — with and without ``--thinking`` — and
+        right after ``-p`` (omp's order), so ``parse_output`` always reads the
+        JSONL stream it was written for (plan §7.3, T7.5)."""
+        cmd = provider.build_command("Review this code", model)
+
+        assert cmd[:5] == ["pi", "--no-session", "-p", "--mode", "json"]
+        assert cmd.count("--mode") == 1
 
     def test_reasoning_efforts_constant(self):
         """Module-level REASONING_EFFORTS holds exactly the seven valid levels."""
@@ -7847,6 +7914,8 @@ class TestPiProvider:
             "pi",
             "--no-session",
             "-p",
+            "--mode",
+            "json",
             "--thinking",
             "high",
             "--model",
@@ -7864,6 +7933,8 @@ class TestPiProvider:
                 "pi",
                 "--no-session",
                 "-p",
+                "--mode",
+                "json",
                 "--thinking",
                 effort,
                 "--model",
@@ -7888,6 +7959,8 @@ class TestPiProvider:
                 "pi",
                 "--no-session",
                 "-p",
+                "--mode",
+                "json",
                 "--model",
                 model,
                 "Review this code",
@@ -9486,8 +9559,11 @@ PRE_L5_ARGV = {
         "--log-level", "ERROR", "--model", "openai/gpt-5.5",
         PRE_L5_ARGV_PROMPT,
     ],
+    # `--mode json` since plan §7 (T7.5): the JSONL event stream parse_output
+    # reads, rendered right after `-p` like omp's.
     "pi": [
-        "pi", "--no-session", "-p", "--model", "anthropic/claude-opus-4-8",
+        "pi", "--no-session", "-p", "--mode", "json",
+        "--model", "anthropic/claude-opus-4-8",
         PRE_L5_ARGV_PROMPT,
     ],
     # No --max-wall-time element at all: that flag is the ONLY row-derived value
@@ -9821,11 +9897,19 @@ class TestVendorTextContract:
         assert (stdout, stderr) == ("some stdout", "some stderr")
 
     @pytest.mark.parametrize("provider", [
-        "agy", "aider", "claude-code", "cline", "codex", "cursor-agent",
-        "gemini", "grok", "kilocode", "kimi", "opencode", "pi", "qwen-code",
+        "agy", "aider", "claude-code", "cline", "cursor-agent",
+        "gemini", "grok", "kilocode", "kimi", "qwen-code",
     ])
     def test_every_non_echoing_adapter_still_gets_the_whole_capture(self, provider):
-        """The thirteen adapters no committed capture shows echoing.
+        """The ten adapters no committed capture shows echoing.
+
+        "Non-echoing" means **echoes neither the prompt nor the repo**. opencode
+        left this roster (T2.2): it does not echo our prompt, but its
+        ``--format json`` stdout carries tool output, and a validator's ``grep``
+        of a plan discussing rate limits was recorded ``rate_limited``. pi left
+        it with ``--mode json`` (T7.4): its stream echoes our prompt, pi's own
+        system prompt and every tool result, so ``PiProvider.vendor_text``
+        reduces it (``tests/fixtures/pi/markers-in-tool-result``).
 
         The default being identity is what makes "fix the class for the adapters
         that echo" a bounded claim rather than a rewrite of every classifier.
@@ -9884,16 +9968,51 @@ class TestVendorTextContract:
         )
 
     def test_nothing_else_applies_it(self):
-        """§7.2 depends on `classify_streams` staying the adapter-free rule."""
+        """§7.2 depends on `classify_streams` staying the adapter-free rule.
+
+        Exactly two appliers (T2.5): `classify_failure`, to classify, and the
+        executor's `_classify_failed_run`, to quote — never to classify.
+        """
+        import ast
+
         text, tree = self._c1_base_source()
 
         assert text.count("self.vendor_text(") == 1, (
             "the hook is applied in more than one place"
         )
         assert "'vendor_text'" not in self._c1_body_of(tree, "classify_streams")
+        assert "'vendor_text'" not in self._c1_body_of(tree, "match_streams")
         assert "'vendor_text'" not in self._c1_body_of(
             tree, "classify_auth_probe", cls="LLMProvider"
         )
+
+        utils_dir = Path(base_module.__file__).parent.parent
+        executor_path = utils_dir / "subagent_executor.py"
+        executor_text = executor_path.read_text(encoding="utf-8")
+        assert executor_text.count("vendor_text(") == 1, (
+            "subagent_executor.py applies the hook more than once"
+        )
+        executor_tree = ast.parse(executor_text)
+        applier = next(
+            node for node in executor_tree.body
+            if isinstance(node, ast.FunctionDef)
+            and node.name == "_classify_failed_run"
+        )
+        assert "'vendor_text'" in ast.dump(applier), (
+            "the executor's one application is not inside _classify_failed_run"
+        )
+
+        for path in sorted(utils_dir.rglob("*.py")):
+            if path in (executor_path, Path(base_module.__file__)):
+                continue
+            calls = [
+                line for line in path.read_text(encoding="utf-8").splitlines()
+                if "vendor_text(" in line
+                and "def vendor_text(" not in line
+                # An override delegating to its own base is not a new applier.
+                and "super().vendor_text(" not in line
+            ]
+            assert not calls, f"{path.name} applies vendor_text: {calls}"
 
     def test_a_reduction_that_empties_the_haystack_is_not_what_the_base_does(self):
         """The degrade rule, stated as behaviour rather than as prose.
@@ -9989,6 +10108,520 @@ class TestVendorTextOnTheFourEchoingAdapters:
         """
         stdout = _c1_capture(provider, capture)
         assert _c1_adapter(provider).classify_failure(stdout, "", 0) == expected
+
+
+OPENCODE_FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
+OPENCODE_1_18_32 = OPENCODE_FIXTURES / "1.18.32"
+
+
+def _oc_fixture(name):
+    return (OPENCODE_FIXTURES / name).read_bytes().decode("utf-8")
+
+
+def _oc_event(event_type, **fields):
+    """One compact `run --format json` line, `type` first like opencode writes."""
+    return json.dumps({"type": event_type, **fields}, separators=(",", ":"))
+
+
+#: A vendor `error` event carrying a 429, in the shape `describe_failure` reads.
+OC_429_EVENT = _oc_event(
+    "error", timestamp=1, sessionID="ses_0",
+    error={"name": "APIError", "data": {
+        "message": "Rate limit exceeded", "statusCode": 429, "isRetryable": True,
+    }},
+)
+#: The same shape for an auth failure, as `provider_auth_error.jsonl` records it.
+OC_AUTH_EVENT = _oc_event(
+    "error", timestamp=1, sessionID="ses_0",
+    error={"name": "ProviderAuthError", "data": {
+        "providerID": "openrouter", "message": "API key is missing",
+    }},
+)
+#: A `--print-logs` stderr line for a real opencode 429.
+OC_429_STDERR = (
+    'timestamp=x level=ERROR message=failed '
+    'error="AI_APICallError: Too Many Requests" statusCode=429\n'
+)
+
+
+class TestOpenCodeVendorText:
+    """T2.1: opencode's classifier haystack is what the VENDOR wrote.
+
+    opencode echoes the repository, not our prompt: `--format json` stdout
+    carries every tool call's output. Run b38de8bb's validator grepped a plan
+    discussing rate limits, died on an auto-rejected permission, and was
+    recorded `rate_limited` off that grep.
+    """
+
+    TOOL_WITH_PLAN_TEXT = _oc_event(
+        "tool_use", timestamp=1, sessionID="ses_0",
+        part={"type": "tool", "tool": "grep", "state": {
+            "status": "completed",
+            "output": "Line 12: the endpoint returns 429 when the rate limit is hit",
+        }},
+    )
+    PROSE = _oc_event(
+        "text", timestamp=2, sessionID="ses_0",
+        part={"type": "text", "text": "The limiter returns 429 on a rate_limit hit."},
+    )
+    REASONING = _oc_event(
+        "reasoning", timestamp=3, sessionID="ses_0",
+        part={"type": "reasoning", "text": "rate limit exceeded? 429?"},
+    )
+    STEP_START = _oc_event("step_start", timestamp=0, sessionID="ses_0",
+                           part={"type": "step-start"})
+    STEP_FINISH = _oc_event("step_finish", timestamp=4, sessionID="ses_0",
+                            part={"type": "step-finish", "reason": "tool-calls",
+                                  "tokens": {"input": 429, "output": 1}})
+
+    @pytest.fixture
+    def provider(self):
+        return OpenCodeProvider()
+
+    @pytest.mark.parametrize("event_type", [
+        "text", "tool_use", "reasoning", "step_start", "step_finish",
+    ])
+    def test_non_vendor_event_types_are_dropped(self, provider, event_type):
+        line = {
+            "text": self.PROSE, "tool_use": self.TOOL_WITH_PLAN_TEXT,
+            "reasoning": self.REASONING, "step_start": self.STEP_START,
+            "step_finish": self.STEP_FINISH,
+        }[event_type]
+        stdout = "\n".join([line, OC_429_EVENT])
+        assert provider.vendor_text(stdout, "") == (OC_429_EVENT, "")
+
+    def test_error_events_unknown_types_and_non_json_lines_are_kept(self, provider):
+        unknown = _oc_event("session_notice", note="429 rate limit")
+        banner = "opencode: some non-JSON banner line"
+        stdout = "\n".join([
+            self.STEP_START, OC_429_EVENT, self.TOOL_WITH_PLAN_TEXT, unknown,
+            banner, self.STEP_FINISH,
+        ])
+        reduced, _ = provider.vendor_text(stdout, "")
+        assert reduced.splitlines() == [OC_429_EVENT, unknown, banner]
+
+    def test_a_run_of_only_prose_and_tools_reduces_to_nothing(self, provider):
+        """`""` is the accurate reduction of "opencode reported no error"."""
+        stdout = "\n".join([self.STEP_START, self.TOOL_WITH_PLAN_TEXT,
+                            self.PROSE, self.STEP_FINISH])
+        assert provider.vendor_text(stdout, "err") == ("", "err")
+        assert provider.classify_failure(stdout, "", 0) is None
+        # The pre-T2.1 haystack read the tool output as a rate limit.
+        assert LLMProvider.classify_failure(
+            type("_Bare", (OpenCodeProvider,), {
+                "vendor_text": LLMProvider.vendor_text,
+            })(), stdout, "", 0
+        ) == STATUS_RATE_LIMITED
+
+    def test_an_end_cut_final_line_is_dropped(self, provider):
+        cut = self.TOOL_WITH_PLAN_TEXT[:90]
+        assert cut.startswith('{"type":"tool_use"')
+        stdout = "\n".join([OC_429_EVENT, cut])
+        assert provider.vendor_text(stdout, "") == (OC_429_EVENT, "")
+
+    def test_an_end_cut_line_with_type_in_second_position_is_dropped(self, provider):
+        """Key order is not guaranteed: the opener is found in any position."""
+        line = json.dumps({
+            "timestamp": 1790268175946, "type": "tool_use",
+            "part": {"state": {"output": "the endpoint returns 429 on a rate limit"}},
+        }, separators=(",", ":"))
+        cut = line[:line.index("429") + 3]
+        stdout = "\n".join([OC_429_EVENT, cut])
+        assert provider.vendor_text(stdout, "") == (OC_429_EVENT, "")
+
+    def test_a_cut_line_that_is_not_last_is_kept(self, provider):
+        """Only the FINAL line can be a kill's cut; anything else is kept."""
+        cut = self.TOOL_WITH_PLAN_TEXT[:90]
+        stdout = "\n".join([cut, OC_429_EVENT])
+        reduced, _ = provider.vendor_text(stdout, "")
+        assert reduced.splitlines() == [cut, OC_429_EVENT]
+
+    def test_a_beginning_cut_first_line_is_kept(self, provider):
+        """A stored tail's first line carries no opener: kept, by design."""
+        head_cut = self.TOOL_WITH_PLAN_TEXT[40:]
+        stdout = "\n".join([head_cut, self.STEP_FINISH])
+        reduced, _ = provider.vendor_text(stdout, "")
+        assert reduced == head_cut
+
+    @pytest.mark.parametrize("junk", [
+        "", "   ", "not json at all", "Ran into this error: 429 rate limit exceeded",
+        '{"unclosed": ', "[1, 2, 3]", "\x00\x01",
+    ])
+    def test_no_parseable_event_is_the_identity(self, provider, junk):
+        assert provider.vendor_text(junk, "err") == (junk, "err")
+
+    def test_a_raised_exception_is_the_identity(self, provider, monkeypatch):
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("parser exploded")
+
+        monkeypatch.setattr("utils.providers.opencode.json.loads", boom)
+        stdout = "\n".join([self.TOOL_WITH_PLAN_TEXT, OC_429_EVENT])
+        assert provider.vendor_text(stdout, "err") == (stdout, "err")
+
+    def test_stderr_is_never_reduced(self, provider):
+        stdout = "\n".join([self.TOOL_WITH_PLAN_TEXT, OC_429_EVENT])
+        _, stderr = provider.vendor_text(stdout, OC_429_STDERR)
+        assert stderr == OC_429_STDERR
+
+    def test_the_reduction_only_ever_removes(self, provider):
+        """Every committed opencode capture: a subsequence, and no stderr."""
+        paths = sorted(
+            p for p in list(OPENCODE_FIXTURES.iterdir())
+            + list(OPENCODE_1_18_32.iterdir())
+            if p.is_file() and p.suffix in (".txt", ".jsonl", ".json")
+        )
+        assert paths
+        for path in paths:
+            raw = path.read_bytes().decode("utf-8")
+            reduced, stderr = provider.vendor_text(raw, "a stderr diagnosis")
+            remaining = iter(raw)
+            assert all(char in remaining for char in reduced), path.name
+            assert stderr == "a stderr diagnosis", path.name
+
+
+#: T2.4: every committed opencode capture, graded through `classify_failure`
+#: before T2.1/T4.3 (identity `vendor_text`, no structural check) and after.
+#: One cell moves: the b38de8bb denied turn, from `rate_limited` to
+#: `runner_error`. `stdout`/`stderr` name fixture files (or carry literal
+#: synthetic text); `None` is an empty stream.
+OC_GRADED_CAPTURES = (
+    # id,                       stdout,                                   stderr,                                    exit, before,          after
+    ("provider_auth_error",    "provider_auth_error.jsonl",              None,                                      1,    "auth_failed",   "auth_failed"),
+    ("invalid-model",          "invalid-model.stdout.txt",               "invalid-model.stderr.txt",                1,    "invalid_model", "invalid_model"),
+    ("run_review.1.18.30",     "run_review.1.18.30.jsonl",               None,                                      0,    None,            None),
+    ("denied_turn_1.18.32",    "1.18.32/denied_permission_turn_end.jsonl", "1.18.32/denied_permission_turn_end.stderr.txt", 0, "rate_limited", "runner_error"),
+    ("continue_loop_on_deny",  "1.18.32/continue_loop_on_deny.jsonl",    "1.18.32/continue_loop_on_deny.stderr.txt", 0,   None,            None),
+    ("synthetic 429 event",    ("literal", OC_429_EVENT),                None,                                      1,    "rate_limited",  "rate_limited"),
+    ("synthetic 429 stderr",   None,                                     ("literal", OC_429_STDERR),                1,    "rate_limited",  "rate_limited"),
+)
+
+
+def _oc_stream(spec):
+    if spec is None:
+        return ""
+    if isinstance(spec, tuple):
+        return spec[1]
+    return _oc_fixture(spec)
+
+
+class _OpenCodeBeforeT21(OpenCodeProvider):
+    """opencode as it was before T2.1 and T4.3: the base haystack, no structure."""
+
+    vendor_text = LLMProvider.vendor_text
+    classify_failure = LLMProvider.classify_failure
+
+
+class TestOpenCodeCapturesKeepTheirVerdict:
+    """T2.4: a later change to `vendor_text` cannot move any committed capture."""
+
+    @pytest.mark.parametrize(
+        "row,stdout,stderr,exit_code,before,after", OC_GRADED_CAPTURES,
+        ids=[row[0] for row in OC_GRADED_CAPTURES],
+    )
+    def test_before_and_after(self, row, stdout, stderr, exit_code, before, after):
+        out, err = _oc_stream(stdout), _oc_stream(stderr)
+        assert _OpenCodeBeforeT21().classify_failure(out, err, exit_code) == before
+        assert OpenCodeProvider().classify_failure(out, err, exit_code) == after
+
+    @pytest.mark.parametrize("case", ["empty", "stored", "env_only",
+                                      "config_provider_only"])
+    def test_the_auth_list_capture_is_not_a_failure_either_way(self, case):
+        """`auth_list.1.18.32.json` is an auth probe, not a run; graded anyway."""
+        data = json.loads(_oc_fixture("auth_list.1.18.32.json"))["cases"][case]
+        out, err = data["stdout"], data["stderr"]
+        assert _OpenCodeBeforeT21().classify_failure(out, err, 0) is None
+        assert OpenCodeProvider().classify_failure(out, err, 0) is None
+
+    @pytest.mark.parametrize(
+        "case", sorted(json.loads(_oc_fixture("debug_config.1.18.32.json"))["cases"])
+    )
+    def test_the_debug_config_capture_is_not_a_failure_either_way(self, case):
+        """`debug_config.1.18.32.json` (plan §8 T8.1) is a config read, not a
+        run, and nothing hands its stdout to `classify_failure` (the reader
+        reduces it in memory). Graded anyway, every case exit 0. One case reads
+        as a failure both before and after T2.1: `builtin_override_keyless`
+        carries an `"options": {"timeout": 30000}` and is one pretty-printed
+        JSON document, not NDJSON events, so `vendor_text` keeps its lines as
+        unrecognised text and the `timeout` pattern matches. Pinned so a
+        change is noticed; it would matter only if this output were ever
+        classified."""
+        data = json.loads(_oc_fixture("debug_config.1.18.32.json"))["cases"][case]
+        out, err = data["stdout"], data["stderr"]
+        assert data["exit"] == 0
+        expected = "timeout" if case == "builtin_override_keyless" else None
+        assert _OpenCodeBeforeT21().classify_failure(out, err, 0) == expected
+        assert OpenCodeProvider().classify_failure(out, err, 0) == expected
+
+    def test_every_committed_capture_is_graded(self):
+        """A new capture under tests/fixtures/opencode/ must join the table."""
+        graded = {
+            spec for row in OC_GRADED_CAPTURES for spec in row[1:3]
+            if isinstance(spec, str)
+        } | {"auth_list.1.18.32.json", "debug_config.1.18.32.json"}
+        committed = {
+            str(p.relative_to(OPENCODE_FIXTURES))
+            for p in list(OPENCODE_FIXTURES.iterdir()) + list(OPENCODE_1_18_32.iterdir())
+            if p.is_file() and p.suffix in (".txt", ".jsonl", ".json")
+        }
+        assert committed == graded
+
+
+def _denied_turn():
+    return (
+        (OPENCODE_1_18_32 / "denied_permission_turn_end.jsonl").read_text(encoding="utf-8"),
+        (OPENCODE_1_18_32 / "denied_permission_turn_end.stderr.txt").read_text(encoding="utf-8"),
+    )
+
+
+class TestOpenCodeDeniedTurn:
+    """T4.3: a turn `run` ended on an auto-rejected permission → `runner_error`.
+
+    Read structurally off `part.reason` / `part.state` (never top-level keys),
+    with the reason sentence carried by `classify_structural` because
+    `classify_failure` returns a category and nothing else.
+    """
+
+    SENTENCE = (
+        "opencode ended the turn after an auto-rejected permission "
+        "(external_directory /etc/*); no final answer"
+    )
+
+    @pytest.fixture
+    def provider(self):
+        return OpenCodeProvider()
+
+    def test_the_fixture_is_runner_error_naming_the_permission(self, provider):
+        stdout, stderr = _denied_turn()
+        assert provider.classify_failure(stdout, stderr, 0) == "runner_error"
+        status, reason = provider.classify_structural(stdout, stderr, 0)
+        assert status == "runner_error"
+        assert reason == self.SENTENCE
+        assert "external_directory" in reason and "/etc/*" in reason
+
+    def test_the_fixture_is_never_rate_limited(self, provider):
+        stdout, stderr = _denied_turn()
+        assert "rate limit" in stdout and "rate_limit" in stdout and "429" in stdout
+        assert provider.classify_failure(stdout, stderr, 0) != STATUS_RATE_LIMITED
+
+    @pytest.mark.parametrize("event,expected", [
+        (OC_429_EVENT, STATUS_RATE_LIMITED),
+        (OC_AUTH_EVENT, STATUS_AUTH_FAILED),
+    ])
+    def test_a_genuine_vendor_error_wins(self, provider, event, expected):
+        stdout, stderr = _denied_turn()
+        stdout = stdout + event + "\n"
+        assert provider.classify_failure(stdout, stderr, 0) == expected
+
+    def test_without_stderr_the_tool_use_alone_fires(self, provider):
+        """1.18.32's PermissionRejectedError carries no fields (read from the
+        binary), so without the stderr line the sentence omits the
+        parenthetical rather than inventing one."""
+        stdout, _ = _denied_turn()
+        assert provider.classify_failure(stdout, "", 0) == "runner_error"
+        assert provider.classify_structural(stdout, "", 0) == (
+            "runner_error",
+            "opencode ended the turn after an auto-rejected permission; "
+            "no final answer",
+        )
+
+    def test_a_tool_use_payload_that_names_the_permission_is_parsed(self, provider):
+        """Hypothetical shape (no 1.18.32 build writes it): if the rejected
+        `tool_use`'s `part.state.error` ever carries `run`'s own
+        `permission requested: <permission> (<pattern>)` words, they are read
+        from there when stderr is absent."""
+        rejected = _oc_event(
+            "tool_use", timestamp=1, sessionID="ses_0",
+            part={"type": "tool", "tool": "read", "state": {
+                "status": "error",
+                "error": "The user rejected permission to use this specific tool "
+                         "call. permission requested: external_directory "
+                         "(/etc/*); auto-rejecting",
+            }},
+        )
+        finish = _oc_event("step_finish", timestamp=2, sessionID="ses_0",
+                           part={"type": "step-finish", "reason": "tool-calls"})
+        stdout = "\n".join([rejected, finish])
+        assert provider.classify_structural(stdout, "", 0) == (
+            "runner_error", self.SENTENCE,
+        )
+
+    def test_a_parenthesised_path_keeps_the_parenthetical(self, provider):
+        """The pattern runs up to the fixed `); auto-rejecting` terminator, so
+        a `)` inside the path does not drop the parenthetical."""
+        stdout, _ = _denied_turn()
+        stderr = ("! permission requested: external_directory "
+                  "(/home/u/My (old) files/*); auto-rejecting\n")
+        assert provider.classify_structural(stdout, stderr, 0) == (
+            "runner_error",
+            "opencode ended the turn after an auto-rejected permission "
+            "(external_directory /home/u/My (old) files/*); no final answer",
+        )
+
+    def test_continue_loop_on_deny_is_not_a_denied_turn(self, provider):
+        """MEASURED: stderr still says `auto-rejecting`, but the turn finished
+        `stop` with an answer. stderr alone must never fire the check."""
+        stdout = (OPENCODE_1_18_32 / "continue_loop_on_deny.jsonl").read_text(encoding="utf-8")
+        stderr = (OPENCODE_1_18_32 / "continue_loop_on_deny.stderr.txt").read_text(encoding="utf-8")
+        assert "auto-rejecting" in stderr
+        assert provider.classify_structural(stdout, stderr, 0) is None
+        assert provider.classify_failure(stdout, stderr, 0) is None
+
+    def test_a_healthy_run_is_not_a_denied_turn(self, provider):
+        stdout = _oc_fixture("run_review.1.18.30.jsonl")
+        assert provider.classify_structural(stdout, "", 0) is None
+        assert provider.classify_failure(stdout, "", 0) is None
+
+    def test_tool_calls_without_a_rejection_falls_through(self, provider):
+        """A stream ending `step_finish tool-calls` with no rejected tool_use and
+        no stderr line is today's path: nothing structural, base tables only."""
+        stdout, _ = _denied_turn()
+        lines = [
+            line for line in stdout.splitlines()
+            if "rejected permission" not in line
+        ]
+        stdout = "\n".join(lines) + "\n"
+        assert json.loads(lines[-1])["part"]["reason"] == "tool-calls"
+        assert provider.classify_structural(stdout, "", 0) is None
+        assert provider.classify_failure(stdout, "", 0) is None
+
+    def test_a_non_zero_exit_is_not_a_denied_turn(self, provider):
+        stdout, stderr = _denied_turn()
+        assert provider.classify_structural(stdout, stderr, 1) is None
+
+    def test_top_level_reason_keys_are_never_read(self, provider):
+        """The fields live under `part`; a top-level `reason` means nothing."""
+        stdout, stderr = _denied_turn()
+        events = [json.loads(line) for line in stdout.splitlines()]
+        for event in events:
+            if event["type"] == "step_finish":
+                event["reason"] = "stop"
+        stdout = "\n".join(json.dumps(e) for e in events)
+        assert provider.classify_structural(stdout, stderr, 0)[0] == "runner_error"
+
+    def test_the_base_hook_answers_none(self):
+        """Every other adapter is unchanged."""
+        stdout, stderr = _denied_turn()
+        assert LLMProvider.classify_structural(
+            GooseProvider(), stdout, stderr, 0
+        ) is None
+
+
+class TestMatchStreams:
+    """T2.5: the quote-only twin of `classify_streams`, and its offsets."""
+
+    @staticmethod
+    def _corpus():
+        """Every committed manifest row, through its own adapter's reduction
+        and tables, plus the opencode captures and the hand-written
+        `classify_streams` cases the suite pins elsewhere."""
+        from utils.provider_registry import _PROVIDERS
+
+        rows = []
+        for manifest_path in sorted(C1_FIXTURES.glob("*/manifest.yaml")):
+            import yaml
+
+            provider = manifest_path.parent.name
+            manifest = yaml.safe_load(manifest_path.read_text(encoding="utf-8"))
+            for name, row in (manifest.get("rows") or {}).items():
+                if not isinstance(row, dict) or row.get("not_applicable"):
+                    continue
+                streams = []
+                for key in ("stdout", "stderr"):
+                    file_name = row.get(key)
+                    streams.append(
+                        (manifest_path.parent / file_name).read_bytes().decode("utf-8")
+                        if file_name else ""
+                    )
+                rows.append((f"{provider}/{name}", provider, streams[0], streams[1],
+                             int(row.get("exit_code") or 0)))
+        for row_id, out, err, exit_code, _before, _after in OC_GRADED_CAPTURES:
+            rows.append((f"opencode/{row_id}", "opencode", _oc_stream(out),
+                         _oc_stream(err), exit_code))
+        # `TestClassifyFailure` grades these through opencode's adapter, so they
+        # are twinned through that adapter's reduction and tables here.
+        for index, stream in enumerate(CLASSIFY_FAILURE_STREAMS):
+            rows.append((f"classify-failure/{index}", "opencode", "", stream, 1))
+        for index, (out, err) in enumerate(CLASSIFY_FAILURE_PAIRS):
+            rows.append((f"classify-failure-pair/{index}", "opencode", out, err, 1))
+        for index, (haystack, _expected) in enumerate(LADDER_ORDER_CASES):
+            rows.append((f"ladder-order/{index}", None, haystack, "", 1))
+        # Edges no other class pins as a `classify_streams` case.
+        literal = [
+            ("", "", 127),
+            ("", "bwrap: setting up uid map: Permission denied\n", 1),
+            ("", "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted\n", 1),
+            ("event: started\n", "Error: 401 Unauthorized\n", 1),
+            ("Ran into this error: 429 rate limit exceeded", "", 0),
+            ("cost 0.0429 in 14290 ms", "", 0),
+            ("cursor-agent exited with code 1", "", 1),
+            ("", "", 0),
+            ("   ", "\n", 0),
+        ]
+        for index, (out, err, exit_code) in enumerate(literal):
+            rows.append((f"literal/{index}", None, out, err, exit_code))
+        assert all(p in _PROVIDERS for _i, p, *_ in rows if p is not None)
+        return rows
+
+    def test_the_status_always_equals_classify_streams(self):
+        from utils.provider_registry import _PROVIDERS
+        from utils.providers.base import classify_streams, match_streams
+
+        for row_id, provider, stdout, stderr, exit_code in self._corpus():
+            kwargs = {}
+            if provider is not None:
+                adapter = _PROVIDERS[provider]
+                stdout, stderr = adapter.vendor_text(stdout, stderr)
+                kwargs = dict(
+                    auth_patterns=adapter.auth_error_patterns,
+                    rate_limit_patterns=adapter.rate_limit_patterns,
+                    exit_zero_markers=adapter.exit_zero_failure_markers,
+                )
+            for out, err, code in ((stdout, stderr, exit_code),
+                                   (stderr, stdout, exit_code),
+                                   (stdout, stderr, 0), (stdout, stderr, 1)):
+                expected = classify_streams(out, err, code, **kwargs)
+                match = match_streams(out, err, code, **kwargs)
+                got = None if match is None else match.status
+                assert got == expected, (row_id, code)
+                if match is not None and match.pattern is not None:
+                    text = (out if match.channel == "stdout" else err).lower()
+                    assert 0 <= match.offset < len(text), row_id
+
+    def test_the_offset_points_at_the_matched_text(self):
+        from utils.providers.base import match_streams
+
+        match = match_streams("model said nothing", "quota\nError: 429 Too Many Requests", 1)
+        assert (match.status, match.channel) == (STATUS_RATE_LIMITED, "stderr")
+        text = "quota\nError: 429 Too Many Requests".lower()
+        assert text[match.offset:].startswith(("429", "too many requests"))
+
+        match = match_streams("x\nthe provider said: rate limit exceeded", "", 1)
+        assert match.channel == "stdout"
+        assert "x\nthe provider said: rate limit exceeded"[match.offset:].startswith(
+            "rate limit"
+        )
+
+    def test_the_patternless_steps_carry_no_position(self):
+        import re
+
+        from utils.providers.base import match_streams
+
+        spawn = match_streams("", "", 127)
+        assert (spawn.status, spawn.pattern, spawn.channel, spawn.offset) == (
+            "spawn_failed", None, None, None,
+        )
+        marker = match_streams('{"is_error":true}', "", 0,
+                               exit_zero_markers=(re.compile(r'"is_error":\s*true'),))
+        assert (marker.status, marker.pattern, marker.channel, marker.offset) == (
+            "runner_error", None, None, None,
+        )
+
+    def test_classify_streams_does_not_delegate_to_it(self):
+        import inspect
+
+        from utils.providers import base
+
+        assert "match_streams" not in inspect.getsource(base.classify_streams)
 
 
 class TestACutInsideCopilotsEchoIsStillDropped:
@@ -10363,6 +10996,378 @@ class TestFormatFailureDetailsIsNoLongerTheOneRawStdoutClassifier:
         )
 
 
+# =========================================================================== #
+# T3.1 / T3.2 — the other subagent runners read what the VENDOR wrote
+#
+# plans/opencode-validator-false-rate-limit-and-denied-turn.md §3. codex does
+# not echo our prompt, but it echoes the REPOSITORY: `command_execution`'s
+# `aggregated_output` is the `rg`/`cat` the model ran over the plan, and
+# `agent_message`/`reasoning` are its prose about it. claude-code's clean
+# envelope carries the model's final prose in `result`. Neither is the vendor's
+# verdict, and a plan that discusses rate limits or model names must not become
+# `rate_limited` (a batch backoff) or `invalid_model` (fatal to the batch).
+# =========================================================================== #
+
+#: Every codex capture, graded through `classify_failure` on the pre-T3.1
+#: haystack (`before`) and through the hook (`after`), at exit 1 — the exit a
+#: failed attempt reaches `_classify_failed_run` with. **This tuple is T3.1's
+#: acceptance table**: exactly one cell moves. `agentic_reasoning_multi_message`
+#: drew `permission_denied` from the model's own prose ("directory listing
+#: blocked by sandbox", in a `reasoning` and an `agent_message` item); nothing
+#: codex itself wrote says so. Graded 2026-09-25 while landing T3.1.
+T3_CODEX_CORPUS = (
+    # capture,                                     before,               after
+    ("agentic_reasoning_multi_message.jsonl",      "permission_denied",  None),
+    ("gpt5_sol_single_message.jsonl",              None,                 None),
+    ("0.156.1/code_mode_mcp.jsonl",                None,                 None),
+    ("0.156.1/code_mode_mcp.rollout.jsonl",        None,                 None),
+    ("0.156.1/code_mode_writes.jsonl",             None,                 None),
+    ("0.156.1/code_mode_writes.rollout.jsonl",     None,                 None),
+    ("0.156.1/collab_spawn_agent.jsonl",           None,                 None),
+    ("0.156.1/exec_session.jsonl",                 None,                 None),
+    ("0.156.1/mcp_tool_call.jsonl",                None,                 None),
+    ("0.156.1/quoting_render.jsonl",               None,                 None),
+    ("0.156.1/read_only_clean.jsonl",              None,                 None),
+    ("0.156.1/run_0c477c4d_partial.jsonl",         None,                 None),
+    ("0.156.1/web_search_code_mode.jsonl",         None,                 None),
+    ("0.156.1/web_search_code_mode.rollout.jsonl", None,                 None),
+    ("0.156.1/web_search_hosted.jsonl",            None,                 None),
+    ("0.156.1/web_search_hosted.sse.json",         None,                 None),
+    ("0.156.1/web_search_hosted_replay.jsonl",     None,                 None),
+    ("0.156.1/web_search_probe_replay.jsonl",      None,                 None),
+    ("0.156.1/writes_patches_sessions.jsonl",      None,                 None),
+)
+
+#: Subdirectories of `tests/fixtures/codex/` that hold rig scripts, schemas and
+#: plugin-route data rather than a codex stdout capture.
+_T3_CODEX_NOT_CAPTURES = ("capture", "schemas", "plugin-route")
+
+
+def _t3_codex_item(item_type, **fields):
+    item = {"id": f"item_{item_type}", "type": item_type, **fields}
+    return json.dumps({"type": "item.completed", "item": item})
+
+
+#: The case the plan names: a validator that grepped a plan discussing rate
+#: limits and model names, on an attempt that failed for some other reason.
+T3_CODEX_REPO_ECHO = "\n".join([
+    json.dumps({"type": "thread.started", "thread_id": "0000"}),
+    json.dumps({"type": "turn.started"}),
+    _t3_codex_item(
+        "command_execution",
+        command="/bin/bash -lc \"rg -n '429|model' plan.md\"",
+        aggregated_output=(
+            "12: the client backs off on 429 Too Many Requests\n"
+            "31: a typo in the id is reported as model not found\n"
+            "40: 401 Unauthorized means the key was revoked\n"
+        ),
+        exit_code=0,
+        status="completed",
+    ),
+    _t3_codex_item("reasoning", text="The plan says rate limit exceeded is retried."),
+    _t3_codex_item("agent_message", text="Section 3 covers the 429 Too Many Requests path."),
+]) + "\n"
+
+
+class TestCodexVendorTextGradesEveryCapture:
+    """T3.1 — T2.4's technique: every committed capture, before and after."""
+
+    @pytest.mark.parametrize("capture,before,after", T3_CODEX_CORPUS)
+    def test_after(self, capture, before, after):
+        stdout = _c1_capture("codex", capture)
+        assert _c1_adapter("codex").classify_failure(stdout, "", 1) == after
+
+    @pytest.mark.parametrize("capture,before,after", T3_CODEX_CORPUS)
+    def test_before(self, capture, before, after, monkeypatch):
+        stdout = _c1_capture("codex", capture)
+        _c1_without_the_hook(monkeypatch, "codex")
+        assert _c1_adapter("codex").classify_failure(stdout, "", 1) == before
+
+    def test_the_table_covers_every_capture(self):
+        """A new capture is graded when it is committed, not when it bites."""
+        root = C1_FIXTURES / "codex"
+        on_disk = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*")
+            if path.is_file()
+            and path.suffix in (".jsonl", ".json", ".txt")
+            and not set(path.relative_to(root).parts) & set(_T3_CODEX_NOT_CAPTURES)
+        }
+        assert on_disk == {row[0] for row in T3_CODEX_CORPUS}
+
+    def test_every_capture_is_only_ever_reduced(self):
+        """Whole lines out, nothing in, stderr untouched (the base contract)."""
+        adapter = _c1_adapter("codex")
+        for capture, _before, _after in T3_CODEX_CORPUS:
+            raw = _c1_capture("codex", capture)
+            reduced, stderr = adapter.vendor_text(raw, "a stderr diagnosis")
+            assert len(reduced) <= len(raw), capture
+            remaining = iter(raw)
+            assert all(char in remaining for char in reduced), capture
+            assert stderr == "a stderr diagnosis", capture
+
+
+class TestCodexVendorText:
+    """T3.1 — what the hook drops, what it keeps, and how it degrades."""
+
+    def test_repo_text_in_a_failed_attempt_classifies_as_nothing(self):
+        """The plan's synthetic stream: `429` and `model not found` quoted."""
+        adapter = _c1_adapter("codex")
+        assert adapter.classify_failure(T3_CODEX_REPO_ECHO, "", 1) is None
+        assert adapter.classify_failure(T3_CODEX_REPO_ECHO, "", 0) is None
+
+    def test_and_that_is_a_change(self, monkeypatch):
+        """On the pre-T3.1 haystack the quoted 401 outranked everything."""
+        _c1_without_the_hook(monkeypatch, "codex")
+        assert _c1_adapter("codex").classify_failure(
+            T3_CODEX_REPO_ECHO, "", 1
+        ) == STATUS_AUTH_FAILED
+
+    @pytest.mark.parametrize("item_type", [
+        "command_execution", "agent_message", "reasoning", "file_change",
+        "mcp_tool_call", "web_search", "collab_tool_call",
+    ])
+    @pytest.mark.parametrize("event_type", [
+        "item.started", "item.updated", "item.completed",
+    ])
+    def test_model_and_repo_items_are_dropped(self, item_type, event_type):
+        line = json.dumps({"type": event_type, "item": {
+            "id": "item_1", "type": item_type, "text": "rate limit exceeded",
+        }})
+        stdout = f'{{"type":"turn.started"}}\n{line}\n'
+        reduced, _stderr = _c1_adapter("codex").vendor_text(stdout, "")
+        assert reduced == '{"type":"turn.started"}\n'
+
+    @pytest.mark.parametrize("line", [
+        '{"type":"thread.started","thread_id":"0000"}',
+        '{"type":"turn.started"}',
+        '{"type":"turn.completed","usage":{"input_tokens":1}}',
+        '{"type":"error","message":"exceeded retry limit, last status: 429"}',
+        '{"type":"turn.failed","error":{"message":"unexpected status 401"}}',
+        # codex's own non-fatal notice is an item, but it is codex's words.
+        _t3_codex_item("error", message="Model metadata for `x` not found."),
+        # Uncaptured item and event types are kept: the conservative direction.
+        _t3_codex_item("todo_list", items=[]),
+        '{"type":"some.future.event","message":"x"}',
+        "stream error: exceeded retry limit, last status: 429 Too Many Requests",
+    ])
+    def test_codex_own_events_are_kept(self, line):
+        stdout = f"{line}\n" + _t3_codex_item("agent_message", text="hi") + "\n"
+        reduced, _stderr = _c1_adapter("codex").vendor_text(stdout, "")
+        assert reduced == f"{line}\n"
+
+    def test_a_real_429_is_not_outranked_by_a_quoted_401(self):
+        """Auth is asked before rate limit, so a quoted 401 used to win."""
+        stdout = T3_CODEX_REPO_ECHO + (
+            '{"type":"turn.failed","error":{"message":"stream error: exceeded '
+            'retry limit, last status: 429 Too Many Requests"}}\n'
+        )
+        assert _c1_adapter("codex").classify_failure(stdout, "", 1) == \
+            STATUS_RATE_LIMITED
+
+    def test_a_real_401_still_reaches_the_tables(self):
+        stdout = T3_CODEX_REPO_ECHO + (
+            '{"type":"turn.failed","error":{"message":"unexpected status 401 '
+            'Unauthorized: Missing authentication in header"}}\n'
+        )
+        assert _c1_adapter("codex").classify_failure(stdout, "", 1) == \
+            STATUS_AUTH_FAILED
+
+    def test_stderr_is_never_reduced(self):
+        stderr = "ERROR: 429 Too Many Requests"
+        reduced, kept = _c1_adapter("codex").vendor_text(T3_CODEX_REPO_ECHO, stderr)
+        assert kept == stderr
+        assert _c1_adapter("codex").classify_failure(
+            T3_CODEX_REPO_ECHO, stderr, 1
+        ) == STATUS_RATE_LIMITED
+
+    def test_a_cut_final_repo_item_is_dropped(self):
+        """A stream killed mid-line: textual, and order-tolerant."""
+        adapter = _c1_adapter("codex")
+        head = '{"type":"turn.started"}\n'
+        for cut in (
+            '{"type":"item.completed","item":{"id":"item_7",'
+            '"type":"command_execution","aggregated_output":"429 Too Many',
+            # `type` is not the first key of either object.
+            '{"item":{"id":"item_7","type":"agent_message","text":"x"},'
+            '"type":"item.updated","extra":"rate lim',
+        ):
+            reduced, _stderr = adapter.vendor_text(head + cut, "")
+            assert reduced == head, cut
+
+    def test_a_cut_final_error_line_is_kept(self):
+        stdout = '{"type":"turn.started"}\n{"type":"turn.failed","error":{"mess'
+        assert _c1_adapter("codex").vendor_text(stdout, "") == (stdout, "")
+
+    def test_a_cut_line_that_is_not_last_is_kept(self):
+        """Only the END of a stream is cut by a kill; a beginning cut is kept."""
+        cut = '"type":"command_execution","aggregated_output":"429 Too Many"}}'
+        stdout = cut + '\n{"type":"turn.started"}\n'
+        assert _c1_adapter("codex").vendor_text(stdout, "") == (stdout, "")
+
+    @pytest.mark.parametrize("junk", [
+        "", "   ", "not json at all", '{"unclosed": ', "\x00\x01",
+        # A lone cut repo item: no line parsed, so not an event stream.
+        '{"type":"item.completed","item":{"id":"i","type":"reasoning","text":"x',
+    ])
+    def test_no_parseable_line_is_identity(self, junk):
+        assert _c1_adapter("codex").vendor_text(junk, "err") == (junk, "err")
+
+    def test_a_raised_exception_is_identity(self, monkeypatch):
+        from utils.providers import codex as codex_module
+
+        def _boom(stdout):
+            raise RuntimeError("reduction failed")
+
+        monkeypatch.setattr(codex_module, "_vendor_stdout", _boom)
+        assert _c1_adapter("codex").vendor_text(T3_CODEX_REPO_ECHO, "err") == (
+            T3_CODEX_REPO_ECHO, "err"
+        )
+
+    def test_the_readonly_audit_still_sees_every_item(self):
+        """The audit is separate: it judges the commands the hook drops."""
+        from utils.providers import codex_stream_audit
+
+        source = Path(codex_stream_audit.__file__).read_text(encoding="utf-8")
+        assert "vendor_text" not in source
+        assert "_vendor_stdout" not in source
+
+
+def _t3_claude_envelope(result, *, is_error=False, status=None,
+                        terminal_reason="completed"):
+    return json.dumps({
+        "type": "result",
+        "subtype": "success",
+        "is_error": is_error,
+        "api_error_status": status,
+        "terminal_reason": terminal_reason,
+        "result": result,
+        "session_id": "00000000-0000-0000-0000-000000000000",
+    })
+
+
+class TestClaudeCodeCleanEnvelopeProseIsNotAVerdict:
+    """T3.2 — the prose fallback, audited against the committed captures."""
+
+    @pytest.mark.parametrize("prose,before", [
+        ("The plan's retry section says: rate limit exceeded -> back off.",
+         STATUS_RATE_LIMITED),
+        ("Section 4: a 429 Too Many Requests is retried twice.",
+         STATUS_RATE_LIMITED),
+        ("The plan says an unknown id is reported as model not found.",
+         CATEGORY_INVALID_MODEL),
+        ("Per the plan, 401 Unauthorized means the key was revoked.",
+         STATUS_AUTH_FAILED),
+    ])
+    def test_a_green_result_quoting_the_plan_classifies_as_nothing(
+        self, prose, before
+    ):
+        stdout = _t3_claude_envelope(prose)
+        adapter = _c1_adapter("claude-code")
+        for exit_code in (0, 1):
+            assert adapter.classify_failure(stdout, "", exit_code) is None
+        # ... and that is a change: the shared ladder over the whole stdout
+        # (the base hook's identity reduction, not claude-code's override).
+        with patch.object(
+            ClaudeCodeProvider, "vendor_text", LLMProvider.vendor_text
+        ):
+            assert LLMProvider.classify_failure(adapter, stdout, "", 0) == before
+
+    def test_stderr_is_still_read_beside_a_clean_envelope(self):
+        stdout = _t3_claude_envelope("rate limit exceeded")
+        assert _c1_adapter("claude-code").classify_failure(
+            stdout, "Error: 401 Unauthorized", 1
+        ) == STATUS_AUTH_FAILED
+
+    def test_a_launch_failure_still_wins(self):
+        assert _c1_adapter("claude-code").classify_failure(
+            _t3_claude_envelope("rate limit exceeded"), "", 127
+        ) is not None
+
+    def test_a_refusing_envelope_without_a_status_is_still_scanned(self):
+        """`is_error: true` is the vendor speaking; its sentence is the verdict."""
+        stdout = _t3_claude_envelope(
+            "API Error: rate limit exceeded", is_error=True,
+            terminal_reason="api_error",
+        )
+        assert _c1_adapter("claude-code").classify_failure(stdout, "", 1) == \
+            STATUS_RATE_LIMITED
+
+    def test_a_non_completed_terminal_reason_is_still_scanned(self):
+        stdout = _t3_claude_envelope(
+            "API Error: rate limit exceeded", terminal_reason="api_error"
+        )
+        assert _c1_adapter("claude-code").classify_failure(stdout, "", 1) == \
+            STATUS_RATE_LIMITED
+
+    def test_a_status_still_answers_first(self):
+        stdout = _t3_claude_envelope("anything", is_error=True, status=429,
+                                     terminal_reason="api_error")
+        assert _c1_adapter("claude-code").classify_failure(stdout, "", 1) == \
+            STATUS_RATE_LIMITED
+
+    def test_non_envelope_stdout_takes_the_ladder_as_before(self):
+        assert _c1_adapter("claude-code").classify_failure(
+            "Error: 429 Too Many Requests", "", 1
+        ) == STATUS_RATE_LIMITED
+
+    def test_every_committed_failure_capture_keeps_its_verdict(self):
+        """The audit's evidence: no real failure needs a clean envelope's prose.
+
+        All eight refusing rows carry `is_error: true`, and the real 429
+        carries `api_error_status: 429`, so the plan's fallback (keep the
+        scan, restricted to `is_error: true`) is what the adapter already does.
+        """
+        import yaml
+        from utils.providers.result_envelope import is_clean_envelope
+
+        root = C1_FIXTURES / "claude-code"
+        manifest = yaml.safe_load((root / "manifest.yaml").read_text())
+        adapter = _c1_adapter("claude-code")
+        graded = 0
+        for name, row in manifest["rows"].items():
+            if not row.get("stdout"):
+                continue
+            stdout = (root / row["stdout"]).read_text(encoding="utf-8")
+            stderr = (root / row["stderr"]).read_text(encoding="utf-8")
+            expected = row["expect"]["classify_failure"]
+            assert adapter.classify_failure(
+                stdout, stderr, row["exit_code"]
+            ) == expected, name
+            if expected is not None:
+                assert not is_clean_envelope(stdout), name
+                graded += 1
+        assert graded == 8
+
+    @pytest.mark.parametrize("stdout,clean", [
+        (_t3_claude_envelope("ok"), True),
+        (_t3_claude_envelope("ok", is_error=True), False),
+        (_t3_claude_envelope("ok", terminal_reason="api_error"), False),
+        (_t3_claude_envelope("ok", status=400), False),
+        ("not an envelope", False),
+        ("", False),
+    ])
+    def test_is_clean_envelope(self, stdout, clean):
+        from utils.providers.result_envelope import is_clean_envelope
+
+        assert is_clean_envelope(stdout) is clean
+
+
+#: `TestClassifyLadderOrder`'s `(haystack, expected)` cases, at module scope so
+#: `TestMatchStreams` twins them through `match_streams` as well.
+LADDER_MODEL_NAMED_404 = (
+    "API error (status 404 Not Found): The model `stub-model` does not "
+    "exist or you do not have access to it."
+)
+LADDER_SERVER_ERRORS = [
+    "API error (status 503)",
+    "internal server error",
+]
+LADDER_ORDER_CASES = [(LADDER_MODEL_NAMED_404, "invalid_model")] + [
+    (haystack, "server_error") for haystack in LADDER_SERVER_ERRORS
+]
+
+
 class TestClassifyLadderOrder:
     """C2: invalid-model is consulted BEFORE server-error, and stays that way.
 
@@ -10382,18 +11387,14 @@ class TestClassifyLadderOrder:
         """The exact collision: both tables match, and the order decides."""
         from utils.providers.base import classify_streams
 
-        haystack = (
-            "API error (status 404 Not Found): The model `stub-model` does not "
-            "exist or you do not have access to it."
-        )
-        assert classify_streams(haystack, "", 1) == "invalid_model"
+        assert classify_streams(LADDER_MODEL_NAMED_404, "", 1) == "invalid_model"
 
     def test_a_server_error_carrying_no_model_name_is_still_server_error(self):
         """Reordering must not launder a genuine 5xx into a config error."""
         from utils.providers.base import classify_streams
 
-        assert classify_streams("API error (status 503)", "", 1) == "server_error"
-        assert classify_streams("internal server error", "", 1) == "server_error"
+        for haystack in LADDER_SERVER_ERRORS:
+            assert classify_streams(haystack, "", 1) == "server_error"
 
     def test_the_two_tables_are_consulted_in_the_declared_order(self):
         """Source-order guard, so a later reshuffle is red rather than silent.
@@ -10503,3 +11504,34 @@ class TestOpenCodeStreamCapturesAcrossThePin:
     def test_the_pin_did_not_move(self, provider):
         """The capture is evidence beside the pin, never a reason to move it."""
         assert provider.verified_version == "1.18.12"
+
+    def test_the_1_18_32_denied_turn_is_read(self, provider):
+        """T2.3: run b38de8bb's validator, whole events only, redacted.
+
+        exit 0, two `step_finish tool-calls`, a rejected bash `tool_use` and no
+        text answer. Its tool output quotes plan text about rate limits, which
+        is how it was recorded `rate_limited`; it is `runner_error` now.
+        """
+        stdout, stderr = _denied_turn()
+        events = [json.loads(line) for line in stdout.splitlines() if line]
+        kinds = [event["type"] for event in events]
+        assert kinds.count("step_finish") == 2
+        assert "error" not in kinds
+        assert events[-1]["part"]["reason"] == "tool-calls"
+        rejected = [
+            event for event in events
+            if event["type"] == "tool_use"
+            and event["part"]["state"]["status"] == "error"
+            and "rejected permission" in event["part"]["state"].get("error", "")
+        ]
+        assert [event["part"]["tool"] for event in rejected] == ["bash"]
+        assert {event["sessionID"] for event in events} == {"ses_" + "0" * 26}
+        assert stderr.strip().endswith(
+            "permission requested: external_directory (/etc/*); auto-rejecting"
+        )
+        result = provider.parse_output(stdout, stderr)
+        assert result["success"] is False
+        assert result["error"] == "No text events found in output" or (
+            "No valid JSON" in str(result["error"])
+        )
+        assert provider.classify_failure(stdout, stderr, 0) == "runner_error"

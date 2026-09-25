@@ -454,6 +454,23 @@ class TestRule6bNoIdenticalRateLimitRedispatch:
         assert len(calls) == 1, "rule 6(b): no identical rate-limit re-dispatch"
         assert result["success"] is False
 
+    def test_a_pi_slot_is_not_re_dispatched_after_a_rate_limit(self):
+        """pi declares ``retries_rate_limit: true`` with **no** wall (T7.14).
+
+        Measured at 0.87.1 (``tests/fixtures/pi/``'s ``rate-limit`` row): a
+        fail-forever 429 is 4 requests over 14.4 s inside one dispatch — three
+        ``auto_retry_start`` events at 2/4/8 s and a give-up. ≤ 3 harness
+        backoffs would have turned 4 requests into 16.
+        """
+        result, calls = _run_lane_a(
+            error="HTTP 429 Too Many Requests",
+            model_spec="pi:openrouter/deepseek/deepseek-v4.1-flash",
+            timeout=30,  # no declared wall, so a short slot is still admitted
+        )
+        assert len(calls) == 1, "rule 6(b): no identical rate-limit re-dispatch"
+        assert result["success"] is False
+        assert "429" in str(result["error"])
+
     def test_an_adapter_with_no_declared_envelope_keeps_the_harness_backoff(self):
         """Rule 6(c) — ``None`` means "assume one request", never "the worst".
 

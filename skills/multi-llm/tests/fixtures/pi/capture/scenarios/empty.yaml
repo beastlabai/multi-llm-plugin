@@ -1,0 +1,4 @@
+name: capture-pi-json-empty
+on_unmatched: default
+fallback:
+  content: ''

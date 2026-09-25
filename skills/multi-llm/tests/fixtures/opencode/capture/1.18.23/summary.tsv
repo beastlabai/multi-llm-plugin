@@ -1,0 +1,10 @@
+q2_ustar_agentlayer_build	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
+q2_ustar_agentlayer_plan	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
+t40_block_build	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
+t40_block_plan	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
+t40_blockcont_build	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
+t40_blockcont_plan	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
+t40_cont_build	exit=0	tool_posts=2	tool=error:rejected	finish=stop	auto_rejecting=True	org_get=False	! permission requested: external_directory (/rig/outside/*); auto-rejecting
+t40_cont_plan	exit=0	tool_posts=2	tool=error:rejected	finish=stop	auto_rejecting=True	org_get=False	! permission requested: external_directory (/rig/outside/*); auto-rejecting
+t40_none_build	exit=0	tool_posts=1	tool=error:rejected	finish=tool-calls	auto_rejecting=True	org_get=False	! permission requested: external_directory (/rig/outside/*); auto-rejecting
+t40_none_plan	exit=0	tool_posts=1	tool=error:rejected	finish=tool-calls	auto_rejecting=True	org_get=False	! permission requested: external_directory (/rig/outside/*); auto-rejecting

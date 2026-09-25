@@ -98,7 +98,18 @@ CONTAINER_SCENARIO = SCENARIO_DIR / "container_full_chain.yaml"
 TURNS_DIR = TESTS_DIR / "golden" / "container_turns"
 TURNS_MANIFEST = TURNS_DIR / "manifest.yaml"
 
-GENERIC_SCENARIOS = tuple(p for p in SHIPPED_SCENARIOS if p != CONTAINER_SCENARIO)
+#: T4.9's deny rows' scenario (plans/opencode-validator-false-rate-limit-and-
+#: denied-turn.md): `container_full_chain.yaml`'s rules VERBATIM plus one
+#: `scripted_tool_call:` block. Held out for the same two reasons, and covered
+#: by equality instead: :func:`test_the_deny_scenario_is_the_chain_scenario`
+#: pins its `prompts:` and `on_unmatched` to the chain scenario's, so every
+#: recorded-turn assertion :class:`TestTheContainerScenario` makes of the chain
+#: rules is a statement about this file's rules too.
+DENY_SCENARIO = SCENARIO_DIR / "scripted_opencode_read_deny.yaml"
+STRICT_SCENARIOS = (CONTAINER_SCENARIO, DENY_SCENARIO)
+
+GENERIC_SCENARIOS = tuple(p for p in SHIPPED_SCENARIOS
+                          if p not in STRICT_SCENARIOS)
 
 
 # --------------------------------------------------------------------------- #
@@ -265,8 +276,8 @@ def test_every_shipped_scenario_is_covered():
     """
     covered = {path for path, _ in PARITY_CASES}
     assert covered == set(GENERIC_SCENARIOS)
-    assert covered | {CONTAINER_SCENARIO} == set(SHIPPED_SCENARIOS)
-    assert CONTAINER_SCENARIO.is_file()
+    assert covered | set(STRICT_SCENARIOS) == set(SHIPPED_SCENARIOS)
+    assert all(path.is_file() for path in STRICT_SCENARIOS)
     assert len(SHIPPED_SCENARIOS) >= 6
 
 
@@ -340,9 +351,28 @@ def test_only_the_container_scenario_declares_on_unmatched():
         assert scenario.on_unmatched == scenario_matcher.ON_UNMATCHED_DEFAULT
         assert not scenario.strict
 
-    container = scenario_matcher.load_scenario(CONTAINER_SCENARIO)
-    assert container.on_unmatched == scenario_matcher.ON_UNMATCHED_FAIL
-    assert container.strict
+    for path in STRICT_SCENARIOS:
+        container = scenario_matcher.load_scenario(path)
+        assert container.on_unmatched == scenario_matcher.ON_UNMATCHED_FAIL
+        assert container.strict
+
+
+def test_the_deny_scenario_is_the_chain_scenario():
+    """The one other strict scenario is the chain's rules plus a script.
+
+    Compared as parsed YAML, so a comment may differ and a rule may not. This
+    is what lets it skip the generic sweep: it is covered by the chain
+    scenario's recorded-turn sweep, rule for rule.
+    """
+    import yaml
+
+    deny = yaml.safe_load(DENY_SCENARIO.read_text(encoding="utf-8"))
+    chain = yaml.safe_load(CONTAINER_SCENARIO.read_text(encoding="utf-8"))
+    assert deny["prompts"] == chain["prompts"], (
+        f"{DENY_SCENARIO.name} drifted from {CONTAINER_SCENARIO.name}: copy the "
+        f"chain scenario's `prompts:` list across verbatim")
+    assert deny["on_unmatched"] == chain["on_unmatched"]
+    assert set(deny) - set(chain) == {"scripted_tool_call"}
 
 
 def test_matcher_raises_on_unmatched_prompt(tmp_path):

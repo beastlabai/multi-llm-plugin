@@ -32,6 +32,7 @@ import shutil
 import stat
 import sys
 import time
+from typing import Dict
 from pathlib import Path
 
 import pytest
@@ -3602,3 +3603,205 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
         assert result.exit_code == 0, result.messages
         assert result.verification is None
         assert not [l for l in lines if "verif" in l.lower()], lines
+
+
+# ===========================================================================
+# T4.8 — a write turn a denial ended is checked BEFORE the retry decision
+# (plans/opencode-validator-false-rate-limit-and-denied-turn.md §4.4 step 4)
+# ===========================================================================
+
+_OPENCODE_DENIED = Path(__file__).parent / "fixtures" / "opencode" / "1.18.32"
+_DENIED_SENTENCE = (
+    "opencode ended the turn after an auto-rejected permission "
+    "(external_directory /etc/*); no final answer"
+)
+_T48_SENTINEL = "sk-canary-not-a-key-t48"
+
+
+def _install_denied_opencode(env: "WriteEnv") -> Dict[str, Path]:
+    """An `opencode` that edits (optionally), then replays the b38de8bb denied
+    turn: exit 0, no final answer, the `auto-rejecting` stderr line.
+
+    Version and auth probes answer like a logged-in 1.18.32. Only a dispatch
+    (`--agent build`) is counted, performs the edit named by `T48_EDIT` and
+    dumps its environment to `T48_ENV_DUMP`, so the spawn count is exact and
+    the env the child really received can be compared with what the host sinks
+    recorded.
+    """
+    counter = env.tmp_path / "t48-spawns.txt"
+    script = env.bin_dir / "opencode"
+    if script.is_symlink() or script.exists():
+        script.unlink()
+    script.write_text(
+        "#!/bin/sh\n"
+        'case "$1" in\n'
+        '  --version|-V) echo "opencode 1.18.32"; exit 0;;\n'
+        "  auth) printf 'Credentials\\n  anthropic  oauth\\n'; exit 0;;\n"
+        "esac\n"
+        "cat >/dev/null\n"
+        'case " $* " in\n'
+        '  *" --agent build "*)\n'
+        f'    echo spawn >> "{counter}"\n'
+        '    if [ -n "$T48_EDIT" ]; then printf "half-applied\\n" >> "$T48_EDIT"; fi\n'
+        '    if [ -n "$T48_ENV_DUMP" ]; then env > "$T48_ENV_DUMP"; fi\n'
+        "    ;;\n"
+        "esac\n"
+        f'cat "{_OPENCODE_DENIED / "denied_permission_turn_end.jsonl"}"\n'
+        f'cat "{_OPENCODE_DENIED / "denied_permission_turn_end.stderr.txt"}" >&2\n'
+        "exit 0\n",
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+    executor.reset_version_cache()
+    return {"counter": counter}
+
+
+def _spawns(paths: Dict[str, Path]) -> int:
+    counter = paths["counter"]
+    return len(counter.read_text().splitlines()) if counter.exists() else 0
+
+
+class TestADeniedWriteTurnIsCheckedBeforeTheRetry:
+    """The denied turn has no schema-valid result, so `_classify` never runs;
+    `dispatch_task` asks the scheduler's snapshot before it would retry."""
+
+    def _setup(self, env):
+        env.use("opencode:opencode/big-pickle", subagent_retries=1)
+        return _install_denied_opencode(env)
+
+    def test_bytes_moved_is_partial_application_and_no_second_attempt(self, env):
+        paths = self._setup(env)
+        env.monkeypatch.setenv("T48_EDIT", str(env.plan))
+        result = env.scheduler([env.apply_task(0), env.apply_task(1)]).run()
+
+        assert _spawns(paths) == 1, "a second attempt started on a half-applied edit"
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert outcome.stops_the_loop
+        assert [a.status for a in outcome.attempts] == [executor.STATUS_PARTIAL]
+        assert "PARTIAL APPLICATION" in outcome.reason
+        assert "plans/p.md" in outcome.reason
+        assert _DENIED_SENTENCE in outcome.reason
+        assert "pre-batch snapshot is kept at" in outcome.reason
+        assert outcome.files_touched == ["plans/p.md"]
+        # The loop stopped at this batch; the phase is not completed.
+        assert result.batches_dispatched == [0]
+        assert result.exit_code == 3
+        assert "half-applied" in env.plan.read_text()
+        # The failure capture carries the same verdict.
+        capture = json.loads(
+            Path(outcome.attempts[0].capture_path).read_text(encoding="utf-8")
+        )
+        assert capture["status"] == executor.STATUS_PARTIAL
+        events = [
+            r["event"] for r in write_safety.AuditLog(str(env.phase_dir)).records()
+        ]
+        assert events == ["dispatched", "completed"]
+
+    def test_an_undeclared_write_counts_too(self, env):
+        """The sweep's pre-run census, peeked rather than consumed."""
+        paths = self._setup(env)
+        env.monkeypatch.setenv("T48_EDIT", str(env.root / "src" / "a.py"))
+        result = env.scheduler([env.apply_task(0)]).run()
+        outcome = result.outcomes[0]
+        assert _spawns(paths) == 1
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert "src/a.py" in outcome.reason
+        # The terminal sweep still ran and adopted it for rollback.
+        assert "src/a.py" in outcome.files_touched
+
+    def test_no_bytes_moved_stays_runner_error_and_is_retried(self, env):
+        paths = self._setup(env)
+        env.monkeypatch.delenv("T48_EDIT", raising=False)
+        result = env.scheduler([env.apply_task(0)]).run()
+        outcome = result.outcomes[0]
+        assert _spawns(paths) == 2
+        assert outcome.status == executor.STATUS_RUNNER_ERROR
+        assert [a.status for a in outcome.attempts] == [
+            executor.STATUS_RUNNER_ERROR, executor.STATUS_RUNNER_ERROR,
+        ]
+        assert outcome.reason == _DENIED_SENTENCE
+        assert outcome.write_outcome is None
+        assert result.exit_code == 3
+
+    def test_a_hook_that_cannot_tell_fails_closed(self, tmp_path):
+        """Unit: a raising check is read as changed, never as "retry"."""
+        status, reason = executor._denied_write_turn(
+            lambda context: (_ for _ in ()).throw(OSError("gone")),
+            _DENIED_SENTENCE, {},
+        )
+        assert status == executor.STATUS_PARTIAL
+        assert "could not be compared" in reason and "OSError" in reason
+        assert executor._denied_write_turn(
+            lambda context: [], _DENIED_SENTENCE, {}
+        ) == (executor.STATUS_RUNNER_ERROR, _DENIED_SENTENCE)
+
+    def test_the_hook_is_asked_once_per_denied_write_attempt(self, env):
+        """Straight through `dispatch_task`: the context names the attempt."""
+        paths = self._setup(env)
+        asked = []
+        task = env.apply_task(0)
+        outcome = executor.dispatch_task(
+            task,
+            phase_dir=str(env.phase_dir),
+            runner="opencode:opencode/big-pickle",
+            cwd=str(env.root),
+            retries=0,
+            prompt=task["prompt"].replace(PRIOR_CHANGES_TOKEN, "(none)"),
+            changed_files=lambda context: asked.append(context) or [],
+        )
+        # agent-write asks exactly once per denied attempt.
+        assert len(asked) == 1 and asked[0]["attempt"] == 1
+        assert outcome.status == executor.STATUS_RUNNER_ERROR
+        assert _spawns(paths) == 1
+
+    def test_the_dry_run_never_reads_the_users_opencode_config(self, env):
+        env.use("opencode:opencode/big-pickle")
+        _install_denied_opencode(env)
+
+        def _refuse(*_args, **_kwargs):  # pragma: no cover - the point
+            raise AssertionError("opencode debug config was spawned by a dry run")
+
+        env.monkeypatch.setattr(oc, "_spawn_debug_config", _refuse)
+        result = env.scheduler([env.apply_task(0)], dry_run=True).run()
+        assert result.dry_run_path
+
+
+class TestHostSinksNeverSeeTheChildsConfigContent:
+    """T4.7: the inherited `OPENCODE_CONFIG_CONTENT` may hold an inline
+    `apiKey`. The child gets it (merged); no host sink records it."""
+
+    MARKERS = ("OPENCODE_CONFIG_CONTENT", _T48_SENTINEL, "doom_loop",
+               "*.env.example", "continue_loop_on_deny")
+
+    def _sinks(self, root: Path, captured: str) -> None:
+        texts = {"<stdout+stderr: orchestrator-run.log>": captured}
+        for path in root.rglob("*"):
+            if path.is_file():
+                texts[str(path)] = path.read_text(encoding="utf-8", errors="replace")
+        assert any(p.endswith("subagent_audit.jsonl") for p in texts)
+        assert any("/failed/" in p for p in texts)
+        assert any(p.endswith(".status.json") for p in texts)
+        for name, text in texts.items():
+            for marker in self.MARKERS:
+                assert marker not in text, f"{marker!r} recorded in {name}"
+
+    def test_the_write_lane(self, env, capsys):
+        env.use("opencode:opencode/big-pickle", subagent_retries=1)
+        _install_denied_opencode(env)
+        dump = env.tmp_path / "child-env.txt"
+        env.monkeypatch.setenv("T48_ENV_DUMP", str(dump))
+        env.monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps(
+            {"provider": {"mine": {"options": {"apiKey": _T48_SENTINEL}}}}
+        ))
+        env.scheduler([env.apply_task(0)], log=print).run()
+        captured = capsys.readouterr()
+        # The child really received the merged content, sentinel included.
+        child = dict(
+            line.split("=", 1) for line in dump.read_text().splitlines() if "=" in line
+        )
+        document = json.loads(child["OPENCODE_CONFIG_CONTENT"])
+        assert document["provider"]["mine"]["options"]["apiKey"] == _T48_SENTINEL
+        assert document["agent"]["build"]["permission"]["doom_loop"] == "deny"
+        self._sinks(env.root / ".multi-llm", captured.out + captured.err)

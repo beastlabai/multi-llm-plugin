@@ -411,7 +411,10 @@ clis:
     help_sha256: 5668cff3cf34fd6f0dbcb7b0d10667761219ca47879ba09d11c137507245824c
     help_bytes: 10176
     profiles: [generate]
+    # `--mode` since plan §7 (T7.9, hand edit): `pi --help` at 0.87.1 documents
+    # it ("Output mode: text (default), json, or rpc"); the help sha is unchanged.
     options:
+      - "--mode"
       - "--model"
       - "--no-session"
       - "-p"

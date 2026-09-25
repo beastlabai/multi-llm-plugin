@@ -776,18 +776,24 @@ clis:
     seed_files: [".pi/agent/models.json"]
     http_log:
       - {method: POST, path: /v1/chat/completions, stream: true, has_tools: true}
+    # Re-measured 2026-09-25 under `--mode json` at 0.87.1 (plan §7, T7.10;
+    # tests/fixtures/pi/ `success` row, two containers): still ONE streamed
+    # completion carrying tools, no catalog fetch, no title turn. first_call_s is
+    # wrapper exec -> first POST from the call log and the stub's own log
+    # (0.241 / 0.282 s), turn_s the spawn-to-exit wall (0.33 / 0.38 s); json mode
+    # costs nothing measurable. startup_s was not re-measured and is 0.80.6's.
     turns: 1
     terminates_on_text: true
     startup_s: 0.343
-    first_call_s: 0.375
-    turn_s: 0.393                     # the fastest row measured
+    first_call_s: 0.241
+    turn_s: 0.330                     # still among the fastest rows measured
     row_timeout_s: 300
     # Phase 3 measurement: `full --quick --yes --exec-subagents` +
     # `ask` + `status`, one green run, wall clock including container
     # start and the workspace seed.
     chain_s: 100.7
     chain_row_timeout_s: 600
-    version_measured: "0.80.6"
+    version_measured: "0.87.1"
     help_invocation: "pi --help"
     version_offline: true
     notes: >
@@ -795,7 +801,12 @@ clis:
       so this is a first-class feature rather than a hack. providers.yaml's auth note
       is correct but incomplete: it omits models.json, which is the only mechanism
       carrying a base URL and therefore the one the container needs. `apiKey` must be
-      present even as a dummy, or the model is filtered out of the selectable set.
+      present even as a dummy: with it dropped, 0.87.1 refuses before any request
+      (`No API key found for stub.`, exit 1 — tests/fixtures/pi/ `preflight-no-key`).
+      Since 2026-09-25 the argv carries `--mode json`, so stdout is a JSONL event
+      stream (the answer is the last assistant `message_end`, and usage rides every
+      assistant message) rather than the bare answer text mode printed; the turn
+      count is unchanged.
 
   # -------------------------------------------------------------------------
   - cli: grok

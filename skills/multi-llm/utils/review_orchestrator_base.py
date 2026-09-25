@@ -616,6 +616,77 @@ def record_high_priority_groups(
     return count
 
 
+#: Group ``validation_status`` → its ``validation_counts`` key (§6 T6.1). Keys
+#: are snake_case (the hyphenated status string is not a good JSON key), and
+#: there is no ``error`` verdict: a model may return only the first three, and
+#: ``validation_failed`` is what a group carries when its batch failed every
+#: attempt, or its result failed schema validation, and so has no verdict.
+VALIDATION_COUNT_KEYS: Dict[str, str] = {
+    "valid": "valid",
+    "invalid": "invalid",
+    "needs-human-decision": "needs_human_decision",
+    "validation_failed": "validation_failed",
+}
+
+
+def validation_counts(
+    groups: Optional[List[Dict[str, Any]]],
+) -> Optional[Dict[str, int]]:
+    """Count ``groups`` by exact ``validation_status``, or ``None`` if none has one.
+
+    The one set of predicates behind both the report's ``**Validation:**``
+    header line and the recorded ``validation_counts``, so the two cannot
+    disagree. ``None`` means no validation ran over these groups (skipped, or
+    nothing to validate) — not four zeros.
+    """
+    counts = {key: 0 for key in VALIDATION_COUNT_KEYS.values()}
+    for g in groups or []:
+        if not isinstance(g, dict):
+            continue
+        key = VALIDATION_COUNT_KEYS.get(g.get("validation_status"))
+        if key:
+            counts[key] += 1
+    return counts if any(counts.values()) else None
+
+
+def validation_counts_line(counts: Optional[Dict[str, int]]) -> Optional[str]:
+    """The report's ``**Validation:**`` header line for ``counts``, or ``None``."""
+    if not counts:
+        return None
+    return (
+        f"**Validation:** {counts['valid']} valid, {counts['invalid']} invalid, "
+        f"{counts['needs_human_decision']} needs human review, "
+        f"{counts['validation_failed']} validation failed"
+    )
+
+
+def record_validation_counts(
+    phase_dir: str, groups: Optional[List[Dict[str, Any]]]
+) -> Optional[Dict[str, int]]:
+    """Record the per-verdict group counts where a detached caller sees them.
+
+    Written to ``.status.json`` and onto the result line the way
+    ``high_priority_groups`` is, because a host summarising a finished run
+    reads those two surfaces and never ``report.md`` (§6: run b38de8bb's
+    summary left out its 3 needs-human-decision groups). Recomputed on every
+    completion path, reaggregate included, so a revalidation that lowers a
+    count lowers it here too (the previous plan's §7.2 lesson). When no group
+    carries a verdict the key is **deleted** from ``.status.json`` — not
+    written as ``null`` — and nothing is recorded, so ``MULTI_LLM_RESULT``
+    omits it.
+
+    Returns:
+        The counts written, or ``None``.
+    """
+    counts = validation_counts(groups)
+    if counts is None:
+        _status_file.remove_status_keys(str(phase_dir), ["validation_counts"])
+    else:
+        update_status(str(phase_dir), {"validation_counts": counts})
+    cli_common.record_validation_counts(counts)
+    return counts
+
+
 def exec_subagents_requested(args: Any) -> bool:
     """Whether this run drives its own subagents (D3b self-contained mode).
 
@@ -4665,12 +4736,12 @@ def aggregate_results(
         f"**Suggestions:** {high_count} HIGH, {medium_count} MEDIUM, {low_count} LOW ({total_suggestions} total)",
     ]
 
-    if groups_to_display:
-        valid_count = sum(1 for g in groups_to_display if g.get("validation_status") == "valid")
-        invalid_count = sum(1 for g in groups_to_display if g.get("validation_status") == "invalid")
-        needs_human = sum(1 for g in groups_to_display if g.get("validation_status") == "needs-human-decision")
-        if valid_count or invalid_count or needs_human:
-            report_lines.append(f"**Validation:** {valid_count} valid, {invalid_count} invalid, {needs_human} needs human review")
+    # §6 T6.1: the same four counts `record_validation_counts` puts on the
+    # result line below, from the same helper, so a `validation_failed` group
+    # shows in the report summary too and the header and payload agree.
+    validation_line = validation_counts_line(validation_counts(groups_to_display))
+    if validation_line:
+        report_lines.append(validation_line)
     # Plan §2.4: read the published `validation_context`, never recomputed;
     # absent (every source inline) adds nothing, so the report is unchanged.
     report_lines.extend(
@@ -4768,6 +4839,10 @@ def aggregate_results(
     # plan suggestion carries the same `importance` field, so the same fact
     # is now recorded for all three.
     record_high_priority_groups(phase_dir, groups_to_display)
+    # §6 T6.1: every completion path (the fan-out's first run and
+    # `--reaggregate`) reaches this function, so recording here recomputes
+    # the counts, up or down, wherever the report is rebuilt.
+    record_validation_counts(phase_dir, groups_to_display)
 
     return report_path
 
@@ -5216,6 +5291,9 @@ async def reaggregate_from_existing_files(
             recompute_consolidation_recommendation(
                 str(phase_dir), [], args, supports_consolidation,
             )
+            # §6 T6.1: and the verdict counts, which no report rebuild will
+            # reach on this early return.
+            record_validation_counts(str(phase_dir), [])
             return
 
         # Group similar suggestions - preserve existing groups if validation exists

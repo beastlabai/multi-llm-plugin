@@ -1,0 +1,4 @@
+name: capture-pi-json-success
+on_unmatched: default
+fallback:
+  content: "[\n  {\"id\": \"S001\", \"title\": \"Bound the retry ladder\", \"severity\": \"high\"},\n  {\"id\": \"S002\", \"title\": \"Strip the vendor token\", \"severity\": \"medium\"}\n]"
