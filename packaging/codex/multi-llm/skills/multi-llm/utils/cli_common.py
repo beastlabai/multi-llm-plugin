@@ -106,6 +106,15 @@ STATE_RUNNING = "running"
 #: for the same reason: this table is where a host learns the vocabulary.
 STATE_DIED = "died"
 
+#: The one terminal result word the exit code cannot express: a run that
+#: produced usable output with at least one model slot failed exits 0 (D6 row
+#: 3) and says ``partial`` instead of ``done``. ``unattended.report_partial_results``
+#: sets it on the live result context; a detached run carries it across the
+#: process boundary as ``run.result_state`` (``detach.finish_active_run``) so a
+#: ``status`` poll can restate it. Terminal, ``next: null`` — a host owes no
+#: further instructions, it names the failed models from ``progress.models``.
+STATE_PARTIAL = "partial"
+
 
 # ---------------------------------------------------------------------------
 # Skill-dir resolution and command building
@@ -537,6 +546,7 @@ class ResultContext:
         self.next: Optional[str] = None
         self.consolidation_recommended: Optional[Dict[str, Any]] = None
         self.high_priority_groups: Optional[Dict[str, Any]] = None
+        self.validation_context: Optional[Dict[str, Any]] = None
         self.notice: Optional[str] = None
         self.progress: Optional[Dict[str, Any]] = None
         self.progress_lines: Optional[List[str]] = None
@@ -583,6 +593,17 @@ class ResultContext:
         other invocation's line is byte-for-byte what it was.
         """
         self.high_priority_groups = dict(data) if data else None
+
+    def set_validation_context(self, obj: Optional[Dict[str, Any]]) -> None:
+        """Record the published ``validation_context`` object (§2.4), if any.
+
+        Mirrors ``set_consolidation_recommended``: the one writer,
+        ``utils.validation.publish_validation_context``, puts the same object
+        in ``.status.json`` and here, so the result line and the checkpoint
+        cannot disagree. ``None`` (a round whose context fit inline) leaves the
+        line byte-for-byte what it was.
+        """
+        self.validation_context = dict(obj) if obj else None
 
     def set_notice(self, text: Optional[str]) -> None:
         """Record the workflow-level notice a terminal ``status`` run carries.
@@ -678,6 +699,8 @@ class ResultContext:
             )
         if self.high_priority_groups:
             payload["high_priority_groups"] = dict(self.high_priority_groups)
+        if self.validation_context:
+            payload["validation_context"] = dict(self.validation_context)
         if self.notice:
             payload["notice"] = self.notice
         if self.progress:
@@ -786,6 +809,12 @@ def record_high_priority_groups(data: Optional[Dict[str, Any]]) -> None:
     """Record the distinct-HIGH-group count (F4), if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_high_priority_groups(data)
+
+
+def record_validation_context(obj: Optional[Dict[str, Any]]) -> None:
+    """Record the ``validation_context`` object, if a dispatcher run is active."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_validation_context(obj)
 
 
 def record_notice(text: Optional[str]) -> None:

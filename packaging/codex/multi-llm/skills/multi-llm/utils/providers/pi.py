@@ -167,6 +167,9 @@ class PiProvider(LLMProvider):
     #: stdout, which the base :meth:`parse_version` reads without an override.
     verified_version = "0.80.6"
 
+    # Usage (§6.3 probe, pi 0.87.1, 2026-09-25): `--mode json` carries omp's usage shape
+    # (tests/fixtures/pi/json-mode/); moving pi onto it + USAGE_FULL is a follow-up plan.
+
     @property
     def name(self) -> str:
         return "pi"

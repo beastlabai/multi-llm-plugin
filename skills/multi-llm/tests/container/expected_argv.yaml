@@ -216,6 +216,16 @@ entries:
     prompt: argv
     min_records: 1
 
+  # The three codex rows below are what a HOST WHOSE SANDBOX WORKS dispatches, and
+  # they carry `min_records: 0` because this image is not one. Before any exec,
+  # codex's sandbox is probed (`codex sandbox -- sh`, entries further down); in
+  # the image bwrap cannot start and landlock is ENOSYS, so the read-only probe
+  # fails, `sandbox_fallback: auto` rewrites the generate/agent-readonly argv to
+  # `--sandbox danger-full-access`, and the workspace-write probe failing makes
+  # every agent-write dispatch refuse before it is built. So on this lane these
+  # shapes match nothing by construction, not because we stopped emitting them;
+  # a zero floor keeps them as the explanation a permissive-userns run's records
+  # must still match, instead of deleting coverage the table cannot re-observe.
   - provider: codex
     profile: agent-readonly
     transport: stdin
@@ -229,7 +239,7 @@ entries:
       "--skip-git-repo-check": null
     tail: []
     prompt: stdin
-    min_records: 1
+    min_records: 0
 
   - provider: codex
     profile: agent-write|generate
@@ -244,7 +254,7 @@ entries:
       "--skip-git-repo-check": null
     tail: ["<prompt>"]
     prompt: argv
-    min_records: 1
+    min_records: 0
 
   - provider: codex
     profile: agent-write|generate
@@ -259,7 +269,7 @@ entries:
       "--skip-git-repo-check": null
     tail: []
     prompt: stdin
-    min_records: 1
+    min_records: 0
 
   - provider: codex
     profile: probe
@@ -279,6 +289,68 @@ entries:
     subcommands: ["login", "status"]
     options: {}
     tail: []
+    prompt: stdin
+    min_records: 1
+
+  # The fail-open rung (`sandbox_fallback: auto`, read-only profiles only): the
+  # same argv as the read-only/workspace-write rows above with the policy
+  # rewritten to `danger-full-access`, which is what every codex generate and
+  # agent-readonly dispatch becomes in this image. agent-write never gets here —
+  # SANDBOX_FALLBACK_PROFILES excludes it and the write path refuses instead.
+  - provider: codex
+    profile: generate
+    transport: argv
+    binary: codex
+    subcommands: ["exec"]
+    options:
+      "--ephemeral": null
+      "--json": null
+      "--model": "<model>"
+      "--sandbox": "danger-full-access"
+      "--skip-git-repo-check": null
+    tail: ["<prompt>"]
+    prompt: argv
+    min_records: 1
+
+  - provider: codex
+    profile: agent-readonly|generate
+    transport: stdin
+    binary: codex
+    subcommands: ["exec"]
+    options:
+      "--ephemeral": null
+      "--json": null
+      "--model": "<model>"
+      "--sandbox": "danger-full-access"
+      "--skip-git-repo-check": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  # The sandbox probes that pick the rung above: `codex sandbox -- sh -c <script>`
+  # under the policy the dispatch would use. normalize_argv reads the `sh -c`
+  # script as a second `-c` value, which is why both land in one list. The
+  # read-only probe is a bare `exit 0`; the workspace-write one creates and
+  # removes a canary under `.multi-llm/tmp` and cleans the dirs it made.
+  - provider: codex
+    profile: probe
+    transport: stdin
+    binary: codex
+    subcommands: ["sandbox"]
+    options:
+      "-c": ["sandbox_mode=\"read-only\"", "exit 0"]
+    tail: ["--", "sh"]
+    prompt: stdin
+    min_records: 1
+
+  - provider: codex
+    profile: probe
+    transport: stdin
+    binary: codex
+    subcommands: ["sandbox"]
+    options:
+      "-c": ["sandbox_mode=\"workspace-write\"", "d=.multi-llm/tmp; f=\"$d/sandbox-probe-$$\"; mkdir -p \"$d\" && : > \"$f\" && rm -f \"$f\"; rc=$?; rmdir \"$d\" .multi-llm 2>/dev/null; exit $rc"]
+    tail: ["--", "sh"]
     prompt: stdin
     min_records: 1
 
@@ -593,6 +665,19 @@ entries:
     transport: stdin
     binary: opencode
     subcommands: ["auth", "list"]
+    options: {}
+    tail: []
+    prompt: stdin
+    min_records: 1
+
+  # D3 step 4: an uncatalogued model is looked up in the CLI's own listing
+  # (`OpencodeProvider.models_cmd`) inside the dispatch's hermetic context before
+  # the dispatch it vets.
+  - provider: opencode
+    profile: probe
+    transport: stdin
+    binary: opencode
+    subcommands: ["models"]
     options: {}
     tail: []
     prompt: stdin

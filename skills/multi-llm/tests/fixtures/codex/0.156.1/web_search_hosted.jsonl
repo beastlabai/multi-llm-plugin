@@ -1,0 +1,10 @@
+{"type":"thread.started","thread_id":"01a0d5b1-a552-7b60-a956-a315c835a756"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"web_search","id":"ws_0077ed8474a03dec016ab5ae82acc887d28f74ceeb395a8cb3","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_0","type":"web_search","id":"ws_0077ed8474a03dec016ab5ae82acc887d28f74ceeb395a8cb3","query":"current Python release python.org downloads","action":{"type":"search","query":"current Python release python.org downloads","queries":["current Python release python.org downloads"]}}}
+{"type":"item.started","item":{"id":"item_1","type":"web_search","id":"ws_0077ed8474a03dec016ab5ae8677f887d28d5d70dfe1362f7c","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_1","type":"web_search","id":"ws_0077ed8474a03dec016ab5ae8677f887d28d5d70dfe1362f7c","query":"https://www.python.org/downloads/","action":{"type":"open_page","url":"https://www.python.org/downloads/"}}}
+{"type":"item.started","item":{"id":"item_2","type":"web_search","id":"ws_0077ed8474a03dec016ab5ae87a24887d2ae782c9d45d187de","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_2","type":"web_search","id":"ws_0077ed8474a03dec016ab5ae87a24887d2ae782c9d45d187de","query":"'Release' in https://www.python.org/downloads/","action":{"type":"find_in_page","url":"https://www.python.org/downloads/","pattern":"Release"}}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Current Python release: Python 3.14.7; found “Release” on python.org/downloads at “Release version Release date.”"}}
+{"type":"turn.completed","usage":{"input_tokens":32632,"cached_input_tokens":5504,"cache_write_input_tokens":0,"output_tokens":148,"reasoning_output_tokens":116}}

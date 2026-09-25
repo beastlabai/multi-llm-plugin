@@ -247,7 +247,7 @@ def _pin_real_sandbox_probes(request, monkeypatch):
     know the rung (``unexpected argument``), which the walk reads as *this rung
     is absent* — so the ladder falls through to exactly the pre-ladder bypass,
     and a test that wants rung 1 fakes its probe itself. Mock launchers under ``tmp_path`` and the fake ``sh`` probes
-    the gate's own tests build run for real. The fan-out's per-process verdict
+    the gate's own tests build run for real. The shared per-process probe
     cache is reset around every test so one verdict never leaks into the next.
     Opt out with ``@pytest.mark.sandbox_probe``.
     """
@@ -259,8 +259,20 @@ def _pin_real_sandbox_probes(request, monkeypatch):
     except Exception:
         yield
         return
-    if hasattr(rob, "_FANOUT_SANDBOX_CACHE"):
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+    # The one probe cache both lanes share (plan §3.6), with its decisions,
+    # version reads and once-per-process retirement lines.
+    for name in (
+        "_SANDBOX_PROBE_CACHE", "_SANDBOX_PROBE_KEY_LOCKS", "_SANDBOX_DECISIONS",
+        "_PROBE_VERSION_CACHE",
+        # The version preflight's cache feeds the walk's removed_at skip
+        # (plan §3.2): a version read by an earlier test (the mock answers
+        # 0.156.1) must not skip rung 1 in a later one.
+        "_VERSION_CACHE",
+    ):
+        if hasattr(executor, name):
+            monkeypatch.setattr(executor, name, {})
+    if hasattr(executor, "_RETIREMENTS_ANNOUNCED"):
+        monkeypatch.setattr(executor, "_RETIREMENTS_ANNOUNCED", set())
     if "sandbox_probe" in request.keywords:
         yield
         return

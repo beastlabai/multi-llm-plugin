@@ -3350,6 +3350,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 file=sys.stderr,
             )
 
+        # 2.1b: the revalidation judges the CURRENT document (the one this
+        # apply step just wrote), bound when revalidation is materialized —
+        # read once and snapshotted as `revalidation-snapshot.md`, so an
+        # over-limit document is named by a hash-bound path. The subclass says
+        # which document it is (`plan`, `tasks`, `diff`).
+        context_document = self.get_revalidation_document(review_dir)
+        if context_document is not None:
+            context = context_document.text
         revalidation_tasks = prepare_batched_revalidation_tasks(
             groups=self.groups,
             validation_results=self.validation,
@@ -3362,6 +3370,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             if sys.argv
             else f"{self.phase_name}_orchestrator.py",
             base_ref=base_ref,
+            context_document=context_document,
+            context_kind=(
+                context_document.label if context_document is not None else None
+            ),
+            phase=os.path.basename(os.path.normpath(review_dir)),
         )
 
         if revalidation_tasks["items_to_revalidate"] == 0:
@@ -3418,6 +3431,30 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             "without --revalidate"
         )
         sys.exit(0)  # Exit — Claude Code handles revalidation
+
+    def get_revalidation_document(self, review_dir: str) -> Optional[Any]:
+        """The document a revalidation judges, bound for this round (2.1b).
+
+        Default: the plan as it is now, read once as bytes and snapshotted to
+        ``{review_dir}/revalidation-snapshot.md`` (never over the original
+        round's ``validation-snapshot.md``, which that round's task file still
+        binds). ``None`` when it cannot be read or decoded, which falls back to
+        :meth:`get_revalidation_context`'s text with no path.
+        """
+        from .validation import REVALIDATION_SNAPSHOT_NAME, bind_document_file
+
+        try:
+            return bind_document_file(
+                str(self.plan_path), review_dir, label="plan",
+                snapshot_name=REVALIDATION_SNAPSHOT_NAME,
+            )
+        except Exception as exc:  # noqa: BLE001 - degrade to the text context
+            print(
+                f"Warning: could not bind {self.plan_path} for revalidation "
+                f"({exc}); the revalidation prompts carry no path.",
+                file=sys.stderr,
+            )
+            return None
 
     def get_revalidation_context(self) -> str:
         """Return the context string used during revalidation.

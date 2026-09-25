@@ -887,7 +887,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # ever observe its own exit status (after the double-spawn nothing is its
         # parent), so it records its own outcome before exiting. A no-op in every
         # other invocation.
-        _close_detached_run(exit_code, crash)
+        _close_detached_run(exit_code, crash, ctx.state)
         deactivate_result()
         clear_invocation()
 
@@ -898,13 +898,22 @@ def _crash_summary(limit: int = 2000) -> str:
     return text[-limit:]
 
 
-def _close_detached_run(exit_code: Optional[int], error: Optional[str]) -> None:
-    """Write the terminal ``run`` record when this process owns a detached run."""
+def _close_detached_run(
+    exit_code: Optional[int],
+    error: Optional[str],
+    result_state: Optional[str] = None,
+) -> None:
+    """Write the terminal ``run`` record when this process owns a detached run.
+
+    *result_state* is the result context's state; ``detach`` records it as
+    ``run.result_state`` only when the exit code cannot express it
+    (``partial``), so a ``status`` poll can restate it (plan §5).
+    """
     detach = sys.modules.get("utils.detach")
     if detach is None:
         return  # nothing detached ran; do not pay the import
     try:
-        detach.finish_active_run(exit_code, error=error)
+        detach.finish_active_run(exit_code, error=error, result_state=result_state)
     except Exception:  # pragma: no cover - close-out must never mask the result
         traceback.print_exc()
 

@@ -233,6 +233,40 @@ LANDLOCK_PROBE_ARGV: Tuple[str, ...] = (
     "--", "sh", "-c", LANDLOCK_CANARY_SCRIPT,
 )
 
+#: What codex 0.156.1 prints when rung 1's probe runs (measured 2026-09-24,
+#: this repo's host, bwrap broken as above): exit 101, a panic at
+#: `linux-sandbox/src/linux_run_main.rs:410` with this sentence. The legacy
+#: landlock path now needs bubblewrap itself, so the rung is **measured
+#: unavailable** from that build on a bwrap-less machine — which is the only
+#: machine it ever served. Matched by text (whitespace-insensitive), never by
+#: exit code: exit 101 is also constraint 2's panic below, a different cause.
+LANDLOCK_NEEDS_BWRAP_PANIC = (
+    "filesystem-restricted execution requires bubblewrap to isolate "
+    "app-server sockets"
+)
+
+#: `removed_at`'s evidence sentence: a measurement on this configuration, not an
+#: upstream changelog entry (none says "removed" yet).
+LANDLOCK_REMOVED_EVIDENCE = (
+    f"measured 2026-09-24: rung probe exits 101, {LANDLOCK_NEEDS_BWRAP_PANIC!r}"
+)
+
+#: What :meth:`CodexProvider.describe_failure` reports for that panic — its own
+#: outcome, never the global-landlock mapping below nor a generic failure.
+LANDLOCK_NEEDS_BWRAP_REASON = (
+    "landlock rung requires bubblewrap in this codex build (measured from "
+    "codex 0.156.1: the legacy landlock path panics with exit 101, "
+    f"{LANDLOCK_NEEDS_BWRAP_PANIC!r}); the contained fallback rung is "
+    "unavailable here, and `sandbox_fallback: auto` falls to "
+    "--sandbox danger-full-access"
+)
+
+
+def is_landlock_needs_bwrap_panic(text: str) -> bool:
+    """Whether ``text`` carries codex 0.156.1's rung-1 panic sentence."""
+    return LANDLOCK_NEEDS_BWRAP_PANIC in " ".join((text or "").split())
+
+
 #: Rung 1 — a real OS boundary on a bwrap-less machine. Serves the two
 #: read-only profiles only, and always renders `--sandbox read-only` whatever
 #: the profile's own row says (`generate` defaults to `workspace-write`, and
@@ -242,11 +276,13 @@ LANDLOCK_RUNG = SandboxRung(
     probe_argv=LANDLOCK_PROBE_ARGV,
     argv_rewrite=("--sandbox", "read-only", *LANDLOCK_FEATURE_PAIR),
     contained=True,
-    retires_when=(
+    deprecated_at=(
         "0.155.1",
         "`[features].use_legacy_landlock` is deprecated and will be removed soon.",
     ),
+    removed_at=("0.156.1", LANDLOCK_REMOVED_EVIDENCE),
     probe_workdir=LANDLOCK_CANARY_WORKDIR,
+    removed_signature=LANDLOCK_NEEDS_BWRAP_PANIC,
 )
 
 #: Rung 2 — today's D6 bypass, now the last rung rather than the first. No
@@ -478,6 +514,9 @@ class CodexProvider(LLMProvider):
     # answers for the `generate` profile too.
     supports_file_output = False
     supports_workspace_reads = True
+    # `--sandbox read-only` restricts writes, not reads: a snapshot outside the
+    # repo root is readable with no extra flag (validation-context-by-path §2.2).
+    reads_outside_cwd = True
     usage_support = USAGE_FULL
     # §4.2.2: this adapter really emits `--output-schema` when handed a
     # materialized schema (see `build_command`), so the caller may mark an
@@ -508,8 +547,11 @@ class CodexProvider(LLMProvider):
     # No ceiling: no codex release has been measured to break this parser, and a
     # guessed `max_version_exclusive` would refuse runs nobody showed to be
     # broken. `verified_version` carries the "newer than the capture" *warning*,
-    # which is the honest posture for an unmeasured future build.
-    verified_version = "0.146.0"
+    # which is the honest posture for an unmeasured future build. 0.156.1 since
+    # the §6.2 recapture (2026-09-24): `tests/fixtures/codex/0.156.1/`, driven
+    # offline against a localhost Responses stub, parsed by this adapter in
+    # `tests/test_codex_stream_audit.py::TestTheCapturedFixtures`.
+    verified_version = "0.156.1"
 
     # M14/§5.4.1(a) — the exemption, as data. Each of these was re-verified
     # FUNCTIONALLY (not merely found in help text) at the declared floor above
@@ -922,7 +964,24 @@ class CodexProvider(LLMProvider):
         """
         if is_landlock_global_panic(stderr):
             return LANDLOCK_GLOBAL_PANIC_REASON
+        # codex 0.156.1's rung-1 panic (2026-09-24): a different sentence from
+        # constraint 2's, with the same exit 101 — told apart by text alone.
+        if is_landlock_needs_bwrap_panic(stderr):
+            return LANDLOCK_NEEDS_BWRAP_REASON
         return super().describe_failure(stdout, stderr)
+
+    def audit_readonly_stream(self, raw_stream: str) -> Optional[Any]:
+        """Plan §4.2 option B: classify every tool item on the full stream.
+
+        The walk (and every fail-closed rule) is
+        ``codex_stream_audit.audit_codex_stream``, written against the 0.156.1
+        capture in ``tests/fixtures/codex/0.156.1/``. ``parse_output`` below
+        never looks at ``command_execution``/``file_change`` items, so the
+        audit parses them itself.
+        """
+        from .codex_stream_audit import audit_codex_stream
+
+        return audit_codex_stream(raw_stream)
 
     def parse_usage(self, stdout: str, stderr: str) -> Optional[Dict[str, Any]]:
         """Read usage off the terminal turn event of ``codex exec --json`` (D3j).

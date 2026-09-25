@@ -4509,6 +4509,65 @@ class TestInstructionsSurface:
             "nothingToDo": False, "running": False, "died": False,
         }
 
+    def test_partial_is_terminal_owes_no_instructions_and_is_not_incomplete(
+        self, built_package
+    ):
+        """Plan §5.5: a detached run whose result was ``partial`` exits 0 with
+        ``next: null``. It must neither attach the runbook
+        (``rowNeedsInstructions``) nor read as "did not complete" (the
+        needs-human completeness test). The word is read from the generated
+        surface, never spelled in JS or here.
+        """
+        surface = pkg_build.cli_surface()
+        assert surface["dispatcher"]["states"]["partial"] == cli_common.STATE_PARTIAL
+        verdicts = node_json(
+            """
+            const row = surface.modes.find((m) => m.supports_detach)
+            const partial = surface.dispatcher.states.partial
+            const payload = {state: partial, exit: 0, artifacts: [], next: null}
+            const finished = T.terminalResult(
+              {code: surface.dispatcher.exit_codes.ok, argv: ["uv"], stdout: "",
+               stderr: "", result: payload, resultRaw: null, truncated: false,
+               banner: {}, aborted: false, timedOut: false, spawnError: null},
+              {anchor: "/anchor", surface, values: null},
+            )
+            // Hypothetical exit 3 carrying the word: the completeness test
+            // keys off the needs-human word alone, so it is not "incomplete".
+            const held = T.terminalResult(
+              {code: surface.dispatcher.exit_codes.needs_human, argv: ["uv"],
+               stdout: "", stderr: "", result: {...payload, exit: 3},
+               resultRaw: null, truncated: false, banner: {}, aborted: false,
+               timedOut: false, spawnError: null},
+              {anchor: "/anchor", surface,
+               values: {word: row.name, plan: "p.md", question: "",
+                        extraFlags: []}},
+            )
+            emit({
+              defined: typeof partial === "string" && partial.length > 0,
+              owes: T.rowNeedsInstructions(
+                row, {state: partial, next: null}, surface),
+              ok: finished.ok,
+              state: finished.state,
+              next: finished.next,
+              message: held.message,
+              phase: row.phase,
+            })
+            """,
+            built_package,
+        )
+        assert verdicts["defined"] is True
+        assert verdicts["owes"] is False
+        assert verdicts["ok"] is True
+        assert verdicts["state"] == cli_common.STATE_PARTIAL
+        assert verdicts["next"] is None
+        text = surface["needs_human_message"]
+        assert _filled(text["phase_incomplete"], phase=verdicts["phase"]) not in (
+            verdicts["message"]
+        )
+        assert _filled(text["phase_known"], phase=verdicts["phase"]) in (
+            verdicts["message"]
+        )
+
 
 # ===========================================================================
 # The host's own file sigil

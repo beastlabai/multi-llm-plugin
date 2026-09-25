@@ -47,6 +47,7 @@ try:  # normal import (utils is a package)
     from .cli_common import (
         EXIT_NEEDS_HUMAN,
         EXIT_OK,
+        STATE_PARTIAL,
         active_result,
         skill_dir,
     )
@@ -54,6 +55,7 @@ except ImportError:  # pragma: no cover - direct script runs with utils/ on path
     from cli_common import (  # type: ignore
         EXIT_NEEDS_HUMAN,
         EXIT_OK,
+        STATE_PARTIAL,
         active_result,
         skill_dir,
     )
@@ -1036,7 +1038,7 @@ def report_partial_results(
         print(f"{PARTIAL_MARKER} {','.join(failed_list)}]")
         ctx = active_result()
         if ctx is not None:
-            ctx.state = "partial"
+            ctx.state = STATE_PARTIAL
         if unattended:
             record_resolution(
                 phase_dir,

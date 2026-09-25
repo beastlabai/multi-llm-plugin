@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-09-23T11:41:56Z",
+    "captured_at": "2026-09-25T09:11:18Z",
     "cli": "claude-code",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -61,7 +61,7 @@
     "image": "mllm-e2e:local",
     "reviewer": "claude-code",
     "row_id": "chain-claude-code",
-    "run_bundle": "20260923T111529Z"
+    "run_bundle": "20260925T084935Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -319,6 +319,7 @@
     "code-review/report.md",
     "code-review/report_data.json",
     "code-review/subagent_batch_report.json",
+    "code-review/validation-snapshot.md",
     "code-review/validation.json",
     "code-review/validation_batch_0.json",
     "code-review/validation_batch_0.prompt.txt",
@@ -368,6 +369,7 @@
     "review-plan/report.md",
     "review-plan/report_data.json",
     "review-plan/subagent_batch_report.json",
+    "review-plan/validation-snapshot.md",
     "review-plan/validation.json",
     "review-plan/validation_batch_0.json",
     "review-plan/validation_batch_0.prompt.txt",
@@ -387,6 +389,7 @@
     "review-tasks/report_data.json",
     "review-tasks/subagent_batch_report.json",
     "review-tasks/tasks-backup.md",
+    "review-tasks/validation-snapshot.md",
     "review-tasks/validation.json",
     "review-tasks/validation_batch_0.json",
     "review-tasks/validation_batch_0.prompt.txt",
@@ -767,6 +770,7 @@
           "user_skipped_items": []
         },
         "subagent_batch_report.json": {
+          "batch_provenance": {},
           "ceilings": {
             "driver_max_concurrent_write_subagents": 1,
             "effective": 1,
@@ -1470,6 +1474,7 @@
           "user_skipped_items": []
         },
         "subagent_batch_report.json": {
+          "batch_provenance": {},
           "ceilings": {
             "driver_max_concurrent_write_subagents": 1,
             "effective": 1,
@@ -2255,6 +2260,7 @@
           "user_skipped_items": []
         },
         "subagent_batch_report.json": {
+          "batch_provenance": {},
           "ceilings": {
             "driver_max_concurrent_write_subagents": 1,
             "effective": 1,
@@ -2938,6 +2944,22 @@
           }
         ],
         "subagent_batch_report.json": {
+          "batch_provenance": {
+            "validation-batch-0": {
+              "kind": "validation",
+              "round": "9e5ee5774538c20a4841e9ee8cea92c6e304c235eb74a59648b5305462b84d95",
+              "runner": "claude-code:haiku",
+              "sha256": "751b1b620e6fbe063c60ce6b4205d0167af3e96ff46bcfd6eba8716a21fa75ce",
+              "task_id": "validation-batch-0"
+            },
+            "validation-batch-1": {
+              "kind": "validation",
+              "round": "9e5ee5774538c20a4841e9ee8cea92c6e304c235eb74a59648b5305462b84d95",
+              "runner": "claude-code:haiku",
+              "sha256": "751b1b620e6fbe063c60ce6b4205d0167af3e96ff46bcfd6eba8716a21fa75ce",
+              "task_id": "validation-batch-1"
+            }
+          },
           "ceilings": {
             "driver_max_concurrent_subagents": 4,
             "effective": 2,
@@ -3090,9 +3112,22 @@
             }
           ],
           "metadata": {
+            "batch_manifest": {
+              "kind": "validation",
+              "round": "9e5ee5774538c20a4841e9ee8cea92c6e304c235eb74a59648b5305462b84d95"
+            },
+            "batch_sha256": {
+              "0": "751b1b620e6fbe063c60ce6b4205d0167af3e96ff46bcfd6eba8716a21fa75ce",
+              "1": "751b1b620e6fbe063c60ce6b4205d0167af3e96ff46bcfd6eba8716a21fa75ce"
+            },
+            "context_contract": 2,
             "grouped_sha256": "bd968fac92b8f856",
             "model": "claude-code:haiku",
             "runner": "claude-code:haiku",
+            "runners": {
+              "0": "claude-code:haiku",
+              "1": "claude-code:haiku"
+            },
             "schema_version": "2.1",
             "timestamp": "<str>"
           }
@@ -3131,8 +3166,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:3f89fc949f31:13485>",
-              "prompt_lines": 399,
+              "prompt": "<text:sha256:521d6dbde9ac:13426>",
+              "prompt_lines": 396,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -3164,8 +3199,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:87e406db87a0:11414>",
-              "prompt_lines": 334,
+              "prompt": "<text:sha256:184f713142ce:11355>",
+              "prompt_lines": 331,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -3181,6 +3216,7 @@
             "subagent_calls_saved": 3,
             "total_groups": 5
           },
+          "context_contract": 2,
           "grouped_file": "<run-root>/plans/auth-feature/code-review/grouped.json",
           "inputs": {
             "diff_base": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
@@ -3203,6 +3239,15 @@
     "generate-tasks": {
       "artifacts": {
         "subagent_batch_report.json": {
+          "batch_provenance": {
+            "task_generation": {
+              "kind": "task_generation",
+              "round": "65ef36a97d27cbedd3edba605513f38292f798c175d575716d62afadbcd8bc5f",
+              "runner": "claude-code:haiku",
+              "sha256": "682c69e3b02c4894b45e17c0f691eadc7fc2584bc8b633f27c1841f6c47143d4",
+              "task_id": "task_generation"
+            }
+          },
           "ceilings": {
             "driver_max_concurrent_subagents": 4,
             "effective": 2,
@@ -3359,6 +3404,7 @@
     "implement": {
       "artifacts": {
         "subagent_batch_report.json": {
+          "batch_provenance": {},
           "ceilings": {
             "driver_max_concurrent_write_subagents": 1,
             "effective": 1,
@@ -3918,6 +3964,29 @@
           ]
         },
         "subagent_batch_report.json": {
+          "batch_provenance": {
+            "validation-batch-0": {
+              "kind": "validation",
+              "round": "dcef803004515289310912ca5f2a00867e0357fae0687f5276967739426122f6",
+              "runner": "claude-code:haiku",
+              "sha256": "ea638867f254e02c6f47e1bf4b2c56b7bf13ad7f0d735f69fe7ed87d6174c084",
+              "task_id": "validation-batch-0"
+            },
+            "validation-batch-1": {
+              "kind": "validation",
+              "round": "dcef803004515289310912ca5f2a00867e0357fae0687f5276967739426122f6",
+              "runner": "claude-code:haiku",
+              "sha256": "ea638867f254e02c6f47e1bf4b2c56b7bf13ad7f0d735f69fe7ed87d6174c084",
+              "task_id": "validation-batch-1"
+            },
+            "validation-batch-2": {
+              "kind": "validation",
+              "round": "dcef803004515289310912ca5f2a00867e0357fae0687f5276967739426122f6",
+              "runner": "claude-code:haiku",
+              "sha256": "ea638867f254e02c6f47e1bf4b2c56b7bf13ad7f0d735f69fe7ed87d6174c084",
+              "task_id": "validation-batch-2"
+            }
+          },
           "ceilings": {
             "driver_max_concurrent_subagents": 4,
             "effective": 2,
@@ -4093,9 +4162,24 @@
             }
           ],
           "metadata": {
+            "batch_manifest": {
+              "kind": "validation",
+              "round": "dcef803004515289310912ca5f2a00867e0357fae0687f5276967739426122f6"
+            },
+            "batch_sha256": {
+              "0": "ea638867f254e02c6f47e1bf4b2c56b7bf13ad7f0d735f69fe7ed87d6174c084",
+              "1": "ea638867f254e02c6f47e1bf4b2c56b7bf13ad7f0d735f69fe7ed87d6174c084",
+              "2": "ea638867f254e02c6f47e1bf4b2c56b7bf13ad7f0d735f69fe7ed87d6174c084"
+            },
+            "context_contract": 2,
             "grouped_sha256": "a9a4e877134f350f",
             "model": "claude-code:haiku",
             "runner": "claude-code:haiku",
+            "runners": {
+              "0": "claude-code:haiku",
+              "1": "claude-code:haiku",
+              "2": "claude-code:haiku"
+            },
             "schema_version": "2.1",
             "timestamp": "<str>"
           }
@@ -4207,6 +4291,7 @@
             "subagent_calls_saved": 1,
             "total_groups": 4
           },
+          "context_contract": 2,
           "format_version": 2,
           "grouped_file": "<run-root>/plans/auth-feature/review-plan/grouped.json",
           "inputs": {
@@ -4311,6 +4396,22 @@
           ]
         },
         "subagent_batch_report.json": {
+          "batch_provenance": {
+            "validation-batch-0": {
+              "kind": "validation",
+              "round": "87a321912caf6b557ef164db89bcea75b007e30c2d303819a85abb2fb988908d",
+              "runner": "claude-code:haiku",
+              "sha256": "12f69caafb22f08323a8bd706e230ae0a5846d663ce3f28a3b939207c0749a30",
+              "task_id": "validation-batch-0"
+            },
+            "validation-batch-1": {
+              "kind": "validation",
+              "round": "87a321912caf6b557ef164db89bcea75b007e30c2d303819a85abb2fb988908d",
+              "runner": "claude-code:haiku",
+              "sha256": "12f69caafb22f08323a8bd706e230ae0a5846d663ce3f28a3b939207c0749a30",
+              "task_id": "validation-batch-1"
+            }
+          },
           "ceilings": {
             "driver_max_concurrent_subagents": 4,
             "effective": 2,
@@ -4443,9 +4544,22 @@
             }
           ],
           "metadata": {
+            "batch_manifest": {
+              "kind": "validation",
+              "round": "87a321912caf6b557ef164db89bcea75b007e30c2d303819a85abb2fb988908d"
+            },
+            "batch_sha256": {
+              "0": "12f69caafb22f08323a8bd706e230ae0a5846d663ce3f28a3b939207c0749a30",
+              "1": "12f69caafb22f08323a8bd706e230ae0a5846d663ce3f28a3b939207c0749a30"
+            },
+            "context_contract": 2,
             "grouped_sha256": "c72b37a44ccfca99",
             "model": "claude-code:haiku",
             "runner": "claude-code:haiku",
+            "runners": {
+              "0": "claude-code:haiku",
+              "1": "claude-code:haiku"
+            },
             "schema_version": "2.1",
             "timestamp": "<str>"
           }
@@ -4528,6 +4642,7 @@
             "subagent_calls_saved": 1,
             "total_groups": 3
           },
+          "context_contract": 2,
           "format_version": 2,
           "grouped_file": "<run-root>/plans/auth-feature/review-tasks/grouped.json",
           "inputs": {

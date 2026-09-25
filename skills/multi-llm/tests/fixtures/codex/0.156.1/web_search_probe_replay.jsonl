@@ -1,0 +1,12 @@
+{"type":"thread.started","thread_id":"01a0d5b6-d6a0-7d80-844a-01bb901c2ca4"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"web_search","id":"ws_probe_1","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_0","type":"web_search","id":"ws_probe_1","query":"","action":{"type":"other"}}}
+{"type":"item.started","item":{"id":"item_1","type":"web_search","id":"ws_probe_2","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_1","type":"web_search","id":"ws_probe_2","query":"'x' in https://example.org/","action":{"type":"find_in_page","url":"https://example.org/","pattern":"x"}}}
+{"type":"item.started","item":{"id":"item_2","type":"web_search","id":"ws_probe_3","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_2","type":"web_search","id":"ws_probe_3","query":"q","action":{"type":"search","query":"q"}}}
+{"type":"item.started","item":{"id":"item_3","type":"web_search","id":"ws_probe_4","query":"","action":{"type":"other"}}}
+{"type":"item.completed","item":{"id":"item_3","type":"web_search","id":"ws_probe_4","query":"","action":{"type":"search"}}}
+{"type":"item.completed","item":{"id":"item_4","type":"agent_message","text":"[]"}}
+{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}

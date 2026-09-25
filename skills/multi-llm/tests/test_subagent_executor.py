@@ -2456,7 +2456,7 @@ class TestRunnerVersions:
             [_validation_batch(tmp_path, i) for i in range(2)],
             phase_dir=str(tmp_path), kind="validation",
         )
-        assert report.runner_versions == {"codex:gpt-5.5": "0.146.0"}
+        assert report.runner_versions == {"codex:gpt-5.5": "0.156.1"}
 
     def test_below_minimum_fails_fast_before_any_child(
         self, tmp_path, runner_env, monkeypatch
@@ -4372,6 +4372,44 @@ class TestCredentialFreeModels:
         assert excinfo.value.reason_code == "not_authenticated"
         assert set(executor._AUTH_CACHE) == {"opencode|0"}
 
+    def test_the_refusal_quotes_the_stream_the_verdict_came_from(
+        self, monkeypatch
+    ):
+        """opencode 1.18.32 prints a bare colour reset on stderr on every run.
+
+        The refusal used to quote ``stderr or stdout``, i.e. ``'\\x1b[0m\\n'``,
+        which read as "the probe printed nothing" and sent the container-lane
+        diagnosis after a parser break that did not exist. A stderr with nothing
+        but escapes in it defers to stdout; a stderr that says something is
+        still preferred, as before.
+        """
+        import json as _json
+
+        fixture = _json.loads(
+            (Path(__file__).parent / "fixtures" / "opencode"
+             / "auth_list.1.18.32.json").read_text(encoding="utf-8")
+        )["cases"]["empty"]
+        completed = subprocess.CompletedProcess(
+            args=["opencode", "auth", "list"], returncode=fixture["exit"],
+            stdout=fixture["stdout"], stderr=fixture["stderr"],
+        )
+        monkeypatch.setattr(executor, "_run_probe", lambda argv: completed)
+        executor.reset_auth_cache()
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor._detect_auth(
+                "opencode", "stub/stub-model",
+                key="driver.subagent_runner", spec="opencode:stub/stub-model",
+                profile="agent-readonly",
+            )
+        assert excinfo.value.reason_code == "not_authenticated"
+        assert "0 credentials" in str(excinfo.value)
+
+        loud = subprocess.CompletedProcess(
+            args=["x"], returncode=1, stdout="out", stderr="\x1b[31mnot logged in\x1b[0m",
+        )
+        assert executor._probe_verdict_stream(loud) == loud.stderr
+        assert executor._probe_verdict_stream(None) == ""
+
     def test_the_verdict_is_still_recorded_not_assumed(self, monkeypatch):
         """A clean probe on a credential-free model still reads `ok`."""
         completed = subprocess.CompletedProcess(
@@ -4704,7 +4742,7 @@ class TestSandboxUnavailable:
             executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
         assert excinfo.value.reason_code == "sandbox_unavailable"
         assert excinfo.value.exit_code == 3
-        assert executor._SANDBOX_CACHE == {}
+        assert executor._SANDBOX_DECISIONS == {}
         assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
         assert provider.sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
 
@@ -4771,7 +4809,7 @@ class TestSandboxUnavailable:
         assert "the runner's own sandbox cannot start under this repo" in rejected.message
         assert "Nothing was dispatched." in rejected.message
         # A refusal is never cached.
-        assert executor._SANDBOX_CACHE == {}
+        assert executor._SANDBOX_DECISIONS == {}
 
     def test_a_passing_self_test_dispatches_and_is_probed_once(
         self, tmp_path, runner_env, monkeypatch
@@ -4798,7 +4836,7 @@ class TestSandboxUnavailable:
         assert again["sandbox"] == "ok"
         assert len(runs) == 1
         assert any(key.endswith(f"|codex:gpt-5.5|{PROFILE_AGENT_WRITE}")
-                   for key in executor._SANDBOX_CACHE)
+                   for key in executor._SANDBOX_DECISIONS)
         # A read-only profile is never asked to write, so it is never probed.
         readonly = executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_READONLY)
         assert readonly["sandbox"] == "not-required"
@@ -4951,7 +4989,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         """Lane A with the probing adapter bound and no dispatch permitted."""
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Probed())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -5009,8 +5047,8 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
 
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_PROBE_LOCKS", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_KEY_LOCKS", {})
         monkeypatch.setattr(rob, "get_provider", lambda name: name)
         probing = threading.Event()
         release = threading.Event()
@@ -5055,7 +5093,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         """`not-required` spawns nothing and the slot dispatches as before."""
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Unprobed())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         runs = []
@@ -5098,7 +5136,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
     def test_the_verdict_is_three_way_and_never_truthy_by_accident(self, monkeypatch):
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         verdict = rob.sandbox_refusal("fakebwrap", None)
         assert verdict.verdict == rob.SANDBOX_DISPATCH_UNSANDBOXED
@@ -5107,7 +5145,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert verdict.rung == "unsandboxed"
         assert rob.sandbox_fallback_kwargs(verdict) == {"sandbox_fallback": "unsandboxed"}
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._FallbackOff())
         verdict = rob.sandbox_refusal("fakebwrap", None)
         assert verdict.verdict == rob.SANDBOX_REFUSE
@@ -5115,7 +5153,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert verdict.reason.startswith("[SANDBOX_UNAVAILABLE]")
         assert rob.sandbox_fallback_kwargs(verdict) == {}
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Unprobed())
         verdict = rob.sandbox_refusal("fakeplain", None)
         assert verdict.verdict == rob.SANDBOX_DISPATCH
@@ -5127,7 +5165,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
     ):
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         seen = []
@@ -5153,7 +5191,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
     def test_off_refuses_exactly_as_before(self, tmp_path, monkeypatch, capsys):
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._FallbackOff())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -5174,7 +5212,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         slot runs as before, and the override does not fire on it."""
         from utils import review_orchestrator_base as rob
 
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         # The probe could not be run at all → `unknown`.
@@ -5213,7 +5251,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils import review_orchestrator_base as rob
 
         self._git_repo(tmp_path)
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 
@@ -5233,9 +5271,10 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert result["error"] == (
 "[SANDBOX_BYPASSED] fakebwrap: the working tree changed during this "
             "unsandboxed slot's window (leak.md, tracked.txt) while 0 other boundary-less "
-            "slots in this fan-out could also write to it; the check cannot "
-            "tell which slot made the change, so this slot fails closed and "
-            "its output is discarded"
+            "slots in this fan-out, or any other process writing to this "
+            "repository, could also have written it; the check cannot tell "
+            "who made the change, so this slot fails closed and its output is "
+            "discarded"
         )
         assert result["error"] in capsys.readouterr().out
         # Nothing was restored.
@@ -5252,7 +5291,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         from utils.output_handler import output_dir_path
 
         self._git_repo(tmp_path)
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._AutoFallback())
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
         plan_out = output_dir_path(tmp_path / "plan.md")
@@ -5274,13 +5313,28 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
         assert plan_out != tmp_path  # the exclusion is the plan dir, not the root
 
     def test_unexpected_writes_reads_porcelain_entries_not_paths(self):
+        # Plan §4.1: the snapshot is a per-path baseline now, and the
+        # comparison walks the union (the pre-§4.1 `after - before` over
+        # porcelain lines is gone). Same scenario as before, same answer.
         from utils import review_orchestrator_base as rob
 
-        before = frozenset({"?? plans/", " M already.txt"})
-        after = frozenset({
-            "?? plans/", " M already.txt", "?? new.md", " M tracked.txt",
-            "?? .multi-llm/", "?? plans/x/report.md",
-        })
+        E = rob.PorcelainEntry
+
+        def snap(**entries):
+            return rob.PorcelainSnapshot(
+                {path.replace("__", "/").replace("_dot_", "."): entry
+                 for path, entry in entries.items()})
+
+        plans = E("??", "file", "b0", False)
+        already = E(" M", "file", "b1", False)
+        before = snap(plans__a_dot_md=plans, already_dot_txt=already)
+        after = snap(
+            plans__a_dot_md=plans, already_dot_txt=already,
+            new_dot_md=E("??", "file", "b2", False),
+            tracked_dot_txt=E(" M", "file", "b3", False),
+            **{"_dot_multi-llm__tmp_dot_md": E("??", "file", "b4", False)},
+            plans__x__report_dot_md=E("??", "file", "b5", False),
+        )
         assert rob.unexpected_writes(before, after, ignore_prefixes=[".multi-llm", "plans/x"]) == [
             "new.md", "tracked.txt",
         ]
@@ -5325,7 +5379,7 @@ class TestTheReviewFanoutGatesOnTheSameProbe:
             "fakeplain": self._Unprobed(),
             "fakeoff": self._FallbackOff(),
         }
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda name: adapters[name])
         monkeypatch.setattr(rob, "get_project_root", lambda _p: str(tmp_path))
 

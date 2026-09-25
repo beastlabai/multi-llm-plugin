@@ -72,6 +72,7 @@ from .cli_common import (
     record_artifact,
     record_consolidation_recommended,
     record_mode_phase,
+    record_validation_context,
     record_next,
     record_notice,
     record_progress,
@@ -94,12 +95,18 @@ from .progress_tracker import (
     render_roster_line,
 )
 from .output_handler import (
+    PHASE_DIR_NAMES,
     PHASE_DIRECTORIES,
     output_dir_path,
     phase_dir_path,
     slugify_question,
 )
 from .stream_bootstrap import bootstrap_streams
+from .validation_context import (
+    pick_worst,
+    validation_context_notice,
+    validation_context_text,
+)
 
 #: ``--wait``'s default. Deliberately under the tightest surveyed host shell cap
 #: (OpenCode's ~120 s): it compresses the poll loop into one turn, it never
@@ -279,6 +286,12 @@ def discover_phase_dirs(
     a caller that wants one run names it (``--phase``/``--run-id``/``--question``).
     A shim's poll step is therefore determined by what that shim launched, never by
     directory shape.
+
+    Only children named in ``output_handler.PHASE_DIR_NAMES`` are phase dirs
+    (plan §7.4a): a hand-made backup that copied a ``.status.json`` showed up as
+    a second, duplicate run. The skipped ones are reported by
+    :func:`ignored_phase_dirs`, never silently dropped. Order stays
+    alphabetical by directory name.
     """
     plan_dir = output_dir_path(plan_path)
     if not plan_dir.is_dir():
@@ -292,12 +305,95 @@ def discover_phase_dirs(
     for child in sorted(plan_dir.iterdir()):
         if not child.is_dir():
             continue
+        if child.name not in PHASE_DIR_NAMES:
+            continue
         if child.name == "ask":
             found.extend(_ask_dirs(plan_dir))
             continue
         if (child / status_file.STATUS_FILENAME).exists():
             found.append(child)
     return found
+
+
+def ignored_phase_dirs(plan_path: Path) -> List[str]:
+    """Children of the plan's output dir that hold a ``.status.json`` but are
+    not phase dirs (not in ``PHASE_DIR_NAMES``), by name (plan §7.4a2).
+
+    A child without a ``.status.json`` is not listed: it was never going to be
+    mistaken for a run.
+    """
+    plan_dir = output_dir_path(plan_path)
+    if not plan_dir.is_dir():
+        return []
+    return [
+        child.name for child in sorted(plan_dir.iterdir())
+        if child.is_dir()
+        and child.name not in PHASE_DIR_NAMES
+        and (child / status_file.STATUS_FILENAME).exists()
+    ]
+
+
+def _dedupe_run_ids(
+    views: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Two views with one ``run.run_id`` are one run (plan §7.4b).
+
+    Keeps the view whose directory is the run's own phase dir (its basename is
+    the directory word of the view's ``phase``), else the first one listed, and
+    returns the others as copies: ``{"dir", "run_id", "copy_of"}``. Views with no
+    ``run_id`` (a foreground checkpoint, a ``full`` run's driven phase dirs) are
+    never deduped.
+    """
+    by_id: Dict[str, List[Dict[str, Any]]] = {}
+    for view in views:
+        run_id = str((view.get("run") or {}).get("run_id") or "")
+        if run_id:
+            by_id.setdefault(run_id, []).append(view)
+    dropped: Dict[int, Dict[str, Any]] = {}
+    for run_id, group in by_id.items():
+        if len(group) < 2:
+            continue
+
+        def _own(view: Dict[str, Any]) -> bool:
+            phase = view.get("phase") or (view.get("run") or {}).get("mode")
+            if not phase:
+                return False
+            return os.path.basename(view["phase_dir"]) == PHASE_DIRECTORIES.get(
+                str(phase), str(phase)
+            )
+
+        keep = next((v for v in group if _own(v)), group[0])
+        for view in group:
+            if view is not keep:
+                dropped[id(view)] = {
+                    "dir": _view_dir_name(view),
+                    "run_id": run_id,
+                    "copy_of": _view_dir_name(keep),
+                }
+    kept = [v for v in views if id(v) not in dropped]
+    copies = [dropped[id(v)] for v in views if id(v) in dropped]
+    return kept, copies
+
+
+def _view_dir_name(view: Dict[str, Any]) -> str:
+    """A view's directory relative to the plan's output dir (``ask/<q>`` for ask)."""
+    path = Path(view["phase_dir"])
+    if path.parent.name == "ask":
+        return f"ask/{path.name}"
+    return path.name
+
+
+def _ignored_text(ignored: Sequence[str], copies: Sequence[Dict[str, Any]]) -> List[str]:
+    """The one-line reports for skipped non-phase dirs and duplicate-run copies."""
+    lines: List[str] = []
+    if ignored:
+        lines.append(f"ignored (not a phase dir): {', '.join(ignored)}")
+    for copy in copies:
+        lines.append(
+            f"ignored (copy of run {str(copy['run_id'])[:8]} in "
+            f"{copy['copy_of']}): {copy['dir']}"
+        )
+    return lines
 
 
 def _select(
@@ -459,7 +555,7 @@ def render_run_text(
         if view.get("question"):
             lines.append(f"      question: {view['question']}")
         # Three state fields, three lines, never collapsed.
-        lines.append(f"      run.state:      {run.get('state') or '(none)'}")
+        lines.append(f"      run.state:      {_run_state_text(view)}")
         lines.append(f"      phase state:    {view.get('state') or '(none)'}")
         if workflow is not None:
             phase_name = view.get("phase") or name
@@ -543,6 +639,11 @@ def render_run_text(
         consolidation = _consolidation_text(view.get("consolidation_recommended"))
         if consolidation:
             lines.append(f"      {consolidation}")
+        validation_context_line = _validation_context_text(
+            view.get("validation_context")
+        )
+        if validation_context_line:
+            lines.append(f"      {validation_context_line}")
         # F4: recorded only for a finished code-review run — `high_priority_groups`
         # is written once, at the very end of main(), so a mid-run poll has
         # nothing to render yet, and the key exists on no other phase.
@@ -573,6 +674,61 @@ def render_run_text(
                 lines.append(tail)
             lines.extend(_resume_lines(view, plan_path))
     return lines
+
+
+def _result_state(view: Dict[str, Any]) -> Optional[str]:
+    """The run's carried result word (``partial``), or ``None``.
+
+    Only a finished run that exited 0 carries one: ``run.result_state`` is
+    written by the detached worker's close-out, bounded by
+    ``detach.carried_result_state`` there and again here, so a missing, ``null``
+    or hand-edited value reads as absent and a clean exit-0 run stays ``done``.
+    """
+    run = view.get("run") or {}
+    if view.get("verdict") != detach.VERDICT_DONE:
+        return None
+    if run.get("exit_code") != EXIT_OK:
+        return None
+    return detach.carried_result_state(run.get("result_state"))
+
+
+def _failed_model_specs(view: Dict[str, Any]) -> List[str]:
+    """Which slots failed, for the text view's ``partial`` note.
+
+    ``models_failed`` is the checkpoint's own record of the fan-out's losses
+    (read from the file: the run view does not carry it); a phase that keeps
+    no such key falls back to the ``failed`` rows of ``progress.models``.
+    """
+    try:
+        failed = status_file.read_status(view["phase_dir"]).get("models_failed")
+    except Exception:  # advisory text only; never fail the poll over it
+        failed = None
+    if isinstance(failed, dict) and failed:
+        return sorted(str(spec) for spec in failed)
+    if isinstance(failed, list) and failed:
+        return [str(spec) for spec in failed]
+    models = (view.get("progress") or {}).get("models")
+    if isinstance(models, dict):
+        return sorted(
+            str(spec) for spec, entry in models.items()
+            if isinstance(entry, dict) and entry.get("state") == STATE_FAILED
+        )
+    return []
+
+
+def _run_state_text(view: Dict[str, Any]) -> str:
+    """``run.state``, annotated when the run's result was ``partial`` (plan §5).
+
+    ``run.state`` keeps its process meaning (``done``); the note says what the
+    exit code could not: ``done (partial — failed: codex:gpt-6-astra:xhigh)``.
+    """
+    word = (view.get("run") or {}).get("state") or "(none)"
+    result = _result_state(view)
+    if result is None:
+        return str(word)
+    failed = _failed_model_specs(view)
+    detail = f" — failed: {', '.join(failed)}" if failed else ""
+    return f"{word} ({result}{detail})"
 
 
 def _died(view: Dict[str, Any]) -> bool:
@@ -671,6 +827,27 @@ def _consolidation_text(recommendation: Any) -> Optional[str]:
         f"consolidation recommended: {groups} valid groups >= {threshold} "
         f"— run {command}"
     )
+
+
+def _validation_context_text(obj: Any) -> Optional[str]:
+    """The phase's ``validation_context`` line (plan §2.4), or ``None``.
+
+    Rendered from the published object only — never recomputed — so the poll
+    text, ``MULTI_LLM_RESULT`` and ``report.md`` say the same thing. A
+    ``mode: path`` source reads "excerpt inline + full snapshot by path",
+    never "inlined in full".
+    """
+    return validation_context_text(obj if isinstance(obj, dict) else None)
+
+
+def _validation_context_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """The truncation sentence(s) over every view, in discovery order, or ``None``."""
+    sentences: List[str] = []
+    for view in views:
+        notice = validation_context_notice(view.get("validation_context"))
+        if notice and notice not in sentences:
+            sentences.append(notice)
+    return "; ".join(sentences) or None
 
 
 def _high_priority_text(high_priority: Any) -> Optional[str]:
@@ -1926,11 +2103,13 @@ def _resolve_phase(word: Optional[str]) -> Optional[str]:
 
     modes = _modes()
     resolved = modes.phase_from_selector(word)
-    if resolved is None and word in PHASE_DIRECTORIES:
+    # The directory words read the same tuple discovery does
+    # (`PHASE_DIR_NAMES`, plan §7.4a), so the two cannot drift.
+    if resolved is None and word in PHASE_DIR_NAMES:
         resolved = word
     if resolved is None:
         valid = list(modes.phase_names()) + sorted(
-            set(PHASE_DIRECTORIES) - set(modes.phase_names())
+            set(PHASE_DIR_NAMES) - set(modes.phase_names())
         )
         print(
             f"ERROR: unknown phase or mode '{word}'. Valid phases: "
@@ -1952,12 +2131,39 @@ def _scope_label(args: argparse.Namespace) -> Optional[str]:
     return None
 
 
+def _discovery_report(plan_path: Path, args: argparse.Namespace) -> Dict[str, Any]:
+    """What discovery skipped (plan §7.4a2/b), for the text line and ``--json``.
+
+    ``ignored_dirs``: non-phase children holding a ``.status.json``, listed only
+    when no ``--phase`` pins one directory. ``copies``: dirs whose run id another
+    phase dir already carries (:func:`_dedupe_run_ids`). Reads the checkpoints
+    directly — no classification, no close-out — so it never writes.
+    """
+    phase = _resolve_phase(args.phase)
+    stubs: List[Dict[str, Any]] = []
+    for directory in discover_phase_dirs(plan_path, phase=phase):
+        try:
+            status = status_file.read_status(str(directory))
+        except Exception:
+            continue
+        run = status.get("run") if isinstance(status.get("run"), dict) else {}
+        stubs.append(
+            {"phase_dir": str(directory), "phase": status.get("phase"), "run": run}
+        )
+    return {
+        "ignored_dirs": [] if phase else ignored_phase_dirs(plan_path),
+        "copies": _dedupe_run_ids(stubs)[1],
+    }
+
+
 def _collect(plan_path: Path, args: argparse.Namespace) -> List[Dict[str, Any]]:
     phase = _resolve_phase(args.phase)
     views = [
         detach.classify_run(str(directory))
         for directory in discover_phase_dirs(plan_path, phase=phase)
     ]
+    # Plan §7.4b: two views with one run id are one run.
+    views = _dedupe_run_ids(views)[0]
     return _select(
         views,
         run_id=args.run_id,
@@ -1997,6 +2203,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return EXIT_OK
 
     views = _collect(plan_path, args)
+    discovery = _discovery_report(plan_path, args)
     if args.wait:
         # `--timeout` is a sentinel out of argparse, and this is the one place
         # it becomes a number: between `parse_args` and the `--wait` branch,
@@ -2063,6 +2270,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     exit_code = exit_code_for(views)
 
+    # Plan §5: a detached run whose result was `partial` exits 0, and
+    # `cli_common.emit` would turn exit 0 into `done` — the word the host then
+    # relays. The worker carried the word across the process boundary as
+    # `run.result_state`; a poll pinned to that one run restates it. The failed
+    # specs and reasons are already on `progress.models`, recorded above. Only
+    # on exit 0: any other exit already has its own word. `--json`'s
+    # `runs[].run.state` stays the process word `done`.
+    if (
+        exit_code == EXIT_OK
+        and len(views) == 1
+        and (args.phase or args.question or args.run_id)
+    ):
+        carried = _result_state(views[0])
+        if carried:
+            record_state(carried)
+
     # F7, 2026-09-16: the opencode plugin polls only `--view run`, so a
     # terminal run's real follow-up — the workflow view's `notice:`/`suggested
     # next:` line — lived in text that channel never read. The model saw
@@ -2094,6 +2317,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         payload: Dict[str, Any] = {"runs": views}
         if args.view == VIEW_ALL:
             payload = {"workflow": workflow, "runs": views}
+        # Plan §7.4a2/b: what discovery skipped, only when there is something
+        # to say, so a plan with none keeps today's payload byte for byte.
+        if discovery.get("ignored_dirs"):
+            payload["ignored_dirs"] = list(discovery["ignored_dirs"])
+        if discovery.get("copies"):
+            payload["copied_runs"] = list(discovery["copies"])
         print(json.dumps(payload, indent=2, default=str))
     else:
         lines: List[str] = []
@@ -2103,6 +2332,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         lines += render_run_text(
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args),
+        )
+        # Plan §7.4a2: after the phase views, never silently dropped.
+        lines += _ignored_text(
+            discovery.get("ignored_dirs") or [], discovery.get("copies") or []
         )
         runner = render_runner_text(
             plan_path, host_id=getattr(args, "host", None), views=views
@@ -2115,8 +2348,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lines += workflow_trailer
         print("\n".join(lines))
 
-    if terminal_notice:
-        record_notice(terminal_notice)
+    # Plan §2.4: a `mode: truncated` validation source sets the notice on any
+    # terminal poll (every view, not only `--view run`); it qualifies the
+    # verdicts the workflow step acts on, so it comes first and joins the
+    # workflow trailer in ONE record. Either part alone is recorded unchanged;
+    # a `mode: path` source sets none.
+    truncation_notice = (
+        _validation_context_notice(views) if terminal_run else None
+    )
+    combined_notice = "; ".join(
+        part for part in (truncation_notice, terminal_notice) if part
+    )
+    if combined_notice:
+        record_notice(combined_notice)
 
     for view in views:
         for path in view["output_files"].values():
@@ -2135,6 +2379,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     if recommended:
         record_consolidation_recommended(recommended)
+    # Plan §2.4 step 3: one field, so the view whose object has the worst
+    # top-level `mode` wins, first in discovery order on a tie (its `phase`
+    # says which); the text above rendered every phase's line.
+    validation_context = pick_worst(
+        [v.get("validation_context") for v in views]
+    )
+    if validation_context:
+        record_validation_context(validation_context)
     if exit_code == EXIT_NOTHING_TO_DO and views:
         # `views[0]` is `discover_phase_dirs`' alphabetical order, not "the run
         # that made the exit code 2" — with several phases listed, a finished

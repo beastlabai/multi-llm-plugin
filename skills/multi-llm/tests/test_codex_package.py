@@ -688,6 +688,10 @@ _ALLOWED_ABSOLUTE = {
         "/dev/fd", "/dev/null", "/proc", "/proc/self/fd"},
     f"{PAYLOAD}/utils/run_registry.py": {"/proc"},
     f"{PAYLOAD}/utils/providers/codex.py": {"/dev/null", "/tmp"},
+    # the shell wrappers codex puts around each command (plan §4.2 step 2) and
+    # the ``2>/dev/null`` suffix the read-only classifier admits.
+    f"{PAYLOAD}/utils/providers/codex_stream_audit.py": {
+        "/bin/bash", "/bin/sh", "/dev/null", "/usr/bin/bash", "/usr/bin/sh"},
     # (4) the sandbox names.
     f"{PAYLOAD}/utils/doctor.py": _SANDBOX | {"/bin/true", "/dev"},
     f"{PAYLOAD}/utils/providers/base.py": {"/usr/bin/bwrap", "/dev/tty", "/tmp"},

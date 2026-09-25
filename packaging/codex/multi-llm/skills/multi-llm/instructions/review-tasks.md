@@ -341,14 +341,20 @@ When the poll loop above ends, check the log file `{plan}/review-tasks/orchestra
 `validation_tasks.json` carries `tasks_schema_version: 2` and one complete task
 per batch under `batches` — each with `prompt`, `output_name`, the derived
 `output_path`, `prompt_path` and `prompt_lines`, `result_channel: file`,
-`context_mode: inline`, `capability_tier`, `executor_role` and `task_id`. The
+`context_mode`, `capability_tier`, `executor_role` and `task_id`. The
 sidecar at `prompt_path` holds exactly the bytes of `prompt` (`prompt_lines` is
 its line count), so the two are interchangeable and a host that would otherwise
 re-emit the whole prompt can point the subagent at the file instead. This
 batch's records and **both** context excerpts — the plan, and the task list
 under review — travel inside `prompt`, each under its own `## Context (…)`
-heading, so no subagent has to open a plan or task-list file to judge a claim
-about a `T###`.
+heading. When both fit the inline limit they are complete, and the task is
+`context_mode: inline`. A document over the limit keeps a head excerpt and is
+also named once under `## Plan file` or `## Tasks file`: a hash-bound snapshot
+in this phase dir (`validation-snapshot.md` for the plan; `tasks-backup.md` or
+`validation-tasks-snapshot.md` for the task list), and the task is
+`context_mode: workspace-read`. The subagent must be able to read those paths,
+so do not run it where it cannot. Never treat such a batch as having that
+document inline in full.
 
 **For each task in the file: when the task carries `prompt_path`, run a subagent
 that reads that file in full — through line `prompt_lines`, paging if a single

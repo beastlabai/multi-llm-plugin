@@ -833,6 +833,25 @@ Finalization (run by the host AFTER every batch has been applied and verified):
                 file=sys.stderr,
             )
 
+    def get_revalidation_document(self, review_dir: str):
+        """``diff_context.txt`` as a ``diff`` source; the plan fallback as ``plan`` (2.1b).
+
+        The diff is never named by path and never gets the "read the full
+        plan" marker — an oversized one stays inline-truncated and is
+        surfaced. Only when the file is missing does the plan stand in, and it
+        is then labelled a plan (bound like any plan revalidation), so the
+        prompt says which document it actually carries.
+        """
+        from utils.validation import bind_document_text
+
+        code_review_dir = os.path.join(self.out_dir, self.review_subdir)
+        context_path = os.path.join(code_review_dir, "diff_context.txt")
+        if os.path.exists(context_path):
+            with open(context_path, 'r', encoding='utf-8') as f:
+                return bind_document_text(f.read(), label="diff")
+        print("Warning: diff_context.txt not found, using plan content", file=sys.stderr)
+        return super().get_revalidation_document(review_dir)
+
     def get_revalidation_context(self) -> str:
         """Return diff_context.txt contents for revalidation, falling back to plan."""
         code_review_dir = os.path.join(self.out_dir, self.review_subdir)

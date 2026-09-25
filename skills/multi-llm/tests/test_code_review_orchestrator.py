@@ -2182,7 +2182,7 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
 
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("# Plan\n", encoding="utf-8")
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: self._Probed())
         monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
 
@@ -2257,7 +2257,7 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
         adapter = adapter or self._AutoFallback
         plan_path = tmp_path / "plan.md"
         plan_path.write_text("# Plan\n", encoding="utf-8")
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: adapter())
         monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
         monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
@@ -2338,12 +2338,59 @@ class TestTheCodeReviewFanoutGatesOnTheSandboxProbe:
         assert error == (
 "[SANDBOX_BYPASSED] fakebwrap: the working tree changed during this "
             "unsandboxed slot's window (src.py) while 0 other boundary-less "
-            "slots in this fan-out could also write to it; the check cannot "
-            "tell which slot made the change, so this slot fails closed and "
-            "its output is discarded"
+            "slots in this fan-out, or any other process writing to this "
+            "repository, could also have written it; the check cannot tell "
+            "who made the change, so this slot fails closed and its output is "
+            "discarded"
         )
         assert error in capsys.readouterr().out
         assert (tmp_path / "src.py").read_text(encoding="utf-8") == "v2\n"
+
+    def test_a_clean_audited_code_review_slot_keeps_its_findings_beside_a_foreign_change(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """Plan §4.3, with option B's switch on: the tree changed during the
+        window, but the slot's own audited stream shows only reads, so the
+        change is reported as not attributed and the review counts. With the
+        switch off the same slot fails closed as above."""
+        import os
+        import subprocess
+
+        from utils import readonly_audit
+
+        env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@x",
+               "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@x"}
+        subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True, env=env)
+        (tmp_path / "src.py").write_text("v1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "src.py"], cwd=tmp_path, check=True, env=env)
+        subprocess.run(["git", "commit", "-q", "-m", "init"], cwd=tmp_path, check=True, env=env)
+        clean = {"clean": True, "reason": "", "actions": 4}
+
+        def dispatch(**kwargs):
+            (tmp_path / "src.py").write_text("edited by another session\n",
+                                             encoding="utf-8")
+            return {
+                "success": True, "data": [], "source": "stdout_fallback",
+                "output_file": str(tmp_path / "out" / "o.json"),
+                "details": {"sandbox": "bypassed", "readonly_audit": clean},
+            }
+
+        plan_path = self._fallback_lane(tmp_path, monkeypatch, dispatch)
+        monkeypatch.setattr(readonly_audit, "STREAM_AUDIT_EXEMPTION_ENABLED", False)
+        success, _issues, error = asyncio.run(cro.run_single_review(
+            "fakebwrap:m1", plan_path, tmp_path / "out",
+        ))
+        assert success is False and "fails closed" in error
+
+        monkeypatch.setattr(readonly_audit, "STREAM_AUDIT_EXEMPTION_ENABLED", True)
+        (tmp_path / "src.py").write_text("v1\n", encoding="utf-8")
+        capsys.readouterr()
+        success, _issues, error = asyncio.run(cro.run_single_review(
+            "fakebwrap:m1", plan_path, tmp_path / "out",
+        ))
+        assert success is True, error
+        out = capsys.readouterr().out
+        assert "not attributed" in out and "(src.py)" in out
 
     def test_off_refuses_the_code_review_slot_exactly_as_before(
         self, tmp_path, monkeypatch, capsys

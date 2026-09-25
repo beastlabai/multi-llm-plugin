@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a0d5b9-a401-70e1-b326-f5991f0e7239"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll call `write_file` once as requested.\n"}}
+{"type":"item.started","item":{"id":"item_1","type":"mcp_tool_call","server":"capfs","tool":"write_file","arguments":{"path":"m.txt","text":"x"},"result":null,"error":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"mcp_tool_call","server":"capfs","tool":"write_file","arguments":{"path":"m.txt","text":"x"},"result":{"content":[{"type":"text","text":"wrote m.txt"}],"structured_content":null},"error":null,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Wrote `x` to `m.txt`."}}
+{"type":"turn.completed","usage":{"input_tokens":28910,"cached_input_tokens":26368,"cache_write_input_tokens":0,"output_tokens":129,"reasoning_output_tokens":0}}

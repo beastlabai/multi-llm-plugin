@@ -445,6 +445,68 @@ class TestOpencodeAuthListExitsZeroWhenLoggedOut:
         ) is not False
 
 
+#: `opencode auth list` on **1.18.32**, captured raw from the container image
+#: (no TTY, stdin /dev/null, scratch HOME). The strings above are the 1.18.12-era
+#: hand transcriptions; this is the byte-exact envelope of the pinned image
+#: build, ANSI and all, so the verdict is graded on both pins.
+OPENCODE_AUTH_LIST_1_18_32 = json.loads(
+    (
+        Path(__file__).parent / "fixtures" / "opencode" / "auth_list.1.18.32.json"
+    ).read_text(encoding="utf-8")
+)
+
+
+class TestOpencodeAuthList_1_18_32:
+    """The 1.18.32 envelope: same count lines, with colour escapes around them.
+
+    Two things it changes and one it does not. stdout now carries ``\\x1b[90m``
+    before the path and each entry's type; stderr is exactly ``\\x1b[0m\\n`` on
+    every run, logged in or not (NO_COLOR/TERM=dumb do not suppress it). The
+    count line itself — the only verdict — is unchanged, so the classifier needs
+    no new reading; these tests hold that true.
+    """
+
+    CASES = OPENCODE_AUTH_LIST_1_18_32["cases"]
+
+    def _classify(self, case):
+        run = self.CASES[case]
+        return get_provider("opencode").classify_auth_probe(
+            run["stdout"], run["stderr"], run["exit"]
+        )
+
+    def test_the_fixture_is_the_pinned_build(self):
+        assert OPENCODE_AUTH_LIST_1_18_32["opencode_version"] == "1.18.32"
+        for case, run in self.CASES.items():
+            assert run["exit"] == 0, case
+            assert run["stderr"] == "\x1b[0m\n", case
+
+    def test_empty_home_is_not_authenticated(self):
+        assert self._classify("empty") is False
+        assert self._classify("empty_no_color") is False
+
+    def test_a_stored_credential_is_authenticated(self):
+        assert self._classify("stored") is True
+
+    def test_an_environment_key_alone_is_not_refused(self):
+        assert self._classify("env_only") is not False
+
+    def test_a_config_declared_provider_is_invisible_to_auth_list(self):
+        """Measured, and pinned so a change is noticed rather than inherited.
+
+        A custom provider declared in ``opencode.json`` — even one carrying its
+        own ``options.apiKey`` — is not listed by ``auth list``: the envelope is
+        byte-identical to the empty home's. The probe therefore reads it as
+        logged out. That is a known limit of this probe, not a verdict about the
+        provider; the container lane's stub runner passes because its seeded
+        home also stores a credential, not because of the config block.
+        """
+        assert (
+            self.CASES["config_provider_only"]["stdout"]
+            == self.CASES["empty"]["stdout"]
+        )
+        assert self._classify("config_provider_only") is False
+
+
 # ---------------------------------------------------------------------------
 # §7.2 — per-adapter overrides for the four structured-error adapters
 # ---------------------------------------------------------------------------

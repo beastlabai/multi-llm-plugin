@@ -807,12 +807,18 @@ When running with `--revalidate` (without `--internal-revalidation`), the orches
 `revalidation_tasks.json` carries `tasks_schema_version: 2` and one complete task
 per batch under `batches` — each with `prompt`, `output_name`, the derived
 `output_path`, `prompt_path` and `prompt_lines`, `result_channel: file`,
-`context_mode: inline`, `capability_tier`, `executor_role` and `task_id`. The
+`context_mode`, `capability_tier`, `executor_role` and `task_id`. The
 sidecar at `prompt_path` holds exactly the bytes of `prompt` (`prompt_lines` is
 its line count), so the two are interchangeable and a host that would otherwise
-re-emit the whole prompt can point the subagent at the file instead. The plan
-excerpt and this batch's issue records travel **inside** `prompt`;
+re-emit the whole prompt can point the subagent at the file instead. The
+context excerpt and this batch's issue records travel **inside** `prompt`;
 `item_indices` and `original_validation` stay on the file for the merge step.
+The context is the fix diff, which is never named by path. Only when the diff
+is missing and the plan stands in can a plan over the inline limit be named
+once under `## Plan file` (a hash-bound snapshot in the phase dir), making the
+task `context_mode: workspace-read`. The subagent must then be able to read
+that path, so do not run it where it cannot. Never treat such a batch as
+having the full plan inline.
 
 **For each task in the file: when the task carries `prompt_path`, run a subagent
 that reads that file in full — through line `prompt_lines`, paging if a single

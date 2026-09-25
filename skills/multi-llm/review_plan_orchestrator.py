@@ -320,6 +320,7 @@ async def reaggregate_from_existing_files(prefix, out_dir, phase_dir, plan_path,
         base_ref=base_ref,
         tasks_path=tasks_path,
         template_style=template_style,
+        supports_consolidation=True,
     )
 
 

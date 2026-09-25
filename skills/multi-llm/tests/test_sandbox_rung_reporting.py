@@ -54,7 +54,13 @@ from utils.subagent_executor import SandboxProbeResult  # noqa: E402
 
 BWRAP_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
 SPEC = "codex:gpt-5.5"
-VERSION, DEPRECATION = LANDLOCK_RUNG.retires_when
+VERSION, DEPRECATION = LANDLOCK_RUNG.deprecated_at
+REMOVED_VERSION = LANDLOCK_RUNG.removed_at[0]
+#: codex 0.156.1's rung-1 panic line, as the walk's probe tail keeps it.
+PANIC_TAIL = (
+    "thread 'main' panicked at linux-sandbox/src/linux_run_main.rs:410:5: "
+    "filesystem-restricted execution requires bubblewrap to isolate app-server sockets"
+)
 
 FINDINGS = [{
     "title": "Add input validation",
@@ -99,13 +105,18 @@ def _pin_probe(monkeypatch, rung):
     """The fan-out's probe answers ``unavailable`` and the walk selected
     ``rung``; everything downstream of it — the key, the gate, the notice, the
     argv, the records — is the real code."""
-    monkeypatch.setattr(base, "_FANOUT_SANDBOX_CACHE", {})
-    monkeypatch.setattr(
-        base, "_fanout_sandbox_verdict",
-        lambda _provider, _cwd: SandboxProbeResult(
-            "unavailable", BWRAP_LINE, rung, ((rung, "taken"),),
-        ),
-    )
+    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    if rung == "unsandboxed":
+        # What codex 0.156.1 measures (2026-09-24): rung 1 probed, its panic
+        # classified by text, then the uncontained rung.
+        verdict = SandboxProbeResult(
+            "unavailable", BWRAP_LINE, rung,
+            (("landlock", "retired"), (rung, "taken")),
+            (("landlock", PANIC_TAIL),), REMOVED_VERSION,
+        )
+    else:
+        verdict = SandboxProbeResult("unavailable", BWRAP_LINE, rung, ((rung, "taken"),))
+    monkeypatch.setattr(base, "_fanout_sandbox_verdict", lambda _provider, _cwd: verdict)
 
 
 # ---------------------------------------------------------------------------
@@ -231,7 +242,15 @@ class TestTheReportingPathSeparatesTheRungs:
         (argv,) = seen["argv"]
         assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
         assert seen["details"][0]["sandbox"] == "bypassed"
-        assert f"[{SPEC}] {base.sandbox_bypassed_notice('codex')}" in out
+        # The fixed stem, with the rung clause appended (plan §3.1): which
+        # contained rung was tried, its outcome and its probe tail.
+        assert (
+            f"[{SPEC}] [SANDBOX_BYPASSED] codex: bubblewrap cannot start; running "
+            f"--sandbox danger-full-access under providers.codex.sandbox_fallback=auto "
+            f"(read-only phase; no OS boundary between the model's shell and this "
+            f"machine); fallback rung 'landlock' unavailable: requires bubblewrap "
+            f"in this codex build (codex 0.156.1: \"{PANIC_TAIL}\")"
+        ) in out
         assert SANDBOX_FALLBACK_MARKER not in out
 
         status = status_file.read_status(str(phase_dir))

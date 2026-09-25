@@ -23,9 +23,15 @@ Two properties are load-bearing and enforced by tests:
   provenance and invoker plumbing, never subagent instructions — a headless
   ``claude -p`` / ``codex exec`` invocation is not guaranteed a workspace-read
   tool, and a prompt full of unreadable paths degrades into a confidently empty
-  answer rather than an error. ``task_generation`` is the single standing
-  exception (``context_mode: workspace-read``): its context is the repository,
-  and it names exactly one path, the pinned repo root.
+  answer rather than an error. There are two named exceptions, both
+  ``context_mode: workspace-read``: ``task_generation``, whose context is the
+  repository and which names exactly one path, the pinned repo root; and a
+  validation/revalidation task, which names at most one path per document
+  whose context exceeded the inline limit, each a hash-bound snapshot of that
+  document (``context_sources``; ``plans/validation-context-by-path-and-codex-0156-fallout.md``
+  §2.3). Every runner able to execute a validation task (``agent-readonly``)
+  declares ``supports_workspace_reads``, which a test pins; the excerpt stays
+  inline either way.
 
 Every generator also ends the same way: the callee **prints** its result and the
 invoker persists it (the D3a print/persist contract). No prompt tells a subagent
@@ -37,7 +43,13 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional, Sequence
 
+try:  # Python 3.8+: TypedDict lives in typing
+    from typing import TypedDict
+except ImportError:  # pragma: no cover
+    TypedDict = dict  # type: ignore[misc,assignment]
+
 __all__ = [
+    "ContextSource",
     "HUMAN_DECISION_JUDGE_RULES",
     "TASK_AUTHORING_RULES",
     "REFERENCE_SECTIONS",
@@ -118,76 +130,74 @@ location.
   "needs-human-decision" and say that the location metadata was absent.'''
 
 
-def build_validation_prompt(
-    *,
-    plan_excerpt: str,
-    suggestion_records: Sequence[Dict[str, Any]],
-    kind: str = "validation",
-    context_label: str = "Plan content",
-    secondary_excerpt: str = "",
-    secondary_label: str = "",
-    extra_instructions: str = "",
-) -> str:
-    """Render the prompt for one validation or revalidation batch.
+class ContextSource(TypedDict, total=False):
+    """One context document of a validation round (§2.3 step 7).
 
-    Args:
-        plan_excerpt: The one shared context excerpt for this phase, already
-            truncated by the caller (excerpted once per phase and reused across
-            batches, so batches never re-truncate and prompts stay
-            deterministic).
-        suggestion_records: This batch's suggestion records — the values, not a
-            path to them. Each record carries at least ``group_hash``, ``theme``
-            and its ``suggestions``.
-        kind: ``"validation"`` or ``"revalidation"``; only the framing sentence
-            differs.
-        context_label: What the embedded context is (``"Plan content"``,
-            ``"Tasks file"``, ``"Diff"``, …).
-        secondary_excerpt: An optional **second** context block, for a phase
-            whose suggestions are about one document but are judged against two
-            — review-tasks embeds the plan *and* the task list the suggestions
-            name. Excerpted by the caller like the first, and rendered as its
-            own ``## Context (…)`` section so the two are never read as one.
-        secondary_label: What that second block is; required whenever
-            ``secondary_excerpt`` is given.
-        extra_instructions: Optional phase-specific guidance appended before the
-            reply contract (e.g. :data:`CODE_REVIEW_VALIDATION_GUIDANCE`). Must be
-            capability-neutral and must not name a task's path fields.
-
-    Returns:
-        The complete prompt text.
+    ``mode`` is ``inline`` (fits, no path), ``path`` (over the limit; the
+    excerpt stays and ``abs_path`` names the hash-bound snapshot of the whole
+    document) or ``truncated`` (over the limit, nothing readable). Only a
+    ``path`` source reaches the prompt as a path.
     """
-    if kind == "revalidation":
-        opening = (
-            "You are re-validating review suggestions that a previous "
-            "validation pass could not classify."
+
+    label: str
+    kind: str
+    path: Optional[str]
+    abs_path: Optional[str]
+    sha256: Optional[str]
+    bytes: int
+    chars_shown: int
+    truncated: bool
+    mode: str
+
+
+#: How a ``path`` source's document is named in the prompt.
+_FILE_HEADING = {"plan": "Plan file", "tasks": "Tasks file"}
+_FILE_NOUN = {"plan": "plan", "tasks": "tasks file"}
+
+
+def _file_sections(sources: Sequence[Dict[str, Any]]) -> str:
+    """The ``## Plan file`` / ``## Tasks file`` sections, in ask.txt's wording."""
+    blocks = []
+    for source in sources:
+        label = str(source.get("label") or "plan")
+        heading = _FILE_HEADING.get(label, f"{label.capitalize()} file")
+        noun = _FILE_NOUN.get(label, label)
+        blocks.append(
+            f"## {heading}\n\n"
+            f"The {noun} under review is on disk at this absolute path, which "
+            f"you may read directly:\n\n"
+            f"{source.get('abs_path') or source.get('path')}\n\n"
+            f"The context below carries only an excerpt of it (its first "
+            f"{source.get('chars_shown')} characters; the file is "
+            f"{source.get('bytes')} bytes) and ends in a truncation marker. "
+            f"Read the full {noun} from the path above.\n"
         )
-    else:
-        opening = "You are validating review suggestions for accuracy."
+    return "\n".join(blocks) + "\n"
 
-    if secondary_excerpt and not secondary_label:
-        raise ValueError(
-            "secondary_excerpt needs a secondary_label: an unlabelled second "
-            "'## Context ()' block is exactly the ambiguity two context "
-            "sections exist to remove."
-        )
-    secondary = (
-        f"\n## Context ({secondary_label})\n\n{secondary_excerpt}\n"
-        if secondary_excerpt
-        else ""
-    )
-    count = len(suggestion_records)
-    guidance = f"\n{extra_instructions.strip()}\n" if extra_instructions.strip() else ""
-    return f'''{opening}
 
-## Context ({context_label})
+def _documents_phrase(sources: Sequence[Dict[str, Any]]) -> str:
+    nouns = [_FILE_NOUN.get(str(s.get("label")), str(s.get("label"))) for s in sources]
+    if len(nouns) == 1:
+        return f"the {nouns[0]}"
+    return "the " + " and the ".join(nouns)
 
-{plan_excerpt}
-{secondary}
-## Suggestion groups to validate ({count})
 
-{_json_block(list(suggestion_records))}
+def _task_section(
+    count: int,
+    sources: Optional[Sequence[Dict[str, Any]]],
+    inline_blocks: int = 0,
+) -> str:
+    """The ``## Task`` sentences; the path variant when any source is by path.
 
-## Task
+    The path variant is scoped per document: only the documents in
+    ``sources`` (the ``mode: path`` ones) are judged against their file.
+    ``inline_blocks`` counts the context blocks whose document is *not* named
+    by path (inline, or cut with no file); each of those stays complete as
+    shown and is the text a claim about that document is judged against, so
+    a mixed round never judges a task-list omission against the plan file.
+    """
+    if not sources:
+        return f'''## Task
 
 For each of the {count} suggestion groups above, decide:
 - "valid": the issue is real and should be addressed
@@ -214,7 +224,159 @@ and a partially implemented tree is exactly the situation this review exists
 for. Code that already does X does not make such a claim invalid; it makes it
 valid — document or decide it — and the reason should say that the code already
 does X. Where the artifact under review is a diff or a code change rather than a
-plan, that change is the text such a claim is judged against.
+plan, that change is the text such a claim is judged against.'''
+    docs = _documents_phrase(sources)
+    headings = " / ".join(
+        f"`## {_FILE_HEADING.get(str(s.get('label')), 'File')}`" for s in sources
+    )
+    verb = "is" if len(sources) == 1 else "are"
+    if inline_blocks:
+        inline_scope = (
+            "\n\nEvery other context block is not named by path: judge it as it is"
+            "\nshown, since it is the authority for the document it carries. A file"
+            "\nnamed above never settles a claim about a document it does not hold."
+        )
+        inline_rule = (
+            "\nA claim about a document that is not named by path is judged against"
+            "\nthat document's own context block."
+        )
+    else:
+        inline_scope = ""
+        inline_rule = ""
+    return f'''## Task
+
+For each of the {count} suggestion groups above, decide:
+- "valid": the issue is real and should be addressed
+- "invalid": a false positive — incorrect or not applicable
+- "needs-human-decision": a genuine judgment call (a product or design
+  trade-off) that the full documents cannot settle. It is never the answer for
+  a section an excerpt cut or dropped: read the file instead.
+
+{docs[0].upper() + docs[1:]} {verb} named by path under {headings} above. A
+file named there is the whole document; its excerpt in the context block is a
+convenience copy of its head, authoritative only for the sections it shows in
+full. For a document named by path, read the file in full and compare each
+group against it. Judge only the groups listed above; ignore anything
+else.{inline_scope}
+
+When a suggestion claims something about existing code — a function name, a
+line number, current behaviour — and you can read the repository you are
+running in, open it and check the claim before answering. Reserve
+"needs-human-decision" for genuine judgment calls, never for a claim you could
+have checked but did not look at.
+
+A claim that the plan or the tasks omit something — "the plan does not specify
+X", "the tasks never say to reset X" — and any claim that something is never
+defined, never reset or never tested, or that two sections disagree, is judged
+against the document it is about. For a document named by path it is judged
+against the full file named above for that document, not against its
+excerpt.{inline_rule}
+No such claim is judged against the working tree: the plan is what an
+implementer follows, and a partially implemented tree is exactly the situation
+this review exists for. Code that already does X does not make such a claim
+invalid; it makes it valid — document or decide it — and the reason should say
+that the code already does X. Where the artifact under review is a diff or a
+code change rather than a plan, that change is the text such a claim is judged
+against.
+
+Insufficient context is explicit. If reading a file named above fails, comes
+back incomplete, or you cannot reach it, do not guess from its excerpt: answer
+"needs-human-decision" with a reason that starts `insufficient-context:` and
+names the sections you could not read.'''
+
+
+def build_validation_prompt(
+    *,
+    plan_excerpt: str,
+    suggestion_records: Sequence[Dict[str, Any]],
+    kind: str = "validation",
+    context_label: str = "Plan content",
+    secondary_excerpt: str = "",
+    secondary_label: str = "",
+    extra_instructions: str = "",
+    context_sources: Optional[List[ContextSource]] = None,
+) -> str:
+    """Render the prompt for one validation or revalidation batch.
+
+    Args:
+        plan_excerpt: The one shared context excerpt for this phase, already
+            truncated by the caller (excerpted once per phase and reused across
+            batches, so batches never re-truncate and prompts stay
+            deterministic).
+        suggestion_records: This batch's suggestion records — the values, not a
+            path to them. Each record carries at least ``group_hash``, ``theme``
+            and its ``suggestions``.
+        kind: ``"validation"`` or ``"revalidation"``; only the framing sentence
+            differs.
+        context_label: What the embedded context is (``"Plan content"``,
+            ``"Tasks file"``, ``"Diff"``, …).
+        secondary_excerpt: An optional **second** context block, for a phase
+            whose suggestions are about one document but are judged against two
+            — review-tasks embeds the plan *and* the task list the suggestions
+            name. Excerpted by the caller like the first, and rendered as its
+            own ``## Context (…)`` section so the two are never read as one.
+        secondary_label: What that second block is; required whenever
+            ``secondary_excerpt`` is given.
+        extra_instructions: Optional phase-specific guidance appended before the
+            reply contract (e.g. :data:`CODE_REVIEW_VALIDATION_GUIDANCE`). Must be
+            capability-neutral and must not name a task's path fields.
+        context_sources: The round's context source records (§2.3 step 7).
+            Only a ``mode: path`` source is rendered: its document gets a
+            ``## Plan file`` / ``## Tasks file`` section naming the snapshot
+            by absolute path above the context blocks, and the ``## Task``
+            sentences that judge against "the context above" switch to the path
+            variant, scoped per document (a file named by path is read in
+            full and its excerpt is authoritative only for what it shows; a
+            context block not named by path stays complete as shown; an
+            omission claim is judged against the document it is about; an
+            unreadable file is an explicit ``insufficient-context:``
+            answer). With no ``path`` source the
+            prompt is byte-identical to what it was.
+
+    Returns:
+        The complete prompt text.
+    """
+    if kind == "revalidation":
+        opening = (
+            "You are re-validating review suggestions that a previous "
+            "validation pass could not classify."
+        )
+    else:
+        opening = "You are validating review suggestions for accuracy."
+
+    if secondary_excerpt and not secondary_label:
+        raise ValueError(
+            "secondary_excerpt needs a secondary_label: an unlabelled second "
+            "'## Context ()' block is exactly the ambiguity two context "
+            "sections exist to remove."
+        )
+    secondary = (
+        f"\n## Context ({secondary_label})\n\n{secondary_excerpt}\n"
+        if secondary_excerpt
+        else ""
+    )
+    count = len(suggestion_records)
+    guidance = f"\n{extra_instructions.strip()}\n" if extra_instructions.strip() else ""
+    by_path = [
+        dict(source) for source in (context_sources or [])
+        if isinstance(source, dict) and source.get("mode") == "path"
+    ]
+    files = _file_sections(by_path) if by_path else ""
+    # Context blocks whose document is not named by path (inline, or cut with
+    # no readable file): the path variant keeps each one its own authority.
+    blocks = 1 + (1 if secondary_excerpt else 0)
+    inline_blocks = max(0, blocks - len(by_path))
+    return f'''{opening}
+
+{files}## Context ({context_label})
+
+{plan_excerpt}
+{secondary}
+## Suggestion groups to validate ({count})
+
+{_json_block(list(suggestion_records))}
+
+{_task_section(count, by_path, inline_blocks)}
 {guidance}
 {_VALIDATION_REPLY_CONTRACT}'''
 

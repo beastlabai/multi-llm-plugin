@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"01a0d4b1-6de6-7481-8024-4f1fd7013f83"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc 'sleep 3; echo done > s.txt'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"/bin/bash -lc 'sleep 3; echo done > s.txt'","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc bash","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc bash","aggregated_output":"echo tty > t.txt\r\n\u001b[?2004l\r\u001b[?2004h\u001b]0;user@host: /work/tree\u0007\u001b[01;32muser@host\u001b[00m:\u001b[01;34m/work/tree\u001b[00m\u001b[91m:master\u001b[00m$ exit\r\n\u001b[?2004l\rexit\r\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"[]"}}
+{"type":"turn.completed","usage":{"input_tokens":5,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}

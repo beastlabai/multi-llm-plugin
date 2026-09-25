@@ -81,7 +81,9 @@ def _landlock_stand_in(script: str) -> SandboxRung:
         probe_argv=("sh", "-c", script),
         argv_rewrite=LANDLOCK_RUNG.argv_rewrite,
         contained=True,
-        retires_when=LANDLOCK_RUNG.retires_when,
+        deprecated_at=LANDLOCK_RUNG.deprecated_at,
+        removed_at=LANDLOCK_RUNG.removed_at,
+        removed_signature=LANDLOCK_RUNG.removed_signature,
     )
 
 
@@ -179,9 +181,14 @@ class TestCodexDeclaresTwoRungs:
     def test_rung_one_is_contained_and_says_when_it_retires(self):
         assert LANDLOCK_RUNG.contained is True
         assert UNSANDBOXED_RUNG.contained is False
-        version, sentence = LANDLOCK_RUNG.retires_when
+        version, sentence = LANDLOCK_RUNG.deprecated_at
         assert version == "0.155.1"
         assert "use_legacy_landlock" in sentence and "deprecated" in sentence
+        # Measured gone from 0.156.1 (2026-09-24): exit 101, its own panic.
+        removed_version, evidence = LANDLOCK_RUNG.removed_at
+        assert removed_version == "0.156.1"
+        assert "2026-09-24" in evidence and "101" in evidence
+        assert LANDLOCK_RUNG.removed_signature == codex_module.LANDLOCK_NEEDS_BWRAP_PANIC
         assert UNSANDBOXED_RUNG.probe_argv is None
         assert UNSANDBOXED_RUNG.argv_rewrite == ("--sandbox", "danger-full-access")
 
@@ -580,9 +587,11 @@ class TestTheVerdictShape:
         verdict = executor.sandbox_verdict(_Ladder(), PROFILE_GENERATE)
         with pytest.raises(ValueError):
             state, tail = verdict  # noqa: F841 - the unpack is the assertion
-        state, tail, rung, walk = verdict
+        state, tail, rung, walk, rung_tails, version = verdict
         assert (state, rung) == ("unavailable", "landlock")
-        assert verdict._fields == ("state", "tail", "rung", "walk")
+        assert verdict._fields == (
+            "state", "tail", "rung", "walk", "rung_tails", "version",
+        )
 
     def test_a_verdict_with_nothing_to_probe_still_has_every_field(self):
         class NoProbe:
@@ -648,7 +657,7 @@ class TestTheWalkSharesOneDeadline:
 @pytest.fixture
 def executor_gate(monkeypatch):
     """`_detect_sandbox` with a stand-in adapter and a clean cache."""
-    monkeypatch.setattr(executor, "_SANDBOX_CACHE", {})
+    monkeypatch.setattr(executor, "_SANDBOX_DECISIONS", {})
 
     def run(adapter, profile=PROFILE_AGENT_READONLY):
         monkeypatch.setattr(executor, "get_provider", lambda _name: adapter)
@@ -691,7 +700,7 @@ class TestTheExecutorGate:
         assert excinfo.value.reason_code == "sandbox_unavailable"
         assert excinfo.value.exit_code == 3
         assert "sandbox_fallback=contained" in str(excinfo.value)
-        assert executor._SANDBOX_CACHE == {}
+        assert executor._SANDBOX_DECISIONS == {}
         assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
 
     @pytest.mark.parametrize("landlock", [CANARY_DENIED, SANDBOX_BROKEN])
@@ -699,7 +708,7 @@ class TestTheExecutorGate:
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor_gate(_Ladder(policy="off", landlock=landlock))
         assert excinfo.value.reason_code == "sandbox_unavailable"
-        assert executor._SANDBOX_CACHE == {}
+        assert executor._SANDBOX_DECISIONS == {}
         out = capsys.readouterr().out
         assert "[SANDBOX_BYPASSED]" not in out and "[SANDBOX_FALLBACK]" not in out
 
@@ -713,13 +722,13 @@ class TestTheExecutorGate:
     def test_agent_write_reaches_no_rung(self, executor_gate, policy):
         with pytest.raises(executor.RunnerRejected):
             executor_gate(_Ladder(policy=policy), profile=PROFILE_AGENT_WRITE)
-        assert executor._SANDBOX_CACHE == {}
+        assert executor._SANDBOX_DECISIONS == {}
 
 
 @pytest.fixture
 def fanout_gate(monkeypatch):
     def run(adapter):
-        monkeypatch.setattr(rob, "_FANOUT_SANDBOX_CACHE", {})
+        monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
         monkeypatch.setattr(rob, "get_provider", lambda _name: adapter)
         return rob.sandbox_refusal("fakecodex", None)
     return run
@@ -737,7 +746,13 @@ class TestTheFanoutGate:
     def test_auto_falls_to_rung_two_exactly_as_before(self, fanout_gate):
         verdict = fanout_gate(_Ladder(policy="auto", landlock=SANDBOX_BROKEN))
         assert verdict.rung == "unsandboxed" and verdict.bypass
-        assert verdict.reason == rob.sandbox_bypassed_notice("fakecodex")
+        # The fixed stem with the rung clause appended (plan §3.1): the
+        # contained rung was tried, failed, and its probe tail says how.
+        assert verdict.reason == (
+            rob.sandbox_bypassed_notice("fakecodex")
+            + f"; fallback rung 'landlock' unavailable (probe: \"{BWRAP_LINE}\")"
+        )
+        assert verdict.walk == (("landlock", "unavailable"), ("unsandboxed", "taken"))
         assert rob.sandbox_fallback_kwargs(verdict) == {"sandbox_fallback": "unsandboxed"}
 
     def test_contained_takes_rung_one(self, fanout_gate):
@@ -760,8 +775,11 @@ class TestTheFanoutGate:
 
     def test_the_cache_holds_the_rung(self, fanout_gate):
         fanout_gate(_Ladder(policy="auto"))
-        (cached,) = rob._FANOUT_SANDBOX_CACHE.values()
-        assert cached.rung == "landlock"
+        cached = [
+            value for key, value in executor._SANDBOX_PROBE_CACHE.items()
+            if key[0] == "verdict"
+        ]
+        assert [value.rung for value in cached] == ["landlock"]
 
 
 # ---------------------------------------------------------------------------
@@ -836,7 +854,7 @@ class TestTheRungSurvivesTheCarriers:
         assert argv[3] == "read-only" and argv.count(FLAG_VALUE) == 1
 
     def test_the_preflight_rung_reaches_the_spawn_as_its_id(self, monkeypatch, tmp_path):
-        monkeypatch.setattr(executor, "_SANDBOX_CACHE", {})
+        monkeypatch.setattr(executor, "_SANDBOX_DECISIONS", {})
         monkeypatch.setattr(executor, "get_provider", lambda _name: _Ladder())
         executor._detect_sandbox(
             "codex", key="k", spec="codex:gpt-5.5", profile=PROFILE_AGENT_READONLY,

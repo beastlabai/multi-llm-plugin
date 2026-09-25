@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import threading
@@ -30,8 +31,10 @@ from typing import Any, Callable, Dict, FrozenSet, List, NamedTuple, Optional, S
 
 from . import detach as _detach
 from . import status_file as _status_file
+from . import validation_context as _validation_context
 from . import cli_common
 from . import progress_tracker as _progress
+from . import readonly_audit as _readonly_audit
 from .progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from .cli_common import (
     dispatcher_command,
@@ -87,6 +90,7 @@ from .providers.base import (
     LLMProvider,
     SandboxRung,
     classify_streams,
+    sandbox_bypassed_notice_text,
     sandbox_fallback_notice_text,
     sandbox_rung_retired_notice,
     context_length_message,
@@ -121,11 +125,22 @@ from .state_manager import (
     CURRENT_FORMAT_VERSION,
 )
 from .validation import (
+    PLAN_SNAPSHOT_NAME,
+    TASKS_BACKUP_NAME,
+    TASKS_SNAPSHOT_NAME,
+    BoundDocument,
+    ValidationContextError,
+    bind_document_file,
+    decode_document,
     ensure_prompt_sidecars,
+    legacy_context_round_reason,
     prepare_batched_validation_tasks,
+    publish_from_task_document,
+    verify_context_sources,
     merge_batched_validation_results,
     resolved_reaggregate_command,
     stale_validation_reason,
+    validation_source_decision,
 )
 from .subagent_tasks import (
     TaskFileError,
@@ -173,6 +188,68 @@ MAX_LOGGED_PROMPT_LENGTH = 5000
 
 write_status = _status_file.write_status
 update_status = _status_file.update_status
+
+
+def recompute_consolidation_recommendation(
+    phase_dir: str,
+    groups: Optional[List[Dict[str, Any]]],
+    args: argparse.Namespace,
+    supports_consolidation: bool,
+) -> Optional[Dict[str, Any]]:
+    """Recompute ``consolidation_recommended`` from ``groups``, up **or down** (§7.2a).
+
+    Called by both completion paths — the fan-out's first run and
+    ``reaggregate_from_existing_files`` — whenever the phase supports
+    consolidation, including when ``groups`` is empty or ``None``: a round that
+    drops to zero groups must clear a recommendation an earlier round recorded.
+
+    The count includes ``needs-human-decision`` as well as ``valid`` groups,
+    matching ``full_workflow_orchestrator._consolidation_recommended``, even
+    though the recorded field is named ``valid_groups`` (renaming it would change
+    the result contract). The threshold is ``args.consolidation_threshold``, else
+    :data:`consolidation.CONSOLIDATION_RECOMMENDED_THRESHOLD`.
+
+    At or above the threshold the object is written with ``update_status`` and
+    put on the result line through ``cli_common.record_consolidation_recommended``
+    (never as ``next``). Below it the key is **deleted** from ``.status.json``
+    with ``status_file.remove_status_keys`` — not written as ``null`` through
+    ``update_status``, whose merge cannot remove a key — and nothing is
+    recorded, so ``MULTI_LLM_RESULT`` omits it.
+
+    Returns:
+        The recommendation written, or ``None``.
+    """
+    if not supports_consolidation:
+        return None
+    from .consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
+    groups = groups or []
+    valid_group_count = sum(
+        1 for g in groups
+        if isinstance(g, dict)
+        and g.get("validation_status") in ("valid", "needs-human-decision")
+    )
+    threshold = getattr(args, 'consolidation_threshold', None) or CONSOLIDATION_RECOMMENDED_THRESHOLD
+    if valid_group_count < threshold:
+        _status_file.remove_status_keys(phase_dir, ["consolidation_recommended"])
+        return None
+    print(f"\n[CONSOLIDATION_RECOMMENDED] {valid_group_count} valid groups >= threshold ({threshold})")
+    print(f"Run: --consolidate to cluster related suggestions")
+    # The marker is a *log* line, and a detached run's caller never sees the log —
+    # so on the route every host actually reads (the launch returns, `status
+    # --view run` renders the checkpoint) the recommendation used to vanish
+    # entirely. Measured 2026-09-16: a 29-group run printed the marker and the
+    # session model reported "no consolidation was recommended". Recorded here in
+    # the checkpoint and on the result line, and **never** as `next` —
+    # `--consolidate` is a mechanical continuation a host may auto-follow, and a
+    # recommendation is not an instruction.
+    recommendation = {
+        "valid_groups": valid_group_count,
+        "threshold": threshold,
+        "command": "--consolidate",
+    }
+    update_status(phase_dir, {"consolidation_recommended": recommendation})
+    cli_common.record_consolidation_recommended(recommendation)
+    return recommendation
 
 
 def maybe_detach(
@@ -246,39 +323,84 @@ def read_plan(plan_path: str) -> str:
         return f.read()
 
 
+def _batch_self_reported_model(batch_file: str) -> Optional[str]:
+    """A batch file's own ``metadata.model`` (its subagent's self-report), or ``None``."""
+    try:
+        with open(batch_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    metadata = data.get("metadata")
+    model = metadata.get("model") if isinstance(metadata, dict) else None
+    return str(model) if model else None
+
+
 def _authoritative_validator_runner(
     phase_dir: str, batch_metadata: Dict[str, Any]
-) -> Optional[str]:
-    """The runner the executor actually dispatched this batch's tasks to (F3).
+) -> Dict[int, Optional[str]]:
+    """Per batch, the runner the executor verifiably dispatched it to (F3, §7.3a).
 
     A validation batch's own ``metadata.model`` is the subagent's free-hand
     self-report — in one captured run, five different spellings across 11
     batches, one of them another model's name copied out of the suggestions
-    it was validating (``_derive_model_from_results`` joins whatever it is
-    told, honestly, which is the problem). ``subagent_batch_report.json`` is
-    the executor's own record of what it dispatched, keyed by the same
-    ``task_id`` each batch carries (``f"{kind}-batch-{batch_index}"``), so
-    reading it back beats trusting the subagent. Returns ``None`` when the
-    report is absent or names no row for this batch's task ids — the
-    host-native (Claude Code Task tool) path, whose batches this process
-    never dispatched, leaves no such report to read.
+    it was validating. ``subagent_batch_report.json`` is the executor's own
+    record of what it dispatched, keyed by the same ``task_id`` each batch
+    carries (``f"{kind}-batch-{batch_index}"``).
+
+    That record only speaks for the bytes the executor persisted, so it is
+    decided **per batch and by content hash** (§7.3a), never by mtime:
+
+    - the report's ``batch_provenance`` row for this task matches the file's
+      current sha256 *and* the current task file's ``kind``/round → the
+      recorded runner;
+    - the hash differs (a hand rewrite, a revalidation by another host) or the
+      kind/round differs (revalidation reuses the filenames with a different
+      subset mapping) → ``None``, and the merge uses the batch's own
+      ``metadata.model``;
+    - no report at all (the host-native Claude Code Task tool path, whose
+      batches this process never dispatched) → ``None`` for every batch.
+
+    **Legacy fallback only:** a report written before ``batch_provenance``
+    existed carries just the per-row ``runner``; that row is used as before.
+
+    Returns:
+        ``{batch_index: runner_or_None}`` for every batch in ``batch_metadata``.
     """
     try:
-        from .subagent_executor import _recorded_runners
+        from .subagent_executor import _recorded_provenance, _recorded_runners
+        from .subagent_tasks import batch_manifest, file_bytes_sha256
     except ImportError:  # pragma: no cover - direct script runs
-        from subagent_executor import _recorded_runners  # type: ignore
-    recorded = _recorded_runners(phase_dir)
-    if not recorded:
-        return None
+        from subagent_executor import _recorded_provenance, _recorded_runners  # type: ignore
+        from subagent_tasks import batch_manifest, file_bytes_sha256  # type: ignore
     kind = batch_metadata.get("kind") or "validation"
-    expected_ids = {
-        f"{kind}-batch-{batch.get('batch_index')}"
-        for batch in batch_metadata.get("batches", [])
-    }
-    specs = {recorded[task_id] for task_id in expected_ids if task_id in recorded}
-    if not specs:
-        return None
-    return ",".join(sorted(specs))
+    batches = batch_metadata.get("batches", [])
+    result: Dict[int, Optional[str]] = {}
+    provenance = _recorded_provenance(phase_dir)
+    if provenance is None:
+        legacy = _recorded_runners(phase_dir)
+        for batch in batches:
+            index = batch.get("batch_index")
+            result[index] = legacy.get(batch.get("task_id") or f"{kind}-batch-{index}")
+        return result
+    manifest = batch_manifest(batch_metadata)
+    for batch in batches:
+        index = batch.get("batch_index")
+        row = provenance.get(str(batch.get("task_id") or f"{kind}-batch-{index}"))
+        runner: Optional[str] = None
+        if (
+            row
+            and row.get("kind") == manifest["kind"]
+            and row.get("round") == manifest["round"]
+            and row.get("sha256")
+            and row.get("sha256") == file_bytes_sha256(
+                os.path.join(phase_dir, f"validation_batch_{index}.json")
+            )
+        ):
+            runner = str(row.get("runner") or "") or None
+        result[index] = runner
+    return result
 
 
 def merge_validation_batches(
@@ -294,7 +416,31 @@ def merge_validation_batches(
     dispatched the batch instead of exiting at the marker. One implementation
     means the executor path and the native path cannot drift in how a batch is
     merged — only in who dispatched it.
+
+    The written ``validation.json`` is bound to the exact batch bytes it
+    consumed (§7.1a): ``metadata.batch_sha256 = {batch_index: sha256}`` for
+    every batch file present, and ``metadata.batch_manifest = {kind, round}``
+    of ``batch_metadata``. ``metadata.runners = {batch_index: model}`` records
+    who answered each batch (§7.3b), and ``metadata.model`` is the single value
+    when every batch agrees, else the sorted comma-joined list.
     """
+    try:
+        from .subagent_tasks import batch_manifest, file_bytes_sha256
+        from .validation import join_model_names
+    except ImportError:  # pragma: no cover - direct script runs
+        from subagent_tasks import batch_manifest, file_bytes_sha256  # type: ignore
+        from validation import join_model_names  # type: ignore
+    # Hashed before the merge reads the files: a batch rewritten in between is
+    # then recorded under its *old* hash, which the next reaggregate sees as a
+    # change and re-merges — the safe direction.
+    batch_hashes: Dict[str, str] = {}
+    for batch in batch_metadata.get("batches", []):
+        index = batch.get("batch_index")
+        digest = file_bytes_sha256(
+            os.path.join(phase_dir, f"validation_batch_{index}.json")
+        )
+        if digest:
+            batch_hashes[str(index)] = digest
     validation_results = merge_batched_validation_results(
         output_dir=phase_dir,
         batch_metadata=batch_metadata,
@@ -303,16 +449,39 @@ def merge_validation_batches(
     # `save_validation_results` already announces this write
     # ("[validation] Saved validation results to: ..."); a second line here
     # under a different name announced the same file twice in the run log.
-    # F3: when the executor dispatched this batch itself, its own record of
-    # who ran it outranks what the batches said about themselves — `model`
-    # stays a plain string (compatibility) but is now the authoritative spec
-    # rather than a best-effort join of self-reports; `runner` carries the
-    # same value explicitly. `None` (host-native path) leaves both to
-    # `save_validation_results`'s existing derivation.
-    runner = _authoritative_validator_runner(phase_dir, batch_metadata)
+    # F3/§7.3: per batch, the executor's own record of who ran it outranks what
+    # the batch said about itself — but only while the batch's bytes are the
+    # ones the executor persisted. `model` stays a plain string (compatibility):
+    # the single attribution, or the sorted comma-joined list. `runner` carries
+    # only the executor-verified attributions, and is omitted when there are
+    # none (host-native path).
+    recorded = _authoritative_validator_runner(phase_dir, batch_metadata)
+    runners: Dict[str, str] = {}
+    for batch in batch_metadata.get("batches", []):
+        index = batch.get("batch_index")
+        if str(index) not in batch_hashes:
+            continue
+        runners[str(index)] = (
+            recorded.get(index)
+            or _batch_self_reported_model(
+                os.path.join(phase_dir, f"validation_batch_{index}.json")
+            )
+            or "unknown"
+        )
+    model = join_model_names(v for v in runners.values() if v != "unknown")
+    runner = join_model_names(v for v in recorded.values() if v)
     save_validation_results(
-        validation_results, Path(validation_path), model=runner, runner=runner
+        validation_results, Path(validation_path), model=model, runner=runner,
+        runners=runners,
+        batch_sha256=batch_hashes,
+        batch_manifest=batch_manifest(batch_metadata),
     )
+    # §2.4: every aggregation re-publishes `validation_context` from the bound
+    # round's own recorded sources (never the live plan), plus how many
+    # verdicts said they could not read the snapshot. One site for all four
+    # merge callers — the first run, both `--reaggregate` legs and the
+    # executor continuation.
+    publish_from_task_document(phase_dir, batch_metadata, validation_results)
     return apply_validation_to_groups(
         [g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
         validation_results,
@@ -548,7 +717,10 @@ def validation_context_kwargs(
     phase_name: str,
     plan_content: str,
     extra_validation_metadata: Optional[Dict[str, str]],
-) -> Dict[str, str]:
+    *,
+    plan_document: Optional[BoundDocument] = None,
+    phase_dir: Optional[str] = None,
+) -> Dict[str, Any]:
     """The inline context kwargs this phase's validation batches embed.
 
     Every phase but ``review-tasks`` embeds the plan alone, which is what the
@@ -565,16 +737,36 @@ def validation_context_kwargs(
     ``extra_validation_metadata`` already carries its path for the file
     envelope; an unreadable file degrades to the plan-only context (the batch
     still validates) rather than failing a completed fan-out.
+
+    §2.3 step 5/7: ``plan_document`` is the round's bound plan (one read, one
+    snapshot); its text is the context and it rides along as
+    ``context_document``. With ``phase_dir`` the tasks file is bound the same
+    way — read once as bytes, reusing ``tasks-backup.md`` when its sha256
+    matches, else snapshotted to ``validation-tasks-snapshot.md`` — and rides
+    as ``secondary_document``.
     """
-    kwargs: Dict[str, str] = {"context": plan_content}
+    if plan_document is not None:
+        plan_content = plan_document.text
+    kwargs: Dict[str, Any] = {"context": plan_content}
+    if plan_document is not None:
+        kwargs["context_document"] = plan_document
     if phase_name != "review-tasks":
         return kwargs
     tasks_file = (extra_validation_metadata or {}).get("tasks_file") or ""
     if not tasks_file:
         return kwargs
+    tasks_document: Optional[BoundDocument] = None
     try:
-        tasks_content = Path(tasks_file).read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        if phase_dir:
+            tasks_document = bind_document_file(
+                tasks_file, phase_dir, label="tasks",
+                snapshot_name=TASKS_SNAPSHOT_NAME,
+                reuse_names=(TASKS_BACKUP_NAME,),
+            )
+            tasks_content = tasks_document.text
+        else:
+            tasks_content = Path(tasks_file).read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError, ValidationContextError) as exc:
         print(
             f"Warning: could not read {tasks_file} for validation context "
             f"({exc}); validating against the plan alone.",
@@ -584,7 +776,181 @@ def validation_context_kwargs(
     kwargs["context_label"] = _REVIEW_TASKS_PLAN_LABEL
     kwargs["secondary_context"] = tasks_content
     kwargs["secondary_context_label"] = _REVIEW_TASKS_TASKS_LABEL
+    if tasks_document is not None:
+        kwargs["secondary_document"] = tasks_document
     return kwargs
+
+
+def _path_under(path: str, root: str) -> bool:
+    real_root = os.path.realpath(root)
+    real = os.path.realpath(path)
+    return real == real_root or real.startswith(real_root.rstrip(os.sep) + os.sep)
+
+
+class _NativeReadAdvisory:
+    """The native-host read check: refuses nothing, flags an out-of-root path.
+
+    Called as a refusal it always answers ``None`` (the host's own subagent
+    reads, and its permissions are not ours to predict), and it sets
+    ``advisory_only`` so a caller that would otherwise impose its own refusal
+    still does. :meth:`advisory` is asked for every ``mode: path`` source: for
+    one outside the plan's project root it prints one notice line (once per
+    path) and returns the ``reason`` the source records. The root is resolved
+    on first use, and a root that cannot be resolved flags nothing.
+    """
+
+    advisory_only = True
+
+    def __init__(self, plan_path: str) -> None:
+        self.plan_path = plan_path
+        self._root: Optional[str] = None
+        self._resolved = False
+        self._noticed: set = set()
+
+    @property
+    def root(self) -> Optional[str]:
+        if not self._resolved:
+            self._resolved = True
+            try:
+                self._root = get_project_root(self.plan_path)
+            except Exception:  # noqa: BLE001 - an advisory never fails a round
+                self._root = None
+        return self._root
+
+    def __call__(self, path: Optional[str]) -> Optional[str]:
+        return None
+
+    def advisory(self, path: Optional[str]) -> Optional[str]:
+        if not path or not self.root or _path_under(path, self.root):
+            return None
+        reason = (
+            f"{path} is outside the project root {self.root}: the host's "
+            f"subagent may be denied Read on it, and every verdict for this "
+            f"round may come back insufficient-context"
+        )
+        if path not in self._noticed:
+            self._noticed.add(path)
+            print(f"[VALIDATION_CONTEXT_OUTSIDE_ROOT] {reason}", file=sys.stderr)
+        return reason
+
+
+def materialization_read_refusal(args: Any, plan_path: str) -> Optional[Any]:
+    """Who will read a validation batch's snapshot, decided at materialization (§2.3 step 4a).
+
+    ``None`` on a native-subagent host (the host's own subagent reads, and the
+    one native host that validates, Claude Code, has a read tool) and whenever
+    the executor's runner cannot be resolved here (the dispatch-time refusal is
+    the backstop). Under ``--exec-subagents`` it resolves the runner the
+    executor will use for a validation task and returns a callable: a runner
+    that declares no ``supports_workspace_reads`` refuses every path, and one
+    that cannot read outside its cwd and cannot widen its read scope
+    (``read_scope_flag``) refuses a snapshot outside the project root. A
+    refused source materializes ``mode: truncated`` with that reason — decided
+    before dispatch, and always reported.
+
+    On the native path it refuses nothing, but a snapshot outside
+    ``get_project_root(plan_path)`` (a plan kept outside the repo) may be one
+    the host's subagent is denied ``Read`` on, with no ``--add-dir`` to widen
+    it. The returned :class:`_NativeReadAdvisory` then prints a one-line notice
+    and records a ``reason`` on that ``mode: path`` source, so an operator
+    whose every verdict came back ``insufficient-context:`` learns why.
+    """
+    if not exec_subagents_requested(args):
+        return _NativeReadAdvisory(plan_path)
+    try:
+        from .subagent_executor import resolve_task_runner
+        from .provider_registry import get_provider, parse_model_spec
+
+        spec = resolve_task_runner(
+            {
+                "task_id": "validation-batch-0",
+                "kind": "validation",
+                "capability_tier": "full",
+                "model_hint": getattr(args, "validation_model", None) or "auto",
+            },
+            anchor=plan_path,
+        )
+        provider_name, _model = parse_model_spec(spec, anchor=plan_path)
+        provider = get_provider(provider_name)
+    except Exception:  # noqa: BLE001 - dispatch-time refusal is the backstop
+        return None
+    if provider is None:
+        return None
+    if not getattr(provider, "supports_workspace_reads", False):
+        return f"runner {spec} cannot read files"
+    if getattr(provider, "reads_outside_cwd", False) or getattr(
+        provider, "read_scope_flag", None
+    ):
+        return None
+    root = get_project_root(plan_path)
+
+    def refusal(path: Optional[str]) -> Optional[str]:
+        if not path or not root:
+            return None
+        if _path_under(path, root):
+            return None
+        return (
+            f"runner {spec} cannot read {path}: it is outside the runner's "
+            f"working directory and the adapter cannot widen its read scope"
+        )
+
+    return refusal
+
+
+def bind_plan_for_validation(
+    plan_path: str, phase_dir: str, *, data: Optional[bytes] = None
+) -> BoundDocument:
+    """The round's one read of the plan, bound to ``validation-snapshot.md`` (§2.3 step 5).
+
+    Every validating phase (review-plan, review-tasks, review-code) calls this
+    at load, the same way, so the plan block of every phase names that phase
+    dir's own snapshot — never the live plan and never ``backup.md``. A plan
+    that does not decode as UTF-8 refuses the round (exit 3) instead of hashing
+    to ``""``.
+
+    ``data`` is the plan's bytes when the caller already read them (the
+    pre-flight decode check of a fan-out that binds only past its detach
+    boundary), so the snapshot is still the one read the excerpt came from.
+    """
+    try:
+        return bind_document_file(
+            plan_path, phase_dir, label="plan", snapshot_name=PLAN_SNAPSHOT_NAME,
+            data=data,
+        )
+    except ValidationContextError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(exc.exit_code)
+
+
+def verify_round_context(
+    document: Dict[str, Any], phase_dir: str, task_file: Optional[str] = None
+) -> None:
+    """Verify (and, for a moved phase dir, rebind) a round's snapshots, or exit 3.
+
+    Run right before dispatch and on every resume/``--reaggregate`` that
+    reuses a materialized round (§2.3 step 5, task 2.9). A rebound document is
+    persisted with its sidecars, so a native host reading the JSON sees the
+    same prompt the executor dispatches.
+    """
+    try:
+        rebound = verify_context_sources(document, phase_dir)
+    except ValidationContextError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(exc.exit_code)
+    if rebound:
+        ensure_prompt_sidecars(document, phase_dir)
+        if task_file:
+            from .subagent_executor import _atomic_write_json
+
+            try:
+                _atomic_write_json(task_file, document)
+            except OSError as exc:
+                print(
+                    f"ERROR: Could not persist the rebound prompts to "
+                    f"{task_file}: {exc}. Nothing was dispatched.",
+                    file=sys.stderr,
+                )
+                sys.exit(3)
 
 
 def dispatch_subagent_tasks(
@@ -654,6 +1020,11 @@ def dispatch_subagent_tasks(
                 f"its marker and its follow-up command."
             )
             return False
+        # §2.3 step 5: right before dispatch, re-hash every snapshot a
+        # validation prompt names (and rebind a moved phase dir); a snapshot
+        # that moved or vanished since materialization refuses the round.
+        if document is not None and label in ("validation", "revalidation"):
+            verify_round_context(document, phase_dir, task_file)
         # Reported before the dispatch, not after it: `report_progress` merges
         # into `progress`, so the step stands while the executor's mirror fills
         # in underneath it (`validating, validation 3/11 ok`).
@@ -1721,32 +2092,64 @@ def announce_retired_rungs(
     *,
     anchor: Optional[Union[str, Path]] = None,
 ) -> List[str]:
-    """Name, once, a contained rung this run could no longer take — and return
-    the lines printed.
+    """Name, once per run, a contained rung this run could no longer take — and
+    return the lines printed.
 
-    Open question 2 of the landlock-rung plan (2026-09-22): when
-    ``use_legacy_landlock`` is removed upstream, rung 1's probe starts failing
-    and every machine on ``auto`` drops to the uncontained rung. That drop must
-    not be silent. It is a *transition*, so it is judged against the previous
-    run of this phase: ``prior_served`` is the ``models_served`` that run wrote
-    (read before this run's ``write_status`` replaced it), ``served_models``
-    this run's. A spec whose previous word was ``fallback-<rung>`` and whose
-    word now is ``bypassed`` gets one line naming the retired rung with its
-    ``retires_when`` version and sentence. The next run compares
-    ``bypassed`` with ``bypassed`` and says nothing, which is what makes it
-    once. Nothing else about the run changes.
+    Two triggers, one line per provider and rung (the slots it covers
+    comma-joined), printed after the fan-out and never per slot — the per-slot
+    ``[SANDBOX_BYPASSED]`` line has by then already said what each slot did.
 
-    Printed after the fan-out rather than ahead of the slot: the previous run's
-    record is read once per phase, where the checkpoint is already in hand,
-    instead of threading it through every lane's dispatch. The per-slot
-    ``[SANDBOX_BYPASSED]`` line has by then already said what this run did;
-    this line says what it no longer does.
+    * **Measured retirement** (plan §3.2, 2026-09-24): this process's probe
+      cache (``subagent_executor.recorded_rung_retirements``) recorded the rung
+      ``skipped`` because the codex version is at or above its ``removed_at``,
+      or ``retired`` because its probe printed the rung's removal panic. The
+      line then says the rung is measured unavailable from that version,
+      *whatever the previous run recorded* — a plan's first run included, the
+      case the transition below misses. A timeout or any other probe failure
+      never triggers it.
+    * **Transition** (open question 2 of the landlock-rung plan): the previous
+      run of this phase (``prior_served``, read before this run's
+      ``write_status`` replaced it) recorded ``fallback-<rung>`` for a spec
+      whose word is now ``bypassed``. The line names the rung with its
+      ``deprecated_at`` version and sentence. The next run compares
+      ``bypassed`` with ``bypassed`` and says nothing, which is what makes it
+      once.
+
+    Nothing else about the run changes.
     """
-    lines: List[str] = []
+    try:
+        from .subagent_executor import recorded_rung_retirements
+    except Exception:  # noqa: BLE001 - a notice may never end a fan-out
+        recorded_rung_retirements = None  # type: ignore[assignment]
+
+    # (provider, rung id) -> {"specs": [...], "measured": bool, "version": str}
+    groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    retirements: Dict[str, List[Tuple[str, str]]] = {}
     for spec in sorted(served_models or {}):
         entry = (served_models or {}).get(spec)
         if not isinstance(entry, dict) or entry.get("sandbox") != SANDBOX_BYPASSED:
             continue
+        try:
+            provider_name = parse_model_spec(spec, anchor=anchor)[0]
+        except Exception:  # noqa: BLE001 - a notice may never end a fan-out
+            provider_name = spec.split(":", 1)[0]
+        if provider_name not in retirements:
+            try:
+                retirements[provider_name] = (
+                    list(recorded_rung_retirements(provider_name))
+                    if recorded_rung_retirements else []
+                )
+            except Exception:  # noqa: BLE001
+                retirements[provider_name] = []
+        for rung_id, version in retirements[provider_name]:
+            group = groups.setdefault(
+                (provider_name, rung_id),
+                {"specs": [], "measured": True, "version": version},
+            )
+            group["measured"] = True
+            group["version"] = group.get("version") or version
+            if spec not in group["specs"]:
+                group["specs"].append(spec)
         before = (prior_served or {}).get(spec)
         rung_id = (
             sandbox_fallback_rung_of(before.get("sandbox"))
@@ -1754,10 +2157,14 @@ def announce_retired_rungs(
         )
         if not rung_id:
             continue
-        try:
-            provider_name = parse_model_spec(spec, anchor=anchor)[0]
-        except Exception:  # noqa: BLE001 - a notice may never end a fan-out
-            provider_name = spec.split(":", 1)[0]
+        group = groups.setdefault(
+            (provider_name, rung_id), {"specs": [], "measured": False, "version": ""},
+        )
+        if spec not in group["specs"]:
+            group["specs"].append(spec)
+
+    lines: List[str] = []
+    for (provider_name, rung_id), group in groups.items():
         rung = None
         try:
             hook = getattr(get_provider(provider_name), "sandbox_fallback_rungs", None)
@@ -1771,7 +2178,10 @@ def announce_retired_rungs(
             rung = SandboxRung(
                 name=rung_id, probe_argv=None, argv_rewrite=(), contained=True,
             )
-        line = sandbox_rung_retired_notice(provider_name, spec, rung)
+        line = sandbox_rung_retired_notice(
+            provider_name, ", ".join(group["specs"]), rung,
+            measured=bool(group["measured"]), version=group.get("version") or None,
+        )
         print(line)
         lines.append(line)
     return lines
@@ -1825,34 +2235,10 @@ def recorded_usage(phase_dir: str) -> Optional[Dict[str, Dict[str, Any]]]:
     } or None
 
 
-#: The executor's ``SandboxProbeResult`` — ``(state, tail, rung, walk)`` — per
-#: ``provider|profile|cwd`` for the fan-out's sandbox self-test (D6 step 3),
-#: asked once per provider per run rather than once per slot; the rung the
-#: fallback walk selected rides in the cached value, so every slot of the
-#: provider renders the same rung. A ``threading.Lock`` and not an ``asyncio`` one: the probe is blocking,
-#: so it runs in a worker thread, and one process may drive more than one event
-#: loop (a phase per ``asyncio.run``) — a loop-bound primitive would be the
-#: wrong shape for both.
-_FANOUT_SANDBOX_CACHE: Dict[str, Any] = {}
-_FANOUT_SANDBOX_LOCK = threading.Lock()
-
-#: One probe lock per cache key, so the cache lock above is held only for the
-#: dict read and the dict write (F5, 2026-09-17). Held across the whole probe,
-#: it serialized every slot of every provider behind codex's — up to
-#: ``SANDBOX_PROBE_TIMEOUT_S`` (10 s) of dead time at the head of a fan-out for
-#: an opencode or claude slot whose own answer is ``not-required`` and spawns
-#: nothing. Keyed the same way the cache is, so two slots of one provider still
-#: share a single probe rather than racing it.
-_FANOUT_SANDBOX_PROBE_LOCKS: Dict[str, threading.Lock] = {}
-
-
-def _fanout_probe_lock(key: str) -> threading.Lock:
-    """The probe lock for one cache key, created once under the cache lock."""
-    with _FANOUT_SANDBOX_LOCK:
-        lock = _FANOUT_SANDBOX_PROBE_LOCKS.get(key)
-        if lock is None:
-            lock = _FANOUT_SANDBOX_PROBE_LOCKS[key] = threading.Lock()
-        return lock
+# The fan-out's own sandbox cache (`_FANOUT_SANDBOX_CACHE`, its lock and its
+# per-key probe locks) is gone (plan §3.6, 2026-09-24): the fan-out and the
+# executor share one probe cache, `subagent_executor._SANDBOX_PROBE_CACHE`,
+# keyed by codex version and policy and holding the whole `SandboxProbeResult`.
 
 
 def sandbox_unavailable_reason(provider_name: str, tail: str) -> str:
@@ -1876,38 +2262,27 @@ def sandbox_unavailable_reason(provider_name: str, tail: str) -> str:
 def _fanout_sandbox_verdict(provider_name: str, cwd: Optional[str]) -> Any:
     """Run — or recall — this provider's ``generate`` sandbox self-test.
 
-    Blocking, so the caller hands it to a thread. ``sandbox_verdict`` is the
-    executor's, which is what makes the fan-out, the subagent preflight and
-    ``doctor`` read the same adapter-declared command the same way; ``cwd`` is
-    the repo root the dispatch is pinned to, the same root
+    Blocking, so the caller hands it to a thread. The probe and its cache are
+    the executor's (``subagent_executor.cached_sandbox_verdict``, plan §3.6),
+    which is what makes the fan-out, the subagent preflight and ``doctor``
+    read the same adapter-declared command the same way — and the fan-out and
+    the preflight share one rung probe per codex version. ``cwd`` is the repo
+    root the dispatch is pinned to, the same root
     ``subagent_executor._probe_cwd`` derives from the plan anchor. An adapter
     with no probe for this profile answers ``not-required`` without spawning
     anything, so this costs nothing for every adapter that declares no OS
     sandbox — which is all of them but codex.
     """
-    key = f"{provider_name}|{PROFILE_GENERATE}|{cwd or ''}"
-    with _FANOUT_SANDBOX_LOCK:
-        cached = _FANOUT_SANDBOX_CACHE.get(key)
-    if cached is not None:
-        return cached
-    with _fanout_probe_lock(key):
-        # Double-checked: a sibling slot on this same key may have finished the
-        # probe while this thread waited for the lock.
-        with _FANOUT_SANDBOX_LOCK:
-            cached = _FANOUT_SANDBOX_CACHE.get(key)
-        if cached is not None:
-            return cached
-        from .subagent_executor import SandboxProbeResult, sandbox_verdict
+    from .subagent_executor import SandboxProbeResult, cached_sandbox_verdict
 
-        try:
-            verdict = sandbox_verdict(
-                get_provider(provider_name), PROFILE_GENERATE, cwd=cwd
-            )
-        except Exception:  # noqa: BLE001 - a diagnostic may never end a fan-out
-            verdict = SandboxProbeResult("unknown", "")
-        with _FANOUT_SANDBOX_LOCK:
-            _FANOUT_SANDBOX_CACHE[key] = verdict
-        return verdict
+    try:
+        provider = get_provider(provider_name)
+    except Exception:  # noqa: BLE001 - a diagnostic may never end a fan-out
+        return SandboxProbeResult("unknown", "")
+    return cached_sandbox_verdict(
+        provider_name, provider, PROFILE_GENERATE, cwd=cwd,
+        policy=_fanout_sandbox_fallback(provider_name, cwd),
+    )
 
 
 #: The three answers :func:`sandbox_refusal` can give a fan-out slot.
@@ -1938,6 +2313,10 @@ class SandboxVerdict(NamedTuple):
     verdict: str
     reason: Optional[str]
     rung: Optional[str] = None
+    #: The probe's fallback walk — ``((rung id, outcome), …)`` — that decided
+    #: this slot (2026-09-24), so a reader of the verdict can tell a contained
+    #: rung that was tried and failed from one never measured.
+    walk: Tuple[Tuple[str, str], ...] = ()
 
     @property
     def refused(self) -> bool:
@@ -1959,11 +2338,18 @@ class SandboxVerdict(NamedTuple):
         return self.verdict == SANDBOX_DISPATCH_UNSANDBOXED and bool(self.reason)
 
 
-def sandbox_bypassed_notice(provider_name: str) -> str:
+def sandbox_bypassed_notice(provider_name: str, probe: Any = None) -> str:
     """The one line a lane prints for a slot dispatched under the D6 override.
 
-    Verbatim the sentence the design fixed (2026-09-17), because it is the
-    whole of what the operator is told at the moment it matters: which runner,
+    Its **stem** is verbatim the sentence the design fixed (2026-09-17),
+    because it is the whole of what the operator is told at the moment it
+    matters. Since 2026-09-24 (plan §3.1) the rung clause is appended after
+    that stem when ``probe`` — the ``SandboxProbeResult`` — shows the walk
+    tried a rung first: each rung with its outcome and, when it was probed,
+    its probe tail (``fallback rung 'landlock' unavailable (codex 0.156.1:
+    "…")``), or ``not tried: unavailable from codex 0.156.1, measured`` when
+    the version skipped it. Without ``probe`` the stem alone is returned. The
+    stem says which runner,
     why its own sandbox is not in the path, which config key governs it (and
     so which word turns it off), and — the clause that cannot be left out —
     that nothing stands between the model's shell and this machine. It is
@@ -1973,13 +2359,17 @@ def sandbox_bypassed_notice(provider_name: str) -> str:
     under ``--disable-sandbox``), and the sentence is what keeps codex's case
     from being the quiet one.
     """
-    return (
-        f"{SANDBOX_BYPASSED_MARKER} {provider_name}: bubblewrap cannot start; "
-        f"running --sandbox danger-full-access under "
-        f"providers.{provider_name}.sandbox_fallback={SANDBOX_FALLBACK_AUTO} "
-        f"(read-only phase; no OS boundary between the model's shell and this "
-        f"machine)"
-    )
+    if probe is None:
+        return sandbox_bypassed_notice_text(provider_name)
+    from .subagent_executor import sandbox_bypass_line
+
+    rungs: Tuple[Any, ...] = ()
+    try:
+        hook = getattr(get_provider(provider_name), "sandbox_fallback_rungs", None)
+        rungs = tuple(hook(PROFILE_GENERATE) or ()) if callable(hook) else ()
+    except Exception:  # noqa: BLE001 - a notice may never end a fan-out
+        rungs = ()
+    return sandbox_bypass_line(provider_name, probe, rungs)
 
 
 def sandbox_fallback_notice(provider_name: str, rung: Any, policy: str) -> str:
@@ -2042,7 +2432,7 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
     rung probe that gave no answer (fail-closed: nothing learned never licenses
     a widening), and for every adapter that declares no fallback.
     """
-    from .subagent_executor import sandbox_fallback_rung, sandbox_walk_note
+    from .subagent_executor import _fallback_rungs, sandbox_fallback_rung, sandbox_walk_note
 
     probe = _fanout_sandbox_verdict(provider_name, cwd)
     if probe.state != "unavailable":
@@ -2058,13 +2448,19 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
         if rung.contained:
             notice = sandbox_fallback_notice(provider_name, rung, policy or "")
         else:
-            notice = sandbox_bypassed_notice(provider_name)
-        return SandboxVerdict(SANDBOX_DISPATCH_UNSANDBOXED, notice, rung.name)
+            notice = sandbox_bypassed_notice(provider_name, probe)
+        return SandboxVerdict(
+            SANDBOX_DISPATCH_UNSANDBOXED, notice, rung.name, tuple(probe.walk or ()),
+        )
     reason = sandbox_unavailable_reason(provider_name, probe.tail)
-    note = sandbox_walk_note(probe, policy)
+    try:
+        declared = _fallback_rungs(get_provider(provider_name), PROFILE_GENERATE)
+    except Exception:  # noqa: BLE001 - a diagnostic may never end a fan-out
+        declared = ()
+    note = sandbox_walk_note(probe, policy, provider_name=provider_name, rungs=declared)
     if note:
         reason = f"{reason} ({note})"
-    return SandboxVerdict(SANDBOX_REFUSE, reason)
+    return SandboxVerdict(SANDBOX_REFUSE, reason, None, tuple(probe.walk or ()))
 
 
 def sandbox_fallback_kwargs(verdict: SandboxVerdict) -> Dict[str, str]:
@@ -2085,31 +2481,154 @@ def sandbox_fallback_kwargs(verdict: SandboxVerdict) -> Dict[str, str]:
     return {}
 
 
-def porcelain_snapshot(cwd: Optional[str]) -> Optional[FrozenSet[str]]:
-    """``git status --porcelain -z`` of ``cwd`` as a set of entries, or ``None``.
+#: Plan §4.1 (option A): above this many bytes of dirty/untracked regular
+#: files, a snapshot records no content hashes and the slot's comparison falls
+#: back to path + status only (today's behaviour), with one printed note.
+PORCELAIN_HASH_CAP_BYTES = 50 * 1024 * 1024
+
+#: The fixed markers a baseline entry carries in place of a blob id.
+PORCELAIN_ABSENT = "absent"
+PORCELAIN_UNREADABLE = "unreadable"
+PORCELAIN_DIRECTORY = "directory"
+PORCELAIN_SYMLINK_PREFIX = "symlink:"
+
+#: The status an R/C record's OLD path is stored under: under ``-z`` git prints
+#: it as its own record with no status columns, and it stays in the compared
+#: set so a rename reports both paths.
+PORCELAIN_RENAME_SOURCE = "<-"
+
+
+class PorcelainEntry(NamedTuple):
+    """One path of a :class:`PorcelainSnapshot`: ``(status, kind, blob, exec)``.
+
+    ``kind`` is ``file``, ``symlink``, ``directory``, ``absent`` or
+    ``unreadable``; ``blob`` is
+    the git blob id of a regular file, ``symlink:<target>`` for a symlink (never
+    followed), or the kind's own marker; ``exec_bit`` is the owner/group/other
+    execute bit of a regular file, so a mode-only change to a pre-dirty file is
+    seen even though its bytes and its ` M` status did not move.
+    """
+
+    status: str
+    kind: str
+    blob: str
+    exec_bit: bool
+
+
+class PorcelainSnapshot(NamedTuple):
+    """The per-path baseline :func:`porcelain_snapshot` returns (plan §4.1).
+
+    ``hashed`` is False when this snapshot degraded (the dirty set was over
+    :data:`PORCELAIN_HASH_CAP_BYTES`, or ``git hash-object`` failed as a whole):
+    its entries then carry no blob ids, and a comparison involving it is by path
+    and status only. ``note`` is the one line that was printed about it.
+    """
+
+    entries: Dict[str, PorcelainEntry]
+    hashed: bool = True
+    note: Optional[str] = None
+
+
+def _under_prefixes(path: str, prefixes: Sequence[str]) -> bool:
+    return any(path.startswith(prefix) or path == prefix.rstrip("/")
+               for prefix in prefixes)
+
+
+def _normalized_prefixes(ignore_prefixes: Sequence[str]) -> Tuple[str, ...]:
+    return tuple(p.rstrip("/") + "/" for p in ignore_prefixes if p and p.rstrip("/"))
+
+
+_PORCELAIN_STATUS_CHARS = frozenset(" MTADRCU?!")
+
+
+def _porcelain_records(stdout: str) -> Optional[List[Tuple[str, str]]]:
+    """``[(status, path)]`` from ``git status --porcelain -z`` output, or ``None``.
+
+    Under ``-z`` an ``R``/``C`` record is followed by the old path as its own
+    NUL-terminated record with no status; it is returned with
+    :data:`PORCELAIN_RENAME_SOURCE` as its status. Output that is not a
+    sequence of ``XY path`` records is not git's answer at all, and is
+    ``None`` — the "git cannot answer" case — rather than a guess.
+    """
+    records: List[Tuple[str, str]] = []
+    fields = [f for f in stdout.split("\0")]
+    i = 0
+    while i < len(fields):
+        field = fields[i]
+        i += 1
+        if not field:
+            continue
+        if (len(field) < 4 or field[2] != " "
+                or not set(field[:2]) <= _PORCELAIN_STATUS_CHARS):
+            return None
+        status, path = field[:2], field[3:]
+        records.append((status, path))
+        if ("R" in status or "C" in status) and i < len(fields) and fields[i]:
+            records.append((PORCELAIN_RENAME_SOURCE, fields[i]))
+            i += 1
+    return records
+
+
+def porcelain_snapshot(
+    cwd: Optional[str], *, ignore_prefixes: Sequence[str] = ()
+) -> Optional[PorcelainSnapshot]:
+    """A per-path baseline of the working tree's dirty set, or ``None``.
 
     The detective half of the D6 override (2026-09-17): a bypassed slot has no
     sandbox to *prevent* a write, so the fan-out takes this before the slot and
-    again after it, and any entry that appeared or changed fails the slot by
-    name. ``-z`` so a path comes back raw, unquoted; an entry is the whole
-    ``XY path`` record, so a tracked file going from clean to modified counts
-    and so does a new untracked file. What it cannot see, stated plainly: a
-    write to a file that was *already* modified or untracked before the slot
-    (its porcelain line does not change), a write outside the repository,
-    anything under ``$HOME`` — and **who** made a change: the snapshot is of
-    the whole tree, and the other slots of the fan-out run in that same tree
-    for the whole window, several of them (cursor-agent, pi, claude-code) with
-    no sandbox by design, so a sibling's write lands in this slot's diff
-    exactly as the slot's own would (the 2026-09-22 misattribution). The
-    reason line therefore reports the change and the count of boundary-less
-    siblings (:func:`bypass_write_violation`), never an author. It is a
-    cheap, honest check, not a boundary.
+    again after it, and :func:`unexpected_writes` compares the two. Since plan
+    §4.1 (option A, 2026-09-24) it is a baseline, not a set of porcelain lines:
 
-    Scope, recorded rather than fixed (T7): only the three fan-out lanes take
-    this snapshot. The executor lane (``subagent_executor``: validation,
-    task generation) takes none, so a read-only dispatch there on the
-    uncontained rung is unchecked — before T7 and after it. Widening the check
-    to that lane is separate work.
+    - ``git status --porcelain -z --untracked-files=all``, so every untracked
+      file is its own entry (without the flag an untracked directory is one
+      ``?? dir/`` record and a write inside it is invisible);
+    - entries under ``ignore_prefixes`` (the plugin's own output trees,
+      :func:`bypass_ignore_prefixes`) are dropped **before** hashing, so they
+      are never read;
+    - every path gets a :class:`PorcelainEntry` — a regular file's blob id from
+      ONE ``git hash-object --no-filters --stdin-paths`` run, a symlink's target
+      (never followed), ``absent`` for a deletion or a path gone from disk,
+      ``directory`` for a directory still reported whole (a nested
+      repository), compared by status/path only, and ``unreadable`` for a
+      path that cannot be read (a path ``hash-object`` cannot open is
+      re-``lstat``-ed and recorded ``absent`` or ``unreadable``, and the rest
+      hashed once more, before the snapshot degrades);
+    - above :data:`PORCELAIN_HASH_CAP_BYTES` of regular files (summed ``lstat``
+      sizes), or when ``hash-object`` fails as a whole, the snapshot records no
+      hashes (``hashed=False``) and prints one note, and the comparison falls
+      back to path + status for this slot.
+
+    Cost, stated because it runs twice per bracketed slot: two ``lstat`` passes
+    and two ``hash-object`` runs over the dirty set, inside the ``to_thread``
+    the three call sites already use, each git call under the same 30 s
+    timeout. It never raises.
+
+    What it can see now that it could not before: a write to a file that was
+    *already* modified or untracked before the slot (its porcelain line does
+    not change, its blob id does), a mode-only change, a retargeted symlink, a
+    pre-existing untracked file deleted, a dirty file restored to clean —
+    unless the snapshot degraded past the cap. What it still cannot see,
+    stated plainly: a write outside the repository, anything under ``$HOME``,
+    a write to a gitignored path — and **who** made a change: the snapshot is
+    of the whole tree, and the other slots of the fan-out, and any other
+    process writing to this repository (another session, an editor, a build),
+    run in that same tree for the whole window, several of them (cursor-agent,
+    pi, claude-code) with no sandbox by design, so a sibling's write lands in
+    this slot's diff exactly as the slot's own would (the 2026-09-22 and
+    2026-09-24 misattributions). The reason line therefore reports the change
+    and the count of boundary-less siblings (:func:`bypass_write_violation`),
+    never an author; only the slot's own audited action stream can clear it
+    (plan §4.2, ``utils/readonly_audit.py``). It is a cheap, honest check, not
+    a boundary.
+
+    Scope, recorded rather than fixed (T7; plan §4.6, Open question 3): only
+    the three fan-out lanes take this snapshot. The executor lane
+    (``subagent_executor``: validation, revalidation, consolidation, task
+    generation) takes none, so a read-only dispatch there on the uncontained
+    rung is unchecked — before T7 and after it. Run ``0c477c4d`` (2026-09-24)
+    dispatched its 16 validation batches to codex on that rung with no check
+    at all. Widening the check (or the §4.2 stream audit, which the executor
+    already has each child's stream for) to that lane is separate work.
     ``None`` when git cannot answer (no repo, no ``git``), and the caller then
     skips the comparison rather than failing a slot on a check it never ran.
     """
@@ -2117,54 +2636,198 @@ def porcelain_snapshot(cwd: Optional[str]) -> Optional[FrozenSet[str]]:
         return None
     try:
         completed = subprocess.run(
-            ["git", "status", "--porcelain", "-z"],
+            ["git", "status", "--porcelain", "-z", "--untracked-files=all"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=cwd, timeout=30,
+        )
+        if completed.returncode != 0:
+            return None
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=cwd, timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    if completed.returncode != 0:
+    root = top.stdout.strip() if top.returncode == 0 else ""
+    if not root or not os.path.isdir(root):
+        root = cwd
+    records = _porcelain_records(completed.stdout)
+    if records is None:
         return None
-    return frozenset(entry for entry in completed.stdout.split("\0") if entry)
+
+    prefixes = _normalized_prefixes(ignore_prefixes)
+    kinds: Dict[str, Tuple[str, str, str, bool]] = {}
+    to_hash: List[str] = []
+    total = 0
+    for status, path in records:
+        if _under_prefixes(path, prefixes):
+            continue
+        if "D" in status and status != PORCELAIN_RENAME_SOURCE:
+            kinds[path] = (status, PORCELAIN_ABSENT, PORCELAIN_ABSENT, False)
+            continue
+        full = os.path.join(root, path)
+        try:
+            st = os.lstat(full)
+        except FileNotFoundError:
+            kinds[path] = (status, PORCELAIN_ABSENT, PORCELAIN_ABSENT, False)
+            continue
+        except OSError:
+            kinds[path] = (status, PORCELAIN_UNREADABLE, PORCELAIN_UNREADABLE, False)
+            continue
+        if stat.S_ISLNK(st.st_mode):
+            try:
+                target = os.readlink(full)
+            except OSError:
+                kinds[path] = (status, PORCELAIN_UNREADABLE, PORCELAIN_UNREADABLE, False)
+                continue
+            kinds[path] = (status, "symlink", PORCELAIN_SYMLINK_PREFIX + target, False)
+            continue
+        if stat.S_ISDIR(st.st_mode):
+            # A directory still reported whole even under
+            # `--untracked-files=all` (a nested repository, an unsearchable
+            # directory): its contents are not ours to hash, so it is compared
+            # by status/path. Recording it `unreadable` (always changed) failed
+            # every uncontained slot of any repo holding one, on every run.
+            kinds[path] = (status, PORCELAIN_DIRECTORY, PORCELAIN_DIRECTORY, False)
+            continue
+        if not stat.S_ISREG(st.st_mode) or "\n" in path or not os.access(full, os.R_OK):
+            # A device, a name `--stdin-paths` cannot carry, or a file we
+            # cannot read.
+            kinds[path] = (status, PORCELAIN_UNREADABLE, PORCELAIN_UNREADABLE, False)
+            continue
+        exec_bit = bool(st.st_mode & 0o111)
+        kinds[path] = (status, "file", "", exec_bit)
+        to_hash.append(path)
+        total += st.st_size
+
+    note: Optional[str] = None
+    blobs: Dict[str, str] = {}
+    if to_hash and total > PORCELAIN_HASH_CAP_BYTES:
+        note = (
+            f"[PORCELAIN_CHECK] the dirty set is {total // (1024 * 1024)} MB, over the "
+            f"{PORCELAIN_HASH_CAP_BYTES // (1024 * 1024)} MB hashing cap: writes to "
+            f"files that were already modified or untracked are not seen for this "
+            f"slot (path + status comparison only)"
+        )
+    elif to_hash:
+        def hash_batch(paths: List[str]) -> Tuple[int, List[str]]:
+            hashed = subprocess.run(
+                ["git", "hash-object", "--no-filters", "--stdin-paths"],
+                input="\n".join(paths) + "\n",
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=root, timeout=30,
+            )
+            return hashed.returncode, hashed.stdout.split()
+
+        try:
+            returncode, lines = hash_batch(to_hash)
+            if returncode != 0:
+                # `--stdin-paths` aborts on the first path it cannot open
+                # (`fatal: Cannot open`, exit 128) — typically an editor's
+                # transient `4913`/`.swp`/`~` file, present at `git status` and
+                # gone by now. Fail closed on THAT path, not open on the whole
+                # dirty set: re-lstat every path, record the vanished ones
+                # `absent` and the no-longer-readable ones `unreadable`, and
+                # hash the rest once more before degrading.
+                retry: List[str] = []
+                for path in to_hash:
+                    status = kinds[path][0]
+                    full = os.path.join(root, path)
+                    try:
+                        st = os.lstat(full)
+                    except FileNotFoundError:
+                        kinds[path] = (status, PORCELAIN_ABSENT, PORCELAIN_ABSENT, False)
+                        continue
+                    except OSError:
+                        kinds[path] = (
+                            status, PORCELAIN_UNREADABLE, PORCELAIN_UNREADABLE, False)
+                        continue
+                    if not stat.S_ISREG(st.st_mode) or not os.access(full, os.R_OK):
+                        kinds[path] = (
+                            status, PORCELAIN_UNREADABLE, PORCELAIN_UNREADABLE, False)
+                        continue
+                    retry.append(path)
+                to_hash = retry
+                returncode, lines = (hash_batch(to_hash) if to_hash else (0, []))
+            if returncode != 0 or len(lines) != len(to_hash):
+                raise subprocess.SubprocessError("hash-object failed")
+            blobs = dict(zip(to_hash, lines))
+        except (OSError, subprocess.SubprocessError):
+            note = (
+                "[PORCELAIN_CHECK] `git hash-object` could not hash the dirty set: "
+                "writes to files that were already modified or untracked are not "
+                "seen for this slot (path + status comparison only)"
+            )
+    if note is not None:
+        print(note)
+
+    entries: Dict[str, PorcelainEntry] = {}
+    for path, (status, kind, blob, exec_bit) in kinds.items():
+        if kind == "file":
+            blob = blobs.get(path, "")
+        entries[path] = PorcelainEntry(status, kind, blob, exec_bit)
+    return PorcelainSnapshot(entries, hashed=note is None, note=note)
+
+
+def _entry_changed(
+    before: PorcelainEntry, after: PorcelainEntry, *, by_content: bool
+) -> bool:
+    if PORCELAIN_UNREADABLE in (before.kind, after.kind):
+        return True  # fail closed: a path we could not read is never "same"
+    deletion = (
+        PORCELAIN_ABSENT in (before.kind, after.kind)
+        or ("D" in before.status and before.status != PORCELAIN_RENAME_SOURCE)
+        or ("D" in after.status and after.status != PORCELAIN_RENAME_SOURCE)
+    )
+    if before.status != after.status and deletion:
+        return True  # a deletion on either side always counts as a change
+    if not by_content:
+        return before.status != after.status
+    return (before.kind, before.blob, before.exec_bit) != (
+        after.kind, after.blob, after.exec_bit)
 
 
 def unexpected_writes(
-    before: Optional[FrozenSet[str]],
-    after: Optional[FrozenSet[str]],
+    before: Optional[PorcelainSnapshot],
+    after: Optional[PorcelainSnapshot],
     *,
     ignore_prefixes: Sequence[str] = (),
 ) -> List[str]:
-    """The porcelain entries ``after`` has that ``before`` did not, minus the
-    plugin's own artifact trees, as repo-relative paths sorted for the record.
+    """Every path whose baseline entry differs between ``before`` and ``after``.
+
+    Walks the **union** of both snapshots (plan §4.1), not ``after - before``:
+    a path that appears, one that disappears (a pre-existing untracked file
+    deleted, a dirty file restored to clean) and one whose kind, blob id,
+    marker or exec bit changed are all reported. A status change with equal
+    content and exec bit (``??`` → ``A ``, ``MM`` → ``M ``) is clean unless
+    either side is a deletion; an ``unreadable`` path is always changed. If
+    either snapshot degraded (``hashed=False``), both are compared by path and
+    status only, which is the pre-§4.1 behaviour.
 
     ``ignore_prefixes`` is where the *plugin* writes during a slot — the
     plan's output directory (logs, result files, ``.status.json``, salvage
     requests, a sibling slot's answer) and ``.multi-llm/`` (the batch snapshot
     tmp files) — because those are this process's writes, made while the slot
     ran, and a check that blamed the model for them would fire on every run.
-    A write there by the model is indistinguishable from the plugin's, and is
-    also the one place ``FILE_OUTPUT_LOCATION`` would have asked it to write,
-    so it is not what this check is for. Either snapshot ``None`` means the
-    check was not run, and the answer is "nothing to report".
+    :func:`porcelain_snapshot` already drops them before hashing; they are
+    filtered again here so a snapshot taken without them still compares right.
+    Either snapshot ``None`` means the check was not run, and the answer is
+    "nothing to report". Sorted by path, for the record.
     """
     if before is None or after is None:
         return []
-    prefixes = tuple(
-        p.rstrip("/") + "/" for p in ignore_prefixes if p and p.rstrip("/")
-    )
-    paths: List[str] = []
-    for entry in after - before:
-        # `XY path`, or `XY new -> old` for a rename under `-z` (git prints the
-        # new name first, then a NUL, then the old one as a separate record —
-        # so a rename's old path arrives as its own entry with no status and
-        # is kept as-is: it still names a path the slot changed).
-        path = entry[3:] if len(entry) > 3 and entry[2] == " " else entry
-        if any(path.startswith(prefix) or path == prefix.rstrip("/") for prefix in prefixes):
+    prefixes = _normalized_prefixes(ignore_prefixes)
+    by_content = bool(before.hashed and after.hashed)
+    changed: List[str] = []
+    for path in set(before.entries) | set(after.entries):
+        if _under_prefixes(path, prefixes):
             continue
-        paths.append(path)
-    # Sorted by path, not by porcelain entry: `" M"` sorts ahead of `"??"`, and
-    # the reader of the reason line wants the files, not git's status columns.
-    return sorted(set(paths))
+        b = before.entries.get(path)
+        a = after.entries.get(path)
+        if b is None or a is None or _entry_changed(b, a, by_content=by_content):
+            changed.append(path)
+    return sorted(changed)
 
 
 def porcelain_check_applies(verdict: SandboxVerdict) -> bool:
@@ -2260,15 +2923,54 @@ def bypass_write_violation(
     the outcome): the slot still fails, its ``output`` is still dropped and its
     findings are still discarded — fail-closed, because on a machine with no
     contained rung this diff is the only containment evidence the slot has.
+    Plan §4.4 (2026-09-24) names the writer T7's sentence left out: on run
+    ``0c477c4d`` neither path was written by any slot — another session in the
+    same repository changed them — so the sibling count alone still read as if
+    the fan-out were the only candidate. The one exit from this verdict is the
+    slot's own audited action stream (:func:`bypass_stream_audit_clears`).
     """
     n = boundaryless_siblings
     plural = "slot" if n == 1 else "slots"
     return (
         f"{SANDBOX_BYPASSED_MARKER} {provider_name}: the working tree changed "
         f"during this unsandboxed slot's window ({', '.join(paths)}) while {n} "
-        f"other boundary-less {plural} in this fan-out could also write to it; "
-        f"the check cannot tell which slot made the change, so this slot fails "
-        f"closed and its output is discarded"
+        f"other boundary-less {plural} in this fan-out, or any other process "
+        f"writing to this repository, could also have written it; the check "
+        f"cannot tell who made the change, so this slot fails closed and its "
+        f"output is discarded"
+    )
+
+
+def bypass_stream_audit_clears(audits: Sequence[Any]) -> bool:
+    """Whether a porcelain delta on an uncontained slot is downgraded (plan §4.3).
+
+    ``audits`` is every attempt's ``details['readonly_audit']`` in the slot's
+    snapshot window, in order — ``None`` for an attempt that carried none.
+    True only when option B's switch is on
+    (:data:`utils.readonly_audit.STREAM_AUDIT_EXEMPTION_ENABLED`, on since the
+    2026-09-25 live hosted-type capture) AND every attempt audited clean: a clean
+    last attempt never excuses an earlier one that wrote, was incomplete, or
+    recorded nothing. Adapters with no structured action stream never carry a
+    verdict, so their slots keep today's fail-closed verdict.
+    """
+    return _readonly_audit.exemption_applies(audits)
+
+
+def bypass_write_not_attributed(provider_name: str, paths: Sequence[str]) -> str:
+    """The warning a slot keeps its findings under when its stream cleared it.
+
+    Plan §4.3: the tree changed during the window, and the slot's own audited
+    stream shows it could not have made that change (every action read-only,
+    the stream complete, on every attempt), so the change is reported — never
+    attributed — and the slot counts. Recorded on
+    ``progress.models[spec].warning`` by the call sites.
+    """
+    return (
+        f"{SANDBOX_BYPASSED_MARKER} {provider_name}: the working tree changed "
+        f"during this unsandboxed slot's window ({', '.join(paths)}), changed "
+        f"during the window by something outside this slot — not attributed: "
+        f"this slot's own action stream shows only read-only actions, so its "
+        f"output is kept"
     )
 
 
@@ -2457,13 +3159,16 @@ async def run_single_model(
             "model_spec": model_spec,
             "source": "not-dispatched",
         }
-    tree_before: Optional[FrozenSet[str]] = None
+    tree_before: Optional[PorcelainSnapshot] = None
+    ignore_prefixes = bypass_ignore_prefixes(plan_path, project_root)
     if sandbox.fallback:
         print(f"[{display_name}] {sandbox.reason}")
     if porcelain_check_applies(sandbox):
-        tree_before = await asyncio.to_thread(porcelain_snapshot, project_root)
+        tree_before = await asyncio.to_thread(
+            porcelain_snapshot, project_root, ignore_prefixes=ignore_prefixes
+        )
 
-    async def _bypass_write_check() -> Optional[str]:
+    async def _bypass_write_check(audits: Sequence[Any]) -> Optional[str]:
         """The reason to fail a bypassed slot whose run changed the tree, or ``None``.
 
         Runs once, after the last attempt. A delta fails the slot whatever the
@@ -2479,15 +3184,32 @@ async def run_single_model(
         sandboxed slot makes no git call at all. The ``git status`` runs in a
         thread like the one before the slot: on a large repository it is not
         instant, and the sibling slots share this event loop.
+
+        ``audits`` is every attempt's ``details['readonly_audit']`` in this
+        slot's window (plan §4.3). When their AND is clean and option B is
+        switched on (:func:`bypass_stream_audit_clears`), a delta is reported
+        as a ``not attributed`` warning on ``progress.models[spec].warning``
+        and the slot keeps its output; otherwise the verdict is as before.
         """
         if not porcelain_check_applies(sandbox):
             return None
-        tree_after = await asyncio.to_thread(porcelain_snapshot, project_root)
+        if tracker is not None:
+            tracker.record_readonly_audit(
+                model_spec, _readonly_audit.combine_audits(audits).to_dict()
+            )
+        tree_after = await asyncio.to_thread(
+            porcelain_snapshot, project_root, ignore_prefixes=ignore_prefixes
+        )
         touched = unexpected_writes(
-            tree_before, tree_after,
-            ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
+            tree_before, tree_after, ignore_prefixes=ignore_prefixes,
         )
         if not touched:
+            return None
+        if bypass_stream_audit_clears(audits):
+            warning = bypass_write_not_attributed(provider_name, touched)
+            print(f"[{display_name}] {warning}")
+            if tracker is not None:
+                tracker.warn(model_spec, warning)
             return None
         siblings = await asyncio.to_thread(
             boundaryless_sibling_count, model_spec, project_root, plan_path
@@ -2534,13 +3256,19 @@ async def run_single_model(
             details = result.get("details", {})
             stderr_text = details.get("stderr", "")
 
-            violation = await _bypass_write_check()
+            violation = await _bypass_write_check([details.get("readonly_audit")])
             if violation is not None:
                 return {
                     "success": False, "output": None, "error": violation,
                     "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
                     "stderr": stderr_text, "duration_seconds": duration,
                     "model_spec": model_spec, "source": "stdout",
+                    # The slot ran — bypassed, which is why it was checked at
+                    # all — so the record keeps its `sandbox` word: without it
+                    # `models_served`, `progress.sandbox_bypassed` and the
+                    # retired-rung line all lose the one slot that most needs
+                    # them. Every failure below that ran a child does the same.
+                    **served_model_fields(details),
                     **usage_fields(details),
                 }
 
@@ -2588,6 +3316,7 @@ async def run_single_model(
                     "duration_seconds": duration,
                     "model_spec": model_spec,
                     "source": "stdout",
+                    **served_model_fields(details),
                     **usage_fields(details),
                 }
         except Exception as e:
@@ -2621,6 +3350,8 @@ async def run_single_model(
     # adapter reports something, which is what keeps "never reported"
     # distinguishable from a measured zero.
     slot_usage: Optional[Dict[str, Any]] = None
+    #: Every attempt's `details['readonly_audit']` (plan §4.3), `None` included.
+    slot_audits: List[Any] = []
     stderr_text = ""
     source = "unknown"
     status: Optional[str] = None
@@ -2697,6 +3428,10 @@ async def run_single_model(
 
             details = result.get("details", {})
             slot_usage = accumulate_usage(slot_usage, details)
+            # Plan §4.3: every attempt's verdict, in order, for the AND at the
+            # end — a retry replaces `details`, so the last one alone would let
+            # a clean retry excuse an earlier attempt that wrote.
+            slot_audits.append(details.get("readonly_audit"))
             stderr_text = details.get("stderr", "")
             source = result.get("source", "unknown")
             output_file = result.get("output_file", "")
@@ -2803,7 +3538,7 @@ async def run_single_model(
         # is failed with the paths whatever its last attempt reported, and the
         # `output` is dropped so `save_model_result` never parses it. Placed
         # after the `result is None` return because nothing ran on that path.
-        violation = await _bypass_write_check()
+        violation = await _bypass_write_check(slot_audits)
         if violation is not None:
             return {
                 "success": False, "output": None, "error": violation,
@@ -2811,6 +3546,7 @@ async def run_single_model(
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
+                **served_model_fields(details),
                 **usage_total_fields(slot_usage),
             }
 
@@ -2847,6 +3583,7 @@ async def run_single_model(
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
+                **served_model_fields(details),
                 **usage_total_fields(slot_usage),
             }
 
@@ -2871,6 +3608,7 @@ async def run_single_model(
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
+                **served_model_fields(details),
                 **usage_total_fields(slot_usage),
             }
 
@@ -2918,6 +3656,7 @@ async def run_single_model(
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
+                **served_model_fields(details),
                 **usage_total_fields(slot_usage),
             }
 
@@ -3932,6 +4671,13 @@ def aggregate_results(
         needs_human = sum(1 for g in groups_to_display if g.get("validation_status") == "needs-human-decision")
         if valid_count or invalid_count or needs_human:
             report_lines.append(f"**Validation:** {valid_count} valid, {invalid_count} invalid, {needs_human} needs human review")
+    # Plan §2.4: read the published `validation_context`, never recomputed;
+    # absent (every source inline) adds nothing, so the report is unchanged.
+    report_lines.extend(
+        _validation_context.report_header_lines(
+            _status_file.read_status(phase_dir).get("validation_context")
+        )
+    )
 
     # NOTE: All phases (including review-tasks) use interactive reports with
     # skip/approve checkboxes.  The original code suppressed these controls for
@@ -4359,6 +5105,7 @@ async def reaggregate_from_existing_files(
     tasks_path: Optional[Path] = None,
     template_style: str = 'pr',
     diff_data: Optional[Dict] = None,
+    supports_consolidation: bool = False,
 ) -> None:
     """Re-aggregate all model results after salvage operations complete.
 
@@ -4380,6 +5127,9 @@ async def reaggregate_from_existing_files(
             (forwarded to ``aggregate_results()``).  Defaults to ``'pr'``.
         diff_data: Optional pre-computed diff hunk data (forwarded to
             ``aggregate_results()``).
+        supports_consolidation: Whether this phase supports consolidation; when
+            true the recommendation is recomputed from the reaggregated groups
+            (§7.2a), exactly as the first run does.
     """
     import glob as glob_module
 
@@ -4419,6 +5169,13 @@ async def reaggregate_from_existing_files(
     # `[PROGRESS]` line even at teardown, and the log's last such line would
     # be the fan-out's rather than the phase's terminal step.
     await asyncio.sleep(0)
+    # Set only where THIS invocation writes a terminal `progress.step`. The
+    # teardown line reads the checkpoint, so on every other ending — an exit 3
+    # refusal (changed snapshot, stale task file), "only n/m batch files", no
+    # suggestions — it would re-print the previous run's `step: complete |
+    # subagents 16/16 done` as if this process had finished (dogfood
+    # 2026-09-25). Those endings print their own reason instead.
+    concluded = False
     try:
         # Collect all suggestions
         all_suggestions = []
@@ -4454,6 +5211,11 @@ async def reaggregate_from_existing_files(
 
         if not all_suggestions:
             print("No suggestions to aggregate.")
+            # §7.2a: zero groups is a recount too — clear what an earlier
+            # round recommended.
+            recompute_consolidation_recommendation(
+                str(phase_dir), [], args, supports_consolidation,
+            )
             return
 
         # Group similar suggestions - preserve existing groups if validation exists
@@ -4510,20 +5272,61 @@ async def reaggregate_from_existing_files(
         validation_path = os.path.join(phase_dir, "validation.json")
         validation_tasks_path = os.path.join(phase_dir, "validation_tasks.json")
 
+        # Task 2.10: a round materialized under context contract 1 from an
+        # over-limit document judged its head alone. Neither its prompts nor the
+        # verdicts reached from them are reused: the whole round is retired
+        # (renamed, kept for history) and rematerialized below in the path form.
+        legacy_round = (
+            None if args.skip_validation else legacy_context_round_reason(phase_dir)
+        )
+        if legacy_round:
+            print(f"\n{legacy_round}")
+            retire_stale_validation_round(
+                phase_dir,
+                reason="validation built from truncated context (contract 1)",
+            )
+
         # Check if validation already completed. D7: a validation.json is honoured
         # only when it binds to the grouped.json beside it (or, for a legacy file
         # without the binding, when no batch file postdates it); otherwise it is
         # retired — renamed, not deleted — and the batch files decide.
         honour_validation_file = os.path.exists(validation_path) and not args.skip_validation
+        use_note = ""
         if honour_validation_file:
-            stale_reason = stale_validation_reason(Path(validation_path), Path(grouped_path))
+            # §7.1: bound to the exact batch bytes it merged (`batch_sha256` +
+            # `batch_manifest`), so a rewritten, restored or missing batch
+            # retires it by content; only a file without the binding falls back
+            # to the legacy mtime test. Both outcomes name what was checked.
+            stale_reason, use_note = validation_source_decision(
+                Path(validation_path), Path(grouped_path),
+                Path(validation_tasks_path),
+            )
             if stale_reason:
                 print(f"\nNot using validation.json: {stale_reason}")
                 retire_stale_validation(phase_dir, reason=stale_reason)
                 honour_validation_file = False
 
         if honour_validation_file:
-            print(f"\nFound existing validation.json, using it for report generation...")
+            # §2.3 step 5 / 2.9 apply to reused verdicts too, not only to the
+            # batch-merge branch below: a merged validation.json whose batch
+            # hashes still match says nothing about the snapshots its prompts
+            # named. Re-hash them (exit 3 on a missing or changed one) and
+            # rebind a moved phase dir before the verdicts are reused. No task
+            # file (an internal validation) records no sources to verify.
+            reused_round: Optional[Dict[str, Any]] = None
+            if os.path.exists(validation_tasks_path):
+                try:
+                    reused_round = read_task_file(
+                        validation_tasks_path, phase_dir=phase_dir
+                    )
+                except TaskFileError as task_file_error:
+                    print(f"ERROR: {task_file_error}", file=sys.stderr)
+                    sys.exit(task_file_error.exit_code)
+                verify_round_context(reused_round, phase_dir, validation_tasks_path)
+            print(
+                f"\nUsing validation.json"
+                f"{f' ({use_note})' if use_note else ''} for report generation..."
+            )
             try:
                 from .validation import load_validation_results as load_validation_v2
                 validation_results = load_validation_v2(Path(validation_path))
@@ -4533,6 +5336,11 @@ async def reaggregate_from_existing_files(
                 )
                 validated_groups_for_report = validated_groups
                 print(f"Loaded {len(validation_results)} validation results")
+                # §2.4: the reused round re-publishes its own recorded context
+                # with the reused verdicts, as every merge does.
+                publish_from_task_document(
+                    phase_dir, reused_round, validation_results
+                )
             except Exception as e:
                 print(f"Warning: Could not load validation.json: {e}")
                 validated_groups_for_report = None
@@ -4565,6 +5373,11 @@ async def reaggregate_from_existing_files(
             except TaskFileError as task_file_error:
                 print(f"ERROR: {task_file_error}", file=sys.stderr)
                 sys.exit(task_file_error.exit_code)
+            # §2.3 step 5 / 2.9: the snapshots this round's prompts name are
+            # re-hashed before anything is reused or dispatched, and a moved or
+            # copied phase dir rebinds its prompts to the copy's own snapshot.
+            # A missing or changed snapshot refuses the round (exit 3).
+            verify_round_context(batch_metadata, phase_dir, validation_tasks_path)
             # The recorded `prompt_path` is a derived convenience field like
             # `output_path`, so it goes stale the moment a phase dir is moved or
             # copied — and a host following it would then hand a subagent a file
@@ -4647,7 +5460,12 @@ async def reaggregate_from_existing_files(
                 )
                 validated_groups_for_report = validated_groups
 
-                save_validation_results(validation_results, Path(validation_path))
+                save_validation_results(
+                    validation_results, Path(validation_path),
+                    # §7.1a: merged from no batch files, so bound to none — an
+                    # empty binding, not the legacy mtime fallback.
+                    batch_sha256={},
+                )
                 print(f"Validation results saved to: {validation_path}")
             else:
                 # Host-neutral: this print runs on every host that dispatches
@@ -4660,6 +5478,9 @@ async def reaggregate_from_existing_files(
                 if extra_validation_metadata:
                     extra_kwargs = {k: v for k, v in extra_validation_metadata.items()
                                     if k in ("tasks_file",)}
+                # A re-materialized round is a new round with a new snapshot
+                # (§2.3 step 5), bound from one read of the plan as it is now.
+                plan_document = bind_plan_for_validation(str(plan_path), phase_dir)
                 batched_tasks = prepare_batched_validation_tasks(
                     groups=[g.to_dict() if hasattr(g, 'to_dict') else g for g in grouped],
                     output_dir=phase_dir,
@@ -4667,8 +5488,13 @@ async def reaggregate_from_existing_files(
                     model=args.validation_model,
                     orchestrator=orchestrator_script,
                     **validation_context_kwargs(
-                        phase_name, plan_content, extra_validation_metadata
+                        phase_name, plan_content, extra_validation_metadata,
+                        plan_document=plan_document, phase_dir=phase_dir,
                     ),
+                    runner_read_refusal=materialization_read_refusal(
+                        args, str(plan_path)
+                    ),
+                    phase=phase_name,
                     **extra_kwargs,
                 )
                 batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
@@ -4682,6 +5508,14 @@ async def reaggregate_from_existing_files(
                 # `validation_pending` — documented in utils/status_file.py since D4
                 # — was never written by anything.
                 update_status(phase_dir, {"state": "validation_pending"})
+                # And the progress word, as the first run's hand-off writes it.
+                # The executor mirror still describes the PREVIOUS round's
+                # batches (16/16 done), and nothing of this round has been
+                # dispatched yet, so it is cleared rather than left beside the
+                # new step; a dispatch below rewrites it from scratch.
+                _detach.report_progress(
+                    phase_dir, step="validation_pending", subagents=None
+                )
 
                 total_batches = batched_tasks["total_batches"]
                 stats = batched_tasks.get("batching_stats", {})
@@ -4725,6 +5559,7 @@ async def reaggregate_from_existing_files(
                     # exposed on the dispatcher's MULTI_LLM_RESULT line so a host
                     # that cannot parse prose does not have to regex-mine stdout.
                     record_next(reaggregate_cmd or None)
+                    concluded = True
                     return
         else:
             print("\nSkipping validation (--skip-validation flag set)")
@@ -4754,6 +5589,23 @@ async def reaggregate_from_existing_files(
         print("\nReaggregation complete!")
         print(f"Report: {report_path}")
 
+        # §7.2: this completion path had no recommendation block at all (the
+        # first run's lived past the `--reaggregate` branch's early return), so
+        # a reaggregate that changed the count left the old one standing.
+        print(
+            f"[consolidation] reaggregate: "
+            f"{len(validated_groups_for_report or [])} validated group(s), "
+            f"supports_consolidation={supports_consolidation}"
+        )
+        # `None` means this run produced no validated groups to count (validation
+        # skipped, or validation.json could not be read) — not that there are
+        # zero. Recounting it would delete a recommendation whose validated
+        # groups still exist on disk, so only a list (empty included) recounts.
+        if validated_groups_for_report is not None:
+            recompute_consolidation_recommendation(
+                str(phase_dir), validated_groups_for_report, args, supports_consolidation,
+            )
+
         # Mark phase complete
         state = get_or_create_state(Path(plan_path))
         state.mark_phase_completed(phase_name)
@@ -4762,6 +5614,7 @@ async def reaggregate_from_existing_files(
         # phase is as finished as a freshly run one, and `status` reads this field.
         update_status(str(phase_dir), {"state": "complete"})
         _detach.report_progress(str(phase_dir), step="complete")
+        concluded = True
     finally:
         # Cancelled and awaited past the terminal `progress.step`, exactly as on
         # the fan-out lane, so the log's last `[PROGRESS]` states `step:
@@ -4771,8 +5624,10 @@ async def reaggregate_from_existing_files(
         # it is taken before `PhaseProgress` is even constructed, which is the
         # right place for it (there is no phase window to narrate when the dir
         # holds nothing to read). F7, 2026-09-20: this comment used to claim
-        # both of them passed through.
-        await phase_ticker.stop_ticker()
+        # both of them passed through. 2026-09-25: it passes through, but prints
+        # a teardown line only when this invocation wrote the step it reads
+        # (`concluded`); otherwise the line would be the previous run's.
+        await phase_ticker.stop_ticker(final_line=concluded)
 
 
 # ---------------------------------------------------------------------------
@@ -4881,6 +5736,7 @@ async def run_review_orchestration(
             tasks_path=tasks_path,
             template_style=template_style,
             diff_data=diff_data,
+            supports_consolidation=supports_consolidation,
         )
         return
 
@@ -4994,8 +5850,21 @@ async def run_review_orchestration(
     if pre_run_hook:
         pre_run_hook()
 
-    # Read plan content
-    plan_content = read_plan(plan_path)
+    # Read plan content — once, as bytes (§2.3 step 5): the excerpt a
+    # validator is shown, the snapshot it is pointed at and `inputs.plan_sha256`
+    # all derive from this one read, never from a later re-read of a file other
+    # sessions may be editing. Only the read and the UTF-8 check happen here, so
+    # an undecodable plan still fails in the foreground; the bytes are bound to
+    # this phase's `validation-snapshot.md` past the detach boundary below, once
+    # this process owns the phase. Binding here replaced the snapshot of a run
+    # that was still going whenever a repeated `--detach` launch (e.g. with
+    # `--if-not-running`) found that run active and handed it back.
+    try:
+        plan_bytes = Path(plan_path).read_bytes()
+        plan_content = decode_document(plan_bytes, plan_path)
+    except ValidationContextError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        sys.exit(exc.exit_code)
     # `chars`, not `bytes`: this is `len(str)`, and on the measured 2026-09-16
     # run it reported 44096 for a 44389-byte file. Counting the encoded bytes
     # would be the other honest fix; the number a reader wants here is the one
@@ -5055,6 +5924,13 @@ async def run_review_orchestration(
     )
     if outcome is not None:
         sys.exit(outcome)
+
+    # This process now owns the phase (the foreground run, or the detached
+    # worker after `claim_run`), so the snapshot may be replaced. The worker is
+    # a fresh process and reads the plan itself; the foreground run binds the
+    # bytes it already read and decoded above.
+    plan_document = bind_plan_for_validation(plan_path, phase_dir, data=plan_bytes)
+    plan_content = plan_document.text
 
     # Stage U: what an earlier attempt of this phase recorded, read *before*
     # the write below — `write_status` replaces every key but the two reserved
@@ -5232,6 +6108,12 @@ async def run_review_orchestration(
     # result has nothing to aggregate and is exit 3 naming the retry command.
     completed_models = [m for m in model_specs if m not in failed_models]
     if not completed_models:
+        # The `models_served` write below is never reached on this exit, and a
+        # run whose every slot was failed (the porcelain check on a bypassed
+        # slot is one way) still ran those slots without a sandbox: the durable
+        # record says so (2026-09-25), as `progress.sandbox_bypassed` already did.
+        if served_models:
+            update_status(phase_dir, {"models_served": served_models})
         print("\nERROR: All models failed")
         for model_spec, reason in failed_models.items():
             print(f"  - {model_spec}: {reason}")
@@ -5382,7 +6264,12 @@ async def run_review_orchestration(
                     validated_groups_for_report = validated_groups
 
                     validation_path = os.path.join(phase_dir, "validation.json")
-                    save_validation_results(validation_results, Path(validation_path))
+                    save_validation_results(
+                        validation_results, Path(validation_path),
+                        # §7.1a: merged from no batch files, so bound to none — an
+                        # empty binding, not the legacy mtime fallback.
+                        batch_sha256={},
+                    )
                 else:
                     # Host-neutral: this print runs on every host that dispatches
                     # subagent validation (opencode, codex, claude-code, ...), and
@@ -5409,8 +6296,13 @@ async def run_review_orchestration(
                         # --reaggregate` for a review-tasks run.
                         orchestrator=orchestrator_script,
                         **validation_context_kwargs(
-                            phase_name, plan_content, extra_validation_metadata
+                            phase_name, plan_content, extra_validation_metadata,
+                            plan_document=plan_document, phase_dir=phase_dir,
                         ),
+                        runner_read_refusal=materialization_read_refusal(
+                            args, str(plan_path)
+                        ),
+                        phase=phase_name,
                         **extra_kwargs,
                     )
                     batched_tasks["format_version"] = CURRENT_FORMAT_VERSION
@@ -5500,33 +6392,13 @@ async def run_review_orchestration(
             usage=usage or None,
         )
 
-        # Handle consolidation recommendation (only for phases that support it)
-        if supports_consolidation and validated_groups_for_report:
-            from .consolidation import CONSOLIDATION_RECOMMENDED_THRESHOLD
-            valid_group_count = sum(
-                1 for g in validated_groups_for_report
-                if g.get("validation_status") in ("valid", "needs-human-decision")
-            )
-            threshold = getattr(args, 'consolidation_threshold', None) or CONSOLIDATION_RECOMMENDED_THRESHOLD
-            if valid_group_count >= threshold:
-                print(f"\n[CONSOLIDATION_RECOMMENDED] {valid_group_count} valid groups >= threshold ({threshold})")
-                print(f"Run: --consolidate to cluster related suggestions")
-                # The marker is a *log* line, and a detached run's caller never sees
-                # the log — so on the route every host actually reads (the launch
-                # returns, `status --view run` renders the checkpoint) the
-                # recommendation used to vanish entirely. Measured 2026-09-16: a
-                # 29-group run printed the marker and the session model reported "no
-                # consolidation was recommended". Recorded here in the checkpoint and
-                # on the result line, and **never** as `next` — `--consolidate` is a
-                # mechanical continuation a host may auto-follow, and a
-                # recommendation is not an instruction.
-                recommendation = {
-                    "valid_groups": valid_group_count,
-                    "threshold": threshold,
-                    "command": "--consolidate",
-                }
-                update_status(phase_dir, {"consolidation_recommended": recommendation})
-                cli_common.record_consolidation_recommended(recommendation)
+        # Handle consolidation recommendation (only for phases that support it).
+        # §7.2a: recomputed up *or down* by one helper, shared with the
+        # reaggregate path, and run even for an empty round so a stale
+        # recommendation is removed rather than left standing.
+        recompute_consolidation_recommendation(
+            phase_dir, validated_groups_for_report, args, supports_consolidation,
+        )
 
         # Mark phase as completed
         state = get_or_create_state(Path(plan_path))

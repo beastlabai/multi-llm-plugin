@@ -1934,7 +1934,9 @@ class TestARegroupRetiresTheVerdictsItOrphans:
 def _as_legacy_file(phase_dir, status):
     """Strip `metadata.grouped_sha256` and set every verdict to *status*.
 
-    A pre-D7 `validation.json`: hashed records, no binding to any grouping.
+    A pre-D7 `validation.json`: hashed records, no binding to any grouping —
+    and (§7.1) none to the batch bytes either, which is what puts it on the
+    legacy mtime test.
     """
     path = phase_dir / "validation.json"
     data = json.loads(path.read_text(encoding="utf-8"))
@@ -1942,6 +1944,8 @@ def _as_legacy_file(phase_dir, status):
         group["status"] = status
         group["reason"] = "From the legacy file"
     del data["metadata"]["grouped_sha256"]
+    for key in ("batch_sha256", "batch_manifest", "runners"):
+        data["metadata"].pop(key, None)
     path.write_text(json.dumps(data, indent=2), encoding="utf-8")
     return path
 
@@ -1975,7 +1979,10 @@ class TestALegacyFileIsHonouredOnlyIfNoBatchIsNewer:
         _reaggregate(plan, out_dir, phase_dir)
         out = capsys.readouterr().out
 
-        assert "Found existing validation.json, using it for report generation" in out
+        assert (
+            "Using validation.json (legacy: no batch_sha256, mtime test) "
+            "for report generation"
+        ) in out
         assert "Not using validation.json" not in out
         assert _stale_files(phase_dir) == []
         # Left as it was: still key-less, still the legacy verdicts.
@@ -1997,8 +2004,9 @@ class TestALegacyFileIsHonouredOnlyIfNoBatchIsNewer:
 
         assert "Found existing validation.json" not in out
         assert (
-            "Not using validation.json: validation.json carries no grouped_sha256 "
-            f"and 1 batch file(s) are newer than it ({newer.name})"
+            "Not using validation.json: validation.json carries no batch_sha256 "
+            f"and 1 batch file(s) are newer than it ({newer.name}) "
+            "(legacy: no batch_sha256, mtime test)"
         ) in out
         stale = _stale_files(phase_dir)
         assert len(stale) == 1

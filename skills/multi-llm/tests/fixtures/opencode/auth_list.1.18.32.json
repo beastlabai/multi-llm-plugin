@@ -1,0 +1,36 @@
+{
+  "opencode_version": "1.18.32",
+  "argv": [
+    "opencode",
+    "auth",
+    "list"
+  ],
+  "captured": "2026-09-25, mllm-e2e:local image, --network none, scratch HOME, no XDG_* set, stdin /dev/null, no TTY",
+  "cases": {
+    "empty": {
+      "exit": 0,
+      "stdout": "┌  Credentials \u001b[90m~/.local/share/opencode/auth.json\n│\n└  0 credentials\n\n",
+      "stderr": "\u001b[0m\n"
+    },
+    "stored": {
+      "exit": 0,
+      "stdout": "┌  Credentials \u001b[90m~/.local/share/opencode/auth.json\n│\n●  OpenRouter \u001b[90mapi\n│\n└  1 credentials\n\n",
+      "stderr": "\u001b[0m\n"
+    },
+    "env_only": {
+      "exit": 0,
+      "stdout": "┌  Credentials \u001b[90m~/.local/share/opencode/auth.json\n│\n└  0 credentials\n\n┌  Environment\n│\n●  OpenRouter \u001b[90mOPENROUTER_API_KEY\n│\n└  1 environment variable\n\n",
+      "stderr": "\u001b[0m\n"
+    },
+    "config_provider_only": {
+      "exit": 0,
+      "stdout": "┌  Credentials \u001b[90m~/.local/share/opencode/auth.json\n│\n└  0 credentials\n\n",
+      "stderr": "\u001b[0m\n"
+    },
+    "empty_no_color": {
+      "exit": 0,
+      "stdout": "┌  Credentials \u001b[90m~/.local/share/opencode/auth.json\n│\n└  0 credentials\n\n",
+      "stderr": "\u001b[0m\n"
+    }
+  }
+}

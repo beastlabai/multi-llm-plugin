@@ -1,0 +1,1 @@
+[[{"id": "fc_m1", "type": "function_call", "status": "completed", "call_id": "call_m1", "name": "write_file", "namespace": "mcp__capfs", "arguments": "{\"path\": \"m.txt\", \"text\": \"x\"}"}]]
