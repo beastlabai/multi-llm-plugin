@@ -49,16 +49,16 @@ By default, full mode still stops to ask you a few questions (model selection, `
 | Model selection (Phase 1 & 5) | Prompts if no models given | Never prompts — uses `--models` if given, else `--quick` if given, else `providers.yaml` `defaults.models`; **exit 3** if nothing resolves (row 2) |
 | Partial fan-out results (Phase 1 & 5) | Asks partial / resume / rerun-all | Resumes the missing models once (`--force`), then reaggregates: `[PARTIAL_RESULTS: …]`, `state: "partial"`, exit 0. Zero results → exit 3 (row 3) |
 | Consolidation (after Phase 1) | Asks "run consolidation?" | Auto-runs once on `[CONSOLIDATION_RECOMMENDED]` (row 4) |
-| Phase 2 Apply Suggestions | Prompts on `needs-human-decision` + no-selection confirmation | Runs with `--claude-decide --no-confirm` (Claude decides every item; no confirmation) — rows 10/11 |
+| Phase 2 Apply Suggestions | Prompts on `needs-human-decision` + no-selection confirmation | Runs with `--agent-decide --no-confirm` (the judge agent decides every item; no confirmation) — rows 10/11 |
 | Phase 3 Generate Tasks gate | Asks apply-first / skip / cancel | **Auto-runs the missing apply phase once, then re-checks** — satisfied, not bypassed. Still unmet → exit 3 (rows 5/6, D6a) |
 | Phase 3b Review Tasks | Prompts "review the tasks?" | Runs review-tasks **automatically** (no prompt) — row 12 |
-| Phase 3c Apply Task Suggestions | `--no-confirm` already | Adds `--claude-decide` (Claude decides every item) |
+| Phase 3c Apply Task Suggestions | `--no-confirm` already | Adds `--agent-decide` (the judge agent decides every item) |
 | Phase 4 unapplied task suggestions | Asks "apply them first?" | Skipped, and the phase is *recorded* skipped (row 7) |
 | Phase 4 human tasks | Asks which strategy, then pauses per task | Strategy resolves to `skip-dependents`; the per-task pause is unreachable (rows 8/9) |
-| Phase 6 Apply Code Fixes | Prompts on `needs-human-decision` + no-selection confirmation | Runs with `--claude-decide --no-confirm` |
+| Phase 6 Apply Code Fixes | Prompts on `needs-human-decision` + no-selection confirmation | Runs with `--agent-decide --no-confirm` |
 | A phase **fails** | Asks retry / run-manually / cancel | **exit 3** naming the failed phase and its `--resume` re-invocation (row 14) |
 
-`--yes` is the umbrella switch; the narrower flags (`--quick`, `--claude-decide`, `--no-confirm`) keep their individual meanings and can still be passed on their own. Throughout the steps below, **"if `--yes` was specified"** means apply the row above for that phase. If `--yes` is NOT set, follow the interactive behavior as written.
+`--yes` is the umbrella switch; the narrower flags (`--quick`, `--agent-decide`, `--no-confirm`) keep their individual meanings and can still be passed on their own. Throughout the steps below, **"if `--yes` was specified"** means apply the row above for that phase. If `--yes` is NOT set, follow the interactive behavior as written.
 
 **`--yes` never implies `--skip-prerequisites`.** Consent to run unattended is not
 consent to stale input: the prerequisite gates are *satisfied* (by auto-running
@@ -161,16 +161,16 @@ Load the `apply-suggestions` core and execute it.
 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH"
 ```
 
-If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended (Claude judges every `needs-human-decision` item, salvaging partially-valid ones, and the no-selection confirmation is skipped):
+If `--yes` (or `--non-interactive`) was specified, append `--agent-decide --no-confirm` so the phase runs fully unattended (the judge agent decides every `needs-human-decision` item, salvaging partially-valid ones, and the no-selection confirmation is skipped):
 ```bash
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --claude-decide --no-confirm
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --agent-decide --no-confirm
 ```
 
 This phase applies validated suggestions sequentially:
 - Load validation results from Phase 1
 - Filter to valid suggestions (HIGH/MEDIUM importance)
 - Apply each suggestion one at a time by spawning subagents
-- Handle needs-human-decision items by asking the user (or, under `--yes`, via the judged/deferred path — rows 10/11: `--yes` sets `--claude-decide` itself, and the no-selection confirmation is bypassed, so no item and no missing selection file can block)
+- Handle needs-human-decision items by asking the user (or, under `--yes`, via the judged/deferred path — rows 10/11: `--yes` sets `--agent-decide` itself, and the no-selection confirmation is bypassed, so no item and no missing selection file can block)
 - Generate applied suggestions report
 
 Wait for completion, then proceed to Phase 3.
@@ -253,9 +253,9 @@ recorded skipped (`reason: Skipped: skipped (no findings)`), and Phase 4 follows
 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-confirm
 ```
 
-If `--yes` (or `--non-interactive`) was specified, also append `--claude-decide` so any `needs-human-decision` task suggestions are judged by Claude rather than prompted:
+If `--yes` (or `--non-interactive`) was specified, also append `--agent-decide` so any `needs-human-decision` task suggestions are decided by the judge agent rather than prompted:
 ```bash
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-confirm --claude-decide
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-task-suggestions --plan-file "$PLAN_PATH" --no-confirm --agent-decide
 ```
 
 This phase:
@@ -304,9 +304,9 @@ through the same `--skip --reason` state path, and the report follows.
 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH"
 ```
 
-If `--yes` (or `--non-interactive`) was specified, append `--claude-decide --no-confirm` so the phase runs fully unattended:
+If `--yes` (or `--non-interactive`) was specified, append `--agent-decide --no-confirm` so the phase runs fully unattended:
 ```bash
-uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --claude-decide --no-confirm
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --agent-decide --no-confirm
 ```
 
 This phase:
@@ -368,7 +368,7 @@ run's own output, and `MULTI_LLM_RESULT.next` is copied verbatim:
 
 ### Phase 6: Apply Code Fixes *(only if executed, omit if skipped)*
 - Fixes applied: N
-- Decided by the judge subagent: N (A approved, V salvaged, S skipped) *(under `--yes`)*
+- Decided by the judge agent: N (A approved, V salvaged, S skipped) *(under `--yes`)*
 - Fixes skipped: N
 - Applied code fixes report: {prefix}_applied_code_fixes.md
 

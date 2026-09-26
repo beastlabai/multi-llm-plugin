@@ -23,10 +23,10 @@ this module owns both ends:
 
 Verdicts stop being inline JSON in a subagent's final message: a verdict that
 never touches disk is unrecoverable after a crash, invisible to ``--resume`` and
-meaningless under ``--detach``. Both judging legs — a native Claude Code
-subagent and the Python executor — therefore land on one recorded state, which
-is what makes the recorded records (and so every report overlay) byte-identical
-across invokers.
+meaningless under ``--detach``. Both judging legs — the host's native subagent
+and the Python executor — therefore land on one recorded state, which is what
+makes the recorded records (and so every report overlay) identical across
+invokers apart from the ``judge`` they name.
 """
 
 from __future__ import annotations
@@ -45,6 +45,7 @@ try:
         PromptBudget,
         build_inputs,
         content_hash,
+        file_bytes_sha256,
         make_task,
         make_task_file,
         write_task_file,
@@ -56,6 +57,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         PromptBudget,
         build_inputs,
         content_hash,
+        file_bytes_sha256,
         make_task,
         make_task_file,
         write_task_file,
@@ -76,6 +78,8 @@ __all__ = [
     "write_judge_tasks",
     "read_verdict_files",
     "ingest_verdicts",
+    "judge_labels",
+    "native_judge_label",
     "record_verdicts",
     "apply_verdicts_to_work_set",
 ]
@@ -107,6 +111,9 @@ _RECORDED_DECISION = {
 
 _ACTION_PLAIN = "claude_auto_decide"
 _ACTION_SALVAGE = "claude_auto_decide_salvage"
+
+#: Who judged when nothing better is known: the host's own agent, unnamed.
+NATIVE_JUDGE = "host agent"
 
 
 # ---------------------------------------------------------------------------
@@ -298,6 +305,8 @@ class VerdictIngest:
     #: Verdict ``group_id``s that match no in-scope item.
     unexpected: List[str] = field(default_factory=list)
     files_read: List[str] = field(default_factory=list)
+    #: ``group_id -> the verdict file it was read from``.
+    sources: Dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -360,6 +369,7 @@ def ingest_verdicts(
             previous = result.verdicts.get(group_id)
             if previous is None:
                 result.verdicts[group_id] = verdict
+                result.sources[group_id] = path
                 continue
             if previous == verdict:
                 # A duplicate that says the same thing is harmless: first wins.
@@ -379,6 +389,68 @@ def ingest_verdicts(
 
 
 # ---------------------------------------------------------------------------
+# Who judged
+# ---------------------------------------------------------------------------
+
+def native_judge_label(host_id: Optional[str]) -> str:
+    """The judge name for a verdict the host's own agent wrote (no executor)."""
+    return f"{host_id} host agent" if host_id else NATIVE_JUDGE
+
+
+def judge_labels(
+    phase_dir: str,
+    sources: Dict[str, str],
+    *,
+    fallback: str = NATIVE_JUDGE,
+) -> Dict[str, str]:
+    """``group_id -> the runner spec that wrote its verdict file``.
+
+    Read from the judge batch report the executor wrote when it dispatched the
+    judges. A verdict file is credited to a runner only while its bytes still
+    hash to what the executor recorded, so a report left over from an earlier
+    executor run never names the judge of a file the host agent rewrote since;
+    every other verdict gets *fallback*.
+    """
+    try:
+        from .subagent_executor import batch_report_path
+    except ImportError:  # pragma: no cover
+        from utils.subagent_executor import batch_report_path
+    runner_by_path: Dict[str, str] = {}
+    try:
+        with open(batch_report_path(phase_dir, "human_decision_judge"),
+                  "r", encoding="utf-8") as handle:
+            report = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        report = None
+    if isinstance(report, dict):
+        provenance = report.get("batch_provenance")
+        for row in report.get("tasks") or []:
+            if not isinstance(row, dict):
+                continue
+            path, runner = row.get("output_path"), row.get("runner")
+            if not path or not runner:
+                continue
+            if isinstance(provenance, dict):
+                prov = provenance.get(str(row.get("task_id")))
+                if not isinstance(prov, dict) or not prov.get("sha256"):
+                    continue
+                if file_bytes_sha256(path) != prov["sha256"]:
+                    continue
+                runner = prov.get("runner") or runner
+            elif row.get("status") != "ok":
+                continue
+            runner_by_path[os.path.realpath(path)] = str(runner)
+    return {
+        group_id: runner_by_path.get(os.path.realpath(path), fallback)
+        for group_id, path in sources.items()
+    }
+
+
+def _decided_reason(judge: str, reason: str) -> str:
+    return f"Agent decide [{judge}]: {reason}"
+
+
+# ---------------------------------------------------------------------------
 # Recording — byte-identical to what an interactive pass produces
 # ---------------------------------------------------------------------------
 
@@ -393,6 +465,8 @@ def record_verdicts(
     phase: str,
     ingest: VerdictIngest,
     items_by_group: Dict[str, Dict[str, Any]],
+    judges: Optional[Dict[str, str]] = None,
+    default_judge: str = NATIVE_JUDGE,
 ) -> Dict[str, Dict[str, Any]]:
     """Record every ingested verdict through ``record_human_decision``.
 
@@ -401,9 +475,9 @@ def record_verdicts(
     ``skipped``, ``salvage`` -> ``approved`` carrying
     ``batch_action``/``decision_source`` ``claude_auto_decide_salvage`` plus
     ``salvaged_description`` and ``dropped`` in ``batch_context``. That is what
-    makes a run judged through the executor produce byte-identical recorded
-    records — and therefore an identical report overlay — to the interactive path
-    that judged natively.
+    makes a run judged through the executor produce the same recorded records —
+    and therefore the same report overlay — as the interactive path that judged
+    natively, apart from the ``judge`` each record names.
 
     Returns:
         ``group_id -> the decision record written``.
@@ -418,23 +492,26 @@ def record_verdicts(
         salvaged = verdict.get("salvaged_description")
         dropped = verdict.get("dropped")
         model_reason = verdict.get("reason", "")
+        judge = (judges or {}).get(group_id) or default_judge
 
         batch_context: Dict[str, Any] = {
             "batch_id": batch_id,
             "batch_action": _ACTION_PLAIN,
             "decision_source": _ACTION_PLAIN,
             "importance_at_decision": importance,
+            "judge": judge,
         }
         if decision == DECISION_SALVAGE:
             reason = (
-                f"Claude auto-decide (salvaged): kept {salvaged}; dropped {dropped}"
+                f"Agent decide [{judge}] (salvaged): kept {salvaged}; "
+                f"dropped {dropped}"
             )
             batch_context["batch_action"] = _ACTION_SALVAGE
             batch_context["decision_source"] = _ACTION_SALVAGE
             batch_context["salvaged_description"] = salvaged
             batch_context["dropped"] = dropped
         else:
-            reason = f"Claude auto-decide: {model_reason}"
+            reason = _decided_reason(judge, model_reason)
 
         state.record_human_decision(
             phase=phase,
@@ -506,6 +583,8 @@ def apply_verdicts_to_work_set(
     needs_human: List[Dict[str, Any]],
     valid: List[Dict[str, Any]],
     skipped: List[Dict[str, Any]],
+    judges: Optional[Dict[str, str]] = None,
+    default_judge: str = NATIVE_JUDGE,
 ) -> Dict[str, int]:
     """Rebuild the work set from the recorded verdicts.
 
@@ -520,6 +599,8 @@ def apply_verdicts_to_work_set(
         needs_human: The needs-human-decision groups; mutated in place.
         valid: The apply set; mutated in place.
         skipped: The skipped set; mutated in place.
+        judges: ``group_id -> who judged it`` (:func:`judge_labels`).
+        default_judge: The judge of a group *judges* does not name.
 
     Returns:
         Counts keyed ``approved``/``salvaged``/``skipped``/``unresolved``.
@@ -536,9 +617,11 @@ def apply_verdicts_to_work_set(
             continue
 
         decision = verdict["decision"]
+        judge = (judges or {}).get(group_id) or default_judge
+        group["judge"] = judge
         if decision == DECISION_SKIP:
             group["validation_status"] = "skipped"
-            group["reason"] = f"Claude auto-decide: {verdict.get('reason', '')}"
+            group["reason"] = _decided_reason(judge, verdict.get("reason", ""))
             group["decision_source"] = _ACTION_PLAIN
             skipped.append(group)
             counts["skipped"] += 1
@@ -558,7 +641,7 @@ def apply_verdicts_to_work_set(
         # Recorded as an approval either way, so it joins the apply set.
         group["validation_status"] = "valid"
         group["auto_approved"] = True
-        group["auto_approval_reason"] = f"Claude auto-decide: {verdict.get('reason', '')}"
+        group["auto_approval_reason"] = _decided_reason(judge, verdict.get("reason", ""))
         valid.append(group)
 
     needs_human[:] = remaining

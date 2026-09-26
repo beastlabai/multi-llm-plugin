@@ -350,7 +350,7 @@ if __name__ == "__main__":
 
 
 class TestLetClaudeDecideIssueCheckbox:
-    """Markdown emit guard for the code-review 'Let Claude decide' checkbox."""
+    """Markdown emit guard for the code-review 'Let the agent decide' checkbox."""
 
     def _issue(self):
         return {"title": "T", "description": "D", "file": "a.py", "type": "bug",
@@ -359,15 +359,15 @@ class TestLetClaudeDecideIssueCheckbox:
     def test_emits_for_needs_human(self):
         lines = _format_issue(1, self._issue(),
                               validation_status="needs-human-decision")
-        assert "- [ ] Let Claude decide" in "\n".join(lines)
+        assert "- [ ] Let the agent decide" in "\n".join(lines)
 
     def test_omits_for_validation_failed(self):
         lines = _format_issue(1, self._issue(),
                               validation_status="validation_failed")
         result = "\n".join(lines)
-        assert "- [ ] Let Claude decide" not in result
+        assert "- [ ] Let the agent decide" not in result
         assert "- [ ] Mark valid" in result
 
     def test_omits_for_valid(self):
         lines = _format_issue(1, self._issue(), validation_status="valid")
-        assert "- [ ] Let Claude decide" not in "\n".join(lines)
+        assert "- [ ] Let the agent decide" not in "\n".join(lines)

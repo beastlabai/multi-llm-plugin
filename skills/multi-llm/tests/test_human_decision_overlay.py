@@ -1,4 +1,4 @@
-"""Tests for the post-apply human/Claude decision overlay in HTML reports.
+"""Tests for the post-apply human/judge-agent decision overlay in HTML reports.
 
 Covers the per-item "Let Claude decide" / --claude-decide decisions surfacing
 in the regenerated HTML review report:
@@ -83,6 +83,13 @@ class TestNormalizeHumanDecision:
         info = _normalize_human_decision(USER_REC)
         assert info["claudeDecided"] is False
         assert info["outcome"] == "approved"
+
+    def test_the_judge_is_carried_to_the_badge(self):
+        record = {**APPROVE_REC, "batch_context": {
+            **APPROVE_REC["batch_context"], "judge": "codex:gpt-6-astra"}}
+        assert _normalize_human_decision(record)["judge"] == "codex:gpt-6-astra"
+        # A record written before the judge was recorded has none.
+        assert _normalize_human_decision(APPROVE_REC)["judge"] == ""
 
     def test_missing_batch_context_is_safe(self):
         info = _normalize_human_decision({"decision": "skipped"})
@@ -303,3 +310,16 @@ class TestRegenerateReport:
             html = (phase_dir / "report.html").read_text(encoding="utf-8")
             assert "salvaged" in html
             assert "Add null-check before user.profile" in html
+
+
+class TestTemplatesNameNoParticularModel:
+    @pytest.mark.parametrize("name", [
+        "report_template.html", "consolidated_report_template.html",
+        "pr_report_template.html",
+    ])
+    def test_the_routing_option_says_agent(self, name):
+        text = (Path(__file__).resolve().parent.parent / "templates" / name).read_text(
+            encoding="utf-8")
+        assert ">Let the agent decide</option>" in text
+        assert "Let Claude decide" not in text
+        assert "'Claude'" not in text

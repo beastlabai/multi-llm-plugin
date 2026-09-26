@@ -354,7 +354,7 @@ def format_fix_for_output(group: Dict[str, Any], index: int) -> Dict[str, Any]:
         }),
     }
 
-    # Per-item routing flag: a reviewer pre-marked this group "Let Claude
+    # Per-item routing flag: a reviewer pre-marked this group "Let the agent
     # decide" in the report. Routed to the per-item judge without prompting.
     if group.get("claude_decide"):
         formatted["decision_mode"] = "claude_auto_decide"

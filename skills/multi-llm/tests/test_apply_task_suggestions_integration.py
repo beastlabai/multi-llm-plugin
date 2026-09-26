@@ -918,7 +918,7 @@ class TestDisplayDecisions:
                     "importance": "LOW",
                     "status": "claude_skipped",
                     "decision_source": "claude_auto_decide",
-                    "reason": "Claude auto-decide: not decidable from the text",
+                    "reason": "Agent decide [codex:gpt-6-astra]: not decidable from the text",
                 },
             ],
             "summary": {"total_groups": 2},
@@ -929,11 +929,11 @@ class TestDisplayDecisions:
         out = display_result.stdout
 
         assert "x INVALID (1 task suggestions)" in out
-        assert "! SKIPPED BY CLAUDE (1 task suggestions)" in out
+        assert "! SKIPPED BY THE JUDGE AGENT (1 task suggestions)" in out
         assert "claude_auto_decide" in out
         assert "not decidable from the text" in out
         # The judged item must not be counted as a validation skip.
-        invalid_block = out.split("INVALID")[1].split("SKIPPED BY CLAUDE")[0]
+        invalid_block = out.split("INVALID")[1].split("SKIPPED BY THE JUDGE AGENT")[0]
         assert "complexity likely underestimated" not in invalid_block
 
 

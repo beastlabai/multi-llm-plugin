@@ -738,7 +738,7 @@ def parse_validation_overrides_groups(report_path: str) -> Dict[str, str]:
         v1: ## G1: Theme              (legacy -- mapped via grouped.json)
 
     If both "Mark valid" and "Mark invalid" are checked, "invalid" wins (safety-first).
-    "Let Claude decide" maps to "claude_decide" (precedence: invalid > valid >
+    "Let the agent decide" maps to "claude_decide" (precedence: invalid > valid >
     claude_decide).
 
     Returns:
@@ -778,9 +778,9 @@ def parse_validation_overrides_groups(report_path: str) -> Dict[str, str]:
             r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
             block, re.IGNORECASE
         ))
-        # Check for "Let Claude decide" checkbox (routing marker, not a status)
+        # Check for "Let the agent decide" checkbox (routing marker, not a status)
         claude_decide_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+claude\s+decide',
+            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
             block, re.IGNORECASE
         ))
 
@@ -839,7 +839,7 @@ def parse_suggestion_validation_overrides(report_path: str) -> Dict[str, str]:
         v1: ### G1S2: Title              (legacy -- mapped via grouped.json)
 
     If both "Mark valid" and "Mark invalid" are checked, "invalid" wins (safety-first).
-    "Let Claude decide" maps to "claude_decide" (precedence: invalid > valid >
+    "Let the agent decide" maps to "claude_decide" (precedence: invalid > valid >
     claude_decide).
 
     Returns:
@@ -878,9 +878,9 @@ def parse_suggestion_validation_overrides(report_path: str) -> Dict[str, str]:
             r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
             block, re.IGNORECASE
         ))
-        # Check for "Let Claude decide" checkbox (routing marker, not a status)
+        # Check for "Let the agent decide" checkbox (routing marker, not a status)
         claude_decide_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+claude\s+decide',
+            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
             block, re.IGNORECASE
         ))
 
@@ -939,7 +939,7 @@ def parse_validation_overrides_issues(report_path: str) -> Dict[int, str]:
         - [ ] Mark invalid
 
     If both "Mark valid" and "Mark invalid" are checked, "invalid" wins (safety-first).
-    "Let Claude decide" maps to "claude_decide" (precedence: invalid > valid >
+    "Let the agent decide" maps to "claude_decide" (precedence: invalid > valid >
     claude_decide).
 
     Returns:
@@ -976,9 +976,9 @@ def parse_validation_overrides_issues(report_path: str) -> Dict[int, str]:
             r'-\s*\[\s*[^\]\s]+\s*\]\s*mark\s+invalid',
             block, re.IGNORECASE
         ))
-        # Check for "Let Claude decide" checkbox (routing marker, not a status)
+        # Check for "Let the agent decide" checkbox (routing marker, not a status)
         claude_decide_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+claude\s+decide',
+            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
             block, re.IGNORECASE
         ))
 
@@ -1076,9 +1076,9 @@ def parse_consolidated_validation_overrides(report_path: str) -> Dict[str, str]:
             r'-\s*\[\s*[^\]\s]+\s*\]\s*needs\s+human\s+attention',
             block, re.IGNORECASE
         ))
-        # Check for "Let Claude decide" checkbox (routing marker, not a status)
+        # Check for "Let the agent decide" checkbox (routing marker, not a status)
         claude_decide_checked = bool(re.search(
-            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+claude\s+decide',
+            r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
             block, re.IGNORECASE
         ))
 

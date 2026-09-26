@@ -2602,16 +2602,40 @@ class TestTheSessionRung:
     def test_a_host_that_declares_no_session_provider_has_no_rung(self, monkeypatch):
         """`session_runner_provider: null` means exactly that, variable or not.
 
-        Codex's own `session_runner_provider` is `null` — its CLI takes a
-        `--model`, but nothing on that host's surface hands the dispatcher the
-        session's selected model, so there is no value to trust.
+        Claude Code's is `null`: nothing on its side of the boundary hands the
+        dispatcher the session's selected model, so there is no value to trust.
         """
         _detected(monkeypatch)
         monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, SESSION_MODEL)
-        assert registry.session_runner(host_id="codex") is None
+        assert registry.session_runner(host_id="claude-code") is None
+        assert registry.resolve_subagent_runner(
+            "full", host_id="claude-code")[1] != registry.SESSION_LAYER
+
+    @pytest.mark.parametrize("tier", ["full", "cheap"])
+    def test_codex_runs_the_session_model_at_codex_s_default_effort(
+        self, monkeypatch, tier
+    ):
+        """The plugin's server exports the turn metadata's `model`; no effort rides along."""
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, "gpt-5.5")
+        assert registry.resolve_subagent_runner(tier, host_id="codex") == (
+            "codex:gpt-5.5", registry.SESSION_LAYER,
+        )
+
+    def test_codex_without_the_variable_keeps_its_floor(self, monkeypatch):
+        """The file-shim route sets nothing, so it resolves exactly as before."""
+        _detected(monkeypatch)
+        monkeypatch.delenv(registry.HOST_SESSION_MODEL_ENV, raising=False)
         assert registry.resolve_subagent_runner("full", host_id="codex") == (
             CODEX_FLOOR, registry.HOST_DEFAULT_LAYER,
         )
+
+    def test_codex_skip_session_drops_to_its_floor(self, monkeypatch):
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, "gpt-5.5")
+        assert registry.resolve_subagent_runner(
+            "full", host_id="codex", skip_session=True
+        ) == (CODEX_FLOOR, registry.HOST_DEFAULT_LAYER)
 
     def test_an_undetected_host_cli_falls_through_instead_of_refusing(
         self, monkeypatch
@@ -2719,6 +2743,26 @@ class TestAnExplicitLayerStillOutranksTheSession:
         registry._config_key = None
         assert registry.resolve_subagent_runner("full", host_id="opencode") == (
             "claude-code:sonnet", "env",
+        )
+
+    @pytest.mark.parametrize("layer", ["project", "env"])
+    def test_an_explicit_layer_wins_over_the_codex_session(
+        self, monkeypatch, tmp_path, layer
+    ):
+        _detected(monkeypatch)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, "gpt-5.5")
+        body = 'driver:\n  subagent_runner: "codex:gpt-6-astra:high"\n'
+        if layer == "project":
+            self._project(monkeypatch, tmp_path, body)
+        else:
+            monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+            override = tmp_path / "env-providers.yaml"
+            override.write_text(body, encoding="utf-8")
+            monkeypatch.setenv(registry.ENV_CONFIG_VAR, str(override))
+            registry._config = None
+            registry._config_key = None
+        assert registry.resolve_subagent_runner("full", host_id="codex") == (
+            "codex:gpt-6-astra:high", layer,
         )
 
     def test_an_explicit_cheap_override_wins_for_the_cheap_tier_only(

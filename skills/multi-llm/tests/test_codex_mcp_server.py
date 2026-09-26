@@ -150,7 +150,7 @@ argv = sys.argv[1:]
 record = {{"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(),
           "env": {{k: os.environ.get(k) for k in (
               "MULTI_LLM_UV", "MULTI_LLM_SKILL_DIR", "STUB_PROFILE_MARK",
-              "PYTHONDONTWRITEBYTECODE")}}}}
+              "PYTHONDONTWRITEBYTECODE", "MULTI_LLM_HOST_SESSION_MODEL")}}}}
 dargv = argv[argv.index("--") + 3:] if "--" in argv else []
 if dargv[:2] == ["util", "instructions"]:
     with open(log + ".instructions", "a", encoding="utf-8") as handle:
@@ -253,15 +253,16 @@ def dispatcher_argv(call: dict) -> list:
 _ABSENT = object()
 
 
-def turn_meta(workspaces=_ABSENT, sandbox_mode=_ABSENT) -> dict:
+def turn_meta(workspaces=_ABSENT, sandbox_mode=_ABSENT, model="stub-model") -> dict:
     """A ``tools/call`` ``_meta`` shaped like codex 0.156.1's (row 7's tap).
 
     ``workspaces`` is a list of paths (each becomes a key, in order) or any
     raw value to put there as is; either argument left out is left out.
     """
-    metadata = {"codex_version": "0.156.1", "model": "stub-model",
-                "sandbox": "none", "session_id": "s", "thread_id": "s",
-                "turn_id": "t", "turn_trigger": "exec"}
+    metadata = {"codex_version": "0.156.1", "sandbox": "none", "session_id": "s",
+                "thread_id": "s", "turn_id": "t", "turn_trigger": "exec"}
+    if model is not _ABSENT:
+        metadata["model"] = model
     if sandbox_mode is not _ABSENT:
         metadata["sandbox_mode"] = sandbox_mode
     if workspaces is not _ABSENT:
@@ -678,6 +679,7 @@ class TestNoWordOfItsOwn:
             SURFACE["runbook"]["banner_opening"], SURFACE["uv"]["env"],
             SURFACE["uv"]["run_args_env"], SURFACE["uv"]["missing_message_file"],
             SURFACE["write_posture_refusal"]["lever_env"],
+            DISPATCHER["session_model_env"],
             *SURFACE["uv"]["candidates"], *SURFACE["nested_exec_reasons"],
         ]
         # Routing words, by equality once surface-key reads are set aside.
@@ -1281,6 +1283,50 @@ class TestChildEnvironment:
         _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
                                      extra_env={"PYTHONDONTWRITEBYTECODE": "x"})
         assert {c["env"]["PYTHONDONTWRITEBYTECODE"] for c in calls} == {"x"}
+
+    SESSION_ENV = DISPATCHER["session_model_env"]
+
+    def test_the_turn_s_model_reaches_the_launch_and_every_poll(self, harness):
+        """The ladder's `session` rung; the detached worker inherits the launch's env."""
+        envelope, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(CODES["nothing_to_do"]), poll_step(0)],
+            meta=turn_meta(model="gpt-5.5"))
+        assert len(calls) == 3
+        assert [c["env"][self.SESSION_ENV] for c in calls] == ["gpt-5.5"] * 3
+        assert envelope["session_model"] == "gpt-5.5"
+
+    @pytest.mark.parametrize("value", [
+        _ABSENT, None, "", 7, ["gpt-5.5"], {"id": "gpt-5.5"}, "gpt-oss:20b",
+        "gpt 5.5", " gpt-5.5", "gpt-5.5\n", "-gpt-5.5", "x" * 201,
+    ], ids=["absent", "null", "empty", "number", "list", "object", "colon",
+            "space", "leading-space", "newline", "leading-dash", "too-long"])
+    def test_an_unusable_model_sets_nothing(self, harness, value):
+        envelope, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0)], meta=turn_meta(model=value))
+        assert calls and {c["env"][self.SESSION_ENV] for c in calls} == {None}
+        assert "session_model" not in envelope
+
+    def test_malformed_turn_metadata_sets_nothing(self, harness):
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
+                                     meta={"x-codex-turn-metadata": "not json"})
+        assert calls and {c["env"][self.SESSION_ENV] for c in calls} == {None}
+
+    def test_the_live_model_beats_a_forwarded_one_and_absence_keeps_it(self, harness):
+        forwarded = {self.SESSION_ENV: "from-env"}
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
+                                     meta=turn_meta(model="gpt-5.5"), extra_env=forwarded)
+        assert {c["env"][self.SESSION_ENV] for c in calls} == {"gpt-5.5"}
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
+                                     meta=turn_meta(model=_ABSENT), extra_env=forwarded)
+        assert {c["env"][self.SESSION_ENV] for c in calls} == {"from-env"}
+
+    def test_the_model_is_read_per_call_and_never_outlives_its_turn(self, harness):
+        client = harness.client([launch_step(), poll_step(0)] * 2)
+        client.envelope(client.start_call(REVIEW, meta=turn_meta(model="gpt-5.5")))
+        client.envelope(client.start_call(REVIEW, meta=turn_meta(model=_ABSENT)))
+        assert client.close() == 0
+        assert [c["env"][self.SESSION_ENV] for c in harness.calls()] == [
+            "gpt-5.5", "gpt-5.5", None, None]
 
 
 class TestRefusals:

@@ -79,11 +79,14 @@ from .human_decisions import (
     build_judge_tasks,
     group_id_of,
     ingest_verdicts,
+    judge_labels,
+    native_judge_label,
     judge_item_from_group,
     record_verdicts,
     write_judge_tasks,
 )
 from . import unattended as _unattended
+from .unattended import AGENT_DECIDE_FLAG, LEGACY_AGENT_DECIDE_FLAGS
 
 
 # ---------------------------------------------------------------------------
@@ -141,7 +144,7 @@ def _format_override_target(value: str) -> str:
     status change).
     """
     if value == "claude_decide":
-        return "Let Claude decide (routing marker)"
+        return "Let the agent decide (routing marker)"
     return value
 
 
@@ -156,7 +159,7 @@ def apply_unattended_defaults(args: argparse.Namespace) -> argparse.Namespace:
     ``should_bypass_no_selection_confirmation(yes=...)`` treats ``--yes`` as
     deliberate intent, so no ``confirmation_needed`` payload is emitted.
 
-    Row 10 (``needs-human-decision`` items) was **not**: ``--claude-decide`` was
+    Row 10 (``needs-human-decision`` items) was **not**: ``--agent-decide`` was
     implied only by the instruction files telling the agent to append it, which
     means a host that invoked the orchestrator directly with ``--yes`` got items
     routed to a prompt that an unattended run can never answer. D5a is explicit
@@ -194,7 +197,7 @@ def build_common_arg_parser(
         --plan-file, --yes, --force, --dry-run, --fresh, --resume,
         --approve-all, --include-low, --min-priority, --verbose,
         --approve-all-low, --skip-all-human, --approve-importance,
-        --claude-decide, --include-high, --no-batch, --max-batch-size,
+        --agent-decide, --include-high, --no-batch, --max-batch-size,
         --batch-review-mode, --accept-stale-consolidation, --no-confirm,
         --skip-human-review
 
@@ -292,14 +295,16 @@ def build_common_arg_parser(
     )
 
     parser.add_argument(
-        "--claude-decide",
-        "--let-claude-decide",
+        AGENT_DECIDE_FLAG,
+        *LEGACY_AGENT_DECIDE_FLAGS,
         dest="claude_decide",
         action="store_true",
         help=(
-            "Let Claude evaluate each needs-human-decision item with its own "
-            "judgment (no interactive prompt), instead of asking you. Equivalent "
-            "to choosing 'Let Claude decide' in the interactive review. Unlike "
+            "Let the judge agent decide each needs-human-decision item with its "
+            "own judgment (no interactive prompt), instead of asking you. "
+            "Equivalent to choosing 'Let the agent decide' in the interactive "
+            "review. The legacy spellings --claude-decide and --let-claude-decide "
+            "are still accepted. Unlike "
             "--approve-all / --skip-all-human, this is a per-item judgment, not a "
             "blanket rule: partially-valid items are salvaged (trimmed to their "
             "worthwhile core and applied) rather than skipped wholesale. Does not "
@@ -565,7 +570,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not claude_decide_before and getattr(args, "claude_decide", False):
             self._record_resolution(
                 _unattended.row(10).site_id,
-                "--claude-decide implied by --yes: needs-human-decision items "
+                f"{AGENT_DECIDE_FLAG} implied by --yes: needs-human-decision items "
                 "are judged, never prompted",
             )
         self.logger = logging.getLogger(f"orchestrator.{self.phase_name}")
@@ -588,7 +593,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         self.old_skipped_ids: Set[str] = set()
         self.validation_overrides: Dict[str, str] = {}
         self.suggestion_validation_overrides: Dict[str, str] = {}
-        # Group hashes / suggestion ids the reviewer pre-marked "Let Claude
+        # Group hashes / suggestion ids the reviewer pre-marked "Let the agent
         # decide" in the report. A routing marker, not a validation status —
         # marked items keep validation_status == "needs-human-decision" and
         # carry group["claude_decide"] = True so they reach the per-item judge.
@@ -906,8 +911,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 file=sys.stderr,
             )
 
-        # Step 8: Warn on contradictory --claude-decide combinations.
-        # --claude-decide only affects items that remain needs-human-decision;
+        # Step 8: Warn on contradictory --agent-decide combinations.
+        # --agent-decide only affects items that remain needs-human-decision;
         # bulk flags that drain that bucket leave it with nothing to judge.
         if getattr(self.args, "claude_decide", False):
             draining_flags = [
@@ -921,9 +926,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             ]
             if draining_flags:
                 print(
-                    "WARNING: --claude-decide has no effect alongside "
+                    f"WARNING: {AGENT_DECIDE_FLAG} has no effect alongside "
                     f"{', '.join(draining_flags)}; those flags resolve all "
-                    "needs-human-decision items before Claude can judge them.",
+                    "needs-human-decision items before the judge agent can "
+                    "judge them.",
                     file=sys.stderr,
                 )
 
@@ -1521,11 +1527,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     def human_decision_scope(self) -> List[Dict[str, Any]]:
         """Return the needs-human-decision groups a judge should decide.
 
-        ``--claude-decide`` puts every needs-human item in scope; otherwise only
-        the ones the reviewer pre-marked "Let Claude decide" in the report (the
+        ``--agent-decide`` puts every needs-human item in scope; otherwise only
+        the ones the reviewer pre-marked "Let the agent decide" in the report (the
         per-item routing marker). The judge prompt is one deterministic function
         of that set, so an unattended run and an interactive one that picked "Let
-        Claude decide" produce the same prompt for the same items.
+        the agent decide" produce the same prompt for the same items.
         """
         if getattr(self.args, "claude_decide", False):
             return list(self.needs_human)
@@ -1617,6 +1623,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if remaining and getattr(self.args, "yes", False):
             self._skip_unjudged(remaining)
 
+    def _host_id(self) -> Optional[str]:
+        """The declared host (``--host``, else ``$MULTI_LLM_HOST``), never guessed."""
+        return getattr(self.args, "host", None) or os.environ.get("MULTI_LLM_HOST") or None
+
     def _skip_unjudged(self, remaining: List[Dict[str, Any]]) -> None:
         """Move judged-but-unresolved groups to skipped under ``--yes``."""
         for group in remaining:
@@ -1626,7 +1636,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 file=sys.stderr,
             )
             group["validation_status"] = "skipped"
-            group["reason"] = "No Claude decision returned for this group"
+            group["reason"] = "No judge decision returned for this group"
             self.skipped.append(group)
         leftover = {id(g) for g in remaining}
         self.needs_human[:] = [
@@ -1660,12 +1670,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             items_by_group = {
                 group_id_of(g): judge_item_from_group(g) for g in scope
             }
+            native = native_judge_label(self._host_id())
+            judges = judge_labels(phase_dir, ingest.sources, fallback=native)
             if self.state is not None:
                 record_verdicts(
                     state=self.state,
                     phase=self.phase_name,
                     ingest=ingest,
                     items_by_group=items_by_group,
+                    judges=judges,
+                    default_judge=native,
                 )
                 self.state.save()
             counts = apply_verdicts_to_work_set(
@@ -1673,9 +1687,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 needs_human=self.needs_human,
                 valid=self.valid,
                 skipped=self.skipped,
+                judges=judges,
+                default_judge=native,
             )
             print(
-                "Ingested Claude decisions: "
+                f"Ingested judge decisions ({', '.join(sorted(set(judges.values())))}): "
                 f"{counts['approved']} approved, {counts['salvaged']} salvaged, "
                 f"{counts['skipped']} skipped, {counts['unresolved']} still "
                 "needing a decision",
@@ -1772,7 +1788,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 ),
             }
 
-        # Post-hoc audit: verify every report-pre-marked "Let Claude decide"
+        # Post-hoc audit: verify every report-pre-marked "Let the agent decide"
         # item actually reached the judge (decision_source == claude_*), rather
         # than being prompted interactively or dropped. This is the runtime
         # backstop for the per-item routing the apply instructions perform; it
@@ -2264,13 +2280,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 if item.get("reason"):
                     print(f"      reason: {item['reason']}")
         # What the judge decided, on the leg where nothing else reports it. The
-        # instructions put a `## Decided by Claude` section in the summary
+        # instructions put a `## Decided by the judge agent` section in the summary
         # report, but that step lives on the native leg only, so before
         # this the one decision a `--yes --exec-subagents` run actually *made*
         # reached no output the phase wrote (measured 2026-09-16).
         decided = self.claude_decisions()
         if decided:
-            print(f"\nDecided by Claude ({len(decided)}):")
+            print(f"\nDecided by the judge agent ({len(decided)}):")
+            print(f"  judge: {', '.join(self._judges_of(decided))}")
             titles = self._titles_by_group_id()
             for group_id, record in decided.items():
                 title = titles.get(group_id, group_id)
@@ -2295,7 +2312,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     def claude_decisions(self) -> Dict[str, Dict[str, Any]]:
         """This phase's recorded decisions that a judge subagent made.
 
-        The same filter the instructions' ``## Decided by Claude`` section
+        The same filter the instructions' ``## Decided by the judge agent`` section
         specifies: ``human_decisions_{phase}`` entries whose
         ``batch_context.decision_source`` is ``claude_auto_decide`` or
         ``claude_auto_decide_salvage``.
@@ -2314,6 +2331,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 or ""
             ).startswith("claude_auto_decide")
         }
+
+    @staticmethod
+    def _judges_of(decided: Dict[str, Dict[str, Any]]) -> List[str]:
+        """The distinct judges named by *decided*'s records, in first-seen order."""
+        judges: List[str] = []
+        for record in decided.values():
+            judge = str(((record or {}).get("batch_context") or {}).get("judge")
+                        or "unrecorded")
+            if judge not in judges:
+                judges.append(judge)
+        return judges
 
     def _titles_by_group_id(self) -> Dict[str, str]:
         """``group_id -> title`` over every work set, for decision reporting."""
@@ -2509,10 +2537,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         if decided:
             lines += [
-                "## Decided by Claude",
+                f"## Decided by the judge agent ({len(decided)})",
+                "",
+                f"judge: {', '.join(self._judges_of(decided))}",
                 "",
                 f"{nouns.capitalize()} whose decision was offloaded to a judge "
-                "subagent (`--claude-decide`, or a per-item \"Let Claude "
+                f"subagent (`{AGENT_DECIDE_FLAG}`, or a per-item \"Let the agent "
                 "decide\" selection).",
                 "",
             ]
@@ -2993,21 +3023,21 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         return {
             "mode": mode,
             "batch_enabled": mode != "individual",
-            # When "claude_auto_decide", Claude Code skips the interactive
+            # When "claude_auto_decide", the host agent skips the interactive
             # batch-review prompt and evaluates each needs-human-decision item
-            # itself ("Let Claude Decide" mode). See
+            # itself ("Let the agent decide" mode). See
             # references/human-decision-batch.md.
             "decision_mode": "claude_auto_decide" if claude_decide else "interactive",
             "prompt_strategy": "single_batch" if mode != "individual" else "per_item",
             "by_importance": by_importance,
             "total_count": len(self.formatted_human),
             "batch_prompt_template": "batch_approval_v1",
-            # Convenience index of items the reviewer pre-marked "Let Claude
+            # Convenience index of items the reviewer pre-marked "Let the agent
             # decide" in the report. The authoritative per-item signal is the
             # per-item ``decision_mode == "claude_auto_decide"`` flag the
             # formatters emit; this list lets the instructions find them without
             # scanning every item. The global ``decision_mode`` above stays
-            # "interactive" unless --claude-decide was passed; per-item routing
+            # "interactive" unless --agent-decide was passed; per-item routing
             # is purely additive.
             "claude_decide_item_ids": [
                 it.get("group_id", "")
@@ -3064,7 +3094,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         should skip the ``validation_status`` assignment), ``False`` otherwise.
 
         A ``claude_decide`` marker keeps the item in ``needs_human`` and tags it
-        so the per-item "Let Claude Decide" judge picks it up at apply time; it
+        so the per-item "Let the agent decide" judge picks it up at apply time; it
         must NEVER be written into ``validation_status`` (which is not a real
         status and would silently fall through ``filter_items``).
         """
@@ -3075,7 +3105,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             self.claude_decide_overrides.add(key)
             # A surfaced reason so the routing is visible in logs/reports. Not a
             # setdefault no-op — the item already carries a needs-human reason.
-            group["validation_reason"] = "Routed to Claude by reviewer"
+            group["validation_reason"] = "Routed to the judge agent by reviewer"
             return True
         return False
 
@@ -3178,7 +3208,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     if not s.get("_user_override_invalid")
                 ]
                 group["suggestions"] = remaining
-                # A "Let Claude decide" marker (set group-level by
+                # A "Let the agent decide" marker (set group-level by
                 # apply_group_validation_overrides, or per-suggestion in the
                 # loop above) is an affirmative "route to the judge" request and
                 # must win over a "valid" promotion. Without this guard, a group

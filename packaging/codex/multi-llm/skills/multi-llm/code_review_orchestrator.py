@@ -2364,10 +2364,10 @@ def _format_issue(
     if validation_status in ("needs-human-decision", "validation_failed"):
         lines.append("- [ ] Mark valid")
         lines.append("- [ ] Mark invalid")
-    # "Let Claude decide" routes this issue to the per-item judge at apply time.
+    # "Let the agent decide" routes this issue to the per-item judge at apply time.
     # Scoped to needs-human-decision only.
     if validation_status == "needs-human-decision":
-        lines.append("- [ ] Let Claude decide")
+        lines.append("- [ ] Let the agent decide")
 
     # Name the other members of this issue's group. One finding, one verdict,
     # one fix — and one checkbox between them, whichever block it is ticked on.

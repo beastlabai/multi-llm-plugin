@@ -448,9 +448,13 @@ class TestConservativeResolution:
     #: model inside `<skills_instructions>`. That row promotes `invocation` on both
     #: hosts and nothing else: it graded a command surface, so codex's `shim`,
     #: `arguments` and `install_paths` stay where they were.
+    #:
+    #: codex 0.156.1, 2026-09-25, `codex-package-sandbox-posture`: every
+    #: `tools/call` its mcp-tap recorded carried the session's `--model` as the turn
+    #: metadata's `model`, which promotes `session_runner_provider` alone.
     RECORDED_SMOKES = {
         "codex": {
-            "invocation",
+            "invocation", "session_runner_provider",
         },
         "opencode": {
             "shim", "installable", "install_paths", "reload", "arguments",

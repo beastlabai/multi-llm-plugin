@@ -45,6 +45,10 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 try:  # normal import (utils is a package)
     from .cli_common import (
+        AGENT_DECIDE_FLAG,
+        AGENT_DECIDE_SPELLINGS,
+        LEGACY_AGENT_DECIDE_FLAGS,
+        canonical_flag,
         EXIT_NEEDS_HUMAN,
         EXIT_OK,
         STATE_PARTIAL,
@@ -53,6 +57,10 @@ try:  # normal import (utils is a package)
     )
 except ImportError:  # pragma: no cover - direct script runs with utils/ on path
     from cli_common import (  # type: ignore
+        AGENT_DECIDE_FLAG,
+        AGENT_DECIDE_SPELLINGS,
+        LEGACY_AGENT_DECIDE_FLAGS,
+        canonical_flag,
         EXIT_NEEDS_HUMAN,
         EXIT_OK,
         STATE_PARTIAL,
@@ -221,7 +229,7 @@ ROWS: Tuple[Row, ...] = (
         modes=("apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
                "review-tasks", "full"),
         dispositions=(AUTO_SELECT,),
-        flags=("--claude-decide", "--no-confirm"),
+        flags=(AGENT_DECIDE_FLAG, "--no-confirm"),
         enforced_in=("utils/apply_orchestrator_base.py",),
     ),
     Row(
@@ -312,6 +320,7 @@ class FlagSpec:
         parsers: Files whose argparse parser accepts it. ``"parent"`` means the
             shared cross-cutting parent in ``utils/cli_common.py``, i.e. every
             entry point.
+        aliases: Other spellings the same parsers accept for it.
     """
 
     name: str
@@ -319,6 +328,7 @@ class FlagSpec:
     choices: Tuple[str, ...]
     value_form: str
     parsers: Tuple[str, ...]
+    aliases: Tuple[str, ...] = ()
 
 
 HUMAN_TASK_ACTIONS: Tuple[str, ...] = ("done", "skip")
@@ -356,10 +366,11 @@ DECISION_FLAGS: Tuple[FlagSpec, ...] = (
              ("implement_orchestrator.py",)),
     FlagSpec("--human-task", (9,), HUMAN_TASK_ACTIONS, "pair",
              ("implement_orchestrator.py",)),
-    FlagSpec("--claude-decide", (10,), (), "none",
+    FlagSpec(AGENT_DECIDE_FLAG, (10,), (), "none",
              ("apply_suggestions_orchestrator.py",
               "apply_task_suggestions_orchestrator.py",
-              "apply_code_fixes_orchestrator.py")),
+              "apply_code_fixes_orchestrator.py"),
+             aliases=LEGACY_AGENT_DECIDE_FLAGS),
     FlagSpec("--review-tasks", (12,), (), "none",
              ("full_workflow_orchestrator.py",)),
     FlagSpec("--resume", (14,), (), "none",
@@ -369,7 +380,9 @@ DECISION_FLAGS: Tuple[FlagSpec, ...] = (
               "apply_code_fixes_orchestrator.py")),
 )
 
-_FLAGS_BY_NAME: Dict[str, FlagSpec] = {f.name: f for f in DECISION_FLAGS}
+_FLAGS_BY_NAME: Dict[str, FlagSpec] = {
+    spelling: f for f in DECISION_FLAGS for spelling in (f.name, *f.aliases)
+}
 
 
 def flags_for_row(number: int) -> Tuple[FlagSpec, ...]:
@@ -610,7 +623,7 @@ INVENTORY: Tuple[InventoryRow, ...] = (
                    "review-each UI",
         free_text="one numbered block per item (no 4-option cap — that was the "
                   "structured tool's)",
-        unattended="`--claude-decide --no-confirm`; the report is printed and "
+        unattended=f"`{AGENT_DECIDE_FLAG} --no-confirm`; the report is printed and "
                    "nothing is asked",
     ),
     InventoryRow(

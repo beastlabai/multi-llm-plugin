@@ -769,7 +769,7 @@ if __name__ == "__main__":
 
 
 class TestLetClaudeDecideCheckbox:
-    """Markdown emit guards for the 'Let Claude decide' checkbox (Section 5)."""
+    """Markdown emit guards for the 'Let the agent decide' checkbox (Section 5)."""
 
     def _group(self, status):
         return {
@@ -786,17 +786,17 @@ class TestLetClaudeDecideCheckbox:
 
     def test_group_emits_checkbox_for_needs_human(self):
         result = "\n".join(format_group(self._group("needs-human-decision"), 1))
-        assert "- [ ] Let Claude decide" in result
+        assert "- [ ] Let the agent decide" in result
 
     def test_group_omits_checkbox_for_validation_failed(self):
         result = "\n".join(format_group(self._group("validation_failed"), 1))
-        assert "- [ ] Let Claude decide" not in result
+        assert "- [ ] Let the agent decide" not in result
         # The existing valid/invalid checkboxes are still there.
         assert "- [ ] Mark valid" in result
 
     def test_group_omits_checkbox_for_valid(self):
         result = "\n".join(format_group(self._group("valid"), 1))
-        assert "- [ ] Let Claude decide" not in result
+        assert "- [ ] Let the agent decide" not in result
 
     def _sugg(self):
         return {
@@ -810,7 +810,7 @@ class TestLetClaudeDecideCheckbox:
             group_validation_status="needs-human-decision",
             group_suggestion_count=2,
         )
-        assert "- [ ] Let Claude decide" in "\n".join(lines)
+        assert "- [ ] Let the agent decide" in "\n".join(lines)
 
     def test_suggestion_omits_checkbox_single_suggestion_group(self):
         lines = format_suggestion_in_group(
@@ -818,7 +818,7 @@ class TestLetClaudeDecideCheckbox:
             group_validation_status="needs-human-decision",
             group_suggestion_count=1,
         )
-        assert "- [ ] Let Claude decide" not in "\n".join(lines)
+        assert "- [ ] Let the agent decide" not in "\n".join(lines)
 
     def test_suggestion_omits_checkbox_validation_failed(self):
         lines = format_suggestion_in_group(
@@ -826,4 +826,4 @@ class TestLetClaudeDecideCheckbox:
             group_validation_status="validation_failed",
             group_suggestion_count=2,
         )
-        assert "- [ ] Let Claude decide" not in "\n".join(lines)
+        assert "- [ ] Let the agent decide" not in "\n".join(lines)

@@ -1023,6 +1023,19 @@ class TestBuildCommonArgParser:
         args = parser.parse_args(["--plan-file", "t.md", "--let-claude-decide"])
         assert args.claude_decide is True
 
+    @pytest.mark.parametrize(
+        "spelling", ["--agent-decide", "--claude-decide", "--let-claude-decide"]
+    )
+    def test_every_spelling_sets_claude_decide(self, spelling):
+        parser = build_common_arg_parser("Test", "")
+        args = parser.parse_args(["--plan-file", "t.md", spelling])
+        assert args.claude_decide is True
+
+    def test_help_leads_with_agent_decide(self):
+        text = build_common_arg_parser("Test", "").format_help()
+        assert "--agent-decide, --claude-decide, --let-claude-decide" in text
+        assert "Let Claude" not in text
+
 
 # ======================================================================
 # Test: build_human_review_config decision_mode
@@ -5083,8 +5096,38 @@ class TestExitCodeAndPromptParity:
 
 
 # ======================================================================
-# Test: "Let Claude decide" routing marker (Section 3)
+# Test: "Let the agent decide" routing marker (Section 3)
 # ======================================================================
+
+
+class TestOldWordingReportStillRoutesToTheJudge:
+    """A report.md written before the rename says "Let Claude decide"; its
+    ticked items must still land in the judge's scope."""
+
+    @pytest.mark.parametrize("wording", ["Let Claude decide", "Let the agent decide"])
+    def test_ticked_item_reaches_the_judge_scope(self, tmp_path, wording):
+        from utils.report_parser import parse_validation_overrides_groups
+
+        report = tmp_path / "report.md"
+        report.write_text(
+            "## G1 [aabb000000000001]: Theme\n"
+            "- [ ] Skip this group\n"
+            "- [ ] Mark valid\n"
+            "- [ ] Mark invalid\n"
+            f"- [x] {wording}\n",
+            encoding="utf-8",
+        )
+        orch = MockApplyOrchestrator(_make_args())
+        orch.merged = [{
+            "group_hash": "aabb000000000001",
+            "validation_status": "needs-human-decision",
+            "suggestions": [],
+        }]
+        orch.validation_overrides = parse_validation_overrides_groups(str(report))
+        orch.apply_group_validation_overrides()
+        orch.needs_human = list(orch.merged)
+
+        assert orch.human_decision_scope() == orch.merged
 
 
 class TestClaudeDecideGroupOverride:
@@ -5112,7 +5155,7 @@ class TestClaudeDecideGroupOverride:
         assert g["validation_status"] == "needs-human-decision"
         assert g["claude_decide"] is True
         assert "abc123" in orch.claude_decide_overrides
-        assert g["validation_reason"] == "Routed to Claude by reviewer"
+        assert g["validation_reason"] == "Routed to the judge agent by reviewer"
         # claude_decide is a marker, not a user-approved override.
         assert g.get("user_override") is not True
 
@@ -6137,7 +6180,7 @@ class TestAJudgedSkipReachesEveryOutputThePhaseWrites:
         orch._rebuild_formatted_skipped()
         entry = orch.formatted_skipped[0]
         assert entry["status"] == "skipped"
-        assert entry["reason"] == "No Claude decision returned for this group"
+        assert entry["reason"] == "No judge decision returned for this group"
         # Still sourceless: nobody decided it, so no `decision_source` is
         # invented for it.
         assert "decision_source" not in entry
@@ -6203,12 +6246,13 @@ class TestTheExecutorLegRunsStepSeven:
             phase=orch.phase_name,
             group_id="3b810046f0a56e8c",
             decision="skipped",
-            reason="Claude auto-decide: not decidable from the text",
+            reason="Agent decide [codex:gpt-6-astra]: not decidable from the text",
             batch_context={
                 "batch_id": "claude_decide_efabfefb",
                 "batch_action": "claude_auto_decide",
                 "decision_source": "claude_auto_decide",
                 "importance_at_decision": "LOW",
+                "judge": "codex:gpt-6-astra",
             },
         )
         orch.state.save()
@@ -6224,11 +6268,13 @@ class TestTheExecutorLegRunsStepSeven:
         orch.state.save()
         assert list(orch.claude_decisions()) == ["3b810046f0a56e8c"]
 
-    def test_the_result_block_names_what_claude_decided(self, tmp_path, capsys):
+    def test_the_result_block_names_what_the_judge_decided(self, tmp_path, capsys):
         orch = self._orchestrator_with_a_decision(tmp_path)
         orch.print_write_outcome_summary()
         out = capsys.readouterr().out
-        assert "Decided by Claude (1)" in out
+        assert "Decided by the judge agent (1)" in out
+        assert "  judge: codex:gpt-6-astra" in out
+        assert "Claude" not in out.split("Decided by the judge agent")[1]
         assert "[skipped] Raise T001 to high [3b810046]" in out
         assert "source: claude_auto_decide" in out
         assert "not decidable from the text" in out
@@ -6243,7 +6289,9 @@ class TestTheExecutorLegRunsStepSeven:
         assert "## Summary" in text
         assert "Batches processed: 1/1" in text
         assert "Suggestions applied: 2" in text
-        assert "## Decided by Claude" in text
+        assert "## Decided by the judge agent (1)" in text
+        assert "judge: codex:gpt-6-astra" in text
+        assert "`--agent-decide`" in text
         assert "Raise T001 to high (LOW) — Skipped" in text
         assert "claude_auto_decide" in text
 
@@ -6285,7 +6333,7 @@ class TestTheExecutorLegRunsStepSeven:
         orch.write_tasks = []
         orch.write_result = _FakeSchedulerResult([])
         text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
-        assert "## Decided by Claude" not in text
+        assert "## Decided by the judge agent" not in text
 
     def test_the_overlay_is_regenerated_from_the_review_sidecar(self, tmp_path):
         orch = self._orchestrator_with_a_decision(tmp_path)

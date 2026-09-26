@@ -362,7 +362,7 @@ class FullWorkflow:
         """The apply phases' unattended answers (rows 10/11).
 
         Both flags are gated the same way, because both *are* the unattended
-        dispositions of those two rows — the core appends ``--claude-decide
+        dispositions of those two rows — the core appends ``--agent-decide
         --no-confirm`` only under ``--yes``. Attended, the no-selection
         confirmation stays a real gate: the phase prints ``confirmation_needed``
         and records nothing, which this driver reads as "did not finish" and ends
@@ -371,7 +371,7 @@ class FullWorkflow:
         """
         flags: List[str] = []
         if self.unattended:
-            flags += ["--claude-decide", "--no-confirm"]
+            flags += [unattended_mod.AGENT_DECIDE_FLAG, "--no-confirm"]
         if getattr(self.args, "resume", False):
             flags += ["--resume"]
         return flags

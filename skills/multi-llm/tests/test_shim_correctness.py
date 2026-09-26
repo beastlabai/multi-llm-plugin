@@ -563,7 +563,8 @@ class TestShim:
         flags = {
             "models", "quick", "interactive", "yes", "non-interactive", "force",
             "dir", "gitignore", "template-only", "detach", "exec-subagents",
-            "host", "resume", "reaggregate", "rerun-all", "claude-decide",
+            "host", "resume", "reaggregate", "rerun-all", "agent-decide", "claude-decide",
+            "let-claude-decide",
             "no-confirm", "consolidate", "skip-prerequisites", "review-tasks",
             "force-strategy", "human-task", "apply-fixes", "init",
             "apply-suggestions", "apply-task-suggestions",

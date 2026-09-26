@@ -139,7 +139,7 @@ def display(data: dict, phase: str) -> None:
     priority_filtered = [i for i in skipped_items if i.get("status") == "below_priority"]
     # The judge's own skips. Bucketed apart from `invalid` because they are the
     # opposite kind of outcome: validation said the item was wrong, whereas this
-    # is a decision somebody (Claude, on the user's behalf) made about an item
+    # is a decision the judge agent made on the user's behalf about an item
     # validation could not settle — and this command is the one surface whose
     # whole job is to say what was decided.
     claude_skipped = [i for i in skipped_items if i.get("status") == "claude_skipped"]
@@ -174,7 +174,7 @@ def display(data: dict, phase: str) -> None:
         print()
 
     if claude_skipped:
-        print(f"  ! SKIPPED BY CLAUDE ({len(claude_skipped)} {item_noun_plural})")
+        print(f"  ! SKIPPED BY THE JUDGE AGENT ({len(claude_skipped)} {item_noun_plural})")
         for item in claude_skipped:
             title = get_title(item)
             imp = importance_badge(get_importance(item))

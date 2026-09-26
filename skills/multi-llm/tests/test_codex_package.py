@@ -328,7 +328,7 @@ NON_MULTI_LLM_FORWARDED = frozenset({
 
 #: Real reads deliberately left out of the allowlist (D9).
 NOT_FORWARDED = frozenset({
-    # codex declares `session_runner_provider: null`; nothing sets it here.
+    # The server sets it per call from the turn metadata; a forwarded one would outlive the turn.
     "MULTI_LLM_HOST_SESSION_MODEL",
     # A test switch, but read by shipped code, so the walk finds it.
     "MULTI_LLM_TEST_FAST_BACKOFF",

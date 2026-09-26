@@ -160,7 +160,7 @@ Invoke with `/multi-llm:multi-llm [mode-flag] <plan_path> [options]` - on OpenCo
 
 Two notes on the table above:
 
-- **`--full`** chains the phases end to end: review-plan -> apply-suggestions -> generate-tasks -> review-tasks -> apply-task-suggestions -> implement -> review-code -> apply-code-fixes. It pauses at each apply step to let you approve `needs-human-decision` findings; pass `--yes` (alias `--non-interactive`) to run the whole pipeline fully unattended — zero prompts: non-interactive model selection, a subagent judges every `needs-human-decision` item, and review-tasks runs automatically. For finer control, add just `--no-confirm` and/or `--claude-decide` (see [below](#34-letting-claude-decide-ambiguous-findings)) instead.
+- **`--full`** chains the phases end to end: review-plan -> apply-suggestions -> generate-tasks -> review-tasks -> apply-task-suggestions -> implement -> review-code -> apply-code-fixes. It pauses at each apply step to let you approve `needs-human-decision` findings; pass `--yes` (alias `--non-interactive`) to run the whole pipeline fully unattended — zero prompts: non-interactive model selection, a judge agent decides every `needs-human-decision` item, and review-tasks runs automatically. For finer control, add just `--no-confirm` and/or `--agent-decide` (see [below](#34-letting-the-agent-decide-ambiguous-findings)) instead.
 - **Applying code fixes** can happen two ways. Run `--apply-code-fixes` as a standalone pass to apply a previous review's fixes - this is the phase that handles `needs-human-decision` items (prompts, salvage, HTML badges). Or, to apply only the clearly-valid fixes inline during the review itself, add `--apply-fixes` to a `--review-code` run.
 
 ### 3.1 Pipeline flow
@@ -224,7 +224,7 @@ You don't have to run the whole chain: **every step is also a standalone entry p
 /multi-llm:multi-llm --review-code plans/my-feature.md
 
 # Review/implement/code-review a plan using the configured default LLMs completely hands-off
-/multi-llm:multi-llm --full plans/my-feature.md --claude-decide --non-interactive
+/multi-llm:multi-llm --full plans/my-feature.md --agent-decide --non-interactive
 
 # Ask every model the same question (read-only Q&A)
 /multi-llm:multi-llm --ask plans/my-feature.md "Is the rollback strategy sufficient?"
@@ -241,23 +241,23 @@ These flags combine with any mode and are **position-independent** - they may ap
 | `--interactive` | Force two-step model selection (provider, then models), ignoring YAML defaults. |
 | `--no-confirm` | Skip confirmation prompts - for unattended/silent runs. |
 | `--dry-run` | Show what would happen (tasks/batches) without making changes. Applies to `--implement` and the apply modes. |
-| `--claude-decide` / `--let-claude-decide` | In the apply modes, let a subagent judge every `needs-human-decision` finding instead of prompting you (see [below](#34-letting-claude-decide-ambiguous-findings)). Implied by `--yes`, which the Codex and OpenCode shims bake in. |
+| `--agent-decide` | In the apply modes, let a judge agent decide every `needs-human-decision` finding instead of prompting you (see [below](#34-letting-the-agent-decide-ambiguous-findings)). Implied by `--yes`, which the Codex and OpenCode shims bake in. `--claude-decide` / `--let-claude-decide` are accepted legacy spellings. |
 | `--force` | **Meaning depends on mode.** In the fan-out review/ask modes (`--review-plan`, `--review-tasks`, `--review-code`, `--ask`), resume an interrupted run: keep already-completed per-model results, run only the missing models, and bypass the completed-phase / partial-completion guards. In the apply modes, it's an alias for `--yes` (confirm bulk approval). |
 | `--rerun-all` | In the fan-out review/ask modes, re-run every model from scratch, discarding any existing per-model results. Combine with `--force` (`--force --rerun-all`) for a fresh full re-run of an already-completed phase. |
 
 The apply and implement modes accept additional approval flags (`--yes`, `--approve-all`, `--resume`, `--task`, and more); run `multi_llm.py <mode> --help` for the authoritative list, or read the per-mode files in `skills/multi-llm/instructions/`.
 
-### 3.4 Letting Claude decide ambiguous findings
+### 3.4 Letting the agent decide ambiguous findings
 
-When the models disagree or a suggestion is borderline, validation marks it `needs-human-decision`. In the apply modes (`--apply-suggestions`, `--apply-code-fixes`, `--apply-task-suggestions`) Claude Code prompts you to approve or skip each one through its structured `AskUserQuestion` tool - it is the only host that has one, so on Codex and OpenCode the baked-in `--yes` resolves these without asking ([docs/hosts.md](docs/hosts.md)). Every such prompt also offers a **Let Claude decide** option, per item or for a whole batch, that hands just that judgment to a Claude subagent instead of you.
+When the models disagree or a suggestion is borderline, validation marks it `needs-human-decision`. In the apply modes (`--apply-suggestions`, `--apply-code-fixes`, `--apply-task-suggestions`) Claude Code prompts you to approve or skip each one through its structured `AskUserQuestion` tool - it is the only host that has one, so on Codex and OpenCode the baked-in `--yes` resolves these without asking ([docs/hosts.md](docs/hosts.md)). Every such prompt also offers a **Let the agent decide** option, per item or for a whole batch, that hands just that judgment to a judge agent instead of you.
 
-To skip the prompts entirely and have a subagent judge **every** `needs-human-decision` finding up front, pass `--claude-decide` (alias `--let-claude-decide`) - which is what the baked-in `--yes` already does on Codex and OpenCode:
+To skip the prompts entirely and have a judge agent decide **every** `needs-human-decision` finding up front, pass `--agent-decide` - which is what the baked-in `--yes` already does on Codex and OpenCode. The judge is not necessarily Claude: on a host with native subagents (Claude Code) it is the host's own agent, and under `--exec-subagents` (the Codex and OpenCode default) it is whatever `driver.subagent_runner` resolves to, e.g. `codex:gpt-6-astra` on Codex. The summary names it on a `judge:` line.
 
 ```text
-/multi-llm:multi-llm --apply-code-fixes plans/my-feature.md --claude-decide --no-confirm
+/multi-llm:multi-llm --apply-code-fixes plans/my-feature.md --agent-decide --no-confirm
 ```
 
-Unlike the blanket approve/skip flags, "Let Claude decide" is a **per-item** judgment that **salvages** partially-valid findings - it trims each to its worthwhile core and applies that, skipping only findings with nothing worth keeping. The generated HTML report badges every finding **Approved / Salvaged / Skipped**. Add `--no-confirm` (as above) for a fully unattended run.
+Unlike the blanket approve/skip flags, "Let the agent decide" is a **per-item** judgment that **salvages** partially-valid findings - it trims each to its worthwhile core and applies that, skipping only findings with nothing worth keeping. The generated HTML report badges every finding **Approved / Salvaged / Skipped**. Add `--no-confirm` (as above) for a fully unattended run.
 
 ---
 

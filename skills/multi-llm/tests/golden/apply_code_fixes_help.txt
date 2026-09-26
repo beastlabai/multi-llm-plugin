@@ -11,7 +11,7 @@ usage: apply_code_fixes_orchestrator.py [-h] [--host ID] [--yes]
                                         [--approve-all-low] [--approve-all]
                                         [--skip-all-human]
                                         [--approve-importance {LOW,MEDIUM,HIGH} [{LOW,MEDIUM,HIGH} ...]]
-                                        [--claude-decide] [--force]
+                                        [--agent-decide] [--force]
                                         [--include-high] [--resume] [--fresh]
                                         [--batch-review-mode {individual,by-importance,summary-only}]
                                         [--accept-stale-consolidation]
@@ -50,17 +50,19 @@ options:
   --approve-importance {LOW,MEDIUM,HIGH} [{LOW,MEDIUM,HIGH} ...]
                         Auto-approve needs-human-decision items at these
                         importance levels
-  --claude-decide, --let-claude-decide
-                        Let Claude evaluate each needs-human-decision item
-                        with its own judgment (no interactive prompt), instead
-                        of asking you. Equivalent to choosing 'Let Claude
-                        decide' in the interactive review. Unlike --approve-
-                        all / --skip-all-human, this is a per-item judgment,
-                        not a blanket rule: partially-valid items are salvaged
-                        (trimmed to their worthwhile core and applied) rather
-                        than skipped wholesale. Does not bypass the no-
-                        selection confirmation for valid items — combine with
-                        --no-confirm for fully unattended runs.
+  --agent-decide, --claude-decide, --let-claude-decide
+                        Let the judge agent decide each needs-human-decision
+                        item with its own judgment (no interactive prompt),
+                        instead of asking you. Equivalent to choosing 'Let the
+                        agent decide' in the interactive review. The legacy
+                        spellings --claude-decide and --let-claude-decide are
+                        still accepted. Unlike --approve-all / --skip-all-
+                        human, this is a per-item judgment, not a blanket
+                        rule: partially-valid items are salvaged (trimmed to
+                        their worthwhile core and applied) rather than skipped
+                        wholesale. Does not bypass the no-selection
+                        confirmation for valid items — combine with --no-
+                        confirm for fully unattended runs.
   --force, -f           Force bulk approval operations (alias for --yes)
   --include-high        Allow --approve-all to include HIGH importance items
                         (otherwise blocked)

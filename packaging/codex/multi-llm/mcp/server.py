@@ -127,10 +127,16 @@ LOG_LEVELS = (
 #: and any malformed shape. ``workspaces`` is an object keyed by absolute
 #: workspace path — under ``codex exec -C <dir>`` it names ``<dir>``, where the
 #: launching shell's ``PWD`` names the wrong checkout — and ``sandbox_mode`` is
-#: the session's posture word (D3b).
+#: the session's posture word (D3b). ``model`` is the session's own model id
+#: (row 7's tap: ``--model stub-model`` arrived as ``"model": "stub-model"``).
 TURN_METADATA_KEY = "x-codex-turn-metadata"
 TURN_METADATA_WORKSPACES = "workspaces"
 TURN_METADATA_SANDBOX_MODE = "sandbox_mode"
+TURN_METADATA_MODEL = "model"
+
+#: A plain model id: the ladder spells it ``<provider>:<id>`` and splits an
+#: effort off the last ``:``, so a colon, whitespace or a leading ``-`` is refused.
+SESSION_MODEL_PATTERN = re.compile(r"[A-Za-z0-9._/@+~][A-Za-z0-9._/@+~-]{0,199}")
 
 #: D3b: the one posture word under which a write-capable mode is refused, and
 #: the posture words under which the session itself may write, so the tool may
@@ -251,7 +257,8 @@ _REQUIRED_SURFACE_PATHS = (
     ("dispatcher", "states"), ("dispatcher", "poll"), ("dispatcher", "abort"),
     ("dispatcher", "instructions"), ("dispatcher", "host_option"),
     ("dispatcher", "run_id_option"), ("dispatcher", "banner"),
-    ("needs_human_message",), ("needs_human_option",), ("write_posture_refusal",),
+    ("dispatcher", "session_model_env"), ("needs_human_message",),
+    ("needs_human_option",), ("write_posture_refusal",),
     ("anchor_unresolved",), ("shell_missing",), ("runbook",), ("host",),
 )
 
@@ -1374,12 +1381,31 @@ class Server:
         os.environ[SKILL_DIR_ENV] = str(SKILL_DIR)
         if NO_BYTECODE_ENV not in os.environ:
             os.environ[NO_BYTECODE_ENV] = "1"
+        model = self.export_session_model(call)
         values = {"word": args["mode"], "plan": self.normalize_plan(args["plan"], call),
                   "question": args["question"], "extra": list(args["extra_flags"])}
         outcome = self.run_workflow(call, row, values)
         if not call.cancel.is_set() and self.unfinished(row, outcome):
             self.attach_runbook(call, row, outcome)
+        if model is not None:
+            outcome["session_model"] = model
         return self.envelope(call, outcome)
+
+    def export_session_model(self, call: Call):
+        """D9 layer 2: this turn's model for the ladder's ``session`` rung, or ``None``.
+
+        Per call, because ``os.environ`` outlives the call: a turn naming no
+        usable model gets back exactly what codex forwarded.
+        """
+        name = self.surface["dispatcher"]["session_model_env"]
+        model = session_model(call.meta)
+        if model is not None:
+            os.environ[name] = model
+        elif name in self.layer1:
+            os.environ[name] = self.layer1[name]
+        else:
+            os.environ.pop(name, None)
+        return model
 
     def find_shell(self):
         found = shutil.which(SHELL_NAME, path=self.layer1.get("PATH") or os.defpath)
@@ -1983,6 +2009,14 @@ def session_posture(meta):
     """D3b: the session's sandbox posture word, or ``None`` when unreadable."""
     value = turn_metadata(meta).get(TURN_METADATA_SANDBOX_MODE)
     if value == POSTURE_READ_ONLY or value in POSTURES_ALLOWING_WRITES:
+        return value
+    return None
+
+
+def session_model(meta):
+    """The session's model id, or ``None`` when absent or not a plain id."""
+    value = turn_metadata(meta).get(TURN_METADATA_MODEL)
+    if isinstance(value, str) and SESSION_MODEL_PATTERN.fullmatch(value):
         return value
     return None
 

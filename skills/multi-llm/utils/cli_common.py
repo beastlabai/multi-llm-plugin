@@ -206,6 +206,29 @@ def reaggregate_command(
     return dispatcher_command(mode, plan_file, "--reaggregate", base=base)
 
 
+#: The judge flag (D6 row 10): the spelling every emitted command uses, and the
+#: legacy spellings the apply parsers still accept and older runs recorded.
+AGENT_DECIDE_FLAG = "--agent-decide"
+LEGACY_AGENT_DECIDE_FLAGS: Tuple[str, ...] = ("--claude-decide", "--let-claude-decide")
+AGENT_DECIDE_SPELLINGS: Tuple[str, ...] = (AGENT_DECIDE_FLAG,) + LEGACY_AGENT_DECIDE_FLAGS
+
+
+def canonical_flag(token: str) -> str:
+    """*token* with a legacy judge-flag spelling folded onto :data:`AGENT_DECIDE_FLAG`."""
+    return AGENT_DECIDE_FLAG if token in LEGACY_AGENT_DECIDE_FLAGS else token
+
+
+def fold_judge_flag(tokens: Iterable[str]) -> List[str]:
+    """*tokens* with every judge-flag spelling emitted once, as ``--agent-decide``."""
+    out: List[str] = []
+    for token in tokens:
+        token = canonical_flag(str(token))
+        if token == AGENT_DECIDE_FLAG and token in out:
+            continue
+        out.append(token)
+    return out
+
+
 #: The verbs a retry adds to a recorded invocation. ``retry_command`` strips
 #: every spelling of these out of the replayed flag list before appending the
 #: one(s) the caller asked for, so a recorded ``--force`` cannot double and a
@@ -265,10 +288,13 @@ def retry_command(
         # would erase decisions, processed items and the prior-changes log
         # before the apply orchestrator has a chance to resume them.
         drop.add("--fresh")
-    kept = [
+    if any(canonical_flag(str(v)) == AGENT_DECIDE_FLAG for v in verbs):
+        drop.update(AGENT_DECIDE_SPELLINGS)
+    kept = fold_judge_flag(
         str(token) for token in (flags or [])
         if str(token).split("=", 1)[0] not in drop
-    ]
+    )
+    verbs = [canonical_flag(str(v)) for v in verbs]
     return dispatcher_command(mode, *positionals, *kept, *verbs, base=base)
 
 
@@ -1001,7 +1027,7 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
             index += 1
             continue
         index += 2 if (takes_value and "=" not in token) else 1
-    return out
+    return fold_judge_flag(out)
 
 
 def current_replay_flags(
@@ -1023,7 +1049,7 @@ def current_replay_flags(
     if record and record.get("mode") and (mode is None or record["mode"] == mode):
         return replay_flags(str(record["mode"]), record.get("argv") or [])
     if isinstance(stored, (list, tuple)):
-        return [str(token) for token in stored]
+        return fold_judge_flag(str(token) for token in stored)
     return []
 
 

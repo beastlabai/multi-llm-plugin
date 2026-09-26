@@ -810,7 +810,25 @@ class TestTheWritePhasesResumeWithResume:
         tokens = self._resume(
             "apply-task-suggestions", ["--host", "opencode", "--claude-decide"]
         )
-        assert tokens[-4:] == ["--host", "opencode", "--claude-decide", "--resume"]
+        assert tokens[-4:] == ["--host", "opencode", "--agent-decide", "--resume"]
+
+    @pytest.mark.parametrize("recorded", [
+        ["--claude-decide", "--agent-decide"],
+        ["--let-claude-decide", "--claude-decide"],
+        ["--agent-decide", "--agent-decide"],
+    ])
+    def test_every_judge_spelling_replays_once_as_agent_decide(self, recorded):
+        tokens = self._resume("apply-suggestions", ["--host", "opencode", *recorded])
+        assert tokens[-4:] == ["--host", "opencode", "--agent-decide", "--resume"]
+        assert not {"--claude-decide", "--let-claude-decide"} & set(tokens)
+
+    def test_a_judge_verb_absorbs_a_recorded_legacy_spelling(self):
+        command = cli_common.retry_command(
+            "apply-suggestions", PLAN, "--agent-decide",
+            flags=["--claude-decide", "--quick"],
+        ).split()
+        assert command.count("--agent-decide") == 1
+        assert "--claude-decide" not in command
 
     def test_a_recorded_resume_or_force_is_not_doubled(self):
         tokens = self._resume(
@@ -825,7 +843,7 @@ class TestTheWritePhasesResumeWithResume:
             mode, ["--host", "opencode", "--fresh", "--claude-decide"]
         )
         assert "--fresh" not in tokens
-        assert tokens[-4:] == ["--host", "opencode", "--claude-decide", "--resume"]
+        assert tokens[-4:] == ["--host", "opencode", "--agent-decide", "--resume"]
 
     def test_the_cost_line_counts_batches_and_never_mentions_the_panel(self):
         view = {
