@@ -230,7 +230,7 @@ Bulk Approval Examples:
             "models": group.get("models", []),
             "suggestion_count": len(suggestions),
         }
-        # Per-item routing flag: reviewer pre-marked this group "Let Claude
+        # Per-item routing flag: reviewer pre-marked this group "Let the agent
         # decide" in the report. Routed to the per-item judge without prompting.
         if group.get("claude_decide"):
             formatted["decision_mode"] = "claude_auto_decide"

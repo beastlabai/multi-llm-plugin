@@ -604,7 +604,7 @@
       color: var(--validation-failed);
     }
 
-    /* Human/Claude decision (post-apply overlay) */
+    /* Human/agent decision (post-apply overlay) */
     .badge-claude-decision {
       background: var(--bg-hover);
       color: var(--text-secondary);
@@ -4375,7 +4375,7 @@
      * skip checkboxes, editable descriptions, validation overrides.
      * Uses the same ID scheme as the flat view for state interchangeability.
      */
-    // --- Human/Claude decision overlay (populated post-apply from state.json) ---
+    // --- Human/agent decision overlay (populated post-apply from state.json) ---
     function getHumanDecisionInfo(group) {
       var hd = group.humanDecision || group.human_decision;
       if (!hd) return null;
@@ -4388,14 +4388,20 @@
         reason: hd.reason || '',
         salvagedDescription: hd.salvagedDescription || hd.salvaged_description || '',
         dropped: hd.dropped || '',
-        source: hd.source || ''
+        source: hd.source || '',
+        judge: hd.judge || ''
       };
+    }
+
+    function decisionMaker(info) {
+      if (!info.claudeDecided) return 'User';
+      return info.judge ? 'Agent (' + info.judge + ')' : 'Agent';
     }
 
     function renderHumanDecisionBadge(group) {
       var info = getHumanDecisionInfo(group);
       if (!info) return '';
-      var label = (info.claudeDecided ? 'Claude' : 'User') + ': ' + info.outcome;
+      var label = decisionMaker(info) + ': ' + info.outcome;
       return '<span class="badge badge-claude-decision badge-decision-' + escapeHtml(info.outcome) + '"' +
         ' title="' + escapeHtml(info.reason) + '">⚙ ' + escapeHtml(label) + '</span>';
     }
@@ -4403,7 +4409,7 @@
     function renderHumanDecisionDetail(group) {
       var info = getHumanDecisionInfo(group);
       if (!info) return '';
-      var summary = '⚙ ' + (info.claudeDecided ? 'Claude' : 'User') + ' decision: ' + info.outcome;
+      var summary = '⚙ ' + decisionMaker(info) + ' decision: ' + info.outcome;
       var body = '';
       if (info.reason) body += '<div class="hd-line"><strong>Reason:</strong> ' + escapeHtml(info.reason) + '</div>';
       if (info.outcome === 'salvaged') {
@@ -4487,7 +4493,7 @@
       else if (effectiveValidation === 'needs-human-decision') html += '<span class="badge badge-validation-needs-human">needs human</span>';
       else if (effectiveValidation === 'validation_failed') html += '<span class="badge badge-validation-failed">failed</span>';
 
-      // Human/Claude decision badge (post-apply)
+      // Human/agent decision badge (post-apply)
       html += renderHumanDecisionBadge(group);
 
       // Consensus badge
@@ -4507,7 +4513,7 @@
       // Group body (collapsible)
       html += '<div class="inline-group-body">';
 
-      // Human/Claude decision detail (post-apply)
+      // Human/agent decision detail (post-apply)
       html += renderHumanDecisionDetail(group);
 
       // Individual suggestions
@@ -4608,7 +4614,7 @@
         html += '<option value="invalid"' + (selections.validation_overrides[groupHashKey] === 'invalid' ? ' selected' : '') + '>Override: invalid</option>';
         html += '<option value="needs-human-decision"' + (selections.validation_overrides[groupHashKey] === 'needs-human-decision' ? ' selected' : '') + '>Override: needs-human</option>';
         if (vs === 'needs-human-decision') {
-          html += '<option value="claude_decide"' + (selections.validation_overrides[groupHashKey] === 'claude_decide' ? ' selected' : '') + '>Let Claude decide</option>';
+          html += '<option value="claude_decide"' + (selections.validation_overrides[groupHashKey] === 'claude_decide' ? ' selected' : '') + '>Let the agent decide</option>';
         }
         html += '</select>';
       }
@@ -4800,7 +4806,7 @@
             '</details>';
         }
 
-        // Human/Claude decision detail (post-apply)
+        // Human/agent decision detail (post-apply)
         html += renderHumanDecisionDetail(group);
 
         // Group content (suggestions)

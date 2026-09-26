@@ -172,7 +172,7 @@ def filter_items(
             skipped.append(group)
             continue
 
-        # A "Let Claude decide" marker is an affirmative "route to the judge"
+        # A "Let the agent decide" marker is an affirmative "route to the judge"
         # request and must never be auto-approved, regardless of the underlying
         # validation_status. This guards against conflicting overrides (e.g. a
         # group marked claude_decide that also got promoted to "valid", or a
@@ -206,7 +206,7 @@ def filter_items(
                 approval_reason = f"--approve-importance {importance}"
 
         elif status == "needs-human-decision":
-            # Per-item "Let Claude decide" beats bulk *approval*: a marked item
+            # Per-item "Let the agent decide" beats bulk *approval*: a marked item
             # is an affirmative "route to the judge" request, so keep it in
             # needs_human (never auto-approved/flipped to valid). Bulk *skip*
             # (--skip-all-human) is still honoured below — an explicit skip is a
@@ -340,10 +340,10 @@ def validate_claude_decide_items_honored(
     human_review_config: Dict[str, Any],
     recorded_decisions: Dict[str, Any],
 ) -> Tuple[bool, List[str]]:
-    """Verify every report-pre-marked "Let Claude decide" item reached the judge.
+    """Verify every report-pre-marked "Let the agent decide" item reached the judge.
 
     The per-item routing decision (judge-without-prompting vs. prompt) is made
-    by Claude Code following the prose in the apply instructions; this is a
+    by the host agent following the prose in the apply instructions; this is a
     post-hoc audit (a sibling of :func:`validate_batch_mode_honored`), not a
     hard pre-flight gate. For every id in
     ``human_review_config["claude_decide_item_ids"]`` it checks that a decision
@@ -378,7 +378,7 @@ def validate_claude_decide_items_honored(
         if not decision:
             is_valid = False
             warnings.append(
-                f"WARNING: report-pre-marked 'Let Claude decide' item {gid} has "
+                f"WARNING: report-pre-marked 'Let the agent decide' item {gid} has "
                 f"no recorded decision. It may have been prompted interactively "
                 f"or dropped instead of routed to the judge."
             )
@@ -388,8 +388,8 @@ def validate_claude_decide_items_honored(
         if source not in claude_sources:
             is_valid = False
             warnings.append(
-                f"WARNING: report-pre-marked 'Let Claude decide' item {gid} was "
-                f"recorded with decision_source {source!r}, not a Claude judge "
+                f"WARNING: report-pre-marked 'Let the agent decide' item {gid} was "
+                f"recorded with decision_source {source!r}, not a judge-agent "
                 f"source ({' / '.join(sorted(claude_sources))}). It may have "
                 f"been prompted instead of auto-decided."
             )

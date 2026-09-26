@@ -1524,7 +1524,7 @@ def generate_consolidated_report(
     lines.append("")
 
     # --- Build validation lookups for per-group aggregate status ---
-    # Mirrors the HTML consolidated path so the "Let Claude decide" checkbox can
+    # Mirrors the HTML consolidated path so the "Let the agent decide" checkbox can
     # be gated on a needs-human-decision aggregate status.
     from .html_report_generator import derive_aggregate_validation_status
 
@@ -1564,7 +1564,7 @@ def generate_consolidated_report(
         )
 
         # Aggregate validation status across the underlying groups (used to
-        # gate the needs-human-decision-only "Let Claude decide" checkbox).
+        # gate the needs-human-decision-only "Let the agent decide" checkbox).
         underlying_statuses: List[str] = []
         for u_idx in underlying_indices:
             if u_idx < 0 or u_idx >= len(groups):
@@ -1582,10 +1582,10 @@ def generate_consolidated_report(
         lines.append("- [ ] Mark valid")
         lines.append("- [ ] Mark invalid")
         lines.append("- [ ] Needs human attention")
-        # "Let Claude decide" routes the consolidated group to the per-item
+        # "Let the agent decide" routes the consolidated group to the per-item
         # judge at apply time. Scoped to needs-human-decision only.
         if agg_status == "needs-human-decision":
-            lines.append("- [ ] Let Claude decide")
+            lines.append("- [ ] Let the agent decide")
 
         # Metadata line
         lines.append(

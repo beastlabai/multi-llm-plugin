@@ -62,7 +62,7 @@ With batching, 10 suggestions might become 3-4 batches:
    - Only process suggestions with `status: "valid"`
    - Exclude suggestions marked `[x] Skip` in `report.md`
 3. **Smart Batching**: Group related suggestions into batches
-4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let Claude decide** option that offloads just that one item's judgment to a subagent. Or, if `--claude-decide` was passed, let Claude judge every item up front — or pre-marked in the report's *Let Claude decide* dropdown/checkbox, which routes just those suggestions to the judge without prompting. See step 6. **Under `--yes` (or `--non-interactive`) this site is never rendered** (D6 row 10): `--yes` sets `--claude-decide` itself, so every item goes through the judged/deferred path up front and no item — and no batched approve-all/skip-all UI — can block.
+4. **Handle Human Decisions**: For `needs-human-decision` items, use AskUserQuestion — each interactive prompt also offers a per-item **Let the agent decide** option that offloads just that one item's judgment to a subagent. Or, if `--agent-decide` was passed, let the judge agent decide every item up front — or pre-marked in the report's *Let the agent decide* dropdown/checkbox, which routes just those suggestions to the judge without prompting. See step 6. **Under `--yes` (or `--non-interactive`) this site is never rendered** (D6 row 10): `--yes` sets `--agent-decide` itself, so every item goes through the judged/deferred path up front and no item — and no batched approve-all/skip-all UI — can block.
 5. **Batch Application**: Process each batch with a single subagent:
    - Spawn a Task subagent with the batch prompt
    - Wait for completion before moving to the next batch
@@ -100,7 +100,7 @@ plans/todo/my-feature/
 
 These options reduce manual review for items with `needs-human-decision` status:
 
-- `--claude-decide` (alias `--let-claude-decide`): Let Claude evaluate each `needs-human-decision` item with its own judgment instead of prompting you. This is the non-interactive equivalent of choosing "Let Claude decide" in the review prompt. Unlike the blanket flags below, it is a **per-item** judgment that **salvages partially-valid items** (trims them to their worthwhile core and applies that) rather than skipping them wholesale; only items with nothing worthwhile are skipped (see "Let Claude Decide" Mode in `references/human-decision-batch.md`). It does **not** bypass the no-selection confirmation for valid items — combine with `--no-confirm` for fully unattended runs.
+- `--agent-decide`: Let the judge agent evaluate each `needs-human-decision` item with its own judgment instead of prompting you — the host's own agent on hosts with native subagents, or `driver.subagent_runner` under `--exec-subagents`. This is the non-interactive equivalent of choosing "Let the agent decide" in the review prompt. Unlike the blanket flags below, it is a **per-item** judgment that **salvages partially-valid items** (trims them to their worthwhile core and applies that) rather than skipping them wholesale; only items with nothing worthwhile are skipped (see "Let the Agent Decide" Mode in `references/human-decision-batch.md`). It does **not** bypass the no-selection confirmation for valid items — combine with `--no-confirm` for fully unattended runs. `--agent-decide` / `--let-claude-decide` are accepted legacy spellings.
 - `--approve-all-low`: Auto-approve all LOW importance items
 - `--approve-all`: Auto-approve ALL items (requires `--yes` or `--force`)
 - `--skip-all-human`: Skip all `needs-human-decision` and `validation_failed` items
@@ -362,9 +362,9 @@ uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metr
 
 Follow the human decision batch mode process in `references/human-decision-batch.md`.
 
-**Auto-route report-pre-marked items first**: before prompting for anything, partition `needs_human_review` into (a) the **pre-marked Claude set** — every suggestion whose `group_id` is in `human_review_config.claude_decide_item_ids` or that carries `decision_mode == "claude_auto_decide"` — and (b) the remaining **interactive set**. Run **"Let Claude Decide" Mode** (per the criteria in `references/human-decision-batch.md`) on the pre-marked Claude set **without any prompt**, then handle only the interactive set with the flow below. These suggestions were chosen in the report's "Let Claude decide" dropdown/checkbox; they are the per-item equivalent of `--claude-decide` scoped to just those suggestions.
+**Auto-route report-pre-marked items first**: before prompting for anything, partition `needs_human_review` into (a) the **pre-marked judge set** — every suggestion whose `group_id` is in `human_review_config.claude_decide_item_ids` or that carries `decision_mode == "claude_auto_decide"` — and (b) the remaining **interactive set**. Run **"Let the Agent Decide" Mode** (per the criteria in `references/human-decision-batch.md`) on the pre-marked judge set **without any prompt**, then handle only the interactive set with the flow below. These suggestions were chosen in the report's "Let the agent decide" dropdown/checkbox; they are the per-item equivalent of `--agent-decide` scoped to just those suggestions.
 
-**Check `human_review_config.decision_mode` first**: if it is `"claude_auto_decide"` (the user passed `--claude-decide`), do NOT prompt the user — go straight to "Let Claude Decide" Mode and evaluate every `needs-human-decision` item autonomously per the criteria in that reference. By default, **partially-valid items are salvaged** (rewritten to their worthwhile core and applied) rather than skipped; only items with nothing worthwhile are skipped entirely.
+**Check `human_review_config.decision_mode` first**: if it is `"claude_auto_decide"` (the user passed `--agent-decide`), do NOT prompt the user — go straight to "Let the Agent Decide" Mode and evaluate every `needs-human-decision` item autonomously per the criteria in that reference. By default, **partially-valid items are salvaged** (rewritten to their worthwhile core and applied) rather than skipped; only items with nothing worthwhile are skipped entirely.
 
 Context line for individual review display: `Type: {type}, Section: {reference}`
 
@@ -383,7 +383,7 @@ After all batches are processed, create `{prefix}_applied_suggestions.md`:
 - Suggestions applied: N
 - Suggestions skipped: N
 - Human decisions made: N
-- Decided by Claude: N (A approved, V salvaged, S skipped) — includes `--claude-decide`, the batch "Let Claude decide" option, and per-item "Let Claude decide" selections
+- Decided by the judge agent: N (A approved, V salvaged, S skipped) — includes `--agent-decide`, the batch "Let the agent decide" option, and per-item "Let the agent decide" selections
 
 ## Batching Efficiency
 - Total suggestions: N
@@ -405,9 +405,11 @@ After all batches are processed, create `{prefix}_applied_suggestions.md`:
 ### Batch 2 (Section: step_4)
 ...
 
-## Decided by Claude
+## Decided by the judge agent
 
-Items whose decision was offloaded to Claude — via `--claude-decide`, the batch "Let Claude decide" option, or a per-item "Let Claude decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `claude_auto_decide` or `claude_auto_decide_salvage`. Omit this section if there are none.
+judge: {judge}
+
+Items whose decision was offloaded to the judge agent — via `--agent-decide`, the batch "Let the agent decide" option, or a per-item "Let the agent decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `claude_auto_decide` or `claude_auto_decide_salvage`. Omit this section if there are none. `{judge}` is the runner spec that actually judged (e.g. `codex:gpt-6-astra` under `--exec-subagents`), or the host agent on a host with native subagents.
 
 ### [Suggestion Title] ({importance}) — Approved
 **Reason**: {reason}
@@ -433,7 +435,7 @@ Items whose decision was offloaded to Claude — via `--claude-decide`, the batc
    ```
    Include the output (if non-empty) at the end of the summary report.
 
-   **Then update the HTML review report** so the decisions show up there too. This overlays every human/Claude decision recorded in `state.json` onto the existing `{plan}/review-plan/report.html`, giving each finding an **Approved / Salvaged / Skipped** badge plus an expandable detail with the kept/dropped notes:
+   **Then update the HTML review report** so the decisions show up there too. This overlays every human/judge-agent decision recorded in `state.json` onto the existing `{plan}/review-plan/report.html`, giving each finding an **Approved / Salvaged / Skipped** badge plus an expandable detail with the kept/dropped notes:
    ```bash
    uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/html_report_generator.py" \
      regenerate-decisions \

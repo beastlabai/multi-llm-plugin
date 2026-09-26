@@ -681,13 +681,18 @@ class TestApplyPhaseRows:
         args = argparse.Namespace(yes=True, claude_decide=False)
         apply_unattended_defaults(args)
         assert args.claude_decide is True, (
-            "D5a row 10: --yes sets both --claude-decide and --no-confirm"
+            "D5a row 10: --yes sets both --agent-decide and --no-confirm"
         )
 
     def test_without_yes_nothing_is_added(self):
         args = argparse.Namespace(yes=False, claude_decide=False)
         apply_unattended_defaults(args)
         assert args.claude_decide is False
+
+    def test_row_10_names_agent_decide_and_accepts_the_legacy_spellings(self):
+        assert un.row(10).flags[0] == "--agent-decide"
+        for spelling in ("--agent-decide", "--claude-decide", "--let-claude-decide"):
+            assert un.flag_spec(spelling).name == "--agent-decide"
 
     def test_an_explicit_claude_decide_is_untouched(self):
         args = argparse.Namespace(yes=True, claude_decide=True)
@@ -1268,7 +1273,8 @@ class TestApplyPhaseRowsAreRecorded:
         _stub_apply_run(tmp_path, yes=True)
         out = capsys.readouterr().out
         assert f"[AUTO_RESOLVED] {un.row(10).site_id}:" in out
-        assert "--claude-decide" in out
+        assert "--agent-decide" in out
+        assert "--claude-decide" not in out
 
     def test_applying_everything_unasked_announces_itself(self, tmp_path, capsys):
         """Row 11: the decision a `--yes` apply run actually makes."""

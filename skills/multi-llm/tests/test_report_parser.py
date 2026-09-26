@@ -2328,8 +2328,48 @@ class TestMergeConsolidatedSelections:
         assert all(isinstance(s, str) for s in skipped)
         assert all(isinstance(k, str) and isinstance(v, str) for k, v in overrides.items())
 
+class TestParseAgentDecideOverrides:
+    """`Let the agent decide` checkbox -> "claude_decide" across all parsers."""
+
+    def test_group(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""## G1 [aabb000000000001]: Theme
+- [ ] Mark valid
+- [x] Let the agent decide
+""", encoding="utf-8")
+        assert parse_validation_overrides_groups(str(report)) == {
+            "aabb000000000001": "claude_decide"}
+
+    def test_suggestion(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""### G1S1 [ccdd000000000001]: Title
+- [ ] Mark valid
+- [x] Let the agent decide
+""", encoding="utf-8")
+        assert parse_suggestion_validation_overrides(str(report)) == {
+            "ccdd000000000001": "claude_decide"}
+
+    def test_issue(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""### 1. Title
+- [ ] Mark valid
+- [x] Let the agent decide
+""", encoding="utf-8")
+        assert parse_validation_overrides_issues(str(report)) == {1: "claude_decide"}
+
+    def test_consolidated(self, tmp_path):
+        report = tmp_path / "report.md"
+        report.write_text("""## CG1 [abc123def456]: Section
+- [ ] Mark valid
+- [x] Let the agent decide
+""", encoding="utf-8")
+        assert parse_consolidated_validation_overrides(str(report)) == {
+            "abc123def456": "claude_decide"}
+
+
 class TestParseClaudeDecideOverrides:
-    """`Let Claude decide` checkbox -> "claude_decide" across all parsers."""
+    """The legacy `Let Claude decide` wording, as reports already on disk carry it,
+    still maps to "claude_decide" across all parsers."""
 
     # --- Group parser ---
     def test_group_claude_decide(self, tmp_path):

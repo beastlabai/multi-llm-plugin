@@ -276,6 +276,13 @@ class TestWorkerCommand:
         assert env["MULTI_LLM_SKILL_DIR"] == str(SKILL_ROOT)
         assert env[detach.WORKER_ENV] == "1"
 
+    def test_the_session_model_reaches_the_detached_worker(self, monkeypatch):
+        """A host plugin sets it on the launcher; the worker's ladder reads it."""
+        from utils.provider_registry import HOST_SESSION_MODEL_ENV
+
+        monkeypatch.setenv(HOST_SESSION_MODEL_ENV, "gpt-5.5")
+        assert detach.child_env(base=SKILL_ROOT)[HOST_SESSION_MODEL_ENV] == "gpt-5.5"
+
 
 def _fake_uv(tmp_path: Path) -> Path:
     path = tmp_path / "fake-uv"

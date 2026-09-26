@@ -2253,6 +2253,7 @@ def _normalize_human_decision(record: Dict[str, Any]) -> Dict[str, Any]:
         "salvagedDescription": bc.get("salvaged_description", "") or "",
         "dropped": bc.get("dropped", "") or "",
         "importanceAtDecision": bc.get("importance_at_decision", "") or "",
+        "judge": bc.get("judge", "") or "",
     }
 
 
@@ -2387,7 +2388,7 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     parser = argparse.ArgumentParser(
         description=(
-            "Regenerate an HTML review report with human/Claude decisions overlaid."
+            "Regenerate an HTML review report with human/judge-agent decisions overlaid."
         )
     )
     sub = parser.add_subparsers(dest="command", required=True)

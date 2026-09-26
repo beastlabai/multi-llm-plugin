@@ -47,7 +47,7 @@ plans/todo/my-feature/                           # Output folder
 - **invalid** (x): False positive, can be ignored
 - **needs-human-decision** (?): Requires human judgment
 
-When items have `needs-human-decision` status, Claude should use `AskUserQuestion` to get user input on how to proceed. **Under `--yes` (or `--non-interactive`) nothing is asked** (D6 row 10): the items travel to the apply phase, which runs with `--claude-decide --no-confirm` and routes every one of them through the judged/deferred path, so no item blocks.
+When items have `needs-human-decision` status, Claude should use `AskUserQuestion` to get user input on how to proceed. **Under `--yes` (or `--non-interactive`) nothing is asked** (D6 row 10): the items travel to the apply phase, which runs with `--agent-decide --no-confirm` and routes every one of them through the judged/deferred path, so no item blocks.
 
 ---
 

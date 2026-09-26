@@ -529,7 +529,7 @@ def ensure_prerequisites(
     2. *Inside the workflow* (``in_workflow`` with an ``apply_runner``) — run the
        missing apply phase **once**, then re-check. If the apply phase exits
        non-zero, or exits 0 but the re-check still reports the prerequisite unmet
-       (e.g. items left ``needs-human-decision`` that ``--claude-decide`` could
+       (e.g. items left ``needs-human-decision`` that ``--agent-decide`` could
        not resolve), stop with exit 3 naming the unresolved items. The auto-run is
        attempted at most once per phase per run: a second unmet re-check is exit
        3, not a retry.

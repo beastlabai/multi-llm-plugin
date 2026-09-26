@@ -257,7 +257,8 @@ class TestSequence:
         assert multi_llm.main(["full", str(plan), "--yes"]) == 0
         capsys.readouterr()
         flags = dict(calls)["apply-suggestions"]
-        assert "--no-confirm" in flags and "--claude-decide" in flags
+        assert "--no-confirm" in flags and "--agent-decide" in flags
+        assert "--claude-decide" not in flags
         assert "--yes" in flags
 
     def test_detach_and_internal_flags_are_never_forwarded(

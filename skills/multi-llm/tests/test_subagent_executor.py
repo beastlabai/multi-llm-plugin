@@ -1376,6 +1376,7 @@ class TestEveryKindReachesItsConsumer:
             build_judge_tasks,
             ingest_verdicts,
             judge_item_from_group,
+            judge_labels,
             record_verdicts,
         )
 
@@ -1413,19 +1414,25 @@ class TestEveryKindReachesItsConsumer:
             def record_human_decision(self, **kwargs):
                 recorded.update(kwargs)
 
+        # The judge is the runner the executor actually dispatched.
+        judges = judge_labels(str(tmp_path), ingest.sources)
+        assert judges == {"aaaa000000000000": "codex:gpt-5.5"}
         record_verdicts(
             state=FakeState(), phase="apply-suggestions", ingest=ingest,
-            items_by_group={"aaaa000000000000": item},
+            items_by_group={"aaaa000000000000": item}, judges=judges,
         )
         assert recorded["decision"] == "approved"
+        assert recorded["reason"].startswith("Agent decide [codex:gpt-5.5]: ")
+        assert "Claude" not in recorded["reason"]
 
         valid, skipped, needs_human = [], [], [group]
         counts = apply_verdicts_to_work_set(
             verdicts=ingest.verdicts, needs_human=needs_human,
-            valid=valid, skipped=skipped,
+            valid=valid, skipped=skipped, judges=judges,
         )
         assert counts["approved"] == 1
         assert valid and valid[0]["validation_status"] == "valid"
+        assert valid[0]["judge"] == "codex:gpt-5.5"
 
     def test_consolidation_reaches_the_merge(self, tmp_path, runner_env):
         from utils.consolidation import merge_consolidation_results
@@ -4157,6 +4164,25 @@ class TestModelCatalogPreflight:
             plan, views=[{"run": {}, "progress": {}}]
         )[1]
 
+    def test_a_codex_poll_names_the_session_model_and_its_layer(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The codex plugin's polls carry the turn's model; another host's never do."""
+        from utils import run_status
+
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, "gpt-5.5")
+        plan = tmp_path / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        view = {"run": {"host": "codex"}, "progress": {}}
+        assert run_status.render_runner_text(plan, host_id="codex", views=[view])[
+            1].strip() == "codex:gpt-5.5  (supplied by session)"
+        monkeypatch.delenv("MULTI_LLM_HOST", raising=False)
+        assert run_status.render_runner_text(plan, views=[view])[1].strip() == (
+            "codex:gpt-6-astra  (supplied by host capabilities)"
+        )
+
     def test_the_runner_a_run_really_dispatched_to_beats_a_fresh_resolution(
         self, tmp_path, runner_env, monkeypatch
     ):
@@ -4750,6 +4776,35 @@ class TestSandboxUnavailable:
         assert executor._SANDBOX_DECISIONS == {}
         assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
         assert provider.sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
+
+    def test_a_codex_session_model_write_falls_to_the_floor_which_is_refused_too(
+        self, tmp_path, runner_env, monkeypatch, capsys
+    ):
+        """No bwrap: the session rung falls through by name, then the floor refuses."""
+        _no_driver_layer(monkeypatch)
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        monkeypatch.setenv("MULTI_LLM_HOST", "codex")
+        monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, "gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            self._broken_probe_for(PROFILE_AGENT_WRITE),
+        )
+        self._no_dispatch(monkeypatch)
+        task = _validation_batch(tmp_path)
+        resolved = {task["task_id"]: executor._resolve_task_source(task)}
+        assert resolved[task["task_id"]][::2] == ("codex:gpt-5.5", registry.SESSION_LAYER)
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor._preflight_batch_runners(
+                resolved, {task["task_id"]: task}, profile=PROFILE_AGENT_WRITE)
+        assert excinfo.value.reason_code == "sandbox_unavailable"
+        assert excinfo.value.spec == "codex:gpt-6-astra"
+        assert (
+            "[exec-subagents] session model codex:gpt-5.5 failed preflight "
+            "(sandbox_unavailable); falling back to codex:gpt-6-astra "
+            f"({registry.HOST_DEFAULT_LAYER})"
+        ) in capsys.readouterr().out
 
     def test_an_unknown_verdict_never_widens_under_auto(
         self, tmp_path, runner_env, monkeypatch, capsys

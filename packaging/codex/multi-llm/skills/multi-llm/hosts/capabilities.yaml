@@ -244,14 +244,9 @@ hosts:
     detach: python
     native_tool:
       subagents: agent
-    # No session rung. `codex exec` does take `--model`, so the CLI half would
-    # work — what is missing is the other half: nothing in this host's skill
-    # surface hands the running session's selected model to the dispatcher, so
-    # there is no value to promote. An explicit `null` rather than an omission,
-    # because "this host has no session rung" is a fact worth stating; the day
-    # codex exposes the session model, this becomes `codex` and the ladder needs
-    # no edit.
-    session_runner_provider: null
+    # The plugin's server exports the turn metadata's `model` (codex 0.156.1 sent `--model
+    # stub-model` as `"model": "stub-model"`, 2026-09-25 package rows); no effort key rides along.
+    session_runner_provider: codex
     # UNVALIDATED MODEL ID — THE ROSTER OWNS THE ID; THIS PIN FOLLOWS IT. This is
     # a credential-free floor (the last rung of `resolve_subagent_runner`'s
     # ladder, chosen so a zero-config install dispatches at all), not an
@@ -346,7 +341,7 @@ hosts:
       ask: documented
       detach: documented
       native_tool: documented
-      session_runner_provider: documented
+      session_runner_provider: verified   # the model key in codex-package-sandbox-posture's mcp-tap
       default_subagent_runner: documented
       subagent_tiers: documented
       runners: documented

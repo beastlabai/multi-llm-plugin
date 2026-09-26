@@ -28,6 +28,8 @@ from utils.human_decisions import (  # noqa: E402
     group_id_of,
     ingest_verdicts,
     judge_item_from_group,
+    judge_labels,
+    native_judge_label,
     read_verdict_files,
     record_verdicts,
     substitute_salvaged_description,
@@ -409,7 +411,7 @@ class TestRecording:
         )
         record = state.get_human_decision("apply-suggestions", GROUP_A)
         assert record["decision"] == "approved"
-        assert record["reason"] == "Claude auto-decide: sound"
+        assert record["reason"] == "Agent decide [host agent]: sound"
         context = record["batch_context"]
         assert context["batch_action"] == "claude_auto_decide"
         assert context["decision_source"] == "claude_auto_decide"
@@ -450,7 +452,8 @@ class TestRecording:
         # decision stays "approved" — it approves the rewritten suggestion.
         assert record["decision"] == "approved"
         assert record["reason"] == (
-            "Claude auto-decide (salvaged): kept Only the retry.; dropped the queue"
+            "Agent decide [host agent] (salvaged): kept Only the retry.; "
+            "dropped the queue"
         )
         context = record["batch_context"]
         assert context["batch_action"] == "claude_auto_decide_salvage"
@@ -699,7 +702,7 @@ class TestOrchestratorHook:
         assert entry["group_id"] == GROUP_A
         assert entry["status"] == "claude_skipped"
         assert entry["decision_source"] == "claude_auto_decide"
-        assert entry["reason"].startswith("Claude auto-decide:")
+        assert entry["reason"].startswith("Agent decide [")
 
     def test_unattended_run_skips_a_group_the_judge_did_not_cover(self, tmp_path, capsys):
         """Judging ran but missed one group: --yes skips it with a warning rather
@@ -744,3 +747,94 @@ class TestOrchestratorHook:
         assert orch.valid == []
         # ... and the judging task is re-materialized so it can be re-run.
         assert (phase_dir / JUDGE_TASKS_FILENAME).exists()
+
+
+# ---------------------------------------------------------------------------
+# Who judged: the dispatched runner, threaded from the executor's batch report
+# ---------------------------------------------------------------------------
+
+def _write_judge_report(phase_dir: Path, verdict_path: Path, runner: str,
+                        *, sha256=None, provenance=True):
+    from utils.subagent_executor import batch_report_path
+    from utils.subagent_tasks import file_bytes_sha256
+
+    task_id = "human_decision_judge-35de02e4a6f6514e"
+    report = {
+        "report_version": 1,
+        "kind": "human_decision_judge",
+        "runner_versions": {runner: "0.157.0"},
+        "tasks": [{"task_id": task_id, "kind": "human_decision_judge",
+                   "runner": runner, "status": "ok",
+                   "output_path": str(verdict_path)}],
+    }
+    if provenance:
+        report["batch_provenance"] = {task_id: {
+            "task_id": task_id, "kind": "human_decision_judge", "round": "r",
+            "runner": runner,
+            "sha256": sha256 or file_bytes_sha256(str(verdict_path)),
+        }}
+    Path(batch_report_path(str(phase_dir), "human_decision_judge")).write_text(
+        json.dumps(report), encoding="utf-8")
+
+
+class TestTheJudgeIsNamed:
+    RUNNER = "codex:gpt-6-astra"
+
+    def _ingest(self, tmp_path, decision=DECISION_APPROVE):
+        path = _write_verdicts(tmp_path, 0, [_verdict(GROUP_A, decision, "sound")])
+        ingest = ingest_verdicts(phase_dir=str(tmp_path), expected_group_ids=[GROUP_A])
+        return ingest, path
+
+    def test_the_dispatched_runner_is_the_judge(self, tmp_path):
+        ingest, path = self._ingest(tmp_path)
+        _write_judge_report(tmp_path, path, self.RUNNER)
+        assert judge_labels(str(tmp_path), ingest.sources) == {GROUP_A: self.RUNNER}
+
+    @pytest.mark.parametrize("decision", [DECISION_APPROVE, DECISION_SALVAGE, DECISION_SKIP])
+    def test_recorded_reason_names_the_runner_and_never_claude(self, tmp_path, decision):
+        ingest, path = self._ingest(tmp_path, decision)
+        _write_judge_report(tmp_path, path, self.RUNNER)
+        judges = judge_labels(str(tmp_path), ingest.sources, fallback="host agent")
+        state = StateManager(tmp_path / "plan.md")
+        written = record_verdicts(state=state, phase="apply-suggestions",
+                                  ingest=ingest, items_by_group={}, judges=judges)
+        record = written[GROUP_A]
+        assert record["reason"].startswith(f"Agent decide [{self.RUNNER}]")
+        assert "Claude" not in record["reason"]
+        assert record["batch_context"]["judge"] == self.RUNNER
+        # Persisted vocabulary is unchanged for old readers.
+        assert record["batch_context"]["decision_source"].startswith("claude_auto_decide")
+
+        needs, valid, skipped = [_group(GROUP_A)], [], []
+        apply_verdicts_to_work_set(verdicts=ingest.verdicts, needs_human=needs,
+                                   valid=valid, skipped=skipped, judges=judges)
+        group = (valid or skipped)[0]
+        assert group["judge"] == self.RUNNER
+        text = group.get("auto_approval_reason") or group.get("reason")
+        assert text.startswith(f"Agent decide [{self.RUNNER}]: ")
+
+    def test_a_file_rewritten_since_the_dispatch_is_not_credited(self, tmp_path):
+        ingest, path = self._ingest(tmp_path)
+        _write_judge_report(tmp_path, path, self.RUNNER, sha256="0" * 64)
+        assert judge_labels(str(tmp_path), ingest.sources,
+                            fallback="opencode host agent") == {
+            GROUP_A: "opencode host agent"}
+
+    def test_no_report_means_the_host_agent_judged(self, tmp_path):
+        ingest, _ = self._ingest(tmp_path)
+        assert judge_labels(str(tmp_path), ingest.sources) == {GROUP_A: "host agent"}
+
+    def test_native_label(self):
+        assert native_judge_label("claude-code") == "claude-code host agent"
+        assert native_judge_label(None) == "host agent"
+
+    def test_the_orchestrator_threads_the_runner_to_ingestion(self, tmp_path, capsys):
+        orch, phase_dir = TestOrchestratorHook._orchestrator(self, tmp_path)
+        orch.needs_human = [_group(GROUP_A)]
+        path = _write_verdicts(phase_dir, 0, [_verdict(GROUP_A, DECISION_APPROVE)])
+        _write_judge_report(phase_dir, path, self.RUNNER)
+        orch._handle_human_decisions()
+        record = orch.state.get_human_decision("apply-suggestions", GROUP_A)
+        assert record["batch_context"]["judge"] == self.RUNNER
+        assert record["reason"].startswith(f"Agent decide [{self.RUNNER}]: ")
+        assert self.RUNNER in capsys.readouterr().err

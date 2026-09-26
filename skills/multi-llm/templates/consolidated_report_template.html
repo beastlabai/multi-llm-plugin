@@ -1270,7 +1270,7 @@
           '<option value="invalid"' + (overrideVal === 'invalid' ? ' selected' : '') + '>Mark Invalid</option>' +
           '<option value="needs-human-decision"' + (overrideVal === 'needs-human-decision' ? ' selected' : '') + '>Needs Human Attention</option>' +
           (validationStatus === 'needs-human-decision' ?
-            '<option value="claude_decide"' + (overrideVal === 'claude_decide' ? ' selected' : '') + '>Let Claude decide</option>' : '') +
+            '<option value="claude_decide"' + (overrideVal === 'claude_decide' ? ' selected' : '') + '>Let the agent decide</option>' : '') +
           '</select>' +
           '<label class="skip-control">' +
           '<input type="checkbox" data-cg-id="' + escapeHtml(cgId) + '"' + (isSkipped ? ' checked' : '') + '>' +

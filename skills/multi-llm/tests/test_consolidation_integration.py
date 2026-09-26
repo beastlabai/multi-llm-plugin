@@ -960,7 +960,7 @@ class TestConsolidatedClaudeDecide:
             [cg], groups, str(tmp_path), "feat", validation=validation
         )
         content = Path(path).read_text(encoding="utf-8")
-        assert "- [ ] Let Claude decide" in content
+        assert "- [ ] Let the agent decide" in content
 
     def test_omit_checkbox_for_valid(self, tmp_path):
         """No checkbox when the aggregate status is not needs-human-decision."""
@@ -971,7 +971,7 @@ class TestConsolidatedClaudeDecide:
             [cg], groups, str(tmp_path), "feat", validation=validation
         )
         content = Path(path).read_text(encoding="utf-8")
-        assert "- [ ] Let Claude decide" not in content
+        assert "- [ ] Let the agent decide" not in content
         # The existing checkboxes are still present.
         assert "- [ ] Mark valid" in content
 

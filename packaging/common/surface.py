@@ -576,9 +576,10 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
             "instructions": ["util", "instructions"],
             "host_option": "--host",
             "run_id_option": RUN_ID_OPTION,
-            # The variable the plugin sets to the model the OpenCode session is
-            # itself running on, read back off the session's newest assistant
-            # message. Python owns the name (`provider_registry`), because
+            # The variable the plugin sets to the model the host session is
+            # itself running on, read back off the OpenCode session's newest
+            # assistant message, or codex's per-call turn metadata `model`.
+            # Python owns the name (`provider_registry`), because
             # `resolve_subagent_runner` is the only thing that reads it: the
             # plugin's job is to *observe* the session model and the ladder's is
             # to decide what that means. Without this the run dispatches the
