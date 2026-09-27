@@ -824,12 +824,35 @@ class TestTheJudgeIsNamed:
         ingest, _ = self._ingest(tmp_path)
         assert judge_labels(str(tmp_path), ingest.sources) == {GROUP_A: "host agent"}
 
+    def test_a_report_without_provenance_cannot_credit_rewritten_verdicts(self, tmp_path):
+        ingest, path = self._ingest(tmp_path)
+        _write_judge_report(tmp_path, path, self.RUNNER, provenance=False)
+        _write_verdicts(tmp_path, 0, [_verdict(GROUP_A, DECISION_SKIP, "rewritten")])
+        assert judge_labels(str(tmp_path), ingest.sources,
+                            fallback="claude-code host agent") == {
+            GROUP_A: "claude-code host agent"}
+
     def test_native_label(self):
         assert native_judge_label("claude-code") == "claude-code host agent"
         assert native_judge_label(None) == "host agent"
 
+    @pytest.mark.parametrize("executor_flag", ["exec_subagents", "detach"])
+    def test_unrecorded_executor_is_not_credited_to_the_host(self, tmp_path, capsys,
+                                                           executor_flag):
+        orch, phase_dir = TestOrchestratorHook._orchestrator(self, tmp_path)
+        orch.args.host = "codex"
+        setattr(orch.args, executor_flag, True)
+        orch.needs_human = [_group(GROUP_A)]
+        _write_verdicts(phase_dir, 0, [_verdict(GROUP_A, DECISION_APPROVE)])
+        orch._handle_human_decisions()
+        record = orch.state.get_human_decision("apply-suggestions", GROUP_A)
+        assert record["batch_context"]["judge"] == "executor (runner unrecorded)"
+        assert orch.valid[0]["judge"] == "executor (runner unrecorded)"
+        assert "executor (runner unrecorded)" in capsys.readouterr().err
+
     def test_the_orchestrator_threads_the_runner_to_ingestion(self, tmp_path, capsys):
         orch, phase_dir = TestOrchestratorHook._orchestrator(self, tmp_path)
+        orch.args.exec_subagents = True
         orch.needs_human = [_group(GROUP_A)]
         path = _write_verdicts(phase_dir, 0, [_verdict(GROUP_A, DECISION_APPROVE)])
         _write_judge_report(phase_dir, path, self.RUNNER)

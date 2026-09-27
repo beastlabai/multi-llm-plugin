@@ -46,9 +46,7 @@ from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 try:  # normal import (utils is a package)
     from .cli_common import (
         AGENT_DECIDE_FLAG,
-        AGENT_DECIDE_SPELLINGS,
         LEGACY_AGENT_DECIDE_FLAGS,
-        canonical_flag,
         EXIT_NEEDS_HUMAN,
         EXIT_OK,
         STATE_PARTIAL,
@@ -58,9 +56,7 @@ try:  # normal import (utils is a package)
 except ImportError:  # pragma: no cover - direct script runs with utils/ on path
     from cli_common import (  # type: ignore
         AGENT_DECIDE_FLAG,
-        AGENT_DECIDE_SPELLINGS,
         LEGACY_AGENT_DECIDE_FLAGS,
-        canonical_flag,
         EXIT_NEEDS_HUMAN,
         EXIT_OK,
         STATE_PARTIAL,

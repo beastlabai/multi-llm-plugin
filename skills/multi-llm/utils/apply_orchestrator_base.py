@@ -1670,8 +1670,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             items_by_group = {
                 group_id_of(g): judge_item_from_group(g) for g in scope
             }
-            native = native_judge_label(self._host_id())
-            judges = judge_labels(phase_dir, ingest.sources, fallback=native)
+            fallback_judge = (
+                "executor (runner unrecorded)"
+                if (getattr(self.args, "exec_subagents", False)
+                    or getattr(self.args, "detach", False))
+                else native_judge_label(self._host_id())
+            )
+            judges = judge_labels(phase_dir, ingest.sources, fallback=fallback_judge)
             if self.state is not None:
                 record_verdicts(
                     state=self.state,
@@ -1679,7 +1684,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     ingest=ingest,
                     items_by_group=items_by_group,
                     judges=judges,
-                    default_judge=native,
+                    default_judge=fallback_judge,
                 )
                 self.state.save()
             counts = apply_verdicts_to_work_set(
@@ -1688,7 +1693,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 valid=self.valid,
                 skipped=self.skipped,
                 judges=judges,
-                default_judge=native,
+                default_judge=fallback_judge,
             )
             print(
                 f"Ingested judge decisions ({', '.join(sorted(set(judges.values())))}): "
