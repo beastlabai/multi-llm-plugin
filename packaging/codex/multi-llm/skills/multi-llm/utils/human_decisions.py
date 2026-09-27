@@ -430,15 +430,14 @@ def judge_labels(
             path, runner = row.get("output_path"), row.get("runner")
             if not path or not runner:
                 continue
-            if isinstance(provenance, dict):
-                prov = provenance.get(str(row.get("task_id")))
-                if not isinstance(prov, dict) or not prov.get("sha256"):
-                    continue
-                if file_bytes_sha256(path) != prov["sha256"]:
-                    continue
-                runner = prov.get("runner") or runner
-            elif row.get("status") != "ok":
+            if not isinstance(provenance, dict):
                 continue
+            prov = provenance.get(str(row.get("task_id")))
+            if not isinstance(prov, dict) or not prov.get("sha256"):
+                continue
+            if file_bytes_sha256(path) != prov["sha256"]:
+                continue
+            runner = prov.get("runner") or runner
             runner_by_path[os.path.realpath(path)] = str(runner)
     return {
         group_id: runner_by_path.get(os.path.realpath(path), fallback)

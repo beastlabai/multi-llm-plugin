@@ -88,7 +88,7 @@ The evaluation is identical in every case; only the *set of items* it runs on di
 
 Always judge in a **subagent**, never inline in the main conversation — the reasoning is token-heavy and would crowd the main agent's context. The main agent stays responsible for *applying* and *recording*. Judging is complex reasoning: use the **full model**, never a cheap tier. Only a pure-orchestration fan-out coordinator (which writes no verdict) may be downgraded.
 
-**The judge is not necessarily Claude.** It is whichever agent runs the judging tasks: the host's own agent (through its native subagent tool) on a host that has one, or the runner `driver.subagent_runner` resolves to under `--exec-subagents` — `codex:gpt-6-astra` by default on Codex. Wherever this file writes `{judge}`, fill in that runner spec (or name the host agent), and never tell the user "Claude is deciding" unless Claude actually is the judge.
+**The judge is not necessarily Claude.** It is whichever agent runs the judging tasks: the host's own agent (through its native subagent tool) on a host that has one, or the runner `driver.subagent_runner` resolves to under `--exec-subagents` — the session model on Codex when available, with `codex:gpt-6-astra` as the host fallback. An explicit `driver.subagent_runner` takes precedence. Wherever this file writes `{judge}`, fill in that runner spec (or name the host agent), and never tell the user "Claude is deciding" unless Claude actually is the judge.
 
 The rules below travel **inside** `task.prompt`, not as a pointer to this file: a headless runner may have no way to open it. They are rendered from `HUMAN_DECISION_JUDGE_RULES` in `utils/subagent_prompts.py`, which is the single source of truth — a test fails when this block and that constant diverge.
 
@@ -166,6 +166,7 @@ Approve / skip:
   "timestamp": "...",
   "batch_context": {
     "batch_id": "{generated}",
+    "judge": "{judge}",
     "batch_action": "claude_auto_decide",
     "decision_source": "claude_auto_decide",
     "importance_at_decision": "{importance}"
@@ -182,6 +183,7 @@ Salvage (note `decision` stays `"approved"`):
   "timestamp": "...",
   "batch_context": {
     "batch_id": "{generated}",
+    "judge": "{judge}",
     "batch_action": "claude_auto_decide_salvage",
     "decision_source": "claude_auto_decide_salvage",
     "importance_at_decision": "{importance}",
