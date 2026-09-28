@@ -83,6 +83,17 @@ prints the path), so you can port any custom settings into the regenerated file.
   `poll_s` has **no** disable form (`0` is rejected, since it would mean a poll
   that returns instantly rather than one switched off), and an unknown key under
   `progress:` is rejected at load rather than silently keeping the default.
+- **`code_review.collapse_paths` decides which changed files reviewers skim.**
+  `review-code` sorts its scope into source, tests, fixtures and generated
+  files, in that order, and writes a whole per-file diff for every source and
+  test file to its phase dir (`code-review/review-scope.md` and
+  `code-review/diff/`). Fixtures and generated files are listed one line per
+  directory, with no diff. A path is generated when `.gitattributes` gives it
+  `linguist-generated`, or when it matches a `generated` glob here; it is a
+  fixture when it matches a `fixtures` glob. The defaults are `generated: []`
+  and `fixtures: ["**/tests/fixtures/**", "**/tests/golden/**"]`; a project can
+  add, say, `**/*.lock` or `dist/**` so a huge machine-written file is never
+  handed to reviewers as a diff. A malformed value is rejected at load.
 
 ## Safety
 

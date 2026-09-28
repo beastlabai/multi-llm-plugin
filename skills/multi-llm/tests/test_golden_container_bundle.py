@@ -580,7 +580,8 @@ class TestCaptureReadsAnExportedRowBundle:
     def test_a_non_duration_number_still_grades_its_type(self, bundle_dir):
         """The fold is by named key, never a global number fold: a counter or a
         configured `timeout_s` that changes int↔float is still a diff."""
-        assert container_bundle.MEASURED_DURATION_KEYS == frozenset({"elapsed_s"})
+        assert container_bundle.MEASURED_DURATION_KEYS == frozenset(
+            {"elapsed_s", "queued_s"})
         for key in ("timeout_s", "interval_s", "models_done", "cost_usd"):
             as_int = self._status_shape(bundle_dir, {key: 2})
             as_float = self._status_shape(bundle_dir, {key: 2.5})

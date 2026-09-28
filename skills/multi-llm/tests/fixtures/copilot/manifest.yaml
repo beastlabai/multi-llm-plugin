@@ -73,6 +73,7 @@ rows:
         - '"type":"assistant.message"'
         - '"type":"result"'
       classify_failure: null
+      salvage: answer
 
   truncated:
     stdout: truncated.jsonl
@@ -91,6 +92,7 @@ rows:
       error_contains: ["no assistant.message record in copilot output"]
       raw_contains: ["model.call_start"]
       classify_failure: null
+      salvage: none  # killed at model.call_start, before any assistant text
 
   truncated-mid-echo:
     stdout: truncated-mid-echo.jsonl
@@ -123,6 +125,7 @@ rows:
       error_contains: ["no assistant.message record in copilot output"]
       raw_contains: ['{"type":"user.message"', "rate-limit"]
       classify_failure: null
+      salvage: none
 
   ephemeral-only:
     stdout: ephemeral-only.jsonl
@@ -143,6 +146,7 @@ rows:
       success: false
       error_contains: ["no assistant.message record in copilot output"]
       classify_failure: null
+      salvage: none
 
   multi-assistant:
     stdout: multi-assistant.jsonl
@@ -166,6 +170,7 @@ rows:
         - {id: "S002", title: "Strip the vendor token", severity: "medium"}
       raw_contains: ["FIRST ANSWER (must NOT be selected)"]
       classify_failure: null
+      salvage: answer
 
   error-envelope:
     not_applicable: >-
@@ -193,6 +198,7 @@ rows:
       error_contains: ["copilot returned an empty assistant message"]
       raw_contains: ['"exitCode":0']
       classify_failure: null
+      salvage: none  # the one assistant message is empty
 
   stdout-error:
     not_applicable: >-
@@ -218,6 +224,7 @@ rows:
       success: false
       error_contains: ["Empty output from copilot"]
       classify_failure: null
+      salvage: none
 
   auth-error:
     stdout: auth-error.jsonl
@@ -234,6 +241,7 @@ rows:
       raw_contains:
         - '"errorType":"authentication"'
       classify_failure: "auth_failed"
+      salvage: none
 
   rate-limit:
     stdout: rate-limit.jsonl
@@ -251,6 +259,7 @@ rows:
         - '"errorType":"rate_limit"'
         - "retried 5 times"
       classify_failure: "rate_limited"
+      salvage: none
 
   invalid-model:
     stdout: invalid-model.jsonl
@@ -267,6 +276,7 @@ rows:
       error_contains: ["query (HTTP 404)"]
       raw_contains: ["Model 'gpt-5.5' not found on provider"]
       classify_failure: "invalid_model"
+      salvage: none
 
   context-overflow:
     stdout: context-overflow.jsonl
@@ -284,6 +294,7 @@ rows:
       error_contains: ["query (HTTP 400)"]
       raw_contains: ["maximum context length is 8192 tokens"]
       classify_failure: "context_length_exceeded"
+      salvage: none
 
   # ----- beyond §6.2's twelve, graded the same way -------------------------- #
 
@@ -304,6 +315,7 @@ rows:
         - {id: "S002", title: "Strip the vendor token", severity: "medium"}
       raw_contains: ['"type":"assistant.message"']
       classify_failure: null
+      salvage: answer
 
   success-silent:
     stdout: success-silent.txt
@@ -321,3 +333,4 @@ rows:
       error_contains: ["no assistant.message record in copilot output"]
       raw_contains: ["S001"]
       classify_failure: null
+      salvage: answer  # no copilot record, so no reducer: the raw text holds the array

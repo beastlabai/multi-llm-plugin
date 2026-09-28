@@ -2213,7 +2213,10 @@
       var typeCounts = {};
       var modelCounts = {};
       var consensusCount = 0;
-      var failedModels = reportData.failedModels || [];
+      // `failedModels` is a {spec: reason} object, never an array: it has no
+      // `length` and no `join`, which is how this row never rendered at all.
+      var failedModels = reportData.failedModels || {};
+      var failedSpecs = Object.keys(failedModels);
 
       groups.forEach(function(group) {
         var models = group.models || [];
@@ -2295,9 +2298,18 @@
       }
       rightHtml += '</span></div>';
 
-      if (failedModels.length > 0) {
+      if (failedSpecs.length > 0) {
+        // "N of M requested" when the report knows the requested set
+        // (`requestedModels`); the bare count otherwise, never succeeded plus
+        // failed. Then one `model: reason` entry per failed model.
+        var failedCount = (typeof reportData.requestedModels === 'number')
+          ? failedSpecs.length + ' of ' + reportData.requestedModels + ' requested'
+          : failedSpecs.length + (failedSpecs.length === 1 ? ' model' : ' models');
         rightHtml += '<div class="summary-row"><span class="summary-label">Failed models</span><span class="summary-value" style="color: var(--importance-high);">';
-        rightHtml += escapeHtml(failedModels.join(', '));
+        rightHtml += '<div>' + escapeHtml(failedCount) + '</div>';
+        failedSpecs.forEach(function(spec) {
+          rightHtml += '<div>' + escapeHtml(spec + ': ' + failedModels[spec]) + '</div>';
+        });
         rightHtml += '</span></div>';
       }
 

@@ -346,12 +346,16 @@ to bare `python`.
    4. **With `--yes` (or `--non-interactive`): always resume, never ask** (D6
       row 3). Re-run only the missing models with `--force`; never `--rerun-all`
       (it discards work that succeeded). If a model fails a second time in the
-      same run, reaggregate with what exists: the orchestrator prints
-      `[PARTIAL_RESULTS: <model>,…]`, lists the failed models in the report and
-      `.status.json`, sets `MULTI_LLM_RESULT.state: "partial"` and exits **0** —
-      a partial aggregate is usable output. The one exception: if *no* model
+      same run, reaggregate with what exists: the orchestrator — the fan-out or
+      `--reaggregate` alike — prints `[PARTIAL_RESULTS: <model>,…]`, names the
+      failed models and their reasons on the report's `**Models failed:**` line
+      and in `.status.json` (`models_failed`, and the `failed` rows of
+      `progress.models`), sets `MULTI_LLM_RESULT.state: "partial"` and exits
+      **0** — a partial aggregate is usable output, the phase is recorded
+      complete and `next` stays `null`. The one exception: if *no* model
       produced a result there is nothing to aggregate, so it exits **3** naming
-      the retry command.
+      the retry command (a `--reaggregate` does so when the checkpoint records
+      failed models) and records no completed phase.
    5. Without `--yes`, **ask the user**, showing:
       - Which models completed successfully
       - Which models failed or were interrupted
@@ -458,6 +462,8 @@ to bare `python`.
 
    Report the verdict counts from `MULTI_LLM_RESULT.validation_counts` (`{valid, invalid, needs_human_decision, validation_failed}`, present only when validation ran, and carried by `status --view run` too). If `needs_human_decision` or `validation_failed` is non-zero, point at `report.md` for those groups; they are decided in apply-suggestions.
 
+   Name every reviewer that produced nothing, with its reason (`references/summary-format.md`). `report.md` lists them on its `**Models failed:** N of M requested — …` line, directly under `**Models:**`. A `--reaggregate` also prints one `[MODEL_FAILED] <model>: <reason>` line per requested reviewer that still has no result, and, when any is left, prints `[PARTIAL_RESULTS: <model>,…]` and sets `MULTI_LLM_RESULT.state: "partial"` with exit **0**: the phase is still complete and `next` stays `null`, so nothing is retried — report the failures from those lines (or from the `failed` rows of `progress.models`). A `--reaggregate` that finds no readable result at all while reviewers are recorded failed exits **3** naming them and the `--force` retry, and records no completed phase.
+
    **Metrics (optional):** After validation/salvage subagents complete, record their metrics. When the validation phase used multiple batches, include `--batch-index` (cumulative across waves: 1..N) and `--total-batches`:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
@@ -466,7 +472,7 @@ to bare `python`.
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
 
    After all batches and reaggregation complete, mark the phase finish (only if `start` was called):
    ```bash
@@ -521,6 +527,7 @@ to bare `python`.
         --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
         --total-batches {total_batches} --batch-index {N}
       ```
+      Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement.
 
    **Strategy A (≤ 4 batches):** Run all batch subagents from the main agent in parallel (single message with multiple subagent calls).
 

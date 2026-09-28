@@ -6158,6 +6158,116 @@ class TestDeclaredOutputChannel:
         assert "/out/result.json" not in block
 
 
+class TestDeclaredGenerateShellAndReadScope:
+    """`runs_shell_in_generate` and `generate_read_scope`: what a fan-out slot
+    can do to reach the change (plan: review-run-scope-salvage-and-failure-
+    visibility D2.3).
+
+    Measured on the 2026-09-25 review run: the code-review prompt told every
+    lane to run `git diff`, and cursor's `--mode ask` lanes have no shell — one
+    returned `[]` without ever seeing a diff. `render_diff_access` now renders
+    the prompt's `{diff_access}` block from these two declarations, so a wrong
+    value tells a lane it has a shell it lacks, or withholds one it has. Each
+    value is pinned to its source here; `tests/test_provider_housekeeping.py`'s
+    `TestShellDeclarationMatchesTheEvidence` checks the shell half against the
+    argv or the named measurement behind it.
+    """
+
+    #: D2.3's table. Every adapter not in it is `None` (not measured), and a
+    #: value leaves `None` only with a measured source: a log, a probe or argv.
+    #:
+    #:   pi           True   the incident's `bash` call running pytest (§3.1)
+    #:   omp          True   its argv: `--tools read,grep,glob,bash,edit,write`
+    #:   codex        True   §7.3's audited stream ran `pwd && rg --files`
+    #:   cursor-agent False  ask mode refused a shell in the kimi and grok logs
+    #:   claude-code  False  `acceptEdits` denies headless Bash (3 denials)
+    #:   qwen-code    False  `--max-tool-calls 0` aborts before any tool runs
+    #:   gemini       False  no `run_shell_command` under this argv (0.25.2)
+    SHELL_IN_GENERATE = {
+        "pi": True,
+        "omp": True,
+        "codex": True,
+        "cursor-agent": False,
+        "claude-code": False,
+        "qwen-code": False,
+        "gemini": False,
+    }
+    #: The adapters whose read scope is measured away from the `"cwd"` default.
+    #: cursor-agent declares `"cwd"` explicitly (measured, and equal to the
+    #: default), so it is not a departure.
+    READ_SCOPE_DEPARTURES = {"qwen-code": "none"}
+
+    def test_the_base_defaults_assert_nothing(self):
+        assert LLMProvider.runs_shell_in_generate is None
+        assert LLMProvider.generate_read_scope == "cwd"
+
+    @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
+    def test_every_adapter_declares_true_false_or_none(self, name):
+        from utils.provider_registry import _PROVIDERS
+
+        value = _PROVIDERS[name].runs_shell_in_generate
+        # `is` and `isinstance(bool)`: a truthy 1 or "yes" is not a declaration.
+        assert value is None or isinstance(value, bool), (name, value)
+
+    @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
+    def test_every_read_scope_is_one_of_the_three(self, name):
+        from utils.llm_client import GENERATE_READ_SCOPES
+        from utils.provider_registry import _PROVIDERS
+
+        assert GENERATE_READ_SCOPES == ("none", "cwd", "any")
+        assert _PROVIDERS[name].generate_read_scope in GENERATE_READ_SCOPES, name
+
+    def test_the_shell_values_are_the_measured_table(self):
+        from utils.provider_registry import _PROVIDERS
+
+        declared = {
+            name: provider.runs_shell_in_generate
+            for name, provider in _PROVIDERS.items()
+            if provider.runs_shell_in_generate is not None
+        }
+        assert declared == self.SHELL_IN_GENERATE
+
+    @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
+    def test_every_adapter_outside_the_table_is_unmeasured(self, name):
+        from utils.provider_registry import _PROVIDERS
+
+        if name in self.SHELL_IN_GENERATE:
+            assert _PROVIDERS[name].runs_shell_in_generate is self.SHELL_IN_GENERATE[name]
+        else:
+            assert _PROVIDERS[name].runs_shell_in_generate is None, (
+                f"{name} declares runs_shell_in_generate="
+                f"{_PROVIDERS[name].runs_shell_in_generate!r} with no row in "
+                f"D2.3's table — a value leaves None only with a measured source"
+            )
+
+    def test_cursor_reads_under_cwd_and_qwen_reads_nothing(self):
+        from utils.provider_registry import get_provider
+
+        assert get_provider("cursor-agent").generate_read_scope == "cwd"
+        assert get_provider("qwen-code").generate_read_scope == "none"
+
+    def test_every_other_adapter_keeps_the_cwd_default(self):
+        from utils.provider_registry import _PROVIDERS
+
+        departures = {
+            name: provider.generate_read_scope
+            for name, provider in _PROVIDERS.items()
+            if provider.generate_read_scope != "cwd"
+        }
+        assert departures == self.READ_SCOPE_DEPARTURES
+
+    def test_the_two_declarations_are_not_the_agent_readonly_ones(self):
+        """codex reads anywhere under `agent-readonly` (`reads_outside_cwd`),
+        but nothing measured that for `generate`, so its fan-out slot keeps the
+        `"cwd"` default: one profile's measurement never stands in for
+        another's."""
+        from utils.provider_registry import get_provider
+
+        codex = get_provider("codex")
+        assert codex.reads_outside_cwd is True
+        assert codex.generate_read_scope == "cwd"
+
+
 #: `TestClassifyFailure`'s case tables, lifted to module scope so
 #: `TestMatchStreams` twins every row through `match_streams` too: a case added
 #: here is graded by both tests without anyone copying it.
@@ -7811,6 +7921,20 @@ class TestOmpProvider:
 class TestPiProvider:
     """Tests for the PiProvider class."""
 
+    @pytest.fixture(autouse=True)
+    def tools_gate_declined(self):
+        """Every exact argv below is the argv WITHOUT ``--tools`` (T3.1).
+
+        ``build_command`` now asks the shared per-flag gate whether the
+        installed pi documents ``--tools``, and that reads the developer's own
+        ``pi --help`` when one is on PATH — so these pinned argvs would depend
+        on the machine. With no gate binary the optional-flag gate declines, and
+        the argv is exactly today's; the WITH-the-flag argv is pinned on its own
+        in :class:`TestPiToolAllowlist`.
+        """
+        with patch.object(LLMProvider, "gate_binary", lambda self, **_kw: None):
+            yield
+
     @pytest.fixture
     def provider(self):
         """Create a PiProvider instance."""
@@ -8032,6 +8156,167 @@ This concludes the review."""
 
         assert result["success"] is False
         assert "error" in result
+
+
+class TestPiToolAllowlist:
+    """T3.1 (decision 11.6): ``--tools read,grep,find,bash,write``, once.
+
+    pi drops an unknown tool name SILENTLY and parses ``--tools`` as one
+    comma-separated value that a repeated flag replaces, so every property
+    pinned here is one whose failure is invisible at run time: a misspelled
+    name quietly removes a tool, and a wrong separator quietly removes them all.
+    """
+
+    PROMPT = "Review this code"
+    MODEL = "openrouter/z-ai/glm-5.2"
+    #: pi 0.87.1's built-in tool names (``pi --help``: "read, bash, edit, write
+    #: tools" by default, plus grep/find/ls as optional built-ins).
+    BUILTINS = {"read", "bash", "edit", "write", "grep", "find", "ls"}
+
+    @pytest.fixture
+    def gate(self):
+        """Answer the ``--tools`` gate without reading any installed help.
+
+        ``state["supported"]`` is the answer (a pi that documents the flag by
+        default); ``state["asked"]`` records every flag the adapter asked about.
+        """
+        state = {"supported": True, "asked": []}
+
+        def supports_flag(_provider, flag):
+            state["asked"].append(flag)
+            return state["supported"]
+
+        with patch.object(PiProvider, "supports_flag", supports_flag):
+            yield state
+
+    def test_the_list_is_the_decided_one(self):
+        from utils.providers.pi import PI_TOOLS
+
+        assert PI_TOOLS == ("read", "grep", "find", "bash", "write")
+
+    def test_the_list_is_built_in_vocabulary_only(self):
+        """An unknown name would be dropped silently, never refused."""
+        from utils.providers.pi import PI_TOOLS
+
+        assert set(PI_TOOLS) <= self.BUILTINS
+        assert len(set(PI_TOOLS)) == len(PI_TOOLS)
+
+    def test_edit_is_not_allowed(self):
+        """``write`` covers the output file; ``edit`` stays out (D3.1)."""
+        from utils.providers.pi import PI_TOOLS
+
+        assert "edit" not in PI_TOOLS
+
+    def test_no_name_carries_a_separator(self):
+        """A comma or a space inside a name would split or merge names."""
+        from utils.providers.pi import PI_TOOLS
+
+        for name in PI_TOOLS:
+            assert name and name == name.strip()
+            assert "," not in name
+            assert not any(ch.isspace() for ch in name)
+
+    def test_exact_argv_with_the_flag(self, gate):
+        cmd = PiProvider().build_command(self.PROMPT, self.MODEL)
+
+        assert cmd == [
+            "pi", "--no-session", "-p", "--mode", "json",
+            "--tools", "read,grep,find,bash,write",
+            "--model", self.MODEL, self.PROMPT,
+        ]
+        assert gate["asked"] == ["--tools"]
+
+    def test_exact_argv_with_the_flag_and_an_effort(self, gate):
+        cmd = PiProvider().build_command(self.PROMPT, f"{self.MODEL}:high")
+
+        assert cmd == [
+            "pi", "--no-session", "-p", "--mode", "json",
+            "--tools", "read,grep,find,bash,write",
+            "--thinking", "high",
+            "--model", self.MODEL, self.PROMPT,
+        ]
+
+    def test_exact_argv_without_the_flag_is_todays(self, gate, capsys):
+        """A pi whose help does not document ``--tools``: today's argv + one WARN."""
+        gate["supported"] = False
+        base_module.reset_flag_gate_cache()
+        try:
+            first = PiProvider().build_command(self.PROMPT, self.MODEL)
+            second = PiProvider().build_command(self.PROMPT, self.MODEL)
+        finally:
+            warned = capsys.readouterr().err
+            base_module.reset_flag_gate_cache()
+
+        assert first == second == [
+            "pi", "--no-session", "-p", "--mode", "json",
+            "--model", self.MODEL, self.PROMPT,
+        ]
+        assert warned.count("[WARN] pi: --tools") == 1
+        assert "read,grep,find,bash,write" in warned
+
+    @pytest.mark.parametrize("model", [
+        "openrouter/z-ai/glm-5.2",
+        "openrouter/z-ai/glm-5.2:off",
+        "openrouter/deepseek/deepseek-r1:free",
+    ])
+    def test_the_flag_appears_once_with_one_comma_joined_value(self, gate, model):
+        """One flag, one value: a second ``--tools`` would REPLACE the first."""
+        from utils.providers.pi import PI_TOOLS
+
+        cmd = PiProvider().build_command(self.PROMPT, model)
+
+        assert cmd.count("--tools") == 1
+        assert "-t" not in cmd
+        value = cmd[cmd.index("--tools") + 1]
+        assert value == ",".join(PI_TOOLS)
+        assert value.split(",") == list(PI_TOOLS)
+        # Right after `--mode json`, the position the argv table pins.
+        assert cmd[3:7] == ["--mode", "json", "--tools", value]
+        # And the prompt is still the last element, whatever came before it.
+        assert cmd[-1] == self.PROMPT
+
+    def test_the_prompt_is_last_without_the_flag_too(self, gate):
+        gate["supported"] = False
+        cmd = PiProvider().build_command(self.PROMPT, f"{self.MODEL}:high")
+
+        assert cmd[-1] == self.PROMPT
+        assert "--tools" not in cmd
+
+    def test_the_hand_edited_argv_row_carries_the_same_value(self):
+        """``expected_argv.yaml`` is edited by hand; keep it on the constant."""
+        import yaml
+        from utils.providers.pi import PI_TOOLS
+
+        table = yaml.safe_load(
+            (Path(__file__).parent / "container" / "expected_argv.yaml")
+            .read_text(encoding="utf-8")
+        )
+        rows = [row for row in table["entries"]
+                if row["provider"] == "pi" and row["profile"] == "generate"]
+
+        assert rows, "the pi generate row is gone from expected_argv.yaml"
+        for row in rows:
+            assert row["options"]["--tools"] == ",".join(PI_TOOLS)
+        # The gate's own help read is a call-log record too.
+        assert any(row["provider"] == "pi" and row["profile"] == "probe"
+                   and "--help" in row["options"] for row in table["entries"])
+
+    def test_the_surface_contract_pins_the_flag_and_its_form(self):
+        """Presence of ``--tools`` AND its comma-separated form, hand-kept."""
+        import yaml
+
+        surface = yaml.safe_load(
+            (Path(__file__).parent / "container" / "cli-surface.yaml")
+            .read_text(encoding="utf-8")
+        )
+        rows = {row["cli"]: row for row in surface["clis"]}
+
+        assert "--tools" in rows["pi"]["options"]
+        assert rows["pi"]["option_forms"] == {"--tools": "Comma-separated"}
+        # A pinned form is only meaningful for a flag the row really emits.
+        for cli, row in rows.items():
+            for option in (row.get("option_forms") or {}):
+                assert option in row["options"], (cli, option)
 
 
 class TestCodexProvider:
@@ -9606,8 +9891,10 @@ class TestTimeoutKeywordIsInertWhenUnset:
         this reason, and the shared gate resolves its binary through
         `LLMProvider.gate_binary`, so neutralizing that one lookup is enough:
         with no binary to read, `missing_flags` reports nothing missing and the
-        argv is the one the adapter would render. Nothing else in the table
-        consults the gate from `build_command` (claude's two optional-flag
+        argv is the one the adapter would render. pi's optional `--tools` gate
+        (T3.1) reads the same lookup, so its row is the argv WITHOUT the flag;
+        the argv with it is pinned in `TestPiToolAllowlist`. Nothing else in the
+        table consults the gate from `build_command` (claude's two optional-flag
         reads are on the `schema`/fallback paths this sweep does not take), and
         both gates are graded on their own, with the help text stubbed rather
         than the lookup.
@@ -9762,15 +10049,12 @@ class TestNoChildOutlivesTheOuterDeadline:
             f"pid {sleeper} outlived the run despite the stub honouring its "
             f"own cutoff")
 
-    @pytest.mark.xfail(
-        reason=(
-            "the leader-only kill is the orphan bug itself, owned by "
-            "plans/timeout-orphans-and-reaggregate-determinism.md. L5 cannot "
-            "make a disobedient child reapable, and a silently-passing version "
-            "of this test would claim it did."
-        ),
-        strict=False,
-    )
+    # This was an `xfail(strict=False)`: the leader-only SIGKILL was the orphan
+    # bug itself, and L5 cannot make a disobedient child reapable. The Lane A
+    # spawn now snapshots the CLI's descendants before the kill and sweeps
+    # every surviving process group (`process_control.terminate_timed_out`,
+    # plan review-run-scope-salvage-and-failure-visibility D3.3), so the
+    # sleeper is reaped and the test holds as an ordinary assertion.
     def test_a_stub_that_ignores_the_flag_leaves_no_descendant(
         self, agy_stub, scaled_margin, monkeypatch, tmp_path
     ):

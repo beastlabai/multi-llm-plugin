@@ -692,3 +692,84 @@ class TestModeSurface:
         assert fwo.ensure_prerequisites is prereq.ensure_prerequisites, (
             "the gate is called, never reimplemented (D6a)"
         )
+
+
+# ---------------------------------------------------------------------------
+# 7. Ctrl-C inside an in-process phase (decision 11.9)
+# ---------------------------------------------------------------------------
+
+class TestAnInterruptedPhaseSweepsItsClis:
+    """``run_mode`` runs an async phase under its own ``asyncio.run``, which joins
+    every worker thread before a ``KeyboardInterrupt`` can reach the dispatcher.
+    So the phase's CLIs are swept inside the cancellation, exactly as the
+    dispatcher's own ``_call_target`` does it."""
+
+    def _phase(self, monkeypatch, body):
+        import types
+
+        module = types.ModuleType("fake_async_phase")
+
+        async def main(argv):
+            return await body()
+
+        module.main = main
+        monkeypatch.setitem(sys.modules, "fake_async_phase", module)
+        monkeypatch.setattr(
+            fwo.mode_table, "resolve",
+            lambda word: types.SimpleNamespace(
+                name=word, target_module="fake_async_phase", target_attr="main",
+            ),
+        )
+
+    def _registry(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from utils import process_control
+
+        swept = []
+
+        def fake_sweep(*_args, **_kwargs):
+            swept.append(True)
+            return [(SimpleNamespace(pid=4242),
+                     process_control.TreeSweep(cli="terminated", groups={77: "killed"}))]
+
+        monkeypatch.setattr(process_control.live_cli_registry, "sweep", fake_sweep)
+        return swept
+
+    def test_the_main_task_cancelled_by_a_ctrl_c_sweeps_before_asyncio_run_returns(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        import asyncio
+
+        async def interrupted():
+            # What asyncio.run's runner does with the first Ctrl-C.
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+
+        swept = self._registry(monkeypatch)
+        self._phase(monkeypatch, interrupted)
+        workflow = fwo.FullWorkflow(
+            fwo.parse_args(["--plan-file", str(_plan(tmp_path)), "--yes"])
+        )
+
+        with pytest.raises(asyncio.CancelledError):
+            workflow.run_mode("review-plan", [])
+        assert swept == [True]
+        assert (
+            "[INTERRUPT_SWEEP] cli pid 4242: cli terminated; process groups: 77 killed"
+            in capsys.readouterr().err
+        )
+
+    def test_a_phase_that_returns_sweeps_nothing(self, tmp_path, monkeypatch, capsys):
+        async def finished():
+            return 0
+
+        swept = self._registry(monkeypatch)
+        self._phase(monkeypatch, finished)
+        workflow = fwo.FullWorkflow(
+            fwo.parse_args(["--plan-file", str(_plan(tmp_path)), "--yes"])
+        )
+
+        assert workflow.run_mode("review-plan", []) == 0
+        assert swept == []
+        assert "[INTERRUPT_SWEEP]" not in capsys.readouterr().err

@@ -174,6 +174,16 @@ class GeminiProvider(LLMProvider):
     that measured it (§14.7 gap 5).
     """
 
+    #: MEASURED FALSE by the same 2026-08-19 probe that measured the missing
+    #: write tool (``plans/harness-expansion/probe-out/gemini/gap5_probe.py``;
+    #: ``NO_WRITE_TOOL_AT_ALL`` in ``tests/test_provider_housekeeping.py``):
+    #: under this argv gemini-cli 0.25.2 advertises nine tools and
+    #: ``run_shell_command`` is not among them. A default rather than a flag, so
+    #: an argv that later adds ``--yolo`` or ``--approval-mode`` must re-measure
+    #: this. ``generate_read_scope`` keeps the ``"cwd"`` default: ``read_file``
+    #: is advertised, but nothing measured its reach outside cwd.
+    runs_shell_in_generate = False
+
     version_cmd = ("gemini", "--version")
     #: 0.25.2 is where every fixture in ``tests/fixtures/gemini/`` was captured —
     #: the §6 step-5 probe, ``--network none``, the stub and the failserver both

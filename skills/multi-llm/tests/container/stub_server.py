@@ -573,8 +573,27 @@ SHELL_TOOL_SPELLINGS = {
 
 
 def _tool_names(body: dict) -> list:
-    return [str(tool.get("name")) for tool in body.get("tools") or []
-            if isinstance(tool, dict) and tool.get("name")]
+    """Every advertised tool's NAME, in both wire spellings.
+
+    Responses puts the name on the entry itself (a namespace entry by its own
+    name); chat-completions nests it as ``{"type": "function", "function":
+    {"name": …}}`` — the spelling :meth:`ScriptedToolCall.chat_declaration`
+    already matches. Reading only the first left every chat host's log entry
+    with ``tool_names: []``, so the pi lane could not show which tools its
+    ``--tools`` allow-list really advertised.
+    """
+    names = []
+    for tool in body.get("tools") or []:
+        if not isinstance(tool, dict):
+            continue
+        name = tool.get("name")
+        if not name:
+            function = tool.get("function")
+            if isinstance(function, dict):
+                name = function.get("name")
+        if name:
+            names.append(str(name))
+    return names
 
 
 def responses_call_body(model: str, script: ScriptedToolCall,

@@ -1480,6 +1480,17 @@ def reset_hermetic_state() -> None:
         _USER_CONFIG_MEMO.clear()
 
 
+class _OpenCodeText(NamedTuple):
+    """What :meth:`OpenCodeProvider._scan_text_parts` collected."""
+
+    #: Every text part's text, in stream order (``parse_output``'s input).
+    parts: List[str]
+    #: The text parts of the last assistant message, in order (salvage's).
+    last_message: List[str]
+    #: Whether any line was one of ``OpenCodeProvider._EVENT_TYPES``.
+    saw_event: bool
+
+
 class OpenCodeProvider(LLMProvider):
     """Provider for OpenCode CLI tool.
 
@@ -2349,6 +2360,61 @@ class OpenCodeProvider(LLMProvider):
             if isinstance(event, dict):
                 yield event
 
+    #: Every top-level ``run --format json`` event type (the emitter in the
+    #: binary's bundle; ``error`` is the one that carries no ``part``). A line
+    #: carrying one of them is what makes stdout an opencode event stream rather
+    #: than a bare answer.
+    _EVENT_TYPES = frozenset({
+        "step_start", "step_finish", "tool_use", "text", "reasoning", "error",
+    })
+
+    @classmethod
+    def _scan_text_parts(cls, stdout: str) -> "_OpenCodeText":
+        """One walk over the stream for the answer text, shared by
+        :meth:`parse_output` and :meth:`salvage_text` (plan:
+        review-run-scope-salvage-and-failure-visibility §4, D4.4).
+
+        A text part is a ``text`` event whose ``part.type`` is ``text`` —
+        ``parse_output``'s rule, unchanged. Each step is one assistant message,
+        named by ``part.messageID`` on every event of that step
+        (``step_start``, ``tool_use``, ``text``, ``step_finish``), so the last
+        message is the one the last such event names — even one that has
+        printed no text yet. A text part that names no message counts as a
+        message of its own.
+        """
+        parts: List[str] = []
+        by_message: Dict[Any, List[str]] = {}
+        last_key: Any = None
+        saw_event = False
+        for index, event in enumerate(cls._iter_events(stdout)):
+            event_type = event.get("type")
+            # `isinstance` first: an unhashable `type` would make the set
+            # lookup raise, and this walk also serves `parse_output`.
+            if isinstance(event_type, str) and event_type in cls._EVENT_TYPES:
+                saw_event = True
+            part = event.get("part")
+            if not isinstance(part, dict):
+                continue
+            text = part.get("text")
+            is_text = (
+                event.get("type") == "text"
+                and part.get("type") == "text"
+                and isinstance(text, str)
+            )
+            message_id = part.get("messageID")
+            if isinstance(message_id, str) and message_id:
+                key: Any = message_id
+            elif is_text:
+                key = ("part", index)
+            else:
+                continue
+            last_key = key
+            if is_text:
+                parts.append(text)
+                by_message.setdefault(key, []).append(text)
+        last_message = by_message.get(last_key, []) if last_key is not None else []
+        return _OpenCodeText(parts, last_message, saw_event)
+
     @staticmethod
     def _direct_json(text: str) -> Optional[Dict[str, Any]]:
         """Parse ``text`` as one complete JSON document, or return None."""
@@ -2675,16 +2741,11 @@ class OpenCodeProvider(LLMProvider):
         an exact parse of the whole stream or of the final message is
         unambiguous and is tried first, and only then the loose extraction
         that can match a fragment or an early draft.
+
+        The text parts come from :meth:`_scan_text_parts`, the walk
+        :meth:`salvage_text` shares.
         """
-        text_parts: List[str] = []
-        for event in self._iter_events(stdout):
-            if event.get("type") != "text":
-                continue
-            part = event.get("part")
-            if isinstance(part, dict) and part.get("type") == "text" and "text" in part:
-                text = part["text"]
-                if isinstance(text, str):
-                    text_parts.append(text)
+        text_parts: List[str] = self._scan_text_parts(stdout).parts
 
         if not text_parts:
             error = "No text events found in output"
@@ -2725,3 +2786,40 @@ class OpenCodeProvider(LLMProvider):
                 return result
 
         return result
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The last assistant message's text, for the salvage gate (D4.1/D4.4).
+
+        opencode's stdout is transport: every ``tool_use`` event carries the
+        tool's input and output (a ``grep`` of the plan, a directory listing),
+        and ``step_finish`` carries token counts. Judged whole by
+        ``has_salvageable_json``, a tool part's arrays read as findings — the
+        exit-0 ``denied_permission_turn_end`` capture, whose only text is
+        narration, passed the gate that way.
+
+        The answer is the text of the **last** assistant message: one message
+        per step, so the last ``messageID`` the stream names, and that step's
+        text parts joined in order (:meth:`_scan_text_parts`). On a finished run
+        that is the closing step's text, the answer :meth:`parse_output` reads.
+        On a run killed mid-step it is that unfinished step's text — ``""``
+        when it had printed none yet — never an earlier step's narration
+        (plan D4.2: earlier messages are dropped, not joined, because narration
+        can quote an example array). opencode emits a text part only once it is
+        complete (``part.time.end``), so a reply cut mid-print leaves no text of
+        its own behind.
+
+        * ``None`` when no line is an opencode event (not this adapter's
+          stream);
+        * ``""`` when the last message has no text part — a verdict, final;
+        * otherwise that message's text.
+
+        Never raises: a failed walk is ``""``, the reading the caller would give
+        a raise anyway.
+        """
+        try:
+            scan = self._scan_text_parts(stdout or "")
+            if not scan.saw_event:
+                return None
+            return "".join(scan.last_message)
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""

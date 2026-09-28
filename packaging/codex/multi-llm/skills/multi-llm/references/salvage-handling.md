@@ -44,27 +44,42 @@ Neither of the two rules below can catch that one: they judge the reply in front
 of them, and a superseded request arrives from an attempt that already ended —
 the phantom participant walking in through the one door the gate cannot watch.
 
-**`raw_output` is whichever stream said something, and it is an excerpt.** The
-salvage gate reads `details["stdout_excerpt"]` ahead of `details["stderr"]`;
-`utils/llm_client._attach_stdout_excerpt` attaches that key on all three losing
-paths — a non-zero exit, a timeout kill, and a zero exit whose output would not
-parse — because a provider can write a truncated array to stdout and *then* die,
-and because the providers that serialize their failures print the failure
-document on stdout with stderr empty. Two consequences when you read a request:
+**`raw_output` is the text the salvage gate judged, and it is bounded.** It is
+chosen by one rule, `utils/review_orchestrator_base.salvage_source`, on all three
+losing paths — a non-zero exit, a timeout kill, and a zero exit whose output
+would not parse — because a provider can write a truncated array and *then* die:
 
-- **Judge the content, never the channel.** A document that arrived on stdout is
-  not more likely to be the model's answer than one that arrived on stderr — it
-  is precisely where an `opencode`/`codex` error event appears — so both rules
-  below apply to it unchanged.
-- **An elision in `raw_output` is the harness's, not the model's.** The excerpt
-  is redacted and then bounded: credential-shaped values are replaced with
-  `<redacted:{name}>`, only the last 20 lines survive, each line is cut at 64 KB
-  and the whole stream at 45 KB, and every cut leaves its own marker in the
-  text. So a document that stops mid-token may have been cut by that bound
-  rather than by the provider, and one that starts mid-sentence may simply be
-  missing its earlier lines. Recover what is present and no more: do not
-  reconstruct a tail you cannot see, and never carry a `<redacted:…>` marker
-  into the result as though it were the model's own text.
+- **When the adapter reduces its stream, `raw_output` is `salvage_text`**: the
+  assistant's answer text and nothing else (for an event-stream CLI, the text of
+  its last assistant message — never its tool calls, its reasoning, or the event
+  framing around them). The adapter reads its whole stdout to produce it, and
+  the harness then redacts it and bounds it **from the answer's opening
+  bracket**: text that fits the 45 KB cap is kept whole, and longer text is
+  windowed forward from the `[` or `{` the answer opened, so a cut falls at the
+  end, never at the start. An empty `salvage_text` is the adapter's verdict that
+  there is no answer text at all, and then no salvage is requested — stderr is
+  never consulted in its place, because a stream CLI's stderr holds only
+  diagnostics.
+- **Only when no reducer applies is it still the raw excerpt**:
+  `details["stdout_excerpt"]` ahead of `details["stderr"]`, the last 20 lines of
+  the stream, each line cut at 64 KB and the whole at 45 KB.
+
+Two consequences when you read a request:
+
+- **Judge the answer text, not the transport stream.** A document is not more
+  likely to be the model's answer because of the channel it arrived on — stdout
+  is precisely where a CLI's own error event appears — so both rules below apply
+  to it unchanged. And when `raw_output` still holds an event stream, only the
+  assistant's own text parts can hold the answer: an event's `content` array of
+  `thinking`/`toolCall` parts, a tool call's arguments, or a tool's result is
+  transport data, however array-shaped it looks.
+- **An elision in `raw_output` is the harness's, not the model's.** Every cut
+  leaves its own marker in the text, and credential-shaped values are replaced
+  with `<redacted:{name}>`. So a document that stops mid-token may have been cut
+  by the bound rather than by the provider, and a raw excerpt that starts
+  mid-sentence may simply be missing its earlier lines. Recover what is present
+  and no more: do not reconstruct a tail you cannot see, and never carry a
+  `<redacted:…>` marker into the result as though it were the model's own text.
 
 **One reply is not a result.** When the raw output holds nothing recoverable —
 an authentication error, a stack trace, an empty stream — the prompt tells the
@@ -77,7 +92,11 @@ input and found nothing — and finding priority is scored partly by how many
 models flagged something. Leave the file untouched, so the model stays failed,
 which is the true outcome; report the subagent's `reason` beside it. An empty
 array that the subagent really did recover from the raw output is a result like
-any other and is written normally.
+any other and is written normally — **unless the request records
+`"failure": "timeout"`**. A run killed at its deadline never said "I found
+nothing", so an empty array recovered from it is a non-result: write nothing,
+leave the model failed, and report that the run timed out before it wrote an
+answer. A timed-out run's recovered findings are still written as usual.
 
 **Not every non-result announces itself.** A stream that was cut off mid-answer
 often still carries a relayed provider error — `{"error": {"code": 401,
@@ -90,6 +109,13 @@ wrapping one, nor an object carrying the answer's own fields (`title`, `desc`,
 `importance`, …), treat it exactly as `salvage_failed` — write nothing, leave the
 model failed, and report that the raw output held a provider error rather than a
 document, which points at the provider's login instead of at a JSON repair.
+
+The same holds for a reply recovered out of an event stream's transport data.
+An array a subagent lifted from an event's `content` field — `thinking` and
+`toolCall` parts, a tool call's arguments, a tool's output — passes the shape
+test, because it *is* an array, but it is not findings the model wrote. It is a
+non-result, like a relayed provider error: write nothing, leave the model
+failed, and report it as `salvage_failed`, naming it as transport data.
 
 **On this lane both checks are yours, and the second one is the write itself.**
 Nothing stands between the subagent's reply and `task.output_path` except you:

@@ -50,6 +50,8 @@ Read this file to understand the proposed implementation. The plan should contai
 - **Code organization**: Is the proposed file structure sensible?
 - **Naming consistency**: Are names clear and consistent throughout?
 
+{working_limits}
+
 ## Output Format
 Return ONLY a valid JSON array with no additional text. Each element must have exactly these fields:
 - "title": string (5-10 word summary of the issue)

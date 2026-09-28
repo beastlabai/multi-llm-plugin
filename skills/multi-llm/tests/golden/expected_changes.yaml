@@ -727,6 +727,24 @@ changes:
       /markers/review-code/0, and again at /2 when the fan-out ticker's teardown
       line first preceded it) moves down one more index now that the roster
       precedes both `[PROGRESS]` teardown lines.
+  # 2026-09-28, review-scope plan §2 (D2.2): review-code writes the scope
+  # manifest and per-file diffs (`review-scope.md`, `diff/`) before it
+  # dispatches. The fixture's base ref is the all-zero sha, which no repository
+  # resolves, so the write degrades exactly as designed — `[DIFF_FAILED]` with
+  # the `--numstat` command's error, then `[DIFF_PARTIAL]` naming the two
+  # tracked files that got no diff file — and the fan-out goes on. Those two
+  # lines now open the marker list, so every earlier-declared marker shifts
+  # down two indices; the new paths land in `/phases/code-review/created_paths`
+  # and `/output_root_paths`, both already covered as whole lists above.
+  - pointer: /markers/review-code/4
+    rationale: >
+      Positional shift only: the second `[PROGRESS]` teardown line moves down
+      two indices behind `[DIFF_FAILED]` and `[DIFF_PARTIAL]` (review-scope
+      plan D2.2).
+  - pointer: /markers/review-code/5
+    rationale: >
+      Positional shift only: `[HIGH_PRIORITY_ISSUES]` moves down two indices
+      behind `[DIFF_FAILED]` and `[DIFF_PARTIAL]` (review-scope plan D2.2).
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):

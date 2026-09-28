@@ -44,17 +44,34 @@ The three primitives and why each exists:
    (``DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`` already removes the console),
    and the launcher must hand the log handle in because a console-less child has
    no valid stdout to inherit.
+
+A fourth, for the Lane A fan-out: **a stopped provider CLI takes its detached
+children with it.** :func:`descendants` snapshots a CLI's tree while it is alive,
+:func:`terminate_timed_out` stops the CLI (SIGTERM first) and then every
+snapshotted process group under :func:`kill_tree`'s identity rule, and
+:data:`live_cli_registry` keeps a refreshed snapshot of every live CLI so an
+abort or a Ctrl-C can do the same after the CLI itself has already died —
+inside a budget that ends before the abort SIGKILLs the worker.
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import signal
 import subprocess
 import sys
+import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field
+from typing import (
+    Any, Awaitable, Callable, Dict, Iterator, List, NamedTuple, Optional, Sequence,
+    Tuple, TypeVar,
+)
+
+_T = TypeVar("_T")
 
 IS_WINDOWS = os.name == "nt"
 
@@ -717,6 +734,26 @@ def _posix_kill_group(pgid: int, escalate_after_s: float, poll_interval_s: float
     return "survived" if _group_has_members(group) else "killed"
 
 
+def _signal_tree(pid: Optional[int], pgid: Optional[int], sig: int) -> None:
+    """*sig* to the group :func:`_resolve_pgid` picks, else to *pid* alone.
+
+    A ``None`` *pid* means no pid is safe to signal (its identity was not just
+    corroborated), so a group that cannot be signalled gets nothing at all.
+    """
+    group = _resolve_pgid(pgid, pid)
+    if group is not None:
+        try:
+            os.killpg(group, sig)
+            return
+        except OSError:
+            pass
+    if pid:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
 def _posix_kill_tree(
     pid: int,
     escalate_after_s: float,
@@ -724,19 +761,7 @@ def _posix_kill_tree(
     pgid: Optional[int] = None,
 ) -> str:
     def signal_target(sig: int) -> None:
-        sent = False
-        group = _resolve_pgid(pgid, pid)
-        if group is not None:
-            try:
-                os.killpg(group, sig)
-                sent = True
-            except OSError:
-                sent = False
-        if not sent:
-            try:
-                os.kill(pid, sig)
-            except OSError:
-                pass
+        _signal_tree(pid, pgid, sig)
 
     signal_target(signal.SIGTERM)
     deadline = time.time() + max(escalate_after_s, 0.0)
@@ -784,6 +809,846 @@ def _windows_kill_tree(pid: int, escalate_after_s: float) -> str:  # pragma: no 
             return "killed"
         time.sleep(0.1)
     return "survived" if process_alive(pid) else "killed"
+
+
+# ---------------------------------------------------------------------------
+# A stopped CLI's detached descendants (plan: review-run-scope-salvage-and-
+# failure-visibility D3.3)
+# ---------------------------------------------------------------------------
+#
+# A Lane A provider CLI stays in the orchestrator's own process group — moving it
+# into a session of its own would stop a terminal Ctrl-C from reaching it — so
+# `kill_tree` on its group is not an option, and a signal to the CLI alone misses
+# every child that left the group. pi's bash tool is the measured case: each
+# shell is spawned `detached: true` (a session and group of its own), and GNU
+# `timeout` inside it moves into yet another group. Once the CLI dies those
+# children reparent to init and nothing links them to the slot any more, so the
+# tree is SNAPSHOTTED (pid, pgid, sid, start time) while the CLI is still alive,
+# and every snapshotted group is swept afterwards under `kill_tree`'s identity
+# rule: a member's recorded start time is re-checked before anything is sent,
+# so a recycled pid is never signalled. The groups are signalled together and
+# share one grace and one SIGKILL window — a sweep's cost does not grow with
+# the number of groups, which is what lets an abort bound it (below).
+
+#: How long :func:`terminate_timed_out` waits between the CLI's SIGTERM and its
+#: SIGKILL, and between each snapshotted group's. SIGTERM first is the point:
+#: pi reaps its own tracked shells only from its SIGTERM/SIGHUP handler, which a
+#: bare SIGKILL never runs. Short, because the slot has already spent its budget.
+DEFAULT_TERMINATE_GRACE_S = 2.0
+
+#: How long the CLI gets to die after its SIGKILL before it is reported
+#: ``survived`` (a process in uninterruptible sleep can outlast a SIGKILL).
+_KILL_CONFIRM_S = 5.0
+
+#: The whole wall clock :meth:`LiveCliRegistry.sweep` may spend by default. The
+#: abort's sweep runs inside the detached worker's SIGTERM handler while
+#: ``detach.abort_run``'s :func:`kill_tree` counts :data:`DEFAULT_ESCALATE_AFTER_S`
+#: down to the SIGKILL that ends the worker, and every signal the sweep still
+#: owes a detached group dies with it — so the sweep has to be *finished*, not
+#: merely started, well inside that window. What is left over is the worker's
+#: own close-out (``RunHandle.finish``) after the sweep returns.
+LIVE_SWEEP_BUDGET_S = DEFAULT_ESCALATE_AFTER_S - 3.0
+
+#: The share of a bounded sweep's budget the SIGTERM graces may use. The SIGKILL
+#: that follows goes out by then at the latest, leaving the rest of the budget
+#: for it to land and be confirmed.
+_SWEEP_TERM_SHARE = 0.75
+
+#: How often :data:`live_cli_registry` re-snapshots every live CLI's tree. The
+#: registry's snapshot is what an abort or a terminal Ctrl-C sweeps, and both of
+#: those signal the CLI at the same moment they signal this process — so by the
+#: time a handler here runs, the CLI may already be dead and its children
+#: reparented. One ``/proc`` scan serves every live CLI (~10 ms for ~1300
+#: processes, measured 2026-09-28); a child started less than one interval
+#: before the signal is the residual gap.
+LIVE_SNAPSHOT_INTERVAL_S = 1.0
+
+
+class Descendant(NamedTuple):
+    """One process below a CLI, as it was when the snapshot was taken."""
+
+    pid: int
+    pgid: Optional[int]
+    sid: Optional[int]
+    #: The same string :func:`process_start_time` returns, so :func:`probe` can
+    #: corroborate it later; ``None`` when the platform could not say.
+    start_time: Optional[str]
+
+
+class _ProcRow(NamedTuple):
+    pid: int
+    ppid: int
+    pgid: Optional[int]
+    sid: Optional[int]
+    start_time: Optional[str]
+    #: ``/proc`` state letter; ``Z`` is a zombie (dead, not yet reaped).
+    #: ``None`` where ``ps`` built the table.
+    state: Optional[str] = None
+
+
+def _linux_process_table() -> Optional[Dict[int, _ProcRow]]:
+    """Every process from one pass over ``/proc/*/stat``, or ``None`` without /proc."""
+    try:
+        names = os.listdir("/proc")
+    except OSError:
+        return None
+    if "self" not in names:
+        return None
+    table: Dict[int, _ProcRow] = {}
+    for name in names:
+        if not name.isdigit():
+            continue
+        try:
+            with open(f"/proc/{name}/stat", "rb") as handle:
+                raw = handle.read()
+        except OSError:
+            continue  # exited between listdir and open
+        # comm (field 2) is parenthesised and may itself contain ')'.
+        close = raw.rfind(b")")
+        fields = raw[close + 2:].split() if close != -1 else []
+        if len(fields) <= 19:
+            continue
+        try:
+            # After comm: state(3) ppid(4) pgrp(5) session(6) … starttime(22).
+            table[int(name)] = _ProcRow(
+                pid=int(name),
+                ppid=int(fields[1]),
+                pgid=int(fields[2]),
+                sid=int(fields[3]),
+                start_time=fields[19].decode("ascii", "replace"),
+                state=fields[0].decode("ascii", "replace"),
+            )
+        except ValueError:
+            continue
+    return table
+
+
+#: The ``ps`` columns :func:`_ps_process_table` asks for, each as its own ``-o``
+#: (POSIX reads everything after a ``name=`` as that column's header, commas
+#: included). ``lstart`` is last because it is several words.
+_PS_TABLE_COLUMNS = ("pid", "ppid", "pgid", "lstart")
+
+
+def _ps_process_table() -> Dict[int, _ProcRow]:
+    """The ``ps`` walk for POSIX without /proc (macOS, the BSDs).
+
+    ONE ``ps -A`` gives the tree and every start time. :data:`live_cli_registry`
+    re-walks this table every :data:`LIVE_SNAPSHOT_INTERVAL_S` for as long as a
+    CLI runs, so nothing here may cost a spawn per process: the start time used
+    to come from a ``ps -o lstart= -p <pid>`` per descendant, every second, for
+    the whole of a fan-out. ``lstart`` is the column :func:`_ps_start_time`
+    reads, so a row's start time is the string :func:`process_start_time`
+    returns for that pid — its internal spacing kept, since ``%e`` pads a
+    one-digit day — and :func:`probe` can corroborate it at sweep time. The
+    session id is left to :func:`_complete_row` (``os.getsid``, a system call,
+    not a spawn), because ``ps`` spells it differently on every platform. A
+    ``ps`` that rejects ``lstart`` still yields the tree, undated.
+    """
+    for columns in (_PS_TABLE_COLUMNS, _PS_TABLE_COLUMNS[:3]):
+        argv = ["ps", "-A"]
+        for column in columns:
+            argv += ["-o", f"{column}="]
+        try:
+            result = subprocess.run(
+                argv, capture_output=True, text=True, encoding="utf-8",
+                errors="replace", timeout=10,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return {}
+        if result.returncode == 0:
+            return _parse_ps_table(result.stdout)
+    return {}
+
+
+def _parse_ps_table(stdout: str) -> Dict[int, _ProcRow]:
+    table: Dict[int, _ProcRow] = {}
+    for line in stdout.splitlines():
+        parts = line.split(None, 3)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid, pgid = (int(part) for part in parts[:3])
+        except ValueError:
+            continue
+        start = parts[3].strip() if len(parts) > 3 else ""
+        table[pid] = _ProcRow(pid, ppid, pgid, None, start or None)
+    return table
+
+
+def _process_table() -> Dict[int, _ProcRow]:
+    if IS_WINDOWS:  # pragma: no cover - Windows
+        return {}
+    table = _linux_process_table()
+    if table is None:
+        table = _ps_process_table()
+    return table
+
+
+def _complete_row(row: _ProcRow) -> Descendant:
+    # Both tables date their rows, so this per-pid start-time probe (a spawn off
+    # Linux) is reached only for a row the table could not date.
+    sid = row.sid
+    if sid is None:
+        try:
+            sid = os.getsid(row.pid)
+        except (OSError, AttributeError):
+            sid = None
+    start = row.start_time if row.start_time is not None else process_start_time(row.pid)
+    return Descendant(row.pid, row.pgid, sid, start)
+
+
+def _descendants_in(table: Dict[int, _ProcRow], pid: int) -> List[Descendant]:
+    children: Dict[int, List[int]] = {}
+    for row in table.values():
+        children.setdefault(row.ppid, []).append(row.pid)
+    found: List[Descendant] = []
+    seen = {pid}
+    queue = sorted(children.get(pid, ()))
+    while queue:
+        child = queue.pop(0)
+        if child in seen or child not in table:
+            continue
+        seen.add(child)
+        found.append(_complete_row(table[child]))
+        queue.extend(sorted(children.get(child, ())))
+    return found
+
+
+def descendants(pid: int) -> List[Descendant]:
+    """(pid, pgid, sid, start time) for every live descendant of *pid*.
+
+    Linux reads ``/proc/*/stat`` once; other POSIX platforms run one ``ps -A``
+    for pid, ppid, pgid and ``lstart``; Windows returns an empty list (its tree
+    is a Job Object, torn down by the worker's own job, D4d). Breadth-first,
+    *pid* itself excluded. The walk follows parent links, which is exactly why
+    it must run **before** the CLI dies: afterwards its children belong to init.
+    """
+    if IS_WINDOWS or not pid or pid <= 0:  # pragma: no cover - Windows leg
+        return []
+    return _descendants_in(_process_table(), int(pid))
+
+
+def _merge_snapshots(*snapshots: Sequence[Descendant]) -> List[Descendant]:
+    """One entry per (pid, start time), first-seen order."""
+    merged: List[Descendant] = []
+    seen = set()
+    for snapshot in snapshots:
+        for entry in snapshot or ():
+            key = (entry.pid, entry.start_time)
+            if key in seen:
+                continue
+            seen.add(key)
+            merged.append(entry)
+    return merged
+
+
+@dataclass
+class TreeSweep:
+    """What :func:`terminate_timed_out` did, for the log line that names it.
+
+    ``cli`` is the CLI's own verdict: ``exited`` (already gone, nothing sent),
+    ``terminated`` (exited within the grace after SIGTERM), ``killed`` (needed
+    the SIGKILL) or ``survived``. ``groups`` maps each snapshotted process group
+    to its verdict, in :func:`kill_tree`'s vocabulary (``gone``, ``killed``,
+    ``survived``, ``skipped``), in the order the snapshot met them.
+    """
+
+    cli: str
+    groups: Dict[int, str] = field(default_factory=dict)
+
+    @property
+    def survived(self) -> List[int]:
+        return [pgid for pgid, verdict in self.groups.items() if verdict == "survived"]
+
+    def describe(self) -> str:
+        if not self.groups:
+            return f"cli {self.cli}; no descendant process groups"
+        verdicts = ", ".join(f"{pgid} {verdict}" for pgid, verdict in self.groups.items())
+        line = f"cli {self.cli}; process groups: {verdicts}"
+        if self.survived:
+            line += (" — SURVIVED: " + ", ".join(str(pgid) for pgid in self.survived)
+                     + " still running")
+        return line
+
+
+def _exited(proc: Any) -> bool:
+    try:
+        return proc.poll() is not None
+    except OSError:  # pragma: no cover - reaped behind Popen's back
+        return True
+
+
+def _wait_exit(proc: Any, timeout_s: float, poll_interval_s: float) -> bool:
+    deadline = time.monotonic() + max(timeout_s, 0.0)
+    while True:
+        if _exited(proc):
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll_interval_s)
+
+
+def _signal_cli(proc: Any) -> bool:
+    """SIGTERM the CLI alone (never its group: that group is this process's).
+
+    ``False`` when it had already exited, so nothing was sent.
+    """
+    try:
+        if proc.poll() is not None:
+            return False
+        proc.terminate()
+    except OSError:
+        return False
+    return True
+
+
+def _await_cli(proc: Any, signalled: bool, grace_s: float, poll_interval_s: float) -> str:
+    if not signalled:
+        return "exited"
+    if _wait_exit(proc, grace_s, poll_interval_s):
+        return "terminated"
+    try:
+        proc.kill()
+    except OSError:
+        pass
+    return "killed" if _wait_exit(proc, _KILL_CONFIRM_S, poll_interval_s) else "survived"
+
+
+def _worst(verdicts: Sequence[str]) -> str:
+    for verdict in ("survived", "killed", "skipped"):
+        if verdict in verdicts:
+            return verdict
+    return "gone"
+
+
+def _linux_state(pid: int) -> Optional[str]:
+    try:
+        with open(f"/proc/{pid}/stat", "rb") as handle:
+            raw = handle.read()
+    except OSError:
+        return None
+    close = raw.rfind(b")")
+    fields = raw[close + 2:].split() if close != -1 else []
+    return fields[0].decode("ascii", "replace") if fields else None
+
+
+def _running(pid: int) -> bool:
+    """Alive and not a zombie (a zombie keeps its pid and group, runs nothing)."""
+    return process_alive(pid) and _linux_state(pid) != "Z"
+
+
+def _group_running(pgid: int) -> bool:
+    """Does any process that is not a zombie still belong to *pgid*?
+
+    ``killpg(pgid, 0)`` succeeds for a group of zombies too, so on Linux the
+    answer comes from ``/proc``; elsewhere membership is the best available.
+    """
+    if not _group_has_members(pgid):
+        return False
+    table = _linux_process_table()
+    if table is None:  # pragma: no cover - non-Linux POSIX
+        return True
+    return any(row.pgid == pgid and row.state != "Z" for row in table.values())
+
+
+class _SweepClock:
+    """When a sweep's SIGTERM graces must end, and when the sweep itself must.
+
+    Unbounded (``budget_s=None``) is the timeout path's clock: every grace runs
+    in full and a SIGKILL gets :data:`_KILL_CONFIRM_S` to land. Bounded, every
+    wait is clipped — the graces to :data:`_SWEEP_TERM_SHARE` of the budget, so
+    the SIGKILLs still go out with time to land, and the confirmations to the
+    budget itself.
+    """
+
+    def __init__(self, budget_s: Optional[float] = None):
+        now = time.monotonic()
+        self.term_by: Optional[float] = None
+        self.deadline: Optional[float] = None
+        if budget_s is not None:
+            budget = max(float(budget_s), 0.0)
+            self.term_by = now + budget * _SWEEP_TERM_SHARE
+            self.deadline = now + budget
+
+    def grace_until(self, grace_s: float) -> float:
+        end = time.monotonic() + max(grace_s, 0.0)
+        return end if self.term_by is None else min(end, self.term_by)
+
+    def confirm_until(self) -> float:
+        end = time.monotonic() + _KILL_CONFIRM_S
+        return end if self.deadline is None else min(end, self.deadline)
+
+
+class _Liveness:
+    """One look at what still runs, shared by every group a poll checks.
+
+    One ``/proc`` scan per poll however many groups are waited on; off Linux
+    each question falls back to its own per-pid probe. "Running" never counts a
+    zombie: an unreaped leader still answers ``kill(pid, 0)``, and a wait that
+    trusted that would sit out its whole window on a process already dead.
+    """
+
+    def __init__(self) -> None:
+        try:
+            self.table: Optional[Dict[int, _ProcRow]] = _linux_process_table()
+        except Exception:  # noqa: BLE001 - the per-pid probes still answer
+            self.table = None
+        self._groups = None if self.table is None else {
+            row.pgid for row in self.table.values() if row.state != "Z"
+        }
+
+    def pid_running(self, pid: int) -> bool:
+        """Running, whoever it is now."""
+        if self.table is None:
+            return _running(pid)
+        row = self.table.get(pid)
+        return row is not None and row.state != "Z"
+
+    def corroborated(self, member: Descendant) -> bool:
+        """Running, and still the process the snapshot recorded (start time)."""
+        if self.table is None:
+            return probe(member.pid, member.start_time) == ALIVE and _running(member.pid)
+        row = self.table.get(member.pid)
+        return (row is not None and row.state != "Z" and bool(member.start_time)
+                and str(row.start_time) == str(member.start_time))
+
+    def group_running(self, pgid: int) -> bool:
+        if self._groups is None:
+            return _group_running(pgid)
+        return pgid in self._groups
+
+    def pgid_of(self, pid: int) -> Optional[int]:
+        """The group *pid* is in now, or ``None`` when that cannot be read."""
+        if self.table is None:
+            try:
+                return os.getpgid(pid)
+            except (OSError, AttributeError):
+                return None
+        row = self.table.get(pid)
+        return row.pgid if row is not None else None
+
+
+@dataclass
+class _GroupTarget:
+    """One snapshotted process group's part in :func:`_sweep_snapshots`.
+
+    A member is *corroborated* when its pid is running (not a zombie) with the
+    start time the snapshot recorded. None corroborated: ``skipped`` (no signal
+    at all) if a pid is running but is not the process the snapshot saw — a
+    recycled pid's group is an unrelated group — else ``gone``: every member is
+    dead, or dead and not yet reaped, which is the same thing to a signal.
+
+    A signalled group's corroborated members are also watched one by one
+    (``watched``), because the group a member was snapshotted in need not be
+    the group it is in now: GNU ``timeout`` calls ``setpgid`` right after exec,
+    and the registry's snapshot that an abort or an outside kill sweeps can be
+    up to :data:`LIVE_SNAPSHOT_INTERVAL_S` old. A signal to the recorded group
+    never reaches such a member, so it is stopped by pid and start time the way
+    :func:`kill_tree` stops a pid (its live group, never ours), and its verdict
+    folds into the group's: a recorded group swept empty while a member runs on
+    elsewhere is ``survived``, never ``killed``.
+    """
+
+    key: int
+    members: List[Descendant]
+    #: The group signalled whole, or ``None`` when each corroborated member is
+    #: stopped on its own (``alone``): a child that stayed in the CLI's group
+    #: stayed in OURS, which is never signalled (a self-kill) — and
+    #: :func:`_resolve_pgid` resolves no group for it for the same reason.
+    pgid: Optional[int] = None
+    leader: Optional[Descendant] = None
+    alone: List[Descendant] = field(default_factory=list)
+    #: The corroborated members of a group signalled whole (see above).
+    watched: List[Descendant] = field(default_factory=list)
+    verdict: Optional[str] = None
+
+    def terminate(self, look: _Liveness, own: Optional[int]) -> None:
+        """Corroborate, then SIGTERM — or settle a verdict that owes no signal."""
+        corroborated = [m for m in self.members if look.corroborated(m)]
+        if not corroborated:
+            running = any(look.pid_running(m.pid) for m in self.members)
+            self.verdict = "skipped" if running else "gone"
+            return
+        if self.key > 1 and self.key != own:
+            self.pgid = self.key
+            self.watched = corroborated
+            self.leader = next((m for m in corroborated if m.pid == self.key),
+                               corroborated[0])
+            _signal_tree(self.leader.pid, self.pgid, signal.SIGTERM)
+            for member in self.watched:
+                if look.pgid_of(member.pid) != self.pgid:
+                    _signal_tree(member.pid, None, signal.SIGTERM)
+            return
+        self.alone = corroborated
+        for member in self.alone:
+            _signal_tree(member.pid, None, signal.SIGTERM)
+
+    def _group_or_watched_running(self, look: _Liveness, pgid: int) -> bool:
+        """The group, else any watched member that runs outside it.
+
+        The members are asked only once the group is empty, so off Linux a
+        group that still runs costs no per-pid probe on each poll.
+        """
+        if look.group_running(pgid):
+            return True
+        return any(look.corroborated(m) for m in self.watched)
+
+    def running(self, look: _Liveness) -> bool:
+        try:
+            if self.pgid is not None:
+                return self._group_or_watched_running(look, self.pgid)
+            return any(look.corroborated(m) for m in self.alone)
+        except Exception:  # noqa: BLE001 - unknown is treated as still running
+            return True
+
+    def kill(self, look: _Liveness) -> None:
+        """SIGKILL whatever still runs, sending nothing to a pid that moved on.
+
+        The whole group goes, not just the member the grace watched: a member
+        that shrugged off the SIGTERM its leader died of still gets it. So does
+        a watched member that runs outside the group, by pid and start time.
+        """
+        if self.pgid is not None:
+            if look.group_running(self.pgid):
+                leader = self.leader if self.leader and look.corroborated(self.leader) else None
+                _signal_tree(leader.pid if leader else None, self.pgid, signal.SIGKILL)
+            for member in self.watched:
+                if look.pgid_of(member.pid) != self.pgid and look.corroborated(member):
+                    _signal_tree(member.pid, None, signal.SIGKILL)
+            return
+        for member in self.alone:
+            if look.corroborated(member):
+                _signal_tree(member.pid, None, signal.SIGKILL)
+
+    def settle(self, look: _Liveness) -> str:
+        if self.verdict is None:
+            if self.pgid is not None:
+                self.verdict = ("survived" if self._group_or_watched_running(look, self.pgid)
+                                else "killed")
+            else:
+                self.verdict = _worst(["survived" if look.corroborated(m) else "killed"
+                                       for m in self.alone])
+        return self.verdict
+
+    def fallback(self) -> str:
+        """The verdict when one of this group's own steps raised."""
+        return "survived" if any(
+            probe(m.pid, m.start_time) == ALIVE for m in self.members
+        ) else "gone"
+
+
+def _wait_targets(
+    targets: Sequence[_GroupTarget], until: float, poll_interval_s: float
+) -> List[_GroupTarget]:
+    """Poll until none of *targets* runs or *until* passes; return those still running."""
+    still = list(targets)
+    while still:
+        look = _Liveness()
+        still = [target for target in still if target.running(look)]
+        now = time.monotonic()
+        if not still or now >= until:
+            break
+        time.sleep(max(0.0, min(poll_interval_s, until - now)))
+    return still
+
+
+def _sweep_snapshots(
+    snapshots: Sequence[Sequence[Descendant]],
+    grace_s: float,
+    poll_interval_s: float,
+    clock: _SweepClock,
+) -> List[Dict[int, str]]:
+    """Stop every group of every snapshot on one shared clock.
+
+    Every group gets its SIGTERM before any is waited on; one grace covers them
+    all; whatever still runs gets its SIGKILL in one pass; one confirmation
+    window covers those. So a sweep costs one grace plus one confirmation however
+    many groups there are. Swept one at a time, each group paid both — and a
+    zombie leader could make one pay its confirmation in full — so an abort with
+    enough detached groups ran past the SIGKILL that ends the worker and left the
+    groups it had not reached yet running. Every wait is clipped by *clock*.
+    Returns one ``{group: verdict}`` map per snapshot, in order.
+    """
+    try:
+        own: Optional[int] = os.getpgid(0)
+    except (OSError, AttributeError):  # pragma: no cover - Windows; never in practice
+        own = None
+    plans: List[List[_GroupTarget]] = []
+    for snapshot in snapshots:
+        by_group: Dict[int, List[Descendant]] = {}
+        for entry in snapshot or ():
+            key = entry.pgid if entry.pgid is not None else -entry.pid
+            by_group.setdefault(key, []).append(entry)
+        plans.append([_GroupTarget(key, members) for key, members in by_group.items()])
+    targets = [target for plan in plans for target in plan]
+    if targets:
+        look = _Liveness()
+        for target in targets:
+            try:
+                target.terminate(look, own)
+            except Exception:  # noqa: BLE001 - one group must not stop the sweep
+                target.verdict = target.fallback()
+        live = [target for target in targets if target.verdict is None]
+        live = _wait_targets(live, clock.grace_until(grace_s), poll_interval_s)
+        if live:
+            look = _Liveness()
+            for target in live:
+                try:
+                    target.kill(look)
+                except Exception:  # noqa: BLE001 - one group must not stop the sweep
+                    pass
+            _wait_targets(live, clock.confirm_until(), poll_interval_s)
+        look = _Liveness()
+        for target in targets:
+            try:
+                target.settle(look)
+            except Exception:  # noqa: BLE001 - one group must not stop the sweep
+                target.verdict = target.fallback()
+    return [{target.key: str(target.verdict) for target in plan} for plan in plans]
+
+
+def _sweep_groups(
+    snapshot: Sequence[Descendant], grace_s: float, poll_interval_s: float
+) -> Dict[int, str]:
+    return _sweep_snapshots([snapshot], grace_s, poll_interval_s, _SweepClock())[0]
+
+
+def terminate_timed_out(
+    proc: Any,
+    snapshot: Sequence[Descendant],
+    grace_s: float = DEFAULT_TERMINATE_GRACE_S,
+    *,
+    poll_interval_s: float = 0.05,
+) -> TreeSweep:
+    """Stop a Lane A CLI and every process group its snapshot recorded.
+
+    *proc* is the CLI's ``subprocess.Popen`` (``poll``/``terminate``/``kill``);
+    *snapshot* is :func:`descendants` of it, taken **before** anything was
+    signalled. SIGTERM to the CLI alone (it shares this process's group), the
+    grace, SIGKILL if it is still alive; then every distinct snapshotted group
+    together — SIGTERM, one shared *grace_s*, SIGKILL (:func:`_sweep_snapshots`)
+    — under :func:`kill_tree`'s identity rule, each member's recorded start time
+    re-checked, so a pid recycled since the snapshot is ``skipped`` and never
+    signalled. Several groups, not one: pi's shell and a ``timeout`` inside it
+    each lead their own. The Ctrl-C and abort paths run the same steps for every
+    live CLI at once (:meth:`LiveCliRegistry.sweep`, decision 11.9). Never raises
+    for a process that is already gone.
+    """
+    signalled = _signal_cli(proc)
+    cli = _await_cli(proc, signalled, grace_s, poll_interval_s)
+    return TreeSweep(cli=cli, groups=_sweep_groups(snapshot, grace_s, poll_interval_s))
+
+
+@dataclass
+class LiveCli:
+    """One Lane A CLI this process is waiting on."""
+
+    pid: int
+    start_time: Optional[str]
+    proc: Any
+    snapshot: List[Descendant] = field(default_factory=list)
+
+
+class LiveCliRegistry:
+    """Every live Lane A CLI in this process, with its latest tree snapshot.
+
+    Entries are added right before ``communicate()`` and removed in its
+    ``finally``; a daemon thread re-snapshots every entry's descendants each
+    :data:`LIVE_SNAPSHOT_INTERVAL_S` from ONE process-table scan, and exits when
+    the registry is empty. The detached worker's SIGTERM handler calls
+    :meth:`sweep` before it exits, so an abort takes the CLIs' detached children
+    with it instead of leaving them to ``kill_tree`` on the worker's group, which
+    never reaches a child in a session of its own.
+
+    Safe to read from a signal handler: the lock is re-entrant (the handler runs
+    on the main thread, which may already hold it) and never held across a scan.
+    """
+
+    def __init__(self, interval_s: float = LIVE_SNAPSHOT_INTERVAL_S):
+        self.interval_s = interval_s
+        self._lock = threading.RLock()
+        self._wake = threading.Condition(self._lock)
+        self._entries: Dict[int, LiveCli] = {}
+        self._thread: Optional[threading.Thread] = None
+
+    def register(self, proc: Any) -> LiveCli:
+        entry = LiveCli(pid=int(proc.pid), start_time=process_start_time(proc.pid),
+                        proc=proc)
+        with self._lock:
+            self._entries[id(proc)] = entry
+            if not IS_WINDOWS and (self._thread is None or not self._thread.is_alive()):
+                self._thread = threading.Thread(
+                    target=self._refresh_loop, name="multi-llm-cli-tree-snapshot",
+                    daemon=True,
+                )
+                self._thread.start()
+        return entry
+
+    def unregister(self, proc: Any) -> None:
+        with self._lock:
+            self._entries.pop(id(proc), None)
+            self._wake.notify_all()
+
+    @contextmanager
+    def tracking(self, proc: Any) -> Iterator[LiveCli]:
+        entry = self.register(proc)
+        try:
+            yield entry
+        finally:
+            self.unregister(proc)
+
+    def entries(self) -> List[LiveCli]:
+        with self._lock:
+            return list(self._entries.values())
+
+    def __len__(self) -> int:
+        with self._lock:
+            return len(self._entries)
+
+    def refresh(self) -> None:
+        """Re-snapshot every entry from one scan. Identity-checked per entry."""
+        entries = self.entries()
+        if not entries:
+            return
+        table = _process_table()
+        for entry in entries:
+            row = table.get(entry.pid)
+            if row is None:
+                continue  # already gone: keep the last snapshot it had
+            if entry.start_time and row.start_time and row.start_time != entry.start_time:
+                continue  # the pid names someone else now
+            fresh = _descendants_in(table, entry.pid)
+            with self._lock:
+                if id(entry.proc) in self._entries:
+                    entry.snapshot = fresh
+
+    def snapshot_for(self, proc: Any) -> List[Descendant]:
+        """The last refreshed snapshot of *proc*'s tree, merged with a fresh one.
+
+        The fresh walk runs only while *proc* is un-reaped (``returncode`` still
+        ``None``): until then its pid cannot be recycled, so its children are
+        still its own. Afterwards only the stored snapshot, whose start times
+        protect every later signal, is used.
+        """
+        with self._lock:
+            entry = self._entries.get(id(proc))
+            stored = list(entry.snapshot) if entry else []
+        fresh: List[Descendant] = []
+        if getattr(proc, "returncode", 0) is None:
+            fresh = descendants(proc.pid)
+        return _merge_snapshots(fresh, stored)
+
+    def sweep(
+        self,
+        grace_s: float = DEFAULT_TERMINATE_GRACE_S,
+        *,
+        poll_interval_s: float = 0.05,
+        budget_s: Optional[float] = LIVE_SWEEP_BUDGET_S,
+    ) -> List[Tuple[LiveCli, TreeSweep]]:
+        """Terminate every registered CLI and sweep its snapshotted groups, on one clock.
+
+        The abort that calls this is itself counting down to the SIGKILL that
+        ends the worker, and a signal this sweep has not sent by then is never
+        sent — so nothing here is paid per CLI or per group. All CLIs are
+        signalled first and share one grace; the survivors are SIGKILLed in one
+        pass; then every group of every snapshot is signalled before any is
+        waited on, and they share one grace and one SIGKILL window
+        (:func:`_sweep_snapshots`). Every wait is clipped to *budget_s*
+        (:data:`LIVE_SWEEP_BUDGET_S`, inside the abort's window), the graces
+        early enough that the SIGKILLs still go out within it; ``None`` leaves
+        the sweep unbounded.
+        """
+        clock = _SweepClock(budget_s)
+        entries = self.entries()
+        snapshots = [self.snapshot_for(entry.proc) for entry in entries]
+        signalled = [_signal_cli(entry.proc) for entry in entries]
+        waiting = [entry.proc for entry, sent in zip(entries, signalled) if sent]
+        until = clock.grace_until(grace_s)
+        for proc in waiting:
+            _wait_exit(proc, until - time.monotonic(), poll_interval_s)
+        killed: List[Any] = []
+        for proc in waiting:
+            if _exited(proc):
+                continue
+            try:
+                proc.kill()
+            except OSError:
+                pass
+            killed.append(proc)
+        groups = _sweep_snapshots(snapshots, grace_s, poll_interval_s, clock)
+        until = clock.confirm_until()
+        for proc in killed:
+            _wait_exit(proc, until - time.monotonic(), poll_interval_s)
+        results: List[Tuple[LiveCli, TreeSweep]] = []
+        for entry, sent, swept in zip(entries, signalled, groups):
+            if not sent:
+                cli = "exited"
+            elif not any(proc is entry.proc for proc in killed):
+                cli = "terminated"
+            else:
+                cli = "killed" if _exited(entry.proc) else "survived"
+            results.append((entry, TreeSweep(cli=cli, groups=swept)))
+        return results
+
+    def _refresh_loop(self) -> None:
+        while True:
+            with self._lock:
+                if not self._entries:
+                    self._thread = None
+                    return
+                self._wake.wait(self.interval_s)
+                if not self._entries:
+                    self._thread = None
+                    return
+            try:
+                self.refresh()
+            except Exception:  # noqa: BLE001 - a snapshot is best-effort
+                pass
+
+
+#: The process-wide registry every Lane A call registers its CLI in.
+live_cli_registry = LiveCliRegistry()
+
+
+def sweep_live_clis(tag: str) -> None:
+    """Sweep :data:`live_cli_registry`, one ``[<tag>] cli pid N: …`` stderr line per CLI.
+
+    A no-op when nothing is registered. Never raises: the interrupt that asked
+    for it must still end the run and its result line must still be written.
+    """
+    try:
+        swept = live_cli_registry.sweep()
+    except Exception as exc:  # noqa: BLE001 - see above
+        print(f"[{tag}] failed: {exc}", file=sys.stderr)
+        return
+    for entry, result in swept:
+        print(f"[{tag}] cli pid {entry.pid}: {result.describe()}", file=sys.stderr)
+
+
+async def sweeping_live_clis_on_interrupt(awaitable: Awaitable[_T]) -> _T:
+    """Await *awaitable*; if a cancellation or Ctrl-C ends it, sweep the registry first.
+
+    What ``asyncio.run`` is handed wherever a dispatch target's fan-out runs
+    (decision 11.9). A slot waits on its CLI from an ``asyncio.to_thread`` worker,
+    and ``asyncio.run`` raises its ``KeyboardInterrupt`` only after the runner
+    has shut the default executor down, which joins every such worker. So a
+    sweep left to the caller's ``except KeyboardInterrupt`` waits for each CLI to
+    reach its own deadline whenever the SIGINT reached the orchestrator alone,
+    or a CLI handled it without exiting. Here it runs on the way out of the
+    coroutine, while the runner is still cancelling the main task: the CLIs are
+    stopped, their workers return, and the executor shutdown that follows has
+    nothing left to wait for.
+
+    Both endings are caught: the first Ctrl-C arrives as the main task's
+    cancellation (3.11+'s runner), a later one — or any Ctrl-C on 3.10 — as a
+    ``KeyboardInterrupt`` raised wherever the main thread is, after which the
+    runner's cancel-all reaches this frame as a cancellation too.
+    """
+    try:
+        return await awaitable
+    except (asyncio.CancelledError, KeyboardInterrupt):
+        sweep_live_clis("INTERRUPT_SWEEP")
+        raise
 
 
 # ---------------------------------------------------------------------------

@@ -5,7 +5,10 @@ Every `*.stdout.txt` / `*.stderr.txt` at this level is a **real capture** of pi
 <prompt>`, taken on 2026-09-25 in the container (`mllm-e2e:local`,
 `--network none`, **no credential**, one container per row, the server running
 inside it, the CLI never wrapped in `timeout(1)`). Raw bytes, nothing scrubbed,
-nothing synthesized. `manifest.yaml` is the authority on what each row asserts
+nothing synthesized — except `killed-mid-toolcall` and `killed-mid-text`, two
+synthetic streams of a reviewer killed at its deadline (the stub rig cannot
+produce a harness-side kill), each marked `synthesized: true` with its
+provenance in the manifest. `manifest.yaml` is the authority on what each row asserts
 and is graded by `tests/test_provider_fixture_rows.py`; this file says why the
 set looks the way it does.
 

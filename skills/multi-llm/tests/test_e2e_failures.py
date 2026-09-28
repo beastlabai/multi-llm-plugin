@@ -1539,6 +1539,13 @@ def _run_cro_review(tmp_path: Path, replies: Dict[str, Dict[str, Any]], **arg_ov
 
     The launch stagger is flattened because two model slots would otherwise cost
     a real 2 s `asyncio.sleep`; nothing here is about launch ordering.
+
+    The repository root is pinned to `tmp_path`, where the plan (and so the
+    phase dir) lives, as it does in a real run. Left to `git rev-parse` from a
+    temp dir it would be `None`, the lane would run in the suite's own cwd, and
+    every `"cwd"`-scoped adapter would correctly be sent down the diff-access
+    inline branch (plan: review-run-scope-salvage-and-failure-visibility D2.3)
+    — a question none of these tests is about.
     """
     plan = tmp_path / "auth-feature.md"
     plan.write_text("# Plan\n\nDo the thing.\n", encoding="utf-8")
@@ -1546,12 +1553,13 @@ def _run_cro_review(tmp_path: Path, replies: Dict[str, Dict[str, Any]], **arg_ov
 
     with patch.object(cro, "parse_args",
                       return_value=_review_args(plan, models, **arg_overrides)), \
+         patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
          patch.object(cro, "get_or_create_state", return_value=_review_state()), \
          patch.object(cro, "resolve_models", return_value=models), \
          patch.object(cro, "is_model_valid", return_value=True), \
          patch.object(cro, "validate_git_ref", side_effect=lambda ref: ref or "HEAD~1"), \
          patch.object(cro, "intent_to_add_untracked",
-                      side_effect=lambda files: contextlib.nullcontext()), \
+                      side_effect=lambda files, **_: contextlib.nullcontext()), \
          patch.object(cro, "PROVIDER_STAGGER_DELAY", 0.0), \
          patch.object(cro, "invoke_with_file_output",
                       side_effect=lambda **kwargs: replies[kwargs["model_spec"]]):
@@ -1809,6 +1817,259 @@ class TestAProviderWhoseFailureIsItselfJSON:
         assert f"**Models:** {GEMINI_SPEC}" in report
         assert f"- **{OPENCODE_SPEC}**: opencode exited with code 1" in report
         assert f"- **{KILOCODE_SPEC}**: kilocode exited with code 1" in report
+
+
+# ---------------------------------------------------------------------------
+# Salvage reads the answer text, not the transport stream (plan:
+# review-run-scope-salvage-and-failure-visibility §4, T4.2)
+# ---------------------------------------------------------------------------
+#
+# On 2026-09-25 pi was killed at the code-review deadline while a `bash` tool
+# call ran. The gate judged the last 20 lines of its `--mode json` stream, whose
+# `message_end` carries `"content": [thinking, toolCall]` — a list, so
+# `has_salvageable_json` passed — and `salvage_pi_…json` was written over pure
+# event data. `LLMProvider.salvage_text` now reduces a stream adapter's stdout to
+# its last assistant message's text, and `salvage_source` makes that the gate's
+# only input whenever the adapter has a reducer.
+
+from utils.json_extractor import has_salvageable_json  # noqa: E402
+from utils.llm_client import ERROR_TIMEOUT  # noqa: E402
+from utils.providers.pi import PiProvider  # noqa: E402
+from utils.review_orchestrator_base import salvage_source  # noqa: E402
+
+PI_SPEC = "pi:openrouter/deepseek/deepseek-v4.1-flash"
+PI_FIXTURES = Path(__file__).parent / "fixtures" / "pi"
+#: The incident: narration turns, then a `thinking` + `toolCall` message killed
+#: while the tool ran.
+PI_KILLED_MID_TOOLCALL = (PI_FIXTURES / "killed-mid-toolcall.stdout.txt").read_text(
+    encoding="utf-8")
+#: A reviewer killed while printing its findings array, after narration turns.
+PI_KILLED_MID_TEXT = (PI_FIXTURES / "killed-mid-text.stdout.txt").read_text(
+    encoding="utf-8")
+PI_AUTH_ERROR = (PI_FIXTURES / "auth-error.stdout.txt").read_text(encoding="utf-8")
+#: A diagnostic on stderr that is itself array-shaped JSON: the gate accepts it,
+#: so it must never reach the gate once an adapter has reduced its stream.
+ARRAY_SHAPED_DIAGNOSTIC = '{"error":"authentication failed","attempts":[]}'
+
+
+def _drive_real_pi_timeout(tmp_path: Path, stdout: str):
+    """`run_single_review` for pi, killed at its deadline after streaming ``stdout``."""
+    plan_path = _plan_file(tmp_path)
+    with patch("utils.llm_client.subprocess.run",
+               side_effect=_killed_after_streaming(stdout)), \
+         patch("shutil.which", return_value="/usr/bin/stub-cli"):
+        success, issues, error = asyncio.run(
+            cro.run_single_review(PI_SPEC, plan_path, tmp_path / "out")
+        )
+    return success, issues, error, cro.get_phase_dir(plan_path, "code-review")
+
+
+class TestSalvageSourceIsOneRule:
+    """`salvage_source(details)`, the gate input both lanes share."""
+
+    def test_a_present_empty_salvage_text_wins_over_a_stderr_that_passes_the_gate(self):
+        assert has_salvageable_json(ARRAY_SHAPED_DIAGNOSTIC)
+        details = {
+            "salvage_text": "",
+            "stdout_excerpt": '{"type":"message_end","message":{"content":[]}}',
+            "stderr": ARRAY_SHAPED_DIAGNOSTIC,
+        }
+
+        assert salvage_source(details) == ""
+
+    def test_a_present_salvage_text_is_the_input_whatever_else_is_there(self):
+        details = {"salvage_text": "[1", "stdout_excerpt": "x", "stderr": "y"}
+
+        assert salvage_source(details) == "[1"
+
+    @pytest.mark.parametrize("details,expected", [
+        ({"stdout_excerpt": TRUNCATED_ARRAY, "stderr": "banner"}, TRUNCATED_ARRAY),
+        ({"stderr": ARRAY_SHAPED_DIAGNOSTIC}, ARRAY_SHAPED_DIAGNOSTIC),
+        ({"stdout_excerpt": "", "stderr": ""}, ""),
+        ({}, ""),
+    ])
+    def test_an_absent_key_keeps_the_stdout_then_stderr_order(self, details, expected):
+        assert salvage_source(details) == expected
+
+    def test_the_fan_out_lane_applies_the_same_rule(self):
+        assert base.failure_output_from_result(
+            {"stdout": "x", "stderr": ARRAY_SHAPED_DIAGNOSTIC, "salvage_text": ""}
+        ) == ""
+        assert base.failure_output_from_result(
+            {"stdout": "", "stderr": ARRAY_SHAPED_DIAGNOSTIC}
+        ) == ARRAY_SHAPED_DIAGNOSTIC
+
+
+class TestSalvageSiteAReadsTheAnswerTextNotTheStream:
+    """Code-review salvage site A, driving the real pi adapter end to end."""
+
+    def _no_salvage(self, phase_dir, output):
+        assert "[SALVAGE_NEEDED]" not in output
+        assert "[SALVAGE_TASK]" not in output
+        assert list(phase_dir.glob("salvage_*.json")) == []
+
+    def test_a_killed_mid_toolcall_is_a_failed_model_not_a_salvage_request(
+        self, tmp_path, capsys
+    ):
+        """(a) The incident. The raw stream passes the gate; its reduction is ``""``."""
+        assert has_salvageable_json(PI_KILLED_MID_TOOLCALL)
+
+        success, issues, error, phase_dir = _drive_real_pi_timeout(
+            tmp_path, PI_KILLED_MID_TOOLCALL)
+        output = capsys.readouterr().out
+
+        assert (success, issues) == (False, None)
+        assert "timed out" in error
+        self._no_salvage(phase_dir, output)
+        assert "timed out before writing an answer — nothing to salvage" in output
+
+    def test_an_auth_error_with_an_array_shaped_stderr_salvages_nothing(
+        self, tmp_path, capsys
+    ):
+        """(b) pi's auth failure on a non-zero exit. stderr would pass the gate on
+        its own; with a reducer present it never reaches it."""
+        assert has_salvageable_json(ARRAY_SHAPED_DIAGNOSTIC)
+
+        success, issues, error, phase_dir = _drive_real_provider_failure(
+            tmp_path, PI_SPEC, stdout=PI_AUTH_ERROR, stderr=ARRAY_SHAPED_DIAGNOSTIC,
+        )
+        output = capsys.readouterr().out
+
+        assert (success, issues) == (False, None)
+        self._no_salvage(phase_dir, output)
+        assert "nothing to salvage" in output
+        envelope = _real_hard_failure(
+            PI_SPEC, stdout=PI_AUTH_ERROR, stderr=ARRAY_SHAPED_DIAGNOSTIC)
+        assert envelope["details"]["salvage_text"] == ""
+        assert not has_salvageable_json(salvage_source(envelope["details"]))
+
+    def test_a_killed_mid_text_array_is_salvaged_from_its_answer_text_alone(
+        self, tmp_path, capsys
+    ):
+        """(c) The case salvage exists for: the cut array, and none of the narration."""
+        success, issues, error, phase_dir = _drive_real_pi_timeout(
+            tmp_path, PI_KILLED_MID_TEXT)
+        output = capsys.readouterr().out
+
+        assert success is False
+        assert "[SALVAGE_NEEDED]" in output
+        stem = cro.sanitize_model_name(PI_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{stem}.json").read_text(encoding="utf-8"))
+        reduced = PiProvider().salvage_text(PI_KILLED_MID_TEXT).strip()
+        assert request["raw_output"] == reduced
+        assert request["raw_output"].startswith("[\n  {")
+        assert "The plan's retry schedule" not in request["raw_output"]
+        assert "[2, 4, 8]" not in request["raw_output"]
+        assert '"type":"message_update"' not in request["raw_output"]
+        # A deadline ended the run, and the request says so (D4.5).
+        assert request["failure"] == "timeout"
+
+    def test_a_reducer_that_raises_salvages_nothing_rather_than_the_raw_stream(
+        self, tmp_path, capsys
+    ):
+        """(d) The raw stream passes the gate today; a raising override records
+        ``""``, never a fall-back to that stream."""
+        assert has_salvageable_json(PI_KILLED_MID_TEXT)
+
+        with patch.object(PiProvider, "salvage_text", side_effect=RuntimeError("boom")):
+            success, issues, error, phase_dir = _drive_real_pi_timeout(
+                tmp_path, PI_KILLED_MID_TEXT)
+        output = capsys.readouterr().out
+
+        assert (success, issues) == (False, None)
+        self._no_salvage(phase_dir, output)
+        assert "timed out before writing an answer — nothing to salvage" in output
+
+
+class TestTheFanOutBaseReadsTheAnswerTextNotTheStream:
+    """The same four cases through `failure_output_from_result` (review-plan and
+    review-tasks), via `_drive_real_fanout_failure`."""
+
+    #: By name: the lane tuples are defined further down the module, beside
+    #: `_drive_real_fanout_failure`, and resolved when the test runs.
+    LANES = pytest.mark.parametrize("lane_name", ["review-plan", "review-tasks"])
+
+    @staticmethod
+    def _lane(name):
+        return {"review-plan": REVIEW_PLAN_LANE, "review-tasks": REVIEW_TASKS_LANE}[name]
+
+    @staticmethod
+    def _no_salvage(phase_dir, output, saved):
+        assert saved is False
+        assert "[SALVAGE_NEEDED]" not in output
+        assert list(phase_dir.glob("salvage_*.json")) == []
+        stem = cro.sanitize_model_name(PI_SPEC)
+        assert (phase_dir / f"error_{stem}.log").exists()
+        assert not (phase_dir / f"{stem}.json").exists()
+
+    @LANES
+    def test_a_killed_mid_toolcall_is_a_failed_model(self, tmp_path, capsys, lane_name):
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, self._lane(lane_name), stdout=PI_KILLED_MID_TOOLCALL, model_spec=PI_SPEC,
+            timing_out=True,
+        )
+
+        assert result["salvage_text"] == ""
+        assert base.failure_output_from_result(result) == ""
+        self._no_salvage(phase_dir, capsys.readouterr().out, saved)
+
+    @LANES
+    def test_an_auth_error_with_an_array_shaped_stderr_salvages_nothing(
+        self, tmp_path, capsys, lane_name
+    ):
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, self._lane(lane_name), stdout=PI_AUTH_ERROR, stderr=ARRAY_SHAPED_DIAGNOSTIC,
+            model_spec=PI_SPEC,
+        )
+
+        assert result["stderr"] == ARRAY_SHAPED_DIAGNOSTIC
+        assert base.failure_output_from_result(result) == ""
+        self._no_salvage(phase_dir, capsys.readouterr().out, saved)
+
+    @LANES
+    def test_a_killed_mid_text_array_is_salvaged_from_its_answer_text_alone(
+        self, tmp_path, capsys, lane_name
+    ):
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, self._lane(lane_name), stdout=PI_KILLED_MID_TEXT, model_spec=PI_SPEC,
+            timing_out=True,
+        )
+        output = capsys.readouterr().out
+
+        assert saved is False
+        assert "[SALVAGE_NEEDED]" in output
+        stem = cro.sanitize_model_name(PI_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{stem}.json").read_text(encoding="utf-8"))
+        assert request["raw_output"] == PiProvider().salvage_text(PI_KILLED_MID_TEXT).strip()
+        assert "The plan's retry schedule" not in request["raw_output"]
+        assert request["failure"] == "timeout"
+
+    @LANES
+    def test_a_reducer_that_raises_salvages_nothing(self, tmp_path, capsys, lane_name):
+        with patch.object(PiProvider, "salvage_text", side_effect=RuntimeError("boom")):
+            result, phase_dir, saved = _drive_real_fanout_failure(
+                tmp_path, self._lane(lane_name), stdout=PI_KILLED_MID_TEXT, model_spec=PI_SPEC,
+                timing_out=True,
+            )
+
+        assert result["salvage_text"] == ""
+        self._no_salvage(phase_dir, capsys.readouterr().out, saved)
+
+    def test_a_non_timeout_failure_records_no_failure_kind(self, tmp_path, capsys):
+        """Only a deadline stamps the request: a run that finished and then
+        exited non-zero keeps its `[]` as a genuine empty review (D4.5)."""
+        result, phase_dir, saved = _drive_real_fanout_failure(
+            tmp_path, REVIEW_PLAN_LANE, stdout=TRUNCATED_ARRAY,
+        )
+        capsys.readouterr()
+
+        assert "failure" not in result
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+        request = json.loads(
+            (phase_dir / f"salvage_{stem}.json").read_text(encoding="utf-8"))
+        assert "failure" not in request
 
 
 # ---------------------------------------------------------------------------
@@ -2219,6 +2480,162 @@ class TestATerminalSalvageIsNotReAdvertised:
 
 
 # ---------------------------------------------------------------------------
+# Plan review-run-scope-salvage-and-failure-visibility §5 (T5.2): the report
+# header names the lost reviewer, and says a salvage was asked for
+# ---------------------------------------------------------------------------
+#
+# `**Models:**` lists only the models that produced results, so the model a
+# salvage gave up on was named only in `## Failed Reviews` at the bottom — and
+# a `--reaggregate` over the same dir named it nowhere. The header line carries
+# it on both lanes, with the salvage clause read from what each lane leaves on
+# disk: the `--exec-subagents` lane's retired `.unrecoverable.` request, and the
+# native lane's live `salvage_{stem}.json`.
+
+
+def _models_failed_line(phase_dir: Path) -> str:
+    lines = (phase_dir / "report.md").read_text(encoding="utf-8").splitlines()
+    index = next(i for i, line in enumerate(lines) if line.startswith("**Models:**"))
+    return lines[index + 1]
+
+
+_TWO_REVIEWERS = {
+    KILOCODE_SPEC: _hard_failure(TRUNCATED_ARRAY),
+    GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+}
+
+
+class TestTheHeaderNamesTheReviewerTheSalvageGaveUpOn:
+    def _assert_the_clause(self, phase_dir: Path) -> None:
+        line = _models_failed_line(phase_dir)
+        assert line.startswith(
+            f"**Models failed:** 1 of 2 requested — {KILOCODE_SPEC}: "
+            "kilocode exited with code 1"
+        ), line
+        assert line.endswith("; salvage requested, nothing recovered"), line
+
+    def test_the_exec_subagents_run_and_its_reaggregate_carry_the_clause(
+        self, tmp_path, capsys
+    ):
+        with patch.object(
+            executor, "run_task_file", _native_salvage_reply(SALVAGE_SENTINEL)
+        ):
+            plan, phase_dir, exit_code = _run_cro_review(
+                tmp_path, dict(_TWO_REVIEWERS), exec_subagents=True,
+            )
+        capsys.readouterr()
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+        assert exit_code == 0
+        # The only evidence left is the retired request, as the plan says.
+        assert not (phase_dir / f"salvage_{stem}.json").exists()
+        assert list(phase_dir.glob(f"retired_salvage_{stem}.unrecoverable.*.json"))
+        self._assert_the_clause(phase_dir)
+
+        _run_cro_review(tmp_path, dict(_TWO_REVIEWERS), reaggregate=True)
+        out = capsys.readouterr().out
+        self._assert_the_clause(phase_dir)
+        assert f"[MODEL_FAILED] {KILOCODE_SPEC}: kilocode exited with code 1" in out
+        assert f"[PARTIAL_RESULTS: {KILOCODE_SPEC}]" in out
+
+    def test_the_native_lanes_reaggregate_carries_it_from_the_live_request(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir, exit_code = _run_cro_review(tmp_path, dict(_TWO_REVIEWERS))
+        capsys.readouterr()
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+        assert exit_code == 0
+        assert (phase_dir / f"salvage_{stem}.json").exists()
+
+        # The host has not salvaged yet (or its salvage recovered nothing):
+        # the request is still on disk when it re-invokes the reaggregate.
+        _run_cro_review(tmp_path, dict(_TWO_REVIEWERS), reaggregate=True)
+        capsys.readouterr()
+        self._assert_the_clause(phase_dir)
+
+
+def _timed_out_after_streaming(stdout_excerpt: str) -> Dict[str, Any]:
+    """What `invoke_with_file_output` returns for a slot killed at its deadline."""
+    return {
+        "success": False,
+        "error": "kilocode timed out after 5s",
+        "error_code": ERROR_TIMEOUT,
+        "details": {"stdout_excerpt": stdout_excerpt, "timeout": 5},
+        "output_file": "",
+        "data": None,
+    }
+
+
+class TestATimedOutRunsSalvagedEmptyArrayIsNotAReview:
+    """D4.5 at the phase level (decision 11.10: timeouts only).
+
+    The same genuine dispatch as the two classes above — the gate correctly asks
+    for salvage over a cut array, `--exec-subagents` runs it — but the salvage
+    subagent answers `[]`. From a run a deadline killed that is not "this model
+    found nothing": the request carries `"failure": "timeout"`, the executor
+    refuses the empty array as `salvage_unrecoverable`, nothing is written, and
+    the model stays failed. From a run that finished and exited non-zero, `[]`
+    is still the model's genuine empty review and still lands.
+    """
+
+    def _run(self, tmp_path, kilocode_reply):
+        with patch.object(executor, "run_task_file", _native_salvage_reply([])):
+            return _run_cro_review(
+                tmp_path,
+                {
+                    KILOCODE_SPEC: kilocode_reply,
+                    GEMINI_SPEC: _good_reply([_issue("Unbounded retry loop")]),
+                },
+                exec_subagents=True,
+            )
+
+    def test_a_timed_out_runs_empty_salvage_leaves_the_model_failed(
+        self, tmp_path, capsys
+    ):
+        with patch.object(cro, "record_next") as next_command:
+            plan, phase_dir, exit_code = self._run(
+                tmp_path, _timed_out_after_streaming(TRUNCATED_ARRAY))
+        output = capsys.readouterr().out
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+
+        assert exit_code == 0
+        assert "[SALVAGE_TASK]" in output
+        assert "[exec-subagents] dispatching salvage task" in output
+        # Refused and reported where the marker used to be, nothing written.
+        assert f"[SALVAGE_UNRECOVERABLE] {stem}: " in output
+        assert "timed out" in output.split(f"[SALVAGE_UNRECOVERABLE] {stem}: ", 1)[1]
+        assert not (phase_dir / f"{stem}.json").exists()
+        assert f"[{KILOCODE_SPEC}] recovered by salvage" not in output
+        assert "SALVAGE NEEDED" not in output
+        assert next_command.call_args_list == []
+
+        # The retired request is the record of why: it names the timeout.
+        retired = list(phase_dir.glob(f"retired_salvage_{stem}.*.json"))
+        assert len(retired) == 1
+        assert json.loads(retired[0].read_text(encoding="utf-8"))["failure"] == "timeout"
+
+        report = json.loads(
+            (phase_dir / executor.BATCH_REPORT_FILENAME).read_text(encoding="utf-8"))
+        assert report["tasks"][0]["reason"] == executor.SALVAGE_EMPTY_AFTER_TIMEOUT_REASON
+
+        status = json.loads((phase_dir / ".status.json").read_text(encoding="utf-8"))
+        assert status["models_completed"] == [GEMINI_SPEC]
+        assert KILOCODE_SPEC in status["models_failed"]
+        grouped = json.loads((phase_dir / "grouped.json").read_text(encoding="utf-8"))
+        assert {m for g in grouped["groups"] for m in g["models"]} == {GEMINI_SPEC}
+
+    def test_a_finished_runs_empty_salvage_is_still_its_review(self, tmp_path, capsys):
+        plan, phase_dir, exit_code = self._run(tmp_path, _hard_failure(TRUNCATED_ARRAY))
+        output = capsys.readouterr().out
+        stem = cro.sanitize_model_name(KILOCODE_SPEC)
+
+        assert exit_code == 0
+        assert "[SALVAGE_UNRECOVERABLE]" not in output
+        assert f"[{KILOCODE_SPEC}] recovered by salvage" in output
+        assert json.loads((phase_dir / f"{stem}.json").read_text(encoding="utf-8")) == []
+        request = json.loads((phase_dir / f"salvage_{stem}.json").read_text(encoding="utf-8"))
+        assert "failure" not in request
+
+
+# ---------------------------------------------------------------------------
 # A salvage pair does not outlive the attempt that wrote it
 # ---------------------------------------------------------------------------
 #
@@ -2616,6 +3033,7 @@ def _drive_real_fanout_failure(
         "plan", model_spec, result["success"], result["output"], result["error"],
         str(out_dir), str(phase_dir), salvage_phase_name,
         failure_output=base.failure_output_from_result(result),
+        failure=result.get(base.SALVAGE_FAILURE_KEY),
     )
     return result, phase_dir, saved
 

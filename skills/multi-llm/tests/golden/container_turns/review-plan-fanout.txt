@@ -50,6 +50,12 @@ Read this file to understand the proposed implementation. The plan should contai
 - **Code organization**: Is the proposed file structure sensible?
 - **Naming consistency**: Are names clear and consistent throughout?
 
+## Working limits
+- This review is stopped after about 20 minutes. Anything unfinished at that point is lost, so write your answer well before then.
+- Do NOT run the project's test suite, builds, linters, installers, or any other long-running command. This is a read-only review. If a finding depends on a test's result, you may run that ONE narrowly scoped test file, and only if you can run commands at all.
+- Do NOT modify, create or delete any file except the output file named below.
+- Do NOT claim that a test passes or fails unless you ran it during this review and saw its result. Say what a test covers, not what it would report.
+
 ## Output Format
 Return ONLY a valid JSON array with no additional text. Each element must have exactly these fields:
 - "title": string (5-10 word summary of the issue)

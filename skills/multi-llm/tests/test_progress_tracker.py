@@ -55,6 +55,7 @@ from utils.progress_tracker import (
     FanoutProgress,
     PhaseProgress,
     entry_elapsed_s,
+    entry_queued_s,
     entry_stagger_remaining_s,
     format_budget,
     format_elapsed,
@@ -86,7 +87,8 @@ class FakeClock:
     It carries a **wall** clock beside the monotonic one, locked to it, because
     the module needs both and they answer different questions: ``_monotonic``
     freezes ``elapsed_s`` at a terminal transition, while a *live* row's elapsed
-    is ``now - started_at`` on the wall clock. Left unpatched, the wall half is
+    is ``now - dispatched_at`` (and a queued row's wait ``now - started_at``)
+    on the wall clock. Left unpatched, the wall half is
     the machine's, so a rendered-line assertion like ``(0m00s/30m)`` passes only
     while the test body runs inside one second — which is a flake, not a test
     (F6, 2026-09-20). Patched, the fan-out's own script decides what every clock
@@ -222,6 +224,10 @@ class TestLifecycle:
         assert all(e["source"] is None for e in seeded.values())
         assert all("ended_at" not in e and "elapsed_s" not in e for e in seeded.values())
         assert all("error" not in e for e in seeded.values())
+        # Admitted, not dispatched: nothing about a dispatch is on the row yet.
+        assert all(
+            "dispatched_at" not in e and "queued_s" not in e for e in seeded.values()
+        )
 
         spec = SPECS[0]
         tracker.staggering(spec, delay_s=4.0)
@@ -230,6 +236,7 @@ class TestLifecycle:
         # The row says *when* it dispatches, not only that it is waiting: the
         # stamp is the sleep's end on the same wall clock as `started_at`.
         assert entry_stagger_remaining_s(entry, now=clock.wall_time()) == pytest.approx(4.0)
+        clock.now += 4
 
         # The stagger sleep ends before the semaphores are acquired, so the
         # slot goes back to `queued` — admitted, not yet dispatched — for the
@@ -238,28 +245,42 @@ class TestLifecycle:
         entry = read_progress(tmp_path)["models"][spec]
         assert entry["state"] == STATE_QUEUED
         assert "stagger_until" not in entry, "a spent countdown is not carried"
+        assert "dispatched_at" not in entry, "the semaphore wait is not a dispatch"
+        clock.now += 30
 
         tracker.running(spec, attempt=1)
         entry = read_progress(tmp_path)["models"][spec]
         assert entry["state"] == STATE_RUNNING and entry["attempt"] == 1
         assert "retry_after_s" not in entry
+        # The first dispatch stamps itself and the wait in front of it: four
+        # seconds of stagger plus thirty on the semaphore.
+        dispatched_at = entry["dispatched_at"]
+        assert dispatched_at == clock.now_iso()
+        assert entry["queued_s"] == 34
+        assert entry["started_at"] != dispatched_at, "`started_at` keeps its meaning"
 
         clock.now += 20
         tracker.retrying(spec, attempt=1, retry_after_s=20)
         entry = read_progress(tmp_path)["models"][spec]
         assert entry["state"] == STATE_RETRYING and entry["retry_after_s"] == 20
+        assert entry["dispatched_at"] == dispatched_at
 
         tracker.running(spec, attempt=2)
         entry = read_progress(tmp_path)["models"][spec]
         assert entry["state"] == STATE_RUNNING and entry["attempt"] == 2
         assert "retry_after_s" not in entry, "a running row advertises no backoff"
+        assert entry["dispatched_at"] == dispatched_at, "a retry is not a new dispatch"
+        assert entry["queued_s"] == 34
 
         clock.now += 100
         tracker.done(spec, source="file")
         entry = read_progress(tmp_path)["models"][spec]
         assert entry["state"] == STATE_DONE
         assert entry["source"] == "file"
+        # Run time from the first dispatch, the wait beside it: 34 s of
+        # admission-to-dispatch is not charged to the run.
         assert entry["ended_at"] and entry["elapsed_s"] == 120
+        assert entry["queued_s"] == 34 and entry["dispatched_at"] == dispatched_at
         assert "error" not in entry, "`error` is absent on every done entry"
         assert entry["attempt"] == 2, "the ladder's counter rides out with the row"
 
@@ -269,10 +290,15 @@ class TestLifecycle:
         assert entry["state"] == STATE_FAILED
         assert entry["error"] == "exit 1: boom" and entry["source"] == "failed"
         assert entry["ended_at"] and "retry_after_s" not in entry
+        assert (entry["elapsed_s"], entry["queued_s"]) == (0, 154)
 
-        # queued -> done directly: the resume skip answers from disk, no attempt.
+        # queued -> done directly: the resume skip answers from disk, no attempt
+        # and no dispatch, so no run time — only the time it sat in the map.
         tracker.done(SPECS[2], source="existing_file")
-        assert read_progress(tmp_path)["models"][SPECS[2]]["attempt"] == 0
+        entry = read_progress(tmp_path)["models"][SPECS[2]]
+        assert entry["attempt"] == 0
+        assert "dispatched_at" not in entry
+        assert (entry["elapsed_s"], entry["queued_s"]) == (0, 154)
 
     def test_queued_is_the_semaphore_wait_and_not_a_terminal_row(
         self, tmp_path, clock
@@ -475,10 +501,32 @@ class TestElapsedIsComputed:
         clock.now += 130
         tracker.done(SPECS[0], source="file")
         entry = read_progress(tmp_path)["models"][SPECS[0]]
-        assert entry["elapsed_s"] == 130
-        # An hour later the table still reads 130 s, because `ended_at` is what
-        # picks the formula.
-        assert entry_elapsed_s(entry, now=_posix_of(entry["started_at"]) + 3600) == 130.0
+        # Never dispatched, so no run time: the 130 s it sat in the map is its
+        # wait (decision 11.14 of plan review-run-scope-salvage-and-failure-
+        # visibility; this read `elapsed_s == 130` when the clock counted from
+        # admission).
+        assert entry["elapsed_s"] == 0 and entry["queued_s"] == 130
+        # An hour later the table still reads the same, because `ended_at` is
+        # what picks the formula.
+        later = _posix_of(entry["started_at"]) + 3600
+        assert entry_elapsed_s(entry, now=later) == 0.0
+        assert entry_queued_s(entry, now=later) == 130.0
+
+    def test_a_dispatched_terminal_row_is_frozen_from_its_dispatch(
+        self, tmp_path, clock
+    ):
+        """The same freeze for a slot that ran, after a wait it did not run in."""
+        tracker = FanoutProgress(tmp_path, SPECS[:1], interval_s=0, timeout=1800)
+        tracker.seed()
+        clock.now += 465
+        tracker.running(SPECS[0], attempt=1)
+        clock.now += 130
+        tracker.done(SPECS[0], source="file")
+        entry = read_progress(tmp_path)["models"][SPECS[0]]
+        assert (entry["elapsed_s"], entry["queued_s"]) == (130, 465)
+        later = _posix_of(entry["started_at"]) + 86400
+        assert entry_elapsed_s(entry, now=later) == 130.0
+        assert entry_queued_s(entry, now=later) == 465.0
 
     def test_elapsed_is_not_reset_by_a_retry(self, tmp_path, clock):
         """The backoff is charged to the same deadline, so the origin holds."""
@@ -492,6 +540,246 @@ class TestElapsedIsComputed:
         clock.now += 40
         tracker.done(SPECS[0], source="file")
         assert read_progress(tmp_path)["models"][SPECS[0]]["elapsed_s"] == 120
+
+
+class TestTheClockStartsAtDispatch:
+    """`elapsed_s` is run time, counted from the first dispatch.
+
+    Plan review-run-scope-salvage-and-failure-visibility §6: every slot was
+    seeded at 15:58:10, pi dispatched at 16:05:55 when kimi finished, and its
+    first live row already read `8m00s/20m`. The recorded 1666.1 s was 1201.4 s
+    of its own run plus 464.7 s of kimi's. The wait is a fact worth keeping —
+    it now lives in `queued_s` — but it is not run time.
+    """
+
+    def test_a_queued_slot_s_run_time_starts_when_it_dispatches(self, tmp_path, clock):
+        """The incident, on the driven clock: pi waits 464.7 s, runs 1201.4 s."""
+        tracker = FanoutProgress(tmp_path, ["pi:kimi"], interval_s=0, timeout=1200)
+        tracker.seed()
+        clock.now += 464.7
+        tracker.running("pi:kimi", attempt=1)
+        live = read_progress(tmp_path)["models"]["pi:kimi"]
+        # The first live row reads zero, not the eight minutes it queued for.
+        assert entry_elapsed_s(live, now=clock.wall_time()) == pytest.approx(0.0, abs=0.01)
+        clock.now += 1201.4
+        tracker.failed("pi:kimi", error="timed out", source="failed")
+        entry = read_progress(tmp_path)["models"]["pi:kimi"]
+        assert (entry["elapsed_s"], entry["queued_s"]) == (1201.4, 464.7)
+
+    def test_a_second_running_does_not_move_the_dispatch(self, tmp_path, clock):
+        tracker = FanoutProgress(tmp_path, SPECS[:1], interval_s=0, timeout=1800)
+        tracker.seed()
+        clock.now += 300
+        tracker.running(SPECS[0], attempt=1)
+        first = dict(read_progress(tmp_path)["models"][SPECS[0]])
+        clock.now += 60
+        tracker.running(SPECS[0], attempt=2)
+        second = read_progress(tmp_path)["models"][SPECS[0]]
+        assert second["dispatched_at"] == first["dispatched_at"]
+        assert second["queued_s"] == first["queued_s"] == 300
+
+    def test_a_retried_slot_covers_both_attempts_and_the_backoff(self, tmp_path, clock):
+        """The ladder's one deadline is taken just before the first dispatch
+        and the `retrying` sleep is charged to it, so the frozen run time is
+        both attempts plus the sleep — and none of the queue wait before."""
+        tracker = FanoutProgress(tmp_path, SPECS[:1], interval_s=0, timeout=1800)
+        tracker.seed()
+        clock.now += 300                      # queued behind a sibling
+        tracker.running(SPECS[0], attempt=1)
+        clock.now += 60                       # attempt 1
+        tracker.retrying(SPECS[0], attempt=1, retry_after_s=20)
+        clock.now += 20                       # the backoff
+        tracker.running(SPECS[0], attempt=2)
+        clock.now += 40                       # attempt 2
+        tracker.done(SPECS[0], source="file")
+        entry = read_progress(tmp_path)["models"][SPECS[0]]
+        assert (entry["elapsed_s"], entry["queued_s"]) == (120, 300)
+
+    def test_a_retry_with_no_running_first_is_still_a_dispatch(self, tmp_path, clock):
+        """A retry follows an attempt: the dispatch is stamped rather than
+        leaving a live row that reads like a map from before `dispatched_at`."""
+        tracker = FanoutProgress(tmp_path, SPECS[:1], interval_s=0, timeout=1800)
+        tracker.seed()
+        clock.now += 10
+        tracker.retrying(SPECS[0], attempt=1, retry_after_s=5)
+        entry = read_progress(tmp_path)["models"][SPECS[0]]
+        assert entry["dispatched_at"] == clock.now_iso() and entry["queued_s"] == 10
+        clock.now += 5
+        tracker.running(SPECS[0], attempt=2)
+        assert read_progress(tmp_path)["models"][SPECS[0]]["dispatched_at"] == (
+            entry["dispatched_at"]
+        )
+
+    def test_a_terminal_row_is_not_dispatched_after_the_fact(self, tmp_path, clock):
+        tracker = FanoutProgress(tmp_path, SPECS[:1], interval_s=0, timeout=1800)
+        tracker.seed()
+        tracker.done(SPECS[0], source="existing_file")
+        frozen = dict(read_progress(tmp_path)["models"][SPECS[0]])
+        clock.now += 30
+        tracker.running(SPECS[0], attempt=1)
+        tracker.retrying(SPECS[0], attempt=1, retry_after_s=5)
+        assert read_progress(tmp_path)["models"][SPECS[0]] == frozen
+        assert "dispatched_at" not in frozen
+
+
+class TestTheReadTimeRules:
+    """`entry_elapsed_s`'s four rules and `entry_queued_s`, on hand-built rows.
+
+    Hand-built, because two of the shapes — a map written before
+    `dispatched_at` existed, and a row whose stamps disagree — are rows the
+    tracker no longer writes but a reader still meets on disk.
+    """
+
+    STARTED = "2026-09-27T15:58:10"
+    DISPATCHED = "2026-09-27T16:05:55"
+
+    def _at(self, stamp: str, plus: float = 0.0) -> float:
+        return _posix_of(stamp) + plus
+
+    def test_a_queued_or_staggering_row_has_no_run_time(self):
+        for state in (STATE_QUEUED, STATE_STAGGERING):
+            entry = {"state": state, "started_at": self.STARTED, "timeout_s": 1200}
+            assert entry_elapsed_s(entry, now=self._at(self.STARTED, 465)) is None
+
+    def test_a_queued_row_s_wait_is_now_minus_admission_unclamped(self):
+        """A wait is not charged to the budget, so it is not clamped at it."""
+        entry = {"state": STATE_QUEUED, "started_at": self.STARTED, "timeout_s": 60}
+        assert entry_queued_s(entry, now=self._at(self.STARTED, 465)) == 465.0
+        staggering = dict(entry, state=STATE_STAGGERING)
+        assert entry_queued_s(staggering, now=self._at(self.STARTED, 4)) == 4.0
+
+    def test_a_dispatched_row_counts_from_its_dispatch(self):
+        entry = {
+            "state": STATE_RUNNING, "started_at": self.STARTED,
+            "dispatched_at": self.DISPATCHED, "timeout_s": 1200,
+        }
+        assert entry_elapsed_s(entry, now=self._at(self.DISPATCHED, 90)) == 90.0
+        # The clamp stays: pinned at the budget now means the kill is due.
+        assert entry_elapsed_s(entry, now=self._at(self.DISPATCHED, 5000)) == 1200.0
+        # No stored `queued_s`: both stamps are exact, so their difference.
+        assert entry_queued_s(entry, now=self._at(self.DISPATCHED, 90)) == 465.0
+        # A stored one (the monotonic figure the dispatch wrote) wins.
+        stored = dict(entry, queued_s=464.7)
+        assert entry_queued_s(stored, now=self._at(self.DISPATCHED, 90)) == 464.7
+
+    def test_a_legacy_row_renders_as_it_always_did(self):
+        """No `dispatched_at`: a running row keeps `now - started_at`, and has
+        no wait to report because none was ever recorded."""
+        entry = {"state": STATE_RUNNING, "started_at": self.STARTED, "timeout_s": 1200}
+        assert entry_elapsed_s(entry, now=self._at(self.STARTED, 130)) == 130.0
+        assert entry_elapsed_s(entry, now=self._at(self.STARTED, 5000)) == 1200.0
+        assert entry_queued_s(entry, now=self._at(self.STARTED, 130)) is None
+        # ...and its queued sibling reads as a wait, keyed on `state`.
+        queued = dict(entry, state=STATE_QUEUED)
+        assert entry_elapsed_s(queued, now=self._at(self.STARTED, 130)) is None
+        assert entry_queued_s(queued, now=self._at(self.STARTED, 130)) == 130.0
+
+    def test_a_terminal_row_reads_only_what_was_stored(self):
+        entry = {
+            "state": STATE_FAILED, "started_at": self.STARTED,
+            "dispatched_at": self.DISPATCHED, "ended_at": "2026-09-27T16:25:56",
+            "elapsed_s": 1201.4, "queued_s": 464.7, "timeout_s": 1200,
+        }
+        later = self._at(self.DISPATCHED, 86400)
+        assert entry_elapsed_s(entry, now=later) == 1201.4
+        assert entry_queued_s(entry, now=later) == 464.7
+        # A terminal row with no stored wait has none, whatever the stamps say.
+        without = {k: v for k, v in entry.items() if k != "queued_s"}
+        assert entry_queued_s(without, now=later) is None
+
+    @pytest.mark.parametrize("value", [
+        True, "465", float("nan"), float("inf"), -5, 10 ** 400, None, [1],
+    ], ids=["bool", "string", "nan", "inf", "negative", "huge", "none", "list"])
+    def test_a_stored_wait_that_is_not_a_duration_reads_as_none(self, value):
+        entry = {"state": STATE_DONE, "ended_at": "2026-09-27T16:25:56",
+                 "elapsed_s": 5, "queued_s": value}
+        assert entry_queued_s(entry) is None
+
+    @pytest.mark.parametrize("row", [
+        "not a row",
+        {"state": STATE_QUEUED, "started_at": "garbage"},
+        {"state": STATE_RUNNING, "started_at": "garbage", "dispatched_at": "also"},
+        {"state": STATE_RUNNING, "started_at": 3, "dispatched_at": {"at": 1}},
+    ], ids=["not-a-mapping", "queued-garbage", "running-garbage", "running-types"])
+    def test_a_row_the_wait_cannot_be_read_from_costs_the_wait_only(self, row):
+        assert entry_queued_s(row) is None
+
+    def test_an_aware_dispatched_at_is_read_not_raised(self):
+        """The one ISO reader's normalisation (F4) covers the new stamp too."""
+        from datetime import datetime, timezone
+
+        when = datetime(2026, 9, 27, 16, 5, 55, tzinfo=timezone.utc)
+        entry = {"state": STATE_RUNNING, "started_at": self.STARTED,
+                 "dispatched_at": when.isoformat(), "timeout_s": 1800}
+        assert entry_elapsed_s(entry, now=when.timestamp() + 90) == 90.0
+        # Mixed naive and aware stamps: read (never negative) or declined, but
+        # never raised.
+        wait = entry_queued_s(entry)
+        assert wait is None or wait >= 0.0
+
+
+class TestAParkedSlotThroughTheRealFanOut:
+    """The plan's offline progress-clock check, through `run_models_concurrent`.
+
+    `max_parallel=1` and two models: while the first holds the semaphore the
+    second can only wait, so its line reads `waiting …`, and once it has run its
+    `elapsed_s` is its own run and not its sibling's (plan
+    review-run-scope-salvage-and-failure-visibility §10).
+    """
+
+    MODELS = ["cursor-agent:auto", "codex:gpt-5.5"]
+
+    def test_the_second_slot_waits_then_records_only_its_own_run(
+        self, tmp_path, clock
+    ):
+        import time
+        from unittest.mock import patch
+
+        from utils import review_orchestrator_base as base
+
+        phase = tmp_path / "review-plan"
+        phase.mkdir()
+        tracker = FanoutProgress(phase, self.MODELS, timeout=1800, interval_s=0)
+        head, tail = self.MODELS
+        dispatched = asyncio.Event()
+        release = asyncio.Event()
+        seen = {}
+
+        async def factory(model_spec, index):
+            tracker.running(model_spec, attempt=1)
+            if model_spec == head:
+                dispatched.set()
+                await release.wait()
+            else:
+                clock.now += 60                  # the tail's own run
+            return {"success": True, "source": "file"}
+
+        async def drive():
+            task = asyncio.ensure_future(base.run_models_concurrent(
+                list(self.MODELS), factory, 1800, 1, tracker=tracker
+            ))
+            await dispatched.wait()
+            deadline = time.monotonic() + 2.0
+            while (tracker.snapshot()[tail]["state"] != STATE_QUEUED
+                   and time.monotonic() < deadline):
+                await asyncio.sleep(0.005)
+            clock.now += 300                     # the head runs five minutes
+            seen["line"] = tracker.render_line()
+            seen["row"] = dict(tracker.snapshot()[tail])
+            release.set()
+            await task
+
+        with patch.object(base, "PROVIDER_STAGGER_DELAY", 0.0):
+            asyncio.run(drive())
+
+        assert f"running: {head} (5m00s/30m)" in seen["line"], seen["line"]
+        assert f"queued: {tail} (waiting 5m00s)" in seen["line"], seen["line"]
+        assert entry_elapsed_s(seen["row"], now=clock.wall_time()) is None
+
+        models = read_progress(phase)["models"]
+        assert (models[head]["elapsed_s"], models[head]["queued_s"]) == (300, 0)
+        # Sixty seconds of its own run, not the 360 s since it was admitted.
+        assert (models[tail]["elapsed_s"], models[tail]["queued_s"]) == (60, 300)
 
 
 def _posix_of(stamp: str) -> float:
@@ -621,7 +909,78 @@ class TestRenderedLine:
 
         assert line.startswith(f"{PROGRESS_PREFIX} 1/4 done (1 ok, 0 failed)")
         assert f"running: {SPECS[0]} (2m10s/30m)" in line
-        assert "staggering 1" in line and "queued 1" in line
+        # A staggering row is still counted; a queued one is named with its
+        # wait (decision 11.13 of plan review-run-scope-salvage-and-failure-
+        # visibility — this read `queued 1`).
+        assert "staggering 1" in line
+        assert "queued: cursor-agent:auto (waiting 2m10s)" in line
+
+    def test_a_running_row_counts_from_its_dispatch_not_its_admission(
+        self, tmp_path, clock
+    ):
+        """pi's first live row read `8m00s/20m` because it had queued eight
+        minutes; from the dispatch it reads what the slot has actually run."""
+        tracker = FanoutProgress(tmp_path, ["pi:kimi"], interval_s=0, timeout=1200)
+        tracker.seed()
+        clock.now += 480
+        tracker.running("pi:kimi", attempt=1)
+        assert "running: pi:kimi (0m00s/20m)" in tracker.render_line()
+        clock.now += 130
+        assert "running: pi:kimi (2m10s/20m)" in tracker.render_line()
+
+    def test_up_to_three_queued_slots_are_named_longest_wait_first(self):
+        """Seed order is deliberately not the wait order here: the map's first
+        queued row has waited least. Ties keep seed order."""
+        def queued(started):
+            return {"state": STATE_QUEUED, "started_at": started, "timeout_s": 1800}
+
+        models = {
+            "m:0": {"state": STATE_RUNNING, "started_at": "2026-09-27T15:58:10",
+                    "dispatched_at": "2026-09-27T15:58:10", "timeout_s": 1800},
+            "m:5": queued("2026-09-27T16:00:10"),
+            "m:4": queued("2026-09-27T16:00:10"),
+            "m:1": queued("2026-09-27T15:58:10"),
+            "m:2": queued("2026-09-27T15:58:10"),
+            "m:3": queued("2026-09-27T15:59:10"),
+        }
+        line = progress_tracker.render_progress_line(
+            models, now=_posix_of("2026-09-27T16:05:55")
+        )
+        assert (
+            "queued: m:1 (waiting 7m45s), m:2 (waiting 7m45s), "
+            "m:3 (waiting 6m45s) +2 more"
+        ) in line, line
+        # The named rows are the longest waits; the two shortest are counted.
+        assert "m:4" not in line and "m:5" not in line
+
+    def test_three_queued_or_fewer_are_all_named_with_no_count(self, tmp_path, clock):
+        tracker = FanoutProgress(tmp_path, SPECS, interval_s=0, timeout=1800)
+        tracker.seed()
+        clock.now += 5
+        line = tracker.render_line()
+        assert "queued: " + ", ".join(
+            f"{spec} (waiting 0m05s)" for spec in SPECS
+        ) in line
+        assert "more" not in line
+
+    def test_a_wait_that_cannot_be_read_sorts_last_and_still_counts(self):
+        models = {
+            "a:unreadable": {"state": STATE_QUEUED, "started_at": "garbage"},
+            "b:long": {"state": STATE_QUEUED, "started_at": "2026-09-27T15:58:10"},
+            "c:short": {"state": STATE_QUEUED, "started_at": "2026-09-27T16:00:10"},
+            "d:shorter": {"state": STATE_QUEUED, "started_at": "2026-09-27T16:01:10"},
+        }
+        now = _posix_of("2026-09-27T16:05:55")
+        line = progress_tracker.render_progress_line(models, now=now)
+        assert (
+            "queued: b:long (waiting 7m45s), c:short (waiting 5m45s), "
+            "d:shorter (waiting 4m45s) +1 more"
+        ) in line, line
+        # With room to name it, the unreadable row is named, with a `?`.
+        three = {k: v for k, v in models.items() if k != "d:shorter"}
+        assert "c:short (waiting 5m45s), a:unreadable (waiting ?)" in (
+            progress_tracker.render_progress_line(three, now=now)
+        )
 
     def test_the_attempt_has_no_denominator(self, tmp_path):
         tracker = FanoutProgress(tmp_path, SPECS[:1], interval_s=0, timeout=1800)
@@ -1155,11 +1514,18 @@ class TestEveryEndingRetiresEverySlot:
         models = read_progress(tmp_path)["models"]
         assert not LIVE_STATES & {e["state"] for e in models.values()}
         assert {e["error"] for e in models.values()} == {DEADLINE_ERROR}
-        # Each retired row carries the time it really spent live, frozen from the
-        # monotonic origin stamped at *seed* — which is what a table rendered an
-        # hour later shows. (This used to assert `elapsed_s is not None`, which
-        # `_freeze` cannot produce: it writes a number or `0` — F6, 2026-09-20.)
-        assert {e["elapsed_s"] for e in models.values()} == {95}
+        # Each retired row carries the time it really spent, frozen from the
+        # monotonic origins — which is what a table rendered an hour later
+        # shows. (This used to assert `elapsed_s is not None`, which `_freeze`
+        # cannot produce: it writes a number or `0` — F6, 2026-09-20.) The two
+        # slots that dispatched ran for 95 s; the one still staggering never
+        # dispatched, so it ran for none of them and its 95 s is a wait
+        # (decision 11.14 of plan review-run-scope-salvage-and-failure-
+        # visibility; this read 95 for all three when the clock counted from
+        # admission).
+        assert (models[SPECS[0]]["elapsed_s"], models[SPECS[0]]["queued_s"]) == (0, 95)
+        for spec in SPECS[1:]:
+            assert (models[spec]["elapsed_s"], models[spec]["queued_s"]) == (95, 0)
         assert all(e["source"] is None for e in models.values())
         assert all("retry_after_s" not in e for e in models.values()), (
             "a slot that will never wake from its backoff must not advertise one"
@@ -1322,10 +1688,18 @@ class TestAbortRetiresTheMapOnDisk:
             assert entry["error"] == CANCELLED_ERROR
             assert entry["source"] is None
             assert entry["ended_at"]
-            # Derived on the wall clock from `started_at`, by the same read-time
-            # rule every renderer applies, because the monotonic origins live in
-            # a tracker a signal handler must not touch.
-            assert entry["elapsed_s"] == 300
+        # Derived on the wall clock from the persisted stamps, by the same
+        # read-time rules every renderer applies, because the monotonic origins
+        # live in a tracker a signal handler must not touch. The running slot
+        # dispatched at second zero and keeps its 300 s of run time; the
+        # staggering one never dispatched, so it freezes no run time and its
+        # 300 s wait lands in `queued_s` — without it the row would lose the
+        # wait the table exists to show (plan review-run-scope-salvage-and-
+        # failure-visibility §6.3; this read `elapsed_s == 300` for both).
+        running, staggering = models[SPECS[1]], models[SPECS[2]]
+        assert (running["elapsed_s"], running["queued_s"]) == (300, 0)
+        assert (staggering["elapsed_s"], staggering["queued_s"]) == (0, 300)
+        assert "dispatched_at" not in staggering
 
         progress = read_progress(phase)
         assert (progress["models_done"], progress["models_succeeded"]) == (3, 1), (
@@ -1575,6 +1949,52 @@ class TestAbortRetiresTheMapOnDisk:
         status_file.update_progress(str(tmp_path), {"step": "fanout"})
         assert progress_tracker.retire_live_entries(tmp_path) == 0
         assert read_progress(tmp_path) == {"step": "fanout"}
+
+    def test_the_close_out_applies_the_dispatch_origin_rule_to_every_row_shape(
+        self, tmp_path
+    ):
+        """The same rule `_freeze` applies, from the persisted stamps alone.
+
+        Four live shapes: a dispatched row (run time from `dispatched_at`, its
+        stored wait kept), a queued row that waited past its whole budget (no
+        run time; the wait is not clamped, because it was not charged to the
+        budget), a row with `dispatched_at` and no stored wait (the stamps'
+        difference), and a running row from a map written before
+        `dispatched_at` existed (today's `now - started_at`, and no wait,
+        because none was recorded). A row that already ended is left alone.
+        """
+        started = "2026-09-27T15:58:10"
+        status_file.update_progress(str(tmp_path), {"models": {
+            "a:ran": {"state": STATE_RUNNING, "started_at": started,
+                      "dispatched_at": "2026-09-27T16:05:55", "queued_s": 464.7,
+                      "timeout_s": 1200},
+            "b:waited": {"state": STATE_QUEUED, "started_at": started,
+                         "timeout_s": 600},
+            "c:stamps": {"state": STATE_RETRYING, "started_at": started,
+                         "dispatched_at": "2026-09-27T16:00:10", "timeout_s": 1800,
+                         "retry_after_s": 20},
+            "d:legacy": {"state": STATE_RUNNING, "started_at": started,
+                         "timeout_s": 1800},
+            "e:ended": {"state": STATE_DONE, "started_at": started,
+                        "ended_at": "2026-09-27T16:00:00", "elapsed_s": 110,
+                        "queued_s": 0, "timeout_s": 1800, "source": "file"},
+        }})
+        ended = read_progress(tmp_path)["models"]["e:ended"]
+        at = _posix_of("2026-09-27T16:15:55")
+
+        assert progress_tracker.retire_live_entries(tmp_path, now=at) == 4
+
+        models = read_progress(tmp_path)["models"]
+        assert (models["a:ran"]["elapsed_s"], models["a:ran"]["queued_s"]) == (600, 464.7)
+        assert (models["b:waited"]["elapsed_s"], models["b:waited"]["queued_s"]) == (0, 1065)
+        assert (models["c:stamps"]["elapsed_s"], models["c:stamps"]["queued_s"]) == (945, 120)
+        assert models["d:legacy"]["elapsed_s"] == 1065
+        assert "queued_s" not in models["d:legacy"]
+        assert models["e:ended"] == ended
+        assert all(
+            models[spec]["state"] == STATE_FAILED for spec in ("a:ran", "b:waited",
+                                                               "c:stamps", "d:legacy")
+        )
 
     @pytest.mark.parametrize(
         "reason", ["heartbeat_timeout", "worker_never_started"]

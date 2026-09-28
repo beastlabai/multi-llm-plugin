@@ -25,11 +25,12 @@ import argparse
 import asyncio
 import json
 import os
+import posixpath
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -92,6 +93,9 @@ from utils.review_orchestrator_base import (
     retire_salvage_artifacts,
     retire_stale_validation,
     retire_stale_validation_round,
+    salvage_failure_fields,
+    salvage_failure_kind,
+    salvage_source,
     bind_plan_for_validation,
     materialization_read_refusal,
     verify_round_context,
@@ -106,6 +110,11 @@ from utils.review_orchestrator_base import (
     record_sandbox_bypassed,
     recorded_served_models,
     recorded_usage,
+    # Plan §5: what a reaggregate says about the models that produced nothing.
+    announce_remaining_failures,
+    exit_when_every_reviewer_failed,
+    remaining_failed_models,
+    salvage_requested_models,
     sandbox_fallback_kwargs,
     sandbox_refusal,
     spawn_fanout_slot,
@@ -145,6 +154,7 @@ from utils import unattended as unattended_mod
 from utils.unattended import NeedsHuman
 from utils.provider_registry import (
     get_all_model_specs,
+    get_collapse_paths,
     parse_model_spec,
     get_provider_timeout,
     get_provider_max_concurrent,
@@ -159,20 +169,40 @@ from utils.json_extractor import (
     sanitize_model_name,
 )
 from utils.llm_client import (
+    INLINE_MANIFEST_LABEL,
+    INLINE_PROMPT_CAP_BYTES,
+    argv_prompt_bytes,
     describe_output_file,
     describe_usage,
     invoke_with_file_output,
     invoke_with_provider,
+    render_diff_access,
     sandbox_record_word,
 )
 from utils.git_utils import (
+    DIFF_COVERAGE_COMPLETE,
+    DIFF_COVERAGE_PARTIAL,
+    REVIEW_DIFF_DIRNAME,
+    REVIEW_GROUP_ORDER,
+    REVIEW_GROUP_SOURCE,
+    REVIEW_GROUP_TESTS,
+    REVIEW_SCOPE_FILENAME,
+    WRITTEN_BY_REAGGREGATE,
     capture_file_context,
     capture_file_snapshots,
+    classify_review_paths,
+    count_review_groups,
     get_project_root,
+    get_project_root_from_dir,
+    list_worktree_untracked_files,
+    load_review_scope,
+    order_review_paths,
     validate_git_ref,
+    write_review_diff,
     _run_git,
 )
 from utils.html_report_generator import generate_html_report, write_html_report, model_label, served_model_label, VALIDATION_ORDER, UNKNOWN_STATUS_RANK
+from utils.html_report_generator import failed_models_line
 
 
 def derive_prefix(plan_path: Path) -> str:
@@ -354,6 +384,31 @@ Examples:
         help='Git ref to compare against (default: from state file)'
     )
 
+    # Decision 11.1 of the review-scope plan: an exact scope for an implementer
+    # that recorded nothing in state.json (anything outside `/multi-llm
+    # implement`). Without it the review falls back to the whole `git diff
+    # <base-ref>`, which on the run that motivated this was 1 040 files, ~30 of
+    # them hand-written source.
+    parser.add_argument(
+        '--files',
+        action='append',
+        default=[],
+        metavar='PATH',
+        help='Review exactly these files (repeatable; repo-relative, or absolute '
+             'inside the repository). Wins over the implement phase\'s '
+             'tracked_files and the git-diff fallback, and is recorded in '
+             'state.json so a later --reaggregate reviews the same scope; a '
+             'fan-out without it clears the record.'
+    )
+
+    parser.add_argument(
+        '--files-from',
+        metavar='FILE',
+        default=None,
+        help='Like --files, one path per line read from FILE ("-" for stdin); '
+             'blank lines are ignored. Combines with --files.'
+    )
+
     parser.add_argument(
         '--timeout',
         type=int,
@@ -439,28 +494,132 @@ def load_code_review_prompt() -> str:
     return load_prompt("code_review.txt")
 
 
-def resolve_changed_files(state: Any, base_ref: Optional[str]) -> List[str]:
-    """The files under review: the implement phase's tracked list, else the diff.
+#: Where a review's scope came from (:attr:`ReviewScope.source`), in the order
+#: :func:`resolve_review_scope` tries them.
+SCOPE_SOURCE_FILES_FLAG = "files_flag"
+SCOPE_SOURCE_TRACKED = "tracked_files"
+SCOPE_SOURCE_GIT_DIFF = "git_diff"
+SCOPE_SOURCE_NONE = "none"
 
-    One resolution for both entry points. The fan-out always had the fallback
-    (``tracked_files`` empty → ``git diff`` from *base_ref*, minus the
-    ``pre_existing_changes`` baseline); the reaggregate path read
-    ``tracked_files`` alone, so a review that had printed ``Files to review:
-    144`` from the diff reported ``**Files Changed:** 0`` and an empty
-    ``## Changed Files`` section in every ``report.md`` its reaggregate wrote
-    (measured 2026-09-17, on a plan with no implement phase behind it). Nothing
-    persists the list between the two, and the fallback is the same live
-    computation either way, so it is re-derived rather than reported as 0.
+#: The ``state.json`` key ``--files``/``--files-from`` are recorded under when a
+#: fan-out starts, so a later ``--reaggregate`` (which takes no ``--files``)
+#: resolves the scope the reviewers were given. A fan-out without the flags
+#: removes it, so a stale override never outlives its run.
+REVIEW_SCOPE_FILES_KEY = "review_scope_files"
 
-    Prints the same lines the fan-out printed, since they explain where the
-    count came from.
+#: ``[SCOPE_LARGE]`` fires when a fallback scope holds MORE than this many
+#: source and test files (fixtures and generated files are not counted: they
+#: are collapsed, not reviewed file by file). A warning only; nothing is
+#: dropped. Decision 11.4 keeps it as a log-only cap.
+SCOPE_LARGE_THRESHOLD = 200
+
+#: How many untracked paths ``[SCOPE_FALLBACK]`` names before ``… and <k>
+#: more``: a repository with unignored build output must not flood the log.
+UNTRACKED_SAMPLE_SIZE = 10
+
+
+class ReviewScope(NamedTuple):
+    """What ``review-code`` reviews, and where that list came from.
+
+    ``source`` is one of :data:`SCOPE_SOURCE_FILES_FLAG` (``--files`` /
+    ``--files-from``, or their record in state), :data:`SCOPE_SOURCE_TRACKED`
+    (the implement phase's ``tracked_files``), :data:`SCOPE_SOURCE_GIT_DIFF`
+    (the ``git diff --name-only <base_ref>`` fallback) or
+    :data:`SCOPE_SOURCE_NONE` (no tracked files and no base ref to diff).
+    ``task_ids`` maps each path to its tracked entry's ``task_id``; only the
+    ``tracked_files`` branch fills it. ``paths`` carries no order a caller may
+    rely on — ``utils.git_utils.order_review_paths`` sets the review order.
     """
+
+    paths: List[str]
+    source: str
+    task_ids: Dict[str, str]
+
+
+def review_git_root(project_root: Optional[str]) -> Optional[str]:
+    """The directory every review-scope git call runs in: the repository root.
+
+    The scope is repository-root-relative (``--files`` is made so,
+    ``tracked_files`` comes from ``git status --porcelain`` and the fallback
+    from ``git diff --name-only``, both root-relative from any directory), but
+    ``git diff -- <path>``, ``git check-attr`` and ``git ls-files``/``git add
+    -N`` read a path relative to where they run. Run from the caller's cwd, a
+    ``review-code`` invoked from a subdirectory diffed paths that do not exist
+    there: every diff came back empty, and the manifest recorded ``no net
+    change`` under ``complete`` coverage. So diff generation, classification
+    and the intent-to-add marking all run here instead.
+
+    ``project_root`` is the plan's repository (``get_project_root(plan)``), the
+    root the rest of this orchestrator already resolves against; when the plan
+    lies outside any repository it is the root of the cwd's. ``None`` only when
+    neither is in a repository, where git has nothing to diff anyway.
+    """
+    return project_root or get_project_root_from_dir()
+
+
+def resolve_review_scope(
+    state: Any,
+    base_ref: Optional[str],
+    *,
+    anchor: Optional[str] = None,
+    repo_root: Optional[str] = None,
+) -> ReviewScope:
+    """The files under review, labelled with the branch that picked them.
+
+    Tried in order, first non-empty wins:
+
+    1. ``review_scope_files`` — the exact list a ``--files``/``--files-from``
+       fan-out recorded (decision 11.1 of the review-scope plan);
+    2. ``tracked_files`` — what the implement phase recorded;
+    3. ``git diff --name-only <base_ref>`` minus the ``pre_existing_changes``
+       baseline, announced loudly (``[SCOPE_FALLBACK]``, and ``[SCOPE_LARGE]``
+       above :data:`SCOPE_LARGE_THRESHOLD` source and test files), because it
+       is a guess: it reviews every committed and uncommitted change since the
+       ref, and it never sees an untracked file;
+    4. nothing, when there is no base ref either.
+
+    One resolution for both entry points. The fan-out always had the fallback;
+    the reaggregate path read ``tracked_files`` alone, so a review that had
+    printed ``Files to review: 144`` from the diff reported ``**Files
+    Changed:** 0`` in every ``report.md`` its reaggregate wrote (measured
+    2026-09-17). The fallback is the same live computation either way, so it is
+    re-derived — and its lines re-printed, since they explain where the count
+    came from — rather than persisted.
+
+    The label is returned by the branch that picked the paths, never derived
+    from a second read of ``state`` that could disagree with it. ``anchor`` is
+    the run's plan path, for the ``code_review.collapse_paths`` read behind the
+    fallback's per-group counts; ``None`` falls back to the process's run
+    anchor, which every entry point pins before it gets here. ``repo_root``
+    (:func:`review_git_root`) is where that classification's ``git
+    check-attr`` runs.
+    """
+    recorded = state.get(REVIEW_SCOPE_FILES_KEY)
+    if isinstance(recorded, list):
+        explicit = list(dict.fromkeys(
+            item for item in recorded if isinstance(item, str) and item.strip()
+        ))
+        if explicit:
+            print(
+                f"Using {len(explicit)} files given with --files "
+                f"(state.json {REVIEW_SCOPE_FILES_KEY})"
+            )
+            return ReviewScope(explicit, SCOPE_SOURCE_FILES_FLAG, {})
+
     tracked_files = state.get("tracked_files", [])
     if tracked_files:
         print(f"Using {len(tracked_files)} tracked files from implementation phase")
-        return list(set(
-            entry.get("path", "") for entry in tracked_files if entry.get("path")
-        ))
+        entries = [entry for entry in tracked_files if isinstance(entry, dict)]
+        # First entry wins for a path listed twice. The paths themselves stay
+        # a de-duplicated *set*: the review order is `order_review_paths`'s
+        # job, and nobody may take one from here.
+        task_ids: Dict[str, str] = {}
+        for entry in entries:
+            path, task_id = entry.get("path"), entry.get("task_id")
+            if path and task_id and path not in task_ids:
+                task_ids[path] = str(task_id)
+        paths = list(set(entry.get("path", "") for entry in entries if entry.get("path")))
+        return ReviewScope(paths, SCOPE_SOURCE_TRACKED, task_ids)
 
     # Fallback to git diff (legacy behavior or no implement phase run)
     if not base_ref:
@@ -469,7 +628,7 @@ def resolve_changed_files(state: Any, base_ref: Optional[str]) -> List[str]:
             "Code review will have no files to review.",
             file=sys.stderr,
         )
-        return []
+        return ReviewScope([], SCOPE_SOURCE_NONE, {})
 
     print(f"No tracked files in state, falling back to git diff from {base_ref}")
     try:
@@ -480,35 +639,300 @@ def resolve_changed_files(state: Any, base_ref: Optional[str]) -> List[str]:
     # Filter out pre-existing changes that were present before implementation.
     # Through `subtract_baseline`, so a baseline entry that is an untracked
     # *directory* (`plans/`, one porcelain line) covers the files under it.
-    pre_existing = list(state.get("pre_existing_changes", []) or [])
+    baseline = state.get("pre_existing_changes")
+    pre_existing = list(baseline or [])
+    filtered_count = 0
     if pre_existing and changed_files:
         original_count = len(changed_files)
         changed_files = subtract_baseline(changed_files, pre_existing)
         filtered_count = original_count - len(changed_files)
         if filtered_count > 0:
             print(f"Filtered out {filtered_count} pre-existing files (not part of implementation)")
-    return changed_files
+
+    _announce_fallback_scope(
+        changed_files,
+        base_ref,
+        baseline_recorded=baseline is not None,
+        baseline_entries=len(pre_existing),
+        subtracted=filtered_count,
+        anchor=anchor,
+        repo_root=repo_root,
+    )
+    return ReviewScope(changed_files, SCOPE_SOURCE_GIT_DIFF, {})
 
 
-def format_tracked_files_for_prompt(tracked_files: List[Dict], max_chars: int = 5000) -> str:
+def _announce_fallback_scope(
+    changed_files: List[str],
+    base_ref: str,
+    *,
+    baseline_recorded: bool,
+    baseline_entries: int,
+    subtracted: int,
+    anchor: Optional[str],
+    repo_root: Optional[str] = None,
+) -> None:
+    """Print ``[SCOPE_FALLBACK]`` (and ``[SCOPE_LARGE]``) for a git-diff scope.
+
+    The fallback used to print one plain line, so a 1 040-file guess — 880 of
+    the paths opencode fixtures, 26 the generated codex mirror, ~30 hand-written
+    source — read exactly like a scoped review (review-scope plan §2.1, D2.5).
+    This says what was guessed and how big the guess is, and names what it left
+    out: ``git diff`` never shows an untracked file, so an implementer that did
+    not stage its new files has them dropped here (decision 11.2: they stay out
+    of the diff and are counted). Nothing is capped silently: the sample of
+    untracked paths is a log cap, and ``[SCOPE_LARGE]`` drops nothing.
     """
-    Format tracked files list for the code review prompt.
+    groups = classify_review_paths(
+        changed_files, get_collapse_paths(anchor=anchor), cwd=repo_root
+    )
+    counts = count_review_groups(groups)
+    per_group = ", ".join(f"{group} {counts[group]}" for group in REVIEW_GROUP_ORDER)
+    if baseline_recorded:
+        baseline_text = (
+            f"baseline: pre_existing_changes recorded ({baseline_entries} "
+            f"entries), {subtracted} path(s) subtracted"
+        )
+    else:
+        baseline_text = (
+            "baseline: none recorded (no pre_existing_changes), nothing subtracted"
+        )
+    print(
+        f"[SCOPE_FALLBACK] no implement phase recorded the files under review "
+        f"(tracked_files is empty); the scope is `git diff --name-only "
+        f"{base_ref}`: {len(changed_files)} files ({per_group}); {baseline_text}"
+    )
+
+    untracked = list_worktree_untracked_files()
+    if untracked is None:
+        print(
+            "[SCOPE_FALLBACK] untracked in worktree, not reviewed: unknown "
+            "(git ls-files failed)"
+        )
+    else:
+        # Worktree-wide, so on an ordinary dirty tree the count alone cannot
+        # say whether this change's own new files were dropped. The sample
+        # leads with the untracked paths that sit in a directory the diff
+        # touched — where an implementer's unstaged new file would be.
+        diffed_dirs = {posixpath.dirname(path) for path in changed_files}
+        beside = sorted(p for p in untracked if posixpath.dirname(p) in diffed_dirs)
+        beside_set = set(beside)
+        rest = sorted(p for p in untracked if p not in beside_set)
+        print(
+            f"[SCOPE_FALLBACK] untracked in worktree, not reviewed: "
+            f"{len(untracked)} (a worktree-wide count, not only files beside "
+            f"this change; git diff never shows an untracked file, so the "
+            f"fallback leaves them out)"
+        )
+        sample = beside + rest
+        for path in sample[:UNTRACKED_SAMPLE_SIZE]:
+            note = " (beside a diffed file)" if path in beside_set else ""
+            print(f"  - {path}{note}")
+        if len(sample) > UNTRACKED_SAMPLE_SIZE:
+            print(f"  … and {len(sample) - UNTRACKED_SAMPLE_SIZE} more")
+
+    reviewed = counts[REVIEW_GROUP_SOURCE] + counts[REVIEW_GROUP_TESTS]
+    if reviewed > SCOPE_LARGE_THRESHOLD:
+        # Two remedies, because the right one depends on where the work is:
+        # `git diff HEAD` shows only UNCOMMITTED changes, so an implementer
+        # that committed its work (as the run behind this marker did) would
+        # get an empty review from `--base-ref HEAD`.
+        print(
+            f"[SCOPE_LARGE] {reviewed} source and test files in this fallback "
+            f"scope (more than {SCOPE_LARGE_THRESHOLD}; fixtures and generated "
+            f"files not counted; nothing is dropped). If the implementation is "
+            f"uncommitted, re-run with `--base-ref HEAD`. Otherwise (`git diff "
+            f"HEAD` sees only uncommitted changes, so committed work would get "
+            f"an empty review) record the exact scope with `util "
+            f"finalize-tracking --state-file <state.json> --only-touched "
+            f"--touched <path> …`, or pass it with `review-code --files <path> "
+            f"…`."
+        )
+
+
+def resolve_changed_files(state: Any, base_ref: Optional[str]) -> List[str]:
+    """The paths of :func:`resolve_review_scope`, for a caller that needs no label.
+
+    The reaggregate path uses this: it dispatches no reviewer, so it needs only
+    the paths (and the same printed lines). No order is promised.
+    """
+    return resolve_review_scope(state, base_ref).paths
+
+
+def describe_scope_source(source: Optional[str], base_ref: Optional[str]) -> str:
+    """The review prompt's one-line account of where the file list came from.
+
+    Rendered into ``prompt_context["scope_source"]``, which is how the prompt
+    tells a reviewer why its list looks the way it does — including why it is
+    empty.
+    """
+    if source == SCOPE_SOURCE_FILES_FLAG:
+        return "given with --files (the exact scope the user named)"
+    if source == SCOPE_SOURCE_TRACKED:
+        return "recorded by the implement phase (tracked_files)"
+    if source == SCOPE_SOURCE_GIT_DIFF:
+        return (
+            f"`git diff --name-only {base_ref}` (fallback: no implement phase "
+            f"recorded the files it changed, so this is every change since "
+            f"that ref; untracked files are not in it)"
+        )
+    if source == SCOPE_SOURCE_NONE:
+        return (
+            "none: no implement phase recorded any files, and there is no base "
+            "ref to diff against"
+        )
+    return "not stated"
+
+
+class ScopeFilesError(ValueError):
+    """A ``--files``/``--files-from`` value that cannot be a review scope."""
+
+
+def _repo_relative_scope_path(raw: str, root: str) -> str:
+    """``raw`` as a repo-relative POSIX path, or :class:`ScopeFilesError`.
+
+    A relative path is taken relative to the repository root (not the cwd), so
+    the value means the same thing to a ``--detach`` worker as to the shell
+    that launched it. An absolute path must lie inside the repository; one that
+    reaches it through a symlinked spelling is accepted by its real location.
+    Existence is not checked: a file the change deleted is legitimately in
+    scope.
+    """
+    text = raw.strip()
+    root_abs = os.path.abspath(root)
+    root_real = os.path.realpath(root)
+    candidate = text if os.path.isabs(text) else os.path.join(root_abs, text)
+    lexical = os.path.normpath(os.path.abspath(candidate))
+
+    def _inside(path: str, base: str) -> Optional[str]:
+        try:
+            rel = os.path.relpath(path, base)
+        except ValueError:  # another drive on Windows
+            return None
+        if rel == os.curdir or rel == os.pardir or rel.startswith(os.pardir + os.sep):
+            return None
+        return rel.replace(os.sep, "/")
+
+    for base in (root_abs, root_real):
+        rel = _inside(lexical, base)
+        if rel is not None:
+            return rel
+    rel = _inside(os.path.realpath(candidate), root_real)
+    if rel is not None:
+        return rel
+    raise ScopeFilesError(
+        f"--files path is outside the repository ({root_real}): {raw}"
+    )
+
+
+def read_scope_files_flags(args: argparse.Namespace, root: str) -> Optional[List[str]]:
+    """The exact scope ``--files``/``--files-from`` name, or ``None`` when unused.
+
+    Both flags combine, ``--files`` first, then ``--files-from`` (one path per
+    line, ``-`` for stdin, blank lines ignored). Paths are made repo-relative
+    and de-duplicated in the order given. Raises :class:`ScopeFilesError` for
+    a path outside the repository, an unreadable list file, ``--files-from -``
+    under ``--detach`` (the worker does not inherit this stdin), or flags that
+    name no path at all — an empty explicit scope would otherwise quietly send
+    the review back to the git-diff fallback it was given to avoid.
+    """
+    given = [item for item in (getattr(args, "files", None) or []) if item is not None]
+    files_from = getattr(args, "files_from", None)
+    if not given and files_from is None:
+        return None
+    raw: List[str] = list(given)
+    if files_from is not None:
+        if files_from == "-":
+            if getattr(args, "detach", False):
+                raise ScopeFilesError(
+                    "--files-from - reads stdin, which a --detach worker does not "
+                    "inherit; write the list to a file and pass its path instead"
+                )
+            text = sys.stdin.read()
+        else:
+            try:
+                text = Path(files_from).read_text(encoding="utf-8")
+            except OSError as exc:
+                raise ScopeFilesError(
+                    f"--files-from {files_from}: cannot read it ({exc})"
+                ) from exc
+        raw.extend(text.splitlines())
+    paths = [
+        _repo_relative_scope_path(item, root) for item in raw if item.strip()
+    ]
+    paths = list(dict.fromkeys(paths))
+    if not paths:
+        raise ScopeFilesError(
+            "--files/--files-from named no path; an empty explicit scope would "
+            "fall back to the whole git diff, which is what the flags are for "
+            "avoiding"
+        )
+    return paths
+
+
+def stage_scope_files_record(state: Any, scope_files: Optional[List[str]]) -> bool:
+    """Set or clear ``review_scope_files`` on *state* in memory; True when it moved.
+
+    Staged in memory before resolution (so :func:`resolve_review_scope` reads
+    this run's value) and saved by the caller only past the detach boundary:
+    an invoker that fails pre-flight, or hands the run to a worker, must not
+    leave its scope in ``state.json`` for another run's reaggregate to adopt.
+    """
+    current = state.get(REVIEW_SCOPE_FILES_KEY)
+    if scope_files is not None:
+        if current == scope_files:
+            return False
+        state.set(REVIEW_SCOPE_FILES_KEY, list(scope_files))
+        return True
+    if current is None:
+        return False
+    # StateManager has no delete; its dict is the documented `.state`.
+    state.state.pop(REVIEW_SCOPE_FILES_KEY, None)
+    return True
+
+
+#: What the prompt's file list says when the resolved scope is empty. The
+#: prompt's scope-source line (``prompt_context["scope_source"]``) says why.
+#: It replaces "(No tracked files - using git diff to discover changes)", which
+#: every reviewer of a 1 040-file fallback scope received in place of the list.
+NO_CHANGED_FILES_LINE = "(No changed files found.)"
+
+
+def format_tracked_files_for_prompt(
+    paths: List[str],
+    task_ids: Optional[Dict[str, str]] = None,
+    max_chars: int = 5000,
+    full_scope_ref: Optional[str] = None,
+) -> str:
+    """
+    Format the resolved review scope for the code review prompt.
 
     Args:
-        tracked_files: List of tracked file entries from state
+        paths: The files under review, already in review order
+            (``utils.git_utils.order_review_paths``: source, tests, fixtures,
+            generated). The order is kept, so a cut drops the least useful
+            paths first.
+        task_ids: ``{path: task_id}`` for a scope the implement phase recorded
+            (``ReviewScope.task_ids``). A path with an entry gets a
+            ``(from task: <id>)`` suffix; any other path — every git-diff or
+            ``--files`` path — is listed bare, since it has no task.
         max_chars: Maximum character length before truncation (default 5000)
+        full_scope_ref: Where the whole list can be read (the scope manifest).
+            When given and the list is cut, the notice is followed by one
+            sentence naming it, because a prompt that says "review ONLY these
+            files" over a cut list would put every dropped path out of scope.
 
     Returns:
         Formatted string for inclusion in the prompt
     """
-    if not tracked_files:
-        return "(No tracked files - using git diff to discover changes)"
+    if not paths:
+        return NO_CHANGED_FILES_LINE
 
+    task_ids = task_ids or {}
     lines = []
-    for entry in tracked_files:
-        path = entry.get("path", "")
-        task_id = entry.get("task_id", "unknown")
-        lines.append(f"- `{path}` (from task: {task_id})")
+    for path in paths:
+        task_id = task_ids.get(path)
+        suffix = f" (from task: {task_id})" if task_id else ""
+        lines.append(f"- `{path}`{suffix}")
 
     full_text = "\n".join(lines)
 
@@ -525,6 +949,11 @@ def format_tracked_files_for_prompt(tracked_files: List[Dict], max_chars: int = 
 
         omitted = len(lines) - len(truncated_lines)
         notice = f"\n\n[... {omitted} more files not shown — list truncated to stay within context limits ...]"
+        if full_scope_ref:
+            notice += (
+                f"\nEvery path not shown is still in scope; the full list is "
+                f"{full_scope_ref}."
+            )
         print(f"WARNING: File list truncated — {omitted} of {len(lines)} files omitted to stay within context limits")
         return "\n".join(truncated_lines) + notice
 
@@ -726,8 +1155,17 @@ def _reviewed_code_sections(
 def _fit_reviewed_code_sections(
     sections: List[Tuple[str, str]],
     budget: Optional[int],
+    *,
+    unnamed: frozenset[str] = frozenset(),
 ) -> Tuple[str, List[str]]:
-    """``(excerpt, dropped paths)`` — the sections under ``budget``, whole files only."""
+    """``(excerpt, dropped paths)`` — the sections under ``budget``, whole files only.
+
+    ``unnamed`` are paths the in-block note must not repeat when they are
+    dropped: a cited path that resolves outside the repository is model output
+    with no window to show, and a prompt that names it among "files not shown"
+    reads as an invitation to go and read it. They are still returned in the
+    dropped list, which only reaches stderr and the run's own records.
+    """
     if not sections:
         return "", []
     header = (
@@ -743,10 +1181,11 @@ def _fit_reviewed_code_sections(
             continue
         kept.append(rendered)
         used += len(rendered) + 2
-    if dropped:
+    named = [path for path in dropped if path not in unnamed]
+    if named:
         kept.append(
             "(Over this block's budget, so the windows for these files are not "
-            "shown: " + ", ".join(dropped) + ".)"
+            "shown: " + ", ".join(named) + ".)"
         )
     return header + "\n\n".join(kept), dropped
 
@@ -872,6 +1311,23 @@ def build_validation_secondary_context(
     as a ``reviewed-code`` context source with ``mode: truncated`` (§2.6).
     Neither half is ever named by path: the record has no file and the windows
     are live working-tree bytes no snapshot binds.
+
+    ``cut_report["open_paths"]`` is the other half of a drop: the dropped files
+    a validator can open itself, absolute, for
+    :func:`validation_extra_instructions` to name **outside** this block. The
+    block's own "not shown" note is appended last, so it is the first text
+    ``build_context_source``'s tail cut removes from a nearly full block; the
+    instruction travels in ``extra_instructions``, which no context budget cuts.
+    Review-code validators are dispatched ``agent-readonly``, which guarantees
+    workspace reads, so they can open the files; they were just never told to.
+    The dropped paths are model output, so each is resolved with
+    :func:`_readable_inside_repo` under the same root rule
+    :func:`_reviewed_code_sections` uses (``project_root``, else the cwd) and
+    kept only when it resolves to a file inside it — never a raw join onto the
+    root: an ``agent-readonly`` prompt naming an escaping path would send the
+    validator to it, and codex reads outside its cwd. Computed here, in the one
+    function both validation sites call, so both get the same containment and
+    the same text.
     """
     raw_record = build_implementation_record(plan_path)
     record = excerpt_context_reported(
@@ -888,13 +1344,20 @@ def build_validation_secondary_context(
     )
     reviewed_code, _ = _fit_reviewed_code_sections(sections, None)
     embedded = reviewed_code
+    # The same root `_reviewed_code_sections` confines its reads to.
+    root = Path(project_root) if project_root else Path.cwd()
+    inside = {path: _readable_inside_repo(path, root) for path, _ in sections}
     if len(embedded) > code_budget:
         # Re-cut by whole files rather than letting the caller's shared excerpt
         # slice the last file mid-window. The files were read once, above; only
         # the fit is redone. The stderr line names the files that went, not a
         # char count, because "which cited file has no window" is the question
         # a verdict about an unshown file raises.
-        embedded, dropped = _fit_reviewed_code_sections(sections, code_budget)
+        embedded, dropped = _fit_reviewed_code_sections(
+            sections,
+            code_budget,
+            unnamed=frozenset(path for path, on_disk in inside.items() if on_disk is None),
+        )
         print(
             f"[VALIDATION_CONTEXT_TRUNCATED] reviewed-code "
             f"{len(reviewed_code) - code_budget} chars over; windows for "
@@ -909,11 +1372,40 @@ def build_validation_secondary_context(
         cut_report["record_chars"] = len(raw_record)
         cut_report["dropped_files"] = list(dropped)
         cut_report["files_total"] = len(sections)
+        open_paths: List[str] = []
+        for path in dropped:
+            on_disk = inside.get(path)
+            if on_disk and os.path.isfile(on_disk) and on_disk not in open_paths:
+                open_paths.append(on_disk)
+        cut_report["open_paths"] = open_paths
 
     parts = [record_part]
     if embedded:
         parts.append(f"{code_heading}{embedded}")
     return "\n\n".join(parts), reviewed_code
+
+
+def validation_extra_instructions(cut_report: Dict[str, Any]) -> str:
+    """``extra_instructions`` for a code-review validation batch.
+
+    :data:`CODE_REVIEW_VALIDATION_GUIDANCE`, then — only when the reviewed-code
+    block dropped files a validator can open (``cut_report["open_paths"]``, see
+    :func:`build_validation_secondary_context`) — one instruction naming them,
+    absolute. ``build_validation_prompt`` renders this field outside both
+    context blocks, so ``excerpt_context`` never touches it; it counts against
+    the batch's prompt budget, which splits a batch or fails loudly but never
+    truncates. Both validation sites build the argument here, so they
+    materialize the same prompt.
+    """
+    open_paths = [p for p in cut_report.get("open_paths") or [] if p]
+    if not open_paths:
+        return CODE_REVIEW_VALIDATION_GUIDANCE
+    return (
+        f"{CODE_REVIEW_VALIDATION_GUIDANCE}\n\n"
+        "These files were dropped from the reviewed-code block only for its "
+        "budget. Open each at the lines the findings cite before judging them: "
+        + ", ".join(f"`{path}`" for path in open_paths)
+    )
 
 
 def reviewed_code_document(secondary: str, cut_report: Dict[str, Any]) -> BoundDocument:
@@ -1141,6 +1633,363 @@ def update_plan_with_fixes(
         print(f"ERROR: Failed to update plan file: {e}")
 
 
+# ---------------------------------------------------------------------------
+# Which scope each result reviewed, and what the prompt says about the diff set
+# (plan: review-run-scope-salvage-and-failure-visibility §2, D2.2/D2.3)
+# ---------------------------------------------------------------------------
+
+#: ``{<result stem>: <scope id>}`` — the scope manifest each model's latest
+#: attempt was shown. Every run for a plan shares one phase dir and a resume
+#: reuses every ``<model>.json`` on disk, so without this a result written
+#: against an earlier change would be reported as a review of this one. A
+#: dotfile, so the reaggregate's ``*.json`` glob skips it as it skips
+#: ``.status.json``.
+REVIEW_SCOPE_LEDGER = ".review-scope.json"
+
+#: A result with no ledger entry predates the ledger (or lost its entry), so
+#: which change it reviewed cannot be said.
+SCOPE_UNKNOWN = "unknown"
+
+#: The scope placeholders when no diff set was written for the slot — a direct
+#: call or a fixture; ``main`` always writes one before dispatch.
+NO_SCOPE_MANIFEST_TEXT = (
+    "(no scope manifest was written for this review, so the list above is the "
+    "whole scope)"
+)
+NO_DIFF_DIR_TEXT = "(no diff files were written for this review)"
+NO_DIFF_ACCESS_TEXT = (
+    "No scope manifest or diff files were written for this review. Review the "
+    "files listed above against the plan with the tools you have."
+)
+
+#: The same placeholders for a lane on the inline branch of the diff-access
+#: block: it cannot open the phase dir, so the prompt names no path there and
+#: points at the labelled blocks instead.
+INLINE_PLAN_TEXT = (
+    "(reproduced in full as the `plan` block under Diff Access below; you "
+    "cannot open it)"
+)
+INLINE_SCOPE_FILE_TEXT = (
+    f"`{INLINE_MANIFEST_LABEL}` (reproduced in full as a block under Diff Access "
+    f"below; you cannot open it)"
+)
+INLINE_DIFF_DIR_TEXT = (
+    "`diff/` (each diff file is reproduced as a block under Diff Access below)"
+)
+INLINE_FULL_SCOPE_REF = f"the `{INLINE_MANIFEST_LABEL}` block under Diff Access below"
+
+
+def read_scope_ledger(phase_dir: Any) -> Dict[str, str]:
+    """``.review-scope.json`` as ``{stem: scope id}``; ``{}`` when absent or unreadable."""
+    try:
+        data = json.loads(
+            (Path(phase_dir) / REVIEW_SCOPE_LEDGER).read_text(encoding="utf-8")
+        )
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {
+        stem: scope_id for stem, scope_id in data.items()
+        if isinstance(stem, str) and isinstance(scope_id, str)
+    }
+
+
+def record_scope_attempt(phase_dir: Any, stem: str, scope_id: str) -> None:
+    """Record that ``stem``'s attempt starting now was shown scope ``scope_id``.
+
+    At attempt start rather than at save: a result this attempt's salvage
+    writes later lands on the same ``<stem>.json`` (a salvage task's
+    ``output_name`` is the model's result file), and is covered too. Atomic
+    replace, so a torn ledger never reads as "every result is unknown".
+    Best-effort, loud: a failed write only costs the next resume a re-run.
+    """
+    ledger = read_scope_ledger(phase_dir)
+    ledger[stem] = scope_id
+    target = Path(phase_dir) / REVIEW_SCOPE_LEDGER
+    temp = target.with_name(f"{REVIEW_SCOPE_LEDGER}.{os.getpid()}.tmp")
+    try:
+        temp.write_text(json.dumps(ledger, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        os.replace(temp, target)
+    except OSError as exc:
+        print(
+            f"Warning: could not record the scope of {stem}'s attempt in "
+            f"{target}: {exc}",
+            file=sys.stderr,
+        )
+
+
+def retire_result_from_another_scope(
+    phase_dir: Any, stem: str, scope_id: str
+) -> Optional[Path]:
+    """Rename a ``<stem>.json`` the ledger does not tie to ``scope_id``.
+
+    It becomes ``<stem>.json.stale-<old id|unknown>`` — never deleted, like a
+    retired salvage pair — so a re-run that then fails leaves no result from
+    another change for the report or the reaggregate to count; the new name no
+    longer matches ``*.json``. An existing stale file of that name is not
+    overwritten. Returns the new path, or ``None`` when nothing was retired.
+    """
+    result = Path(phase_dir) / f"{stem}.json"
+    if not result.exists():
+        return None
+    recorded = read_scope_ledger(phase_dir).get(stem)
+    if recorded == scope_id:
+        return None
+    target = result.with_name(f"{result.name}.stale-{recorded or SCOPE_UNKNOWN}")
+    if target.exists():
+        target = target.with_name(
+            f"{target.name}.{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+        )
+    try:
+        os.replace(result, target)
+    except OSError as exc:
+        print(
+            f"Warning: could not retire {result} (reviewed scope "
+            f"{recorded or SCOPE_UNKNOWN}, this run's is {scope_id}): {exc}",
+            file=sys.stderr,
+        )
+        return None
+    print(
+        f"Retired {result.name} (reviewed scope {recorded or SCOPE_UNKNOWN}, "
+        f"this run's is {scope_id}) as {target.name}"
+    )
+    return target
+
+
+#: How many omitted paths ``report.md``'s coverage line names before "… and N
+#: more"; ``report_data.json`` and ``review-scope.md`` carry every one.
+REPORT_OMITTED_SAMPLE = 10
+
+
+def review_scope_record(
+    phase_dir: Any,
+    *,
+    scope_id: str,
+    base_ref: str,
+    base_commit: Optional[str],
+    written_by: str,
+    coverage: str,
+    omitted: List[Tuple[str, str]],
+    result_notes: Optional[Dict[str, str]] = None,
+    results_match: Optional[bool] = None,
+) -> Dict[str, Any]:
+    """The scope a report describes, as ``generate_review_report`` renders it.
+
+    One shape for both entry points: the fan-out builds it from what
+    ``write_review_diff`` returned, the reaggregate from the manifest it read
+    back (or regenerated). ``scopeFile``/``diffDir`` are set only when the
+    artifact exists, so the report links nothing that is not there.
+    ``result_notes`` is ``{model: "reviewed another scope (<id>)" | "scope
+    unknown"}`` for each loaded result the ledger does not tie to this set.
+    """
+    scope_file = Path(phase_dir) / REVIEW_SCOPE_FILENAME
+    diff_dir = Path(phase_dir) / REVIEW_DIFF_DIRNAME
+    record: Dict[str, Any] = {
+        "scopeId": scope_id,
+        "baseRef": base_ref,
+        "baseCommit": base_commit,
+        "writtenBy": written_by,
+        "regenerated": written_by == WRITTEN_BY_REAGGREGATE,
+        "scopeFile": str(scope_file.absolute()) if scope_file.is_file() else None,
+        "diffDir": str(diff_dir.absolute()) if diff_dir.is_dir() else None,
+        "coverage": coverage,
+        "omitted": [{"path": path, "reason": reason} for path, reason in omitted],
+        "results": dict(result_notes or {}),
+    }
+    if results_match is not None:
+        record["resultsMatch"] = bool(results_match)
+    return record
+
+
+def reaggregate_review_scope(
+    phase_dir: Path,
+    plan_path: Path,
+    base_ref: str,
+    changed_files: List[str],
+    scope_source: Optional[str],
+    result_stems: Dict[str, str],
+    *,
+    repo_root: Optional[str] = None,
+) -> Dict[str, Any]:
+    """The reaggregate's half of D2.2: report the scope that was reviewed.
+
+    It never enters the fan-out block, so it writes the pair only when the pair
+    is missing — a phase dir from before the manifest existed, one cleaned by
+    hand, an interrupted write — and then from the current tree, marked
+    ``Written by: reaggregate (regenerated from the current tree)``. A whole
+    pair is read back and left untouched. Each loaded result is then checked
+    against the scope ledger; one tied to another set, or to none, is named in
+    the report, and its findings stay. ``repo_root`` (:func:`review_git_root`)
+    is where a regeneration's git runs, as on the fan-out.
+    """
+    header = load_review_scope(phase_dir)
+    if header is None:
+        print(
+            f"[REVIEW_SCOPE_REGENERATED] {REVIEW_SCOPE_FILENAME} or "
+            f"{REVIEW_DIFF_DIRNAME}/ is missing or incomplete in {phase_dir}; "
+            f"regenerating both from the current tree — the change as it is "
+            f"now, not a record of what the reviewers read"
+        )
+        diff_set = write_review_diff(
+            base_ref, changed_files, phase_dir,
+            get_collapse_paths(anchor=str(plan_path)),
+            scope_source=describe_scope_source(scope_source, base_ref),
+            written_by=WRITTEN_BY_REAGGREGATE,
+            cwd=repo_root,
+        )
+        scope_id, header_base_ref, base_commit = (
+            diff_set.scope_id, diff_set.base_ref, diff_set.base_commit,
+        )
+        written_by, coverage, omitted = (
+            diff_set.written_by, diff_set.coverage, list(diff_set.omitted),
+        )
+    else:
+        print(
+            f"Review scope read back from {Path(phase_dir) / REVIEW_SCOPE_FILENAME} "
+            f"(scope {header.scope_id}, written by {header.written_by}); nothing "
+            f"rewritten"
+        )
+        scope_id, header_base_ref, base_commit = (
+            header.scope_id, header.base_ref, header.base_commit,
+        )
+        written_by, coverage, omitted = (
+            header.written_by, header.coverage, list(header.omitted),
+        )
+
+    ledger = read_scope_ledger(phase_dir)
+    notes: Dict[str, str] = {}
+    for model in sorted(result_stems):
+        recorded = ledger.get(result_stems[model])
+        if recorded is None:
+            notes[model] = "scope unknown"
+        elif recorded != scope_id:
+            notes[model] = f"reviewed another scope ({recorded})"
+    for model, note in notes.items():
+        print(
+            f"[{model}] {note}: its findings stay in the report, but it did not "
+            f"review scope {scope_id}"
+        )
+    # The id is derived from content, so a regenerated set every result's
+    # ledger entry matches IS the set the reviewers were shown.
+    results_match = bool(result_stems) and not notes
+    return review_scope_record(
+        phase_dir,
+        scope_id=scope_id,
+        base_ref=header_base_ref,
+        base_commit=base_commit,
+        written_by=written_by,
+        coverage=coverage,
+        omitted=omitted,
+        result_notes=notes,
+        results_match=results_match,
+    )
+
+
+def review_scope_report_lines(record: Optional[Dict[str, Any]]) -> List[str]:
+    """``report.md``'s header lines for the scope manifest and its coverage."""
+    if not record:
+        return []
+    if record.get("scopeFile"):
+        manifest = f"[`{REVIEW_SCOPE_FILENAME}`]({REVIEW_SCOPE_FILENAME})"
+    else:
+        manifest = f"`{REVIEW_SCOPE_FILENAME}` (not on disk)"
+    base_ref = record.get("baseRef") or ""
+    if base_ref:
+        base = f"base `{base_ref}`"
+        if record.get("baseCommit"):
+            base += f" at `{str(record['baseCommit'])[:12]}`"
+    else:
+        base = "no base ref"
+    line = (
+        f"**Review scope:** {manifest} — scope `{record.get('scopeId')}`, {base}, "
+        f"written by {record.get('writtenBy')}"
+    )
+    if record.get("diffDir"):
+        line += f"; per-file diffs in [`{REVIEW_DIFF_DIRNAME}/`]({REVIEW_DIFF_DIRNAME}/)"
+    if record.get("regenerated"):
+        if record.get("resultsMatch"):
+            line += (
+                ". Regenerated from the current tree, and every result's "
+                "recorded scope matches it, so it is the set the reviewers "
+                "were shown"
+            )
+        else:
+            line += (
+                ". Regenerated from the current tree: the change as it is now, "
+                "not a record of what the reviewers read"
+            )
+    lines = [line]
+    omitted = record.get("omitted") or []
+    if record.get("coverage") == DIFF_COVERAGE_COMPLETE:
+        lines.append(f"**Diff coverage:** {DIFF_COVERAGE_COMPLETE}")
+    else:
+        named = ", ".join(
+            f"`{item['path']}` ({item['reason']})"
+            for item in omitted[:REPORT_OMITTED_SAMPLE]
+        )
+        if len(omitted) > REPORT_OMITTED_SAMPLE:
+            named += f", … and {len(omitted) - REPORT_OMITTED_SAMPLE} more"
+        lines.append(
+            f"**Diff coverage:** {DIFF_COVERAGE_PARTIAL} — {len(omitted)} source "
+            f"and test file(s) have no diff file, so reviewers without a shell "
+            f"could not review them" + (f": {named}" if named else "")
+        )
+    notes = record.get("results") or {}
+    if notes:
+        lines.append(
+            "**Scope notes:** "
+            + "; ".join(f"`{model}` {note}" for model, note in notes.items())
+            + " — their findings stay in this report, but they did not review "
+            "this scope"
+        )
+    return lines
+
+
+def record_review_scope_in_report_data(
+    phase_dir: Any, record: Optional[Dict[str, Any]]
+) -> None:
+    """Add ``diffCoverage`` and ``reviewScope`` to ``report_data.json``.
+
+    Merged into the sidecar ``generate_html_report`` just wrote, rather than
+    threaded through it, so the HTML generator stays phase-agnostic.
+    Best-effort, like the sidecar write itself.
+    """
+    if not record:
+        return
+    sidecar = Path(phase_dir) / "report_data.json"
+    try:
+        data = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    coverage: Dict[str, Any] = {
+        "coverage": record.get("coverage"),
+        "omitted": list(record.get("omitted") or []),
+        "scopeFile": record.get("scopeFile"),
+        "diffDir": record.get("diffDir"),
+    }
+    if record.get("coverage") != DIFF_COVERAGE_COMPLETE:
+        coverage["note"] = (
+            "reviewers without a shell could not review the omitted files"
+        )
+    data["diffCoverage"] = coverage
+    data["reviewScope"] = {
+        key: record.get(key)
+        for key in (
+            "scopeId", "baseRef", "baseCommit", "writtenBy", "regenerated",
+            "scopeFile", "diffDir", "results",
+        )
+    }
+    if "resultsMatch" in record:
+        data["reviewScope"]["resultsMatch"] = record["resultsMatch"]
+    try:
+        sidecar.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def emit_salvage_task(
     salvage_request: Dict,
     salvage_path: Path,
@@ -1171,12 +2020,18 @@ async def run_single_review(
     plan_path: Path,
     out_dir: Path,
     timeout: Optional[int] = None,
-    tracked_files: Optional[List[Dict]] = None,
+    changed_files: Optional[List[str]] = None,
     base_ref: str = "HEAD~1",
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
     usage: Optional[Dict[str, Dict[str, Any]]] = None,
     *,
     tracker: Optional[FanoutProgress] = None,
+    scope_source: Optional[str] = None,
+    task_ids: Optional[Dict[str, str]] = None,
+    scope_file: Optional[str] = None,
+    diff_dir: Optional[str] = None,
+    scope_id: Optional[str] = None,
+    diff_coverage: Optional[str] = None,
 ) -> Tuple[bool, Optional[List[Dict]], Optional[str]]:
     """
     Run a single model code review using agent exploration with file-based output.
@@ -1186,8 +2041,10 @@ async def run_single_review(
 
     The agent will:
     1. Read the plan file to understand requirements
-    2. Identify changed files from the tracked files list (or discover via git)
-    3. Use git diff with base_ref to examine actual changes
+    2. Take the files to review from the resolved scope it is handed
+    3. Read each file's change from the diff set main wrote before dispatch
+       (``review-scope.md`` and ``diff/``), reached the way its adapter can
+       (the ``{diff_access}`` block, :func:`utils.llm_client.render_diff_access`)
     4. Write findings as JSON to the specified output file
 
     Args:
@@ -1195,8 +2052,28 @@ async def run_single_review(
         plan_path: Path to the implementation plan
         out_dir: Directory for output files
         timeout: Optional timeout override in seconds. Uses provider default if not specified.
-        tracked_files: Optional list of tracked files from implementation phase
+        changed_files: The resolved review scope, in review order (main
+            applies ``order_review_paths`` to ``ReviewScope.paths``). It used to
+            be the implement phase's raw ``tracked_files``, which main passed
+            even when it had just resolved a git-diff fallback — so every
+            reviewer of a plan with no implement phase got an empty list.
         base_ref: Git reference to diff against (commit at implementation start)
+        scope_source: ``ReviewScope.source`` — where ``changed_files`` came
+            from — rendered into ``prompt_context["scope_source"]`` by
+            :func:`describe_scope_source`.
+        task_ids: ``ReviewScope.task_ids``; each listed path's ``(from task:
+            <id>)`` attribution. Empty for every source but ``tracked_files``.
+        scope_file: Absolute path of the ``review-scope.md`` main wrote
+            (:func:`utils.git_utils.write_review_diff`). ``None`` — a direct
+            call — renders the scope placeholders as "none written" and skips
+            the diff-access decision, so the slot dispatches as it always did.
+        diff_dir: Absolute path of the ``diff/`` beside it.
+        scope_id: That set's scope id. At attempt start a ``<stem>.json``
+            the scope ledger ties to another id is retired to
+            ``.stale-<id|unknown>``, and the ledger records this id.
+        diff_coverage: That set's coverage, ``complete`` or ``partial``; a
+            lane that cannot open the phase dir gets the change inline only
+            when it is complete (D2.3).
         served_models: Optional collector for §3.6's attribution.  When a
             configured ``--fallback-model`` list produced a served model, this
             slot's ``{model_spec: {"served_model", "fallback"}}`` entry is
@@ -1238,8 +2115,12 @@ async def run_single_review(
     # slot is a `generate` dispatch, and a runner whose own sandbox cannot start
     # reads neither the plan nor the diff — it answers with a sentence about not
     # being able to open them, which scores as a completed review. Refused
-    # before the phase dir is claimed and before anything an earlier attempt
-    # left is retired, because a refused slot replaces nothing.
+    # before the phase dir is claimed and before an earlier attempt's salvage
+    # pair is retired, because a refused slot replaces nothing. The one thing
+    # a refusal still retires is a `<stem>.json` from ANOTHER scope (D2.2): it
+    # is not a review of this change whether or not this attempt runs, and
+    # left on disk the next `--reaggregate` would load it, move the model out
+    # of `models_failed` and report another change's findings as this one's.
     #
     # The third answer (D6 override, 2026-09-17): `dispatch_unsandboxed` when
     # the probe said `unavailable` AND `providers.<name>.sandbox_fallback` is
@@ -1249,6 +2130,15 @@ async def run_single_review(
     sandbox = await asyncio.to_thread(sandbox_refusal, provider_name, project_root)
     if sandbox.refused:
         print(f"[{display_name}] {sandbox.reason}")
+        # Retired, never re-recorded: no attempt started, so the ledger keeps
+        # the old id — the one the `.stale-<id>` name carries — and the next
+        # attempt that really starts records this scope over it.
+        if scope_id is not None:
+            retire_result_from_another_scope(
+                get_phase_dir(plan_path, 'code-review'),
+                sanitize_model_name(model_spec),
+                scope_id,
+            )
         # Terminal, and `not-dispatched` is the whole of what happened: no
         # attempt was started, so there is no channel a result could have come
         # from. Without this the slot would sit `queued` until the fan-out's
@@ -1317,8 +2207,74 @@ async def run_single_review(
         str(phase_dir), sanitized_model, reason=RETIRE_SUPERSEDED, quiet=True
     )
 
-    # Format tracked files for the prompt
-    tracked_files_list = format_tracked_files_for_prompt(tracked_files or [])
+    # The same rule for this model's result file, keyed on the scope it
+    # reviewed (D2.2): a `<stem>.json` written against another change is
+    # retired to `.stale-<id|unknown>` before this attempt can fail and leave
+    # it behind, and then the ledger records what THIS attempt is shown. The
+    # skip branch in `run_all_reviews` only sends a result here when its
+    # ledger id differs, but `--rerun-all` reaches here with every result.
+    if scope_id is not None:
+        retire_result_from_another_scope(phase_dir, sanitized_model, scope_id)
+        record_scope_attempt(phase_dir, sanitized_model, scope_id)
+
+    # How this lane reaches the change (D2.3): by path when its adapter can
+    # read the phase dir, inline when it cannot and the whole change fits the
+    # argv cap with nothing omitted, and otherwise not at all. Decided before
+    # `tracker.running`, because an unsupported slot is not dispatched and
+    # costs nothing: it is recorded failed with the reason, so the report names
+    # it like any other lost reviewer, rather than handed a prompt it cannot
+    # act on — which is how two cursor-agent lanes once "reviewed" a change
+    # they never saw.
+    diff_access = None
+    if scope_file is not None and diff_dir is not None:
+        diff_access = render_diff_access(
+            model_spec,
+            scope_file,
+            diff_dir,
+            str(phase_dir.absolute()),
+            project_root or os.getcwd(),
+            base_ref=base_ref,
+            coverage=diff_coverage or DIFF_COVERAGE_PARTIAL,
+            plan_path=str(plan_path.absolute()),
+            anchor=str(plan_path),
+        )
+        if diff_access.mode == "unsupported":
+            detail = (
+                f"read scope {diff_access.read_scope}, inline "
+                f"{diff_access.inline_bytes} B — {diff_access.reason}"
+            )
+            print(f"[REVIEW_UNSUPPORTED] {display_name}: {detail}")
+            unsupported = f"review unsupported: {detail}"
+            if tracker is not None:
+                tracker.failed(model_spec, error=unsupported, source="not-dispatched")
+            return False, None, unsupported
+
+    if diff_access is None:
+        plan_text, scope_file_text, diff_dir_text = (
+            str(plan_path.absolute()), NO_SCOPE_MANIFEST_TEXT, NO_DIFF_DIR_TEXT,
+        )
+        diff_access_text, full_scope_ref = NO_DIFF_ACCESS_TEXT, None
+    elif diff_access.mode == "inline":
+        # The lane cannot open the phase dir, so the prompt names no path there:
+        # every pointer is to a labelled block inside `{diff_access}`.
+        plan_text, scope_file_text, diff_dir_text = (
+            INLINE_PLAN_TEXT, INLINE_SCOPE_FILE_TEXT, INLINE_DIFF_DIR_TEXT,
+        )
+        diff_access_text, full_scope_ref = diff_access.text, INLINE_FULL_SCOPE_REF
+    else:
+        plan_text, scope_file_text, diff_dir_text = (
+            str(plan_path.absolute()), str(scope_file), str(diff_dir),
+        )
+        diff_access_text, full_scope_ref = diff_access.text, str(scope_file)
+
+    # The resolved scope, in the review order main gave it. The placeholder key
+    # keeps its old name (`tracked_files_list`) because the template binds it;
+    # what it carries is now the scope whatever its source. When the list is
+    # cut, its notice names the manifest as the full list, so a dropped path
+    # never reads as out of scope.
+    tracked_files_list = format_tracked_files_for_prompt(
+        changed_files or [], task_ids=task_ids, full_scope_ref=full_scope_ref
+    )
 
     # Load prompt template
     prompt_template = load_code_review_prompt()
@@ -1330,12 +2286,23 @@ async def run_single_review(
     # record is read here, per slot, rather than threaded down from main(): it
     # is three small files, and `run_all_reviews` hands this function every
     # other input it needs from the plan path alone.
+    #
+    # Every placeholder the template binds has its key here on every path
+    # (`working_limits`, `output_location` and `output_json_path` are added by
+    # `invoke_with_file_output`): a placeholder with no key fails the slot with
+    # `PROMPT_FORMAT_ERROR`, and it would fail every slot at once.
     prompt_context = {
-        "plan_path": str(plan_path.absolute()),
+        "plan_path": plan_text,
         "tracked_files_list": tracked_files_list,
+        # Where the list came from (tracked files, the `git diff` fallback,
+        # `--files`, or nothing).
+        "scope_source": describe_scope_source(scope_source, base_ref),
         "base_ref": base_ref,
         "prefix": prefix,
         "implementation_record": build_implementation_record(plan_path),
+        "scope_file": scope_file_text,
+        "diff_dir": diff_dir_text,
+        "diff_access": diff_access_text,
     }
 
     # Determine timeout: use provided override, or get provider-specific default
@@ -1343,6 +2310,35 @@ async def run_single_review(
         timeout if timeout is not None
         else get_provider_timeout(provider_name, anchor=str(plan_path))
     )
+
+    # The inline cap above bounds the `{diff_access}` block alone, but the
+    # prompt that goes on argv also carries the implementation record, the
+    # file list, the template and the working limits. Measured whole, as it
+    # will be dispatched, so a block that fit is still refused — undispatched,
+    # `[REVIEW_UNSUPPORTED]` like any other inline miss — when the prompt it
+    # sits in would fail the spawn with E2BIG and be recorded as a provider
+    # error. `None` is a lane whose prompt does not travel on argv.
+    if diff_access is not None and diff_access.mode == "inline":
+        prompt_bytes = argv_prompt_bytes(
+            prompt_template,
+            model_spec,
+            prompt_context,
+            out_dir,
+            "code_review",
+            timeout=int(effective_timeout),
+            anchor=str(plan_path),
+        )
+        if prompt_bytes is not None and prompt_bytes > INLINE_PROMPT_CAP_BYTES:
+            detail = (
+                f"read scope {diff_access.read_scope}, inline "
+                f"{diff_access.inline_bytes} B — rendered prompt {prompt_bytes} B "
+                f"exceeds the {INLINE_PROMPT_CAP_BYTES} B argv cap"
+            )
+            print(f"[REVIEW_UNSUPPORTED] {display_name}: {detail}")
+            unsupported = f"review unsupported: {detail}"
+            if tracker is not None:
+                tracker.failed(model_spec, error=unsupported, source="not-dispatched")
+            return False, None, unsupported
 
     print(f"[{display_name}] Starting code review with file-based output (timeout: {effective_timeout}s)...")
     # The dispatch starts here, so the row stops being `queued`/`staggering`.
@@ -1511,26 +2507,34 @@ async def run_single_review(
         # fallback waiting when it guesses wrong. stdout is the one that can hold
         # an answer, so stdout is the one that is asked first.
         #
-        # `utils/llm_client.py`'s `_attach_stdout_excerpt` (:413) is what makes
-        # the falsy test below sufficient: it attaches `stdout_excerpt` on all
-        # three losing paths — non-zero exit, timeout kill, and the zero exit
-        # whose output would not parse — already `_redact`ed and `_bound_stream`ed
-        # in that order (§4.5/§4.4), and it **omits the key entirely** when
-        # nothing survived rather than setting `""`. So absent and empty mean the
-        # same thing here, no second emptiness check is owed, and stderr still
-        # answers for the provider that died before printing a byte.
+        # `utils/llm_client.py`'s `_attach_stdout_excerpt` attaches
+        # `stdout_excerpt` on all three losing paths — non-zero exit, timeout
+        # kill, and the zero exit whose output would not parse — already
+        # `_redact`ed and `_bound_stream`ed in that order (§4.5/§4.4), and it
+        # **omits the key entirely** when nothing survived rather than setting
+        # `""`. So when no reducer applies, absent and empty mean the same thing,
+        # and stderr still answers for the provider that died before printing a
+        # byte.
         #
         # Whatever this picks is also what gets persisted: the gate below judges
         # `raw_content` and the salvage request stores `raw_content`, so the text
         # a subagent is asked to repair is the text the decision was made on.
         # Gating on one string and writing another would let a request be written
         # for evidence nobody ever saw.
-        raw_content = ""
+        #
+        # **And a stream adapter's answer is not its stream.** `salvage_source`
+        # (the rule `failure_output_from_result` applies to the other lane)
+        # reads `details["salvage_text"]` first — the adapter's own reduction of
+        # its full stdout to the assistant's answer text — and, when that key is
+        # present, reads nothing else, even when it is `""`. On pi and omp the
+        # stdout excerpt is JSONL whose `content` arrays pass the gate as
+        # findings: a reviewer killed while a tool ran was sent to salvage over
+        # its own `thinking`/`toolCall` parts (plan:
+        # review-run-scope-salvage-and-failure-visibility §4). Only when no
+        # reducer applies does the stdout-then-stderr order above still hold.
         details = result.get("details", {}) or {}
-        if details.get("stdout_excerpt"):
-            raw_content = details["stdout_excerpt"]
-        elif details.get("stderr"):
-            raw_content = details["stderr"]
+        raw_content = salvage_source(details)
+        timed_out = salvage_failure_kind(result) is not None
 
         if has_salvageable_json(raw_content):
             salvage_request = {
@@ -1545,13 +2549,26 @@ async def run_single_review(
                 },
                 "output_path": str(phase_dir / f"{sanitized_model}.json"),
                 "output_json_path": output_file,
-                "timestamp": datetime.now().isoformat()
+                "timestamp": datetime.now().isoformat(),
+                # `"failure": "timeout"` on a run a deadline ended, so the
+                # executor refuses a salvaged `[]` from it (D4.5): a reviewer
+                # killed mid-review never reported an empty review.
+                **salvage_failure_fields(result),
             }
             salvage_path = phase_dir / f"salvage_{sanitized_model}.json"
             with open(salvage_path, 'w', encoding='utf-8') as f:
                 json.dump(salvage_request, f, indent=2)
             print(f"[SALVAGE_NEEDED] {salvage_path}")
             emit_salvage_task(salvage_request, salvage_path, phase_dir, plan_path)
+        elif timed_out and not raw_content.strip():
+            # A deadline, and no answer text at all: the adapter read its whole
+            # stream and found none (a reviewer killed while a tool ran, or
+            # while it was still reasoning), or the run printed nothing. Named
+            # as the timeout it was, not as a provider that never produced JSON.
+            print(
+                f"[{display_name}] Provider timed out before writing an answer — "
+                f"nothing to salvage, model recorded as failed"
+            )
         else:
             # Say which failure this was, in the same line-per-model channel the
             # markers use. Silence here would read as "salvage was not reached",
@@ -1660,13 +2677,19 @@ async def run_all_reviews(
     out_dir: Path,
     timeout: Optional[int],
     max_parallel: int,
-    tracked_files: Optional[List[Dict]] = None,
+    changed_files: Optional[List[str]] = None,
     base_ref: str = "HEAD~1",
     skip_existing: bool = True,
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
     usage: Optional[Dict[str, Dict[str, Any]]] = None,
     prior_usage: Optional[Dict[str, Dict[str, Any]]] = None,
     tracker_out: Optional[List[FanoutProgress]] = None,
+    scope_source: Optional[str] = None,
+    task_ids: Optional[Dict[str, str]] = None,
+    scope_file: Optional[str] = None,
+    diff_dir: Optional[str] = None,
+    scope_id: Optional[str] = None,
+    diff_coverage: Optional[str] = None,
 ) -> Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]]:
     """
     Run code review across all models using agent exploration.
@@ -1675,7 +2698,7 @@ async def run_all_reviews(
     provider (e.g., 'cursor-agent:auto', 'gemini:gemini-2.5-flash').
 
     Each agent:
-    - Receives the list of tracked files from implementation (if available)
+    - Receives the resolved review scope, in review order, labelled with its source
     - Receives the base_ref to use for git diff commands
     - Reads the plan to understand requirements
     - Uses git diff to examine actual changes
@@ -1687,8 +2710,17 @@ async def run_all_reviews(
         out_dir: Output directory for results
         timeout: Optional timeout override per model in seconds. If None, uses per-provider defaults.
         max_parallel: Maximum concurrent model invocations
-        tracked_files: Optional list of tracked files from implementation phase
+        changed_files: The resolved, ordered review scope, forwarded to each
+            :func:`run_single_review` (see its docstring)
         base_ref: Git reference to diff against
+        scope_source: ``ReviewScope.source``, forwarded the same way
+        task_ids: ``ReviewScope.task_ids``, forwarded the same way
+        scope_file, diff_dir, scope_id, diff_coverage: The diff set main wrote
+            before dispatch (``write_review_diff``), forwarded the same way.
+            ``scope_id`` also gates the resume: an existing result is reused
+            only when the scope ledger records this id for its stem;
+            otherwise ``[SCOPE_CHANGED]`` and the model re-runs. ``None``
+            reuses every result, as before the ledger existed.
         served_models: Optional §3.6 attribution collector, forwarded to each
             :func:`run_single_review` (see its docstring)
         usage: Optional per-slot usage collector, forwarded the same way
@@ -1761,7 +2793,24 @@ async def run_all_reviews(
                 try:
                     with open(existing_path, 'r', encoding='utf-8') as f:
                         existing_data = json.load(f)
-                    if isinstance(existing_data, list):
+                    # D2.2: a result is reused only when it reviewed the diff
+                    # set this run's reviewers are shown. One written against
+                    # an earlier change — or before the ledger existed, which
+                    # is `unknown` — re-runs, and `run_single_review` retires
+                    # the old file at its attempt start. The alternative
+                    # reports a review of another change as a review of this
+                    # one.
+                    scope_changed = False
+                    if isinstance(existing_data, list) and scope_id is not None:
+                        reviewed_scope = read_scope_ledger(phase_dir).get(sanitized)
+                        if reviewed_scope != scope_id:
+                            scope_changed = True
+                            print(
+                                f"[SCOPE_CHANGED] {display_name}: result reviewed "
+                                f"scope {reviewed_scope or SCOPE_UNKNOWN}, this "
+                                f"run's is {scope_id}; re-running"
+                            )
+                    if isinstance(existing_data, list) and not scope_changed:
                         print(f"[SKIP] {display_name} - already has results ({len(existing_data)} issues)")
                         # Stage U: the result is reused, so what it cost is
                         # reused with it. Nothing else can refill this entry —
@@ -1794,10 +2843,13 @@ async def run_all_reviews(
         if index > 0:
             stagger_delay = index * PROVIDER_STAGGER_DELAY
             print(f"[{display_name}] Waiting {stagger_delay:.1f}s before starting (staggered launch)...")
-            # The row is not idle and it is not running: `started_at` was
-            # stamped when the slot was admitted to the fan-out, so a staggered
-            # row's elapsed counts this wait while the ladder's own clock starts
-            # later, at dispatch.
+            # The row is not idle and it is not running: it was admitted at
+            # `started_at` and has not dispatched, so the table renders this
+            # sleep as a wait (`waiting …`), never as budget spent. Its run
+            # time starts at `running()` — `dispatched_at`, the same point this
+            # slot's own timeout clock starts — and the wait lands in
+            # `queued_s` (plan: review-run-scope-salvage-and-failure-visibility
+            # §6).
             tracker.staggering(model_spec, delay_s=stagger_delay)
             await asyncio.sleep(stagger_delay)
             # The stagger is spent, but this slot is not dispatched: the two
@@ -1832,16 +2884,22 @@ async def run_all_reviews(
                 async with prov_sem:
                     async with semaphore:
                         result = await run_single_review(
-                            model_spec, plan_path, out_dir, timeout, tracked_files,
+                            model_spec, plan_path, out_dir, timeout, changed_files,
                             base_ref, served_models=served_models, usage=usage,
-                            tracker=tracker,
+                            tracker=tracker, scope_source=scope_source,
+                            task_ids=task_ids, scope_file=scope_file,
+                            diff_dir=diff_dir, scope_id=scope_id,
+                            diff_coverage=diff_coverage,
                         )
             else:
                 async with semaphore:
                     result = await run_single_review(
-                        model_spec, plan_path, out_dir, timeout, tracked_files,
+                        model_spec, plan_path, out_dir, timeout, changed_files,
                         base_ref, served_models=served_models, usage=usage,
-                        tracker=tracker,
+                        tracker=tracker, scope_source=scope_source,
+                        task_ids=task_ids, scope_file=scope_file,
+                        diff_dir=diff_dir, scope_id=scope_id,
+                        diff_coverage=diff_coverage,
                     )
         except Exception as exc:
             # F5, 2026-09-20: two lanes, one event, two different answers. A
@@ -1997,8 +3055,16 @@ def generate_review_report(
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
     usage: Optional[Dict[str, Dict[str, Any]]] = None,
     failed_models: Optional[Dict[str, str]] = None,
+    requested_models: Optional[int] = None,
+    review_scope: Optional[Dict[str, Any]] = None,
 ) -> str:
     """Generate a markdown review report.
+
+    ``review_scope`` is :func:`review_scope_record`'s account of the scope
+    manifest the reviewers were pointed at (review-scope plan D2.2): rendered
+    as the ``**Review scope:**`` / ``**Diff coverage:**`` header lines and
+    added to ``report_data.json`` as ``reviewScope`` and ``diffCoverage``.
+    ``None`` (a direct call) adds neither.
 
     ``served_models`` is §3.6's attribution
     (``{model_spec: {"served_model", "fallback"}}``): every row that names a
@@ -2013,12 +3079,24 @@ def generate_review_report(
     per issue, because a cost repeated under every finding is noise. Empty for
     a fan-out of duration-only adapters, which leaves the report as it was.
 
-    ``failed_models`` is main()'s authoritative post-salvage failure map
-    (model -> reason), including any model F11 seeded for never returning at
-    all. A caller with no map of its own (a fixture exercising this function
-    directly, or the reaggregate path, whose ``results`` is rebuilt from
-    per-model files on disk and so has no failures to report) gets the same
-    map derived from ``results`` on ``success`` alone (F10).
+    ``failed_models`` is the caller's authoritative failure map (model ->
+    reason): main()'s post-salvage map, including any model F11 seeded for
+    never returning at all, or the reaggregate's read-back of
+    ``.status.json.models_failed`` plus every requested model with neither a
+    result file nor a recorded failure (``remaining_failed_models``) — the
+    reaggregate's ``results`` holds only models with a file, so deriving the
+    map from it named no failure at all. A caller with no map of its own (a
+    fixture exercising this function directly) gets one derived from
+    ``results`` on ``success`` alone (F10).
+
+    Whatever the map holds is named on a ``**Models failed:**`` line directly
+    under ``**Models:**`` (``failed_models_line``: "N of M requested" when
+    ``requested_models`` is given, and the salvage clause for a model this
+    attempt asked a salvage of, ``salvage_requested_models``), in the HTML
+    report's warning notice and failure row from the same inputs, and in the
+    ``## Failed Reviews`` section at the bottom. ``requested_models`` is the
+    size of the requested set — main()'s ``len(model_specs)``, the
+    reaggregate's recorded requested set — never succeeded plus failed.
     """
     lines = [
         "# Code Review Report",
@@ -2058,6 +3136,18 @@ def generate_review_report(
         "**Models:** "
         + ", ".join(model_label(m, served_models, usage) for m in successful_models)
     )
+    # Plan §5 T5.2: the models that produced nothing, directly under the ones
+    # that did (the bottom `## Failed Reviews` section alone left a lost
+    # reviewer below the fold). The salvage answer is computed once and handed
+    # to the HTML report too, so the notice there is this line minus its bold.
+    salvage_requested = salvage_requested_models(
+        str(phase_dir) if phase_dir is not None else None, list(failed_models)
+    )
+    failure_line = failed_models_line(
+        failed_models, requested_models, salvage_requested
+    )
+    if failure_line:
+        lines.append(failure_line)
     lines.append(f"**Total Issues:** {len(all_issues)}")
 
     # The blocks below are per issue (one per model finding) but every count
@@ -2095,6 +3185,9 @@ def generate_review_report(
                 read_status(str(phase_dir)).get("validation_context")
             )
         )
+    # Review-scope plan D2.2: the manifest and per-file diffs the reviewers
+    # were pointed at, their coverage, and any result that reviewed another set.
+    lines.extend(review_scope_report_lines(review_scope))
     lines.append("")
 
     lines.append("> **Note:** An interactive HTML report is also available at `report.html`.")
@@ -2294,11 +3387,15 @@ def generate_review_report(
                 template_style=template_style,
                 served_models=served_models,
                 usage=usage,
+                requested_models=requested_models,
+                salvage_requested=salvage_requested,
             )
             write_html_report(html_content, phase_dir)
             print(f"HTML report written to: {phase_dir / 'report.html'}")
         except Exception as e:
             print(f"Warning: Failed to generate HTML report: {e}")
+        # D2.2: `diffCoverage` and `reviewScope`, beside what the page shows.
+        record_review_scope_in_report_data(phase_dir, review_scope)
 
     return "\n".join(lines)
 
@@ -2446,11 +3543,22 @@ async def reaggregate_from_existing_files(
 
     if not result_files:
         print(f"No model result files found matching: {pattern}")
+        # Decision 11.11 (T5.4c): nothing to aggregate because every requested
+        # reviewer failed is the fan-out's exit 3 naming them, not a quiet
+        # exit 0; with no recorded failure it stays exit 0.
+        no_results, _requested = remaining_failed_models(str(phase_dir), [])
+        announce_remaining_failures(str(phase_dir), no_results)
+        exit_when_every_reviewer_failed(
+            str(phase_dir), no_results,
+            mode="review-code", plan_path=str(plan_path),
+        )
         return
 
     # Collect all issues and build synthetic results dict for report generation
     all_issues = []
     models_found = set()
+    # Each model's result file stem, for the scope-ledger check (D2.2).
+    result_stems: Dict[str, str] = {}
     results: Dict[str, Tuple[bool, Optional[List[Dict]], Optional[str]]] = {}
 
     # Restore original model specs (with colons) from .status.json
@@ -2488,6 +3596,7 @@ async def reaggregate_from_existing_files(
         str(phase_dir), result_files, unsanitize, noun="issues"
     ):
         models_found.add(model)
+        result_stems[model] = Path(_chosen_path).stem
 
         # The file on disk is whatever the fan-out (or a salvage, or a hand
         # edit) left there, so the same guard the fan-out's own aggregate uses
@@ -2519,6 +3628,15 @@ async def reaggregate_from_existing_files(
 
     if not results:
         print("No readable model results to aggregate.")
+        # T5.4c: no model has a readable result. With reviewers recorded
+        # failed this is exit 3 naming them (the phase stays unrecorded);
+        # otherwise today's exit 0.
+        no_results, _requested = remaining_failed_models(str(phase_dir), [])
+        announce_remaining_failures(str(phase_dir), no_results)
+        exit_when_every_reviewer_failed(
+            str(phase_dir), no_results,
+            mode="review-code", plan_path=str(plan_path),
+        )
         return
 
     # A model whose result file is on disk has completed as far as this
@@ -2528,6 +3646,16 @@ async def reaggregate_from_existing_files(
     # checkpoint is what `status` and `build_unsanitize_map` read.
     for model in record_models_present(str(phase_dir), sorted(models_found)):
         print(f"[{model}] result file present; recorded as completed (was failed)")
+
+    # Plan §5 (T5.1/T5.4a): read back only now, after the reconciliation above
+    # moved every model with a file out of `models_failed`. What is left — plus
+    # any requested model with neither a file nor a recorded failure — is named
+    # to the host here, and handed to the report below; `results` holds only
+    # the models with a file, so it has no failures of its own to report.
+    failed_models_map, requested_set = remaining_failed_models(
+        str(phase_dir), sorted(models_found)
+    )
+    announce_remaining_failures(str(phase_dir), failed_models_map)
 
     # Get changed files from state (or empty list if not available)
     state = get_or_create_state(plan_path)
@@ -2555,10 +3683,28 @@ async def reaggregate_from_existing_files(
             )
     base_ref = validate_git_ref(base_ref)
 
-    changed_files = resolve_changed_files(state, base_ref)
+    # The same resolution as `resolve_changed_files` (the same printed lines),
+    # kept whole because a regenerated scope manifest names its source (D2.2).
+    # The scope is root-relative, so its git calls run at the root, never at a
+    # subdirectory the command happened to be invoked from.
+    git_root = review_git_root(project_root)
+    reaggregate_scope = resolve_review_scope(
+        state, base_ref, anchor=str(plan_path), repo_root=git_root
+    )
+    changed_files = reaggregate_scope.paths
     print(f"Files to review: {len(changed_files)}")
 
-    with intent_to_add_untracked(changed_files):
+    with intent_to_add_untracked(changed_files, cwd=git_root):
+        # The scope the loaded results reviewed (D2.2): read back from the
+        # fan-out's manifest, or — when the pair is missing or incomplete —
+        # regenerated from the current tree, inside this block so a new file's
+        # intent-to-add entry is visible to `git diff`. Never touches a whole
+        # pair, and names each result the scope ledger ties to another set.
+        scope_record = reaggregate_review_scope(
+            phase_dir, plan_path, base_ref, changed_files,
+            reaggregate_scope.source, result_stems, repo_root=git_root,
+        )
+
         # Save raw issues as JSON
         issues_path = get_output_paths(plan_path, "code_review_issues", phase='code-review')
         issues_path = issues_path.with_suffix(".json")
@@ -2774,7 +3920,10 @@ async def reaggregate_from_existing_files(
                 secondary_context=secondary,
                 secondary_context_label=REVIEWED_CODE_CONTEXT_LABEL,
                 reviewed_code=reviewed_code,
-                extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
+                # The guidance, plus the dropped files to open when the
+                # reviewed-code block lost any (T7.4) — outside every block
+                # a context budget can cut.
+                extra_instructions=validation_extra_instructions(cut_report),
                 context_document=plan_document,
                 secondary_document=reviewed_code_document(secondary, cut_report),
                 runner_read_refusal=materialization_read_refusal(args, str(plan_path)),
@@ -2867,6 +4016,14 @@ async def reaggregate_from_existing_files(
             # is a bare issue list here too, so a reaggregated report that did
             # not read this lost every number the original run recorded.
             usage=recorded_usage(str(phase_dir)),
+            # Plan §5 T5.1: the failures read back above, and the recorded
+            # requested set as the "of M requested" denominator.
+            failed_models=failed_models_map,
+            requested_models=(
+                len(requested_set) if requested_set is not None else None
+            ),
+            # D2.2: the scope read back (or regenerated) above.
+            review_scope=scope_record,
         )
 
         # Save report
@@ -2892,6 +4049,20 @@ async def reaggregate_from_existing_files(
         )
         record_review_artifacts(
             report_path, report_html_path, grouped_path, validation_path, issues_path
+        )
+
+        # T5.4b (decision 11.11): a reaggregate that still lacks some models
+        # reports `[PARTIAL_RESULTS: …]` and `state: "partial"` (exit 0), as the
+        # fan-out does — the host's cue to name them from `progress.models`.
+        # `unattended=False`: the `[AUTO_RESOLVED]` record that call writes names
+        # the fan-out's in-process continuation, never a separate reaggregate.
+        # The phase is still recorded completed below and no `next` is
+        # recorded, so the result line keeps `next: null`.
+        unattended_mod.report_partial_results(
+            completed=sorted(models_found),
+            failed=list(failed_models_map),
+            phase_dir=str(phase_dir),
+            unattended=False,
         )
 
         # Mark phase complete after successful reaggregation
@@ -2937,6 +4108,30 @@ async def main(argv: Optional[List[str]] = None) -> int:
         print("=== REAGGREGATE MODE ===")
         print(f"Plan file: {plan_path}")
         print(f"Output directory: {out_dir}")
+        # `--files`/`--files-from` are not re-read here: the results on disk
+        # were reviewed against the scope their fan-out recorded, so that is
+        # the scope this pass reports. Said, not dropped silently — an explicit
+        # scope request ignored without a word is the fallback the flags exist
+        # to remove. A line, not an exit: every reaggregate command this
+        # orchestrator prints replays the fan-out's own flags, `--files`
+        # included, so refusing them would break its own recovery path.
+        # Never parsed either, so `--files-from -` reads no stdin.
+        ignored_scope_flags = [
+            flag
+            for flag, given in (
+                ("--files", bool(getattr(args, "files", None))),
+                ("--files-from", getattr(args, "files_from", None) is not None),
+            )
+            if given
+        ]
+        if ignored_scope_flags:
+            print(
+                f"[SCOPE_FLAGS_IGNORED] --reaggregate does not re-resolve "
+                f"{' or '.join(ignored_scope_flags)}; it uses the scope recorded "
+                f"in state.json ({REVIEW_SCOPE_FILES_KEY}, else tracked_files, "
+                f"else the git diff). Run a fan-out with the flag to review "
+                f"another scope."
+            )
         print("")
 
         if not out_dir.is_dir():
@@ -3127,11 +4322,26 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
     # Get tracked files and base ref from state (if available from implementation phase)
     state = get_or_create_state(plan_path)
-    tracked_files = state.get("tracked_files", [])
 
     # The root an issue's relative `file` is resolved against when the
     # validation prompt embeds the code at the lines it cites.
     project_root = get_project_root(str(plan_path))
+    # Where every git call over the (root-relative) scope runs — classification,
+    # intent-to-add and the diff set — so a review invoked from a subdirectory
+    # diffs the files it names rather than none of them.
+    git_root = review_git_root(project_root)
+
+    # `--files`/`--files-from` (decision 11.1): the exact scope, checked ahead
+    # of `tracked_files` and the git fallback. Parsed here, in pre-flight, so a
+    # path outside the repository fails on the caller's terminal naming it.
+    # Staged on the in-memory state now — `resolve_review_scope` reads it from
+    # there — and saved only past the detach boundary below.
+    try:
+        scope_files = read_scope_files_flags(args, git_root or os.getcwd())
+    except ScopeFilesError as exc:
+        print(f"ERROR: {exc}")
+        sys.exit(1)
+    scope_record_moved = stage_scope_files_record(state, scope_files)
 
     # Get the git base reference - this is the commit when implementation started
     # Used by agents to run: git diff <base_ref> -- <file>
@@ -3168,7 +4378,22 @@ async def main(argv: Optional[List[str]] = None) -> int:
         except Exception:
             pass
 
-    changed_files = resolve_changed_files(state, base_ref)
+    # The scope, labelled by the branch that picked it, then put in review
+    # order: source, tests, fixtures, generated, by path within each. The
+    # resolver's own order is never used (its tracked-files branch is a set).
+    # This ordered list is what every reviewer's prompt lists, what
+    # `intent_to_add_untracked` marks and what the report counts; before this,
+    # main resolved it and then handed the reviewers the raw — and, on the
+    # fallback, empty — `tracked_files` instead (review-scope plan §2.1).
+    review_scope = resolve_review_scope(
+        state, base_ref, anchor=str(plan_path), repo_root=git_root
+    )
+    # One read of `code_review.collapse_paths` for the prompt's order and the
+    # diff set's groups, so the two classify every path alike.
+    collapse_paths = get_collapse_paths(anchor=str(plan_path))
+    changed_files = order_review_paths(
+        review_scope.paths, collapse_paths, cwd=git_root
+    )
     print(f"Files to review: {len(changed_files)}")
     print("Running code review in agent exploration mode...")
     print("")
@@ -3204,6 +4429,23 @@ async def main(argv: Optional[List[str]] = None) -> int:
     )
     if detach_outcome is not None:
         sys.exit(detach_outcome)
+
+    # The fan-out starts here, so its `--files` scope is recorded here — or a
+    # previous run's is cleared — for a later `--reaggregate` to resolve the
+    # same scope. Below the boundary, like the plan snapshot: only the process
+    # that owns the phase writes it.
+    if scope_record_moved:
+        state.save()
+        if scope_files is not None:
+            print(
+                f"Recorded the --files scope ({len(scope_files)} files) as "
+                f"{REVIEW_SCOPE_FILES_KEY} in state.json"
+            )
+        else:
+            print(
+                f"Cleared {REVIEW_SCOPE_FILES_KEY} from state.json (this fan-out "
+                f"was not given --files)"
+            )
 
     # This process now owns the phase, so the snapshot may be replaced.
     plan_document_at_load: Optional[BoundDocument] = None
@@ -3329,21 +4571,45 @@ async def main(argv: Optional[List[str]] = None) -> int:
     # collector idiom, and the same reason, as `served_models` and `usage`
     # above: `run_all_reviews`' return value is destructured by every caller.
     fanout_trackers: List[FanoutProgress] = []
-    with intent_to_add_untracked(changed_files):
-        # Run reviews - agents receive tracked files list and base ref for git diff
+    with intent_to_add_untracked(changed_files, cwd=git_root):
+        # The scope manifest and one whole diff per source or test file, the
+        # FIRST thing inside this block (D2.2): inside it because `git diff`
+        # shows a new untracked file only once it is intent-to-add, and before
+        # the fan-out because every reviewer's prompt names these two paths — a
+        # slot that started first would find them missing, or holding the
+        # previous run's set. Into `detach_phase_dir`, resolved up front: the
+        # `get_phase_dir` call below runs only after the fan-out returns. A git
+        # failure degrades the set (`[DIFF_FAILED]`, coverage partial) and the
+        # fan-out goes on. At `git_root`, like the marking above: the paths are
+        # root-relative, and from a subdirectory every diff came back empty and
+        # the manifest called that complete coverage with no net change.
+        diff_set = write_review_diff(
+            base_ref, changed_files, detach_phase_dir, collapse_paths,
+            scope_source=describe_scope_source(review_scope.source, base_ref),
+            cwd=git_root,
+        )
+
+        # Run reviews - agents receive the resolved, ordered scope (labelled
+        # with its source), the diff set, and the base ref
         results = await run_all_reviews(
             model_specs,
             plan_path,
             out_dir,
             args.timeout,  # May be None - run_all_reviews will use per-provider defaults
             args.max_parallel,
-            tracked_files,
+            changed_files,
             base_ref,
             skip_existing=not args.rerun_all,
             served_models=served_models,
             usage=usage,
             prior_usage=prior_usage,
             tracker_out=fanout_trackers,
+            scope_source=review_scope.source,
+            task_ids=review_scope.task_ids,
+            scope_file=diff_set.scope_file,
+            diff_dir=diff_set.diff_dir,
+            scope_id=diff_set.scope_id,
+            diff_coverage=diff_set.coverage,
         )
 
         # Get the phase directory for code review outputs
@@ -3466,6 +4732,16 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # as review_orchestrator_base's fan-out, on the post-salvage truth.
         completed_models = [m for m in model_specs if m not in failed_models]
         if not completed_models:
+            # Record the failure map before exiting (plan
+            # review-run-scope-salvage-and-failure-visibility, D5.2): a later
+            # `--reaggregate` of this dir reads `models_failed` back to name
+            # each loss and to exit 3 when every requested reviewer failed.
+            # Without it that reaggregate finds no recorded failure and names
+            # the models only with the "no result file" gap reason, at exit 0.
+            update_status(str(phase_dir), {
+                "models_completed": [],
+                "models_failed": failed_models,
+            })
             print("\nERROR: All models failed")
             for model_spec, reason in failed_models.items():
                 print(f"  - {model_spec}: {reason}")
@@ -3664,7 +4940,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
                         secondary_context=secondary,
                         secondary_context_label=REVIEWED_CODE_CONTEXT_LABEL,
                         reviewed_code=reviewed_code,
-                        extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
+                        # Same builder as the `--reaggregate` site, so both
+                        # materialize the same instruction (T7.4).
+                        extra_instructions=validation_extra_instructions(
+                            cut_report
+                        ),
                         context_document=plan_document,
                         secondary_document=reviewed_code_document(
                             secondary, cut_report
@@ -3779,6 +5059,23 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 served_models=served_models or None,
                 usage=usage or None,
                 failed_models=failed_models,
+                # Plan §5 T5.2: "N of M requested" counts this run's own specs.
+                requested_models=len(model_specs),
+                # D2.2: the diff set this fan-out wrote before dispatch.
+                review_scope=review_scope_record(
+                    phase_dir,
+                    scope_id=diff_set.scope_id,
+                    base_ref=diff_set.base_ref,
+                    base_commit=diff_set.base_commit,
+                    written_by=diff_set.written_by,
+                    coverage=diff_set.coverage,
+                    omitted=list(diff_set.omitted),
+                    # Every result here was either run against this set or
+                    # reused because the ledger ties it to this set, so even
+                    # a set an earlier reaggregate wrote (left untouched,
+                    # same id) is the one the reviewers were shown.
+                    results_match=True,
+                ),
             )
 
             # Save report

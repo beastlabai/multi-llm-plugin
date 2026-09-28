@@ -81,6 +81,7 @@ from .pi_family_stream import (
     _stream_version,
     _tool_ends,
     _unclosed_container,
+    assistant_text_of_stream,
     shape_fault,
     sum_usage,
     unrecognized_stop_reason,
@@ -838,6 +839,16 @@ class OmpProvider(LLMProvider):
     #: files in the measurement. The declaration is that fact, not an inference.
     supports_file_output = True
 
+    #: TRUE, from its argv: every ``generate`` dispatch renders
+    #: ``--approval-mode yolo --tools read,grep,glob,bash,edit,write``
+    #: (:data:`OMP_TOOLS`, :data:`OMP_APPROVAL_MODE`), and ``bash`` is on the
+    #: allow-list precisely because the code-review lane shells out to ``git
+    #: diff`` — under any narrower approval mode ``bash`` is denied headless.
+    #: ``tests/test_provider_housekeeping.py``'s ``SHELL_EVIDENCE`` row reads
+    #: ``bash`` out of the rendered ``--tools`` value, so dropping it from the
+    #: list turns that test red until this moves too.
+    runs_shell_in_generate = True
+
     #: The first adapter whose fan-out default is not argv (§2.5). ``argv`` stays
     #: supported for a caller that asks for it and renders ``-- <prompt>`` last.
     prompt_transport = "stdin"
@@ -1387,6 +1398,23 @@ class OmpProvider(LLMProvider):
         if reason in ("stop", "toolUse"):
             return "", stderr
         return _one_line(str(final.get("errorMessage") or "")), stderr
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The last assistant message's answer text, never the event stream.
+
+        omp's JSONL is a transport: every assistant ``message_end`` carries a
+        ``content`` array, and a ``--max-time`` cut leaves an exit-0
+        ``toolUse``/``aborted`` stream whose ``thinking``/``toolCall`` parts the
+        salvage gate would otherwise accept as findings. The reader is pi's
+        (:func:`~utils.providers.pi_family_stream.assistant_text_of_stream`),
+        under :data:`OMP_DIALECT`; ``None`` for a non-empty stdout that is not
+        an omp stream at all keeps the caller's old input. An empty or
+        whitespace-only stdout is ``""``, a final verdict: ``--mode json`` is a
+        required flag, so no bytes means the transport carried nothing
+        (``invalid-model``, a slot killed before omp printed), and stderr's
+        diagnostics must not reach the gate in its place.
+        """
+        return assistant_text_of_stream(stdout, OMP_DIALECT)
 
     def classify_failure(
         self, stdout: str, stderr: str, exit_code: int = 0

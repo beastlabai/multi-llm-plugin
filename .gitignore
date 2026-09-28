@@ -83,6 +83,14 @@ skills/multi-llm/tests/container/records/*
 # set someone accepted once, and a scheduler lock.
 /.claude/settings.local.json
 /.claude/scheduled_tasks.lock
+# A personal workflow skill, kept out of the repo by choice. Named by its own
+# directory so the rest of `.claude/skills/` stays tracked.
+/.claude/skills/autopilot/
+
+# Personal helpers that link or copy this checkout's skill into other repos on
+# this machine. Anchored to the root.
+/link-skill.sh
+/sync-skill.sh
 
 # Personal scratch kept beside the checkout, not a repo artifact. Anchored, so a
 # `note.md` that a subdirectory ever means to track is unaffected.

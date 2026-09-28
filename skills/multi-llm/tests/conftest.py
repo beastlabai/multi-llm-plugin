@@ -4,6 +4,7 @@ import json
 import os
 import pytest
 import re
+import signal
 import subprocess
 import sys
 import tempfile
@@ -143,6 +144,78 @@ def pytest_sessionfinish(session, exitstatus):
         # is that the record is the evidence. Reported as a failed
         # invocation rather than as a green run with a missing file.
         session.exitstatus = session.exitstatus or 1
+
+
+#: The stdlib's own ``subprocess.run``, captured before any test can patch it.
+_STDLIB_SUBPROCESS_RUN = subprocess.run
+
+#: Signals whose handlers a test can leave behind in this process.
+_RESTORED_SIGNALS = tuple(
+    sig for sig in (getattr(signal, name, None)
+                    for name in ("SIGINT", "SIGTERM", "SIGHUP", "SIGBREAK"))
+    if sig is not None
+)
+
+
+@pytest.fixture(autouse=True)
+def _signal_handlers_do_not_outlive_their_test():
+    """Put back every cancellation handler a test replaced.
+
+    A test that claims a detached run in-process installs the worker's abort
+    handlers (``process_control.install_worker_signal_handlers``), which answer
+    SIGINT/SIGTERM with ``os._exit(3)``, and nothing ever uninstalled them. That
+    was harmless while no test signalled the suite's own process. The Ctrl-C
+    sweep tests (plan: review-run-scope-salvage-and-failure-visibility, decision
+    11.9) do exactly that, and under a leaked handler the whole pytest process
+    vanished mid-run with exit 3 and no summary.
+    """
+    saved = {}
+    for sig in _RESTORED_SIGNALS:
+        try:
+            saved[sig] = signal.getsignal(sig)
+        except (OSError, ValueError):  # pragma: no cover
+            pass
+    yield
+    for sig, handler in saved.items():
+        if handler is None:
+            continue
+        try:
+            if signal.getsignal(sig) is not handler:
+                signal.signal(sig, handler)
+        except (OSError, ValueError):  # pragma: no cover - non-main thread
+            pass
+
+
+@pytest.fixture(autouse=True)
+def _lane_a_spawn_honours_a_faked_subprocess_run(monkeypatch):
+    """Keep ``subprocess.run`` the suite's fake for the Lane A process boundary.
+
+    The Lane A spawn used to BE ``subprocess.run``, so dozens of tests across the
+    suite fake the provider process by patching ``utils.llm_client.subprocess.run``
+    (which, being the stdlib module's attribute, patches it globally). The spawn
+    is now ``llm_client._run_provider_cli`` — ``subprocess.run``'s own contract
+    and arguments over a ``Popen``, so a timed-out CLI's detached children can be
+    swept (plan: review-run-scope-salvage-and-failure-visibility D3.3). While a
+    test has replaced ``subprocess.run``, the spawn is routed to that
+    replacement with the identical call, so every existing fake still receives
+    exactly the argv and keyword arguments the production call site passes.
+    With ``subprocess.run`` untouched — every test that runs a real fake CLI —
+    the real ``_run_provider_cli`` runs, sweep and all.
+    """
+    try:
+        from utils import llm_client
+    except Exception:
+        yield
+        return
+    real_spawn = llm_client._run_provider_cli
+
+    def spawn(cmd, **kwargs):
+        if subprocess.run is not _STDLIB_SUBPROCESS_RUN:
+            return subprocess.run(cmd, **kwargs)
+        return real_spawn(cmd, **kwargs)
+
+    monkeypatch.setattr(llm_client, "_run_provider_cli", spawn)
+    yield
 
 
 @pytest.fixture(autouse=True)

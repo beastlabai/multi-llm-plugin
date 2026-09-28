@@ -43,7 +43,7 @@ from .container import harness
 # a whole-token match, never `opt in help_text`: `-m` is a substring of almost
 # any help text, so a substring probe would make this assertion vacuous for
 # every short option — green whatever upstream did to it.
-from .container.seed_cli_surface import missing_options
+from .container.seed_cli_surface import missing_options, option_is_documented
 
 pytestmark = [pytest.mark.container, requires_docker()]
 
@@ -248,6 +248,32 @@ def probe(request):
     return cli, row, (completed.stdout or "") + (completed.stderr or "")
 
 
+def option_entry(option: str, help_text: str) -> str | None:
+    """The help entry that INTRODUCES ``option``: its line plus continuations.
+
+    The introducing line is the first one whose text starts with an option
+    (after indentation) and that documents ``option`` as a whole token, by the
+    same rule presence uses — so ``--exclude-tools`` never answers for
+    ``--tools``, and a usage example further down (``pi --tools read,grep …``,
+    which starts with the binary's name) is never mistaken for the option's own
+    description. Its continuation lines are the non-blank ones after it that
+    start with anything but another option. ``None`` when no line introduces
+    the option at all, which the presence assertion reports on its own.
+    """
+    lines = help_text.splitlines()
+    for index, line in enumerate(lines):
+        if not line.lstrip().startswith("-") or \
+                not option_is_documented(option, line):
+            continue
+        entry = [line]
+        for follow in lines[index + 1:]:
+            if not follow.strip() or follow.lstrip().startswith("-"):
+                break
+            entry.append(follow)
+        return "\n".join(entry)
+    return None
+
+
 class TestTheOptionsWeDependOnStillExist:
     def test_every_documented_option_is_still_in_the_help(self, probe):
         cli, row, help_text = probe
@@ -260,6 +286,33 @@ class TestTheOptionsWeDependOnStillExist:
             f"stop emitting it, or the option moved and the contract needs the "
             f"new spelling."
         )
+
+    def test_every_pinned_option_form_is_still_the_documented_form(self, probe):
+        """``option_forms``: presence is not enough when the value's FORM matters.
+
+        As hard as presence, and for the same reason: pi drops unknown
+        ``--tools`` names silently, so a changed separator turns our one
+        comma-joined value into a single unknown name and empties the reviewer's
+        toolset while every presence check stays green. The phrase must appear
+        in the entry that introduces the option, not anywhere in the help.
+        """
+        cli, row, help_text = probe
+        forms = row.get("option_forms") or {}
+        if not forms:
+            pytest.skip(f"{cli}: no option forms pinned")
+        for option, phrase in forms.items():
+            assert option in row["options"], (
+                f"{cli}: option_forms pins {option!r}, which is not in this "
+                f"row's options — a form is only meaningful for a flag we emit"
+            )
+            entry = option_entry(option, help_text)
+            assert entry is not None and str(phrase) in entry, (
+                f"{cli} {row['version']}: the help entry introducing {option} "
+                f"no longer says {phrase!r}, the value form this repo's adapter "
+                f"renders.\nentry: {entry!r}\n"
+                f"This is upstream drift: re-read how the option parses its "
+                f"value before re-pinning the phrase."
+            )
 
     def test_hidden_options_are_still_accepted(self, probe):
         """Absent from the help, but the binary takes them — proven, not assumed."""

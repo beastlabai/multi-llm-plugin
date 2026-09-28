@@ -1708,7 +1708,10 @@ class TestStatusSurface:
         assert table[0].split() == ["codex:gpt-5.6-sol", "done", "2m10s/30m"]
         assert table[1].split() == ["opencode:auto", "skipped", "0m00s/30m"]
         assert table[2].split() == ["gemini:gemini-3-pro", "running", "0m00s/30m"]
-        assert table[3].split() == ["openai:gpt-5.2", "queued", "0m00s/30m"]
+        # A queued row has spent no budget, so it shows its wait, not a share
+        # of the budget (plan review-run-scope-salvage-and-failure-visibility
+        # §6.2; this read `0m00s/30m`).
+        assert table[3].split() == ["openai:gpt-5.2", "queued", "waiting", "0m00s"]
 
         # `--json` gains no key: the view already carries `progress` whole, so
         # the map rides out exactly as `update_progress` wrote it — which is the
@@ -1843,10 +1846,81 @@ class TestStatusSurface:
             line.strip() for line in out.splitlines() if line.startswith("        ")
         ]
         assert table[0].split() == ["codex:gpt-5.6-sol", "running", "0m00s/30m"]
+        # A staggering row has not dispatched either, so its clock is a wait
+        # rather than run time against the budget (plan review-run-scope-
+        # salvage-and-failure-visibility §6.2; these read `0m00s/30m`).
         assert table[1].split() == [
-            "opencode:auto", "staggering", "0m00s/30m", "starts", "in", "6s",
+            "opencode:auto", "staggering", "waiting", "0m00s", "starts", "in", "6s",
         ]
-        assert table[2].split() == ["gemini:pro", "staggering", "0m00s/30m"]
+        assert table[2].split() == ["gemini:pro", "staggering", "waiting", "0m00s"]
+
+    def test_a_queued_row_reads_its_wait_and_a_finished_row_keeps_it(
+        self, tmp_path, capsys
+    ):
+        """The table half of separating the wait from the run.
+
+        pi was seeded at 15:58:10 and dispatched at 16:05:55 when kimi finished;
+        while it waited, its row read `7m30s/20m`, which is budget spent, and it
+        had spent none. A queued row now reads `waiting 7m45s`, and once a slot
+        that waited has ended, its row keeps the wait beside the run time as
+        `, queued 7m45s`. A slot that dispatched at once (or a map written
+        before `queued_s` existed) grows no clause.
+        """
+        from datetime import datetime, timedelta
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        now = datetime.now()
+        seeded = (now - timedelta(seconds=465)).isoformat()
+        ended = now.isoformat()
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {
+                "step": "fanout",
+                "models_total": 4, "models_done": 2, "models_succeeded": 1,
+                "models": {
+                    "kimi:k2": {
+                        "state": "done", "started_at": seeded,
+                        "dispatched_at": seeded, "updated_at": ended,
+                        "ended_at": ended, "elapsed_s": 465, "queued_s": 0,
+                        "timeout_s": 1200, "attempt": 1, "source": "file",
+                    },
+                    "fable:f1": {
+                        "state": "failed", "started_at": seeded,
+                        "updated_at": ended, "ended_at": ended,
+                        "elapsed_s": 0, "queued_s": 465, "timeout_s": 1800,
+                        "attempt": 0, "source": None, "error": "cancelled",
+                    },
+                    "pi:kimi": {
+                        "state": "queued", "started_at": seeded,
+                        "updated_at": seeded, "timeout_s": 1200,
+                        "attempt": 0, "source": None,
+                    },
+                    "codex:gpt-5.6-sol": {
+                        "state": "running", "started_at": seeded,
+                        "dispatched_at": ended, "queued_s": 465,
+                        "updated_at": ended, "timeout_s": 1800, "attempt": 1,
+                        "source": None,
+                    },
+                },
+            },
+        })
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        rows = {
+            line.split()[0]: line.strip()
+            for line in capsys.readouterr().out.splitlines()
+            if line.startswith("        ")
+        }
+        assert rows["kimi:k2"].split() == ["kimi:k2", "done", "7m45s/20m"]
+        assert rows["fable:f1"].split() == [
+            "fable:f1", "failed", "0m00s/30m,", "queued", "7m45s", "cancelled",
+        ]
+        assert rows["pi:kimi"].split() == ["pi:kimi", "queued", "waiting", "7m45s"]
+        # Counted from its dispatch, so its first live row reads zero rather
+        # than the 7m45s it queued for.
+        assert rows["codex:gpt-5.6-sol"].split() == [
+            "codex:gpt-5.6-sol", "running", "0m00s/30m",
+        ]
 
     def test_a_progress_object_with_no_models_map_renders_as_it_always_did(
         self, tmp_path, capsys
@@ -3222,6 +3296,478 @@ class TestProcessControlFacade:
         pid = os.getpid()
         assert process_control.process_start_time(pid) == \
             process_control.process_start_time(pid)
+
+
+# ===========================================================================
+# D3.3 (review-run-scope-salvage-and-failure-visibility T3.3): the CLI-tree
+# snapshot and sweep beside `kill_tree`, and an abort that takes a Lane A CLI's
+# detached children with it.
+# ===========================================================================
+
+_GRANDCHILD_IN_ITS_OWN_SESSION = (
+    "import subprocess, sys, time\n"
+    "child = subprocess.Popen(['sleep', '60'], start_new_session=True)\n"
+    "print(child.pid, flush=True)\n"
+    "time.sleep(60)\n"
+)
+
+
+_ORPHAN_SLEEPER = (
+    "import subprocess\n"
+    "child = subprocess.Popen(['sleep', '60'], start_new_session={own_session},\n"
+    "                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    "print(child.pid, flush=True)\n"
+)
+
+
+def _orphan_sleeper(*, own_session: bool) -> int:
+    """A `sleep` whose parent has already exited — a CLI's descendant's shape.
+
+    Reparented to init (or the session's subreaper), which reaps it the moment
+    it dies, exactly as a dead CLI's children are; a `sleep` that was THIS
+    process's own child would linger as a zombie until the test waited on it.
+    ``own_session`` puts it in a session and group of its own (pi's detached
+    shell); without it, it stays in this process's group.
+    """
+    spawned = subprocess.run(
+        [sys.executable, "-c", _ORPHAN_SLEEPER.format(own_session=own_session)],
+        capture_output=True, text=True, timeout=30,
+    )
+    return int(spawned.stdout.strip())
+
+
+def _kill_quietly(pid: int) -> None:
+    try:
+        os.kill(pid, signal.SIGKILL)
+    except OSError:
+        pass
+
+
+@POSIX_ONLY
+class TestTheCliTreeSnapshot:
+    def test_descendants_finds_a_grandchild_in_another_session(self):
+        parent = subprocess.Popen(
+            [sys.executable, "-c", _GRANDCHILD_IN_ITS_OWN_SESSION],
+            stdout=subprocess.PIPE, text=True,
+        )
+        found = {}
+        try:
+            grandchild = int(parent.stdout.readline().strip())
+            found = {d.pid: d for d in process_control.descendants(parent.pid)}
+
+            assert grandchild in found, found
+            record = found[grandchild]
+            # Its own session and group — no signal to the parent or to the
+            # parent's group would reach it, which is why it is snapshotted.
+            assert record.sid == grandchild != os.getsid(parent.pid)
+            assert record.pgid == grandchild != os.getpgid(parent.pid)
+            assert record.start_time == process_control.process_start_time(grandchild)
+            assert parent.pid not in found, "the root is not its own descendant"
+        finally:
+            for pid in found:
+                try:
+                    os.kill(pid, signal.SIGKILL)
+                except OSError:
+                    pass
+            parent.kill()
+            parent.wait()
+            parent.stdout.close()
+
+    def test_a_snapshotted_pid_whose_start_time_moved_is_skipped_unsignalled(self):
+        """A recycled pid's group is an unrelated group: no signal at all."""
+        from tests.harness import cli_tree
+
+        bystander = _orphan_sleeper(own_session=True)
+        cli = subprocess.Popen([sys.executable, "-c", "pass"])
+        cli.wait()
+        try:
+            stale = process_control.Descendant(
+                pid=bystander, pgid=bystander, sid=bystander,
+                start_time="not-the-start-time-it-has",
+            )
+            sweep = process_control.terminate_timed_out(cli, [stale], grace_s=0.2)
+
+            assert sweep.cli == "exited", "nothing is sent to a CLI already gone"
+            assert sweep.groups == {bystander: "skipped"}
+            time.sleep(0.3)
+            assert cli_tree.running(bystander), "the bystander was signalled"
+        finally:
+            _kill_quietly(bystander)
+
+    def test_a_corroborated_group_is_swept(self):
+        """The positive control: the same record with its real start time."""
+        from tests.harness import cli_tree
+
+        target = _orphan_sleeper(own_session=True)
+        cli = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        try:
+            record = process_control.Descendant(
+                pid=target, pgid=target, sid=target,
+                start_time=process_control.process_start_time(target),
+            )
+            sweep = process_control.terminate_timed_out(cli, [record], grace_s=0.5)
+
+            assert sweep.cli == "terminated"
+            assert cli.returncode == -signal.SIGTERM, "SIGTERM was enough"
+            assert sweep.groups == {target: "killed"}
+            assert not cli_tree.await_dead([target])
+            assert "SURVIVED" not in sweep.describe()
+        finally:
+            _kill_quietly(target)
+            if cli.poll() is None:
+                cli.kill()
+                cli.wait()
+
+    def test_a_child_left_in_our_own_group_is_stopped_alone(self):
+        """Our group is never signalled — that would be this process too."""
+        from tests.harness import cli_tree
+
+        stray = _orphan_sleeper(own_session=False)  # still in OUR group
+        cli = subprocess.Popen([sys.executable, "-c", "pass"])
+        cli.wait()
+        try:
+            assert os.getpgid(stray) == os.getpgid(0)
+            record = process_control.Descendant(
+                pid=stray, pgid=os.getpgid(0), sid=os.getsid(0),
+                start_time=process_control.process_start_time(stray),
+            )
+            sweep = process_control.terminate_timed_out(cli, [record], grace_s=0.5)
+
+            assert sweep.groups == {os.getpgid(0): "killed"}
+            assert not cli_tree.await_dead([stray])
+        finally:
+            _kill_quietly(stray)
+
+    def test_a_member_that_left_its_recorded_group_is_still_stopped(self):
+        """GNU `timeout` calls setpgid after exec; a stale snapshot misses it.
+
+        The member was snapshotted in its parent's group and runs in a group of
+        its own now, where a signal to the recorded group never reaches it. It
+        also shrugs off SIGTERM, so only a SIGKILL sent by its own pid stops it.
+        """
+        from tests.harness import cli_tree
+
+        leader = _orphan_sleeper(own_session=True)
+        moved = _stubborn_orphan()
+        cli = subprocess.Popen([sys.executable, "-c", "pass"])
+        cli.wait()
+        try:
+            snapshot = [
+                process_control.Descendant(
+                    pid=leader, pgid=leader, sid=leader,
+                    start_time=process_control.process_start_time(leader),
+                ),
+                moved._replace(pgid=leader),
+            ]
+            sweep = process_control.terminate_timed_out(cli, snapshot, grace_s=0.5)
+
+            assert sweep.groups == {leader: "killed"}
+            assert not cli_tree.await_dead([leader, moved.pid], timeout=5)
+        finally:
+            _kill_quietly(leader)
+            _kill_quietly(moved.pid)
+
+    def test_a_member_running_on_outside_its_group_is_reported_survived(
+        self, monkeypatch
+    ):
+        """The verdict folds the member in: an emptied group is not `killed`."""
+        leader = _orphan_sleeper(own_session=True)
+        moved = _orphan_sleeper(own_session=True)
+        real_signal_tree = process_control._signal_tree
+
+        def deaf_to_the_moved_member(pid, pgid, sig):
+            if pid == moved and pgid is None:
+                return
+            real_signal_tree(pid, pgid, sig)
+
+        monkeypatch.setattr(process_control, "_signal_tree", deaf_to_the_moved_member)
+        try:
+            snapshot = [
+                process_control.Descendant(
+                    pid=pid, pgid=leader, sid=pid,
+                    start_time=process_control.process_start_time(pid),
+                )
+                for pid in (leader, moved)
+            ]
+            groups = process_control._sweep_snapshots(
+                [snapshot], 0.2, 0.05, process_control._SweepClock(1.0),
+            )[0]
+
+            assert groups == {leader: "survived"}
+        finally:
+            _kill_quietly(leader)
+            _kill_quietly(moved)
+
+
+_PS_TABLE = (
+    "  100     1   100 Mon Sep  8 09:00:00 2026\n"
+    "  101   100   101 Mon Sep  8 09:00:01 2026\n"
+    "  102   101   102 Mon Sep  8 09:00:02 2026      \n"
+    "  103   101   101 Mon Sep 28 10:00:00 2026\n"
+    "  900     1   900 Mon Sep 28 10:00:00 2026\n"
+)
+
+
+@POSIX_ONLY
+class TestTheTableWalkOffLinux:
+    """macOS and the BSDs: the registry's once-a-second walk is ONE `ps -A`.
+
+    Start times used to be filled in with a `ps -o lstart= -p <pid>` per
+    descendant, on every refresh, for the whole life of a fan-out.
+    """
+
+    @staticmethod
+    def _fake_ps(monkeypatch, *, lstart_supported: bool = True):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(list(argv))
+            if "lstart=" in argv and not lstart_supported:
+                return subprocess.CompletedProcess(argv, 1, "", "ps: lstart: unknown")
+            stdout = _PS_TABLE if "lstart=" in argv else "".join(
+                " ".join(line.split()[:3]) + "\n" for line in _PS_TABLE.splitlines()
+            )
+            return subprocess.CompletedProcess(argv, 0, stdout, "")
+
+        monkeypatch.setattr(process_control, "_linux_process_table", lambda: None)
+        monkeypatch.setattr(process_control.subprocess, "run", fake_run)
+        return calls
+
+    def test_the_periodic_refresh_is_one_ps_walk(self, monkeypatch):
+        from types import SimpleNamespace
+
+        calls = self._fake_ps(monkeypatch)
+
+        def no_per_pid_probe(pid):
+            raise AssertionError(f"per-descendant start-time probe for {pid}")
+
+        monkeypatch.setattr(process_control, "process_start_time", no_per_pid_probe)
+        registry = process_control.LiveCliRegistry(interval_s=3600)
+        proc = SimpleNamespace(pid=100, returncode=None)
+        entry = process_control.LiveCli(
+            pid=100, start_time="Mon Sep  8 09:00:00 2026", proc=proc,
+        )
+        registry._entries[id(proc)] = entry
+
+        registry.refresh()
+        registry.refresh()
+
+        assert len(calls) == 2, calls
+        assert calls[0][:2] == ["ps", "-A"] and "lstart=" in calls[0]
+        found = {d.pid: d for d in entry.snapshot}
+        assert set(found) == {101, 102, 103}, "the CLI's identity matched its row"
+        # `%e` pads a one-digit day: the spacing is the per-pid probe's, kept.
+        assert found[102].start_time == "Mon Sep  8 09:00:02 2026"
+        assert found[103].pgid == 101
+
+    def test_a_ps_without_lstart_still_yields_the_tree(self, monkeypatch):
+        calls = self._fake_ps(monkeypatch, lstart_supported=False)
+        monkeypatch.setattr(process_control, "process_start_time", lambda pid: None)
+
+        found = {d.pid: d for d in process_control.descendants(100)}
+
+        assert [("lstart=" in argv) for argv in calls] == [True, False]
+        assert set(found) == {101, 102, 103}
+        assert all(d.start_time is None for d in found.values())
+
+
+_STUBBORN_ORPHAN = (
+    "import signal, subprocess\n"
+    "# Ignored before the spawn, so `sleep` inherits it through exec: there is\n"
+    "# no window in which a SIGTERM could still reach the default action.\n"
+    "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
+    "child = subprocess.Popen(['sleep', '60'], start_new_session=True,\n"
+    "                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+    "print(child.pid, flush=True)\n"
+)
+
+
+def _stubborn_orphan() -> process_control.Descendant:
+    """A dead parent's child in a group of its own that only SIGKILL stops."""
+    spawned = subprocess.run(
+        [sys.executable, "-c", _STUBBORN_ORPHAN],
+        capture_output=True, text=True, timeout=30,
+    )
+    pid = int(spawned.stdout.strip())
+    return process_control.Descendant(
+        pid=pid, pgid=pid, sid=pid, start_time=process_control.process_start_time(pid),
+    )
+
+
+def _ignore_sigterm() -> None:
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+@POSIX_ONLY
+class TestTheSweepIsBoundedByOneClock:
+    """An abort's sweep must finish before the abort SIGKILLs the worker.
+
+    `abort_run` gives the worker `DEFAULT_ESCALATE_AFTER_S` to exit; the sweep
+    runs inside that window, in the worker's own SIGTERM handler. Swept one group
+    at a time — a grace and a SIGKILL confirmation each, the whole confirmation
+    again for a zombie leader — enough detached groups outlasted the window, and
+    the ones not reached yet were never signalled at all.
+    """
+
+    def test_every_group_is_signalled_before_any_is_waited_on(self):
+        from tests.harness import cli_tree
+
+        groups = [_stubborn_orphan() for _ in range(5)]
+        cli = subprocess.Popen([sys.executable, "-c", "pass"])
+        cli.wait()
+        try:
+            started = time.monotonic()
+            sweep = process_control.terminate_timed_out(cli, groups, grace_s=0.5)
+            elapsed = time.monotonic() - started
+
+            assert sweep.groups == {g.pgid: "killed" for g in groups}
+            # One shared grace, not five of them back to back.
+            assert elapsed < 2.0, f"{elapsed:.2f}s: the groups were swept serially"
+            assert not cli_tree.await_dead([g.pid for g in groups], timeout=5)
+        finally:
+            for group in groups:
+                _kill_quietly(group.pid)
+
+    def test_a_zombie_leader_holds_up_no_wait(self):
+        """Dead but unreaped still answers `kill(pid, 0)`; it is not *running*."""
+        leader = subprocess.Popen(["sleep", "60"], start_new_session=True)
+        cli = subprocess.Popen([sys.executable, "-c", "pass"])
+        cli.wait()
+        try:
+            record = process_control.Descendant(
+                pid=leader.pid, pgid=leader.pid, sid=leader.pid,
+                start_time=process_control.process_start_time(leader.pid),
+            )
+            started = time.monotonic()
+            # `leader` is OUR child and nothing here reaps it until `finally`,
+            # so the SIGTERM leaves a zombie behind for the whole sweep.
+            sweep = process_control.terminate_timed_out(cli, [record], grace_s=0.5)
+            elapsed = time.monotonic() - started
+
+            assert sweep.groups == {leader.pid: "killed"}
+            assert elapsed < 2.0, (
+                f"{elapsed:.2f}s: the zombie leader was waited on as if it ran"
+            )
+        finally:
+            leader.kill()
+            leader.wait()
+
+    def test_a_bounded_sweep_signals_every_group_inside_its_budget(self):
+        from tests.harness import cli_tree
+
+        # Its own registry, refreshing never: the snapshot is the test's.
+        registry = process_control.LiveCliRegistry(interval_s=3600)
+        groups = [_stubborn_orphan() for _ in range(4)]
+        # A CLI that shrugs off its SIGTERM too, so its grace is spent in full.
+        cli = subprocess.Popen(["sleep", "60"], preexec_fn=_ignore_sigterm)
+        try:
+            with registry.tracking(cli) as entry:
+                entry.snapshot = list(groups)
+                started = time.monotonic()
+                swept = registry.sweep(grace_s=5.0, budget_s=1.5)
+                elapsed = time.monotonic() - started
+
+            assert len(swept) == 1
+            _, result = swept[0]
+            assert result.cli == "killed"
+            assert result.groups == {g.pgid: "killed" for g in groups}
+            # A 5 s grace per CLI and per group, unbounded, is 25 s.
+            assert elapsed < 2.5, f"{elapsed:.2f}s: the sweep ran past its budget"
+            assert not cli_tree.await_dead([g.pid for g in groups], timeout=5)
+        finally:
+            for group in groups:
+                _kill_quietly(group.pid)
+            if cli.poll() is None:
+                cli.kill()
+                cli.wait()
+
+    def test_the_abort_budget_ends_inside_the_abort_window(self):
+        assert 0 < process_control.LIVE_SWEEP_BUDGET_S < \
+            process_control.DEFAULT_ESCALATE_AFTER_S
+
+
+ABORT_WORKER_TEMPLATE = '''
+import os, subprocess, sys
+sys.path.insert(0, {skill!r})
+from utils import detach, llm_client, process_control
+
+PHASE = {phase!r}
+process_control.enter_detached_worker(detach.log_path(PHASE))
+handle = detach.RunHandle(
+    PHASE, run_id={run_id!r}, mode="review-plan", plan_file={plan!r},
+    host="test-host",
+)
+handle.start()
+# The Lane A spawn itself, on the fake CLI: registered in the process-wide
+# registry for as long as it is waited on, exactly as a fan-out slot's is.
+llm_client._run_provider_cli(
+    [{cli!r}, "--mode", "json"], capture_output=True, text=True, timeout=120,
+    stdin=subprocess.DEVNULL,
+)
+handle.finish(0)
+sys.exit(0)
+'''
+
+
+@POSIX_ONLY
+class TestAnAbortTakesTheCliTreeWithIt:
+    """Decision 11.9: an abort sweeps what the worker's group kill never reaches.
+
+    `abort_run` SIGTERMs the worker's process group, which holds the provider
+    CLI — and the CLI dies at once, before the worker's handler has run, so its
+    detached tree is already reparented to init. Only the registry's refreshed
+    snapshot still links that tree to the run.
+    """
+
+    def test_no_marker_pid_survives_the_abort(self, tmp_path, capsys):
+        import shutil
+
+        from tests.harness import cli_tree
+
+        if shutil.which("timeout") is None:
+            pytest.skip("GNU `timeout` (its own process group) is the shape under test")
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        fake = cli_tree.install_fake_cli(tmp_path / "bin", "pi")
+        marker = tmp_path / "tree.pids"
+        script = tmp_path / "abort-worker.py"
+        script.write_text(
+            ABORT_WORKER_TEMPLATE.format(
+                skill=str(SKILL_ROOT), phase=str(phase), plan=str(plan),
+                run_id="run-tree-abort-1", cli=str(fake),
+            ),
+            encoding="utf-8",
+        )
+        env = dict(os.environ)
+        env[detach.WORKER_ENV] = "1"
+        env.update(FAST_HEARTBEAT)
+        env["CLI_TREE_MARKER"] = str(marker)
+        try:
+            pid = process_control.spawn_detached(
+                [sys.executable, str(script)], cwd=str(tmp_path), env=env,
+                log_path=str(detach.log_path(str(phase))),
+            )
+            assert cli_tree.await_ready(marker, timeout=30), "the fake never started"
+            # Let the registry refresh its snapshot at least once past `ready`.
+            time.sleep(process_control.live_cli_registry.interval_s * 2 + 0.5)
+
+            assert run_status.main(["--plan-file", str(plan), "--abort"]) == 0
+            capsys.readouterr()
+
+            roles = cli_tree.tree_roles(marker)
+            everything = list(roles.values()) + [cli_tree.cli_pid(marker), pid]
+            still = cli_tree.await_dead(everything, timeout=20)
+            assert not still, f"outlived the abort: {still} of {roles}"
+            run = _terminal_once(phase)
+            assert run["state"] == "aborted"
+            log = Path(detach.log_path(str(phase))).read_text(encoding="utf-8")
+            assert "[ABORT_SWEEP] cli pid" in log
+            # `timeout`'s own group is named, and it did not survive.
+            assert f"{roles['timeout']} killed" in log or \
+                f"{roles['timeout']} gone" in log, log[-2000:]
+            assert "SURVIVED" not in log
+        finally:
+            cli_tree.reap_leftovers(marker)
 
 
 class TestWindowsSeam:
@@ -4717,6 +5263,59 @@ class TestOneBadModelRowCostsItsOwnColumn:
             ["codex:gpt-5.6-sol", "running"], ["opencode:auto", "running"]
         ], rows
 
+    def test_a_wait_that_raises_costs_only_the_wait(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The wait is read under its own guard, beside the run time's.
+
+        `entry_queued_s` is the second clock this table reads (plan
+        review-run-scope-salvage-and-failure-visibility §6.2): a queued row's
+        `waiting …` and a finished row's `, queued …`. A reader that raised on
+        one of them would otherwise take the row's run time down with it — or,
+        with no guard at all, the whole command.
+        """
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        beat = status_file.now_iso()
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {
+                "step": "fanout", "models_total": 2, "models_done": 1,
+                "models_succeeded": 0,
+                "models": {
+                    "codex:gpt-5.6-sol": {
+                        "state": "failed", "started_at": beat,
+                        "dispatched_at": beat, "updated_at": beat,
+                        "ended_at": beat, "elapsed_s": 130, "queued_s": 465,
+                        "timeout_s": 1800, "attempt": 1, "error": "boom",
+                    },
+                    "opencode:auto": {
+                        "state": "queued", "started_at": beat,
+                        "updated_at": beat, "timeout_s": 1800, "attempt": 0,
+                    },
+                },
+            },
+        })
+
+        def _explode(entry, now=None):
+            raise TypeError("can't subtract offset-naive and offset-aware datetimes")
+
+        monkeypatch.setattr(run_status, "entry_queued_s", _explode)
+
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 2
+        out = capsys.readouterr().out
+        assert "Traceback" not in out
+        rows = [
+            line.strip().split() for line in out.splitlines()
+            if line.startswith("        ")
+        ]
+        # The finished row keeps its run time and loses only `, queued …`; the
+        # queued row, whose only clock is the wait, renders with no clock.
+        assert rows == [
+            ["codex:gpt-5.6-sol", "failed", "2m10s/30m", "boom"],
+            ["opencode:auto", "queued"],
+        ], rows
+
     def test_an_aware_started_at_does_not_take_the_command_down(
         self, tmp_path, capsys
     ):
@@ -6154,3 +6753,152 @@ class TestTheRenderedProgressLinesRideTheResultLine:
         assert "progress_lines" not in context.payload(2)
         context.set_progress_lines(None)
         assert "progress_lines" not in context.payload(2)
+
+
+class TestACtrlCAtTheDispatcherSweepsTheRegisteredClis:
+    """Decision 11.9 (plan review-run-scope-salvage-and-failure-visibility):
+    Ctrl-C runs the same sweep as a timeout and an abort. A fan-out slot waits
+    on its CLI from a worker thread, where no ``KeyboardInterrupt`` is raised,
+    so the dispatcher's own interrupt handler sweeps every CLI still in the
+    registry before the process exits."""
+
+    def test_the_interrupt_sweeps_names_each_cli_and_still_exits_one(
+        self, monkeypatch, capsys
+    ):
+        from types import SimpleNamespace
+
+        from utils import process_control
+
+        swept = []
+
+        def fake_sweep(*_args, **_kwargs):
+            swept.append(True)
+            return [(SimpleNamespace(pid=4242),
+                     process_control.TreeSweep(cli="terminated", groups={77: "killed"}))]
+
+        def interrupted(_argv, _ctx):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(process_control.live_cli_registry, "sweep", fake_sweep)
+        monkeypatch.setattr(multi_llm, "_dispatch", interrupted)
+
+        code = multi_llm.main(["review-plan", "plan.md"])
+        err = capsys.readouterr().err
+
+        assert code == 1
+        assert swept == [True]
+        assert "Interrupted." in err
+        assert "[INTERRUPT_SWEEP] cli pid 4242: cli terminated; process groups: 77 killed" in err
+
+    def test_a_sweep_that_raises_never_costs_the_exit(self, monkeypatch, capsys):
+        from utils import process_control
+
+        def broken_sweep(*_args, **_kwargs):
+            raise RuntimeError("proc unreadable")
+
+        def interrupted(_argv, _ctx):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(process_control.live_cli_registry, "sweep", broken_sweep)
+        monkeypatch.setattr(multi_llm, "_dispatch", interrupted)
+
+        assert multi_llm.main(["review-plan", "plan.md"]) == 1
+        assert "[INTERRUPT_SWEEP] failed: proc unreadable" in capsys.readouterr().err
+
+    def test_nothing_registered_prints_nothing(self, monkeypatch, capsys):
+        def interrupted(_argv, _ctx):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(multi_llm, "_dispatch", interrupted)
+
+        assert multi_llm.main(["review-plan", "plan.md"]) == 1
+        assert "[INTERRUPT_SWEEP]" not in capsys.readouterr().err
+
+    def test_a_real_threaded_fan_out_is_swept_before_the_executor_shuts_down(
+        self, tmp_path
+    ):
+        """The sweep has to run inside the async cancellation, not after it.
+
+        ``asyncio.run`` raises the ``KeyboardInterrupt`` only after its runner has
+        shut the default executor down, and that shutdown joins every
+        ``asyncio.to_thread`` slot still blocked in its CLI's ``communicate()``.
+        So when SIGINT reaches the orchestrator alone (a ``kill -INT``, or a CLI
+        that shrugs a terminal Ctrl-C off), a sweep left to the dispatcher's
+        ``except KeyboardInterrupt`` runs only once every slot has reached its own
+        deadline. Three real CLIs on three worker threads, each with a detached
+        tree and a 60 s deadline: the orchestrator must be gone, with every CLI
+        and every tree, in a fraction of that, and the sweep's lines must come
+        before the dispatcher's ``Interrupted.``.
+        """
+        from tests.harness import cli_tree
+
+        fake = cli_tree.install_fake_cli(tmp_path / "bin")
+        markers = [tmp_path / f"tree-{index}" for index in range(3)]
+        child_script = tmp_path / "fan_out.py"
+        child_script.write_text(
+            f"""
+import asyncio, os, signal, sys
+sys.path.insert(0, {str(SKILL_ROOT)!r})
+# Whatever SIGINT disposition the test runner inherited, the orchestrator's is
+# Python's own, so asyncio.run's runner installs its Ctrl-C handler.
+signal.signal(signal.SIGINT, signal.default_int_handler)
+import multi_llm
+from utils import llm_client
+
+async def fan_out(_argv):
+    async def slot(marker):
+        env = dict(os.environ, CLI_TREE_MARKER=marker)
+        return await asyncio.to_thread(
+            llm_client._run_provider_cli, [{str(fake)!r}],
+            capture_output=True, text=True, timeout=60, env=env,
+        )
+    await asyncio.gather(*(slot(m) for m in {[str(m) for m in markers]!r}))
+    return 0
+
+multi_llm._dispatch = lambda argv, ctx: multi_llm._call_target(fan_out, argv)
+sys.exit(multi_llm.main([]))
+""",
+            encoding="utf-8",
+        )
+        child = subprocess.Popen(
+            [sys.executable, str(child_script)],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True,
+        )
+        try:
+            assert all(cli_tree.await_ready(marker) for marker in markers), (
+                "the fan-out's CLIs never came up"
+            )
+            # A moment for every slot to be back inside communicate().
+            time.sleep(0.3)
+            started = time.monotonic()
+            os.kill(child.pid, signal.SIGINT)   # the orchestrator, and only it
+            try:
+                _out, err = child.communicate(timeout=20)
+            except subprocess.TimeoutExpired:
+                pytest.fail(
+                    "the interrupted orchestrator waited on its slots' CLIs "
+                    "instead of sweeping them before the executor shut down"
+                )
+            elapsed = time.monotonic() - started
+
+            assert child.returncode == 1, err
+            assert elapsed < 15, f"{elapsed:.1f}s to end an interrupted fan-out"
+            clis = [cli_tree.cli_pid(marker) for marker in markers]
+            for cli in clis:
+                assert f"[INTERRUPT_SWEEP] cli pid {cli}: cli terminated" in err, err
+            # Swept on the way out of the coroutine, before the runner joined the
+            # executor, so before the dispatcher's own handler printed anything.
+            assert err.index("[INTERRUPT_SWEEP]") < err.index("Interrupted."), err
+            everything = [pid for marker in markers for pid in cli_tree.tree_pids(marker)]
+            still = cli_tree.await_dead(everything + clis)
+            assert not still, f"outlived the interrupt: {still}"
+        finally:
+            if child.poll() is None:
+                try:
+                    os.killpg(child.pid, signal.SIGKILL)
+                except OSError:
+                    pass
+                child.wait(timeout=10)
+            for marker in markers:
+                cli_tree.reap_leftovers(marker)

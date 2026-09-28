@@ -350,6 +350,10 @@ class MuseProvider(LLMProvider):
         ``tail`` holds the deltas emitted after the LAST ``tool.result``, which
         is the closest thing muse gives to "the final assistant message" — see
         parse_output for why that matters.
+
+        The walk is shared by :meth:`parse_output`, :meth:`describe_failure`
+        and :meth:`salvage_text`; ``envelope``, ``saw_delta`` and
+        ``terminal_text`` are salvage's and nothing else reads them.
         """
         deltas: List[str] = []
         tail: List[str] = []
@@ -357,14 +361,19 @@ class MuseProvider(LLMProvider):
         reason: Optional[str] = None
         terminal_text: Optional[str] = None
         task_failures: List[str] = []
+        envelope = False
+        saw_delta = False
 
         for event in self._iter_events(stdout):
             payload_type = event.get("payload_type") or ""
             payload = event["payload"]
+            if isinstance(event.get("payload_type"), str):
+                envelope = True
 
             if payload_type == "run.output.delta":
                 text = payload.get("text")
                 if isinstance(text, str):
+                    saw_delta = True
                     deltas.append(text)
                     tail.append(text)
             elif payload_type == "tool.result":
@@ -392,6 +401,9 @@ class MuseProvider(LLMProvider):
             "terminal": terminal,
             "reason": reason,
             "task_failures": task_failures,
+            "envelope": envelope,
+            "saw_delta": saw_delta,
+            "terminal_text": terminal_text,
         }
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
@@ -553,3 +565,42 @@ class MuseProvider(LLMProvider):
                 scan["terminal"], scan["reason"],
             )
         return result
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The closing assistant message's text, for the salvage gate (D4.1/D4.4).
+
+        muse's stdout is an envelope of typed records — the runtime's
+        lifecycle, tool calls and their results, reminder observers — and only
+        ``run.output.delta`` payloads are the model's words. The answer is the
+        text :meth:`parse_output` tries first: ``tail``, the deltas after the
+        last ``tool.result`` (:meth:`_scan`). Deltas are token fragments, so a
+        run killed mid-answer leaves the answer's first half in ``tail`` — the
+        case salvage exists for — and the terminal state is deliberately not
+        consulted: ``truncated-json-answer`` exits 1 with ``run.terminal.failed``
+        and its deltas still hold a complete array.
+
+        When ``tail`` is empty the last turn wrote nothing. If earlier turns
+        did, that is narration before a tool call and is dropped, not used as a
+        fallback the way ``parse_output`` falls back to ``full`` (plan D4.2:
+        narration can quote an example array). Only a stream with no delta at
+        all reads the terminal record's ``text`` — the one source of answer
+        text left if a build stops emitting deltas.
+
+        * ``None`` when no line is a muse record (not this adapter's stream);
+        * ``""`` when the closing turn holds no text — a verdict, final;
+        * otherwise that text.
+
+        Never raises: a failed walk is ``""``, the reading the caller would give
+        a raise anyway.
+        """
+        try:
+            scan = self._scan(stdout or "")
+            if not scan["envelope"]:
+                return None
+            if scan["tail"].strip():
+                return scan["tail"]
+            if scan["saw_delta"]:
+                return ""
+            return scan["terminal_text"] or ""
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""

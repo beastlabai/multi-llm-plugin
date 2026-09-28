@@ -22,6 +22,9 @@ from utils.git_utils import (
     baseline_covers,
     capture_diff_hunks,
     capture_file_context,
+    classify_review_paths,
+    compile_path_glob,
+    count_review_groups,
     get_branch_name,
     get_current_head,
     get_diff_since_ref,
@@ -33,6 +36,8 @@ from utils.git_utils import (
     intent_to_add_untracked,
     is_clean_working_tree,
     list_untracked_files,
+    list_worktree_untracked_files,
+    order_review_paths,
     stage_files,
     subtract_baseline,
     unstage_files,
@@ -2077,3 +2082,222 @@ class TestGetModifiedFilesAgainstRealGit:
         assert porcelain.strip() == "R  old.py -> new.py", porcelain
 
         assert get_modified_files() == ["new.py"]
+
+
+# ---------------------------------------------------------------------------
+# The review-scope classifier (review-scope plan §2 D2.1): one set of rules for
+# the prompt's file list and the scope manifest, run in a real repository so
+# the `linguist-generated` attribute comes from a real `.gitattributes`.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def attributed_repo(temp_git_repo):
+    """``temp_git_repo`` with a ``.gitattributes`` marking a generated tree.
+
+    One pattern reaches INTO ``tests/fixtures/`` on purpose, so a path there can
+    carry the attribute and prove generated outranks fixtures.
+    """
+    (temp_git_repo / ".gitattributes").write_text(
+        "mirror/** linguist-generated=true -diff\n"
+        "tests/fixtures/gen/** linguist-generated\n"
+        "notgen/** -linguist-generated\n",
+        encoding="utf-8",
+    )
+    return temp_git_repo
+
+
+class TestClassifyReviewPaths:
+    def test_a_linguist_generated_path_under_fixtures_is_generated(self, attributed_repo):
+        groups = classify_review_paths([
+            "tests/fixtures/gen/big.json",   # attribute AND fixtures segment
+            "mirror/utils/x.py",             # attribute on a would-be source file
+            "mirror/tests/test_x.py",        # attribute on a would-be test
+        ])
+        assert groups == {
+            "tests/fixtures/gen/big.json": "generated",
+            "mirror/utils/x.py": "generated",
+            "mirror/tests/test_x.py": "generated",
+        }
+
+    def test_an_unset_attribute_is_not_generated(self, attributed_repo):
+        assert classify_review_paths(["notgen/a.py"]) == {"notgen/a.py": "source"}
+
+    def test_a_golden_path_is_a_fixture_not_a_test(self, attributed_repo):
+        groups = classify_review_paths([
+            "tests/golden/prompts/x.txt",
+            "skills/multi-llm/tests/fixtures/pi/a.stdout.txt",
+        ])
+        assert set(groups.values()) == {"fixtures"}
+
+    def test_tests_and_source(self, attributed_repo):
+        assert classify_review_paths(["tests/test_x.py", "utils/x.py"]) == {
+            "tests/test_x.py": "tests",
+            "utils/x.py": "source",
+        }
+
+    def test_segments_match_whole_directory_names_at_any_depth(self, attributed_repo):
+        groups = classify_review_paths([
+            "skills/multi-llm/tests/x.py",   # nested tests/ segment
+            "pkg/test/helpers.py",           # test/ segment
+            "latest/x.py",                   # "test" inside a name, not a segment
+            "contests/x.py",
+            "contests/fixtures/y.json",      # not a tests/fixtures segment
+        ])
+        assert groups == {
+            "skills/multi-llm/tests/x.py": "tests",
+            "pkg/test/helpers.py": "tests",
+            "latest/x.py": "source",
+            "contests/x.py": "source",
+            "contests/fixtures/y.json": "source",
+        }
+
+    def test_test_file_names_are_read_from_the_name_only(self, attributed_repo):
+        groups = classify_review_paths([
+            "src/test_util.py", "go/x_test.go", "web/a.test.ts", "web/b.spec.js",
+            "test_data/readme.md",            # a directory name, not a file name
+            "src/contest.py",
+        ])
+        assert groups == {
+            "src/test_util.py": "tests",
+            "go/x_test.go": "tests",
+            "web/a.test.ts": "tests",
+            "web/b.spec.js": "tests",
+            "test_data/readme.md": "source",
+            "src/contest.py": "source",
+        }
+
+    def test_outside_a_repository_nothing_is_generated_and_the_rest_still_applies(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`git check-attr` fails there: one warning, no generated group, and the
+        glob and segment rules classify every path as usual."""
+        outside = tmp_path / "not-a-repo"
+        outside.mkdir()
+        monkeypatch.chdir(outside)
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+
+        groups = classify_review_paths([
+            "mirror/utils/x.py", "tests/fixtures/gen/big.json",
+            "tests/test_x.py", "utils/x.py",
+        ])
+
+        assert groups == {
+            "mirror/utils/x.py": "source",
+            "tests/fixtures/gen/big.json": "fixtures",
+            "tests/test_x.py": "tests",
+            "utils/x.py": "source",
+        }
+        err = capsys.readouterr().err
+        assert err.count("git check-attr linguist-generated failed") == 1
+
+    def test_configured_globs_run_after_the_attribute_and_before_tests(
+        self, attributed_repo
+    ):
+        collapse = {"generated": ["**/*.lock", "dist/**"], "fixtures": ["**/data/**"]}
+        groups = classify_review_paths(
+            ["poetry.lock", "dist/app.js", "tests/data/case.json", "tests/fixtures/x.json"],
+            collapse,
+        )
+        assert groups == {
+            "poetry.lock": "generated",
+            "dist/app.js": "generated",
+            "tests/data/case.json": "fixtures",
+            # The fixture rule was REPLACED by this config, so a
+            # tests/fixtures/ path now falls through to the tests rule.
+            "tests/fixtures/x.json": "tests",
+        }
+
+    def test_a_key_left_out_keeps_its_default(self, attributed_repo):
+        groups = classify_review_paths(
+            ["poetry.lock", "tests/fixtures/x.json"], {"generated": ["**/*.lock"]}
+        )
+        assert groups == {"poetry.lock": "generated", "tests/fixtures/x.json": "fixtures"}
+
+    def test_duplicates_and_empty_paths_are_dropped(self, attributed_repo):
+        assert classify_review_paths(["a.py", "", "a.py"]) == {"a.py": "source"}
+
+    def test_count_review_groups_names_every_group(self):
+        assert count_review_groups({"a.py": "source", "t/test_a.py": "tests"}) == {
+            "source": 1, "tests": 1, "fixtures": 0, "generated": 0,
+        }
+
+
+class TestCompilePathGlob:
+    @pytest.mark.parametrize(
+        "pattern, path, expected",
+        [
+            ("**/tests/fixtures/**", "tests/fixtures/a.json", True),
+            ("**/tests/fixtures/**", "a/b/tests/fixtures/c/d.json", True),
+            ("**/tests/fixtures/**", "contests/fixtures/a.json", False),
+            ("**/*.lock", "poetry.lock", True),
+            ("*.lock", "web/yarn.lock", True),
+            ("dist/**", "dist/a/b.js", True),
+            ("dist/**", "src/dist/a.js", False),
+            ("src/*.py", "src/a/b.py", False),
+            ("a/**/b.txt", "a/b.txt", True),
+            ("a/**/b.txt", "a/x/y/b.txt", True),
+            ("file?.py", "file1.py", True),
+            ("[!a]x.py", "bx.py", True),
+            ("[!a]x.py", "ax.py", False),
+        ],
+    )
+    def test_gitignore_like_semantics(self, pattern, path, expected):
+        assert bool(compile_path_glob(pattern).fullmatch(path)) is expected
+
+
+class TestOrderReviewPaths:
+    PATHS = [
+        "skills/multi-llm/tests/fixtures/opencode/a.json",
+        "skills/multi-llm/tests/test_git_utils.py",
+        "mirror/utils/git_utils.py",
+        "skills/multi-llm/utils/z.py",
+        "skills/multi-llm/utils/git_utils.py",
+        "skills/multi-llm/tests/golden/b.txt",
+    ]
+    EXPECTED = [
+        "skills/multi-llm/utils/git_utils.py",
+        "skills/multi-llm/utils/z.py",
+        "skills/multi-llm/tests/test_git_utils.py",
+        "skills/multi-llm/tests/fixtures/opencode/a.json",
+        "skills/multi-llm/tests/golden/b.txt",
+        "mirror/utils/git_utils.py",
+    ]
+
+    def test_source_tests_fixtures_generated_then_by_path(self, attributed_repo):
+        assert order_review_paths(self.PATHS) == self.EXPECTED
+
+    def test_every_permutation_gives_the_same_list(self, attributed_repo):
+        """The tracked-files branch de-duplicates through a set, so its order
+        differs run to run; the rendered list must not."""
+        import itertools
+
+        results = {
+            tuple(order_review_paths(permutation))
+            for permutation in itertools.permutations(self.PATHS)
+        }
+        assert results == {tuple(self.EXPECTED)}
+
+
+class TestListWorktreeUntrackedFiles:
+    def test_it_is_worktree_wide_and_root_relative_from_a_subdirectory(
+        self, temp_git_repo, monkeypatch
+    ):
+        (temp_git_repo / "a").mkdir()
+        (temp_git_repo / "a" / "new.py").write_text("x\n", encoding="utf-8")
+        (temp_git_repo / "b").mkdir()
+        (temp_git_repo / "b" / "other.txt").write_text("y\n", encoding="utf-8")
+        (temp_git_repo / ".gitignore").write_text("*.log\n", encoding="utf-8")
+        (temp_git_repo / "b" / "noise.log").write_text("z\n", encoding="utf-8")
+        monkeypatch.chdir(temp_git_repo / "a")
+
+        assert sorted(list_worktree_untracked_files()) == [
+            ".gitignore", "a/new.py", "b/other.txt",
+        ]
+
+    def test_outside_a_repository_it_is_unknown_not_empty(self, tmp_path, monkeypatch):
+        outside = tmp_path / "plain"
+        outside.mkdir()
+        monkeypatch.chdir(outside)
+        monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+        assert list_worktree_untracked_files() is None

@@ -188,6 +188,7 @@ rows:
         - '"stopReason":"stop"'
         - '"toolName":"write","result"'
       classify_failure: null
+      salvage: answer
 
   truncated:
     stdout: truncated.stdout.txt
@@ -230,6 +231,7 @@ rows:
         - '"type":"auto_retry_end"'
         - "Assistant returned empty stop after retry cap"
       classify_failure: null
+      salvage: none
 
   ephemeral-only:
     stdout: ephemeral-only.stdout.txt
@@ -256,6 +258,7 @@ rows:
       success: false
       error_contains: ["run ended before any assistant message", "message_end/user"]
       classify_failure: null
+      salvage: none
 
   multi-assistant:
     stdout: multi-assistant.stdout.txt
@@ -307,6 +310,7 @@ rows:
         - '"toolName":"read"'
         - '"toolName":"write"'
       classify_failure: null
+      salvage: answer
 
   error-envelope:
     stdout: error-envelope.stdout.txt
@@ -342,6 +346,7 @@ rows:
       raw_contains:
         - '"type":"auto_retry_end"'
       classify_failure: null
+      salvage: none
 
   exit-zero-failure:
     stdout: exit-zero-failure.stdout.txt
@@ -374,6 +379,7 @@ rows:
         - '"isError":true'
         - "[Command cancelled]"
       classify_failure: "timeout"
+      salvage: none
 
   stdout-error:
     stdout: stdout-error.stdout.txt
@@ -402,6 +408,7 @@ rows:
         - '"errorStatus":500'
         - '"stopReason":"error"'
       classify_failure: "server_error"
+      salvage: none
 
   empty:
     stdout: empty.stdout.txt
@@ -447,6 +454,7 @@ rows:
       raw_contains:
         - "The socket connection was closed unexpectedly"
       classify_failure: connection_error
+      salvage: none
 
   auth-error:
     stdout: auth-error.stdout.txt
@@ -479,6 +487,7 @@ rows:
         - '"errorStatus":401'
         - "param=invalid_api_key"
       classify_failure: "auth_failed"
+      salvage: none
 
   rate-limit:
     stdout: rate-limit.stdout.txt
@@ -512,6 +521,7 @@ rows:
         - '"errorStatus":429'
         - "Please try again in 20s."
       classify_failure: "rate_limited"
+      salvage: none
 
   invalid-model:
     stdout: invalid-model.stdout.txt
@@ -545,6 +555,7 @@ rows:
         - 'Model "stub/nonexistent" not found'
         - "/home/e2e/.omp/agent/models.yml"
       classify_failure: invalid_model
+      salvage: none
 
   context-overflow:
     stdout: context-overflow.stdout.txt
@@ -579,6 +590,7 @@ rows:
         - '"errorStatus":400'
         - "raw-http-request=/home/e2e/.omp/logs/http-400-requests/"
       classify_failure: "context_length_exceeded"
+      salvage: none
 
   # ----- beyond §6.2's twelve, graded the same way --------------------------- #
 
@@ -614,6 +626,7 @@ rows:
         - '"text":"[{\"title\": \"Cut in the middle\"'
         - '"stopReason":"error"'
       classify_failure: null
+      salvage: partial
 
   aborted:
     stdout: aborted.stdout.txt
@@ -641,6 +654,7 @@ rows:
         - '"stopReason":"aborted"'
         - '"errorMessage":"Deadline exceeded"'
       classify_failure: "timeout"
+      salvage: none
 
   auth-error-preflight:
     stdout: auth-error-preflight.stdout.txt
@@ -683,6 +697,7 @@ rows:
         - "error: No API key found for openrouter."
         - '"type":"session"'
       classify_failure: "auth_failed"
+      salvage: none
 
   invalid-tool:
     stdout: invalid-tool.stdout.txt
@@ -722,6 +737,7 @@ rows:
       raw_contains:
         - "CliUsageError: Unknown tool in --tools: bogus."
       classify_failure: spawn_failed
+      salvage: none
 
   invalid-model-api:
     stdout: invalid-model-api.stdout.txt
@@ -750,6 +766,7 @@ rows:
         - '"errorStatus":404'
         - "The model `stub-model` does not exist"
       classify_failure: "invalid_model"
+      salvage: none
 
   tool-error-recovered:
     stdout: tool-error-recovered.stdout.txt
@@ -783,6 +800,7 @@ rows:
         - "EACCES: permission denied"
         - '"stopReason":"stop"'
       classify_failure: null
+      salvage: answer
 
   # ------------------------------------------------------------------------ #
   # The five SYNTHESIZED rows. Every other row above is omp's own bytes; these
@@ -826,6 +844,10 @@ rows:
         - "write"
         - "the answer that followed is not trusted"
       classify_failure: permission_denied
+      # The label is the bytes, never `success`: the final message's text IS a
+      # whole findings array, so a salvage reading it would recover one. Whether
+      # a denied run should be salvaged at all is a caller's question.
+      salvage: answer
 
   markers-in-tool-result:
     stdout: markers-in-tool-result.stdout.txt
@@ -860,6 +882,7 @@ rows:
         - "401 User not found."
         - "No API key found for openrouter"
       classify_failure: rate_limited
+      salvage: none
 
   unrecognized-stop-reason:
     stdout: unrecognized-stop-reason.stdout.txt
@@ -890,6 +913,7 @@ rows:
         - "unrecognized stopReason 'maxTokens'"
         - "stream version 3"
       classify_failure: null
+      salvage: answer
 
   missing-stop-reason:
     stdout: missing-stop-reason.stdout.txt
@@ -916,6 +940,7 @@ rows:
         - "assistant message_end without stopReason"
         - "stream version 3"
       classify_failure: null
+      salvage: answer
 
   thinking-then-text:
     stdout: thinking-then-text.stdout.txt
@@ -939,6 +964,7 @@ rows:
     expect:
       success: true
       classify_failure: null
+      salvage: answer
 
   # ----- P13: the three Responses-path rate-limit rows (2026-09-18) --------- #
   # Vehicle `p13`. Everything above this line drove the `openai-completions`
@@ -986,6 +1012,7 @@ rows:
         # /chat/completions could not carry this.
         - '"api":"openrouter"'
       classify_failure: "rate_limited"
+      salvage: none
 
   rate-limit-delayed:
     stdout: rate-limit-delayed.stdout.txt
@@ -1023,6 +1050,7 @@ rows:
         - "Please try again in 20s."
         - '"api":"openrouter"'
       classify_failure: "rate_limited"
+      salvage: none
 
   rate-limit-multi-turn:
     stdout: rate-limit-multi-turn.stdout.txt
@@ -1064,6 +1092,7 @@ rows:
         - '"type":"tool_execution_end"'
         - '"isError":false'
       classify_failure: "rate_limited"
+      salvage: none
 
   compaction-summarized:
     stdout: compaction-summarized.stdout.txt
@@ -1107,3 +1136,4 @@ rows:
         - '"type":"auto_compaction_end","action":"context-full"'
         - '"shortSummary"'
       classify_failure: null
+      salvage: answer

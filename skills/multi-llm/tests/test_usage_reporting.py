@@ -844,7 +844,7 @@ class TestResume:
         ):
             asyncio.run(cro.run_all_reviews(
                 [FULL_SPEC, NONE_SPEC], plan, tmp_path / "out", timeout=600,
-                max_parallel=2, tracked_files=None, base_ref="HEAD~1",
+                max_parallel=2, changed_files=None, base_ref="HEAD~1",
                 skip_existing=True, served_models={}, usage=usage,
                 prior_usage={FULL_SPEC: EXPECTED_USAGE,
                              NONE_SPEC: {"cost_usd": 99.0}},

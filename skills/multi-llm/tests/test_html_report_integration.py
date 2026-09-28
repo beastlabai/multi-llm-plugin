@@ -673,18 +673,34 @@ class TestHtmlReportGeneratorDirect:
         """Verify HTML includes failed model information."""
         setup = setup_report_dir
 
+        failed = {"gpt-4": "Timeout error", "gemini": "API error"}
         html = generate_html_report(
             groups=TestFixtures.GROUPED_SUGGESTIONS,
             plan_path=setup["plan_file"],
             phase_dir=setup["phase_dir"],
             phase_type="review-plan",
             models=["claude-sonnet"],
-            failed_models={"gpt-4": "Timeout error", "gemini": "API error"},
+            failed_models=failed,
+            requested_models=3,
         )
 
-        # Check failed models are in the data
-        assert "gpt-4" in html
-        assert "Timeout error" in html or "failedModels" in html
+        # Plan §5 T5.3, tightened from "the string appears somewhere": the
+        # embedded data carries the map as a dict (the templates iterate it with
+        # Object.keys — an array-shaped reading is how the row never rendered),
+        # the requested count, and exactly one warning notice naming both.
+        data = json.loads(
+            (setup["phase_dir"] / "report_data.json").read_text(encoding="utf-8")
+        )
+        assert data["failedModels"] == failed
+        assert data["requestedModels"] == 3
+        warnings = [n for n in data["notices"] if n["type"] == "warning"]
+        assert len(warnings) == 1
+        message = warnings[0]["message"]
+        assert message.startswith("Models failed: 2 of 3 requested — ")
+        assert "gpt-4: Timeout error" in message
+        assert "gemini: API error" in message
+        assert "**" not in message
+        assert '"failedModels"' in html
 
 
 class TestReportParserIntegration:

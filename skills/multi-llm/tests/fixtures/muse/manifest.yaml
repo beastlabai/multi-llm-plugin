@@ -96,6 +96,7 @@ rows:
         - '"payload_type":"run.terminal.completed"'
         - '"terminal":"completed"'
       classify_failure: null
+      salvage: answer
 
   multi-assistant:
     stdout: multi-assistant.stdout.txt
@@ -136,6 +137,7 @@ rows:
         - "FIRST ANSWER (must NOT be selected)"
         - '"tool_name":"read_file"'
       classify_failure: null
+      salvage: answer
 
   ephemeral-only:
     stdout: ephemeral-only.stdout.txt
@@ -163,6 +165,7 @@ rows:
         - '"terminal":"completed"'
         - '"text":""'
       classify_failure: null
+      salvage: none
 
   auth-error:
     stdout: auth-error.stdout.txt
@@ -200,6 +203,7 @@ rows:
         - "your API key from META_API_KEY was rejected"
         - "opening meta model stream attempt 1/10"
       classify_failure: "auth_failed"
+      salvage: none
 
   invalid-model:
     stdout: invalid-model.stdout.txt
@@ -225,6 +229,7 @@ rows:
       raw_contains:
         - "The model `muse-spark-9.9-nonexistent` does not exist or you do not have access to it."
       classify_failure: "invalid_model"
+      salvage: none
 
   context-overflow:
     stdout: context-overflow.stdout.txt
@@ -248,6 +253,7 @@ rows:
       raw_contains:
         - "This model's maximum context length is 8192 tokens."
       classify_failure: "context_length_exceeded"
+      salvage: none
 
   error-envelope:
     stdout: error-envelope.stdout.txt
@@ -271,6 +277,7 @@ rows:
       raw_contains:
         - "server returned a 200 body with no event-stream frames"
       classify_failure: null
+      salvage: none
 
   stdout-error:
     stdout: stdout-error.stdout.txt
@@ -298,6 +305,7 @@ rows:
         - "The server had an error while processing your request."
         - "run ended with Failed"
       classify_failure: "server_error"
+      salvage: none
 
   rate-limit:
     stdout: rate-limit.stdout.txt
@@ -321,6 +329,7 @@ rows:
         - "Rate limit reached for stub-model"
         - "opening meta model stream attempt 10/10"
       classify_failure: "rate_limited"
+      salvage: none
 
   truncated:
     stdout: truncated.stdout.txt
@@ -366,6 +375,7 @@ rows:
         - "4 failed attempts (40 provider requests)"
         - '"terminal":"failed"'
       classify_failure: null
+      salvage: none
 
   truncated-after-deltas:
     stdout: truncated-after-deltas.stdout.txt
@@ -411,6 +421,7 @@ rows:
         - "stream ended before terminal event"
         - '"terminal":"failed"'
       classify_failure: null
+      salvage: none  # the delivered text is `OK`: prose, nothing to repair
 
   truncated-json-answer:
     stdout: truncated-json-answer.stdout.txt
@@ -464,6 +475,7 @@ rows:
         - "model failed after 10 attempts: stream ended before terminal event"
         - '"terminal":"failed"'
       classify_failure: null
+      salvage: answer  # exit 1, yet its deltas hold a complete array
 
   exit-zero-failure:
     not_applicable: >-

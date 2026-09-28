@@ -2,7 +2,7 @@
 import json
 import os
 import shutil
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
@@ -551,6 +551,120 @@ def _vendor_stdout(stdout: str) -> str:
     return "".join(kept) if parsed_any else stdout
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# The answer walk, shared by `parse_output` and `salvage_text` (plan:
+# review-run-scope-salvage-and-failure-visibility §4, D4.4). One walk so the
+# text salvage recovers is, by construction, the text the parser reads as the
+# answer — never the `command_execution` output or `reasoning` text around it.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: codex's top-level event types — the serde tag table of the 0.14x/0.156.1
+#: binaries (`tests/fixtures/codex/0.156.1/SCHEMA.md`). A line carrying one of
+#: them is what makes stdout a codex event stream rather than a bare answer.
+_CODEX_EVENT_TYPES = frozenset({
+    "thread.started",
+    "turn.started",
+    "turn.completed",
+    "turn.failed",
+    "item.started",
+    "item.updated",
+    "item.completed",
+    "error",
+})
+
+
+class _CodexStream(NamedTuple):
+    """What one pass over a ``codex exec --json`` stream collected."""
+
+    #: ``agent_message`` texts from ``item.completed`` events, in stream order.
+    messages: List[str]
+    #: Text from the pre-0.14x ``text``/``message``/``content`` event shapes.
+    legacy_parts: List[str]
+    #: Top-level ``error`` and ``turn.failed`` messages (the fatal pair).
+    fatal_errors: List[str]
+    #: Nested ``item.type == "error"`` messages (often benign notices).
+    item_errors: List[str]
+    #: Whether any line was one of :data:`_CODEX_EVENT_TYPES`.
+    saw_event: bool
+
+
+def _scan_codex_stream(stdout: str) -> _CodexStream:
+    """Walk the NDJSON once and collect the answer text and the error reports.
+
+    The rules are ``parse_output``'s (see its docstring): only ``item.completed``
+    counts, and only an ``agent_message`` item's ``text`` is the model's reply —
+    a ``reasoning`` item carries a ``text`` field too.
+    """
+    messages: List[str] = []
+    legacy_parts: List[str] = []
+    fatal_errors: List[str] = []
+    item_errors: List[str] = []
+    saw_event = False
+
+    for line in stdout.strip().split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+
+        if not isinstance(event, dict):
+            continue
+
+        event_type = event.get("type", "")
+        # `isinstance` first: an unhashable `type` would make the set lookup
+        # raise, and this walk also serves `parse_output`, which never did.
+        if isinstance(event_type, str) and event_type in _CODEX_EVENT_TYPES:
+            saw_event = True
+
+        if event_type == "item.completed":
+            item = event.get("item")
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "agent_message":
+                text = item.get("text")
+                if isinstance(text, str):
+                    messages.append(text)
+            elif item_type == "error":
+                # Not fatal on its own: codex emits these for benign
+                # conditions such as unrecognised model metadata, on runs
+                # that go on to succeed.
+                message = item.get("message")
+                if isinstance(message, str) and message:
+                    item_errors.append(message)
+        elif event_type == "error":
+            message = event.get("message")
+            if isinstance(message, str) and message:
+                fatal_errors.append(message)
+        elif event_type == "turn.failed":
+            error = event.get("error")
+            if isinstance(error, dict):
+                message = error.get("message")
+                if isinstance(message, str) and message:
+                    fatal_errors.append(message)
+        # Legacy event shapes, kept as a fallback for Codex builds that
+        # predate the dotted-namespace stream. No 0.14x release emits these.
+        elif event_type == "text":
+            if isinstance(event.get("text"), str):
+                legacy_parts.append(event["text"])
+            part = event.get("part")
+            if isinstance(part, dict) and part.get("type") == "text" \
+                    and isinstance(part.get("text"), str):
+                legacy_parts.append(part["text"])
+        elif event_type == "message":
+            if isinstance(event.get("content"), str):
+                legacy_parts.append(event["content"])
+        elif event_type == "content":
+            if isinstance(event.get("text"), str):
+                legacy_parts.append(event["text"])
+
+    return _CodexStream(messages, legacy_parts, fatal_errors, item_errors, saw_event)
+
+
 class CodexProvider(LLMProvider):
     """Provider for OpenAI Codex CLI tool.
 
@@ -608,6 +722,15 @@ class CodexProvider(LLMProvider):
     # `--sandbox read-only` restricts writes, not reads: a snapshot outside the
     # repo root is readable with no extra flag (validation-context-by-path §2.2).
     reads_outside_cwd = True
+    # MEASURED TRUE: an audited review stream of the 2026-09-25 run ran the
+    # `command_execution` `pwd && rg --files …`, under `generate`'s
+    # `--sandbox workspace-write` (`_SANDBOX_BY_PROFILE`) — the stream that
+    # moved `pwd` into `codex_stream_audit.ANY_FLAG_VERBS` (plan:
+    # review-run-scope-salvage-and-failure-visibility §7.3). Where bubblewrap
+    # cannot start, the D6 fallback runs the same profile unsandboxed, which
+    # keeps the shell. `generate_read_scope` stays the "cwd" default:
+    # `reads_outside_cwd` above describes `agent-readonly`, not this profile.
+    runs_shell_in_generate = True
     usage_support = USAGE_FULL
     # §4.2.2: this adapter really emits `--output-schema` when handed a
     # materialized schema (see `build_command`), so the caller may mark an
@@ -1181,68 +1304,15 @@ class CodexProvider(LLMProvider):
           them keeps text from being counted twice.
         - A turn may contain several agent messages (prose, then the answer),
           so the last is preferred over concatenating standalone JSON documents.
+
+        The walk itself is :func:`_scan_codex_stream`, shared with
+        :meth:`salvage_text`.
         """
-        messages: List[str] = []
-        legacy_parts: List[str] = []
-        fatal_errors: List[str] = []
-        item_errors: List[str] = []
-
-        for line in stdout.strip().split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-
-            if not isinstance(event, dict):
-                continue
-
-            event_type = event.get("type", "")
-
-            if event_type == "item.completed":
-                item = event.get("item")
-                if not isinstance(item, dict):
-                    continue
-                item_type = item.get("type")
-                if item_type == "agent_message":
-                    text = item.get("text")
-                    if isinstance(text, str):
-                        messages.append(text)
-                elif item_type == "error":
-                    # Not fatal on its own: codex emits these for benign
-                    # conditions such as unrecognised model metadata, on runs
-                    # that go on to succeed.
-                    message = item.get("message")
-                    if isinstance(message, str) and message:
-                        item_errors.append(message)
-            elif event_type == "error":
-                message = event.get("message")
-                if isinstance(message, str) and message:
-                    fatal_errors.append(message)
-            elif event_type == "turn.failed":
-                error = event.get("error")
-                if isinstance(error, dict):
-                    message = error.get("message")
-                    if isinstance(message, str) and message:
-                        fatal_errors.append(message)
-            # Legacy event shapes, kept as a fallback for Codex builds that
-            # predate the dotted-namespace stream. No 0.14x release emits these.
-            elif event_type == "text":
-                if isinstance(event.get("text"), str):
-                    legacy_parts.append(event["text"])
-                part = event.get("part")
-                if isinstance(part, dict) and part.get("type") == "text" \
-                        and isinstance(part.get("text"), str):
-                    legacy_parts.append(part["text"])
-            elif event_type == "message":
-                if isinstance(event.get("content"), str):
-                    legacy_parts.append(event["content"])
-            elif event_type == "content":
-                if isinstance(event.get("text"), str):
-                    legacy_parts.append(event["text"])
+        scan = _scan_codex_stream(stdout)
+        messages = scan.messages
+        legacy_parts = scan.legacy_parts
+        fatal_errors = scan.fatal_errors
+        item_errors = scan.item_errors
 
         candidates: List[str] = []
         if messages:
@@ -1277,3 +1347,41 @@ class CodexProvider(LLMProvider):
                 result.get("error", "Failed to parse response"), "; ".join(fatal_errors)
             )
         return result
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The last ``agent_message``'s text, for the salvage gate (D4.1/D4.4).
+
+        A failed codex stream is mostly transport: ``command_execution`` items
+        whose ``aggregated_output`` is whatever the model ``cat``-ed, ``reasoning``
+        text, ``turn.completed`` usage. Handed to ``has_salvageable_json`` whole,
+        the arrays inside those items (an MCP result's ``content``, a
+        ``web_search`` item's action) pass it as if they were findings — 14 of the
+        18 committed ``.jsonl`` captures did, ``run_0c477c4d_partial`` (a run that
+        never wrote an answer) among them — while a real answer array, being a
+        JSON-escaped string inside ``item.text``, did not.
+
+        The answer is the text :meth:`parse_output` reads first: the **last**
+        ``agent_message`` (same walk, :func:`_scan_codex_stream`). Earlier ones
+        are narration between tool calls and are dropped, not joined — joining
+        could hand the gate an example array quoted in passing (plan D4.2).
+        codex emits an ``agent_message`` only on ``item.completed``, never as a
+        streamed delta, so there is no half-written message to recover: a run
+        killed mid-answer holds none of it.
+
+        * ``None`` when no line is a codex event (not this adapter's stream);
+        * ``""`` when the stream holds no ``agent_message`` — a verdict, final;
+        * the legacy ``text``/``message``/``content`` parts joined, for the
+          pre-0.14x shape ``parse_output`` still falls back to.
+
+        Never raises: a failed walk is ``""``, the reading the caller would give
+        a raise anyway.
+        """
+        try:
+            scan = _scan_codex_stream(stdout or "")
+            if scan.messages:
+                return scan.messages[-1]
+            if scan.legacy_parts:
+                return "".join(scan.legacy_parts)
+            return "" if scan.saw_event else None
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""

@@ -2107,6 +2107,143 @@ class TestSalvageFoundNothing:
 
 
 # ---------------------------------------------------------------------------
+# A timed-out run's salvaged `[]` (plan:
+# review-run-scope-salvage-and-failure-visibility D4.5, decision 11.10)
+# ---------------------------------------------------------------------------
+
+class TestATimedOutRunsEmptySalvageIsRefused:
+    """``"failure": "timeout"`` on the request turns a salvaged ``[]`` terminal.
+
+    A reviewer killed at its deadline never said "I found nothing"; a subagent
+    handed only its ``toolcall_delta`` fragments can return ``[]``, and that
+    would be written over the model's result file as a clean review. Timeouts
+    only: a ``[]`` from a run that finished and then exited non-zero is still a
+    genuine empty review, so it keeps persisting.
+    """
+
+    RECOVERED = [{
+        "title": "Recovered suggestion",
+        "desc": "Pulled out of the cut array.",
+        "importance": "MEDIUM",
+        "reference": "## Step 1",
+        "type": "addition",
+    }]
+
+    def _salvage_task_file(self, tmp_path, *, timed_out):
+        from utils.subagent_tasks import write_salvage_task_file
+
+        request = {
+            "model": "codex:gpt-5.5",
+            "phase": "review_plan",
+            "raw_output": '[{"title": "cut',
+            "expected_type": "array",
+            "expected_schema": {
+                "fields": ["title", "desc", "importance", "reference", "type"]
+            },
+            "output_path": str(tmp_path / "codex_gpt-5_5.json"),
+        }
+        if timed_out:
+            request["failure"] = "timeout"
+        request_path = tmp_path / "salvage_codex_gpt-5_5.json"
+        request_path.write_text(json.dumps(request), encoding="utf-8")
+        return write_salvage_task_file(
+            salvage_request=request,
+            salvage_request_path=str(request_path),
+            phase_dir=str(tmp_path),
+        )
+
+    def _run(self, tmp_path, runner_env, monkeypatch, response, *, timed_out, **driver):
+        runner_env.use("codex:gpt-5.5", **driver)
+        monkeypatch.setenv("MOCK_LLM_CONFIG", json.dumps({"response": response}))
+        task_file = self._salvage_task_file(tmp_path, timed_out=timed_out)
+        return executor.run_task_file(task_file, phase_dir=str(tmp_path))
+
+    def _native(self, tmp_path, response, *, timed_out):
+        from utils.subagent_tasks import tasks_of
+
+        task_file = self._salvage_task_file(tmp_path, timed_out=timed_out)
+        tasks = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))
+        return executor.simulate_native_invoker(
+            tasks, phase_dir=str(tmp_path), kind="salvage",
+            respond=lambda _t: response,
+        )
+
+    def test_a_timed_out_runs_empty_array_is_unrecoverable_and_writes_nothing(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        report = self._run(
+            tmp_path, runner_env, monkeypatch, [], timed_out=True, subagent_retries=3
+        )
+
+        assert not report.ok
+        outcome = report.outcomes[0]
+        assert outcome.status == executor.STATUS_SALVAGE_UNRECOVERABLE
+        assert outcome.reason == executor.SALVAGE_EMPTY_AFTER_TIMEOUT_REASON
+        # Terminal: the same raw output through the same prompt has one answer.
+        assert len(outcome.attempts) == 1
+        assert not (tmp_path / "codex_gpt-5_5.json").exists()
+        written = json.loads(
+            (tmp_path / executor.BATCH_REPORT_FILENAME).read_text(encoding="utf-8")
+        )
+        assert written["counts"] == {"salvage_unrecoverable": 1}
+
+    def test_a_non_timeout_empty_array_still_persists(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        report = self._run(tmp_path, runner_env, monkeypatch, [], timed_out=False)
+
+        assert report.ok, report.failure_summary()
+        assert json.loads(
+            (tmp_path / "codex_gpt-5_5.json").read_text(encoding="utf-8")
+        ) == []
+
+    def test_a_timed_out_runs_recovered_findings_still_persist(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """Only the empty array is refused: a cut array's findings are the point."""
+        report = self._run(
+            tmp_path, runner_env, monkeypatch, self.RECOVERED, timed_out=True
+        )
+
+        assert report.ok, report.failure_summary()
+        assert json.loads(
+            (tmp_path / "codex_gpt-5_5.json").read_text(encoding="utf-8")
+        ) == self.RECOVERED
+
+    def test_the_native_invoker_answers_identically(self, tmp_path):
+        refused = self._native(tmp_path, [], timed_out=True)
+        assert refused.outcomes[0].status == executor.STATUS_SALVAGE_UNRECOVERABLE
+        assert refused.outcomes[0].reason == executor.SALVAGE_EMPTY_AFTER_TIMEOUT_REASON
+        assert not (tmp_path / "codex_gpt-5_5.json").exists()
+
+        kept = self._native(tmp_path, [], timed_out=False)
+        assert kept.ok
+        assert json.loads(
+            (tmp_path / "codex_gpt-5_5.json").read_text(encoding="utf-8")
+        ) == []
+
+    def test_the_sentinel_still_names_its_own_reason_on_a_timed_out_run(self, tmp_path):
+        report = self._native(
+            tmp_path, {"salvage_failed": True, "reason": "only tool-call fragments"},
+            timed_out=True,
+        )
+
+        assert "only tool-call fragments" in report.outcomes[0].reason
+
+    def test_the_failure_kind_is_read_from_the_request_beside_the_task(self, tmp_path):
+        from utils.subagent_tasks import tasks_of
+
+        task_file = self._salvage_task_file(tmp_path, timed_out=True)
+        task = tasks_of(json.loads(Path(task_file).read_text(encoding="utf-8")))[0]
+
+        assert executor.salvage_failure_of(task, str(tmp_path)) == "timeout"
+        (tmp_path / "salvage_codex_gpt-5_5.json").unlink()
+        assert executor.salvage_failure_of(task, str(tmp_path)) is None
+        assert executor.salvage_failure_of(
+            {**task, "kind": "validation"}, str(tmp_path)) is None
+
+
+# ---------------------------------------------------------------------------
 # Flag off ⇒ nothing changes
 # ---------------------------------------------------------------------------
 

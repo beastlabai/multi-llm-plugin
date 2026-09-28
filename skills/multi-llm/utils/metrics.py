@@ -9,6 +9,7 @@ import json
 import os
 import sys
 import tempfile
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -165,6 +166,12 @@ def start_phase_in_state(state: dict, phase: str, total_batches: int) -> None:
     ``StateManager``'s own ``save()`` — which dumps its dict wholesale and never
     merges — always wins. Measured 2026-09-16: three independent runs finished
     with `metrics: null` after every batch had recorded one (F4).
+
+    Each start also stamps a fresh ``run_id``, which every entry recorded under
+    it carries. It is what tells a second record of the *same* event (collapsed
+    by ``record_metric_in_state``) from a rerun's or a ``--resume``'s real
+    measurement of the same label: ``metrics`` outlives runs in ``state.json``,
+    and a rerun or resume starts the phase again, so it gets a new id.
     """
     progress = state.get("metrics_progress")
     if not isinstance(progress, dict):
@@ -173,6 +180,7 @@ def start_phase_in_state(state: dict, phase: str, total_batches: int) -> None:
     progress[phase] = {
         "started_at": datetime.now().isoformat(),
         "total_batches": int(total_batches),
+        "run_id": uuid.uuid4().hex,
     }
 
 
@@ -180,9 +188,11 @@ def start_phase(state_path: Path, phase: str, total_batches: int) -> None:
     """Record the start time and total batch count for a phase.
 
     Writes ``metrics_progress.{phase}`` = {"started_at": ISO timestamp,
-    "total_batches": int}. Used by ``record_metric`` to compute wall-clock ETA.
+    "total_batches": int, "run_id": uuid4 hex}. Used by ``record_metric`` to
+    compute wall-clock ETA and to recognise this run's own entries.
     Idempotent: a second call for the same phase replaces the prior entry
-    (necessary so ``--resume`` runs reset the progress baseline).
+    (necessary so ``--resume`` runs reset the progress baseline, and start a new
+    ``run_id``).
     """
     state = _read_state(state_path)
     start_phase_in_state(state, phase, total_batches)
@@ -358,6 +368,149 @@ def normalize_recorded_executor(value: str) -> str:
     return value
 
 
+#: The measured fields of a metric entry. A record carrying none of them, or
+#: only zeros in them, is *empty*: nothing was measured (the host's subagent
+#: tool reports no usage) or a zero was fabricated for a value nobody had.
+_MEASURED_FIELDS = ("token_count", "tool_uses", "duration_ms")
+
+#: Every field two records of one event are compared on.
+_PAYLOAD_FIELDS = ("subagent_type",) + _MEASURED_FIELDS
+
+_EMPTY_NONE = "no numbers"
+_EMPTY_ZERO = "only zeros"
+
+
+def _current_run_id(state: dict, phase: str) -> Optional[str]:
+    """The ``run_id`` ``start_phase_in_state`` stamped for ``phase``, or None.
+
+    None when the phase was never started (or finished), or was started before
+    run ids existed: such a record appends unchecked, exactly as before.
+    """
+    progress = state.get("metrics_progress")
+    if not isinstance(progress, dict):
+        return None
+    entry = progress.get(phase)
+    if not isinstance(entry, dict):
+        return None
+    run_id = entry.get("run_id")
+    return run_id if isinstance(run_id, str) and run_id else None
+
+
+def _is_index(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _emptiness(entry: dict) -> Optional[str]:
+    """Why ``entry`` measured nothing, or None when it carries a real number."""
+    measured = [entry[k] for k in _MEASURED_FIELDS if entry.get(k) is not None]
+    if not measured:
+        return _EMPTY_NONE
+    if all(value == 0 for value in measured):
+        return _EMPTY_ZERO
+    return None
+
+
+def _payload(entry: dict) -> Dict[str, Any]:
+    return {k: entry[k] for k in _PAYLOAD_FIELDS if entry.get(k) is not None}
+
+
+def _describe_event(phase: str, label: str, batch_index: Optional[int]) -> str:
+    where = f" (batch {batch_index})" if batch_index is not None else ""
+    return f'{phase}: "{label}"{where}'
+
+
+def _replacement(existing: dict, new: dict, keep_measured: bool) -> dict:
+    """``new``, keeping any field of ``existing`` it does not carry itself.
+
+    The executor role always survives. A measured field survives only from a
+    non-empty entry (``keep_measured``): carrying an empty entry's zeros into
+    the replacement would re-fabricate exactly what the replacement removes.
+    """
+    merged = dict(new)
+    for key in _PAYLOAD_FIELDS:
+        if key in merged or existing.get(key) is None:
+            continue
+        if key == "subagent_type" or keep_measured:
+            merged[key] = existing[key]
+    return merged
+
+
+def _collapse_duplicate(
+    entries: list, index: int, new: dict, event: str
+) -> bool:
+    """Settle a second record of the event ``entries[index]`` already holds.
+
+    Returns True when ``entries[index]`` now holds the new record's numbers
+    (so the caller's ``[ETA]`` line reflects them), False when the new record
+    was dropped. Either way nothing is appended: two entries for one batch
+    would count it twice in every per-phase total and average.
+    """
+    existing = entries[index]
+    old_empty = _emptiness(existing)
+    new_empty = _emptiness(new)
+
+    if new_empty is not None:
+        # An empty record never displaces a measured one. Of two empty ones,
+        # the one without numbers is kept over the all-zero one (whose zeros
+        # were made up and would average in), so the incident's pair
+        # (one all zeros, one with none, 45 ms apart) collapses to the same
+        # entry whichever write lands first.
+        if old_empty == _EMPTY_ZERO and new_empty == _EMPTY_NONE:
+            entries[index] = _replacement(existing, new, keep_measured=False)
+            print(
+                f"[METRICS_DUPLICATE] {event} recorded twice in this run; kept "
+                f"the record with no numbers over the one with only zeros",
+                file=sys.stderr,
+            )
+            return True
+        print(
+            f"[METRICS_DUPLICATE] {event} already recorded in this run; skipped "
+            f"the second record (it carried {new_empty})",
+            file=sys.stderr,
+        )
+        return False
+
+    if old_empty is not None:
+        # An empty row that landed first must not cost the real numbers.
+        entries[index] = _replacement(existing, new, keep_measured=False)
+        print(
+            f"[METRICS_DUPLICATE] {event} recorded twice in this run; the second "
+            f"record replaced the first, which carried {old_empty}",
+            file=sys.stderr,
+        )
+        return True
+
+    old_payload = _payload(existing)
+    new_payload = _payload(new)
+    differing = sorted(
+        k for k in old_payload.keys() & new_payload.keys()
+        if old_payload[k] != new_payload[k]
+    )
+    if differing:
+        print(
+            f"[METRICS_CONFLICT] {event} recorded twice in this run with "
+            f"different {', '.join(differing)}: kept {json.dumps(old_payload, sort_keys=True)}, "
+            f"dropped {json.dumps(new_payload, sort_keys=True)}",
+            file=sys.stderr,
+        )
+        return False
+    if new_payload.keys() <= old_payload.keys():
+        print(
+            f"[METRICS_DUPLICATE] {event} already recorded in this run; skipped "
+            f"the second record (it repeats the recorded values)",
+            file=sys.stderr,
+        )
+        return False
+    entries[index] = _replacement(existing, new, keep_measured=True)
+    added = sorted(new_payload.keys() - old_payload.keys())
+    print(
+        f"[METRICS_DUPLICATE] {event} recorded twice in this run; the second "
+        f"record agrees and adds {', '.join(added)}, so it replaced the first",
+        file=sys.stderr,
+    )
+    return True
+
+
 def record_metric_in_state(
     state: dict,
     phase: str,
@@ -376,6 +529,41 @@ def record_metric_in_state(
     stderr for the CLI, the phase log for the scheduler — and nothing is
     printed for a caller that wants none. See ``start_phase_in_state`` for why
     the in-memory form exists.
+
+    **A second record of the same event collapses; nothing else does.** An
+    event is ``(phase, run_id, label, batch_index)``, where ``run_id`` is the
+    one ``start_phase_in_state`` stamped for this run. On the native leg the
+    orchestrating agent works out each record across separate shell calls, and
+    one audited run recorded ``Batch 4 (step_4)`` twice, 45 ms apart, one copy
+    all zeros and the other with no numbers. The second record of an event:
+
+    - replaces the first when the first measured nothing and it did;
+    - is skipped when it measured nothing (of two empty records, the one with
+      no numbers is kept over the all-zero one), or repeats the first, or is a
+      subset agreeing on every field it carries;
+    - replaces the first when it agrees on every shared field and adds more;
+    - is dropped with ``[METRICS_CONFLICT]`` when a shared field differs,
+      because appending would count one batch twice in the phase averages.
+
+    Every one of those prints a line on stderr (``[METRICS_DUPLICATE]`` or
+    ``[METRICS_CONFLICT]``): it reports a caller's mistake, the way
+    ``prior_changes append`` reports a duplicate entry. A skipped or conflicting
+    record returns no ``[ETA]`` line, since it recorded no progress.
+
+    A record with no started phase has no ``run_id`` and appends unchecked, as
+    before, and an entry without one (every entry recorded before run ids) is
+    never matched: keying on ``(phase, label)`` alone would drop a rerun's real
+    measurements, since metrics outlive runs in ``state.json``.
+
+    **``batch_index`` is checked against this run's own progress** (only on a
+    record that appends): the expected index is the highest one this run has
+    recorded, plus one, and anything else prints
+    ``[METRICS_INDEX_MISMATCH]``. A warning, never a rejection — a skipped
+    batch is legitimate — and the high-water mark means one gap warns once.
+    ``len(entries) + 1`` would warn on every record after a rerun or a resume
+    (``entries`` spans every run) and after any skipped record. A run's first
+    record is not checked: a resumed scheduler run's first index legitimately
+    starts past 1, because it counts the batches the resume skipped.
     """
     metrics = state.get("metrics")
     if not isinstance(metrics, dict):
@@ -407,8 +595,36 @@ def record_metric_in_state(
         entry["tool_uses"] = tool_uses
     if duration_ms is not None:
         entry["duration_ms"] = duration_ms
+    if batch_index is not None:
+        entry["batch_index"] = batch_index
 
-    entries.append(entry)
+    run_id = _current_run_id(state, phase)
+    if run_id is not None:
+        entry["run_id"] = run_id
+        event = _describe_event(phase, label, batch_index)
+        this_run = [
+            (i, e) for i, e in enumerate(entries)
+            if isinstance(e, dict) and e.get("run_id") == run_id
+        ]
+        for i, recorded in this_run:
+            if recorded.get("label") == label and recorded.get("batch_index") == batch_index:
+                if not _collapse_duplicate(entries, i, entry, event):
+                    return None
+                break
+        else:
+            marks = [e["batch_index"] for _, e in this_run if _is_index(e.get("batch_index"))]
+            if _is_index(batch_index) and marks:
+                expected = max(marks) + 1
+                if batch_index != expected:
+                    print(
+                        f"[METRICS_INDEX_MISMATCH] {event} was recorded as batch "
+                        f"{batch_index}; this run's next index is {expected} "
+                        f"(highest recorded so far: {max(marks)}). Recorded as given.",
+                        file=sys.stderr,
+                    )
+            entries.append(entry)
+    else:
+        entries.append(entry)
 
     if total_batches is None or batch_index is None:
         return None
@@ -439,8 +655,10 @@ def record_metric(
 ) -> None:
     """Record a single metric entry into the state file.
 
-    Appends to the ``metrics.{phase}`` array in the state JSON.
-    Auto-generates a timestamp for the entry.
+    Appends to the ``metrics.{phase}`` array in the state JSON, except that a
+    second record of an event this run already recorded collapses into the
+    first (see ``record_metric_in_state``). Auto-generates a timestamp for the
+    entry.
 
     When both ``total_batches`` and ``batch_index`` are provided and
     ``print_eta`` is True, prints an ``[ETA]`` line to stderr after writing

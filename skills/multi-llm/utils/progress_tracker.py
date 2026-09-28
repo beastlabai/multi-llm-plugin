@@ -20,16 +20,27 @@ rather than a preference:
   counters restatement, a ``step=``) carries no ``models`` key at all, which is
   what keeps the executor mirrors and ``step`` alive beside it.
 * **Elapsed is computed at read time, not stored per tick.** The file carries
-  ``started_at`` and ``timeout_s``; every renderer derives a live row's elapsed
-  as ``now - started_at`` clamped at ``timeout_s`` (:func:`entry_elapsed_s` is
-  that one rule, exported so the ticker and ``run_status`` cannot drift apart).
-  So the ticker prints and writes **nothing** on the interval, the checkpoint
-  stays event-driven, and ``checkpoint_lock`` gains no periodic contender. A
-  stored per-tick ``elapsed_s`` would be a cache that is stale between ticks,
-  frozen at ``interval_s: 0``, and rendered as truth by every reader.
-  ``elapsed_s`` is written exactly once, at the terminal transition, from a
-  :func:`time.monotonic` origin stamped at seed — the one figure a reader cannot
-  recompute afterwards.
+  ``started_at`` (admission), ``dispatched_at`` (the first dispatch) and
+  ``timeout_s``; every renderer derives a live dispatched row's elapsed as
+  ``now - dispatched_at`` clamped at ``timeout_s``, and a row still waiting for
+  its dispatch has no elapsed at all, only a wait, ``now - started_at``
+  (:func:`entry_elapsed_s` and :func:`entry_queued_s` are those rules, exported
+  so the ticker and ``run_status`` cannot drift apart). So the ticker prints
+  and writes **nothing** on the interval, the checkpoint stays event-driven,
+  and ``checkpoint_lock`` gains no periodic contender. A stored per-tick
+  ``elapsed_s`` would be a cache that is stale between ticks, frozen at
+  ``interval_s: 0``, and rendered as truth by every reader. ``elapsed_s`` is
+  written exactly once, at the terminal transition, from a
+  :func:`time.monotonic` origin stamped at the **first dispatch**, and
+  ``queued_s`` beside it holds the wait between admission and that dispatch —
+  the two figures a reader cannot recompute afterwards. They are separate
+  because they answer different questions: the per-model timeout clock starts
+  inside the concurrency semaphores, so counting the queue wait as run time
+  made a slot that waited for a sibling read as having spent its whole budget
+  (measured 2026-09-27: pi recorded 1666.1 s, of which 464.7 s was the kimi
+  slot it queued behind; plan: review-run-scope-salvage-and-failure-visibility
+  §6). A slot that never dispatched freezes ``elapsed_s: 0`` with its whole
+  wait in ``queued_s``.
 * **Every ending retires every slot.** The lifecycle has two terminal states and
   nothing may outlive the fan-out in ``queued``/``staggering``/``running``/
   ``retrying``: :meth:`FanoutProgress.sweep` retires the rest with one of
@@ -96,6 +107,21 @@ LIVE_STATES: Tuple[str, ...] = (
     STATE_RUNNING, STATE_RETRYING, STATE_STAGGERING, STATE_QUEUED,
 )
 
+#: The live states that mean *admitted, not yet dispatched*: the slot is
+#: sleeping out its stagger or parked on a concurrency semaphore. A row in one
+#: of them has no run time yet — :func:`entry_elapsed_s` is ``None`` for it —
+#: only a wait (:func:`entry_queued_s`). Read from ``state`` and never from the
+#: absence of ``dispatched_at``, so a map written before that key existed reads
+#: its queued rows the same way (plan: review-run-scope-salvage-and-failure-
+#: visibility §6.2).
+WAITING_STATES = frozenset({STATE_QUEUED, STATE_STAGGERING})
+
+#: How many queued slots the ``[PROGRESS]`` line names, longest wait first,
+#: before it counts the rest as ``+N more`` (decision 11.13 of that plan). A
+#: bare ``queued 3`` said nothing about which models were waiting or for how
+#: long, while eight named waits on one line is noise the count already carries.
+QUEUED_NAMED_MAX = 3
+
 #: The ``source`` values that mean "this row never dispatched, it was answered
 #: from disk". A renderer that wants to label such a row *skipped* reads this
 #: rather than inventing a state for it. ``salvage`` — a slot that *did*
@@ -137,10 +163,10 @@ PROGRESS_PREFIX = "[PROGRESS]"
 _monotonic: Callable[[], float] = time.monotonic
 
 #: The *wall* clock, which is a second seam because the two answer different
-#: questions: ``_monotonic`` freezes ``elapsed_s`` at a terminal transition,
-#: while this is the ``now`` a live row's elapsed is derived against (its
-#: ``started_at`` is a wall stamp, so the arithmetic has to happen on the wall
-#: clock). Unpatched, a rendered-line test asserting ``(0m00s/30m)`` passes only
+#: questions: ``_monotonic`` freezes ``elapsed_s`` and ``queued_s`` at a
+#: terminal transition, while this is the ``now`` a live row's elapsed and wait
+#: are derived against (its ``dispatched_at`` and ``started_at`` are wall
+#: stamps, so the arithmetic has to happen on the wall clock). Unpatched, a rendered-line test asserting ``(0m00s/30m)`` passes only
 #: while its body runs inside one second — a latent flake that was in the suite
 #: until 2026-09-20.
 _wall_time: Callable[[], float] = time.time
@@ -308,21 +334,39 @@ def format_budget(seconds: Optional[float]) -> str:
 def entry_elapsed_s(
     entry: Mapping[str, Any], now: Optional[float] = None
 ) -> Optional[float]:
-    """How long this slot has been going, by the one read-time rule.
+    """How long this slot has been *running*, by the one read-time rule.
 
-    ``ended_at`` present -> the stored ``elapsed_s``, frozen at the terminal
-    transition and never touched again, so a table rendered an hour later shows
-    the slot's real duration rather than a clock that kept running. Absent ->
-    ``now - started_at`` clamped at ``timeout_s``, which is always fresh and is
-    why no writer has to tick.
+    Four rules, in order:
+
+    1. ``ended_at`` present -> the stored ``elapsed_s``, frozen at the terminal
+       transition and never touched again, so a table rendered an hour later
+       shows the slot's real duration rather than a clock that kept running.
+    2. A row still waiting for its dispatch (``state`` in
+       :data:`WAITING_STATES`) -> ``None``. It has no run time yet; what it
+       has is a wait, and :func:`entry_queued_s` is the rule for that. Keyed on
+       ``state`` rather than on a missing ``dispatched_at``, so a map written
+       before that key existed reads its queued rows the same way.
+    3. A live row carrying ``dispatched_at`` -> ``now - dispatched_at``,
+       clamped at ``timeout_s``. Always fresh, which is why no writer has to
+       tick.
+    4. A live row with no ``dispatched_at`` (a map written before the key
+       existed) -> ``now - started_at``, clamped the same way — today's rule,
+       so an old map renders as it always did.
+
+    Rule 3 counts from the *first* dispatch, the origin the per-model timeout
+    clock is taken from (it starts inside the concurrency semaphores). Counting
+    from admission instead charged a slot's queue wait to its run: measured
+    2026-09-27, pi's first live row read ``8m00s/20m`` the moment it
+    dispatched, because it had queued eight minutes behind kimi (plan:
+    review-run-scope-salvage-and-failure-visibility §6). A retry does not move
+    the origin, so a retried slot's elapsed covers every attempt and the backoff
+    between them — the same deadline the ladder charges them to.
+
+    The clamp stays: now that the origin is the dispatch, a row pinned at its
+    budget really does mean the slot's kill is due.
 
     *now* is a POSIX timestamp (``None`` = the real clock), matching
-    ``detach.heartbeat_age`` and the rest of the status surface. The clamp is
-    what keeps a *staggered* row honest: ``started_at`` is stamped when the slot
-    was admitted to the fan-out, while the per-model timeout clock the ladder
-    enforces starts later, at dispatch, so a live row's elapsed runs slightly
-    ahead of the budget actually spent. Erring toward "it has been waiting this
-    long" is the honest direction; nothing treats this number as budget spent.
+    ``detach.heartbeat_age`` and the rest of the status surface.
     """
     if not isinstance(entry, Mapping):
         return None
@@ -331,13 +375,18 @@ def entry_elapsed_s(
         if isinstance(stored, bool) or not isinstance(stored, (int, float)):
             return None
         return float(stored)
+    if _entry_state(entry) in WAITING_STATES:
+        return None
 
     # One ISO parser for the whole checkpoint (`heartbeat_at`, `dispatched_at`,
-    # and now `started_at`), imported lazily so `status` does not pay for the
-    # detach subtree just to format a row.
+    # `started_at`), imported lazily so `status` does not pay for the detach
+    # subtree just to format a row.
     from . import detach
 
-    live = detach._elapsed_since(entry.get("started_at"), now)
+    dispatched = entry.get("dispatched_at")
+    live = detach._elapsed_since(
+        dispatched if dispatched else entry.get("started_at"), now
+    )
     if live is None:
         return None
     # Through the one guard rather than a fourth inline type check: the clamp is
@@ -348,6 +397,72 @@ def entry_elapsed_s(
     if budget is not None and budget > 0:
         return min(live, float(budget))
     return live
+
+
+def _stored_duration(value: Any) -> Optional[float]:
+    """A stored duration as a float, or ``None`` when it is not one.
+
+    :func:`_renderable`'s shapes (a bool, a string, NaN, an infinity, an
+    integer too large for a float) plus a negative number, which no clock this
+    module reads can produce.
+    """
+    number = _renderable(value) if isinstance(value, (int, float)) else None
+    if number is None or number < 0:
+        return None
+    return number
+
+
+def entry_queued_s(
+    entry: Mapping[str, Any], now: Optional[float] = None
+) -> Optional[float]:
+    """How long this slot waited between admission and dispatch, or ``None``.
+
+    The companion of :func:`entry_elapsed_s`: that one is run time, this is the
+    wait in front of it — the stagger sleep plus the time parked on the
+    concurrency semaphores. The two were one number until 2026-09-27, when a
+    slot that queued behind a sibling recorded the sibling's run as its own
+    (plan: review-run-scope-salvage-and-failure-visibility §6).
+
+    * A terminal row (``ended_at`` present) -> the stored ``queued_s``, frozen
+      beside ``elapsed_s``, or ``None`` when none was stored (a map written
+      before the key existed, or a slot a ``--reaggregate`` closed out without
+      knowing when its wait would have ended).
+    * A row still waiting (:data:`WAITING_STATES`) -> ``now - started_at``: the
+      wait so far, **unclamped**, because a wait is not charged to the slot's
+      budget.
+    * A live dispatched row -> the stored ``queued_s`` the first dispatch
+      wrote, measured on the monotonic clock; failing that, ``dispatched_at -
+      started_at``, since both stamps are exact.
+    * A live row with no ``dispatched_at`` in any other state (a map written
+      before the key existed) -> ``None``: its wait was never recorded.
+
+    Total over what ``json.loads`` accepts, for the reason every reader of this
+    map is: one malformed row costs its own clause, never the ``status``
+    command. *now* follows :func:`entry_elapsed_s`'s convention.
+    """
+    if not isinstance(entry, Mapping):
+        return None
+    if entry.get("ended_at"):
+        return _stored_duration(entry.get("queued_s"))
+
+    from . import detach
+
+    if _entry_state(entry) in WAITING_STATES:
+        return detach._elapsed_since(entry.get("started_at"), now)
+    dispatched = entry.get("dispatched_at")
+    if not dispatched:
+        return None
+    stored = _stored_duration(entry.get("queued_s"))
+    if stored is not None:
+        return stored
+    start = detach._parse_stamp(entry.get("started_at"))
+    end = detach._parse_stamp(dispatched)
+    if start is None or end is None:
+        return None
+    try:
+        return max((end - start).total_seconds(), 0.0)
+    except (ValueError, TypeError, OverflowError):
+        return None
 
 
 def entry_stagger_remaining_s(
@@ -571,13 +686,20 @@ def render_progress_line(
     """The ``[PROGRESS]`` line — counts, then the live rows — from a map alone.
 
     ``[PROGRESS] 4/8 done (3 ok, 1 failed) | running: codex:gpt-5.6-sol
-    (2m10s/30m), opencode:auto (0m40s/30m) | queued 2``
+    (2m10s/30m), opencode:auto (0m40s/30m) | queued: pi:openrouter/kimi
+    (waiting 7m45s), gemini:pro (waiting 7m05s)``
 
-    Live rows are named with their elapsed and their budget; the rest are
-    counted, because eight queued specs on one line is noise the head count
-    already carries. Empty clauses are dropped, so a line never ends in a
-    dangling separator, and an empty or unreadable map renders ``""`` rather
-    than ``0/0 done``, which states nothing about a phase that has no fan-out.
+    Running and retrying rows are named with their elapsed and their budget.
+    Queued rows are named with their wait, longest first, up to
+    :data:`QUEUED_NAMED_MAX` of them, then ``+N more`` (:func:`_queued_clause`):
+    a bare ``queued 2`` said nothing about which models were waiting or for how
+    long, and a wait read as run time is how a queued slot came to look as if
+    it had spent its budget (plan: review-run-scope-salvage-and-failure-
+    visibility §6). Staggering rows are counted — their wait is seconds long
+    and the table's ``starts in`` clause already names it. Empty clauses are
+    dropped, so a line never ends in a dangling separator, and an empty or
+    unreadable map renders ``""`` rather than ``0/0 done``, which states
+    nothing about a phase that has no fan-out.
 
     **A module function rather than only a method**, and for the reason
     :func:`render_roster_line` already is: two processes want this sentence and
@@ -592,8 +714,9 @@ def render_progress_line(
 
     It is also the line that **differs between two polls of a live fan-out**,
     which is what the package route's shown-once memory needs: every live row's
-    elapsed is derived at read time from ``started_at``, so ninety seconds apart
-    is ninety seconds of difference. A map whose rows are *all* terminal is
+    elapsed (from ``dispatched_at``) and every queued row's wait (from
+    ``started_at``) is derived at read time, so ninety seconds apart is ninety
+    seconds of difference. A map whose rows are *all* terminal is
     genuinely unchanged and renders the same string twice — that window is the
     phase's, not the fan-out's, and ``run_status`` answers it with the phase's
     own ``progress:`` text instead.
@@ -621,9 +744,39 @@ def render_progress_line(
                 f"{state}: "
                 + ", ".join(_row_text(spec, entry, reference) for spec, entry in live)
             )
+        elif state == STATE_QUEUED:
+            parts.append(_queued_clause(live, reference))
         else:
             parts.append(f"{state} {len(live)}")
     return one_line_ascii(" | ".join(parts))
+
+
+def _queued_clause(
+    live: Sequence[Tuple[str, Any]], now: float
+) -> str:
+    """``queued: pi:… (waiting 7m45s), fable:… (waiting 7m05s) +2 more``.
+
+    Longest wait first, because the slot that has waited longest is the one a
+    reader is asking about, and ties keep seed order so two polls of one map
+    print one line. A row whose wait cannot be read sorts last and renders
+    ``(waiting ?)`` rather than dropping out of a clause whose ``+N more`` count
+    would then be wrong. Only the first :data:`QUEUED_NAMED_MAX` are named
+    (decision 11.13 of plan review-run-scope-salvage-and-failure-visibility).
+    """
+    waits = [
+        (index, spec, entry_queued_s(entry, now))
+        for index, (spec, entry) in enumerate(live)
+    ]
+    waits.sort(key=lambda row: (row[2] is None, -(row[2] or 0.0), row[0]))
+    named = ", ".join(
+        f"{spec} (waiting {format_elapsed(wait)})"
+        for _index, spec, wait in waits[:QUEUED_NAMED_MAX]
+    )
+    clause = f"{STATE_QUEUED}: {named}"
+    rest = len(waits) - QUEUED_NAMED_MAX
+    if rest > 0:
+        clause += f" +{rest} more"
+    return clause
 
 
 def budget_for_spec(
@@ -800,8 +953,14 @@ class FanoutProgress:
         self._models: Dict[str, Dict[str, Any]] = {}
         #: spec -> the monotonic reading stamped beside ``started_at``. Kept out
         #: of the entry because it is meaningless to a reader (an arbitrary
-        #: process-local origin) and is only ever used to freeze ``elapsed_s``.
+        #: process-local origin) and is only ever used to measure ``queued_s``.
         self._origins: Dict[str, float] = {}
+        #: spec -> the monotonic reading stamped beside ``dispatched_at``, at
+        #: the slot's *first* dispatch only. The origin ``elapsed_s`` is frozen
+        #: from, for the same reason as ``_origins``: an NTP step or a suspended
+        #: laptop cannot corrupt a monotonic difference. A spec absent here
+        #: never dispatched.
+        self._dispatch_origins: Dict[str, float] = {}
         self._sweep_reason = CANCELLED_ERROR
         self._ticker: Optional[asyncio.Task] = None
         #: Conditions already reported (see :func:`_warn_once`).
@@ -829,6 +988,9 @@ class FanoutProgress:
     def _seed_one(self, spec: str) -> Dict[str, Any]:
         stamp = _now_iso()
         self._origins[spec] = _monotonic()
+        # A re-seeded spec starts a new admission, so nothing about a previous
+        # dispatch may carry into it.
+        self._dispatch_origins.pop(spec, None)
         entry: Dict[str, Any] = {
             "state": STATE_QUEUED,
             "started_at": stamp,
@@ -849,9 +1011,9 @@ class FanoutProgress:
         *remains* and shrinks every round: ``2m10s/30m`` rendered against a
         shrinking denominator would overstate the budget left. Seeding it from
         the same ``get_provider_timeout`` call the fan-out already makes to size
-        its own deadline is what lets a queued row render ``0m00s/30m`` instead
-        of a blank denominator, and it is what Layer 2's ceiling rule reads
-        before any model has started.
+        its own deadline is what lets the roster name ``(30m)`` for a slot that
+        has not dispatched yet instead of a blank, and it is what Layer 2's
+        ceiling rule reads before any model has started.
 
         A config that cannot be read must not kill a fan-out at seed time, so a
         failure here leaves the key absent and every renderer falls back to
@@ -963,13 +1125,20 @@ class FanoutProgress:
         *timeout_s* is accepted for the one case the seed cannot know about: a
         per-slot override that gave this model a different budget from its
         provider default.
+
+        The **first** call stamps the dispatch (:meth:`_mark_dispatched`):
+        ``dispatched_at``, ``queued_s`` and the monotonic origin ``elapsed_s`` is
+        later frozen from. A later call — the dispatch after a backoff — moves
+        none of them, because the retry is charged to the same slot deadline.
         """
         entry = self._live_entry(spec)
         if entry is None:
             return
+        stamp = _now_iso()
         entry["state"] = STATE_RUNNING
-        entry["updated_at"] = _now_iso()
+        entry["updated_at"] = stamp
         entry.pop("stagger_until", None)
+        self._mark_dispatched(spec, entry, stamp)
         if attempt is not None:
             entry["attempt"] = int(attempt)
         if timeout_s is not None:
@@ -978,6 +1147,28 @@ class FanoutProgress:
         # backoff would read as "waiting" in the table.
         entry.pop("retry_after_s", None)
         self._write()
+
+    def _mark_dispatched(self, spec: str, entry: Dict[str, Any], stamp: str) -> None:
+        """Stamp this slot's first dispatch, once, and the wait that preceded it.
+
+        ``dispatched_at`` is the wall stamp a reader counts a live row's elapsed
+        from; ``queued_s`` is dispatch minus admission on the monotonic clock,
+        written here because it is final the moment the slot dispatches. The
+        name ``dispatched_at`` already means exactly this on the write
+        scheduler's ``in_flight`` rows, so a reader of the checkpoint learns one
+        word, not two.
+
+        Idempotent: the first dispatch is the origin the per-model timeout clock
+        is taken from, and a retry's dispatch is charged to that same deadline.
+        """
+        if spec in self._dispatch_origins:
+            return
+        reading = _monotonic()
+        self._dispatch_origins[spec] = reading
+        entry["dispatched_at"] = stamp
+        origin = self._origins.get(spec)
+        if origin is not None:
+            entry["queued_s"] = _seconds(round(max(0.0, reading - origin), 1))
 
     def retrying(
         self,
@@ -991,13 +1182,22 @@ class FanoutProgress:
         The entry stays ``retrying`` for the sleep and returns to ``running``
         when the next attempt is dispatched. ``elapsed_s`` is *not* reset by
         this: the backoff is charged to the same slot deadline, so a reset would
-        claim budget the slot does not have.
+        claim budget the slot does not have, and the dispatch origin stays at
+        the first dispatch.
+
+        A retry follows an attempt, so a slot that reaches here is dispatched
+        whether or not its lane called :meth:`running` first; the dispatch is
+        stamped here when nothing stamped it, rather than leaving a live
+        ``retrying`` row that reads like a map written before ``dispatched_at``
+        existed.
         """
         entry = self._live_entry(spec)
         if entry is None:
             return
+        stamp = _now_iso()
         entry["state"] = STATE_RETRYING
-        entry["updated_at"] = _now_iso()
+        entry["updated_at"] = stamp
+        self._mark_dispatched(spec, entry, stamp)
         if attempt is not None:
             entry["attempt"] = int(attempt)
         if retry_after_s is None:
@@ -1011,9 +1211,10 @@ class FanoutProgress:
 
         A model answered from disk by a resume skip is ``done`` the moment it is
         seeded (``source: existing_file`` / ``resume``, ``attempt: 0``,
-        ``elapsed_s: 0``), because it has a usable result and no attempt is ever
-        dispatched — so a resumed run of four models that finds three on disk
-        reads ``3/4`` at the *first* poll rather than ``0/4``.
+        ``elapsed_s: 0`` and no wait to speak of in ``queued_s``), because it
+        has a usable result and no attempt is ever dispatched — so a resumed run
+        of four models that finds three on disk reads ``3/4`` at the *first*
+        poll rather than ``0/4``.
         """
         self._freeze(spec, STATE_DONE, source=source)
 
@@ -1095,26 +1296,47 @@ class FanoutProgress:
         arrives first records the real ending and the belt-and-braces passes
         behind it can never overwrite it with ``cancelled``.
 
-        ``elapsed_s`` is frozen from the monotonic origin stamped at *seed* —
-        deliberately not ``ladder.elapsed()``, whose origin is the dispatch: the
-        two differ by the stagger wait, and a row whose live elapsed counted that
-        wait must not appear to shrink the moment it goes terminal. A monotonic
-        difference is also what an NTP step or a suspended laptop cannot corrupt,
-        and it is computable for a ``queued`` slot that never built a ladder.
+        **The dispatch-origin rule**, shared with the two close-out writers that
+        cannot reach this tracker (:func:`retire_live_entries` and
+        ``review_orchestrator_base.flip_map_entries_to_done``), so the three
+        cannot drift apart:
+
+        * a slot that dispatched freezes ``elapsed_s`` from its **first**
+          dispatch — the origin the per-model timeout clock is taken from — and
+          keeps the ``queued_s`` that dispatch wrote;
+        * a slot that never dispatched freezes ``elapsed_s: 0``, and its whole
+          wait, admission to now, goes in ``queued_s`` (decision 11.14 of plan
+          review-run-scope-salvage-and-failure-visibility).
+
+        This used to freeze from the *seed* origin, so a terminal row could not
+        shrink below the live number it replaced while the live number counted
+        the queue wait too. Nothing shrinks under the dispatch rule either: a
+        live row counts from ``dispatched_at`` as well (:func:`entry_elapsed_s`),
+        and a never-dispatched row renders a wait, not a number. What changed
+        is that a slot which queued behind a sibling no longer records the
+        sibling's run as its own. A monotonic difference is also what an NTP
+        step or a suspended laptop cannot corrupt.
         """
         entry = self._entry(spec)
         if entry["state"] in TERMINAL_STATES:
             return False
         stamp = _now_iso()
+        reading = _monotonic()
         origin = self._origins.get(spec)
+        dispatch = self._dispatch_origins.get(spec)
         entry["state"] = state
         entry["updated_at"] = stamp
         entry["ended_at"] = stamp
-        entry["elapsed_s"] = (
-            _seconds(round(max(0.0, _monotonic() - origin), 1))
-            if origin is not None
-            else 0
-        )
+        if dispatch is not None:
+            entry["elapsed_s"] = _seconds(round(max(0.0, reading - dispatch), 1))
+            if origin is not None:
+                # Already written at the dispatch; restated so a terminal row
+                # always carries it, and it is the same figure.
+                entry["queued_s"] = _seconds(round(max(0.0, dispatch - origin), 1))
+        else:
+            entry["elapsed_s"] = 0
+            if origin is not None:
+                entry["queued_s"] = _seconds(round(max(0.0, reading - origin), 1))
         entry["source"] = source
         if state == STATE_FAILED:
             entry["error"] = str(error) if error is not None else CANCELLED_ERROR
@@ -1302,8 +1524,9 @@ class FanoutProgress:
         Created alongside the ``gather`` and cancelled in the fan-out's
         ``finally``. ``0`` is the documented disable form and costs a reader
         nothing: the status file still gets every event-driven transition and
-        every elapsed figure is computed from ``started_at`` at read time, so
-        silencing the ticker silences the *log* and nothing else.
+        every elapsed and wait figure is computed from ``dispatched_at`` /
+        ``started_at`` at read time, so silencing the ticker silences the *log*
+        and nothing else.
         """
         if self.interval_s <= 0:
             return None
@@ -1346,9 +1569,9 @@ class FanoutProgress:
     async def _tick_forever(self) -> None:
         """Print one line per interval; write nothing until teardown.
 
-        The interval body is print-only — every row's elapsed is computed from
-        ``started_at`` — so this task adds no contender on ``checkpoint_lock``
-        and no stale ``elapsed_s`` cache to the file.
+        The interval body is print-only — every row's elapsed and wait is
+        computed from its stamps — so this task adds no contender on
+        ``checkpoint_lock`` and no stale ``elapsed_s`` cache to the file.
 
         Its ``finally`` sweeps, and what that covers is **asyncio shutdown's
         cancel-all**: a second Ctrl-C, or anything else that cancels every task
@@ -1578,11 +1801,23 @@ def retire_live_entries(
     ``run`` record and the map close out inside one critical section, which is
     what stops a poller catching the pair disagreeing.
 
-    ``elapsed_s`` is derived from ``started_at`` on the wall clock rather than
-    from :func:`time.monotonic`, unlike :meth:`FanoutProgress._freeze`: the
-    monotonic origins live in the tracker we are not allowed to touch, and the
-    read-time rule (:func:`entry_elapsed_s`, clamped at the slot's own budget) is
-    the same one every renderer would have applied to this row a moment earlier.
+    It applies :meth:`FanoutProgress._freeze`'s dispatch-origin rule, which is
+    the rule all three close-out writers share (the third is
+    ``review_orchestrator_base.flip_map_entries_to_done``): a row that
+    dispatched freezes ``elapsed_s`` as ``now - dispatched_at`` and keeps its
+    ``queued_s``; a row still waiting (``queued``/``staggering``) freezes
+    ``elapsed_s: 0`` and ``queued_s`` as ``now - started_at``, because this
+    runs at the real end of the run, so *now* is when that wait ended. Without
+    the ``queued_s`` half, every row an abort retired would lose the wait the
+    table exists to show. The figures come from the persisted wall stamps
+    rather than from :func:`time.monotonic`, unlike ``_freeze``: the monotonic
+    origins live in the tracker we are not allowed to touch, and the read-time
+    rules (:func:`entry_elapsed_s`, clamped at the slot's own budget, and
+    :func:`entry_queued_s`) are the ones every renderer would have applied to
+    this row a moment earlier. A row with no ``dispatched_at`` in a running
+    state (a map written before the key existed) keeps today's
+    ``now - started_at`` and gains no ``queued_s``, since its wait was never
+    recorded.
 
     Never raises, and returns ``0`` when nothing was live — so the file is not
     rewritten on the ordinary path, where the fan-out's own sweep has already
@@ -1614,13 +1849,18 @@ def retire_live_entries(
                 if row.get("state") in TERMINAL_STATES:
                     retired[str(spec)] = row
                     continue
+                # Both read before `ended_at` is stamped, because the read-time
+                # rules key on it.
                 elapsed = entry_elapsed_s(row, reference)
+                queued = entry_queued_s(row, reference)
                 row["state"] = STATE_FAILED
                 row["updated_at"] = stamp
                 row["ended_at"] = stamp
                 row["elapsed_s"] = (
                     _seconds(round(elapsed, 1)) if elapsed is not None else 0
                 )
+                if queued is not None:
+                    row["queued_s"] = _seconds(round(queued, 1))
                 row["error"] = str(reason)
                 # Nothing produced this row, so it carries no source, and a
                 # backoff it will never wake from is noise in the table.

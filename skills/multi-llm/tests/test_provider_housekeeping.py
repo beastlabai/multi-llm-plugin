@@ -664,6 +664,230 @@ class TestReadOnlyArgvMatchesTheDeclaration:
         )
 
 
+# ---------------------------------------------------------------------------
+# `runs_shell_in_generate` against its evidence (plan: review-run-scope-
+# salvage-and-failure-visibility D2.3)
+# ---------------------------------------------------------------------------
+#
+# The code-review prompt's `{diff_access}` block grants `git diff` to a lane
+# declaring `True`, tells a `False` lane it has no shell, and asserts nothing
+# for `None`. A declaration nobody can trace to a source is therefore a prompt
+# that lies to a model about its tools — the 2026-09-25 run's cursor lanes were
+# told to run `git diff` and had no shell. So every non-`None` value needs a row
+# here, and the row is either something this file can read out of the argv, or
+# a measurement named well enough to be re-run.
+
+from typing import NamedTuple, Optional  # noqa: E402
+
+
+class ShellEvidence(NamedTuple):
+    """One adapter's evidence for its `runs_shell_in_generate` value."""
+
+    #: The value the evidence supports; the declaration must equal it.
+    shell: bool
+    #: Where the fact comes from: the measurement, or why the argv shows it.
+    source: str
+    #: An ARGV-TOKEN row: the flag whose comma-split value the adapter renders…
+    flag: Optional[str] = None
+    #: …and the shell-granting tool name that value must carry. A row with no
+    #: token is a NAMED-MEASUREMENT row.
+    token: Optional[str] = None
+
+
+#: Hand-kept, one row per adapter that declares `True` or `False`; an adapter
+#: declaring `None` has no row. A `True` value is backed by a shell-granting
+#: token in its `generate` argv or by a named measurement; a `False` value only
+#: by a named measurement, AND its argv must grant no shell tool — so a later
+#: tool-list edit that grants one turns this red.
+SHELL_EVIDENCE = {
+    "pi": ShellEvidence(
+        True,
+        "`bash` in the `--tools` allow-list (PI_TOOLS, D3.1); pi has no "
+        "permission prompt. Measured too: the 2026-09-25 review-code slot's "
+        "stream ended inside a `bash` call running `timeout 1700 python -m "
+        "pytest tests …` (plan §3.1).",
+        flag="--tools",
+        token="bash",
+    ),
+    "omp": ShellEvidence(
+        True,
+        "`bash` in the `--tools` allow-list (OMP_TOOLS) under `--approval-mode "
+        "yolo`, rendered on every `generate` dispatch because every narrower "
+        "approval mode denies `bash` headless.",
+        flag="--tools",
+        token="bash",
+    ),
+    "codex": ShellEvidence(
+        True,
+        "MEASURED: an audited review stream of the 2026-09-25 run ran the "
+        "`command_execution` `pwd && rg --files …` under `generate`'s "
+        "`--sandbox workspace-write` (plan §7.3; codex_stream_audit's "
+        "ANY_FLAG_VERBS). The argv names a sandbox policy, not a tool list, so "
+        "no argv token can show it.",
+    ),
+    "cursor-agent": ShellEvidence(
+        False,
+        "MEASURED 2026-09-25 in the review-code logs of both cursor lanes under "
+        "`--mode ask`: kimi — \"Shell access is refused in this environment\"; "
+        "grok — \"Shell diffs are blocked in this mode\" (plan §2.1).",
+    ),
+    "claude-code": ShellEvidence(
+        False,
+        "MEASURED 2026-09-25: the review-code envelope carries three `Bash` "
+        "`permission_denials`; `--permission-mode acceptEdits` auto-accepts file "
+        "edits only and headless `claude -p` denies Bash (plan §2.1).",
+    ),
+    "qwen-code": ShellEvidence(
+        False,
+        "MEASURED: `--max-tool-calls 0` aborts before the first tool call runs "
+        "(FatalBudgetExceededError, exit 55, zero bytes on stdout; "
+        "plans/harness-expansion/probe-out/qwen-code/captures/block/), and a "
+        "shell is a tool call.",
+    ),
+    "gemini": ShellEvidence(
+        False,
+        "MEASURED 2026-08-19 (plans/harness-expansion/probe-out/gemini/"
+        "gap5_probe.py): under this argv gemini-cli 0.25.2 advertises nine tools "
+        "and `run_shell_command` is not among them (NO_WRITE_TOOL_AT_ALL above).",
+    ),
+}
+
+#: Tool names that hand a model a shell when an argv grants them: `bash`
+#: (pi/omp tool lists), `Bash` (claude-code's tool), `run_shell_command`
+#: (gemini-cli's). A `Bash(` prefix is claude-code's pattern grant
+#: (`Bash(git diff:*)`), which grants a shell as surely as the bare name.
+SHELL_TOOL_NAMES = frozenset({"bash", "Bash", "run_shell_command"})
+
+
+def _generate_argv(name):
+    """The adapter's `generate` argv, host-independently.
+
+    `_argv_for`'s cursor stub, widened to the two other adapters whose argv
+    depends on the INSTALLED binary's help: omp refuses to render unless every
+    flag it needs is documented, and pi renders `--tools` only when its help
+    documents it. Each gate is answered "documented", so this reads the
+    adapter's code, never the developer's installed build — and pi's row sees
+    the flag whether or not a pi binary is on this machine.
+    """
+    from utils.providers.omp import OMP_REQUIRED_FLAGS
+    from utils.providers.pi import PI_TOOLS_FLAG
+
+    gate_answers = {
+        "cursor-agent": frozenset({"--trust", "--mode"}),
+        "omp": frozenset(OMP_REQUIRED_FLAGS),
+        "pi": frozenset({PI_TOOLS_FLAG}),
+    }
+    answer = gate_answers.get(name)
+    if answer is None:
+        return _argv_for(name)
+    with mock.patch.object(
+        base_module, "read_help_tokens", lambda _b, **_kw: answer
+    ), mock.patch.object(base_module.shutil, "which", lambda _n: sys.executable):
+        return _PROVIDERS[name].build_command(PROMPT, MODELS[name])
+
+
+def _shell_grants(argv):
+    """Every shell-granting tool name in ``argv``, split on commas.
+
+    Each element but the prompt is split on commas (the `--tools a,b,c` form)
+    and on whitespace (a space-separated `--allowed-tools` list); the prompt
+    is data this test chose.
+    """
+    grants = set()
+    for element in argv:
+        if element == PROMPT:
+            continue
+        for piece in re.split(r"[,\s]+", element):
+            if piece in SHELL_TOOL_NAMES or piece.startswith(("Bash(", "bash(")):
+                grants.add(piece)
+    return sorted(grants)
+
+
+def _comma_split_value(argv, flag):
+    """The comma-split value ``flag`` carries in ``argv``, or ``[]``."""
+    if flag not in argv or argv.index(flag) + 1 >= len(argv):
+        return []
+    return argv[argv.index(flag) + 1].split(",")
+
+
+TOKEN_ROWS = sorted(name for name, row in SHELL_EVIDENCE.items() if row.token)
+MEASUREMENT_ROWS = sorted(name for name, row in SHELL_EVIDENCE.items() if not row.token)
+
+
+class TestShellDeclarationMatchesTheEvidence:
+    """`runs_shell_in_generate` is checked against its argv or its measurement."""
+
+    @pytest.mark.parametrize("name", sorted(_PROVIDERS))
+    def test_a_declared_value_has_exactly_its_evidence_row(self, name):
+        declared = _PROVIDERS[name].runs_shell_in_generate
+        row = SHELL_EVIDENCE.get(name)
+        if declared is None:
+            assert row is None, (
+                f"{name} declares runs_shell_in_generate=None (not measured) but "
+                f"SHELL_EVIDENCE carries a row for it — set the value the row "
+                f"supports, or delete the row."
+            )
+            return
+        assert row is not None, (
+            f"{name} declares runs_shell_in_generate={declared} with no "
+            f"SHELL_EVIDENCE row. A value leaves None only with a measured "
+            f"source — a log, a probe or its argv — so add the row naming it."
+        )
+        assert row.shell is declared, (
+            f"{name} declares runs_shell_in_generate={declared} but its evidence "
+            f"supports {row.shell}: {row.source}"
+        )
+
+    def test_every_row_names_a_registered_adapter(self):
+        assert set(SHELL_EVIDENCE) <= set(_PROVIDERS)
+
+    @pytest.mark.parametrize("name", TOKEN_ROWS)
+    def test_an_argv_token_row_is_still_rendered(self, name):
+        """A row whose token the adapter no longer renders is stale, as in
+        `test_no_adjudication_row_is_stale`: the shell it vouches for is gone."""
+        row = SHELL_EVIDENCE[name]
+        argv = _generate_argv(name)
+
+        assert row.shell is True, f"{name}: an argv token can only show a shell"
+        assert row.token in _comma_split_value(argv, row.flag), (
+            f"{name} no longer renders {row.token!r} in its {row.flag} value "
+            f"({_comma_split_value(argv, row.flag)}), so this row describes a "
+            f"build that no longer ships — re-measure the shell and move "
+            f"runs_shell_in_generate with it."
+        )
+        # And the detector the False rows rely on sees it: a positive control,
+        # so `_shell_grants` cannot pass the rows below by seeing nothing.
+        assert row.token in _shell_grants(argv)
+
+    @pytest.mark.parametrize("name", MEASUREMENT_ROWS)
+    def test_a_measurement_row_names_its_measurement(self, name):
+        row = SHELL_EVIDENCE[name]
+
+        assert row.flag is None and row.token is None
+        assert "MEASURED" in row.source, (
+            f"{name}: a named-measurement row must say what was measured"
+        )
+
+    @pytest.mark.parametrize(
+        "name", sorted(n for n, row in SHELL_EVIDENCE.items() if row.shell is False)
+    )
+    def test_a_false_declaration_grants_no_shell_tool(self, name):
+        """`False` is a measurement of THIS argv; an edit that hands the model a
+        shell tool makes it false, and the prompt would then deny a shell the
+        lane has."""
+        row = SHELL_EVIDENCE[name]
+        argv = _generate_argv(name)
+
+        assert row.token is None, (
+            f"{name}: a False value is backed by a measurement, never by an "
+            f"argv token"
+        )
+        assert _shell_grants(argv) == [], (
+            f"{name} declares runs_shell_in_generate=False but its generate argv "
+            f"grants {_shell_grants(argv)}: {argv}"
+        )
+
+
 class TestDispatchTimeOverrideAtoms:
     """`DISPATCH_TIME_OVERRIDES` — adjudicated from both sides (D6, 2026-09-17)."""
 

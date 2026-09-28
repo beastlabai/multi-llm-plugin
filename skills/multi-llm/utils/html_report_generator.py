@@ -13,7 +13,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 try:
     from .stream_bootstrap import bootstrap_streams
@@ -593,6 +593,112 @@ def sum_usage(usage: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         key: round(value, 6) if isinstance(value, float) else value
         for key, value in totals.items()
     }
+
+
+#: The clause a failed model's entry carries when this attempt asked for a
+#: salvage of it and the model is still failed. Fixed text on both lanes (the
+#: live native request and the ``--exec-subagents`` unrecoverable one): the
+#: subagent's own reason stays on its ``[SALVAGE_UNRECOVERABLE]`` stdout line,
+#: so the header never quotes a second, paraphrased cause.
+SALVAGE_REQUESTED_CLAUSE = "salvage requested, nothing recovered"
+
+#: The label of the failure line, shared by ``report.md``'s bold header line and
+#: the HTML warning notice built from the same text without the bold markers.
+FAILED_MODELS_LABEL = "Models failed:"
+
+
+def _one_line(text: Any) -> str:
+    """*text* with every line break folded to a space.
+
+    A stored failure reason is provider output and can carry a newline, which
+    would end a markdown header line early — and in ``code-review``'s
+    ``report.md`` a line that starts ``### N.`` after a blank one is an issue
+    header the apply phase's parser reads a Skip box under. So the reason is
+    verbatim apart from its line breaks.
+    """
+    return " ".join(str(text).replace("\r\n", "\n").replace("\r", "\n").split("\n"))
+
+
+def failed_models_line(
+    failed_models: Optional[Dict[str, Any]],
+    requested_models: Optional[int] = None,
+    salvage_requested: Optional[Sequence[str]] = None,
+    *,
+    bold: bool = True,
+) -> str:
+    """The one-line account of the models that produced no result, or ``""``.
+
+    ``**Models:**`` names only the models that produced results, so a reviewer
+    that timed out used to be absent from every surface above the fold (plan
+    review-run-scope-salvage-and-failure-visibility §5.2 item 2). This is the
+    line that goes directly under it — and, with ``bold=False``, the HTML
+    warning notice's ``message`` — so ``report.md`` and ``report.html`` are
+    built from one string and cannot disagree::
+
+        **Models failed:** 1 of 5 requested — pi:x/y: pi timed out after 1200s; salvage requested, nothing recovered
+
+    Args:
+        failed_models: ``{spec: reason}``; each reason is rendered verbatim
+            (line breaks folded, see :func:`_one_line`). Empty or ``None``
+            renders nothing.
+        requested_models: The size of the requested set, never succeeded plus
+            failed (a requested model with neither a result nor a recorded
+            failure is in neither). ``None`` when the caller has no requested
+            set, and the line then states the count without "of M".
+        salvage_requested: The specs whose entry carries
+            :data:`SALVAGE_REQUESTED_CLAUSE` — the caller's answer to "did this
+            attempt ask for a salvage of this still-failed model"
+            (``review_orchestrator_base.salvage_requested_models``).
+        bold: ``True`` for the markdown header line, ``False`` for the notice.
+    """
+    if not failed_models:
+        return ""
+    salvaged = {str(spec) for spec in (salvage_requested or ())}
+    entries = []
+    for spec, reason in failed_models.items():
+        entry = f"{spec}: {_one_line(reason)}"
+        if str(spec) in salvaged:
+            entry += f"; {SALVAGE_REQUESTED_CLAUSE}"
+        entries.append(entry)
+    count = len(failed_models)
+    if requested_models is not None:
+        count_text = f"{count} of {int(requested_models)} requested"
+    else:
+        count_text = str(count)
+    label = f"**{FAILED_MODELS_LABEL}**" if bold else FAILED_MODELS_LABEL
+    return f"{label} {count_text} — {'; '.join(entries)}"
+
+
+def build_report_notices(
+    notices: Optional[Sequence[Any]],
+    failed_models: Optional[Dict[str, Any]] = None,
+    requested_models: Optional[int] = None,
+    salvage_requested: Optional[Sequence[str]] = None,
+) -> List[Dict[str, str]]:
+    """``reportData.notices``: the failure warning first, then *notices*.
+
+    Every template's ``renderNotices`` prints ``escapeHtml(n.message)`` and
+    nothing else, so a notice without a ``message`` renders as an empty
+    coloured bar. Nothing reaches the list without a non-empty one — the
+    data-source notices are filtered on the same rule — and the failure
+    notice exists only when :func:`failed_models_line` has something to say.
+    Shared by the phase report and the consolidated report so both pages
+    carry the same bar.
+    """
+    result: List[Dict[str, str]] = []
+    failure = failed_models_line(
+        failed_models, requested_models, salvage_requested, bold=False
+    )
+    if failure:
+        result.append({"type": "warning", "message": failure})
+    for notice in notices or ():
+        if not isinstance(notice, dict):
+            continue
+        message = notice.get("message")
+        if not isinstance(message, str) or not message.strip():
+            continue
+        result.append(notice)
+    return result
 
 
 #: The label a bypassed slot carries in every report surface. The config key
@@ -1278,6 +1384,8 @@ def generate_html_report(
     file_snapshots: Optional[Dict[str, list]] = None,
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
     usage: Optional[Dict[str, Dict[str, Any]]] = None,
+    requested_models: Optional[int] = None,
+    salvage_requested: Optional[Sequence[str]] = None,
 ) -> str:
     """Generate complete HTML report and return the HTML string.
 
@@ -1287,7 +1395,20 @@ def generate_html_report(
         phase_dir: Directory for this phase (for log files)
         phase_type: Phase identifier ("review-plan", "code-review", "review-tasks")
         models: List of models that were used
-        failed_models: Optional dict of model name -> error message for failures
+        failed_models: Optional dict of model name -> error message for
+            failures. Written out as ``reportData.failedModels`` (always a
+            dict; the templates iterate it with ``Object.keys``), and, when
+            non-empty, as one ``warning`` notice whose ``message`` is
+            :func:`failed_models_line` without its bold markers — the same
+            text as ``report.md``'s ``**Models failed:**`` line.
+        requested_models: The size of the run's requested model set, written
+            out as ``reportData.requestedModels`` and used for the notice's
+            "N of M requested". The caller's own count (the fan-out's
+            ``len(model_specs)``, a reaggregate's recorded requested set) —
+            never succeeded plus failed. ``None`` leaves the key out, and the
+            page then names the failures without "of M".
+        salvage_requested: The failed specs whose entry carries the salvage
+            clause, exactly as the caller passed them to the markdown line.
         validation_results: Optional list of validation results
         base_ref: Optional git ref to diff against for PR-style code context.
             When provided (and ``diff_data`` is ``None``), ``capture_diff_hunks()``
@@ -1769,7 +1890,9 @@ def generate_html_report(
         "globalSuggestions": global_suggestions_list,
         "fullSectionContexts": full_section_contexts,
         "sectionOrder": section_order,
-        "notices": source_notices,
+        "notices": build_report_notices(
+            source_notices, failed_models, requested_models, salvage_requested
+        ),
         "summary": {
             "totalGroups": len(effective_groups),
             "totalSuggestions": sum(
@@ -1794,6 +1917,13 @@ def generate_html_report(
             ),
         }
     }
+
+    # The denominator of "N of M requested", as the caller counted it. Absent
+    # rather than guessed when the caller holds no requested set: succeeded
+    # plus failed would silently drop a requested model that has neither a
+    # result nor a recorded failure.
+    if requested_models is not None:
+        report_data["requestedModels"] = int(requested_models)
 
     # §3.6: the structured half of the attribution, added only when a fallback
     # list was configured AND something came back — so a default run's

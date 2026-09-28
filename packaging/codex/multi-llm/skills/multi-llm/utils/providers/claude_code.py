@@ -730,6 +730,15 @@ class ClaudeCodeProvider(LLMProvider):
     # directory is added: a validation batch naming a snapshot in a phase dir
     # outside the repo gets `--add-dir <dir>` (validation-context-by-path §2.2).
     read_scope_flag = "--add-dir"
+    # MEASURED FALSE, and by design: `generate` renders `--permission-mode
+    # acceptEdits`, which "auto-accepts FILE EDITS only; Bash and the rest still
+    # hit the headless prompt and are denied" (the argv comment in
+    # `_render_argv`). The 2026-09-25 `review-code` envelope carries three
+    # `Bash` `permission_denials` and the run still returned 27 findings, so any
+    # `git diff` it tried was denied. `generate_read_scope` keeps the "cwd"
+    # default: only the executor widens reads with `--add-dir` (above), and
+    # `generate` never renders it.
+    runs_shell_in_generate = False
     usage_support = USAGE_FULL
     # §4.2.2: this adapter really emits `--json-schema` when handed a schema (see
     # `build_command`), so the caller may mark an accepted result `native`.

@@ -9,6 +9,10 @@ This script:
 2. Subtracts pre_existing_changes recorded at start
 3. Stores the result in state.tracked_files
 
+With ``--only-touched`` it skips all of that and stores exactly the
+``--touched`` paths: the route for an implementer that ran outside
+``/multi-llm implement`` and so recorded no baseline to subtract.
+
 This approach is more reliable than parsing subagent output because:
 - Git utilities always capture all changes consistently
 - Subagents may not report all files they touch
@@ -22,7 +26,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Set
+from typing import Dict, List, Set
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -167,9 +171,25 @@ def main(argv=None) -> int:
         action="append",
         default=[],
         metavar="PATH",
-        help="A repo-relative file the write executor verified it changed; "
-             "kept in tracked_files even when it was modified before the "
-             "phase started (repeatable)",
+        help="A repo-relative file the implementation changed; kept in "
+             "tracked_files even when it was modified before the phase started "
+             "(repeatable). It only ADDS paths and never removes a dirty one: "
+             "without --only-touched the whole dirty census minus "
+             "pre_existing_changes is still tracked beside it",
+    )
+    # The exact-scope route for an implementer that ran outside `/multi-llm
+    # implement` and so recorded no `pre_existing_changes` baseline (review-scope
+    # plan §2 D2.6). Plain `--touched` only unions its paths into the census, so
+    # with no baseline every unrelated dirty or untracked path stays in — and a
+    # non-empty `tracked_files` silences review-code's `[SCOPE_FALLBACK]` and is
+    # labelled as the phase's own scope, so the over-wide list goes unnoticed.
+    parser.add_argument(
+        "--only-touched",
+        action="store_true",
+        help="Make tracked_files exactly the --touched paths (de-duplicated, "
+             "sorted): the git census, the pre_existing_changes subtraction and "
+             "the directory expansion are skipped, and pre_existing_changes is "
+             "neither read nor written. Requires at least one --touched",
     )
     # The implementation summary's back-reference used to be an inline `python -c`
     # in instructions/implement.md that put the skill dir on sys.path by hand. That
@@ -196,6 +216,19 @@ def main(argv=None) -> int:
         )
         return 1
 
+    explicit_scope = sorted({f.strip() for f in args.touched if f and f.strip()})
+    if args.only_touched and not explicit_scope:
+        # Refused before the state file is even read: an empty explicit list
+        # would empty `tracked_files`, and review-code would then quietly fall
+        # back to the whole `git diff` — the scope this flag exists to replace.
+        print(
+            "ERROR: --only-touched needs at least one --touched <path>: it makes "
+            "tracked_files exactly those paths, and an empty list would send "
+            "review-code back to its git-diff fallback.",
+            file=sys.stderr,
+        )
+        return 1
+
     state_path = Path(args.state_file)
 
     if not state_path.exists():
@@ -214,56 +247,14 @@ def main(argv=None) -> int:
         print("ERROR: State file is not a JSON object", file=sys.stderr)
         return 1
 
-    # Ensure pre_existing_changes is a list
-    pre_existing_raw = state.get("pre_existing_changes")
-    if pre_existing_raw is not None and not isinstance(pre_existing_raw, list):
-        print("WARNING: pre_existing_changes is not a list, treating as empty", file=sys.stderr)
-        state["pre_existing_changes"] = []
-
-    # Get current modified files (using shared utilities for consistency)
-    current_modified = get_all_modified_files()
-
-    # Subtract pre-existing changes. Prefix-aware, because a baseline entry is
-    # whatever `git status --porcelain` printed, and an untracked *directory* is
-    # one `plans/` line standing for every path beneath it: a plain set
-    # difference subtracts none of them.
-    pre_existing = list(state.get("pre_existing_changes", []))
-    implementation_changes = set(subtract_baseline(current_modified, pre_existing))
-
-    # A directory that survived the subtraction is one this phase created:
-    # expand it to the files inside it, which is what every consumer needs.
-    implementation_changes = _expand_uncovered_directories(implementation_changes)
-
-    # ...except for the files the executor verified it changed: those are
-    # implementation changes whether or not they were dirty at the start.
-    verified = [f for f in args.touched if f and f.strip()]
-    kept_pre_existing = sorted(
-        f for f in verified
-        if baseline_covers(f, pre_existing) and f not in implementation_changes
-    )
-    implementation_changes |= set(verified)
-
-    # Build tracked_files list
-    tracked_files = []
-    for f in sorted(implementation_changes):
-        tracked_files.append({
-            "path": f,
-            "action": "modified",
-            "task_id": "implementation"
-        })
-
-    print(f"Current modified files: {len(current_modified)}")
-    print(f"Pre-existing changes: {len(pre_existing)}")
-    if verified:
+    if args.only_touched:
+        tracked_files = _tracked_entries(explicit_scope)
         print(
-            f"Verified by the write executor: {len(verified)}"
-            + (
-                f" ({len(kept_pre_existing)} kept although modified before the "
-                f"phase started: {', '.join(kept_pre_existing)})"
-                if kept_pre_existing else ""
-            )
+            f"Explicit scope (--only-touched): {len(tracked_files)} files "
+            f"(the git census and pre_existing_changes were not consulted)"
         )
-    print(f"Implementation changes: {len(implementation_changes)}")
+    else:
+        tracked_files = _census_tracked_files(state, args.touched)
 
     if args.dry_run:
         print("\nDry run - would track these files:")
@@ -291,6 +282,64 @@ def main(argv=None) -> int:
             return code
         _restamp_plan_hash(state_path, Path(args.plan_file))
     return 0
+
+
+def _tracked_entries(paths) -> List[Dict[str, str]]:
+    """``tracked_files`` entries for *paths*, in the order given."""
+    return [
+        {"path": f, "action": "modified", "task_id": "implementation"}
+        for f in paths
+    ]
+
+
+def _census_tracked_files(state: dict, touched: List[str]) -> List[Dict[str, str]]:
+    """The default scope: the dirty census, minus the baseline, plus ``--touched``.
+
+    Prints the census counts. May rewrite a malformed ``pre_existing_changes``
+    on *state* to ``[]`` (warned), which the caller then persists.
+    """
+    # Ensure pre_existing_changes is a list
+    pre_existing_raw = state.get("pre_existing_changes")
+    if pre_existing_raw is not None and not isinstance(pre_existing_raw, list):
+        print("WARNING: pre_existing_changes is not a list, treating as empty", file=sys.stderr)
+        state["pre_existing_changes"] = []
+
+    # Get current modified files (using shared utilities for consistency)
+    current_modified = get_all_modified_files()
+
+    # Subtract pre-existing changes. Prefix-aware, because a baseline entry is
+    # whatever `git status --porcelain` printed, and an untracked *directory* is
+    # one `plans/` line standing for every path beneath it: a plain set
+    # difference subtracts none of them.
+    pre_existing = list(state.get("pre_existing_changes", []))
+    implementation_changes = set(subtract_baseline(current_modified, pre_existing))
+
+    # A directory that survived the subtraction is one this phase created:
+    # expand it to the files inside it, which is what every consumer needs.
+    implementation_changes = _expand_uncovered_directories(implementation_changes)
+
+    # ...except for the files the executor verified it changed: those are
+    # implementation changes whether or not they were dirty at the start.
+    verified = [f for f in touched if f and f.strip()]
+    kept_pre_existing = sorted(
+        f for f in verified
+        if baseline_covers(f, pre_existing) and f not in implementation_changes
+    )
+    implementation_changes |= set(verified)
+
+    print(f"Current modified files: {len(current_modified)}")
+    print(f"Pre-existing changes: {len(pre_existing)}")
+    if verified:
+        print(
+            f"Verified by the write executor: {len(verified)}"
+            + (
+                f" ({len(kept_pre_existing)} kept although modified before the "
+                f"phase started: {', '.join(kept_pre_existing)})"
+                if kept_pre_existing else ""
+            )
+        )
+    print(f"Implementation changes: {len(implementation_changes)}")
+    return _tracked_entries(sorted(implementation_changes))
 
 
 def _insert_summary_reference(plan_file: str, summary_relative: str) -> int:

@@ -86,8 +86,10 @@ from .progress_tracker import (
     STATE_QUEUED,
     STATE_RETRYING,
     TERMINAL_STATES,
+    WAITING_STATES,
     entry_budget,
     entry_elapsed_s,
+    entry_queued_s,
     entry_stagger_remaining_s,
     format_budget,
     format_elapsed,
@@ -977,14 +979,28 @@ def _model_state_label(entry: Dict[str, Any]) -> str:
 
 
 def _model_timing_text(entry: Dict[str, Any]) -> str:
-    """``2m10s/30m``, or ``""`` when the entry has no clock to read.
+    """``2m10s/30m``, ``waiting 7m45s``, or ``""`` when the entry has no clock.
 
-    One read-time rule, and :func:`progress_tracker.entry_elapsed_s` owns it:
-    ``ended_at`` present -> the stored ``elapsed_s`` (a terminal row is frozen,
-    so a table rendered an hour later still shows the slot's real duration);
-    absent -> ``now - started_at`` clamped at ``timeout_s``. Nothing stores a
-    per-tick ``elapsed_s``, so this number is always fresh — including at
-    ``progress.interval_s: 0``, where the ticker prints nothing at all.
+    Two read-time rules, and :mod:`progress_tracker` owns both, so the ticker
+    and this table cannot disagree:
+
+    * run time, :func:`progress_tracker.entry_elapsed_s`: ``ended_at`` present
+      -> the stored ``elapsed_s`` (a terminal row is frozen, so a table
+      rendered an hour later still shows the slot's real duration); a live row
+      -> ``now - dispatched_at`` clamped at ``timeout_s`` (``now -
+      started_at`` for a map written before ``dispatched_at`` existed);
+    * the wait before dispatch, :func:`progress_tracker.entry_queued_s`.
+
+    A row still waiting for its dispatch (``queued``/``staggering``) renders
+    ``waiting 7m45s`` and no budget: it has spent none, and ``7m30s/20m`` —
+    what it rendered until the wait and the run were separated — read as budget
+    spent (plan: review-run-scope-salvage-and-failure-visibility §6). A
+    terminal row that waited at least a second before dispatching adds
+    ``, queued 7m45s``, so the wait a slot paid is still on its row once the
+    run is over; below a second there is nothing a ``0m00s`` would tell anyone
+    (the first slot, a resume skip). Nothing stores a per-tick figure, so these
+    are always fresh — including at ``progress.interval_s: 0``, where the
+    ticker prints nothing at all.
 
     The denominator is the slot's **whole** budget, fixed for its life, never the
     shrinking slice a retry ladder hands back for the next attempt: ``2m10s/30m``
@@ -1012,7 +1028,16 @@ def _model_timing_text(entry: Dict[str, Any]) -> str:
     the race — so the catch is deliberately broad and belongs on the *reader*:
     one malformed row costs its own column, never the command. The parser's own
     half of this (``heartbeat_at`` reads the same way) is ``detach``'s to harden.
+    The wait is read under its own guard for the same reason: a wait that
+    cannot be read costs the ``, queued`` clause, never the run time beside it.
     """
+    terminal = bool(entry.get("ended_at"))
+    if not terminal and str(entry.get("state") or "") in WAITING_STATES:
+        try:
+            wait = entry_queued_s(entry)
+        except Exception:
+            return ""
+        return f"waiting {format_elapsed(wait)}" if wait is not None else ""
     try:
         elapsed = entry_elapsed_s(entry)
     except Exception:
@@ -1021,8 +1046,17 @@ def _model_timing_text(entry: Dict[str, Any]) -> str:
         return ""
     budget = entry_budget(entry)
     if budget is not None and budget > 0:
-        return f"{format_elapsed(elapsed)}/{format_budget(budget)}"
-    return format_elapsed(elapsed)
+        text = f"{format_elapsed(elapsed)}/{format_budget(budget)}"
+    else:
+        text = format_elapsed(elapsed)
+    if terminal:
+        try:
+            wait = entry_queued_s(entry)
+        except Exception:
+            wait = None
+        if wait is not None and wait >= 1.0:
+            text += f", queued {format_elapsed(wait)}"
+    return text
 
 
 def _model_detail_text(entry: Dict[str, Any]) -> str:
@@ -1215,7 +1249,11 @@ def _just_finished_text(view: Dict[str, Any]) -> str:
     * The elapsed is the frozen duration with **no** ``/budget`` denominator.
       Every table row carries one because a live row needs the comparison; a row
       that has stopped does not, and ``4m12s/30m`` invites reading the budget as
-      time still available.
+      time still available. It is run time, counted from the slot's first
+      dispatch, so a slot that never dispatched reads ``0m00s``; the wait in
+      front of the run stays on the ``models:`` row (``, queued 7m45s``) rather
+      than being added here (plan: review-run-scope-salvage-and-failure-
+      visibility §6.2).
 
     One line and ASCII, through the **same** scrub the roster takes
     (:func:`progress_tracker.one_line_ascii`), applied to the whole composed

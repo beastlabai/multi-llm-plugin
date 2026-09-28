@@ -58,6 +58,8 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import structured_output
     from .json_extractor import extract_json_from_text, is_answer_shaped
     from .llm_client import (
+        SALVAGE_FAILURE_KEY,
+        SALVAGE_FAILURE_TIMEOUT,
         _CMD_UNSAFE_CHARS,
         _resolve_executable,
         expand_env_home,
@@ -153,6 +155,8 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils import structured_output
     from utils.json_extractor import extract_json_from_text, is_answer_shaped
     from utils.llm_client import (
+        SALVAGE_FAILURE_KEY,
+        SALVAGE_FAILURE_TIMEOUT,
         _CMD_UNSAFE_CHARS,
         _resolve_executable,
         expand_env_home,
@@ -3854,8 +3858,45 @@ def _salvage_result_errors(data: Any) -> List[str]:
 #: an *array*, so no genuine recovery can carry it.
 SALVAGE_FAILED_KEY = "salvage_failed"
 
+#: The reason :func:`_salvage_gave_up` gives for an empty array recovered from a
+#: run a deadline ended. The request records ``"failure": "timeout"``
+#: (``review_orchestrator_base.salvage_failure_kind``); this is its read side.
+SALVAGE_EMPTY_AFTER_TIMEOUT_REASON = (
+    "salvage recovered an empty array from a run that timed out: a reviewer "
+    "killed at its deadline never reported an empty review, so `[]` is not "
+    "written as this model's result"
+)
 
-def _salvage_gave_up(kind: str, data: Any) -> Optional[str]:
+
+def salvage_failure_of(task: Dict[str, Any], phase_dir: str) -> Optional[str]:
+    """How the run behind a salvage task was lost, read from its request file.
+
+    A salvage task's ``output_name`` is ``<stem>.json`` and its request is
+    ``salvage_<stem>.json`` beside it — the pairing every writer uses and every
+    retire glob relies on. The request is the record that says whether a
+    deadline ended the run (``"failure": "timeout"``); the task itself carries no
+    such field, and its ``inputs.salvage_request_sha256`` already binds it to
+    that request's bytes. ``None`` for any other kind, and whenever the request
+    cannot be read — which keeps today's behaviour (a salvaged ``[]`` persists).
+    """
+    if str(task.get("kind", "")) != "salvage":
+        return None
+    output_name = str(task.get("output_name") or "")
+    if not output_name:
+        return None
+    path = os.path.join(phase_dir, f"salvage_{output_name}")
+    try:
+        with open(path, encoding="utf-8") as handle:
+            request = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    if not isinstance(request, dict):
+        return None
+    failure = request.get(SALVAGE_FAILURE_KEY)
+    return failure if isinstance(failure, str) and failure else None
+
+
+def _salvage_gave_up(kind: str, data: Any, failure: Optional[str] = None) -> Optional[str]:
     """Why this salvage recovered nothing, or ``None`` if it recovered a result.
 
     A salvage task's ``output_name`` **is** the model result file it repairs, so
@@ -3927,9 +3968,19 @@ def _salvage_gave_up(kind: str, data: Any) -> Optional[str]:
     errs errs towards writing nothing — and clause 2 is the backstop in any case,
     since the sentinel object names no answer field either.
 
+    **The one ``[]`` that is refused** (decision 11.10, timeouts only): when the
+    salvage request records ``"failure": "timeout"`` (``failure`` here, read by
+    :func:`salvage_failure_of`), an empty array is
+    :data:`SALVAGE_EMPTY_AFTER_TIMEOUT_REASON`. A run killed at its deadline
+    never said "I found nothing" — a subagent handed only its ``toolcall_delta``
+    fragments can return ``[]``, and that would read as a clean review. A ``[]``
+    from a run that finished and then exited non-zero still persists: there
+    the model did write it.
+
     Args:
         kind: The task's kind. Anything but ``salvage`` returns ``None``.
         data: The extracted result, before validation.
+        failure: The salvage request's ``"failure"`` value, or ``None``.
 
     Returns:
         The reason for the outcome row, or ``None``.
@@ -3943,6 +3994,8 @@ def _salvage_gave_up(kind: str, data: Any) -> Optional[str]:
             f"salvage recovered no result from the raw output: "
             f"{reason or 'the subagent gave no reason'}"
         )
+    if failure == SALVAGE_FAILURE_TIMEOUT and isinstance(data, list) and not data:
+        return SALVAGE_EMPTY_AFTER_TIMEOUT_REASON
     if is_answer_shaped(data):
         return None
     # Name the shape, never the payload: the keys are what diagnoses this (an
@@ -4748,6 +4801,9 @@ def dispatch_task(
         return outcome
 
     prefer_arrays = kind == "salvage"
+    # D4.5: a salvage of a timed-out run may not persist `[]` (read once, here,
+    # from the request the task is bound to; `None` for every other kind).
+    salvage_failure = salvage_failure_of(task, phase_dir)
     effective_timeout = timeout or get_subagent_timeout(provider_name, anchor=anchor)
     budget = retries if retries is not None else get_subagent_retries(anchor=anchor)
     napper = sleep or time.sleep
@@ -4912,6 +4968,7 @@ def dispatch_task(
                 schema=schema, schema_phase=schema_phase or "",
                 model=f"{provider_name}:{model}",
                 declined_marker=declined_marker,
+                failure=salvage_failure,
             )
             if marker is not None:
                 outcome.structured_output = marker
@@ -5269,7 +5326,12 @@ def _classify_pre_parse(capture: _Capture) -> Tuple[str, str]:
 
 
 def _parse_and_validate(
-    provider: Any, capture: _Capture, *, kind: str, prefer_arrays: bool
+    provider: Any,
+    capture: _Capture,
+    *,
+    kind: str,
+    prefer_arrays: bool,
+    failure: Optional[str] = None,
 ) -> Tuple[str, str, Any]:
     """Ladder rungs 4–6, plus the two ways a salvage answers with no answer.
 
@@ -5290,7 +5352,7 @@ def _parse_and_validate(
         )
     except ResultRejected as exc:
         return exc.status, exc.message, None
-    gave_up = _salvage_gave_up(kind, data)
+    gave_up = _salvage_gave_up(kind, data, failure)
     if gave_up is not None:
         return STATUS_SALVAGE_UNRECOVERABLE, gave_up, data
     _report_normalized(kind, normalize_result(kind, data))
@@ -5315,6 +5377,7 @@ def _parse_with_schema_policy(
     schema_phase: str = "",
     model: str = "",
     declined_marker: Optional[str] = None,
+    failure: Optional[str] = None,
 ) -> Tuple[str, str, Any, Optional[str]]:
     """:func:`_parse_and_validate` plus §4.2.1, when a schema was really carried.
 
@@ -5364,7 +5427,8 @@ def _parse_with_schema_policy(
     """
     if schema is None:
         status, error, data = _parse_and_validate(
-            provider, capture, kind=kind, prefer_arrays=prefer_arrays
+            provider, capture, kind=kind, prefer_arrays=prefer_arrays,
+            failure=failure,
         )
         return (
             status, error, data,
@@ -5406,7 +5470,8 @@ def _parse_with_schema_policy(
         return STATUS_OK, "", verdict.data, structured_output.MARKER_NATIVE
 
     status, error, data = _parse_and_validate(
-        provider, capture, kind=kind, prefer_arrays=prefer_arrays
+        provider, capture, kind=kind, prefer_arrays=prefer_arrays,
+        failure=failure,
     )
     if status == STATUS_OK:
         if not verdict.warning:
@@ -6828,7 +6893,9 @@ def simulate_native_invoker(
                 report.outcomes.append(outcome)
                 continue
             data = extracted["data"]
-        gave_up = _salvage_gave_up(task_kind, data)
+        gave_up = _salvage_gave_up(
+            task_kind, data, salvage_failure_of(task, phase_dir)
+        )
         if gave_up is not None:
             # The same rule the executor lane applies in `_parse_and_validate`,
             # at the same point: after extraction, before validation, and before

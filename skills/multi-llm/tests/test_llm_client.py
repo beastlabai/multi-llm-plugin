@@ -1062,6 +1062,217 @@ class TestHardFailureStdoutExcerpt:
         assert details["stdout_excerpt"] == "something"
 
 
+from utils.llm_client import SALVAGE_TEXT_KEY, _attach_salvage_text  # noqa: E402
+from utils.providers.pi import PiProvider  # noqa: E402
+
+PI_SPEC = "pi:openrouter/deepseek/deepseek-v4.1-flash"
+
+
+def _pi_stream(narration=(), final_text="", *, final_finished=False):
+    """A pi ``--mode json`` stream: narration turns, then one last message.
+
+    Each narration turn is a finished assistant message with a text part and a
+    ``toolCall`` part. The last message streams ``final_text`` as
+    ``text_delta``s and, unless ``final_finished``, is cut there — the reviewer
+    killed while printing its answer.
+    """
+    events = [{"type": "session", "version": 3}]
+    for index, text in enumerate(narration):
+        call = {"type": "toolCall", "id": f"c{index}", "name": "read",
+                "arguments": {"path": f"f{index}.py"}}
+        events.append({"type": "message_start", "message": {
+            "role": "assistant", "content": [], "stopReason": "pending"}})
+        events.append({"type": "message_end", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": text}, call],
+            "stopReason": "toolUse"}})
+        events.append({"type": "tool_execution_end", "toolCallId": f"c{index}",
+                       "result": {"content": [{"type": "text", "text": "ok"}]}})
+    events.append({"type": "message_start", "message": {
+        "role": "assistant", "content": [], "stopReason": "pending"}})
+    for cut in range(0, len(final_text), 512):
+        events.append({"type": "message_update", "assistantMessageEvent": {
+            "type": "text_delta", "contentIndex": 0,
+            "delta": final_text[cut:cut + 512]}})
+    if final_finished:
+        events.append({"type": "message_end", "message": {
+            "role": "assistant", "content": [{"type": "text", "text": final_text}],
+            "stopReason": "stop"}})
+    return "\n".join(json.dumps(event) for event in events) + "\n"
+
+
+def _truncated_array(approx_bytes):
+    """A findings array cut mid-record, about ``approx_bytes`` long."""
+    record = json.dumps({"title": "Retry sleeps after the last attempt",
+                         "desc": "x" * 200, "importance": "high"})
+    count = max(1, approx_bytes // (len(record) + 4))
+    return "[\n  " + ",\n  ".join([record] * count) + ',\n  {"title": "cut her'
+
+
+class TestSalvageTextOnTheLosingPaths:
+    """``details["salvage_text"]``: the adapter's answer text, beside the excerpt.
+
+    ``stdout_excerpt`` is the raw stream's last 20 lines, and on a transport
+    adapter (pi, omp) those are events whose ``content`` arrays pass the salvage
+    gate as findings. ``_attach_salvage_text`` asks the adapter's
+    ``salvage_text`` hook for the answer text of the **full** stdout, redacts it,
+    then bounds it without ever cutting before the answer's opening bracket
+    (plan: review-run-scope-salvage-and-failure-visibility §4, D4.3).
+    """
+
+    KILLED_MID_TEXT = (
+        Path(__file__).parent / "fixtures" / "pi" / "killed-mid-text.stdout.txt"
+    ).read_text(encoding="utf-8")
+
+    @staticmethod
+    def _run(stdout, returncode=1):
+        return subprocess.CompletedProcess(
+            args=["pi"], returncode=returncode, stdout=stdout, stderr=""
+        )
+
+    @staticmethod
+    def _timeout(stdout):
+        exc = subprocess.TimeoutExpired(cmd=["pi"], timeout=600)
+        exc.stdout = stdout
+        exc.stderr = ""
+        return exc
+
+    def _invoke(self, **patch_kwargs):
+        with patch("utils.llm_client.subprocess.run", **patch_kwargs), \
+             patch("shutil.which", return_value="/usr/bin/pi"):
+            return invoke_with_provider(prompt="Test", model_spec=PI_SPEC)
+
+    @pytest.mark.parametrize("path", ["non-zero exit", "exit-0 parse failure", "timeout"])
+    def test_present_on_all_three_losing_paths(self, path):
+        if path == "non-zero exit":
+            result = self._invoke(return_value=self._run(self.KILLED_MID_TEXT))
+        elif path == "exit-0 parse failure":
+            result = self._invoke(return_value=self._run(self.KILLED_MID_TEXT, 0))
+        else:
+            result = self._invoke(side_effect=self._timeout(self.KILLED_MID_TEXT))
+
+        assert result["success"] is False
+        text = result["details"][SALVAGE_TEXT_KEY]
+        assert text.startswith('[\n  {\n    "title": "The retry loop sleeps')
+        # Only the cut last message: none of the narration turns before it.
+        assert "The plan's retry schedule" not in text
+        # The excerpt is still attached, for the log and the diagnosis.
+        assert result["details"]["stdout_excerpt"]
+
+    def test_a_killed_tool_call_is_present_and_empty(self):
+        stdout = (
+            Path(__file__).parent / "fixtures" / "pi" / "killed-mid-toolcall.stdout.txt"
+        ).read_text(encoding="utf-8")
+
+        result = self._invoke(side_effect=self._timeout(stdout))
+
+        assert result["details"][SALVAGE_TEXT_KEY] == ""
+
+    def test_a_credential_in_the_answer_text_is_redacted(self):
+        secret = _synthesize("anthropic-api-key", "llm-client-salvage-text")
+        stdout = _pi_stream(final_text=f'[{{"title": "leaked key {secret}"')
+
+        result = self._invoke(side_effect=self._timeout(stdout))
+
+        text = result["details"][SALVAGE_TEXT_KEY]
+        assert secret not in text
+        assert "<redacted:" in text
+        assert text.startswith('[{"title": "leaked key')
+
+    def test_absent_when_the_hook_has_no_opinion(self):
+        """cursor-agent keeps the base hook (``None``): no reducer applies."""
+        with patch("utils.llm_client.subprocess.run",
+                   return_value=self._run('[{"title": "cut')), \
+             patch("shutil.which", return_value="/usr/bin/cursor-agent"):
+            result = invoke_with_provider(prompt="Test", model_spec="cursor-agent:gpt-4")
+
+        assert result["success"] is False
+        assert SALVAGE_TEXT_KEY not in result["details"]
+        assert result["details"]["stdout_excerpt"] == '[{"title": "cut'
+
+    def test_empty_when_the_hook_raises(self):
+        """An override that raises still declared its stdout a transport."""
+        with patch.object(PiProvider, "salvage_text", side_effect=RuntimeError("boom")):
+            result = self._invoke(side_effect=self._timeout(self.KILLED_MID_TEXT))
+
+        assert result["details"][SALVAGE_TEXT_KEY] == ""
+
+    def test_a_non_string_return_is_no_opinion(self):
+        details = {}
+        stub = MagicMock()
+        stub.salvage_text.return_value = ["not", "text"]
+
+        _attach_salvage_text(details, stub, "anything")
+
+        assert details == {}
+
+    def test_all_three_losing_paths_route_through_the_one_helper(self):
+        seen = []
+        with patch.object(
+            llm_client, "_attach_salvage_text",
+            side_effect=lambda details, provider, stdout: seen.append(stdout),
+        ):
+            self._invoke(return_value=self._run("nonzero stdout"))
+            self._invoke(return_value=self._run("unparseable", 0))
+            self._invoke(side_effect=self._timeout("timeout stdout"))
+
+        assert seen == ["nonzero stdout", "unparseable", "timeout stdout"]
+
+    # -- the cap keeps the answer ------------------------------------------
+
+    def test_many_turns_then_a_truncated_array_keep_the_whole_array(self):
+        """More than 45 KB of narration, then a 30 KB cut array: the array survives
+        whole, opening bracket included, because only the last message counts."""
+        narration = [f"Turn {i}: now I'll read the next file. " + "n" * 400
+                     for i in range(150)]
+        array = _truncated_array(30 * 1024)
+        stdout = _pi_stream(narration, array)
+        assert len(stdout.encode("utf-8")) > 2 * MAX_LOG_STREAM_BYTES
+
+        details = {}
+        _attach_salvage_text(details, PiProvider(), stdout)
+
+        assert details[SALVAGE_TEXT_KEY] == array.strip()
+        assert details[SALVAGE_TEXT_KEY].startswith("[\n  {")
+        assert "Turn 0" not in details[SALVAGE_TEXT_KEY]
+
+    def test_one_text_over_the_cap_is_windowed_from_the_arrays_bracket(self):
+        """Long prose (with a closed ``[see 1]`` and a quote) ahead of a cut array:
+        the window starts at the array's never-closed ``[``."""
+        prose = ('I checked the "retry" path [see 1] and it\'s fine. ' * 600)
+        array = _truncated_array(30 * 1024)
+        stdout = _pi_stream(final_text=prose + "\n" + array, final_finished=True)
+
+        details = {}
+        _attach_salvage_text(details, PiProvider(), stdout)
+
+        text = details[SALVAGE_TEXT_KEY]
+        assert text == array.strip()
+        assert len(text.encode("utf-8")) <= MAX_LOG_STREAM_BYTES
+
+    def test_an_answer_longer_than_the_cap_is_cut_at_the_end_only(self):
+        array = _truncated_array(80 * 1024)
+        stdout = _pi_stream(final_text="Findings:\n" + array)
+
+        details = {}
+        _attach_salvage_text(details, PiProvider(), stdout)
+
+        text = details[SALVAGE_TEXT_KEY]
+        assert text.startswith("[\n  {")
+        assert len(text.encode("utf-8")) <= MAX_LOG_STREAM_BYTES
+        assert text.endswith(f"[salvage text truncated at {MAX_LOG_STREAM_BYTES} B]")
+
+    def test_text_with_no_bracket_keeps_its_head(self):
+        prose = "".join(f"line {i} of a long refusal\n" for i in range(4000))
+        stdout = _pi_stream(final_text=prose, final_finished=True)
+
+        details = {}
+        _attach_salvage_text(details, PiProvider(), stdout)
+
+        text = details[SALVAGE_TEXT_KEY]
+        assert text.startswith("line 0 of a long refusal")
+        assert len(text.encode("utf-8")) <= MAX_LOG_STREAM_BYTES
+
+
 class TestIsValidParsedData:
     """Tests for _is_valid_parsed_data() function."""
 
@@ -1645,6 +1856,512 @@ class TestOutputLocationBlock:
         prompt = call_args.kwargs.get("prompt") or call_args[0][0]
         assert "Write your JSON output to this file" in prompt
         assert str(tmp_path / "code-review" / "claude-code_sonnet.json") in prompt
+
+
+class TestWorkingLimitsBlock:
+    """The `{working_limits}` block states the attempt's real minutes (D3.2).
+
+    Measured on the 2026-09-25 review run: a pi code-review slot with a 1200 s
+    budget started `timeout 1700 python -m pytest tests` and was killed
+    mid-suite with nothing written, and a grok lane reported a test failure it
+    had never run. The block is advisory, so what these pin is its content: the
+    real number, the one-test-file allowance, the test-claim line, and no shell
+    command (it reaches lanes that have no shell).
+    """
+
+    TEST_CLAIM_LINE = (
+        "- Do NOT claim that a test passes or fails unless you ran it during "
+        "this review and saw its result."
+    )
+    TEMPLATE = (
+        "Review it.\n\n{working_limits}\n\n## Output Location\n{output_location}\n"
+    )
+
+    def test_a_1200_s_slot_reads_20_minutes(self):
+        from utils.llm_client import render_working_limits
+
+        block = render_working_limits(1200)
+
+        assert block.startswith("## Working limits\n")
+        assert "stopped after about 20 minutes." in block
+
+    def test_a_59_s_slot_reads_1_minute_never_0(self):
+        from utils.llm_client import render_working_limits
+
+        block = render_working_limits(59)
+
+        assert "stopped after about 1 minute." in block
+        assert "0 minutes" not in block
+
+    def test_minutes_are_floored_so_the_prompt_never_overpromises(self):
+        from utils.llm_client import render_working_limits
+
+        assert "about 19 minutes." in render_working_limits(1199.9)
+
+    def test_the_block_allows_one_test_file_and_names_no_shell_command(self):
+        from utils.llm_client import render_working_limits
+
+        block = render_working_limits(1200)
+
+        assert self.TEST_CLAIM_LINE in block
+        assert "you may run that ONE narrowly scoped test file" in block
+        assert "Do NOT run the project's test suite" in block
+        # cursor-agent and claude-code have no shell in this lane, and
+        # `{diff_access}` is what grants or denies one; a command named here
+        # would contradict it in the same prompt.
+        for token in ("`", "git ", "pytest", "npm ", "make "):
+            assert token not in block, token
+
+    def test_an_echoed_block_trips_no_failure_classifier(self):
+        """Four adapters echo our prompt into their stream; `plan_review.txt`'s
+        one word "timeout" once classified a clean goose run as a timeout."""
+        from utils.llm_client import render_working_limits
+        from utils.providers.base import classify_streams
+
+        block = render_working_limits(1200)
+
+        assert classify_streams(block, "") is None
+        assert classify_streams("", block) is None
+
+    def test_invoke_with_file_output_renders_the_block_from_its_timeout(
+        self, tmp_path
+    ):
+        from utils.llm_client import render_working_limits
+
+        with patch("utils.llm_client.invoke_with_provider") as mock_invoke, \
+             patch("utils.json_extractor.read_json_from_file") as mock_read:
+            mock_invoke.return_value = {"success": True, "data": [], "details": {}}
+            mock_read.return_value = {"success": True, "data": [], "source": "file"}
+
+            invoke_with_file_output(
+                prompt_template=self.TEMPLATE,
+                model_spec="claude-code:sonnet",
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="code_review",
+                timeout=1200,
+            )
+
+        call_args = mock_invoke.call_args
+        prompt = call_args.kwargs.get("prompt") or call_args[0][0]
+        # The minutes and the kill come from the same number.
+        assert call_args[0][2] == 1200
+        assert render_working_limits(1200) in prompt
+        assert "stopped after about 20 minutes." in prompt
+        assert self.TEST_CLAIM_LINE in prompt
+
+    def test_a_missing_timeout_renders_the_providers_own_default(self, tmp_path):
+        """`timeout=None` is resolved the way `invoke_with_provider` resolves
+        it, so the prompt names the budget the provider default really gives."""
+        with patch("utils.llm_client.invoke_with_provider") as mock_invoke, \
+             patch("utils.json_extractor.read_json_from_file") as mock_read, \
+             patch("utils.llm_client.get_provider_timeout", return_value=300):
+            mock_invoke.return_value = {"success": True, "data": [], "details": {}}
+            mock_read.return_value = {"success": True, "data": [], "source": "file"}
+
+            invoke_with_file_output(
+                prompt_template=self.TEMPLATE,
+                model_spec="claude-code:sonnet",
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="code_review",
+            )
+
+        call_args = mock_invoke.call_args
+        prompt = call_args.kwargs.get("prompt") or call_args[0][0]
+        assert "stopped after about 5 minutes." in prompt
+
+
+class TestDiffAccessBlock:
+    """The `{diff_access}` block is rendered from two `generate` declarations.
+
+    Measured on the 2026-09-25 review run (plan: review-run-scope-salvage-and-
+    failure-visibility §2.1): the code-review prompt only told reviewers to run
+    `git diff`, the two cursor lanes had no shell, kimi returned `[]` without
+    ever seeing a diff and grok reported a test failure it could not have run.
+    The diff now arrives as files in the phase dir, and this block tells each
+    lane how to reach them. These pin the three shell-state texts, their
+    partial-coverage additions, the inline branch for a lane that cannot open
+    the phase dir, and the unsupported outcome when inlining would be partial
+    or would not fit one argv string.
+    """
+
+    BASE_REF = "abc1234"
+    PLAN_TEXT = "# Feature plan\n\nAdd `frob()` to utils/x.py.\n"
+    MANIFEST_TEXT = (
+        "# Review scope\n\n"
+        "Diff coverage: complete\n\n"
+        "## source\n- utils/x.py +2 -1 diff/1-utils-x.py.diff (full, 40 B)\n\n"
+        "## tests\n- tests/test_x.py +3 -0 diff/2-tests-test_x.py.diff (full, 30 B)\n"
+    )
+    SOURCE_DIFF = "--- a/utils/x.py\n+++ b/utils/x.py\n-old\n+def frob(): ...\n"
+    TEST_DIFF = "--- a/tests/test_x.py\n+++ b/tests/test_x.py\n+def test_frob(): ...\n"
+    #: The `True` text's cross-check sentence, which no other state may carry.
+    CROSS_CHECK = (
+        "`git diff abc1234`, `git show` and `git log` are an optional cross-check "
+        "of the diff files"
+    )
+    #: Plan D2.3's `False` and `None` first paragraphs, word for word.
+    FALSE_HEAD = (
+        "You cannot run shell commands. The diff is at {diff_dir}; read it with "
+        "your file tools. Do not claim a test passes or fails, because you "
+        "cannot run it."
+    )
+    NONE_HEAD = (
+        "The diff files at {diff_dir} are the authoritative record of the "
+        "change; read them with your file tools. Do not claim a test passes or "
+        "fails unless you actually ran it and saw the result."
+    )
+
+    @pytest.fixture
+    def art(self, tmp_path):
+        """A repo root with a plan and a written code-review diff set inside it."""
+        from types import SimpleNamespace
+
+        repo = tmp_path / "repo"
+        phase = repo / "plans" / "feature" / "code-review"
+        diff_dir = phase / "diff"
+        diff_dir.mkdir(parents=True)
+        plan = repo / "plans" / "feature.md"
+        plan.write_text(self.PLAN_TEXT, encoding="utf-8")
+        scope_file = phase / "review-scope.md"
+        scope_file.write_text(self.MANIFEST_TEXT, encoding="utf-8")
+        (diff_dir / "1-utils-x.py.diff").write_text(self.SOURCE_DIFF, encoding="utf-8")
+        (diff_dir / "2-tests-test_x.py.diff").write_text(self.TEST_DIFF, encoding="utf-8")
+        (diff_dir / ".gitignore").write_text("*\n", encoding="utf-8")
+        return SimpleNamespace(
+            root=tmp_path, repo=repo, phase=phase, diff_dir=diff_dir,
+            scope_file=scope_file, plan=plan,
+        )
+
+    @pytest.fixture
+    def stub(self):
+        """Register a `stub:` adapter whose two declarations a test sets."""
+        from types import SimpleNamespace
+
+        from utils import provider_registry
+
+        provider = SimpleNamespace(runs_shell_in_generate=None, generate_read_scope="cwd")
+        with patch.dict(provider_registry._PROVIDERS, {"stub": provider}):
+            yield provider
+
+    def render(self, spec, art, *, coverage="complete", cwd=None):
+        from utils.llm_client import render_diff_access
+
+        return render_diff_access(
+            spec,
+            str(art.scope_file),
+            str(art.diff_dir),
+            str(art.phase),
+            str(cwd if cwd is not None else art.repo),
+            base_ref=self.BASE_REF,
+            coverage=coverage,
+            plan_path=str(art.plan),
+        )
+
+    # -- the three shell-state texts ---------------------------------------
+
+    def test_true_names_both_paths_and_grants_git_as_a_cross_check(self, art, stub):
+        stub.runs_shell_in_generate = True
+
+        access = self.render("stub:m", art)
+
+        assert access.mode == "paths"
+        assert (access.runs_shell, access.read_scope) == (True, "cwd")
+        assert (access.inline_bytes, access.reason) == (0, "")
+        assert str(art.scope_file) in access.text
+        assert str(art.diff_dir) in access.text
+        assert "authoritative record of the change" in access.text
+        assert self.CROSS_CHECK in access.text
+        # The guidance the static template used to hold travels with the grant.
+        assert "`git diff abc1234 -- path/to/file`" in access.text
+        assert "`git diff abc1234 -- <file1> <file2> ...`" in access.text
+        assert (
+            "`git diff abc1234 -- <path>` is required for any file the manifest "
+            "marks `omitted`"
+        ) in access.text
+
+    def test_false_is_plan_d23s_text_word_for_word(self, art, stub):
+        stub.runs_shell_in_generate = False
+
+        access = self.render("stub:m", art)
+
+        assert access.mode == "paths"
+        assert access.text.startswith(self.FALSE_HEAD.format(diff_dir=art.diff_dir))
+        assert str(art.scope_file) in access.text
+        assert "authoritative record of the change" in access.text
+        assert "git " not in access.text
+
+    def test_none_neither_grants_nor_denies_a_shell(self, art, stub):
+        stub.runs_shell_in_generate = None
+
+        access = self.render("stub:m", art)
+
+        assert access.mode == "paths"
+        assert access.text.startswith(self.NONE_HEAD.format(diff_dir=art.diff_dir))
+        assert str(art.scope_file) in access.text
+        assert "You cannot run shell commands" not in access.text
+        assert self.CROSS_CHECK not in access.text
+        assert "git " not in access.text
+
+    @pytest.mark.parametrize("coverage", ["complete", "partial"])
+    @pytest.mark.parametrize("shell", [True, False, None])
+    def test_only_the_true_text_names_a_git_command(self, art, stub, shell, coverage):
+        """`{diff_access}` is the one block that may grant a shell command, and
+        only its `True` rendering does. `None`'s partial sentence names the
+        command the MANIFEST gives, conditionally — a pointer, not a grant."""
+        from utils.llm_client import DIFF_ACCESS_UNMEASURED_PARTIAL
+
+        stub.runs_shell_in_generate = shell
+
+        text = self.render("stub:m", art, coverage=coverage).text
+
+        if shell is True:
+            for command in ("git diff abc1234", "`git show`", "`git log`"):
+                assert command in text, command
+            return
+        for command in ("git show", "git log", "git diff abc1234", self.CROSS_CHECK):
+            assert command not in text, command
+        if shell is None and coverage == "partial":
+            assert text.count("git ") == DIFF_ACCESS_UNMEASURED_PARTIAL.count("git ") == 1
+            assert "If you can run the `git diff` command the manifest gives" in text
+        else:
+            assert "git " not in text
+
+    # -- partial coverage ---------------------------------------------------
+
+    def test_partial_false_lists_omitted_files_as_not_reviewed(self, art, stub):
+        stub.runs_shell_in_generate = False
+
+        text = self.render("stub:m", art, coverage="partial").text
+
+        assert text.endswith(
+            "Files the manifest marks `omitted` have no diff you can read. List "
+            "them as not reviewed. Do not review their current contents as if "
+            "they were the change."
+        )
+
+    def test_partial_true_requires_git_diff_for_omitted_files(self, art, stub):
+        stub.runs_shell_in_generate = True
+
+        text = self.render("stub:m", art, coverage="partial").text
+
+        assert "Diff coverage for this change is partial" in text
+        assert "Run `git diff abc1234 -- <path>` for each of them" in text
+        assert "Do not review their current contents as if they were the change." in text
+
+    def test_partial_none_reviews_from_git_diff_only_if_it_ran_it(self, art, stub):
+        stub.runs_shell_in_generate = None
+
+        text = self.render("stub:m", art, coverage="partial").text
+
+        assert text.endswith(
+            "Files the manifest marks `omitted` have no diff file. If you can run "
+            "the `git diff` command the manifest gives for one, review it from "
+            "that output; otherwise list it as not reviewed. Do not review their "
+            "current contents as if they were the change."
+        )
+
+    @pytest.mark.parametrize("shell", [True, False, None])
+    def test_complete_coverage_carries_no_partial_sentence(self, art, stub, shell):
+        from utils.llm_client import (
+            DIFF_ACCESS_NO_SHELL_PARTIAL,
+            DIFF_ACCESS_SHELL_PARTIAL,
+            DIFF_ACCESS_UNMEASURED_PARTIAL,
+        )
+
+        stub.runs_shell_in_generate = shell
+
+        text = self.render("stub:m", art).text
+
+        assert "Diff coverage for this change is partial" not in text
+        assert DIFF_ACCESS_NO_SHELL_PARTIAL not in text
+        assert DIFF_ACCESS_UNMEASURED_PARTIAL not in text
+        assert DIFF_ACCESS_SHELL_PARTIAL.format(base_ref=self.BASE_REF) not in text
+
+    def test_an_unknown_coverage_word_reads_as_partial(self, art, stub):
+        """The conservative reading: only `complete` promises every diff."""
+        stub.runs_shell_in_generate = False
+
+        text = self.render("stub:m", art, coverage="").text
+
+        assert "List them as not reviewed." in text
+
+    # -- the adapters' own declarations -------------------------------------
+
+    @pytest.mark.parametrize(
+        "spec,shell",
+        [("codex:gpt-5.5", True), ("cursor-agent:auto", False), ("grok:grok-4", None)],
+    )
+    def test_a_real_adapter_renders_from_its_declaration(self, art, spec, shell):
+        from utils.provider_registry import get_provider
+
+        access = self.render(spec, art)
+
+        assert access.mode == "paths"
+        assert access.runs_shell is shell
+        assert access.runs_shell is get_provider(spec.split(":")[0]).runs_shell_in_generate
+
+    def test_an_unknown_adapter_reads_under_cwd_and_asserts_no_shell(self, art):
+        access = self.render("no-such-provider:m", art)
+
+        assert (access.mode, access.read_scope, access.runs_shell) == ("paths", "cwd", None)
+        assert access.text.startswith(self.NONE_HEAD.format(diff_dir=art.diff_dir))
+
+    # -- which lanes can open the phase dir ---------------------------------
+
+    def test_cwd_with_the_phase_dir_outside_the_repo_goes_inline(self, art, stub):
+        """A plan kept outside the repo puts its phase dir where a `"cwd"` lane
+        cannot read, so the paths it would be handed are useless to it."""
+        elsewhere = art.root / "other-repo"
+        elsewhere.mkdir()
+
+        access = self.render("stub:m", art, cwd=elsewhere)
+
+        assert access.mode == "inline"
+        assert access.text.startswith(
+            "The review's artifacts sit outside the directory you can read, so "
+            "everything you need is inline below:"
+        )
+
+    def test_any_gets_the_paths_even_outside_the_repo(self, art, stub):
+        stub.generate_read_scope = "any"
+        elsewhere = art.root / "other-repo"
+        elsewhere.mkdir()
+
+        access = self.render("stub:m", art, cwd=elsewhere)
+
+        assert (access.mode, access.read_scope) == ("paths", "any")
+        assert str(art.scope_file) in access.text
+
+    def test_cwd_resolves_through_symlinks(self, art, stub, tmp_path):
+        """Containment compares resolved paths on both sides, so a repo reached
+        through a symlink still contains its own phase dir."""
+        link = tmp_path / "repo-link"
+        link.symlink_to(art.repo, target_is_directory=True)
+
+        access = self.render("stub:m", art, cwd=link)
+
+        assert access.mode == "paths"
+
+    # -- the inline branch ---------------------------------------------------
+
+    def test_inline_carries_plan_manifest_and_every_diff_under_the_cap(self, art):
+        from utils.llm_client import INLINE_DIFF_CAP_BYTES
+
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art)
+
+        assert (access.mode, access.read_scope, access.runs_shell) == ("inline", "none", False)
+        assert access.reason == ""
+        text = access.text
+        assert text.startswith(
+            "You cannot open files in this review, so everything you need is "
+            "inline below:"
+        )
+        for body in (self.PLAN_TEXT, self.MANIFEST_TEXT, self.SOURCE_DIFF, self.TEST_DIFF):
+            assert body.rstrip("\n") in text
+        # Each under a header naming it, the diffs in name (= review) order, and
+        # the ignore file is not a diff.
+        order = [
+            text.index("===== BEGIN plan ====="),
+            text.index("===== BEGIN review-scope.md ====="),
+            text.index("===== BEGIN diff/1-utils-x.py.diff ====="),
+            text.index("===== BEGIN diff/2-tests-test_x.py.diff ====="),
+        ]
+        assert order == sorted(order)
+        assert ".gitignore" not in text
+        # The measured size is the block's own, and it fits.
+        assert access.inline_bytes == len(text.encode("utf-8"))
+        assert access.inline_bytes <= INLINE_DIFF_CAP_BYTES
+        # qwen-code has no shell either: its sentence says so, and grants nothing.
+        assert "You cannot run shell commands." in text
+        assert "git " not in text.split("===== BEGIN plan =====")[0]
+
+    def test_inline_names_no_path_the_lane_cannot_open(self, art):
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art)
+
+        assert access.mode == "inline"
+        assert str(art.root) not in access.text
+
+    def test_the_cap_leaves_room_under_one_argv_string(self):
+        from utils.llm_client import INLINE_DIFF_CAP_BYTES
+
+        assert INLINE_DIFF_CAP_BYTES == 96 * 1024
+        assert INLINE_DIFF_CAP_BYTES < 131072  # Linux MAX_ARG_STRLEN
+
+    def test_over_the_cap_is_unsupported(self, art):
+        from utils.llm_client import INLINE_DIFF_CAP_BYTES
+
+        (art.diff_dir / "3-utils-big.py.diff").write_text(
+            "+" + "x" * (100 * 1024) + "\n", encoding="utf-8"
+        )
+
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art)
+
+        assert access.mode == "unsupported"
+        assert access.text == ""
+        assert access.inline_bytes > INLINE_DIFF_CAP_BYTES
+        assert access.reason == (
+            f"inline context {access.inline_bytes} B exceeds the "
+            f"{INLINE_DIFF_CAP_BYTES} B cap"
+        )
+
+    def test_partial_coverage_on_a_no_read_lane_is_unsupported(self, art):
+        """A partial inline review would read as a review of the whole change."""
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art, coverage="partial")
+
+        assert access.mode == "unsupported"
+        assert access.text == ""
+        assert access.reason == "diff coverage is partial"
+        assert 0 < access.inline_bytes <= 96 * 1024
+
+    def test_a_missing_manifest_is_unsupported_not_raised(self, art):
+        art.scope_file.unlink()
+
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art)
+
+        assert access.mode == "unsupported"
+        assert access.text == ""
+        assert "scope manifest not readable" in access.reason
+
+    def test_a_missing_plan_or_diff_dir_is_unsupported_not_raised(self, art):
+        import shutil
+
+        art.plan.unlink()
+        shutil.rmtree(art.diff_dir)
+
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art)
+
+        assert access.mode == "unsupported"
+        assert "plan file not readable" in access.reason
+        # The manifest still names two diffs that are no longer there.
+        assert "the manifest names 2 diff file(s) that do not exist" in access.reason
+
+    def test_a_diff_the_manifest_names_but_is_gone_is_unsupported(self, art):
+        (art.diff_dir / "2-tests-test_x.py.diff").unlink()
+
+        access = self.render("qwen-code:qwen/qwen3.8-27b", art)
+
+        assert access.mode == "unsupported"
+        assert access.reason == (
+            "the manifest names 1 diff file(s) that do not exist: "
+            "2-tests-test_x.py.diff"
+        )
+
+    # -- hygiene -------------------------------------------------------------
+
+    @pytest.mark.parametrize("coverage", ["complete", "partial"])
+    @pytest.mark.parametrize("shell", [True, False, None])
+    def test_an_echoed_block_trips_no_failure_classifier(self, art, stub, shell, coverage):
+        """Several adapters echo our prompt into their stream; a block that
+        reads as a failure would turn a clean run into a classified one."""
+        from utils.providers.base import classify_streams
+
+        stub.runs_shell_in_generate = shell
+        text = self.render("stub:m", art, coverage=coverage).text
+
+        assert classify_streams(text, "") is None
+        assert classify_streams("", text) is None
 
 
 class TestDescribeOutputFile:
@@ -3432,3 +4149,249 @@ class TestOmpFileRecoveryHonoursTheTerminalCode:
         written = log_file.read_text(encoding="utf-8")
         assert "Success: False" in written
         assert "run ended inside a tool call" in written
+
+
+# =========================================================================== #
+# D3.3 (review-run-scope-salvage-and-failure-visibility T3.3): a stopped Lane A
+# CLI takes its detached children with it.
+#
+# The shape of `tests/test_subagent_executor.py`'s "a timed-out dispatch never
+# hangs on a surviving grandchild", on Lane A, and with pi's harder shape: the
+# grandchildren are in a SESSION of their own (pi's bash tool spawns its shell
+# `detached: true`) and `timeout` takes a group of its own again inside it, so no
+# signal to the CLI or to its group reaches them. Real processes throughout —
+# "is it still running?" is the one question a mock cannot answer.
+# =========================================================================== #
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX sessions and groups")
+class TestAStoppedLaneACliTakesItsTreeWithIt:
+    MODEL_SPEC = "pi:stub/stub-model"
+
+    @pytest.fixture
+    def fake_pi(self, tmp_path, monkeypatch):
+        """The fake CLI as `pi` on PATH, its marker, and a cleanup net."""
+        import os
+        import shutil
+
+        from tests.harness import cli_tree
+        from utils.providers import base as providers_base
+
+        if shutil.which("timeout") is None:
+            pytest.skip("GNU `timeout` (its own process group) is the shape under test")
+
+        bin_dir = tmp_path / "bin"
+        cli_tree.install_fake_cli(bin_dir, "pi")
+        monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+        marker = tmp_path / "tree.pids"
+        monkeypatch.setenv("CLI_TREE_MARKER", str(marker))
+        # The `--tools` gate memoises one help read per binary path.
+        providers_base.reset_flag_gate_cache()
+        try:
+            yield marker
+        finally:
+            cli_tree.reap_leftovers(marker)
+            providers_base.reset_flag_gate_cache()
+
+    def _everything(self, marker):
+        from tests.harness import cli_tree
+
+        pids = cli_tree.tree_pids(marker)
+        assert len(pids) == 4, f"the fake recorded {pids}, not sh/timeout/sleep/cat"
+        cli = cli_tree.cli_pid(marker)
+        assert cli is not None
+        return pids, cli
+
+    def test_a_timed_out_slot_leaves_no_descendant_and_keeps_its_partial_stdout(
+        self, fake_pi, tmp_path, monkeypatch
+    ):
+        from tests.harness import cli_tree
+
+        # `cat` holds the CLI's stdout pipe too, so the drain is exercised.
+        monkeypatch.setenv("CLI_TREE_SHELL_STDOUT", "inherit")
+        log_file = tmp_path / "run.log"
+        result = invoke_with_provider(
+            "Review this", self.MODEL_SPEC, timeout=1, log_file=log_file,
+        )
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_TIMEOUT
+        # The partial stdout §4's salvage reads survives the new kill path.
+        assert cli_tree.PARTIAL_LINE in result["details"]["stdout_excerpt"]
+        pids, cli = self._everything(fake_pi)
+        still = cli_tree.await_dead(pids + [cli])
+        assert not still, f"outlived the slot's kill: {still}"
+        # And the log names what the sweep did, group by group.
+        written = log_file.read_text(encoding="utf-8")
+        assert "timed out after 1s; cli terminated; process groups:" in written
+        assert "SURVIVED" not in written
+        # Two groups, both swept: the detached shell's (sh + cat, led by sh) and
+        # the one `timeout` made for itself (timeout + sleep).
+        roles = cli_tree.tree_roles(fake_pi)
+        assert f"{roles['sh']} killed" in written
+        assert f"{roles['timeout']} killed" in written
+
+    def test_the_call_returns_within_the_grace_plus_the_bounded_drain(
+        self, fake_pi, tmp_path, monkeypatch
+    ):
+        """A CLI that ignores SIGTERM costs the grace and the SIGKILL, no more.
+
+        `cat` inherited the CLI's stdout pipe, so an unbounded drain would wait
+        on it for its whole minute; the sweep ends it and the drain is capped.
+        """
+        from tests.harness import cli_tree
+
+        monkeypatch.setenv("CLI_TREE_ON_TERM", "ignore")
+        monkeypatch.setenv("CLI_TREE_SHELL_STDOUT", "inherit")
+        log_file = tmp_path / "run.log"
+        started = time.monotonic()
+        result = invoke_with_provider(
+            "Review this", self.MODEL_SPEC, timeout=1, log_file=log_file,
+        )
+        elapsed = time.monotonic() - started
+
+        assert result["error_code"] == ERROR_TIMEOUT
+        budget = (1 + llm_client.LANE_A_TERMINATE_GRACE_S + llm_client.LANE_A_DRAIN_S)
+        assert elapsed < budget, f"{elapsed:.1f}s against a {budget:.1f}s bound"
+        assert "cli killed" in log_file.read_text(encoding="utf-8")
+        pids, cli = self._everything(fake_pi)
+        assert not cli_tree.await_dead(pids + [cli])
+
+    def test_a_cli_that_exits_on_sigterm_is_never_sigkilled(
+        self, fake_pi, tmp_path, monkeypatch
+    ):
+        """SIGTERM first is the point: pi reaps its own shells from that handler."""
+        from pathlib import Path as _Path
+
+        from tests.harness import cli_tree
+
+        monkeypatch.setenv("CLI_TREE_ON_TERM", "exit")
+        log_file = tmp_path / "run.log"
+        result = invoke_with_provider(
+            "Review this", self.MODEL_SPEC, timeout=1, log_file=log_file,
+        )
+
+        assert result["error_code"] == ERROR_TIMEOUT
+        assert _Path(str(fake_pi) + ".term").read_text() == "SIGTERM"
+        written = log_file.read_text(encoding="utf-8")
+        assert "cli terminated" in written
+        assert "cli killed" not in written
+        pids, cli = self._everything(fake_pi)
+        assert not cli_tree.await_dead(pids + [cli])
+
+    def test_ctrl_c_sweeps_the_tree_and_still_ends_the_run(self, fake_pi):
+        """Decision 11.9: the interrupt propagates, and nothing is left behind."""
+        import os
+        import signal
+        import threading
+
+        from tests.harness import cli_tree
+
+        def interrupt_when_ready():
+            if cli_tree.await_ready(fake_pi):
+                # A moment for the parent to be back inside communicate().
+                time.sleep(0.3)
+                os.kill(os.getpid(), signal.SIGINT)
+
+        # The interrupt must arrive as Python's own KeyboardInterrupt, whatever
+        # an earlier test installed for SIGINT (a detached worker's abort
+        # handler answers it with `os._exit(3)`, which would end pytest itself).
+        previous = signal.signal(signal.SIGINT, signal.default_int_handler)
+        try:
+            threading.Thread(target=interrupt_when_ready, daemon=True).start()
+            with pytest.raises(KeyboardInterrupt):
+                invoke_with_provider("Review this", self.MODEL_SPEC, timeout=60)
+        finally:
+            signal.signal(signal.SIGINT, previous)
+
+        pids, cli = self._everything(fake_pi)
+        still = cli_tree.await_dead(pids + [cli])
+        assert not still, f"outlived the Ctrl-C: {still}"
+
+    def test_a_cli_killed_from_outside_still_has_its_tree_swept(
+        self, fake_pi, monkeypatch
+    ):
+        """A fan-out slot runs on a worker thread, where no KeyboardInterrupt is
+        ever raised: a terminal Ctrl-C (or an abort) kills the CLI directly, and
+        the call simply returns. Its detached tree is swept from the registry's
+        last snapshot, the only thing that still links it to the slot.
+
+        pi's shape (the shell read through pi's own pipe), because a child that
+        holds the CALLER's pipe keeps ``communicate()`` waiting until the
+        slot's deadline, where the timeout path sweeps it instead.
+        """
+        from tests.harness import cli_tree
+
+        monkeypatch.setenv("CLI_TREE_SELF_SIGNAL", "SIGTERM")
+        monkeypatch.setenv(
+            "CLI_TREE_SELF_SIGNAL_AFTER_S",
+            str(process_control_interval() * 2 + 0.5),
+        )
+        result = invoke_with_provider("Review this", self.MODEL_SPEC, timeout=60)
+
+        assert result["success"] is False
+        assert result.get("error_code") != ERROR_TIMEOUT
+        pids, cli = self._everything(fake_pi)
+        still = cli_tree.await_dead(pids + [cli])
+        assert not still, f"outlived their CLI: {still}"
+
+    def test_a_cli_whose_own_handler_exits_143_still_has_its_tree_swept(
+        self, fake_pi, monkeypatch
+    ):
+        """pi's real shape of the outside kill: its SIGTERM handler reaps its
+        shell and exits 143, so it never *dies* of the signal — and the
+        ``timeout`` group inside that shell survives the handler. The 128+N exit
+        is the same stop as the ``-N`` death and gets the same sweep.
+        """
+        from pathlib import Path as _Path
+
+        from tests.harness import cli_tree
+
+        monkeypatch.setenv("CLI_TREE_ON_TERM", "reap-shell")
+        monkeypatch.setenv("CLI_TREE_SELF_SIGNAL", "SIGTERM")
+        monkeypatch.setenv(
+            "CLI_TREE_SELF_SIGNAL_AFTER_S",
+            str(process_control_interval() * 2 + 0.5),
+        )
+        completed = llm_client._run_provider_cli(
+            ["pi"], capture_output=True, text=True, timeout=60,
+        )
+
+        assert completed.returncode == 143
+        assert _Path(str(fake_pi) + ".term").read_text() == "reap-shell"
+        pids, cli = self._everything(fake_pi)
+        still = cli_tree.await_dead(pids + [cli])
+        assert not still, f"outlived their CLI's own handler: {still}"
+
+    def test_the_registry_is_empty_after_every_return(self, fake_pi):
+        from utils import process_control
+
+        completed = llm_client._run_provider_cli(
+            [sys.executable, "-c", "print('ok')"],
+            capture_output=True, text=True, timeout=30,
+        )
+        assert completed.returncode == 0 and completed.stdout == "ok\n"
+        assert len(process_control.live_cli_registry) == 0
+
+        with pytest.raises(subprocess.TimeoutExpired) as caught:
+            llm_client._run_provider_cli(
+                ["pi"], capture_output=True, text=True, timeout=1,
+            )
+        assert len(process_control.live_cli_registry) == 0
+        assert caught.value.tree_sweep.cli == "terminated"
+        assert set(caught.value.tree_sweep.groups.values()) == {"killed"}
+
+    def test_stdin_input_is_still_written_and_closed(self):
+        """`input=` exactly as `subprocess.run` took it: written whole, then EOF."""
+        text = "x" * 300_000 + "\nEND"
+        completed = llm_client._run_provider_cli(
+            [sys.executable, "-c",
+             "import sys; data = sys.stdin.read(); print(len(data), data[-3:])"],
+            capture_output=True, text=True, timeout=30, input=text,
+        )
+        assert completed.stdout.split() == [str(len(text)), "END"]
+
+
+def process_control_interval() -> float:
+    from utils import process_control
+
+    return process_control.live_cli_registry.interval_s

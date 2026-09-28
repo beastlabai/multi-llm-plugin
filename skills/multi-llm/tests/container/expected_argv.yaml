@@ -699,6 +699,20 @@ entries:
     prompt: stdin
     min_records: 1
 
+  # The §5.4.1 per-flag gate for `--tools` below: `supports_flag` reads
+  # `pi --help` once per process, memoised on the resolved binary, before the
+  # first `generate` argv is built (T3.1, added by hand).
+  - provider: pi
+    profile: probe
+    transport: stdin
+    binary: pi
+    subcommands: []
+    options:
+      "--help": null
+    tail: []
+    prompt: stdin
+    min_records: 1
+
   - provider: pi
     profile: generate
     transport: argv
@@ -706,10 +720,15 @@ entries:
     subcommands: []
     # `--mode json` since plan §7 (T7.9, by hand — never `seed_expected_argv.py`
     # bare): the JSONL stream PiProvider.parse_output reads. Not timeout-derived.
+    # `--tools` since review-run-scope-salvage-and-failure-visibility T3.1, also
+    # by hand: PiProvider's PI_TOOLS as ONE comma-joined value, verbatim because
+    # the value is the policy (a space-separated or repeated form would silently
+    # empty pi's toolset). Not timeout-derived either.
     options:
       "--mode": "json"
       "--model": "<model>"
       "--no-session": null
+      "--tools": "read,grep,find,bash,write"
       "-p": null
     tail: ["<prompt>"]
     prompt: argv

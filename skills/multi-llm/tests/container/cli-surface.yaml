@@ -413,11 +413,24 @@ clis:
     profiles: [generate]
     # `--mode` since plan §7 (T7.9, hand edit): `pi --help` at 0.87.1 documents
     # it ("Output mode: text (default), json, or rpc"); the help sha is unchanged.
+    # `--tools` since review-run-scope-salvage-and-failure-visibility T3.1, also
+    # by hand: `--tools, -t <tools>  Comma-separated allowlist of tool names to
+    # enable` at 0.87.1; the help sha is unchanged.
     options:
       - "--mode"
       - "--model"
       - "--no-session"
+      - "--tools"
       - "-p"
+    # HAND-KEPT, never seeded: the accepted FORM of an option whose value format
+    # is load-bearing, as a phrase the help line introducing it must contain.
+    # Presence alone is not enough for `--tools`: pi drops unknown tool names
+    # silently, so if upstream changed the separator, PiProvider's one
+    # comma-joined value would become a single unknown name and pi would review
+    # with no tools at all while every presence check stayed green. Checked as
+    # hard as presence (tests/test_container_cli_surface.py).
+    option_forms:
+      "--tools": "Comma-separated"
 
   # vibe. Every option this adapter emits is in the VISIBLE help (the seeder
   # reported `missing_options: []`), so unlike qwen-code this row needs no

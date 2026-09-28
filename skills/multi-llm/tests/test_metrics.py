@@ -1144,3 +1144,358 @@ class TestEta:
         assert result.returncode == 0, f"stderr: {result.stderr}"
         state = json.loads(state_file.read_text(encoding="utf-8"))
         assert "implement" not in state.get("metrics_progress", {})
+
+
+# --------------------------------------------------------------------------- #
+# One event, one entry (review-run-scope-salvage-and-failure-visibility §7.1)
+# --------------------------------------------------------------------------- #
+
+PHASE = "apply-suggestions"
+LABEL = "Batch 4 (step_4)"
+
+
+def _record(state, label=LABEL, batch_index=4, **values):
+    return record_metric_in_state(
+        state, PHASE, label, subagent_type="general-purpose",
+        total_batches=8, batch_index=batch_index, **values,
+    )
+
+
+def _entries(state, phase=PHASE):
+    return state["metrics"][phase]
+
+
+def _measured(entry):
+    return {k: entry[k] for k in ("token_count", "tool_uses", "duration_ms")
+            if k in entry}
+
+
+def _phase_token_total(state):
+    """The token total a phase report would print (None when nothing was
+    measured): a fabricated zero would print `0` here, a free run."""
+    total = None
+    for entry in state["metrics"][PHASE]:
+        if entry.get("token_count") is not None:
+            total = (total or 0) + entry["token_count"]
+    return total
+
+
+class TestTheRecordingIdentity:
+    """Each start stamps a run id; each entry carries it and its index."""
+
+    def test_every_start_stamps_a_fresh_run_id(self):
+        state = {}
+        start_phase_in_state(state, PHASE, 8)
+        first = state["metrics_progress"][PHASE]["run_id"]
+        start_phase_in_state(state, PHASE, 8)
+        second = state["metrics_progress"][PHASE]["run_id"]
+
+        assert len(first) == 32 and int(first, 16) >= 0
+        assert first != second
+
+    def test_an_entry_carries_the_run_id_and_its_batch_index(self):
+        state = {}
+        start_phase_in_state(state, PHASE, 8)
+        _record(state, batch_index=1, duration_ms=1000)
+
+        entry = _entries(state)[0]
+        assert entry["run_id"] == state["metrics_progress"][PHASE]["run_id"]
+        assert entry["batch_index"] == 1
+
+    def test_the_cli_leg_persists_the_run_id_across_calls(self, tmp_path):
+        """The native leg records through separate processes, so the id has to
+        live in `state.json`, and the second identical record has to collapse
+        there too."""
+        state_file = _create_state(tmp_path)
+
+        def run(*args):
+            return subprocess.run(
+                [sys.executable, "-m", "utils.metrics", *args,
+                 "--state-file", str(state_file)],
+                cwd=Path(__file__).parent.parent,
+                capture_output=True, text=True, encoding="utf-8",
+            )
+
+        assert run("start", "--phase", PHASE, "--total-batches", "8").returncode == 0
+        record = ("record", "--phase", PHASE, "--label", LABEL,
+                  "--duration-ms", "5000", "--total-batches", "8", "--batch-index", "1")
+        assert run(*record).returncode == 0
+        second = run(*record)
+
+        assert second.returncode == 0
+        assert "[METRICS_DUPLICATE]" in second.stderr
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        assert len(state["metrics"][PHASE]) == 1
+        assert state["metrics"][PHASE][0]["run_id"] == \
+            state["metrics_progress"][PHASE]["run_id"]
+
+
+class TestASecondRecordOfTheSameEvent:
+    """T7.1: collapse a second record of the same event, and nothing else."""
+
+    @pytest.fixture
+    def state(self):
+        state = {}
+        start_phase_in_state(state, PHASE, 8)
+        for index in (1, 2, 3):
+            _record(state, label=f"Batch {index}", batch_index=index)
+        return state
+
+    def test_an_identical_duplicate_is_skipped_with_a_notice(self, state, capsys):
+        _record(state, token_count=1200, tool_uses=7, duration_ms=5000)
+        capsys.readouterr()
+
+        line = _record(state, token_count=1200, tool_uses=7, duration_ms=5000)
+
+        assert line is None
+        err = capsys.readouterr().err
+        assert "[METRICS_DUPLICATE]" in err and LABEL in err
+        assert "[METRICS_INDEX_MISMATCH]" not in err
+        batch_4 = [e for e in _entries(state) if e["label"] == LABEL]
+        assert len(batch_4) == 1
+        assert _measured(batch_4[0]) == {
+            "token_count": 1200, "tool_uses": 7, "duration_ms": 5000}
+
+    @pytest.mark.parametrize("empty", [{}, {"token_count": 0, "tool_uses": 0,
+                                            "duration_ms": 0}],
+                             ids=["no-numbers", "all-zeros"])
+    def test_real_numbers_survive_an_empty_record_landing_first(
+        self, state, capsys, empty
+    ):
+        _record(state, **empty)
+        capsys.readouterr()
+
+        line = _record(state, token_count=1200, duration_ms=5000)
+
+        assert line is not None and line.startswith("[ETA]")
+        assert "[METRICS_DUPLICATE]" in capsys.readouterr().err
+        batch_4 = [e for e in _entries(state) if e["label"] == LABEL]
+        assert len(batch_4) == 1
+        # The zeros are gone, not merged in beside the real numbers.
+        assert _measured(batch_4[0]) == {"token_count": 1200, "duration_ms": 5000}
+        # The executor role survives the replacement, in place.
+        assert batch_4[0]["subagent_type"] == "agent"
+        assert _entries(state).index(batch_4[0]) == 3
+
+    @pytest.mark.parametrize("empty", [{}, {"token_count": 0, "tool_uses": 0,
+                                            "duration_ms": 0}],
+                             ids=["no-numbers", "all-zeros"])
+    def test_real_numbers_survive_an_empty_record_landing_second(
+        self, state, capsys, empty
+    ):
+        _record(state, token_count=1200, duration_ms=5000)
+        capsys.readouterr()
+
+        assert _record(state, **empty) is None
+
+        assert "[METRICS_DUPLICATE]" in capsys.readouterr().err
+        batch_4 = [e for e in _entries(state) if e["label"] == LABEL]
+        assert len(batch_4) == 1
+        assert _measured(batch_4[0]) == {"token_count": 1200, "duration_ms": 5000}
+
+    @pytest.mark.parametrize("first,second", [
+        ({"token_count": 0, "tool_uses": 0, "duration_ms": 0}, {}),
+        ({}, {"token_count": 0, "tool_uses": 0, "duration_ms": 0}),
+    ], ids=["zeros-then-none", "none-then-zeros"])
+    def test_the_incidents_zero_and_none_pair_keeps_the_one_without_numbers(
+        self, state, capsys, first, second
+    ):
+        """`EV/state.json`: two `Batch 4 (step_4)` entries 45 ms apart, one all
+        zeros and one with no numbers. Whichever lands first, one entry
+        remains, and it is the one that fabricated nothing."""
+        _record(state, **first)
+        _record(state, **second)
+
+        assert "[METRICS_DUPLICATE]" in capsys.readouterr().err
+        batch_4 = [e for e in _entries(state) if e["label"] == LABEL]
+        assert len(batch_4) == 1
+        assert _measured(batch_4[0]) == {}
+        assert _phase_token_total(state) is None
+
+    def test_a_subset_agreeing_on_what_it_carries_is_skipped(self, state, capsys):
+        _record(state, token_count=1200, tool_uses=7, duration_ms=5000)
+
+        assert _record(state, duration_ms=5000) is None
+
+        assert "[METRICS_DUPLICATE]" in capsys.readouterr().err
+        batch_4 = [e for e in _entries(state) if e["label"] == LABEL]
+        assert _measured(batch_4[0]) == {
+            "token_count": 1200, "tool_uses": 7, "duration_ms": 5000}
+
+    def test_a_superset_agreeing_on_every_shared_field_replaces(self, state, capsys):
+        _record(state, duration_ms=5000)
+
+        _record(state, token_count=1200, duration_ms=5000)
+
+        assert "[METRICS_DUPLICATE]" in capsys.readouterr().err
+        batch_4 = [e for e in _entries(state) if e["label"] == LABEL]
+        assert len(batch_4) == 1
+        assert _measured(batch_4[0]) == {"token_count": 1200, "duration_ms": 5000}
+
+    def test_a_conflict_keeps_the_first_and_appends_nothing(self, state, capsys):
+        _record(state, token_count=1200, duration_ms=5000)
+        capsys.readouterr()
+
+        assert _record(state, token_count=900, duration_ms=5000) is None
+
+        err = capsys.readouterr().err
+        assert "[METRICS_CONFLICT]" in err
+        # Both payloads are named, so the reader can tell which one was dropped.
+        assert '"token_count": 1200' in err and '"token_count": 900' in err
+        batch_4 = [e for e in _entries(state) if e["label"] == LABEL]
+        assert len(batch_4) == 1
+        assert batch_4[0]["token_count"] == 1200
+
+    def test_the_same_label_at_another_index_is_another_event(self, state, capsys):
+        _record(state, duration_ms=5000)
+        _record(state, batch_index=5, duration_ms=6000)
+
+        err = capsys.readouterr().err
+        assert "[METRICS_DUPLICATE]" not in err
+        assert len([e for e in _entries(state) if e["label"] == LABEL]) == 2
+
+    def test_a_rerun_records_the_same_label_again(self, state, capsys):
+        """A rerun starts the phase again, so it is a new run with its own
+        measurement, never a duplicate of the last run's."""
+        _record(state, duration_ms=5000)
+        start_phase_in_state(state, PHASE, 8)
+
+        _record(state, batch_index=4, duration_ms=5000)
+
+        err = capsys.readouterr().err
+        assert "[METRICS_DUPLICATE]" not in err
+        batch_4 = [e for e in _entries(state) if e["label"] == LABEL]
+        assert len(batch_4) == 2
+        assert batch_4[0]["run_id"] != batch_4[1]["run_id"]
+
+    def test_a_resumed_execution_leaves_the_interrupted_runs_entries_alone(
+        self, capsys
+    ):
+        state = {}
+        start_phase_in_state(state, PHASE, 4)
+        _record(state, label="Batch 1", batch_index=1, duration_ms=1000)
+        _record(state, label="Batch 2", batch_index=2, duration_ms=2000)
+        interrupted = json.loads(json.dumps(_entries(state)))
+
+        # --resume: the phase starts again, and batch 2 is re-dispatched.
+        start_phase_in_state(state, PHASE, 4)
+        _record(state, label="Batch 2", batch_index=2, duration_ms=2500)
+        _record(state, label="Batch 3", batch_index=3, duration_ms=3000)
+
+        err = capsys.readouterr().err
+        assert "[METRICS_DUPLICATE]" not in err and "[METRICS_CONFLICT]" not in err
+        entries = _entries(state)
+        assert entries[:2] == interrupted
+        assert [e["label"] for e in entries[2:]] == ["Batch 2", "Batch 3"]
+        assert [e["duration_ms"] for e in entries[2:]] == [2500, 3000]
+
+    def test_a_legacy_entry_without_a_run_id_is_never_matched(self, capsys):
+        legacy = {"label": LABEL, "timestamp": "2026-09-25T13:40:00",
+                  "subagent_type": "agent", "batch_index": 4, "token_count": 0}
+        state = {"metrics": {PHASE: [dict(legacy)]}}
+        start_phase_in_state(state, PHASE, 8)
+
+        _record(state, token_count=1200)
+
+        assert "[METRICS_" not in capsys.readouterr().err
+        entries = _entries(state)
+        assert len(entries) == 2
+        assert entries[0] == legacy
+
+    def test_a_record_with_no_started_phase_appends_unchecked(self, capsys):
+        state = {}
+
+        _record(state, token_count=0)
+        _record(state, token_count=0)
+        _record(state, token_count=5, batch_index=9)
+
+        assert "[METRICS_" not in capsys.readouterr().err
+        entries = _entries(state)
+        assert len(entries) == 3
+        assert all("run_id" not in e for e in entries)
+
+    def test_a_finished_phase_no_longer_collapses(self, capsys):
+        """`finish` pops the progress entry, so a record after it has no run to
+        belong to and appends as it always did."""
+        state = {}
+        start_phase_in_state(state, PHASE, 1)
+        _record(state, batch_index=1, duration_ms=1000)
+        finish_phase_in_state(state, PHASE)
+
+        _record(state, batch_index=1, duration_ms=1000)
+
+        assert "[METRICS_" not in capsys.readouterr().err
+        assert len(_entries(state)) == 2
+
+
+class TestTheBatchIndexCheck:
+    """T7.2: `--batch-index` against this run's own high-water mark."""
+
+    @staticmethod
+    def _run(indices, state=None, start=True):
+        state = {} if state is None else state
+        if start:
+            start_phase_in_state(state, PHASE, 10)
+        for index in indices:
+            _record(state, label=f"Batch {index}", batch_index=index,
+                    duration_ms=1000)
+        return state
+
+    def test_consecutive_indices_are_silent(self, capsys):
+        self._run([1, 2, 3, 4])
+
+        assert "[METRICS_INDEX_MISMATCH]" not in capsys.readouterr().err
+
+    def test_one_skipped_batch_warns_once_and_the_next_is_silent(self, capsys):
+        self._run([1, 2, 4, 5, 6])
+
+        err = capsys.readouterr().err
+        assert err.count("[METRICS_INDEX_MISMATCH]") == 1
+        line = next(ln for ln in err.splitlines() if "[METRICS_INDEX_MISMATCH]" in ln)
+        # Both numbers are named: what was recorded and what was expected.
+        assert "batch 4" in line and "next index is 3" in line
+
+    def test_a_duplicate_submission_does_not_make_the_next_batch_warn(self, capsys):
+        state = self._run([1, 2])
+        _record(state, label="Batch 2", batch_index=2, duration_ms=1000)
+        _record(state, label="Batch 3", batch_index=3, duration_ms=1000)
+
+        err = capsys.readouterr().err
+        assert "[METRICS_DUPLICATE]" in err
+        assert "[METRICS_INDEX_MISMATCH]" not in err
+
+    def test_a_rerun_does_not_warn(self, capsys):
+        state = self._run([1, 2, 3])
+        self._run([1, 2, 3], state=state)
+
+        assert "[METRICS_INDEX_MISMATCH]" not in capsys.readouterr().err
+
+    def test_a_resumed_run_whose_first_index_is_4_does_not_warn(self, capsys):
+        """A resumed scheduler run's index counts the batches the resume
+        skipped, so its first record legitimately starts past 1."""
+        state = self._run([1, 2])
+        self._run([4, 5, 6], state=state)
+
+        assert "[METRICS_INDEX_MISMATCH]" not in capsys.readouterr().err
+
+    @pytest.mark.parametrize("indices", [[1, 2, 2], [1, 2, 3, 1]],
+                             ids=["repeated", "backward"])
+    def test_a_repeated_or_backward_index_within_a_run_warns(self, capsys, indices):
+        """Distinct batches (distinct labels) handed an index already used, or
+        one behind the mark: the shifted-by-one labels of the audited run."""
+        state = {}
+        start_phase_in_state(state, PHASE, 10)
+        for position, index in enumerate(indices, start=1):
+            _record(state, label=f"Task {position}", batch_index=index,
+                    duration_ms=1000)
+
+        err = capsys.readouterr().err
+        assert "[METRICS_DUPLICATE]" not in err
+        assert err.count("[METRICS_INDEX_MISMATCH]") == 1
+        # A warning, not a rejection: the record is still there.
+        assert len(_entries(state)) == len(indices)
+
+    def test_no_started_phase_is_never_checked(self, capsys):
+        self._run([1, 5, 2], start=False)
+
+        assert "[METRICS_INDEX_MISMATCH]" not in capsys.readouterr().err

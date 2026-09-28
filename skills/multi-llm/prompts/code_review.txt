@@ -6,45 +6,26 @@ You are reviewing code changes that implement a feature plan.
 ## Git Base Reference
 {base_ref}
 
-This is the git commit from when implementation started. Use this to see what changed.
+This is the git commit from when implementation started. The change under review is everything since it.
 
 ## Files Changed During Implementation
+Where this list came from: {scope_source}
+
 {tracked_files_list}
 
-These are the files that were modified during the implementation phase.
-Focus your review on ONLY these files. Ignore any other uncommitted changes in the repo.
+This list is only the head of the review scope. The full scope is the scope manifest, {scope_file}: a path it lists is in scope whether or not the list above shows it. Ignore any other uncommitted changes in the repo, meaning changes the manifest does not list.
 
 ## Implementation Record
 
 {implementation_record}
 
-## How to Examine Changes
+## Diff Access
 
-To see what changed in each file, use these git commands:
-
-1. **See all implementation changes at once:**
-   ```bash
-   git diff {base_ref} -- <file1> <file2> ...
-   ```
-
-2. **See changes for a specific file:**
-   ```bash
-   git diff {base_ref} -- path/to/file.ts
-   ```
-
-3. **See the current content of a file:**
-   ```bash
-   cat path/to/file.ts
-   # or use the Read tool
-   ```
-
-Read the plan file to understand:
-1. What features/changes were planned
-2. The implementation requirements and acceptance criteria
+{diff_access}
 
 ## Your Task
-1. Read the plan file at the path above to understand requirements
-2. For EACH file in the "Files Changed" list, examine the actual diff using `git diff {base_ref} -- <file>`
+1. Read the plan (see Plan File above) to understand what features and changes were planned, and the implementation requirements and acceptance criteria
+2. For EACH file the scope manifest lists, examine its change in its diff file (under {diff_dir}). An entry with no diff file says why on its own line
 3. Compare the implementation against the plan requirements, and against the
    Implementation Record above — a difference the record explains is a decision
    to weigh, not an unexplained divergence, and work the record says was
@@ -57,6 +38,8 @@ Look for:
 - **Security issues**: Vulnerabilities, unsafe patterns
 - **Scope creep**: Code that goes beyond what was planned
 - **Quality issues**: Performance problems, code smells
+
+{working_limits}
 
 ## Output Format
 Return ONLY a valid JSON array with no additional text. Each issue must have this structure:

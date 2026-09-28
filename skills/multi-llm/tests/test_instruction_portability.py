@@ -231,7 +231,12 @@ PLACEHOLDER_MANIFEST = {
     # reading of the first poll because the first poll waits 120-300 s, and a
     # roster that reaches the user three minutes after launch is not a roster —
     # so `ask.md` moves this time too, where the poll row above left it alone.
-    "instructions/review-code.md": (0, 28),
+    #
+    # review-code.md 28 -> 30: the "If implementation ran outside `/multi-llm
+    # implement`" note carries the one `util finalize-tracking --only-touched`
+    # command an external implementer runs before the review (review-scope
+    # plan D2.6).
+    "instructions/review-code.md": (0, 30),
     "instructions/review-plan.md": (0, 30),
     "instructions/review-tasks.md": (0, 20),
     # The shared shim partials (D5). Authored once, interpolated into a rendered

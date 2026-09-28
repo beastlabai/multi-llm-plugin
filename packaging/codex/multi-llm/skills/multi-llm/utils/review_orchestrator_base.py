@@ -68,6 +68,10 @@ from .json_extractor import (
 )
 from .schema_validator import drop_non_record_entries
 from .llm_client import (
+    ERROR_TIMEOUT,
+    SALVAGE_FAILURE_KEY,
+    SALVAGE_FAILURE_TIMEOUT,
+    SALVAGE_TEXT_KEY,
     SANDBOX_BYPASSED,
     STDOUT_OUTPUT_LOCATION,
     sandbox_fallback_rung_of,
@@ -76,6 +80,7 @@ from .llm_client import (
     invoke_with_provider,
     invoke_with_file_output,
     render_output_location,
+    render_working_limits,
 )
 from .providers.base import (
     CATEGORY_CONNECTION_ERROR,
@@ -109,6 +114,7 @@ from .retry_ladder import (
 )
 from .git_utils import get_project_root
 from .html_report_generator import (
+    failed_models_line,
     generate_html_report,
     write_html_report,
     model_label,
@@ -1526,12 +1532,13 @@ def flip_map_entries_to_done(
     *models_map* in place and reports whether anything moved, so the caller can
     decide whether its write needs to carry a ``models`` key at all.
 
-    ``ended_at``/``elapsed_s`` are left exactly as the fan-out froze them **on
-    an entry that was already terminal**: that slot really did end when it
-    ended, and this is a later reading of the same slot's outcome, not a second
-    run of it. Only the verdict and its provenance move — and ``error`` is
-    popped, because it is terminal-and-failed-only and a ``done`` row carrying
-    one is the contradiction this whole function exists to remove.
+    ``ended_at``/``elapsed_s``/``queued_s`` are left exactly as the fan-out (or
+    an abort's close-out) froze them **on an entry that was already
+    terminal**: that slot really did end when it ended, and this is a later
+    reading of the same slot's outcome, not a second run of it. Only the
+    verdict and its provenance move — and ``error`` is popped, because it is
+    terminal-and-failed-only and a ``done`` row carrying one is the
+    contradiction this whole function exists to remove.
 
     **A non-terminal entry has no ending to preserve, so it is given one**
     (2026-09-21). A ``--reaggregate`` can meet a map that still holds a
@@ -1539,14 +1546,26 @@ def flip_map_entries_to_done(
     on the foreground lane, where neither the fan-out's sweep nor
     ``progress_tracker.retire_live_entries`` ever ran, or a hand-written file —
     and flipping that row to ``done`` while leaving ``ended_at`` absent leaves
-    ``entry_elapsed_s`` on its *live* branch forever: ``now - started_at``,
-    recomputed at every read, so the table renders a finished model whose clock
-    is still running and stops only when it hits the slot's own budget. So the
-    close-out here is the one :func:`progress_tracker.retire_live_entries`
-    performs for the same shape of row — ``ended_at`` now, ``elapsed_s`` frozen
-    from ``started_at`` by the read-time rule (clamped at the slot's budget),
-    on the wall clock because this process holds no monotonic origin for a slot
-    another process ran.
+    ``entry_elapsed_s`` on its *live* branch forever, recomputed at every read,
+    so the table renders a finished model whose clock is still running and
+    stops only when it hits the slot's own budget. So the row is closed out by
+    the dispatch-origin rule all three close-out writers share
+    (``FanoutProgress._freeze``, ``retire_live_entries`` and this), on the
+    wall clock because this process holds no monotonic origin for a slot
+    another process ran:
+
+    * a row that dispatched freezes ``elapsed_s`` as ``now - dispatched_at``
+      (clamped at the slot's budget) and ``queued_s`` as ``dispatched_at -
+      started_at``, because both stamps are exact;
+    * a row that never dispatched freezes ``elapsed_s: 0`` and **no**
+      ``queued_s``. Unlike ``retire_live_entries``, which runs at the real end
+      of the run, this can run hours after a killed run, so *now* is not when
+      the wait ended and its length is unknown. The rule reads ``state``, not
+      the absence of ``dispatched_at``, so a queued row in a map written before
+      that key existed lands at ``0`` too, rather than at the clamped budget it
+      used to (plan: review-run-scope-salvage-and-failure-visibility §6.2);
+    * a running row with no ``dispatched_at`` (such a map again) keeps the old
+      ``now - started_at`` and gains no ``queued_s``.
 
     **The two events do not share a ``source``, and that is the caller's to
     say.** ``run_status.SKIPPED_SOURCES`` / ``progress_tracker.RESUME_SOURCES``
@@ -1568,20 +1587,28 @@ def flip_map_entries_to_done(
         if entry.get("state") == _progress.STATE_DONE:
             continue
         if entry.get("state") not in _progress.TERMINAL_STATES:
-            # Read before `ended_at` is stamped, because the read-time rule keys
-            # on it: absent (the live row this branch exists for) gives
-            # `now - started_at`, present (only a hand-written row can be both
-            # non-terminal and ended) gives the value already frozen there, and
-            # either way what lands is a number that never moves again.
+            # Read before `ended_at` is stamped, because the read-time rules
+            # key on it: absent (the live row this branch exists for) gives the
+            # live figures, present (only a hand-written row can be both
+            # non-terminal and ended) gives the values already frozen there,
+            # and either way what lands is a number that never moves again.
             # `_seconds` is progress_tracker's one definition of how a duration
             # reaches the checkpoint — a bare int when integral, which a clamped
             # `1800.0` otherwise would not be.
             elapsed = _progress.entry_elapsed_s(entry)
+            # Only a dispatched row's wait has a known end; a never-dispatched
+            # row's `entry_queued_s` would be "until this reaggregate".
+            queued = (
+                _progress.entry_queued_s(entry)
+                if entry.get("dispatched_at") else None
+            )
             if not entry.get("ended_at"):
                 entry["ended_at"] = stamp
             entry["elapsed_s"] = (
                 _progress._seconds(round(elapsed, 1)) if elapsed is not None else 0
             )
+            if queued is not None:
+                entry["queued_s"] = _progress._seconds(round(queued, 1))
         entry["state"] = _progress.STATE_DONE
         entry["source"] = source
         entry["updated_at"] = stamp
@@ -2304,6 +2331,333 @@ def recorded_usage(phase_dir: str) -> Optional[Dict[str, Dict[str, Any]]]:
     return {
         spec: entry for spec, entry in recorded.items() if isinstance(entry, dict)
     } or None
+
+
+# ---------------------------------------------------------------------------
+# What a reaggregate says about the models that produced nothing
+# (plan: review-run-scope-salvage-and-failure-visibility §5)
+# ---------------------------------------------------------------------------
+
+#: The reason a reaggregate gives a requested model that has neither a result
+#: file nor a ``models_failed`` entry (its file removed by hand, a fan-out killed
+#: before it recorded outcomes). Named rather than dropped, so in "N of M
+#: requested" N is always M minus the models listed under ``**Models:**``.
+UNACCOUNTED_MODEL_REASON = "no result file and no recorded failure"
+
+#: The stdout line a reaggregate prints per model that is still failed, right
+#: after ``record_models_present``: the model and its stored reason, which is
+#: what ``references/summary-format.md`` tells a host to name.
+MODEL_FAILED_MARKER = "[MODEL_FAILED]"
+
+#: Stands in for an empty or missing stored reason, so the line never reads
+#: ``spec: `` with nothing after the colon.
+_NO_RECORDED_REASON = "no reason recorded"
+
+#: The three checkpoint fields whose union is the requested set.
+_REQUESTED_SET_FIELDS = ("models_requested", "models_completed", "models_failed")
+
+
+def _stored_reason(reason: Any) -> str:
+    text = "" if reason is None else str(reason)
+    return text if text.strip() else _NO_RECORDED_REASON
+
+
+def recorded_failed_models(phase_dir: str) -> Dict[str, str]:
+    """``.status.json``'s ``models_failed`` as ``{spec: reason}``, or ``{}``.
+
+    The third reader beside :func:`recorded_served_models` and
+    :func:`recorded_usage`, for the same reason: a per-model result file is a
+    bare list, so the one record of *why* a model produced nothing is the
+    checkpoint the fan-out wrote. Both reaggregates used to report no failure
+    at all — code-review's derived its map from ``results``, which holds only
+    models with a file, and the base hard-coded ``{}`` — so a reviewer that
+    timed out vanished from every report rebuilt after it.
+
+    Call it **after** :func:`record_models_present`, which moves a model whose
+    file has since appeared (a salvage, an out-of-band result) out of
+    ``models_failed``; read before, a recovered model would be named as
+    failed. A legacy list-shaped ``models_failed`` reads as specs with no
+    recorded reason, and anything else (absent, unreadable) as ``{}``.
+    """
+    try:
+        recorded = _status_file.read_status(str(phase_dir)).get("models_failed")
+    except Exception:  # noqa: BLE001 - read_status is documented not to raise
+        return {}
+    if isinstance(recorded, dict):
+        return {str(spec): _stored_reason(reason) for spec, reason in recorded.items()}
+    if isinstance(recorded, list):
+        return {str(spec): _NO_RECORDED_REASON for spec in recorded}
+    return {}
+
+
+def recorded_requested_models(
+    phase_dir: str, present_models: Optional[Sequence[str]] = None
+) -> Optional[List[str]]:
+    """The requested set a reaggregate counts "of M requested" against, or ``None``.
+
+    The union, in first-seen order, of ``.status.json``'s ``models_requested``,
+    ``models_completed`` and ``models_failed`` plus *present_models* (every
+    model with a result file on disk). Each fan-out rewrites all three fields
+    wholesale, so a model the latest run did not request is neither counted
+    nor named — unless its old result file is still here, in which case it is
+    loaded, recorded completed and counted on both sides, and the numbers
+    still add up.
+
+    **Never ``progress``.** A detached reaggregate's worker drops ``progress``
+    wholesale when it claims the dir, and ``progress.models_total`` is a bare
+    count that cannot be reconciled with the files; so a checkpoint that
+    predates ``progress.models`` reads exactly like one that has it.
+
+    A checkpoint that records none of the three fields returns ``None``, and
+    the caller then leaves ``requestedModels`` out rather than guessing it from
+    the files.
+    """
+    try:
+        status = _status_file.read_status(str(phase_dir))
+    except Exception:  # noqa: BLE001 - read_status is documented not to raise
+        return None
+    recorded = [
+        status.get(key) for key in _REQUESTED_SET_FIELDS
+        if isinstance(status.get(key), (list, dict))
+    ]
+    if not recorded:
+        return None
+    ordered: List[str] = []
+    seen = set()
+    for source in [*recorded, list(present_models or ())]:
+        for spec in source:
+            spec = str(spec)
+            if spec not in seen:
+                seen.add(spec)
+                ordered.append(spec)
+    return ordered
+
+
+def remaining_failed_models(
+    phase_dir: str, present_models: Optional[Sequence[str]] = None
+) -> Tuple[Dict[str, str], Optional[List[str]]]:
+    """``({spec: reason}, requested)``: every requested model with no result.
+
+    The recorded failures (:func:`recorded_failed_models`, minus any model
+    that has a file now), then every model of :func:`recorded_requested_models`
+    that has neither a file nor a recorded failure, under
+    :data:`UNACCOUNTED_MODEL_REASON`. This one map is what both reaggregates
+    print, name on the ``**Models failed:**`` line and put under
+    ``failedModels`` — gap models included — so the header, the page and the
+    host's summary say the same thing.
+
+    Args:
+        phase_dir: The phase directory.
+        present_models: The models with a readable result file. ``None`` reads
+            ``models_completed`` instead, for a caller that holds no file list
+            of its own (the consolidated report, which runs after a reaggregate
+            has reconciled that field with the files).
+    """
+    if present_models is None:
+        try:
+            completed = _status_file.read_status(str(phase_dir)).get(
+                "models_completed"
+            )
+        except Exception:  # noqa: BLE001 - read_status is documented not to raise
+            completed = None
+        present = [str(spec) for spec in completed] if isinstance(completed, list) else []
+    else:
+        present = [str(spec) for spec in present_models]
+    present_set = set(present)
+    requested = recorded_requested_models(phase_dir, present)
+    failures = {
+        spec: reason
+        for spec, reason in recorded_failed_models(phase_dir).items()
+        if spec not in present_set
+    }
+    for spec in requested or ():
+        if spec not in present_set and spec not in failures:
+            failures[spec] = UNACCOUNTED_MODEL_REASON
+    return failures, requested
+
+
+def _iso_stamp(value: Any) -> Optional[datetime]:
+    """An ISO-8601 checkpoint stamp as a ``datetime``, or ``None``."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        return datetime.fromisoformat(value.strip())
+    except ValueError:
+        return None
+
+
+def salvage_requested_this_attempt(phase_dir: str, model_spec: str) -> bool:
+    """Did this attempt ask for a salvage of *model_spec*?
+
+    The one answer both report builders use for the ``**Models failed:**``
+    line's salvage clause. The two invokers leave different evidence:
+
+    * **A live request**, ``salvage_{stem}.json``. The native lane's invoker
+      deletes it only after the reaggregate (``references/salvage-handling.md``),
+      and an executor salvage that failed with a retryable status keeps it.
+    * **A retired unrecoverable request**,
+      ``retired_salvage_{stem}.unrecoverable.*.json``. Under
+      ``--exec-subagents`` ``dispatch_salvage_tasks`` renames the pair
+      (:data:`RETIRE_UNRECOVERABLE`) before the fan-out writes its report, and
+      that name is also all a later ``--reaggregate`` finds. It counts only when
+      the request's own ``timestamp`` is not earlier than
+      ``.status.json.started_at`` — set by each fan-out's opening write — because
+      :func:`retire_salvage_artifacts` renames only live ``salvage_*`` names, so
+      a previous run's verdict survives the next attempt. A checkpoint without
+      ``started_at`` gets no clause from this route.
+
+    Never a ``.superseded.`` pair (a previous attempt's, retired when this one
+    began), and never ``subagent_batch_report.json``: the validation dispatch
+    that follows the salvage in the same phase dir writes the same bare name,
+    so the salvage verdict is usually gone by report time.
+    """
+    import glob as glob_module
+
+    phase_dir = str(phase_dir)
+    stem = sanitize_model_name(str(model_spec))
+    if os.path.exists(os.path.join(phase_dir, f"salvage_{stem}.json")):
+        return True
+    try:
+        started = _iso_stamp(_status_file.read_status(phase_dir).get("started_at"))
+    except Exception:  # noqa: BLE001 - read_status is documented not to raise
+        started = None
+    if started is None:
+        return False
+    pattern = os.path.join(
+        glob_module.escape(phase_dir),
+        f"retired_salvage_{glob_module.escape(stem)}.{RETIRE_UNRECOVERABLE}.*.json",
+    )
+    for path in sorted(glob_module.glob(pattern)):
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                request = json.load(handle)
+        except (OSError, ValueError):
+            continue
+        stamp = _iso_stamp(request.get("timestamp")) if isinstance(request, dict) else None
+        if stamp is None:
+            continue
+        try:
+            if stamp >= started:
+                return True
+        except TypeError:  # one stamp zone-aware, the other naive
+            continue
+    return False
+
+
+def salvage_requested_models(
+    phase_dir: Optional[str], models: Optional[Sequence[str]]
+) -> List[str]:
+    """The subset of *models* for which :func:`salvage_requested_this_attempt` holds."""
+    if not phase_dir:
+        return []
+    return [
+        str(spec) for spec in (models or ())
+        if salvage_requested_this_attempt(str(phase_dir), str(spec))
+    ]
+
+
+def record_failed_models_in_progress(phase_dir: str, failures: Dict[str, str]) -> bool:
+    """Write each still-failed model into ``progress.models`` as a ``failed`` row.
+
+    ``progress.models`` is the machine-readable record a host names failures
+    from (``cli_common.STATE_PARTIAL``; both Codex templates), and a detached
+    reaggregate's worker drops ``progress`` wholesale when it claims the dir —
+    so after such a run the source was empty while the result line said
+    ``partial``. A row already ``failed`` keeps the fan-out's own entry (its
+    timings and wording); any other row is moved to ``failed`` with the stored
+    reason, a live one frozen by the same read-time rule
+    :func:`flip_map_entries_to_done` uses; a missing row is added with no
+    clock, since this process never ran that slot. Counters are left alone.
+
+    Returns whether anything was written. The map is written whole, because
+    only a ``progress`` write carrying a ``models`` key replaces it.
+    """
+    if not failures:
+        return False
+    try:
+        progress = _status_file.read_status(str(phase_dir)).get("progress")
+    except Exception:  # noqa: BLE001 - read_status is documented not to raise
+        progress = None
+    existing = progress.get("models") if isinstance(progress, dict) else None
+    models_map: Dict[str, Any] = dict(existing) if isinstance(existing, dict) else {}
+    stamp = _status_file.now_iso()
+    changed = False
+    for spec, reason in failures.items():
+        entry = models_map.get(spec)
+        if isinstance(entry, dict) and entry.get("state") == _progress.STATE_FAILED:
+            continue
+        if isinstance(entry, dict):
+            row = dict(entry)
+            if row.get("state") not in _progress.TERMINAL_STATES:
+                elapsed = _progress.entry_elapsed_s(row)
+                if not row.get("ended_at"):
+                    row["ended_at"] = stamp
+                row["elapsed_s"] = (
+                    _progress._seconds(round(elapsed, 1)) if elapsed is not None else 0
+                )
+        else:
+            row = {"source": None}
+        row["state"] = _progress.STATE_FAILED
+        row["error"] = str(reason)
+        row["updated_at"] = stamp
+        models_map[spec] = row
+        changed = True
+    if changed:
+        _status_file.update_progress(str(phase_dir), {"models": models_map})
+    return changed
+
+
+def announce_remaining_failures(phase_dir: str, failures: Dict[str, str]) -> None:
+    """Name every model a reaggregate still has no result for, to the host.
+
+    One :data:`MODEL_FAILED_MARKER` line per model with its stored reason —
+    the reaggregate's own summary text, since after ``--reaggregate`` nothing
+    else said so (plan §5.1: no ``[PARTIAL_RESULTS]``, no failure section) —
+    and the same failures written into ``progress.models``
+    (:func:`record_failed_models_in_progress`). ``MULTI_LLM_RESULT.state`` and
+    the exit code are the completion path's to set, not this function's.
+    """
+    for spec, reason in failures.items():
+        one_line = " ".join(str(reason).splitlines())
+        print(f"{MODEL_FAILED_MARKER} {spec}: {one_line}")
+    record_failed_models_in_progress(phase_dir, failures)
+
+
+def exit_when_every_reviewer_failed(
+    phase_dir: str,
+    failures: Dict[str, str],
+    *,
+    mode: str,
+    plan_path: str,
+) -> None:
+    """A reaggregate with no readable result: exit 3 when reviewers failed.
+
+    Both reaggregates return early, before any report, when no model has a
+    readable result file. That used to be exit 0 with no phase recorded
+    completed. When ``.status.json.models_failed`` is non-empty — reviewers
+    were requested and every one failed — this is the fan-out's own zero-result
+    ending instead: :func:`unattended.report_partial_results` with no completed
+    model names the failures and the retry command and returns exit 3, needs a
+    human, and the phase is still not recorded completed (decision 11.11).
+
+    With no recorded failure (nothing was ever requested, or the dir was cleaned
+    by hand) it returns, and the caller keeps today's exit 0.
+    """
+    if not recorded_failed_models(phase_dir):
+        return
+    try:
+        stored_flags = _status_file.read_status(str(phase_dir)).get("replay_flags")
+    except Exception:  # noqa: BLE001 - read_status is documented not to raise
+        stored_flags = None
+    sys.exit(_unattended.report_partial_results(
+        completed=[],
+        failed=list(failures),
+        phase_dir=str(phase_dir),
+        retry_command=cli_common.retry_command(
+            mode, plan_path, "--force",
+            flags=cli_common.current_replay_flags(stored_flags, mode=mode),
+        ),
+    ))
 
 
 # The fan-out's own sandbox cache (`_FANOUT_SANDBOX_CACHE`, its lock and its
@@ -3297,11 +3651,13 @@ async def run_single_model(
         # `invoke_with_provider` parses off stdout — so the prompt asks for
         # stdout outright, for every provider. It used to interpolate the string
         # "(stdout)" into "Write your JSON output to this file:", which named a
-        # channel as if it were a path.
+        # channel as if it were a path. The working-limits minutes come from the
+        # same `int(effective_timeout)` the one dispatch below is handed.
         prompt = prompt_template.format(
             **full_prompt_context,
             output_json_path="(stdout)",
             output_location=STDOUT_OUTPUT_LOCATION,
+            working_limits=render_working_limits(int(effective_timeout)),
         )
         try:
             print(f"[{display_name}] Starting review (timeout: {effective_timeout}s)...")
@@ -3332,6 +3688,7 @@ async def run_single_model(
                 return {
                     "success": False, "output": None, "error": violation,
                     "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
+                    **salvage_text_fields(details),
                     "stderr": stderr_text, "duration_seconds": duration,
                     "model_spec": model_spec, "source": "stdout",
                     # The slot ran — bypassed, which is why it was checked at
@@ -3383,6 +3740,8 @@ async def run_single_model(
                     "error": result.get("error", "Unknown error"),
                     "prompt": prompt,
                     "stdout": details.get("stdout_excerpt", ""),
+                    **salvage_text_fields(details),
+                    **salvage_failure_fields(result),
                     "stderr": stderr_text,
                     "duration_seconds": duration,
                     "model_spec": model_spec,
@@ -3447,10 +3806,17 @@ async def run_single_model(
         # rule 4 can refuse this slot before any dispatch, and the result dict
         # still owes its caller a `prompt`. The output-location block is already
         # this provider's real one — it depends on the adapter, not on the path.
+        # The working-limits block names the slot's whole budget, rounded the way
+        # `attempt_timeout` is below. Not a slice: calling `next_attempt()` here
+        # would use up the first attempt, and nothing was sent yet anyway — every
+        # dispatched attempt re-renders this with its own `attempt_timeout`.
         prompt = prompt_template.format(
             **full_prompt_context,
             output_json_path="",
             output_location=render_output_location("", model_spec, anchor=plan_path),
+            working_limits=render_working_limits(
+                max(1, int(round(effective_timeout)))
+            ),
         )
 
         while (slice_s := ladder.next_attempt()) is not None:
@@ -3508,15 +3874,16 @@ async def run_single_model(
             output_file = result.get("output_file", "")
 
             # The prompt this attempt really sent, reconstructed for the record:
-            # `invoke_with_file_output` renders the same two values from the same
-            # spec, so this stays the text the child saw rather than a
-            # file-flavoured approximation of it.
+            # `invoke_with_file_output` renders the same three values from the
+            # same spec and the same `attempt_timeout`, so this stays the text
+            # the child saw rather than a file-flavoured approximation of it.
             prompt = prompt_template.format(
                 **full_prompt_context,
                 output_json_path=output_file,
                 output_location=render_output_location(
                     output_file, model_spec, anchor=plan_path
                 ),
+                working_limits=render_working_limits(attempt_timeout),
             )
 
             # Only for an attempt that answered — same rule as the code-review
@@ -3614,6 +3981,7 @@ async def run_single_model(
             return {
                 "success": False, "output": None, "error": violation,
                 "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
+                **salvage_text_fields(details),
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
@@ -3651,6 +4019,7 @@ async def run_single_model(
                 # same attempt `stderr_text` and `source` are taken from — so the
                 # three fields describe one run rather than three.
                 "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
+                **salvage_text_fields(details),
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
@@ -3676,6 +4045,7 @@ async def run_single_model(
                 # through a long array is the shape that matters: there is no
                 # second attempt to produce it again.
                 "prompt": prompt, "stdout": details.get("stdout_excerpt", ""),
+                **salvage_text_fields(details),
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
@@ -3724,6 +4094,12 @@ async def run_single_model(
                 # gated to False. It is reachable now because this line carries
                 # the evidence to it.
                 "stdout": details.get("stdout_excerpt", ""),
+                # The adapter's reduced answer text, when it has a reducer:
+                # `failure_output_from_result` gates on it ahead of `stdout`.
+                # And whether a deadline ended the run, which the salvage
+                # request records so a salvaged `[]` from it is refused.
+                **salvage_text_fields(details),
+                **salvage_failure_fields(result),
                 "stderr": stderr_text,
                 "duration_seconds": duration, "model_spec": model_spec,
                 "source": source,
@@ -4319,15 +4695,95 @@ async def run_all_models(
 # Result saving
 # ---------------------------------------------------------------------------
 
+def salvage_source(details: Dict[str, Any]) -> str:
+    """The text the salvage gate judges for one losing run — one rule, both lanes.
+
+    ``code_review_orchestrator.run_single_review``'s salvage site A calls it on
+    the invocation's ``details``, and :func:`failure_output_from_result` calls it
+    on the review-plan / review-tasks result dict, so the two gates cannot come
+    to disagree about which channel answers.
+
+    * **``details['salvage_text']`` present** (the adapter's
+      ``LLMProvider.salvage_text`` reduced its stream): that text, **even when
+      it is ``""``**. It never falls back to ``stdout_excerpt`` or stderr. A
+      stream adapter writes its answer into its stdout stream, so the raw
+      excerpt is event data whose ``content`` arrays pass
+      ``has_salvageable_json`` as findings (a reviewer killed mid-tool-call was
+      "salvaged" from its own ``thinking``/``toolCall`` parts), and its stderr
+      holds only diagnostics — which the gate also accepts when one is
+      array-shaped, e.g. ``{"error":"authentication failed","attempts":[]}``.
+      stderr keeps its other uses (the failure message, the log); it just
+      never reaches the gate once a reducer has spoken.
+    * **Absent** (no reducer applies — the hook returned ``None``): today's
+      order, ``stdout_excerpt`` first and stderr second (see
+      :func:`failure_output_from_result` for why stdout wins and the two are
+      never concatenated).
+
+    Whatever this returns is also the request's ``raw_output``: the text a
+    salvage subagent is asked to repair is the text the gate decided on.
+
+    (plan: review-run-scope-salvage-and-failure-visibility §4, D4.3.)
+    """
+    if SALVAGE_TEXT_KEY in details:
+        text = details.get(SALVAGE_TEXT_KEY)
+        return text if isinstance(text, str) else ""
+    return details.get("stdout_excerpt") or details.get("stderr") or ""
+
+
+def salvage_text_fields(details: Dict[str, Any]) -> Dict[str, Any]:
+    """``{"salvage_text": …}`` when ``details`` carries it, else ``{}``.
+
+    Spread into every losing result dict :func:`run_single_model` builds from a
+    child's ``details``, so :func:`failure_output_from_result` can apply
+    :func:`salvage_source`'s rule. Copied **only when present**: an absent key
+    ("no reducer applies") and ``""`` ("the reducer found nothing") are
+    different verdicts, and a dict that always carried the key would turn the
+    first into the second.
+    """
+    if SALVAGE_TEXT_KEY in details:
+        return {SALVAGE_TEXT_KEY: details[SALVAGE_TEXT_KEY]}
+    return {}
+
+
+def salvage_failure_kind(result: Dict[str, Any]) -> Optional[str]:
+    """``"timeout"`` when an invocation result was lost to a deadline, else ``None``.
+
+    Read off the invocation's ``error_code``: ``ERROR_TIMEOUT`` is set by the
+    harness's own kill and by an adapter whose stream says the run was cut by
+    its deadline (pi/omp's ``toolUse``/``aborted`` final message). A salvage
+    request records it as ``"failure": "timeout"``, and the executor then
+    refuses a salvaged ``[]`` from that run (D4.5, decision 11.10): a reviewer
+    killed mid-review never reported an empty review.
+    """
+    if result.get("error_code") == ERROR_TIMEOUT:
+        return SALVAGE_FAILURE_TIMEOUT
+    return None
+
+
+def salvage_failure_fields(result: Dict[str, Any]) -> Dict[str, Any]:
+    """``{"failure": "timeout"}`` for a timed-out invocation result, else ``{}``.
+
+    Spread into :func:`run_single_model`'s losing result dicts beside
+    :func:`salvage_text_fields`, so ``save_model_result`` can stamp the kind on
+    the salvage request it writes.
+    """
+    kind = salvage_failure_kind(result)
+    return {SALVAGE_FAILURE_KEY: kind} if kind else {}
+
+
 def failure_output_from_result(result: Dict[str, Any]) -> str:
-    """The text a losing run left behind, stdout first and stderr second.
+    """The text a losing run left behind, for the salvage gate.
+
+    :func:`salvage_source`'s rule applied to a review-plan / review-tasks result
+    dict: the adapter's reduced ``salvage_text`` when the dict carries it (even
+    ``""``), otherwise stdout first and stderr second.
 
     One rule, one place. ``code_review_orchestrator.run_single_review``'s
-    salvage site A states the same precedence for the ``review-code`` fan-out —
-    ``if details.get("stdout_excerpt") … elif details.get("stderr")`` — and this
-    is that rule for the ``review-plan`` / ``review-tasks`` fan-out, whose result
-    dicts have already flattened those two ``details`` keys into ``stdout`` and
-    ``stderr`` by the time :func:`run_single_model` returns. Two lanes, two
+    salvage site A applies the same :func:`salvage_source` to the
+    ``review-code`` fan-out's ``details``, and this is that rule for the
+    ``review-plan`` / ``review-tasks`` fan-out, whose result dicts have already
+    flattened those ``details`` keys into ``stdout``, ``stderr`` and
+    ``salvage_text`` by the time :func:`run_single_model` returns. Two lanes, two
     plumbing shapes, one sentence about which channel answers first; spelling it
     twice in two paraphrases is how the two lanes would come to disagree without
     anybody editing either.
@@ -4357,12 +4813,18 @@ def failure_output_from_result(result: Dict[str, Any]) -> str:
         result: One model's entry from :func:`run_all_models`.
 
     Returns:
-        The first non-empty of ``stdout`` then ``stderr``, or ``""``. On a run
+        ``result["salvage_text"]`` when present (``""`` included); otherwise the
+        first non-empty of ``stdout`` then ``stderr``, or ``""``. On a run
         that *succeeded* ``stdout`` is the answer itself, which is harmless:
         :func:`save_model_result` only consults this value on the branch where
         there is no usable ``output`` to parse.
     """
-    return result.get("stdout") or result.get("stderr") or ""
+    source: Dict[str, Any] = {
+        "stdout_excerpt": result.get("stdout"),
+        "stderr": result.get("stderr"),
+    }
+    source.update(salvage_text_fields(result))
+    return salvage_source(source)
 
 
 def _write_salvage_request(
@@ -4372,6 +4834,7 @@ def _write_salvage_request(
     raw_output: str,
     phase_dir: str,
     phase_name: str,
+    failure: Optional[str] = None,
 ) -> str:
     """Write one model's salvage request **and** its task file, and announce both.
 
@@ -4405,6 +4868,11 @@ def _write_salvage_request(
             be written for evidence nobody ever saw.
         phase_dir: Where the pair lands.
         phase_name: Salvage metadata phase (``review_plan`` / ``review_tasks``).
+        failure: How the run was lost, when that decides what a salvage may
+            return: ``"timeout"`` (:func:`salvage_failure_kind`) is recorded as
+            the request's ``"failure"`` key, and a salvaged ``[]`` from such a
+            run is then refused rather than written as a clean review. ``None``
+            (a run that finished, or failed another way) records nothing.
 
     Returns:
         The path of the salvage request.
@@ -4422,6 +4890,8 @@ def _write_salvage_request(
         "output_path": os.path.join(phase_dir, f"{sanitized_model}.json"),
         "timestamp": datetime.now().isoformat()
     }
+    if failure == SALVAGE_FAILURE_TIMEOUT:
+        salvage_request[SALVAGE_FAILURE_KEY] = SALVAGE_FAILURE_TIMEOUT
     salvage_path = os.path.join(phase_dir, f"salvage_{sanitized_model}.json")
     with open(salvage_path, 'w', encoding='utf-8') as f:
         json.dump(salvage_request, f, indent=2)
@@ -4453,6 +4923,7 @@ def save_model_result(
     phase_name: str,
     *,
     failure_output: Optional[str] = None,
+    failure: Optional[str] = None,
 ) -> bool:
     """Save model result to appropriate file.
 
@@ -4489,6 +4960,11 @@ def save_model_result(
             untouched and keeps today's behaviour exactly. Production callers
             build it with :func:`failure_output_from_result`, which owns the
             stdout-then-stderr precedence.
+        failure: Keyword-only, the losing run's kind (the result dict's
+            ``"failure"`` key, set by :func:`salvage_failure_fields`). Passed to
+            the hard-failure branch's salvage request only, so a salvaged ``[]``
+            from a timed-out run is refused; a completed run's parse failure
+            never carries one.
 
     Returns:
         True if result was saved successfully, False otherwise. A salvage request
@@ -4531,6 +5007,7 @@ def save_model_result(
                 raw_output=failure_output or "",
                 phase_dir=phase_dir,
                 phase_name=phase_name,
+                failure=failure,
             )
 
         error_path = os.path.join(phase_dir, f"error_{sanitized_model}.log")
@@ -4651,6 +5128,7 @@ def aggregate_results(
     diff_data: Optional[Dict] = None,
     served_models: Optional[Dict[str, Dict[str, Any]]] = None,
     usage: Optional[Dict[str, Dict[str, Any]]] = None,
+    requested_models: Optional[int] = None,
 ) -> str:
     """Aggregate all model results into a consolidated markdown report.
 
@@ -4660,7 +5138,16 @@ def aggregate_results(
         phase_dir: Phase-specific directory for output files
         phase_name: Phase type for HTML report (e.g., 'review-plan', 'review-tasks')
         models: List of all models used
-        failed_models: Dict of model -> error for failed models
+        failed_models: Dict of model -> error for failed models. Named on a
+            ``**Models failed:**`` line directly under ``**Models:**``
+            (:func:`~utils.html_report_generator.failed_models_line`, with the
+            salvage clause from :func:`salvage_requested_models`), in the HTML
+            report's warning notice and failure row, and in the ``## Models
+            Failed`` section at the bottom.
+        requested_models: The size of the requested set, for "N of M
+            requested": the fan-out's ``len(model_specs)``, a reaggregate's
+            :func:`recorded_requested_models`. ``None`` states the count alone
+            and leaves ``requestedModels`` out of the HTML report data.
         validated_groups: Optional list of validated suggestion groups
         plan_path: Optional path to the plan file for HTML report
         base_ref: Optional git ref for PR-style diff context (forwarded to
@@ -4732,6 +5219,18 @@ def aggregate_results(
         # `**Model:**` field in the code-review report repeats per finding and
         # keeps the bare attribution label.)
         f"**Models:** {', '.join(model_label(m, served_models, usage) for m in successful_models)}",
+    ]
+    # The models that produced nothing, directly under the ones that did — the
+    # bottom `## Models Failed` section alone left a lost reviewer below the
+    # fold, and a reaggregate never wrote it. The same salvage answer goes to
+    # the HTML notice below, so the two surfaces render one string.
+    salvage_requested = salvage_requested_models(phase_dir, list(failed_models or {}))
+    failure_line = failed_models_line(
+        failed_models, requested_models, salvage_requested
+    )
+    if failure_line:
+        report_lines.append(failure_line)
+    report_lines += [
         f"**Groups:** {len(groups_to_display) if groups_to_display else 0}",
         f"**Suggestions:** {high_count} HIGH, {medium_count} MEDIUM, {low_count} LOW ({total_suggestions} total)",
     ]
@@ -4796,6 +5295,8 @@ def aggregate_results(
             diff_data=diff_data,
             served_models=served_models,
             usage=usage,
+            requested_models=requested_models,
+            salvage_requested=salvage_requested,
         )
         write_html_report(html_content, Path(phase_dir))
         print(f"HTML report written to: {os.path.join(phase_dir, 'report.html')}")
@@ -5224,8 +5725,19 @@ async def reaggregate_from_existing_files(
         if not any(os.path.basename(f).startswith(ex) or ex in os.path.basename(f) for ex in exclude_patterns)
     ]
 
+    # The mode word a zero-result exit names in its `--force` retry command.
+    reaggregate_mode = _modes().mode_for_script(orchestrator_script) or phase_name
+
     if not result_files:
         print(f"No model result files found in: {phase_dir}")
+        # Decision 11.11 (T5.4c): nothing to aggregate because every requested
+        # reviewer failed is the fan-out's exit 3 naming them, not a quiet
+        # exit 0; with no recorded failure it stays exit 0.
+        no_results, _requested = remaining_failed_models(phase_dir, [])
+        announce_remaining_failures(phase_dir, no_results)
+        exit_when_every_reviewer_failed(
+            phase_dir, no_results, mode=reaggregate_mode, plan_path=plan_path,
+        )
         return
 
     # T5, the lane with no fan-out at all: a `--reaggregate` invocation's whole
@@ -5284,7 +5796,18 @@ async def reaggregate_from_existing_files(
         for model in record_models_present(phase_dir, sorted(models_found)):
             print(f"[{model}] result file present; recorded as completed (was failed)")
 
-        if not all_suggestions:
+        # Plan §5 (T5.1/T5.4a): read back only now, after the reconciliation
+        # above moved every model with a file out of `models_failed`. What is
+        # left — plus any requested model with neither a file nor a recorded
+        # failure — is named here, on every ending below, and in the report.
+        failed_models_map, requested_set = remaining_failed_models(
+            phase_dir, sorted(models_found)
+        )
+        announce_remaining_failures(phase_dir, failed_models_map)
+
+        # No readable result at all (no result file on disk could be read). Only
+        # this case returns early; `all_suggestions` is necessarily empty here.
+        if not models_found:
             print("No suggestions to aggregate.")
             # §7.2a: zero groups is a recount too — clear what an earlier
             # round recommended.
@@ -5294,7 +5817,20 @@ async def reaggregate_from_existing_files(
             # §6 T6.1: and the verdict counts, which no report rebuild will
             # reach on this early return.
             record_validation_counts(str(phase_dir), [])
+            # T5.4c: no readable result at all, and reviewers recorded failed:
+            # exit 3 like the fan-out; with no recorded failure, exit 0.
+            exit_when_every_reviewer_failed(
+                phase_dir, failed_models_map,
+                mode=reaggregate_mode, plan_path=plan_path,
+            )
             return
+        # Readable results that hold no findings (`[]` from every model that
+        # answered) are a finished review with zero groups, not "nothing to
+        # aggregate": they go through the same report rebuild, partial-results
+        # report and completion below as any other reaggregate. Returning here
+        # used to leave a reviewer that failed beside a clean `[]` out of
+        # report.md, off `[PARTIAL_RESULTS]`, and the phase unrecorded, while
+        # the invocation still ended `done`.
 
         # Group similar suggestions - preserve existing groups if validation exists
         grouped_path = os.path.join(phase_dir, "grouped.json")
@@ -5306,7 +5842,14 @@ async def reaggregate_from_existing_files(
             os.path.exists(validation_tasks_path_check)
         )
 
-        reuse_bound_grouping = has_existing_validation and os.path.exists(grouped_path)
+        # Zero findings bind nothing: a grouped.json on disk belongs to an
+        # earlier round's findings, so it is rewritten (to zero groups) rather
+        # than reused, as code-review's reaggregate does.
+        reuse_bound_grouping = (
+            bool(all_suggestions)
+            and has_existing_validation
+            and os.path.exists(grouped_path)
+        )
         if reuse_bound_grouping:
             with open(grouped_path, 'r', encoding='utf-8') as f:
                 raw_data = json.load(f)
@@ -5384,7 +5927,12 @@ async def reaggregate_from_existing_files(
                 retire_stale_validation(phase_dir, reason=stale_reason)
                 honour_validation_file = False
 
-        if honour_validation_file:
+        if not grouped:
+            # Zero groups: nothing to validate, and no round to materialize,
+            # merge or resume — a leftover validation_tasks.json is bound to the
+            # grouping just rewritten and must not be read against it.
+            validated_groups_for_report = []
+        elif honour_validation_file:
             # §2.3 step 5 / 2.9 apply to reused verdicts too, not only to the
             # batch-merge branch below: a merged validation.json whose batch
             # hashes still match says nothing about the snapshots its prompts
@@ -5642,9 +6190,10 @@ async def reaggregate_from_existing_files(
         else:
             print("\nSkipping validation (--skip-validation flag set)")
 
-        # Build list of successful models
+        # Build list of successful models. The failure map is the one read back
+        # above (after `record_models_present`) — this used to hard-code `{}`,
+        # so a reaggregated report never named a model that produced nothing.
         successful_models = list(models_found)
-        failed_models_map: Dict[str, str] = {}
 
         # Generate report. `served_models` is what the fan-out recorded in the
         # checkpoint (§3.6's attribution and the D6 override's `sandbox: bypassed`,
@@ -5662,6 +6211,11 @@ async def reaggregate_from_existing_files(
             # …and what it spent, read back off the same checkpoint for the same
             # reason: the per-model files never held it.
             usage=recorded_usage(phase_dir),
+            # The denominator of "N of M requested": the recorded requested set,
+            # never `progress` (a detached worker's claim drops it).
+            requested_models=(
+                len(requested_set) if requested_set is not None else None
+            ),
         )
 
         print("\nReaggregation complete!")
@@ -5683,6 +6237,20 @@ async def reaggregate_from_existing_files(
             recompute_consolidation_recommendation(
                 str(phase_dir), validated_groups_for_report, args, supports_consolidation,
             )
+
+        # T5.4b (decision 11.11): a reaggregate that still lacks some models
+        # reports `[PARTIAL_RESULTS: …]` and `state: "partial"` (exit 0), as
+        # the fan-out does — the host's cue to name them from
+        # `progress.models`. `unattended=False`: the `[AUTO_RESOLVED]` record
+        # that call writes names the fan-out's in-process continuation, never a
+        # separate `--reaggregate`. The phase is still recorded completed below
+        # and no `next` is recorded, so the result line keeps `next: null`.
+        _unattended.report_partial_results(
+            completed=sorted(models_found),
+            failed=list(failed_models_map),
+            phase_dir=str(phase_dir),
+            unattended=False,
+        )
 
         # Mark phase complete
         state = get_or_create_state(Path(plan_path))
@@ -6107,6 +6675,7 @@ async def run_review_orchestration(
             prefix, model_spec, success, output, error, out_dir, phase_dir,
             salvage_phase_name,
             failure_output=failure_output_from_result(result),
+            failure=result.get(SALVAGE_FAILURE_KEY),
         ):
             failed_models[model_spec] = error or "Unknown error"
 
@@ -6190,8 +6759,17 @@ async def run_review_orchestration(
         # run whose every slot was failed (the porcelain check on a bypassed
         # slot is one way) still ran those slots without a sandbox: the durable
         # record says so (2026-09-25), as `progress.sandbox_bypassed` already did.
-        if served_models:
-            update_status(phase_dir, {"models_served": served_models})
+        # The failure map is recorded too (plan
+        # review-run-scope-salvage-and-failure-visibility, D5.2): a later
+        # `--reaggregate` of this dir reads `models_failed` back to name each
+        # loss and to exit 3 when every requested reviewer failed. Without it
+        # that reaggregate would find no recorded failure and name the models
+        # only with the "no result file" gap reason, at exit 0.
+        update_status(phase_dir, {
+            "models_completed": [],
+            "models_failed": failed_models,
+            **({"models_served": served_models} if served_models else {}),
+        })
         print("\nERROR: All models failed")
         for model_spec, reason in failed_models.items():
             print(f"  - {model_spec}: {reason}")
@@ -6468,6 +7046,8 @@ async def run_review_orchestration(
             diff_data=diff_data,
             served_models=served_models or None,
             usage=usage or None,
+            # Plan §5 T5.2: "N of M requested" counts this fan-out's own specs.
+            requested_models=len(model_specs),
         )
 
         # Handle consolidation recommendation (only for phases that support it).
