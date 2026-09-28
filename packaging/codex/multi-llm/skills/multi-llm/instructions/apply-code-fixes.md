@@ -105,7 +105,7 @@ plans/todo/my-feature/
 
 These options reduce manual review for items with `needs-human-decision` status:
 
-- `--agent-decide`: Let the judge agent evaluate each `needs-human-decision` fix with its own judgment instead of prompting you — the host's own agent on hosts with native subagents, or `driver.subagent_runner` under `--exec-subagents`. This is the non-interactive equivalent of choosing "Let the agent decide" in the review prompt. Unlike the blanket flags below, it is a **per-item** judgment that **salvages partially-valid fixes** (trims them to their worthwhile core and applies that) rather than skipping them wholesale; only fixes with nothing worthwhile are skipped (see "Let the Agent Decide" Mode in `references/human-decision-batch.md`). It does **not** bypass the no-selection confirmation for valid fixes — combine with `--no-confirm` for fully unattended runs. `--claude-decide` / `--let-claude-decide` are accepted legacy spellings.
+- `--agent-decide`: Let the judge agent evaluate each `needs-human-decision` fix with its own judgment instead of prompting you — the host's own agent on hosts with native subagents, or under `--exec-subagents` the model your session is running on (e.g. `codex:<chat model>` on Codex). An explicit `driver.subagent_runner` overrides the session model, and the host's floor runner (`codex:gpt-6-astra` on Codex) is used only when neither is available (see `references/human-decision-batch.md`). This is the non-interactive equivalent of choosing "Let the agent decide" in the review prompt. Unlike the blanket flags below, it is a **per-item** judgment that **salvages partially-valid fixes** (trims them to their worthwhile core and applies that) rather than skipping them wholesale; only fixes with nothing worthwhile are skipped (see "Let the Agent Decide" Mode in `references/human-decision-batch.md`). It does **not** bypass the no-selection confirmation for valid fixes — combine with `--no-confirm` for fully unattended runs. `--claude-decide` / `--let-claude-decide` are accepted legacy spellings.
 - `--approve-all-low`: Auto-approve all LOW importance items
 - `--approve-all`: Auto-approve ALL items (requires `--yes` or `--force`)
 - `--skip-all-human`: Skip all `needs-human-decision` and `validation_failed` items
@@ -434,11 +434,11 @@ same path the *Output Files* tree above lists, and the same one the
 **Subagent**: general-purpose
 ...
 
-## Decided by the judge agent
+## Decided by the judge agent (N)
 
 judge: {judge}
 
-Fixes whose decision was offloaded to the judge agent — via `--agent-decide`, the batch "Let the agent decide" option, or a per-item "Let the agent decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `claude_auto_decide` or `claude_auto_decide_salvage`. Omit this section if there are none. `{judge}` is the runner spec that actually judged (e.g. `codex:gpt-6-astra` under `--exec-subagents`), or the host agent on a host with native subagents.
+Fixes whose decision was offloaded to the judge agent — via `--agent-decide`, the batch "Let the agent decide" option, or a per-item "Let the agent decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `claude_auto_decide` or `claude_auto_decide_salvage`. Omit this section if there are none. `{judge}` is the runner spec that actually judged (e.g. `codex:<chat model>`, the session model, under `--exec-subagents` on Codex — or an explicit `driver.subagent_runner` override, or the `codex:gpt-6-astra` host floor when that is what resolved), or the host agent on a host with native subagents.
 
 ### [Fix Title] ({importance}) — Approved
 **Reason**: {reason}

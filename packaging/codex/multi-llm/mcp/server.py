@@ -1395,16 +1395,29 @@ class Server:
         """D9 layer 2: this turn's model for the ladder's ``session`` rung, or ``None``.
 
         Per call, because ``os.environ`` outlives the call: a turn naming no
-        usable model gets back exactly what codex forwarded.
+        usable model gets back exactly what codex forwarded. A model the turn
+        did name but ``SESSION_MODEL_PATTERN`` refused (``gpt-oss:20b`` under
+        ``codex --oss``) is logged by value, so the fallback is never silent.
         """
         name = self.surface["dispatcher"]["session_model_env"]
         model = session_model(call.meta)
         if model is not None:
             os.environ[name] = model
-        elif name in self.layer1:
+            return model
+        if name in self.layer1:
             os.environ[name] = self.layer1[name]
         else:
             os.environ.pop(name, None)
+        refused = turn_metadata(call.meta).get(TURN_METADATA_MODEL)
+        if refused is not None:
+            shown = json.dumps(refused)
+            if len(shown) > 80:
+                shown = shown[:77] + "..."
+            self.record_choice(
+                "turn-metadata model {} refused (not a plain model id); {}".format(
+                    shown, "the session rung keeps the forwarded " + name
+                    if name in self.layer1
+                    else "the subagent runner falls back past the session rung"))
         return model
 
     def find_shell(self):

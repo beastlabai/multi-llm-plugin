@@ -837,8 +837,12 @@ class TestTheJudgeIsNamed:
         assert native_judge_label(None) == "host agent"
 
     @pytest.mark.parametrize("executor_flag", ["exec_subagents", "detach"])
-    def test_unrecorded_executor_is_not_credited_to_the_host(self, tmp_path, capsys,
-                                                           executor_flag):
+    def test_a_verdict_on_disk_before_the_dispatch_is_unrecorded(
+        self, tmp_path, capsys, executor_flag
+    ):
+        """The executor leg ingests once before it dispatches. A file already
+        there (a `--resume`, a Codex retry) may be a native host agent's, so
+        without provenance it is credited to neither the host nor the executor."""
         orch, phase_dir = TestOrchestratorHook._orchestrator(self, tmp_path)
         orch.args.host = "codex"
         setattr(orch.args, executor_flag, True)
@@ -846,9 +850,41 @@ class TestTheJudgeIsNamed:
         _write_verdicts(phase_dir, 0, [_verdict(GROUP_A, DECISION_APPROVE)])
         orch._handle_human_decisions()
         record = orch.state.get_human_decision("apply-suggestions", GROUP_A)
-        assert record["batch_context"]["judge"] == "executor (runner unrecorded)"
-        assert orch.valid[0]["judge"] == "executor (runner unrecorded)"
-        assert "executor (runner unrecorded)" in capsys.readouterr().err
+        assert record["batch_context"]["judge"] == "unrecorded"
+        assert orch.valid[0]["judge"] == "unrecorded"
+        err = capsys.readouterr().err
+        assert "Ingested judge decisions (unrecorded)" in err
+        assert "codex host agent" not in err
+
+    def test_only_a_group_this_invocation_dispatched_is_the_executors(
+        self, tmp_path, monkeypatch
+    ):
+        """Post-dispatch, a verdict with no matching provenance is still an
+        executor's work — but only for the groups that dispatch covered; the
+        re-ingest must not relabel a verdict that predates it."""
+        import utils.review_orchestrator_base as review_base
+
+        orch, phase_dir = TestOrchestratorHook._orchestrator(self, tmp_path)
+        orch.args.host = "codex"
+        orch.args.exec_subagents = True
+        orch.needs_human = [_group(GROUP_A), _group(GROUP_B)]
+        _write_verdicts(phase_dir, 0, [_verdict(GROUP_A, DECISION_APPROVE)])
+
+        def fake_dispatch(*_args, **_kwargs):
+            _write_verdicts(phase_dir, 1, [_verdict(GROUP_B, DECISION_SKIP)])
+            return True
+
+        monkeypatch.setattr(review_base, "dispatch_subagent_tasks", fake_dispatch)
+        orch._handle_human_decisions()
+
+        def judge(group_id):
+            record = orch.state.get_human_decision("apply-suggestions", group_id)
+            return record["batch_context"]["judge"]
+
+        assert judge(GROUP_A) == "unrecorded"
+        assert judge(GROUP_B) == "executor (runner unrecorded)"
+        assert [g["judge"] for g in orch.valid] == ["unrecorded"]
+        assert [g["judge"] for g in orch.skipped] == ["executor (runner unrecorded)"]
 
     def test_the_orchestrator_threads_the_runner_to_ingestion(self, tmp_path, capsys):
         orch, phase_dir = TestOrchestratorHook._orchestrator(self, tmp_path)

@@ -29,6 +29,7 @@ from typing import (
     Generic,
     List,
     Optional,
+    Sequence,
     Set,
     Tuple,
     TypeVar,
@@ -1619,7 +1620,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         ):
             return
 
-        ingest, remaining = self._ingest_judge_verdicts(scope, phase_dir, expected_ids)
+        ingest, remaining = self._ingest_judge_verdicts(
+            scope, phase_dir, expected_ids,
+            dispatched_ids=[group_id_of(g) for g in remaining],
+        )
         if remaining and getattr(self.args, "yes", False):
             self._skip_unjudged(remaining)
 
@@ -1648,6 +1652,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         scope: List[Dict[str, Any]],
         phase_dir: str,
         expected_ids: List[str],
+        dispatched_ids: Sequence[str] = (),
     ) -> Tuple[Any, List[Dict[str, Any]]]:
         """Read, record and apply every verdict file present. Returns the leftovers.
 
@@ -1655,6 +1660,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         reaches it once (the driving agent persisted the files before re-invoking)
         and the executor path reaches it twice — before dispatching, and again
         after — which is what closes the loop in one invocation.
+
+        *dispatched_ids* is the set of groups this invocation's executor just
+        judged; it is empty on the pre-dispatch pass. Only those groups may fall
+        back to ``executor (runner unrecorded)`` when the executor's provenance
+        does not cover their file.
         """
         ingest = ingest_verdicts(phase_dir=phase_dir, expected_group_ids=expected_ids)
         for message in ingest.errors:
@@ -1670,13 +1680,32 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             items_by_group = {
                 group_id_of(g): judge_item_from_group(g) for g in scope
             }
-            fallback_judge = (
-                "executor (runner unrecorded)"
-                if (getattr(self.args, "exec_subagents", False)
-                    or getattr(self.args, "detach", False))
-                else native_judge_label(self._host_id())
-            )
-            judges = judge_labels(phase_dir, ingest.sources, fallback=fallback_judge)
+            if (getattr(self.args, "exec_subagents", False)
+                    or getattr(self.args, "detach", False)):
+                # A verdict file already on disk before this invocation
+                # dispatched (a `--resume`, a Codex retry) may have been written
+                # by a native host agent, so without matching provenance neither
+                # the runner nor "executor" is known: it is just unrecorded. Only
+                # the groups this invocation dispatched are an executor's work.
+                dispatched = set(dispatched_ids)
+                fallback_judge = "unrecorded"
+                judges = judge_labels(
+                    phase_dir,
+                    {gid: path for gid, path in ingest.sources.items()
+                     if gid not in dispatched},
+                    fallback=fallback_judge,
+                )
+                judges.update(judge_labels(
+                    phase_dir,
+                    {gid: path for gid, path in ingest.sources.items()
+                     if gid in dispatched},
+                    fallback="executor (runner unrecorded)",
+                ))
+            else:
+                fallback_judge = native_judge_label(self._host_id())
+                judges = judge_labels(
+                    phase_dir, ingest.sources, fallback=fallback_judge
+                )
             if self.state is not None:
                 record_verdicts(
                     state=self.state,
@@ -2470,7 +2499,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             f"- Batches processed: {len(ok)}/{len(outcomes)}",
             f"- {nouns.capitalize()} applied: {item_counts['applied']}",
             f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
-            f"- Decided by the judge subagent: {len(decided)}",
+            f"- Decided by the judge agent: {len(decided)}",
         ]
         if item_counts["no-op"]:
             lines.append(f"- {nouns.capitalize()} needing no changes: {item_counts['no-op']}")
