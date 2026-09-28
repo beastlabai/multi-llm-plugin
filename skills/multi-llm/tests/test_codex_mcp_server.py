@@ -1306,6 +1306,30 @@ class TestChildEnvironment:
         assert calls and {c["env"][self.SESSION_ENV] for c in calls} == {None}
         assert "session_model" not in envelope
 
+    REFUSED = "refused (not a plain model id)"
+
+    def test_a_refused_model_is_named_in_one_log_line(self, harness):
+        """A colon id (``codex --oss``) falls back visibly, not silently."""
+        _, _, _, client = harness.run(REVIEW, [launch_step(), poll_step(0)],
+                                      meta=turn_meta(model="gpt-oss:20b"))
+        lines = [line for line in client.stderr.splitlines() if self.REFUSED in line]
+        assert len(lines) == 1
+        assert '"gpt-oss:20b"' in lines[0]
+        assert "falls back past the session rung" in lines[0]
+        assert any('"gpt-oss:20b"' in n["params"]["data"] for n in client.notifications
+                   if n["method"] == "notifications/message")
+        _, _, _, client = harness.run(REVIEW, [launch_step(), poll_step(0)],
+                                      meta=turn_meta(model="gpt-oss:20b"),
+                                      extra_env={self.SESSION_ENV: "from-env"})
+        assert "keeps the forwarded " + self.SESSION_ENV in client.stderr
+
+    @pytest.mark.parametrize("value", [_ABSENT, None, "gpt-5.5"],
+                             ids=["absent", "null", "usable"])
+    def test_an_absent_or_usable_model_logs_nothing(self, harness, value):
+        _, _, _, client = harness.run(REVIEW, [launch_step(), poll_step(0)],
+                                      meta=turn_meta(model=value))
+        assert self.REFUSED not in client.stderr
+
     def test_malformed_turn_metadata_sets_nothing(self, harness):
         _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
                                      meta={"x-codex-turn-metadata": "not json"})

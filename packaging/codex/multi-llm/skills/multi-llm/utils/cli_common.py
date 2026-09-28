@@ -258,11 +258,15 @@ def retry_command(
     retry verb(s) — ``--force``, ``--reaggregate``, ``--rerun-all``,
     ``--reaggregate-consolidation``. *flags* is the replay list
     (:func:`replay_flags`, or a document's stored ``replay_flags``); it is
-    spliced in **behind the positionals and ahead of the verbs**, verbatim,
-    minus every retry verb it already carried, so ``--quick`` survives a retry
-    and ``--force`` never doubles. With no flags the output is byte-identical
-    to ``dispatcher_command(mode, *args)``, which is what every pre-D2 test
-    pins.
+    spliced in **behind the positionals and ahead of the verbs**, verbatim
+    except for two edits: every retry verb it already carried is stripped, so
+    ``--quick`` survives a retry and ``--force`` never doubles; and every judge
+    spelling (``--claude-decide``, ``--let-claude-decide``) is folded onto
+    ``--agent-decide`` and emitted once (:func:`fold_judge_flag`). A verb that
+    is itself a judge spelling is canonicalized the same way, and drops every
+    recorded spelling from the replay list so the flag appears only among the
+    verbs. With no flags the output is byte-identical to
+    ``dispatcher_command(mode, *args)``, which is what every pre-D2 test pins.
 
     The name deliberately matches the ``retry_command=`` keyword argument of
     ``dispatch_subagent_tasks``/``continue_past_marker``/``retry_instruction``
