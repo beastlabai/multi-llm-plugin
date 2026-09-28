@@ -1285,6 +1285,16 @@ class TestSummaryStatistics:
 
         assert data["failedModels"]["gpt-4"] == "Connection timeout after 30s"
         assert data["failedModels"]["gemini-pro"] == "API rate limit exceeded"
+        # Plan §5 T5.3: one warning notice names them, with a real message —
+        # `renderNotices` prints `n.message` and nothing else. No requested
+        # set was passed, so the count stands alone and no key is invented.
+        assert "requestedModels" not in data
+        warnings = [n for n in data["notices"] if n.get("type") == "warning"]
+        assert len(warnings) == 1
+        assert warnings[0]["message"] == (
+            "Models failed: 2 — gpt-4: Connection timeout after 30s; "
+            "gemini-pro: API rate limit exceeded"
+        )
 
 
 # ============================================================================
@@ -1383,7 +1393,218 @@ class TestZeroSuggestions:
         assert data["taskView"]["_coverageGaps"]["suggestions"] == []
 
 
-class TestSuggestionsLackingReferences:
+# ============================================================================
+# Plan review-run-scope-salvage-and-failure-visibility §5 (T5.3): a failed
+# reviewer is named on the page, in both report styles
+# ============================================================================
+
+_TEMPLATES_DIR = Path(__file__).resolve().parent.parent / "templates"
+
+#: The incident's lost reviewer, verbatim from the evidence run.
+_PI_SPEC = "pi:openrouter/deepseek/deepseek-v4.1-flash"
+_PI_REASON = (
+    "pi timed out after 1200s (spent $0.09 est., 28,193 output tokens)"
+)
+
+
+def _function_source(template: str, name: str) -> str:
+    """The text of ``function <name>() { … }`` in *template*, braces balanced."""
+    start = template.index(f"function {name}(")
+    depth = 0
+    for index in range(template.index("{", start), len(template)):
+        if template[index] == "{":
+            depth += 1
+        elif template[index] == "}":
+            depth -= 1
+            if depth == 0:
+                return template[start:index + 1]
+    raise AssertionError(f"unbalanced function {name} in template")
+
+
+def _init_source(template: str) -> str:
+    return _function_source(template, "init")
+
+
+class TestAFailedReviewerRendersInBothStyles:
+    """Five requested, four answered with no findings, one failed.
+
+    The empty-findings case is the one that hid the failure on the flat page:
+    its ``Models:`` meta is read off the groups' suggestions, so a run whose
+    reviewers found nothing names nobody — and the one that failed least of
+    all. The data every style renders from must carry the failure regardless.
+    """
+
+    @pytest.fixture
+    def sample_plan(self, tmp_path):
+        plan_path = tmp_path / "test-plan.md"
+        plan_path.write_text("# Empty Plan\n", encoding="utf-8")
+        return plan_path
+
+    @pytest.mark.parametrize("template_style", ["pr", "flat"])
+    def test_the_failure_reaches_the_report_data_with_its_denominator(
+        self, sample_plan, tmp_path, template_style
+    ):
+        phase_dir = tmp_path / f"{template_style}-review"
+        phase_dir.mkdir()
+        answered = [f"cursor-agent:model-{n}" for n in range(4)]
+
+        html = generate_html_report(
+            groups=[],
+            plan_path=sample_plan,
+            phase_dir=phase_dir,
+            phase_type="code-review",
+            models=answered,
+            failed_models={_PI_SPEC: _PI_REASON},
+            template_style=template_style,
+            requested_models=5,
+        )
+
+        data = extract_report_data(html)
+        assert data["templateStyle"] == template_style
+        assert data["groups"] == []
+        assert data["failedModels"] == {_PI_SPEC: _PI_REASON}
+        assert data["requestedModels"] == 5
+        warnings = [n for n in data["notices"] if n["type"] == "warning"]
+        assert len(warnings) == 1
+        message = warnings[0]["message"]
+        assert _PI_SPEC in message
+        assert _PI_REASON in message
+        assert "1 of 5 requested" in message
+        # The same data the page renders is what the apply phase re-embeds.
+        persisted = json.loads(
+            (phase_dir / "report_data.json").read_text(encoding="utf-8")
+        )
+        assert persisted["notices"] == data["notices"]
+
+    def test_the_salvage_clause_follows_the_callers_answer(
+        self, sample_plan, tmp_path
+    ):
+        phase_dir = tmp_path / "salvage"
+        phase_dir.mkdir()
+        html = generate_html_report(
+            groups=[], plan_path=sample_plan, phase_dir=phase_dir,
+            phase_type="code-review", models=[],
+            failed_models={_PI_SPEC: _PI_REASON}, requested_models=5,
+            salvage_requested=[_PI_SPEC],
+        )
+        [notice] = extract_report_data(html)["notices"]
+        assert notice["message"] == (
+            f"Models failed: 1 of 5 requested — {_PI_SPEC}: {_PI_REASON}; "
+            "salvage requested, nothing recovered"
+        )
+
+    def test_requested_models_is_absent_without_a_requested_set(
+        self, sample_plan, tmp_path
+    ):
+        phase_dir = tmp_path / "no-denominator"
+        phase_dir.mkdir()
+        html = generate_html_report(
+            groups=[], plan_path=sample_plan, phase_dir=phase_dir,
+            phase_type="review-plan", models=["claude"],
+            failed_models={_PI_SPEC: _PI_REASON},
+        )
+        data = extract_report_data(html)
+        assert "requestedModels" not in data
+        [notice] = data["notices"]
+        assert "of" not in notice["message"].split(" — ")[0]
+
+    def test_no_failure_adds_no_notice(self, sample_plan, tmp_path):
+        phase_dir = tmp_path / "clean"
+        phase_dir.mkdir()
+        html = generate_html_report(
+            groups=[], plan_path=sample_plan, phase_dir=phase_dir,
+            phase_type="review-plan", models=["claude"], failed_models={},
+            requested_models=1,
+        )
+        data = extract_report_data(html)
+        assert data["failedModels"] == {}
+        assert data["notices"] == []
+        assert data["requestedModels"] == 1
+
+
+class TestEveryNoticeCarriesAMessage:
+    """``renderNotices`` prints ``escapeHtml(n.message)`` and nothing else, so a
+    notice without a message is an empty coloured bar."""
+
+    def test_generated_notices_all_have_a_non_empty_message(self, tmp_path):
+        plan = tmp_path / "plan.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+        # A malformed consolidated.json produces the data-source notice too.
+        (phase_dir / "consolidated.json").write_text("{}", encoding="utf-8")
+        html = generate_html_report(
+            groups=[], plan_path=plan, phase_dir=phase_dir,
+            phase_type="review-plan", models=[],
+            failed_models={_PI_SPEC: _PI_REASON}, requested_models=2,
+        )
+        notices = extract_report_data(html)["notices"]
+        assert len(notices) == 2
+        for notice in notices:
+            assert isinstance(notice.get("message"), str)
+            assert notice["message"].strip()
+
+    def test_a_notice_without_a_message_is_never_kept(self):
+        from utils.html_report_generator import build_report_notices
+
+        kept = build_report_notices(
+            [{"type": "warning"}, {"type": "info", "message": "  "},
+             "not a dict", {"type": "info", "message": "kept"}],
+        )
+        assert kept == [{"type": "info", "message": "kept"}]
+
+    def test_a_multi_line_reason_stays_on_one_line(self):
+        """A stored reason is provider output; a line break in the header line
+        would end it early (and in code-review's report.md, a `### N.` after a
+        blank line is an issue header the apply parser reads)."""
+        from utils.html_report_generator import failed_models_line
+
+        line = failed_models_line({"a:b": "first\n\n### 2. forged\r\nlast"}, 1)
+        assert "\n" not in line and "\r" not in line
+        assert line == "**Models failed:** 1 of 1 requested — a:b: first  ### 2. forged last"
+
+
+class TestTheTemplatesReadFailedModelsAsAnObject:
+    """Static checks — the tests never run the templates' JavaScript.
+
+    ``failedModels`` is a dict in every report_data.json this generator has
+    written; the PR template called ``.length``/``.join`` on it (an array
+    reading), so its "Failed models" row never rendered, and the flat template
+    had no notice bar and no failure entry at all.
+    """
+
+    @pytest.mark.parametrize(
+        "name", ["pr_report_template.html", "report_template.html"]
+    )
+    def test_each_template_carries_the_bar_and_renders_it_at_init(self, name):
+        template = (_TEMPLATES_DIR / name).read_text(encoding="utf-8")
+        assert "failedModels.join" not in template
+        assert "failedModels.length" not in template
+        assert "Object.keys(failedModels)" in template
+        assert "requestedModels" in template
+        assert '<div id="report-notices"></div>' in template
+        render = _function_source(template, "renderNotices")
+        assert "escapeHtml(n.message)" in render
+        assert "renderNotices();" in _init_source(template)
+
+    def test_the_flat_render_notices_is_the_pr_ones(self):
+        pr = (_TEMPLATES_DIR / "pr_report_template.html").read_text(encoding="utf-8")
+        flat = (_TEMPLATES_DIR / "report_template.html").read_text(encoding="utf-8")
+        assert _function_source(flat, "renderNotices") == _function_source(
+            pr, "renderNotices"
+        )
+
+    def test_the_flat_template_renders_notices_before_the_groups(self):
+        """Both sit outside the groups container, so its "No groups found"
+        empty state cannot hide the bar — and the call comes first."""
+        flat = (_TEMPLATES_DIR / "report_template.html").read_text(encoding="utf-8")
+        init = _init_source(flat)
+        assert init.index("renderNotices();") < init.index("renderGroups();")
+        assert flat.index('<div id="report-notices"></div>') < flat.index(
+            '<main id="groups-container">'
+        )
+        assert 'id="meta-failed-wrap"' in flat
+        assert 'id="meta-failed"' in flat
     """Suggestions without file/section references routed to global/unanchored."""
 
     @pytest.fixture

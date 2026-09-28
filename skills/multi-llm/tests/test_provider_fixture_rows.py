@@ -33,8 +33,28 @@ provider may sit without one — by name, with a reason.
           error_contains: ["..."]    # optional: substrings of ["error"]
           raw_contains: ["..."]      # optional: substrings of the captured bytes
           classify_failure: null     # optional, and `null` is an assertion
+          salvage: answer            # optional: none | partial | answer
       empty:
         not_applicable: "<the measurement that says why>"
+
+``expect.salvage`` labels whether the row's stdout holds answer text a salvage
+could recover, judged from the bytes and **never** from ``success`` — a failed
+run can still hold an answer worth salvaging, and a timed-out one can hold
+none. The three values, graded by each adapter's ``salvage_text`` sweep
+(``test_pi_json_mode.py``, ``test_omp_stream_reading.py``,
+``test_salvage_text.py``):
+
+- ``none``: transport only (an auth error, a rate limit, an empty stream, a
+  reviewer killed while a tool ran). The reduced text must be *rejected* by
+  ``has_salvageable_json``.
+- ``partial``: a real partial answer on a failed run (an output-limit cut, a
+  timeout mid-array). The reduced text must *pass* that gate; these rows are
+  what salvage exists for.
+- ``answer``: a whole answer. ``extract_json_from_text`` recovers it, and where
+  the row pins ``data`` it recovers exactly that.
+
+Only these three values are accepted, so a typo cannot quietly assert nothing
+(plan: review-run-scope-salvage-and-failure-visibility §4, T4.1).
 
 A row carries **either** files+``exit_code``+``expect`` **or**
 ``not_applicable`` with a measured reason — §6.3's rule, enforced here: *"not
@@ -132,7 +152,9 @@ _ALLOWED_TOP = {"schema_version", "provider", "cli_version", "captured", "method
 _ALLOWED_ROW = {"stdout", "stderr", "exit_code", "expect", "not_applicable",
                 "synthesized", "provenance", "notes", "wall_s", "requests"}
 _ALLOWED_EXPECT = {"success", "data", "error_contains", "raw_contains",
-                   "classify_failure"}
+                   "classify_failure", "salvage"}
+#: ``expect.salvage``'s whole vocabulary (see the module docstring).
+SALVAGE_LABELS = ("none", "partial", "answer")
 
 
 def _load(provider_dir: Path) -> dict:
@@ -304,6 +326,11 @@ def test_row_is_well_formed(provider, row_name):
     assert isinstance(expect.get("success"), bool), (
         "expect.success is required — it is the minimum a fixture may pin"
     )
+    if "salvage" in expect:
+        assert expect["salvage"] in SALVAGE_LABELS, (
+            f"expect.salvage is {expect['salvage']!r}; it must be one of "
+            f"{list(SALVAGE_LABELS)}"
+        )
     for key in ("stdout", "stderr"):
         if row.get(key):
             assert (FIXTURES / provider / row[key]).is_file(), (

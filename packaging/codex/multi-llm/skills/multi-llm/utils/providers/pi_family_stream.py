@@ -331,6 +331,81 @@ def _answer_text(message: Dict[str, Any]) -> str:
     return "".join(parts)
 
 
+def assistant_text_of_stream(stdout: str, dialect: StreamDialect) -> Optional[str]:
+    """The **last** assistant message's answer text, for salvage — or ``None``.
+
+    This is the pi-family ``LLMProvider.salvage_text``. A failed attempt's
+    stdout is a transport stream, and every assistant ``message_end`` carries a
+    ``"content": [...]`` array, so handing the raw stream to the salvage gate
+    (``has_salvageable_json``) accepts event data as findings: a reviewer
+    killed while a ``toolCall`` ran was "salvaged" from its own ``thinking`` and
+    ``toolCall`` parts (plan: review-run-scope-salvage-and-failure-visibility
+    §4). What comes back here is only the words the model wrote as its answer.
+
+    Which message is "last":
+
+    * **A message cut mid-stream** — an assistant ``message_start`` with no
+      ``message_end`` after it. Its text is its ``text_delta``s, joined in
+      order (``toolcall_delta``s and thinking deltas are never text). A
+      reviewer killed while printing its array is the case salvage exists for.
+    * Otherwise **the last assistant** ``message_end``: its ``text`` parts
+      (:func:`_answer_text`), the same message the adapters' ``parse_output``
+      reads as the answer (``final = messages[-1]``).
+
+    A last message with no text gives ``""`` — "nothing to salvage", which is
+    a verdict and not a gap: the incident this exists for was a ``thinking``
+    part and a ``toolCall`` part, killed while the tool ran.
+
+    **Earlier assistant messages are dropped, not capped.** They are narration
+    between tool calls ("I'll now open X") and can quote an example array.
+    Joining them in would let dozens of turns push the trailing array past the
+    caller's size cap, and would let an example array pass the gate or hand
+    the salvage subagent two arrays to choose between. A run that printed its
+    answer and then called another tool loses that answer here, exactly as it
+    does in ``parse_output``.
+
+    ``None`` when ``stdout`` is not this dialect's stream at all
+    (:func:`has_stream_envelope`): a bare text-mode answer is its own answer
+    text, so the caller keeps its old input rather than being told "nothing".
+
+    **An empty or whitespace-only stdout is ``""``, not ``None``.** Both
+    adapters render ``--mode json`` on every ``generate`` (pi unconditionally,
+    omp as a required flag), so a stdout that holds no bytes is a transport
+    that carried nothing — a slot killed before the CLI printed its header, an
+    early crash — and never a text-mode answer. ``None`` there would send the
+    gate to stderr, whose diagnostics can be array-shaped
+    (``{"error": ..., "attempts": []}``) and pass ``has_salvageable_json``: the
+    outcome D4.3 removes for stream adapters. ``""`` keeps the verdict final.
+    """
+    if not (stdout or "").strip():
+        return ""
+    if not has_stream_envelope(stdout, dialect):
+        return None
+    events, _junk = _events(stdout)
+    last_text = ""
+    open_deltas: Optional[List[str]] = None
+    for event in events:
+        kind = event.get("type")
+        message = event.get("message")
+        is_assistant = isinstance(message, dict) and message.get("role") == "assistant"
+        if kind == "message_start" and is_assistant:
+            # A new assistant message supersedes everything before it, finished
+            # or not: only the last message is ever the answer.
+            open_deltas = []
+        elif kind == "message_end" and is_assistant:
+            last_text = _answer_text(message)
+            open_deltas = None
+        elif kind == "message_update" and open_deltas is not None:
+            update = event.get("assistantMessageEvent")
+            if isinstance(update, dict) and update.get("type") == "text_delta":
+                delta = update.get("delta")
+                if isinstance(delta, str):
+                    open_deltas.append(delta)
+    if open_deltas is not None:
+        return "".join(open_deltas)
+    return last_text
+
+
 def _unclosed_container(text: str) -> Optional[str]:
     """The opening bracket of a JSON document the answer **never closes**.
 

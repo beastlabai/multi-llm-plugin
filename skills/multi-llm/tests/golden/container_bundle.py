@@ -59,9 +59,9 @@ can never match a real digest. `stale_hash_pointers` names such pointers, and th
 container lane refuses the baseline with a re-seed command rather than listing
 sixty-odd `"<str>"` diffs per row as if each were a regression.
 
-**Folded to one type token: `elapsed_s` in the `.status.json` shapes**
-(`MEASURED_DURATION_KEYS`). Its value was never compared, only its type, and the
-product writes a whole-number measurement as an `int` and anything else as a
+**Folded to one type token: `elapsed_s` and `queued_s` in the `.status.json`
+shapes** (`MEASURED_DURATION_KEYS`). Their values were never compared, only their
+types, and the product writes a whole-number measurement as an `int` and anything else as a
 `float` (`progress_tracker._seconds`), so `<int>`/`<float>` there is a coin toss
 per run; both become `<number>`.
 
@@ -218,6 +218,10 @@ FILE_HASH_KEYS = frozenset({
 #: type, is still a diff.
 MEASURED_DURATION_KEYS = frozenset({
     "elapsed_s",
+    # The queue wait beside it (``progress_tracker`` stamps it at first
+    # dispatch from the same monotonic clock and ``_seconds`` rounding), so it
+    # flips ``<int>``/``<float>`` per run for the same reason.
+    "queued_s",
 })
 
 NUMBER_TOKEN = "<number>"

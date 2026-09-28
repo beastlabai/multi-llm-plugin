@@ -22,6 +22,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import multi_llm  # noqa: E402
 from utils import cli_common, detach, run_status, status_file, unattended  # noqa: E402
+from utils.json_extractor import sanitize_model_name  # noqa: E402
 
 FAILED_SPEC = "codex:gpt-6-astra:xhigh"
 FAILED_REASON = "no result (cancelled at the fan-out deadline)"
@@ -271,3 +272,304 @@ class TestACrashRecordsNoResultState:
         capsys.readouterr()
         assert exit_code == 3
         assert payload["state"] != cli_common.STATE_PARTIAL
+
+
+# ---------------------------------------------------------------------------
+# Plan review-run-scope-salvage-and-failure-visibility §5 (T5.4a/b/c): a
+# reaggregate tells the host which reviewers it still has no result for
+# ---------------------------------------------------------------------------
+#
+# These drive the real `--reaggregate` through the dispatcher — no stub
+# target — under a `RunHandle`, whose claim drops `progress` wholesale exactly
+# as a detached worker's does. That is the case the Codex templates could not
+# serve: "name the failed models from `progress.models`" read an empty map.
+
+SUGGESTION = {
+    "title": "Add input validation",
+    "desc": "The plan does not validate the new email field.",
+    "importance": "HIGH",
+    "reference": "Overview",
+    "type": "addition",
+}
+
+
+def _left_by_a_fanout(phase: Path, *, good: bool = True) -> None:
+    """The dir a lossy fan-out leaves: one result file, one recorded failure."""
+    requested = [GOOD_SPEC, FAILED_SPEC] if good else [FAILED_SPEC]
+    if good:
+        (phase / f"{sanitize_model_name(GOOD_SPEC)}.json").write_text(
+            json.dumps([SUGGESTION]), encoding="utf-8"
+        )
+    status_file.write_status(str(phase), {
+        "phase": "review-plan",
+        "state": "complete",
+        "started_at": "2026-09-25T15:58:00",
+        "models_requested": requested,
+        "models_completed": [GOOD_SPEC] if good else [],
+        "models_failed": {FAILED_SPEC: FAILED_REASON},
+        "progress": {
+            "step": "complete", "models_total": len(requested),
+            "models_done": len(requested), "models_succeeded": int(good),
+            "models": {
+                **({GOOD_SPEC: {"state": "done"}} if good else {}),
+                FAILED_SPEC: {"state": "failed", "error": FAILED_REASON},
+            },
+        },
+    })
+
+
+def _reaggregate_under_a_run(capsys, plan, phase, run_id, *argv):
+    """The real reaggregate, dispatched in-process under a claimed run."""
+    handle = detach.RunHandle(
+        str(phase), run_id=run_id, mode=argv[0], plan_file=str(plan),
+        detached=False,
+    )
+    handle.start()
+    # The claim is what a detached worker does first: `progress` is gone.
+    assert "progress" not in status_file.read_status(str(phase)) or not (
+        status_file.read_status(str(phase)).get("progress") or {}
+    ).get("models")
+    code = 1
+    try:
+        code = multi_llm.main([argv[0], str(plan), *argv[1:]])
+    finally:
+        handle.finish(code)
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err
+
+
+def _phase_recorded_completed(plan: Path, phase_name: str) -> bool:
+    from utils.state_manager import get_or_create_state
+
+    return get_or_create_state(plan).is_phase_completed(phase_name)
+
+
+class TestAReaggregateWithAFailureLeftReportsPartial:
+    def test_it_names_the_model_completes_the_phase_and_owes_nothing(
+        self, tmp_path, capsys
+    ):
+        """T5.4a: holds with or without T5.4b."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        _left_by_a_fanout(phase)
+
+        code, out, _err = _reaggregate_under_a_run(
+            capsys, plan, phase, "run-reagg-00001",
+            "review-plan", "--reaggregate", "--skip-validation",
+        )
+
+        assert code == 0
+        assert f"[MODEL_FAILED] {FAILED_SPEC}: {FAILED_REASON}" in out
+        assert _phase_recorded_completed(plan, "review-plan")
+        assert status_file.read_status(str(phase))["state"] == "complete"
+        result = cli_common.parse_result_line(out)
+        assert result["next"] is None
+        report = (phase / "report.md").read_text(encoding="utf-8")
+        assert f"**Models failed:** 1 of 2 requested — {FAILED_SPEC}: {FAILED_REASON}" in report
+
+    def test_the_run_reads_partial_and_progress_names_the_slot(
+        self, tmp_path, capsys
+    ):
+        """T5.4b: `[PARTIAL_RESULTS]`, `state: partial` on the line and on the
+        poll, and the failed row written back although the claim dropped
+        `progress` — with the phase still completed and `next: null`."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        _left_by_a_fanout(phase)
+
+        code, out, _err = _reaggregate_under_a_run(
+            capsys, plan, phase, "run-reagg-00002",
+            "review-plan", "--reaggregate", "--skip-validation",
+        )
+
+        assert code == 0
+        assert f"[PARTIAL_RESULTS: {FAILED_SPEC}]" in out
+        result = cli_common.parse_result_line(out)
+        assert result["state"] == cli_common.STATE_PARTIAL
+        assert result["exit"] == 0
+        assert result["next"] is None
+        assert status_file.read_run(str(phase))["result_state"] == cli_common.STATE_PARTIAL
+
+        exit_code, payload = _poll(plan, "--run-id", "run-reagg-00002")
+        capsys.readouterr()
+        assert exit_code == 0
+        assert payload["state"] == cli_common.STATE_PARTIAL
+        row = payload["progress"]["models"][FAILED_SPEC]
+        assert row["state"] == "failed"
+        assert row["error"] == FAILED_REASON
+        assert _phase_recorded_completed(plan, "review-plan")
+
+    def test_a_clean_reaggregate_stays_done(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        _left_by_a_fanout(phase)
+        (phase / f"{sanitize_model_name(FAILED_SPEC)}.json").write_text(
+            json.dumps([SUGGESTION]), encoding="utf-8"
+        )
+
+        code, out, _err = _reaggregate_under_a_run(
+            capsys, plan, phase, "run-reagg-00003",
+            "review-plan", "--reaggregate", "--skip-validation",
+        )
+
+        assert code == 0
+        assert "[MODEL_FAILED]" not in out
+        assert "[PARTIAL_RESULTS:" not in out
+        assert cli_common.parse_result_line(out)["state"] == "done"
+
+
+class TestAReaggregateWhoseAnswersHoldNoFindingsStillCompletes:
+    """A reviewer that answered ``[]`` beside one that failed is a partial
+    review with zero groups, not "nothing to aggregate": the reaggregate
+    rebuilds the report naming the failure, reports ``partial`` and records
+    the phase completed, exactly as it does when the answer held findings."""
+
+    @pytest.mark.parametrize("mode", ["review-plan", "review-tasks"])
+    @pytest.mark.parametrize("extra", [["--skip-validation"], []])
+    def test_the_failure_is_reported_and_the_phase_completes(
+        self, tmp_path, capsys, mode, extra
+    ):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, mode)
+        _left_by_a_fanout(phase)
+        (phase / f"{sanitize_model_name(GOOD_SPEC)}.json").write_text(
+            "[]", encoding="utf-8"
+        )
+
+        code, out, _err = _reaggregate_under_a_run(
+            capsys, plan, phase, "run-reagg-00006", mode, "--reaggregate", *extra,
+        )
+
+        assert code == 0
+        assert f"[MODEL_FAILED] {FAILED_SPEC}: {FAILED_REASON}" in out
+        assert f"[PARTIAL_RESULTS: {FAILED_SPEC}]" in out
+        assert "[VALIDATION" not in out
+        result = cli_common.parse_result_line(out)
+        assert (result["exit"], result["state"]) == (0, cli_common.STATE_PARTIAL)
+        assert result["next"] is None
+        assert _phase_recorded_completed(plan, mode)
+        assert status_file.read_status(str(phase))["state"] == "complete"
+        report = (phase / "report.md").read_text(encoding="utf-8")
+        assert f"**Models failed:** 1 of 2 requested — {FAILED_SPEC}: {FAILED_REASON}" in report
+        assert "**Groups:** 0" in report
+        assert "_No suggestions found._" in report
+
+    def test_an_earlier_rounds_grouping_is_not_reported_or_validated(
+        self, tmp_path, capsys
+    ):
+        """The grouping and validation round left by an earlier run describe
+        findings no longer on disk: the report shows zero groups, and the
+        leftover task file is neither read against the new grouping nor
+        re-materialized."""
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        _left_by_a_fanout(phase)
+        (phase / f"{sanitize_model_name(GOOD_SPEC)}.json").write_text(
+            "[]", encoding="utf-8"
+        )
+        stale_group = {
+            "theme": "Add input validation",
+            "suggestions": [{**SUGGESTION, "source_model": GOOD_SPEC}],
+        }
+        (phase / "grouped.json").write_text(
+            json.dumps({"format_version": 2, "groups": [stale_group]}),
+            encoding="utf-8",
+        )
+        stale_tasks = json.dumps({"tasks_schema_version": 2, "batches": []})
+        (phase / "validation_tasks.json").write_text(stale_tasks, encoding="utf-8")
+
+        code, out, _err = _reaggregate_under_a_run(
+            capsys, plan, phase, "run-reagg-00007", "review-plan", "--reaggregate",
+        )
+
+        assert code == 0
+        assert "[VALIDATION" not in out
+        grouped = json.loads((phase / "grouped.json").read_text(encoding="utf-8"))
+        assert grouped["groups"] == []
+        assert (phase / "validation_tasks.json").read_text(encoding="utf-8") == stale_tasks
+        report = (phase / "report.md").read_text(encoding="utf-8")
+        assert "**Groups:** 0" in report
+        assert "Add input validation" not in report
+        assert _phase_recorded_completed(plan, "review-plan")
+
+
+class TestAReaggregateWhereEveryReviewerFailedExitsThree:
+    @pytest.mark.parametrize("mode, phase_name", [
+        ("review-plan", "review-plan"),
+        ("review-code", "code-review"),
+    ])
+    def test_it_exits_three_names_the_model_and_records_no_phase(
+        self, tmp_path, capsys, mode, phase_name
+    ):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, phase_name)
+        _left_by_a_fanout(phase, good=False)
+
+        code, out, err = _reaggregate_under_a_run(
+            capsys, plan, phase, "run-reagg-00004", mode, "--reaggregate",
+        )
+
+        assert code == 3
+        assert f"[MODEL_FAILED] {FAILED_SPEC}: {FAILED_REASON}" in out
+        assert "no model produced a result" in err
+        assert FAILED_SPEC in err
+        assert "--force" in err
+        result = cli_common.parse_result_line(out)
+        assert (result["exit"], result["state"]) == (3, "needs-human")
+        assert not _phase_recorded_completed(plan, phase_name)
+
+    def test_no_results_and_no_recorded_failure_still_exits_zero(
+        self, tmp_path, capsys
+    ):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "models_requested": [GOOD_SPEC],
+        })
+
+        code, out, _err = _reaggregate_under_a_run(
+            capsys, plan, phase, "run-reagg-00005",
+            "review-plan", "--reaggregate", "--skip-validation",
+        )
+
+        assert code == 0
+        assert "No model result files found" in out
+        assert not _phase_recorded_completed(plan, "review-plan")
+
+    def test_a_full_run_that_hits_the_three_stops_and_relays_it(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """`full` never re-dispatches a phase that exited 3: it stops there,
+        reports the phase and the `--resume` re-invocation, and exits 3."""
+        import full_workflow_orchestrator as fwo
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        _left_by_a_fanout(_phase_dir(plan, "code-review"), good=False)
+        state = StateManager(plan)
+        for done in ("review-plan", "apply-suggestions", "generate-tasks",
+                     "review-tasks", "apply-task-suggestions", "implement"):
+            state.mark_phase_completed(done)
+        state.save()
+
+        real_run_mode = fwo.FullWorkflow.run_mode
+        calls = []
+
+        def run_mode(self, mode_word, extra):
+            calls.append(mode_word)
+            assert mode_word == "review-code", f"no other phase may run: {mode_word}"
+            # The phase's own code path, ending in the reaggregate's exit 3.
+            return real_run_mode(self, mode_word, [*extra, "--reaggregate"])
+
+        monkeypatch.setattr(fwo.FullWorkflow, "run_mode", run_mode)
+        code = multi_llm.main(["full", str(plan), "--yes"])
+        captured = capsys.readouterr()
+
+        assert code == 3
+        assert calls == ["review-code"], "stopped, not retried"
+        assert "Phase 5: Review Code did not complete (exited 3)" in captured.err
+        assert "--resume" in captured.err
+        result = cli_common.parse_result_line(captured.out)
+        assert (result["exit"], result["state"]) == (3, "needs-human")
+        assert not StateManager(plan).is_phase_completed("code-review")

@@ -34,6 +34,7 @@ from .pi_family_stream import (  # noqa: F401 - _MAX_DIAGNOSIS_CHARS re-exported
     _stream_version,
     _tool_ends,
     _unclosed_container,
+    assistant_text_of_stream,
     has_stream_envelope,
     shape_fault,
     sum_usage,
@@ -109,6 +110,54 @@ _TRUNCATED_RECOVERY = "truncated response recovery failed"
 #: produced it yet. The sentence need not embed the vendor's 400 text, so it is
 #: a positive overflow signal of its own on the terminal ``errorMessage``.
 _OVERFLOW_RECOVERY = "context overflow recovery failed"
+
+#: The tool allow-list every ``generate`` dispatch pins with ``--tools`` (plan:
+#: review-run-scope-salvage-and-failure-visibility D3.1, decision 11.6).
+#:
+#: * **What it replaces.** With no ``--tools``, pi 0.87.1 activates ``read,
+#:   bash, edit, write`` (``core/sdk.js:140-145``) — unless the user's settings,
+#:   a trusted project's ``.pi/settings.json`` or an installed extension change
+#:   that, so the reviewer's toolset used to be whatever the host happened to
+#:   configure. This list is that default minus ``edit`` (``write`` covers the
+#:   one legitimate write, the output file) plus omp's search tools: ``grep``,
+#:   and ``find``, pi's name for omp's ``glob``. ``ls`` is left out because
+#:   ``read`` and ``find`` cover it. ``bash`` stays because the code-review
+#:   prompt runs ``git diff``, so this is **not** a read-only mode
+#:   (``read_only_modes.pi`` stays ``null``).
+#: * **The accepted form is ONE comma-separated value.** ``cli/args.js:110-115``
+#:   splits the value on ``,``, trims each name and drops empty ones; ``pi
+#:   --help`` says "Comma-separated allowlist of tool names to enable". A second
+#:   ``--tools``/``-t`` *replaces* the first value rather than adding to it, and a
+#:   space-separated value is one name. Hence one flag and one
+#:   ``",".join(PI_TOOLS)``, never a flag per tool.
+#: * **Unknown names are dropped silently** (``cli/args.js:110-115``,
+#:   ``core/agent-session.js:2496``, probed offline). A misspelled name removes
+#:   that tool with no error, and a wrong separator removes every tool: ``read
+#:   bash write`` is one unknown name, and pi would review with no ``read`` at
+#:   all. That is why the names live here once, pinned by tests to pi's
+#:   built-in vocabulary (``read, bash, edit, write, grep, find, ls``), and why
+#:   ``cli-surface.yaml`` pins the help's "Comma-separated" wording.
+#: * **It pins names, not implementations.** ``_refreshToolRegistry``
+#:   (``core/agent-session.js:2491-2567``) puts built-ins and extension tools
+#:   through the same name check, then lays each surviving extension tool over
+#:   the built-in of the same name. A user or trusted-project extension that
+#:   registers ``bash``, ``read`` or ``write`` therefore replaces the built-in
+#:   under this list too, and extension ``tool_call``/``tool_result`` handlers
+#:   (``:245-267``) see every call whatever the list says. Isolating extensions
+#:   is deliberately deferred (decision 11.8).
+#: * **``grep`` and ``find`` may download a binary.** They call
+#:   ``ensureTool("rg")`` / ``ensureTool("fd")``, which fetch the tool the first
+#:   time it is missing. Accepted (decision 11.6), on the condition that a failed
+#:   download does not fail the run — MEASURED 2026-09-28 in the pinned image
+#:   (``--network none``, no ``rg``/``fd`` on PATH, one scripted ``grep`` call):
+#:   the tool returned ``isError: true`` with "ripgrep (rg) is not available and
+#:   could not be downloaded", the model's next turn ended ``stopReason: stop``
+#:   and pi exited 0. A tool error the model can work around, so both names stay.
+PI_TOOLS = ("read", "grep", "find", "bash", "write")
+
+#: The flag that carries :data:`PI_TOOLS`, gated per flag like claude-code's
+#: optional flags: a pi whose help does not document it gets today's argv.
+PI_TOOLS_FLAG = "--tools"
 
 
 def parse_answer_text(text: str) -> Dict[str, Any]:
@@ -404,10 +453,58 @@ class PiProvider(LLMProvider):
     before --model also keeps pi's own native ":level" parsing out of the
     picture, so the whitelist here is the single source of truth.
 
-    pi has no permission prompts: built-in tools (read, bash, edit, write,
-    grep, find, ls) run with the pi process's own permissions, so the
-    headless file reads/writes review prompts rely on work unattended with
-    no extra flags.
+    **Tools: a pinned allow-list, and NOT a read-only mode.** pi has no
+    permission prompts and no sandbox: whatever tools are active run with the
+    pi process's own permissions, which is how the headless file reads and the
+    output-file write the review prompts rely on work unattended. Every
+    ``generate`` dispatch pins those tools with ``--tools
+    read,grep,find,bash,write`` (:data:`PI_TOOLS`, gated on the installed help
+    documenting the flag), so which tool *names* are active no longer depends on
+    the user's settings, a trusted project's ``.pi/settings.json`` or pi's own
+    default (``read, bash, edit, write``). Three things it does not do:
+
+    * **It is not read-only.** ``bash`` stays, because the code-review prompt
+      runs ``git diff``; a model can still run any command, so
+      ``read_only_modes.pi.mechanism`` stays ``null``.
+    * **It pins names, not implementations.** A user or trusted-project
+      extension that registers ``bash``, ``read`` or ``write`` replaces the
+      built-in of that name under the allow-list too, and extension
+      ``tool_call``/``tool_result`` handlers see every call whatever the list
+      says (``core/agent-session.js:2491-2567``, ``:245-267``). Isolating
+      extensions is a later plan (decision 11.8).
+    * **It does not bound time.** pi has no ``--max-time`` and no setting caps
+      the bash tool's ``timeout`` parameter ("no default timeout",
+      ``core/tools/bash.js:28``).
+
+    **The orphan risk a killed slot carries.** pi's bash tool spawns its shell
+    ``detached: true`` (``core/tools/bash.js:52``): the shell gets a session and
+    process group of its own, so a signal to pi, or to pi's group, never reaches
+    it. pi reaps its tracked shells only on SIGTERM or SIGHUP (print and json
+    mode call ``killTrackedDetachedChildren()``, ``modes/print-mode.js:31-45``,
+    which SIGKILLs each shell's *group*, ``utils/shell.js:168-203``); a SIGKILL
+    runs no handler. And a ``timeout``-wrapped command escapes even that
+    cleanup: GNU ``timeout`` moves itself into a group of its own inside the
+    shell's session. The incident this records was a review killed at its 1200 s
+    slot while pi's last ``bash`` call was ``timeout 1700 python -m pytest …``,
+    which could then run on for up to 1700 s, writing into the same ``plans/``
+    tree. The fix is not here: ``llm_client``'s Lane A spawn snapshots a
+    timed-out (or interrupted, or aborted) CLI's descendants before it signals
+    anything, SIGTERMs the CLI first so pi's own handler runs, and then sweeps
+    every snapshotted process group (``process_control.terminate_timed_out``).
+
+    **Confirmed against pi 0.87.1 itself** (2026-09-28, the pinned image,
+    ``--network none``, zero spend: the rig's stub scripted one chat ``bash``
+    call, ``timeout 120 sleep 120 | cat``, and the process table was read from
+    procfs after each stop, the image having no ``ps``). pi runs it as
+    ``bash -c …`` leading its own session and group; ``cat`` shares the
+    shell's group; ``timeout`` leads a group of its own in the shell's session,
+    with ``sleep`` in it. After a SIGKILL of pi alone — what
+    ``subprocess.run(timeout=…)`` used to send — all four survived, reparented
+    to init. After a SIGTERM of pi alone, pi exited 143 having reaped the shell
+    and ``cat``, and ``timeout`` and ``sleep`` survived. Through the Lane A spawn
+    with the sweep, nothing survived and the log read ``pi timed out after 8s;
+    cli terminated; process groups: 74 gone, 75 killed`` — the shell's group
+    already reaped by pi's own SIGTERM handler, ``timeout``'s by the sweep.
     """
 
     version_cmd = ("pi", "--version")
@@ -438,6 +535,15 @@ class PiProvider(LLMProvider):
     #: ``message_end`` (probe: ``tests/fixtures/pi/json-mode/``; recaptured in
     #: the fixture set), summed by :meth:`parse_usage`.
     usage_support = USAGE_FULL
+
+    #: MEASURED TRUE: the 2026-09-25 ``review-code`` slot's own stream ended
+    #: inside a ``bash`` tool call running ``timeout 1700 python -m pytest
+    #: tests …`` (plan: review-run-scope-salvage-and-failure-visibility §3.1).
+    #: pi has no permission prompt, and ``bash`` stays in :data:`PI_TOOLS` (the
+    #: ``--tools`` allow-list, D3.1), so the shell is still there under the
+    #: pinned argv; ``tests/test_provider_housekeeping.py``'s ``SHELL_EVIDENCE``
+    #: row reads ``bash`` out of the rendered ``--tools`` value.
+    runs_shell_in_generate = True
 
     #: pi's own retry chain (decision 12.7). MEASURED at 0.87.1
     #: (``tests/fixtures/pi/manifest.yaml``: ``rate-limit``, ``server-error``,
@@ -499,13 +605,29 @@ class PiProvider(LLMProvider):
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
     ) -> List[str]:
-        # pi --no-session -p --mode json [--thinking <effort>] --model <model> "<prompt>"
+        # pi --no-session -p --mode json [--tools <PI_TOOLS>] [--thinking <effort>]
+        #    --model <model> "<prompt>"
         # -p prints and exits; `--mode json` right after it (omp's order) makes
         # stdout the JSONL event stream parse_output reads. The prompt goes last
         # as a bare positional (adding `--` is a separate change: `@file`
         # expansion is a real pi feature).
         base_model, effort = split_reasoning_effort(model, REASONING_EFFORTS)
         cmd = ["pi", "--no-session", "-p", "--mode", "json"]
+        # ONE `--tools`, ONE comma-joined value: pi splits the value on `,` and
+        # a repeated flag replaces it (see PI_TOOLS). Optional-flag posture: a
+        # pi whose own help does not document it (or whose help cannot be read)
+        # gets today's argv byte for byte, plus one WARN naming what it lost.
+        if self.supports_flag(PI_TOOLS_FLAG):
+            cmd += [PI_TOOLS_FLAG, ",".join(PI_TOOLS)]
+        else:
+            warn_gate_once(
+                ("pi", PI_TOOLS_FLAG),
+                f"[WARN] pi: {PI_TOOLS_FLAG} is not documented by the installed "
+                f"CLI's own help (verified at {self.verified_version}); the "
+                f"tool allow-list ({','.join(PI_TOOLS)}) is not passed, so pi "
+                f"runs with whatever toolset its own defaults, settings and "
+                f"extensions enable. Everything else is unchanged.",
+            )
         if effort is not None:
             cmd += ["--thinking", effort]
         cmd += ["--model", base_model, prompt]
@@ -771,6 +893,22 @@ class PiProvider(LLMProvider):
             return _one_line(str(final.get("errorMessage") or "")), stderr
         except Exception:  # noqa: BLE001 - a failed reduction is identity
             return stdout, stderr
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The last assistant message's answer text, never the event stream.
+
+        pi's ``--mode json`` stdout is a transport: every assistant
+        ``message_end`` carries a ``content`` array of ``thinking``/``toolCall``
+        parts that the salvage gate would otherwise accept as findings. See
+        :func:`~utils.providers.pi_family_stream.assistant_text_of_stream` for
+        which message counts; ``None`` (a text-mode stdout that is its own
+        answer) keeps the caller's old input. An empty or whitespace-only
+        stdout is ``""``, a final verdict: ``generate`` always renders ``--mode
+        json``, so no bytes means the transport carried nothing (a slot killed
+        before pi printed, an early crash), and stderr's diagnostics must not
+        reach the gate in its place.
+        """
+        return assistant_text_of_stream(stdout, PI_DIALECT)
 
     def classify_failure(
         self, stdout: str, stderr: str, exit_code: int = 0

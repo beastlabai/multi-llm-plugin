@@ -1347,6 +1347,169 @@ class TestAnInProcessSalvageMovesTheMapWithTheReport:
         ]
 
 
+# ---------------------------------------------------------------------------
+# Plan review-run-scope-salvage-and-failure-visibility §5 (T5.1, T5.2): the
+# base reaggregate names the models that produced nothing
+# ---------------------------------------------------------------------------
+#
+# The base reaggregate hard-coded `failed_models_map = {}`, so a review-plan or
+# review-tasks report rebuilt by `--reaggregate` never mentioned a reviewer
+# that timed out. These drive `review_plan_orchestrator.main(--reaggregate)`
+# over a phase dir shaped the way a fan-out leaves one.
+
+_GOOD = "cursor-agent:auto"
+_LOST = "pi:openrouter/deepseek/deepseek-v4.1-flash"
+_LOST_REASON = "pi timed out after 1200s (spent $0.09 est., 28,193 output tokens)"
+_LOST_STEM = base.sanitize_model_name(_LOST)
+_STARTED_AT = "2026-09-25T15:58:00"
+
+
+def _write_result(phase_dir: Path, spec: str) -> None:
+    (phase_dir / f"{base.sanitize_model_name(spec)}.json").write_text(
+        json.dumps(_ok_reply(spec)["data"]), encoding="utf-8"
+    )
+
+
+def _phase_left_by_a_fanout(tmp_path: Path, **fields):
+    plan = _plan(tmp_path)
+    phase_dir = Path(base.get_phase_dir(plan, "review-plan"))
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    _write_result(phase_dir, _GOOD)
+    status_file.write_status(str(phase_dir), {
+        "phase": "review-plan",
+        "state": "complete",
+        "started_at": _STARTED_AT,
+        "models_requested": [_GOOD, _LOST],
+        "models_completed": [_GOOD],
+        "models_failed": {_LOST: _LOST_REASON},
+        **fields,
+    })
+    return plan, phase_dir
+
+
+def _reaggregate_review_plan(plan: Path) -> int:
+    return asyncio.run(rpo.main([
+        "--plan-file", str(plan), "--skip-validation", "--timeout", "120",
+        "--reaggregate",
+    ]))
+
+
+def _line_after_models(phase_dir: Path) -> str:
+    lines = (phase_dir / "report.md").read_text(encoding="utf-8").splitlines()
+    index = next(i for i, line in enumerate(lines) if line.startswith("**Models:**"))
+    return lines[index + 1]
+
+
+class TestTheBaseReaggregateNamesTheModelsThatProducedNothing:
+    def test_a_recorded_failure_with_no_result_file_is_named(self, tmp_path, capsys):
+        plan, phase_dir = _phase_left_by_a_fanout(tmp_path)
+
+        assert _reaggregate_review_plan(plan) == 0
+        out = capsys.readouterr().out
+
+        assert _line_after_models(phase_dir) == (
+            f"**Models failed:** 1 of 2 requested — {_LOST}: {_LOST_REASON}"
+        )
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert f"- **{_LOST}**: {_LOST_REASON}" in report
+        assert f"[MODEL_FAILED] {_LOST}: {_LOST_REASON}" in out
+        assert f"[PARTIAL_RESULTS: {_LOST}]" in out
+        data = json.loads((phase_dir / "report_data.json").read_text(encoding="utf-8"))
+        assert data["failedModels"] == {_LOST: _LOST_REASON}
+        assert data["requestedModels"] == 2
+        # Still a finished phase.
+        assert base.get_or_create_state(plan).is_phase_completed("review-plan")
+        assert status_file.read_status(str(phase_dir))["state"] == "complete"
+
+    def test_a_model_whose_file_appeared_is_not_reported(self, tmp_path, capsys):
+        plan, phase_dir = _phase_left_by_a_fanout(tmp_path)
+        _write_result(phase_dir, _LOST)
+
+        assert _reaggregate_review_plan(plan) == 0
+        out = capsys.readouterr().out
+
+        assert f"[{_LOST}] result file present; recorded as completed" in out
+        assert "[MODEL_FAILED]" not in out
+        assert "[PARTIAL_RESULTS:" not in out
+        report = (phase_dir / "report.md").read_text(encoding="utf-8")
+        assert "**Models failed:**" not in report
+        assert "## Models Failed" not in report
+
+    def test_the_denominator_counts_a_model_with_neither_file_nor_failure(
+        self, tmp_path, capsys
+    ):
+        five = [f"cursor-agent:model-{letter}" for letter in "abcde"]
+        plan, phase_dir = _phase_left_by_a_fanout(
+            tmp_path,
+            models_requested=five,
+            models_completed=five[:3],
+            models_failed={five[3]: "exited with code 1"},
+        )
+        (phase_dir / f"{base.sanitize_model_name(_GOOD)}.json").unlink()
+        for spec in five[:3]:
+            _write_result(phase_dir, spec)
+
+        assert _reaggregate_review_plan(plan) == 0
+        capsys.readouterr()
+
+        assert _line_after_models(phase_dir) == (
+            f"**Models failed:** 2 of 5 requested — {five[3]}: exited with code 1; "
+            f"{five[4]}: {base.UNACCOUNTED_MODEL_REASON}"
+        )
+
+    def test_the_native_lanes_live_request_carries_the_salvage_clause(
+        self, tmp_path, capsys
+    ):
+        """The native invoker deletes `salvage_{stem}.json` only after the
+        reaggregate, so a salvage that recovered nothing is still on disk."""
+        plan, phase_dir = _phase_left_by_a_fanout(tmp_path)
+        (phase_dir / f"salvage_{_LOST_STEM}.json").write_text(
+            json.dumps({"model": _LOST, "timestamp": "2026-09-25T16:20:00"}),
+            encoding="utf-8",
+        )
+
+        assert _reaggregate_review_plan(plan) == 0
+        capsys.readouterr()
+
+        assert _line_after_models(phase_dir).endswith(
+            f"{_LOST}: {_LOST_REASON}; salvage requested, nothing recovered"
+        )
+
+    def _line_with_a_retired_request(self, tmp_path, reason, timestamp):
+        """Under `--exec-subagents` an unrecoverable salvage leaves only
+        `retired_salvage_{stem}.unrecoverable.*.json`; it counts only when it is
+        this attempt's (not earlier than `started_at`), and a `.superseded.`
+        pair never does."""
+        plan, phase_dir = _phase_left_by_a_fanout(tmp_path)
+        (phase_dir / f"retired_salvage_{_LOST_STEM}.{reason}.20260925-162000.json").write_text(
+            json.dumps({"model": _LOST, "timestamp": timestamp}), encoding="utf-8"
+        )
+        assert _reaggregate_review_plan(plan) == 0
+        line = _line_after_models(phase_dir)
+        assert line.startswith(f"**Models failed:** 1 of 2 requested — {_LOST}")
+        return line
+
+    def test_the_exec_subagents_lanes_unrecoverable_request_carries_it(
+        self, tmp_path, capsys
+    ):
+        line = self._line_with_a_retired_request(
+            tmp_path, "unrecoverable", "2026-09-25T16:20:00"
+        )
+        assert line.endswith("; salvage requested, nothing recovered")
+
+    def test_a_previous_runs_unrecoverable_request_does_not(self, tmp_path, capsys):
+        line = self._line_with_a_retired_request(
+            tmp_path, "unrecoverable", "2026-09-24T09:00:00"
+        )
+        assert "salvage requested" not in line
+
+    def test_a_superseded_pair_does_not(self, tmp_path, capsys):
+        line = self._line_with_a_retired_request(
+            tmp_path, "superseded", "2026-09-25T16:20:00"
+        )
+        assert "salvage requested" not in line
+
+
 class TestThePhaseTickerOutlivesTheFanOut:
     """T5: the fan-out is not the phase.
 
@@ -1652,3 +1815,80 @@ class TestThePhaseTickerOutlivesTheFanOut:
         # froze is exactly what it was — a table rendered after a reaggregate
         # still shows each model's real duration.
         assert status_file.read_status(str(phase_dir))["progress"]["models"] == before
+
+
+# ---------------------------------------------------------------------------
+# The recorded prompt carries the working-limits minutes the attempt really got
+# ---------------------------------------------------------------------------
+
+class TestTheRecordedPromptNamesTheAttemptsMinutes:
+    """`run_single_model` records the prompt it sent by re-rendering the
+    template, so the `{working_limits}` minutes there must come from the same
+    seconds `invoke_with_file_output` rendered them from — otherwise the record
+    says one budget and the model was told another (plan:
+    review-run-scope-salvage-and-failure-visibility D3.2). Only the provider
+    call is replaced: the real template, the real `invoke_with_file_output` and
+    the real ladder run.
+    """
+
+    def _run(self, tmp_path, model_spec, timeout, sent):
+        from utils import llm_client
+
+        plan = _plan(tmp_path)
+
+        def fake_provider(prompt, spec, attempt_timeout, *args, **kwargs):
+            sent.append((prompt, attempt_timeout))
+            return {
+                "success": True,
+                "data": _ok_reply(spec)["data"],
+                "details": {"provider": spec.partition(":")[0], "model": "auto"},
+            }
+
+        with patch.object(llm_client, "invoke_with_provider", fake_provider), \
+             patch.object(base, "get_project_root", lambda _p: str(tmp_path)):
+            return asyncio.run(base.run_single_model(
+                model_spec=model_spec,
+                plan_path=str(plan),
+                prompt_template=rpo.load_review_prompt_template(),
+                prompt_context={"plan_path": str(plan), "prefix": "auth-feature"},
+                phase_name="review-plan",
+                invoke_phase="plan_review",
+                timeout=timeout,
+                out_dir=str(tmp_path),
+                prefix="auth-feature",
+            ))
+
+    def test_the_reconstructed_prompt_equals_the_sent_prompt(self, tmp_path):
+        from utils.llm_client import render_working_limits
+
+        sent = []
+        result = self._run(tmp_path, "cursor-agent:auto", 1200, sent)
+
+        assert result["success"] is True, result
+        assert len(sent) == 1
+        prompt, attempt_timeout = sent[0]
+        # The first attempt gets the whole slot, rounded to whole seconds.
+        assert attempt_timeout == 1200
+        assert render_working_limits(1200) in prompt
+        assert "stopped after about 20 minutes." in prompt
+        assert result["prompt"] == prompt
+
+    def test_a_slot_refused_before_dispatch_records_the_slot_timeouts_minutes(
+        self, tmp_path
+    ):
+        """muse declares a 736 s worst-case wall, so rule 4 refuses a shorter
+        slot with nothing spawned, and the placeholder is the recorded prompt.
+
+        719.6 s pins the rounding: the placeholder uses `attempt_timeout`'s
+        `round` (720 s, 12 minutes), where a truncated 719 s would read 11.
+        """
+        from utils.llm_client import render_working_limits
+
+        sent = []
+        result = self._run(tmp_path, "muse:muse-spark-1.2", 719.6, sent)
+
+        assert sent == [], "rule 4 is a pre-dispatch admission test"
+        assert result["source"] == "not-dispatched"
+        assert "budget_exhausted" in str(result["error"])
+        assert render_working_limits(720) in result["prompt"]
+        assert "stopped after about 12 minutes." in result["prompt"]

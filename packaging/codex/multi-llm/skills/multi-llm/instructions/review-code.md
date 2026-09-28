@@ -12,6 +12,7 @@ Reviews code changes made during implementation against the original plan.
 
 - `--models`: Models to use for review (default: claude-sonnet)
 - `--base-ref`: Git ref to compare against (default: from state file)
+- `--files <path>` (repeatable) / `--files-from <file>` (one path per line, `-` for stdin): review exactly these repo-relative paths, ahead of the implement phase's `tracked_files` and the `git diff` fallback. The list is saved in the state file so a later `--reaggregate` reviews the same scope, and a later run without the flag clears it.
 - `--skip-validation`: Skip the LLM validation step (faster but no false-positive filtering)
 - `--validation-model <model>`: Model to use for validation (default: "auto")
 - `--apply-fixes`: Prepare fix tasks for subagents to apply
@@ -19,8 +20,8 @@ Reviews code changes made during implementation against the original plan.
 
 ## Process
 
-1. **Get Diff**: Compare current code against base ref
-2. **Run Reviews**: Each model reviews the diff against the plan
+1. **Get Diff**: Compare current code against base ref, and write the scope manifest (`code-review/review-scope.md`) and one whole diff per source or test file (`code-review/diff/`) before any reviewer starts
+2. **Run Reviews**: Each model reviews the diff against the plan, reading those files (a model that cannot open them gets them inline when they fit, and is reported as unable to review otherwise)
 3. **Aggregate Issues**: Collect and prioritize issues by severity
 4. **Validate Issues**: Filter out false positives and invalid issues
 5. **Prepare Fix Tasks** (if `--apply-fixes`): Generate fix tasks JSON for subagents
@@ -38,6 +39,9 @@ plans/todo/my-feature/                        # Output folder
 ├── state.json                                # Session state (plan-local)
 └── code-review/                              # Code review phase outputs
     ├── report.md                             # Review report
+    ├── review-scope.md                       # Scope manifest: every path under review, its diff file or why it has none
+    ├── diff/                                 # One whole diff per source/test file (git-ignored by its own .gitignore)
+    ├── .review-scope.json                    # Which scope each model's result reviewed (resume check)
     ├── issues.json                           # Raw issues
     ├── grouped.json                          # Grouped issues
     ├── validation.json                       # Validation results
@@ -157,6 +161,25 @@ to bare `python`.
    - If neither exists: falls back to HEAD~1
 
    **IMPORTANT**: Do NOT manually search for state files. The orchestrator handles state loading automatically via `get_or_create_state(plan_path)`.
+
+   **If implementation ran outside `/multi-llm implement`.** Nothing recorded the
+   files it changed, so the review falls back to every change since the base
+   ref (`[SCOPE_FALLBACK]`), which can be far wider than the implementation.
+   Record the exact scope first, with the files the implementation changed:
+
+   ```bash
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking \
+     --state-file "{plan}/state.json" --only-touched --touched <path> [--touched <path> …]
+   ```
+
+   `--only-touched` makes `tracked_files` exactly those paths. Plain `--touched`
+   (without `--only-touched`) does **not** narrow the scope: it only adds its
+   paths to the dirty-tree census, so every unrelated modified or untracked
+   path stays in. It is exact only when a `pre_existing_changes` baseline
+   already covers every unrelated dirty path. The one-step alternative is to
+   pass the scope to the review itself: `review-code --files <path>` (repeatable)
+   or `--files-from <file>` (one path per line, `-` for stdin). Those paths win
+   over `tracked_files`, and a later `--reaggregate` reviews the same scope.
 
 4. **Resume Detection** (check BEFORE running orchestrator)
 
@@ -357,12 +380,27 @@ to bare `python`.
       configured it; state that number there instead. Announcing an interval you are
       not waiting is worse than announcing none.
 
-   **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results.
+   **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results. A kept result must have reviewed the current scope: when the change moved since it was written, the model re-runs (`[SCOPE_CHANGED]`) and its old file is kept as `{model}.json.stale-<scope id>`.
 
    The orchestrator will output (to the log):
    - `Git base reference: {commit}` - showing which base ref is being used
-   - `Tracked files: N files` - files that were modified during implementation
-   - If no state file exists, it will show: "No tracked files in state, falling back to git diff from {base_ref}"
+   - Where the scope came from, one of: `Using N files given with --files (…)`;
+     `Using N tracked files from implementation phase`; or, when neither exists,
+     `No tracked files in state, falling back to git diff from {base_ref}`
+     followed by `[SCOPE_FALLBACK]` lines (the file count per group — source,
+     tests, fixtures, generated — whether a `pre_existing_changes` baseline
+     existed, and the worktree-wide count of untracked files the diff left out,
+     with a sample) and, above 200 source and test files, `[SCOPE_LARGE]` with
+     its remedy. Relay a `[SCOPE_FALLBACK]` or `[SCOPE_LARGE]` line to the user:
+     the review is over a guessed scope.
+   - `Files to review: N` - the resolved scope every reviewer is given, source
+     files first
+   - `Review scope written (scope <id>, coverage complete|partial, …)` - the
+     manifest and diffs every reviewer is pointed at. `[DIFF_FAILED]` and
+     `[DIFF_PARTIAL]` mean git produced no diff for some files (reviewers
+     without a shell cannot review those), and `[REVIEW_UNSUPPORTED] <model>`
+     means that model could not open the files and they did not fit inline, so
+     it was not run and is listed as failed. Relay any of the three to the user.
 
 6. **Salvage Handling (Post-Orchestrator):**
 
@@ -427,7 +465,7 @@ to bare `python`.
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_batches} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. Single-batch validation runs may omit `--total-batches`/`--batch-index`.
 
    3. Run the reaggregation command under **Reaggregation (After Validation)** below. `validation_tasks.json` records `reaggregate_mode` + `plan_file`, never a resolved command, so the command is rebuilt from those two values
 
@@ -517,7 +555,7 @@ to bare `python`.
      --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
      --total-batches {total_fixes} --batch-index {N}
    ```
-   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the 1-based fix index. Omit any flag it does not report. The script prints an `[ETA]` line to stderr after each call.
+   Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the 1-based fix index. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
 
    d. After all fixes are attempted, mark the phase finish:
    ```bash
@@ -594,6 +632,8 @@ After spawning subagents to apply fixes:
    - Summary of fixes applied (if --apply-fixes)
 
    Report the verdict counts from `MULTI_LLM_RESULT.validation_counts` (`{valid, invalid, needs_human_decision, validation_failed}`, present only when validation ran, and carried by `status --view run` too). If `needs_human_decision` or `validation_failed` is non-zero, point at `report.md` for those groups; they are decided in apply-code-fixes.
+
+   Name every reviewer that produced nothing, with its reason (`references/summary-format.md`). `report.md` lists them on its `**Models failed:** N of M requested — …` line, directly under `**Models:**`. A `--reaggregate` also prints one `[MODEL_FAILED] <model>: <reason>` line per requested reviewer that still has no result, and, when any is left, prints `[PARTIAL_RESULTS: <model>,…]` and sets `MULTI_LLM_RESULT.state: "partial"` with exit **0**: the phase is still complete and `next` stays `null`, so nothing is retried — report the failures from those lines (or from the `failed` rows of `progress.models`). A `--reaggregate` that finds no readable result at all while reviewers are recorded failed exits **3** naming them and the `--force` retry, and records no completed phase.
 
 ---
 

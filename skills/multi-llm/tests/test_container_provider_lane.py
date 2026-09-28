@@ -217,6 +217,31 @@ class TestTheRowRanExactlyOneCli:
         assert models, f"{row_result.row.cli}: the stub recorded no model id at all"
 
 
+class TestPiAdvertisesExactlyItsAllowList:
+    """T3.1's behavioural pin (review-run-scope-salvage-and-failure-visibility).
+
+    ``PiProvider`` renders ``--tools read,grep,find,bash,write``, and pi drops an
+    unknown or mis-separated name without a word — so the argv table and the
+    help contract can both be green while pi reviews with a different toolset,
+    or none. Only the request pi really sent says which tools the model was
+    offered. (The stub logs chat-completions tool names since the same task;
+    before it, a chat host's ``tool_names`` was always empty.)
+    """
+
+    def test_the_first_request_offers_exactly_the_allow_list(self, row_result):
+        from utils.providers.pi import PI_TOOLS
+
+        if row_result.row.cli != "pi":
+            pytest.skip("pi's --tools allow-list only")
+        calls = [r for r in row_result.stub_log
+                 if r.get("method") == "POST" and r.get("has_tools")]
+        assert calls, "pi: no request carried tools at all"
+        assert sorted(calls[0].get("tool_names") or []) == sorted(PI_TOOLS), (
+            f"pi advertised {sorted(calls[0].get('tool_names') or [])}, not the "
+            f"allow-list {sorted(PI_TOOLS)} — a dropped or renamed tool name"
+        )
+
+
 class TestTheEvidenceSurvivedTheContainer:
     def test_artifacts_were_exported(self, row_result):
         """The entrypoint's `finally` export ran.

@@ -1382,12 +1382,34 @@ class RunHandle:
         # expects to run after it.
         name = _signal_name(signum)
         print(f"\nReceived {name}: aborting this detached run.", file=sys.stderr)
+        # First, while the snapshots still name them: the provider CLIs this
+        # worker is waiting on, and every process group they spawned. The
+        # abort's `kill_tree` signals this worker's group, which holds the CLIs
+        # but never a child they put in a session of its own (pi's detached
+        # bash shells, a `timeout` inside one) — those would outlive the run.
+        _sweep_live_clis()
         self.finish(
             EXIT_NEEDS_HUMAN,
             state=RUN_STATE_ABORTED,
             error=f"aborted_by_request ({name})",
         )
         os._exit(EXIT_NEEDS_HUMAN)
+
+
+def _sweep_live_clis() -> None:
+    """Stop every registered Lane A CLI and its snapshotted process groups.
+
+    One ``[ABORT_SWEEP]`` line per CLI into the run log, naming each group's
+    verdict, so a ``survived`` group is on record. Never raises: the abort's own
+    record (``finish``) must still be written whatever this hits.
+    """
+    try:
+        swept = process_control.live_cli_registry.sweep()
+    except Exception as exc:  # noqa: BLE001 - see above
+        print(f"[ABORT_SWEEP] failed: {exc}", file=sys.stderr)
+        return
+    for entry, result in swept:
+        print(f"[ABORT_SWEEP] cli pid {entry.pid}: {result.describe()}", file=sys.stderr)
 
 
 def _signal_name(signum: int) -> str:

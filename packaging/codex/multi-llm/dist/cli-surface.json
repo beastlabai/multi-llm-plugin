@@ -194,6 +194,7 @@
       "--approve-all",
       "--consolidate",
       "--dry-run",
+      "--files",
       "--force",
       "--host",
       "--mode",

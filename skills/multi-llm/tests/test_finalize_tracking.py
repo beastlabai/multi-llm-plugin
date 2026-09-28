@@ -876,3 +876,155 @@ class TestTheSummaryBackReferenceIsNotReadAsAHumanEdit:
 
         assert code == 0
         assert "plan_hash" not in json.loads(state_path.read_text(encoding="utf-8"))
+
+
+# --- `--only-touched`: the exact-scope route (review-scope plan §2 D2.6) ---
+#
+# These run the REAL census in a real temp git repo (`monkeypatch.chdir`), not a
+# mocked `get_all_modified_files`: the thing under test is what plain `--touched`
+# does with the unrelated dirty paths a no-baseline repository carries, and a
+# clean repo or a mocked census cannot show that union.
+
+
+def _git(repo, *args):
+    import subprocess
+
+    subprocess.run(
+        ["git", *args], cwd=str(repo), check=True, capture_output=True, text=True,
+    )
+
+
+@pytest.fixture
+def dirty_repo_without_baseline(tmp_path, monkeypatch):
+    """A repo holding the intended change and three unrelated dirty paths.
+
+    ``app.py`` is the intended change. ``unrelated.py`` is a committed file
+    modified outside it, ``notes.txt`` an unrelated untracked file and
+    ``scratch/`` an untracked directory. The state file records NO
+    ``pre_existing_changes`` — the external-implementer case — and lives outside
+    the repo so it is not itself a dirty path.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "--quiet")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "commit.gpgsign", "false")
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    (repo / "unrelated.py").write_text("y = 1\n", encoding="utf-8")
+    _git(repo, "add", "app.py", "unrelated.py")
+    _git(repo, "commit", "--quiet", "-m", "init")
+
+    (repo / "app.py").write_text("x = 2\n", encoding="utf-8")
+    (repo / "unrelated.py").write_text("y = 2\n", encoding="utf-8")
+    (repo / "notes.txt").write_text("scratch notes\n", encoding="utf-8")
+    (repo / "scratch").mkdir()
+    (repo / "scratch" / "tmp.log").write_text("log\n", encoding="utf-8")
+
+    state_dir = tmp_path / "plan-out"
+    state_dir.mkdir()
+    state_path = state_dir / "state.json"
+    state_path.write_text(
+        json.dumps({"created_at": "2026-09-28T00:00:00"}, indent=2), encoding="utf-8"
+    )
+    monkeypatch.chdir(repo)
+    return repo, state_path
+
+
+def _tracked(state_path):
+    return [e["path"] for e in json.loads(state_path.read_text(encoding="utf-8"))["tracked_files"]]
+
+
+class TestOnlyTouchedIsTheExactScope:
+    def test_only_the_touched_paths_are_tracked(self, dirty_repo_without_baseline, capsys):
+        _repo, state_path = dirty_repo_without_baseline
+
+        code = main([
+            "--state-file", str(state_path), "--only-touched", "--touched", "app.py",
+        ])
+
+        assert code == 0
+        tracked = _tracked(state_path)
+        assert tracked == ["app.py"]
+        for unrelated in ("unrelated.py", "notes.txt", "scratch/", "scratch/tmp.log"):
+            assert unrelated not in tracked
+        out = capsys.readouterr().out
+        assert "Explicit scope (--only-touched): 1 files" in out
+        # The census was not consulted, so its lines are not printed either.
+        assert "Current modified files" not in out
+        # ...and it wrote no baseline of its own.
+        assert "pre_existing_changes" not in json.loads(
+            state_path.read_text(encoding="utf-8")
+        )
+
+    def test_plain_touched_still_unions_the_unrelated_dirty_paths(
+        self, dirty_repo_without_baseline
+    ):
+        """Pins the documented "adds, never narrows" behaviour of plain
+        `--touched`, so a later change to it is a deliberate one."""
+        _repo, state_path = dirty_repo_without_baseline
+
+        code = main(["--state-file", str(state_path), "--touched", "app.py"])
+
+        assert code == 0
+        tracked = _tracked(state_path)
+        assert "app.py" in tracked
+        assert "unrelated.py" in tracked
+        assert "notes.txt" in tracked
+        # The untracked directory the (baseline-less) census reports is expanded
+        # to its file, as for any directory the subtraction did not cover.
+        assert "scratch/tmp.log" in tracked
+
+    def test_the_touched_paths_are_deduplicated_and_sorted(
+        self, dirty_repo_without_baseline
+    ):
+        _repo, state_path = dirty_repo_without_baseline
+
+        code = main([
+            "--state-file", str(state_path), "--only-touched",
+            "--touched", "b/z.py", "--touched", "app.py", "--touched", "b/z.py",
+        ])
+
+        assert code == 0
+        assert _tracked(state_path) == ["app.py", "b/z.py"]
+
+    def test_only_touched_without_touched_exits_1_and_leaves_the_state_alone(
+        self, dirty_repo_without_baseline, capsys
+    ):
+        _repo, state_path = dirty_repo_without_baseline
+        before = state_path.read_bytes()
+
+        code = main(["--state-file", str(state_path), "--only-touched"])
+
+        assert code == 1
+        assert state_path.read_bytes() == before
+        assert "--only-touched needs at least one --touched" in capsys.readouterr().err
+
+    def test_an_existing_baseline_is_ignored_and_left_untouched(
+        self, dirty_repo_without_baseline
+    ):
+        """A `--touched` path the baseline covers is still tracked, and the
+        baseline — even a malformed one the census path would rewrite — is
+        neither read nor written."""
+        _repo, state_path = dirty_repo_without_baseline
+        for baseline in (["app.py", "unrelated.py"], "not-a-list"):
+            state_path.write_text(
+                json.dumps({"pre_existing_changes": baseline}), encoding="utf-8"
+            )
+
+            code = main([
+                "--state-file", str(state_path), "--only-touched",
+                "--touched", "app.py",
+            ])
+
+            assert code == 0
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            assert [e["path"] for e in state["tracked_files"]] == ["app.py"]
+            assert state["pre_existing_changes"] == baseline
+
+    def test_the_touched_help_says_it_never_narrows(self, capsys):
+        with pytest.raises(SystemExit):
+            main(["--help"])
+        help_text = " ".join(capsys.readouterr().out.split())
+        assert "never removes a dirty one" in help_text
+        assert "--only-touched" in help_text

@@ -285,8 +285,8 @@ class TestMainWrapsPipelineWithIntentToAdd:
         )
         parent.generate_review_report = MagicMock(return_value="# report\n")
 
-        def fake_ctx(files):
-            parent.intent_to_add_untracked(files)
+        def fake_ctx(files, **kwargs):
+            parent.intent_to_add_untracked(files, **kwargs)
             return _TrackingContextManager(parent, list(files))
 
         args = _make_args(plan_path)
@@ -378,7 +378,7 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         parent = MagicMock()
 
-        def fake_ctx(files):
+        def fake_ctx(files, **kwargs):
             return _TrackingContextManager(parent, list(files))
 
         with patch.object(cro, "parse_args", return_value=args), \
@@ -458,7 +458,7 @@ class TestValidationInputsCarryTheStampedGroupHash:
 
         parent = MagicMock()
 
-        def fake_ctx(files):
+        def fake_ctx(files, **kwargs):
             return _TrackingContextManager(parent, list(files))
 
         with patch.object(cro, "parse_args", return_value=args), \
@@ -520,8 +520,8 @@ class TestReaggregateWrapsPipelineWithIntentToAdd:
         parent = MagicMock()
         parent.generate_review_report = MagicMock(return_value="# report\n")
 
-        def fake_ctx(files):
-            parent.intent_to_add_untracked(files)
+        def fake_ctx(files, **kwargs):
+            parent.intent_to_add_untracked(files, **kwargs)
             return _TrackingContextManager(parent, list(files))
 
         args = _make_args(plan_path, reaggregate=True, skip_validation=True)
@@ -1049,6 +1049,130 @@ class TestGenerateReviewReportFailedModelDerivation:
         assert "## Failed Reviews" in report
         assert "model-a" in report
         assert "boom" in report
+
+
+# ---------------------------------------------------------------------------
+# Plan review-run-scope-salvage-and-failure-visibility §5 (T5.2): the lost
+# reviewer is named in the header, and a salvage this attempt asked for says so
+# ---------------------------------------------------------------------------
+
+_PI_SPEC = "pi:openrouter/deepseek/deepseek-v4.1-flash"
+_PI_REASON = "pi timed out after 1200s (spent $0.09 est., 28,193 output tokens)"
+_PI_STEM = cro.sanitize_model_name(_PI_SPEC)
+_STARTED_AT = "2026-09-25T15:58:00"
+
+
+class TestTheModelsFailedHeaderLine:
+    """``**Models:**`` names the models that produced results; the one that
+    produced nothing used to appear only in ``## Failed Reviews`` at the very
+    bottom — and on the reaggregate path, not at all."""
+
+    ANSWERED = ["cursor-agent:grok-4.7-high", "cursor-agent:kimi-k3-high",
+                "codex:gpt-6-astra:xhigh", "claude-code:fable-5-1:high"]
+
+    def _report(self, tmp_path, *, phase_dir=None, requested=5, started_at=None):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        if phase_dir is not None and started_at is not None:
+            status_file.write_status(str(phase_dir), {
+                "phase": "code-review", "state": "models_complete",
+                "started_at": started_at,
+            })
+        results = {spec: (True, [], None) for spec in self.ANSWERED}
+        return cro.generate_review_report(
+            plan_path, results, changed_files=["x.py"], phase_dir=phase_dir,
+            failed_models={_PI_SPEC: _PI_REASON}, requested_models=requested,
+        )
+
+    def _phase_dir(self, tmp_path):
+        phase_dir = tmp_path / "code-review"
+        phase_dir.mkdir()
+        return phase_dir
+
+    def _retired_request(self, phase_dir, reason, timestamp, stamp="20260925-160000"):
+        name = f"retired_salvage_{_PI_STEM}.{reason}.{stamp}.json"
+        (phase_dir / name).write_text(json.dumps({
+            "model": _PI_SPEC, "phase": "code_review", "raw_output": "…",
+            "timestamp": timestamp,
+        }), encoding="utf-8")
+
+    @staticmethod
+    def _failed_line(report):
+        lines = report.splitlines()
+        index = next(i for i, line in enumerate(lines) if line.startswith("**Models:**"))
+        return lines[index + 1]
+
+    def test_the_line_sits_directly_under_models_with_the_reason_verbatim(
+        self, tmp_path
+    ):
+        report = self._report(tmp_path)
+        assert self._failed_line(report) == (
+            f"**Models failed:** 1 of 5 requested — {_PI_SPEC}: {_PI_REASON}"
+        )
+        # The bottom section stays.
+        assert f"- **{_PI_SPEC}**: {_PI_REASON}" in report
+
+    def test_no_failure_writes_no_line(self, tmp_path):
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# plan\n", encoding="utf-8")
+        report = cro.generate_review_report(
+            plan_path, {"a:b": (True, [], None)}, changed_files=[],
+            failed_models={}, requested_models=1,
+        )
+        assert "**Models failed:**" not in report
+
+    def test_a_live_salvage_request_adds_the_clause(self, tmp_path):
+        phase_dir = self._phase_dir(tmp_path)
+        (phase_dir / f"salvage_{_PI_STEM}.json").write_text("{}", encoding="utf-8")
+        report = self._report(tmp_path, phase_dir=phase_dir)
+        assert self._failed_line(report).endswith(
+            f"{_PI_SPEC}: {_PI_REASON}; salvage requested, nothing recovered"
+        )
+
+    def test_an_unrecoverable_request_from_this_attempt_adds_the_clause(
+        self, tmp_path
+    ):
+        phase_dir = self._phase_dir(tmp_path)
+        self._retired_request(phase_dir, "unrecoverable", "2026-09-25T16:20:00")
+        report = self._report(tmp_path, phase_dir=phase_dir, started_at=_STARTED_AT)
+        assert "; salvage requested, nothing recovered" in self._failed_line(report)
+
+    @pytest.mark.parametrize("reason, timestamp, started_at", [
+        # A previous attempt's pair, retired when this attempt began.
+        ("superseded", "2026-09-25T16:20:00", _STARTED_AT),
+        # A previous run's unrecoverable verdict survives the next attempt.
+        ("unrecoverable", "2026-09-24T09:00:00", _STARTED_AT),
+        # A checkpoint without `started_at` gets no clause from this route.
+        ("unrecoverable", "2026-09-25T16:20:00", None),
+    ])
+    def test_no_clause_from_a_request_this_attempt_did_not_make(
+        self, tmp_path, reason, timestamp, started_at
+    ):
+        phase_dir = self._phase_dir(tmp_path)
+        self._retired_request(phase_dir, reason, timestamp)
+        report = self._report(tmp_path, phase_dir=phase_dir, started_at=started_at)
+        assert "salvage requested" not in report
+
+    def test_the_batch_report_is_not_evidence(self, tmp_path):
+        """The validation dispatch that follows the salvage writes the same bare
+        name, so the salvage verdict is usually gone by report time."""
+        phase_dir = self._phase_dir(tmp_path)
+        (phase_dir / "subagent_batch_report.json").write_text(json.dumps({
+            "tasks": [{"task_id": f"salvage_{_PI_STEM}",
+                       "status": "salvage_unrecoverable"}],
+        }), encoding="utf-8")
+        report = self._report(tmp_path, phase_dir=phase_dir, started_at=_STARTED_AT)
+        assert "salvage requested" not in report
+
+    def test_the_html_notice_is_the_same_line_without_its_bold(self, tmp_path):
+        phase_dir = self._phase_dir(tmp_path)
+        (phase_dir / f"salvage_{_PI_STEM}.json").write_text("{}", encoding="utf-8")
+        report = self._report(tmp_path, phase_dir=phase_dir)
+        data = json.loads((phase_dir / "report_data.json").read_text(encoding="utf-8"))
+        assert data["failedModels"] == {_PI_SPEC: _PI_REASON}
+        assert data["requestedModels"] == 5
+        [notice] = [n for n in data["notices"] if n["type"] == "warning"]
+        assert notice["message"] == self._failed_line(report).replace("**", "")
 
 
 class TestTheFanoutReportsProgressWhileItRuns:
@@ -3048,7 +3172,7 @@ class TestTheValidationTaskFileMainWrites:
                           side_effect=lambda r: r or "HEAD~1"), \
              patch.object(cro, "get_project_root", return_value=str(tmp_path)), \
              patch.object(cro, "intent_to_add_untracked",
-                          side_effect=lambda files: _TrackingContextManager(
+                          side_effect=lambda files, **_: _TrackingContextManager(
                               MagicMock(), list(files))), \
              patch.object(cro, "run_all_reviews", new=AsyncMock(
                  return_value={"cursor-agent:auto": (True, issues, None)})), \
@@ -3087,3 +3211,1355 @@ class TestTheValidationTaskFileMainWrites:
             project_root=str(tmp_path),
         )
         assert content_hash(recut) == tasks["inputs"]["reviewed_code_sha256"]
+
+
+#: The first sentence of the instruction T7.4 appends to `extra_instructions`.
+DROPPED_LEAD = (
+    "These files were dropped from the reviewed-code block only for its budget."
+)
+
+
+class TestTheValidatorIsToldToOpenTheFilesItLost:
+    """T7.4/T7.5 (review-run-scope-salvage-and-failure-visibility §7.2).
+
+    Over its budget the reviewed-code block drops whole files, and the only
+    trace used to be a passive "(… not shown: <path>…)" note appended *last* to
+    the block, the first text `build_context_source`'s tail cut removes. The
+    audited run reported "windows for 3 of 12 cited files not shown" and no
+    validator was told to go and read them, though review-code validators run
+    `agent-readonly` and can. The instruction now travels in
+    `extra_instructions`, which no context budget cuts, and it names only the
+    dropped paths that resolve inside the project: the paths are model output.
+    """
+
+    WIDTH = 60
+
+    @classmethod
+    def _write(cls, path, pad=0):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [f"line {n} " + "x" * cls.WIDTH for n in range(1, 201)]
+        lines[99] += "y" * pad  # line 100, inside every cited window
+        path.write_text("\n".join(lines), encoding="utf-8")
+
+    @staticmethod
+    def _plan(root):
+        root.mkdir(parents=True, exist_ok=True)
+        plan_path = root / "plan.md"
+        plan_path.write_text("# plan\n\n## accel: 28\n", encoding="utf-8")
+        return plan_path
+
+    @staticmethod
+    def _groups(paths):
+        return [{"suggestions": [{"file": p, "line_range": [100, 101]}]}
+                for p in paths]
+
+    @staticmethod
+    def _issues(paths):
+        # The path only in `file`, so a count of its mentions in a prompt is a
+        # count of the records that cite it.
+        return [{
+            "title": f"finding {i} about {Path(p).name}",
+            "desc": f"line 100 of this file does the wrong thing ({i})",
+            "importance": "medium", "file": p, "line_range": [100, 101],
+            "type": "bug",
+        } for i, p in enumerate(paths)]
+
+    def _fill(self, repo, plan_path, first):
+        """Pad ``first`` so the block holding its window alone ends 3 chars
+        short of `VALIDATION_CONTEXT_LIMIT`: once it is kept, every later
+        section is dropped however small, and the block's own "not shown" note
+        after it is what a tail cut removes."""
+        from utils.validation import VALIDATION_CONTEXT_LIMIT
+
+        self._write(repo / first)
+        alone, _ = cro.build_validation_secondary_context(
+            self._groups([first]), plan_path, project_root=str(repo)
+        )
+        self._write(repo / first, pad=VALIDATION_CONTEXT_LIMIT - 3 - len(alone))
+        alone, _ = cro.build_validation_secondary_context(
+            self._groups([first]), plan_path, project_root=str(repo)
+        )
+        assert len(alone) == VALIDATION_CONTEXT_LIMIT - 3
+
+    @staticmethod
+    def _fake_state(paths):
+        fake_state = MagicMock()
+        fake_state.get = MagicMock(
+            side_effect=lambda k, default=None: {
+                "tracked_files": [{"path": p} for p in paths],
+                "head_before_implement": "abc123",
+                "head_at_start": "abc123",
+                "pre_existing_changes": [],
+            }.get(k, default)
+        )
+        fake_state.mark_phase_completed = MagicMock()
+        fake_state.save = MagicMock()
+        fake_state.is_phase_completed = MagicMock(return_value=False)
+        fake_state.state = {"phases_completed": {}}
+        return fake_state
+
+    def _fanout(self, plan_path, root, cited):
+        """`main`'s validation site, stopped at the host hand-off."""
+        phase_dir = cro.get_phase_dir(plan_path, "code-review")
+        args = _make_args(plan_path, skip_validation=False)
+        with patch.object(cro, "parse_args", return_value=args), \
+             patch.object(cro, "get_or_create_state",
+                          return_value=self._fake_state(cited)), \
+             patch.object(cro, "resolve_models",
+                          return_value=["cursor-agent:auto"]), \
+             patch.object(cro, "is_model_valid", return_value=True), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(root)), \
+             patch.object(cro, "run_all_reviews", new=AsyncMock(
+                 return_value={"cursor-agent:auto": (
+                     True, self._issues(cited), None)})):
+            asyncio.run(cro.main())
+        return phase_dir
+
+    def _reaggregate(self, plan_path, root, cited, phase_dir):
+        """`reaggregate_from_existing_files`' validation site."""
+        phase_dir.mkdir(parents=True)
+        (phase_dir / "cursor-agent_auto.json").write_text(
+            json.dumps(self._issues(cited)), encoding="utf-8"
+        )
+        out_dir = phase_dir.parent / "out"
+        out_dir.mkdir()
+        args = _make_args(plan_path, reaggregate=True, skip_validation=False)
+        with patch.object(cro, "get_or_create_state",
+                          return_value=self._fake_state(cited)), \
+             patch.object(cro, "get_phase_dir", return_value=phase_dir), \
+             patch.object(cro, "validate_git_ref",
+                          side_effect=lambda r: r or "HEAD~1"), \
+             patch.object(cro, "get_project_root", return_value=str(root)), \
+             patch.object(cro, "build_unsanitize_map", return_value={}):
+            asyncio.run(cro.reaggregate_from_existing_files(
+                "plan", out_dir, plan_path, args
+            ))
+        return phase_dir
+
+    @staticmethod
+    def _prompts(phase_dir):
+        tasks = json.loads(
+            (phase_dir / "validation_tasks.json").read_text(encoding="utf-8")
+        )
+        assert tasks["batches"]
+        return [batch["prompt"] for batch in tasks["batches"]]
+
+    @staticmethod
+    def _instruction(prompt):
+        lines = [ln for ln in prompt.splitlines() if ln.startswith(DROPPED_LEAD)]
+        assert len(lines) == 1, lines
+        return lines[0]
+
+    # -- T7.4 ------------------------------------------------------------
+
+    def test_a_drop_names_the_files_to_open_outside_the_block(self, tmp_path):
+        from utils.subagent_prompts import CODE_REVIEW_VALIDATION_GUIDANCE
+
+        plan_path = self._plan(tmp_path)
+        names = [f"m{i:02d}.py" for i in range(20)]
+        for name in names:
+            self._write(tmp_path / name)
+        cut_report = {}
+
+        secondary, _ = cro.build_validation_secondary_context(
+            self._groups(names), plan_path, project_root=str(tmp_path),
+            cut_report=cut_report,
+        )
+
+        dropped = cut_report["dropped_files"]
+        assert dropped, "the fixture is meant to overflow the code budget"
+        expected = [str((tmp_path / name).resolve()) for name in dropped]
+        assert cut_report["open_paths"] == expected
+        extra = cro.validation_extra_instructions(cut_report)
+        # After the guidance, never instead of it.
+        assert extra.startswith(CODE_REVIEW_VALIDATION_GUIDANCE)
+        assert DROPPED_LEAD in extra
+        assert "Open each at the lines the findings cite before judging them" in extra
+        for path in expected:
+            assert f"`{path}`" in extra
+            # Absolute, and only outside the block: the block keeps its own
+            # relative note, which is what a tail cut removes first.
+            assert path not in secondary
+        assert DROPPED_LEAD not in secondary
+
+    def test_no_drop_adds_no_instruction(self, tmp_path):
+        from utils.subagent_prompts import CODE_REVIEW_VALIDATION_GUIDANCE
+
+        plan_path = self._plan(tmp_path)
+        for name in ("a.py", "b.py"):
+            self._write(tmp_path / name)
+        cut_report = {}
+
+        cro.build_validation_secondary_context(
+            self._groups(["a.py", "b.py"]), plan_path,
+            project_root=str(tmp_path), cut_report=cut_report,
+        )
+
+        assert cut_report["dropped_files"] == []
+        assert cut_report["open_paths"] == []
+        assert cro.validation_extra_instructions(cut_report) == (
+            CODE_REVIEW_VALIDATION_GUIDANCE
+        )
+
+    def test_with_no_project_root_the_cwd_is_the_boundary(
+        self, tmp_path, monkeypatch
+    ):
+        """The same root rule `_reviewed_code_sections` reads under."""
+        plan_path = self._plan(tmp_path)
+        names = [f"m{i:02d}.py" for i in range(20)]
+        for name in names:
+            self._write(tmp_path / name)
+        monkeypatch.chdir(tmp_path)
+        cut_report = {}
+
+        cro.build_validation_secondary_context(
+            self._groups(names), plan_path, project_root=None,
+            cut_report=cut_report,
+        )
+
+        assert cut_report["dropped_files"]
+        assert cut_report["open_paths"] == [
+            str((tmp_path / name).resolve()) for name in cut_report["dropped_files"]
+        ]
+
+    def test_an_escaping_path_among_the_dropped_is_named_nowhere(self, tmp_path):
+        """An absolute path, a `../` escape and an in-tree symlink out of the
+        tree, each forced among the dropped: none reaches the instruction or
+        the block, in its cited or its resolved form. An `agent-readonly`
+        prompt naming one would send the validator to it, and codex reads
+        outside its cwd."""
+        repo = tmp_path / "repo"
+        plan_path = self._plan(repo)
+        self._fill(repo, plan_path, "m00.py")
+        names = ["m00.py", "m01.py", "m02.py"]
+        for name in names[1:]:
+            self._write(repo / name)
+        outside = tmp_path / "outside.py"
+        self._write(outside)
+        secret = tmp_path / "secret_target.py"
+        self._write(secret)
+        (repo / "zz_link.py").symlink_to(secret)
+        escaping = ["/etc/passwd", "../outside.py", "zz_link.py"]
+
+        # Sorted by path, `/…` and `../…` always come first, and the first
+        # section is always kept; move the escaping ones last, behind the
+        # filled `m00.py`, so a budget drop reaches them, which is the case the
+        # containment exists for.
+        real_sections = cro._reviewed_code_sections
+
+        def escaping_last(*args, **kwargs):
+            return sorted(real_sections(*args, **kwargs),
+                          key=lambda section: section[0] in escaping)
+
+        cut_report = {}
+        with patch.object(cro, "_reviewed_code_sections", escaping_last):
+            secondary, _ = cro.build_validation_secondary_context(
+                self._groups(names + escaping), plan_path,
+                project_root=str(repo), cut_report=cut_report,
+            )
+
+        assert set(escaping) <= set(cut_report["dropped_files"])
+        extra = cro.validation_extra_instructions(cut_report)
+        named = escaping + [str(outside), str(outside.resolve()),
+                            str(secret), str(secret.resolve())]
+        for text in (secondary, extra):
+            for path in named:
+                assert path not in text, (path, text[-400:])
+        # The contained drops are still named, absolute, in the instruction,
+        # and by their cited spelling in the block's own note.
+        assert cut_report["open_paths"] == [
+            str((repo / name).resolve()) for name in names[1:]
+        ]
+        for path in cut_report["open_paths"]:
+            assert f"`{path}`" in extra
+        assert ("the windows for these files are not shown: m01.py, m02.py.)"
+                in secondary)
+
+    def test_both_validation_sites_materialize_the_same_instruction(
+        self, tmp_path
+    ):
+        plan_path = self._plan(tmp_path)
+        names = [f"src/m{i:02d}.py" for i in range(20)]
+        for name in names:
+            self._write(tmp_path / name)
+
+        fanout_dir = self._fanout(plan_path, tmp_path, names)
+        reaggregate_dir = self._reaggregate(
+            plan_path, tmp_path, names, tmp_path / "reagg" / "code-review"
+        )
+
+        fanout = {self._instruction(p) for p in self._prompts(fanout_dir)}
+        reaggregate = {self._instruction(p) for p in self._prompts(reaggregate_dir)}
+        assert len(fanout) == 1
+        assert fanout == reaggregate
+        (instruction,) = fanout
+        assert f"`{(tmp_path / 'src').resolve()}/" in instruction
+
+    # -- T7.5 ------------------------------------------------------------
+
+    def test_a_block_filled_to_the_limit_still_carries_every_path_to_open(
+        self, tmp_path
+    ):
+        """The reviewed-code block ends a few characters under
+        `VALIDATION_CONTEXT_LIMIT`, so the block's own "not shown" note is the
+        text the tail cut removes, and many long paths are dropped, one of them
+        an in-tree symlink out of the tree. Every materialized
+        `validation_batch_N.prompt.txt` still names each contained dropped
+        file, absolute, and never the escaping one."""
+        repo = tmp_path / "repo"
+        plan_path = self._plan(repo)
+        long_dir = "pkg/" + "/".join(
+            ["a_rather_long_directory_name_for_the_budget_test"] * 3
+        )
+        longs = [f"{long_dir}/module_with_a_long_name_{i:02d}.py" for i in range(12)]
+        for path in longs:
+            self._write(repo / path)
+        secret = tmp_path / "secret_outside.py"
+        self._write(secret)
+        link = f"{long_dir}/zz_escape_link.py"
+        (repo / link).symlink_to(secret)
+
+        # The first file (by path) fills the block: every later one is dropped.
+        big = "a_big.py"
+        self._fill(repo, plan_path, big)
+
+        phase_dir = self._fanout(plan_path, repo, [big] + longs + [link])
+
+        sidecars = sorted(phase_dir.glob("validation_batch_*.prompt.txt"))
+        assert sidecars
+        contained = [str((repo / path).resolve()) for path in longs]
+        target = str(secret.resolve())
+        without_the_link = 0
+        for sidecar in sidecars:
+            prompt = sidecar.read_text(encoding="utf-8")
+            block = prompt.split(
+                f"## Context ({cro.REVIEWED_CODE_CONTEXT_LABEL})"
+            )[1].split("## Suggestion groups to validate")[0]
+            # The precondition: the block really was filled, and its own note
+            # (the only in-block list of the dropped files) was cut away.
+            assert "[... truncated ...]" in block
+            assert not any(path in block for path in longs + [link])
+
+            instruction = self._instruction(prompt)
+            for path in contained:
+                assert f"`{path}`" in instruction
+            assert target not in prompt
+            assert link not in instruction
+            # The link's only mentions are its own finding's `file` field, the
+            # record the validator is judging.
+            assert prompt.count(link) == prompt.count(f'"file": "{link}"')
+            without_the_link += link not in prompt
+        if len(sidecars) > 1:
+            assert without_the_link >= 1
+
+
+# ---------------------------------------------------------------------------
+# Every reviewer is given the resolved scope (review-scope plan §2 D2.1, T2.1)
+# and `--files`/`--files-from` set it exactly (decision 11.1, T2.6)
+# ---------------------------------------------------------------------------
+
+
+class _NoProbeAdapter:
+    """An adapter with no sandbox probe: the slot dispatches straight away."""
+
+    internal_retries = None
+
+    def sandbox_probe_command(self, profile):
+        return None
+
+    def sandbox_fallback_rungs(self, profile):
+        return ()
+
+
+class _Blank(dict):
+    def __missing__(self, key):
+        return ""
+
+
+def _rendered(dispatch_kwargs) -> str:
+    """The review prompt as the template renders it from `prompt_context`.
+
+    Keys `invoke_with_file_output` adds itself (the output path and friends)
+    render blank: the file list is what these tests read.
+    """
+    import string
+
+    return string.Formatter().vformat(
+        dispatch_kwargs["prompt_template"], (), _Blank(dispatch_kwargs["prompt_context"])
+    )
+
+
+def _run_fanout_capturing_prompts(tmp_path, monkeypatch, args_overrides, *, diff=None,
+                                  setup_state=None, stdin=None):
+    """Run `main()` over a real plan-local `state.json`; return the dispatches.
+
+    The real `run_all_reviews` → `run_single_review` path runs; only the
+    provider call (`invoke_with_file_output`) is replaced, so what it receives
+    is exactly what a reviewer would have been sent.
+    """
+    from utils import review_orchestrator_base as rob
+    from utils.state_manager import get_or_create_state
+
+    plan_path = tmp_path / "plan.md"
+    if not plan_path.exists():
+        plan_path.write_text("# Plan\n", encoding="utf-8")
+    if setup_state is not None:
+        state = get_or_create_state(plan_path)
+        setup_state(state)
+        state.save()
+
+    seen = []
+
+    def dispatch(**kwargs):
+        seen.append(kwargs)
+        return {
+            "success": True, "data": [], "source": "file",
+            "output_file": str(tmp_path / "o.json"), "details": {},
+        }
+
+    monkeypatch.setattr(rob, "get_provider", lambda _name: _NoProbeAdapter())
+    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    monkeypatch.setattr(cro, "get_project_root", lambda _p: str(tmp_path))
+    monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
+    monkeypatch.setattr(cro, "PROVIDER_STAGGER_DELAY", 0.0)
+    if stdin is not None:
+        import io
+
+        monkeypatch.setattr(sys, "stdin", io.StringIO(stdin))
+
+    args = _make_args(plan_path, **{"files": [], "files_from": None, **args_overrides})
+    with patch.object(cro, "parse_args", return_value=args), \
+         patch.object(cro, "resolve_models", return_value=["cursor-agent:auto"]), \
+         patch.object(cro, "is_model_valid", return_value=True), \
+         patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"), \
+         patch.object(cro, "get_files_changed_since_ref",
+                      side_effect=(lambda _ref: list(diff)) if diff is not None
+                      else AssertionError("the git-diff fallback was consulted")), \
+         patch.object(cro, "list_worktree_untracked_files", return_value=[]), \
+         patch.object(cro, "intent_to_add_untracked",
+                      side_effect=lambda files, **_: contextlib.nullcontext()), \
+         patch.object(cro, "generate_review_report", return_value="# report\n"):
+        asyncio.run(cro.main())
+    return plan_path, seen
+
+
+def _listed(prompt: str) -> list:
+    """The paths the prompt's file list names, in order."""
+    return [
+        line.split("`")[1] for line in prompt.splitlines()
+        if line.startswith("- `") and line.count("`") >= 2
+    ]
+
+
+def _state_json(plan_path):
+    from utils.state_manager import get_or_create_state
+
+    return json.loads(get_or_create_state(plan_path).state_file.read_text(encoding="utf-8"))
+
+
+class TestReviewersAreGivenTheResolvedScope:
+    def test_a_fallback_runs_prompt_lists_the_diffs_paths_source_first(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        """The bug: main resolved the fallback scope, then handed every reviewer
+        the EMPTY `tracked_files`, so each prompt carried the placeholder."""
+        plan_path, seen = _run_fanout_capturing_prompts(
+            tmp_path, monkeypatch, {"base_ref": "abc123"},
+            diff=["tests/test_a.py", "utils/z.py"],
+        )
+
+        assert len(seen) == 1
+        prompt = _rendered(seen[0])
+        assert _listed(prompt)[:2] == ["utils/z.py", "tests/test_a.py"]
+        assert "No tracked files - using git diff" not in prompt
+        assert "(from task:" not in prompt
+        scope_label = seen[0]["prompt_context"]["scope_source"]
+        assert "`git diff --name-only abc123`" in scope_label
+        assert "[SCOPE_FALLBACK]" in capsys.readouterr().out
+
+    def test_a_tracked_scope_keeps_its_task_attribution(self, tmp_path, monkeypatch):
+        def setup(state):
+            state.set("tracked_files", [
+                {"path": "tests/test_b.py", "action": "modified", "task_id": "T002"},
+                {"path": "src/b.py", "action": "modified", "task_id": "T001"},
+            ])
+
+        _plan, seen = _run_fanout_capturing_prompts(
+            tmp_path, monkeypatch, {"base_ref": "abc123"}, setup_state=setup,
+        )
+
+        prompt = _rendered(seen[0])
+        assert "- `src/b.py` (from task: T001)" in prompt
+        assert "- `tests/test_b.py` (from task: T002)" in prompt
+        assert prompt.index("src/b.py") < prompt.index("tests/test_b.py")
+        assert seen[0]["prompt_context"]["scope_source"] == (
+            "recorded by the implement phase (tracked_files)"
+        )
+
+    def test_the_shipped_template_formats_with_the_context_this_lane_builds(
+        self, tmp_path, monkeypatch
+    ):
+        """`scope_source` is an extra key until the template binds it: `format`
+        ignores it, and no placeholder of the template goes missing."""
+        _plan, seen = _run_fanout_capturing_prompts(
+            tmp_path, monkeypatch, {"base_ref": "abc123"}, diff=["src/a.py"],
+        )
+        context = dict(seen[0]["prompt_context"])
+        context.update(output_json_path="/o.json", output_location="-",
+                       working_limits="-")
+        seen[0]["prompt_template"].format(**context)
+
+
+class TestFilesFlagSetsTheExactScope:
+    def _tracked(self, state):
+        state.set("tracked_files", [
+            {"path": "src/other.py", "action": "modified", "task_id": "T001"},
+        ])
+
+    def test_files_over_tracked_files_reviews_exactly_those_paths(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        plan_path, seen = _run_fanout_capturing_prompts(
+            tmp_path, monkeypatch, {"files": ["b.py", "a.py"]},
+            setup_state=self._tracked,
+        )
+
+        prompt = _rendered(seen[0])
+        assert _listed(prompt) == ["a.py", "b.py"]
+        assert seen[0]["prompt_context"]["scope_source"].startswith("given with --files")
+        # Recorded at fan-out start, for a later --reaggregate.
+        assert _state_json(plan_path)["review_scope_files"] == ["b.py", "a.py"]
+        from utils.state_manager import get_or_create_state
+
+        scope = cro.resolve_review_scope(get_or_create_state(plan_path), "abc123")
+        assert scope.source == "files_flag"
+        assert sorted(scope.paths) == ["a.py", "b.py"]
+        assert "Recorded the --files scope (2 files)" in capsys.readouterr().out
+
+    def test_files_from_with_blank_lines_gives_the_same_scope(
+        self, tmp_path, monkeypatch
+    ):
+        listing = tmp_path / "scope.txt"
+        listing.write_text("b.py\n\n   \na.py\n", encoding="utf-8")
+
+        plan_path, seen = _run_fanout_capturing_prompts(
+            tmp_path, monkeypatch, {"files_from": str(listing)},
+            setup_state=self._tracked,
+        )
+
+        assert _listed(_rendered(seen[0])) == ["a.py", "b.py"]
+        assert _state_json(plan_path)["review_scope_files"] == ["b.py", "a.py"]
+
+    def test_files_from_stdin(self, tmp_path, monkeypatch):
+        _plan, seen = _run_fanout_capturing_prompts(
+            tmp_path, monkeypatch, {"files_from": "-"}, stdin="lib/x.py\n",
+            setup_state=self._tracked,
+        )
+        assert _listed(_rendered(seen[0])) == ["lib/x.py"]
+
+    def test_an_absolute_path_inside_the_repository_is_made_relative(
+        self, tmp_path, monkeypatch
+    ):
+        _plan, seen = _run_fanout_capturing_prompts(
+            tmp_path, monkeypatch, {"files": [str(tmp_path / "pkg" / "m.py")]},
+        )
+        assert _listed(_rendered(seen[0])) == ["pkg/m.py"]
+
+    @pytest.mark.parametrize("outside", ["/definitely/elsewhere/x.py", "../escape.py"])
+    def test_a_path_outside_the_repository_exits_1_naming_it(
+        self, tmp_path, monkeypatch, capsys, outside
+    ):
+        with pytest.raises(SystemExit) as exc:
+            _run_fanout_capturing_prompts(
+                tmp_path, monkeypatch, {"files": ["a.py", outside]},
+            )
+        assert exc.value.code == 1
+        out = capsys.readouterr().out
+        assert "outside the repository" in out
+        assert outside in out
+
+    def test_files_from_stdin_under_detach_is_refused(self, tmp_path, monkeypatch, capsys):
+        with pytest.raises(SystemExit) as exc:
+            _run_fanout_capturing_prompts(
+                tmp_path, monkeypatch, {"files_from": "-", "detach": True},
+                stdin="a.py\n",
+            )
+        assert exc.value.code == 1
+        assert "--detach worker does not inherit" in capsys.readouterr().out
+
+    def test_a_later_fanout_without_files_removes_the_record(
+        self, tmp_path, monkeypatch, capsys
+    ):
+        plan_path, _seen = _run_fanout_capturing_prompts(
+            tmp_path, monkeypatch, {"files": ["a.py"]}, setup_state=self._tracked,
+        )
+        assert _state_json(plan_path)["review_scope_files"] == ["a.py"]
+
+        _plan, seen = _run_fanout_capturing_prompts(
+            tmp_path, monkeypatch, {"force": True, "rerun_all": True},
+        )
+
+        assert "review_scope_files" not in _state_json(plan_path)
+        # ...so this run, and every reaggregate after it, is back on tracked_files.
+        assert _listed(_rendered(seen[0])) == ["src/other.py"]
+        assert "Cleared review_scope_files from state.json" in capsys.readouterr().out
+
+    @pytest.mark.parametrize("flags, named", [
+        ({"files": ["x.py"]}, "--files"),
+        ({"files_from": "-"}, "--files-from"),
+        ({"files": ["x.py"], "files_from": "list.txt"}, "--files or --files-from"),
+        ({}, None),
+    ])
+    def test_a_reaggregate_says_it_does_not_re_resolve_the_flags(
+        self, tmp_path, monkeypatch, capsys, flags, named
+    ):
+        """Every printed reaggregate command replays the fan-out's own flags, so
+        they are accepted — and said to be unused, never dropped silently."""
+        plan_path = tmp_path / "plan.md"
+        plan_path.write_text("# Plan\n", encoding="utf-8")
+        cro.get_phase_dir(plan_path, "code-review")
+        reaggregated = []
+
+        async def fake_reaggregate(*args, **kwargs):
+            reaggregated.append(args)
+
+        class _NoStdin:
+            def read(self, *_a):
+                raise AssertionError("--reaggregate read --files-from - from stdin")
+
+        monkeypatch.setattr(cro, "reaggregate_from_existing_files", fake_reaggregate)
+        monkeypatch.setattr(sys, "stdin", _NoStdin())
+        args = _make_args(plan_path, reaggregate=True,
+                          **{"files": [], "files_from": None, **flags})
+        with patch.object(cro, "parse_args", return_value=args):
+            asyncio.run(cro.main())
+
+        out = capsys.readouterr().out
+        assert len(reaggregated) == 1
+        lines = [text for text in out.splitlines()
+                 if text.startswith("[SCOPE_FLAGS_IGNORED]")]
+        if named is None:
+            assert lines == []
+            return
+        assert len(lines) == 1
+        assert f"does not re-resolve {named};" in lines[0]
+        assert "review_scope_files" in lines[0]
+
+    def test_the_parser_accepts_both_flags(self):
+        args = cro.parse_args([
+            "--plan-file", "p.md", "--files", "a.py", "--files", "b.py",
+            "--files-from", "list.txt",
+        ])
+        assert args.files == ["a.py", "b.py"]
+        assert args.files_from == "list.txt"
+        plain = cro.parse_args(["--plan-file", "p.md"])
+        assert plain.files == [] and plain.files_from is None
+
+
+# ---------------------------------------------------------------------------
+# The scope manifest and per-file diffs every reviewer is pointed at
+# (review-scope plan §2: D2.2/T2.2, D2.3/T2.3, D3.2/T3.2)
+# ---------------------------------------------------------------------------
+#
+# These drive the real `main()` → `run_all_reviews` → `run_single_review` path
+# in a real temp repository, with only the provider call replaced: the diff set
+# is written by the real `write_review_diff`, and what the stub receives is
+# exactly what a reviewer would have been sent.
+
+import os as _os
+import re
+import subprocess as _subprocess
+from types import SimpleNamespace as _NS
+
+from utils import git_utils as _git_utils
+from utils import llm_client as _llm_client
+from utils.git_utils import (
+    REVIEW_SCOPE_FILENAME as _MANIFEST,
+    read_review_scope as _read_review_scope,
+)
+
+_HERMETIC_GIT = {
+    "GIT_CONFIG_GLOBAL": _os.devnull,
+    "GIT_CONFIG_SYSTEM": _os.devnull,
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+    "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+}
+
+
+def _git(cwd, *args):
+    return _subprocess.run(
+        ["git", *args], cwd=cwd, check=True, capture_output=True, text=True
+    ).stdout
+
+
+def _put(root, rel, text):
+    path = Path(root) / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+@pytest.fixture
+def scope_repo(tmp_path, monkeypatch):
+    """A repository whose implementation changed two files since `base`."""
+    for key, value in _HERMETIC_GIT.items():
+        monkeypatch.setenv(key, value)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "root")
+    _put(repo, "src/app.py", "def a():\n    return 1\n")
+    _put(repo, "tests/test_app.py", "def test_a():\n    assert True\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "base")
+    base = _git(repo, "rev-parse", "HEAD").strip()
+    _put(repo, "src/app.py", "def a():\n    return 2\n")
+    _put(repo, "tests/test_app.py", "def test_a():\n    assert a() == 2\n")
+    plan = repo / "plans" / "feature.md"
+    _put(repo, "plans/feature.md", "# Plan\n\nMake a() return 2.\n")
+    monkeypatch.chdir(repo)
+    return _NS(repo=repo, plan=plan, base=base)
+
+
+def _record_scope(plan, base, paths=("src/app.py", "tests/test_app.py")):
+    from utils.state_manager import get_or_create_state
+
+    state = get_or_create_state(plan)
+    state.set("tracked_files", [
+        {"path": path, "action": "modified", "task_id": "T001"} for path in paths
+    ])
+    state.set("head_before_implement", base)
+    state.save()
+
+
+class _Capability:
+    """An adapter as `render_diff_access`/`render_output_location` read it."""
+
+    supports_file_output = False
+
+    def __init__(self, read_scope, shell):
+        self.generate_read_scope = read_scope
+        self.runs_shell_in_generate = shell
+
+
+def _phase(plan):
+    return cro.get_phase_dir(plan, "code-review")
+
+
+def _scope_fanout(plan, monkeypatch, models, *, respond=None, capabilities=None,
+                  real_report=False, **arg_overrides):
+    """Run `main()`; return ``(dispatches, exit code)``.
+
+    Each dispatch records the kwargs `invoke_with_file_output` received plus
+    what was on disk at that moment (the manifest, the ledger), which is what
+    "written before dispatch" means.
+    """
+    from utils import review_orchestrator_base as rob
+
+    seen = []
+
+    def dispatch(**kwargs):
+        phase = _phase(plan)
+        manifest = phase / _MANIFEST
+        seen.append({
+            "kwargs": kwargs,
+            "manifest": manifest.read_text(encoding="utf-8") if manifest.is_file() else None,
+            "diff_files": sorted(p.name for p in (phase / "diff").glob("*.diff")),
+            "ledger": cro.read_scope_ledger(phase),
+        })
+        if respond is not None:
+            return respond(kwargs)
+        return {"success": True, "data": [], "source": "file",
+                "output_file": "", "details": {}}
+
+    monkeypatch.setattr(rob, "get_provider", lambda _name: _NoProbeAdapter())
+    monkeypatch.setattr("utils.subagent_executor._SANDBOX_PROBE_CACHE", {})
+    monkeypatch.setattr(cro, "invoke_with_file_output", dispatch)
+    monkeypatch.setattr(cro, "PROVIDER_STAGGER_DELAY", 0.0)
+    if capabilities is not None:
+        real = _llm_client.get_provider
+        monkeypatch.setattr(
+            _llm_client, "get_provider",
+            lambda name: capabilities.get(name) or real(name),
+        )
+    args = _make_args(plan, models=list(models), files=[], files_from=None,
+                      **arg_overrides)
+    with contextlib.ExitStack() as stack:
+        stack.enter_context(patch.object(cro, "parse_args", return_value=args))
+        stack.enter_context(patch.object(cro, "resolve_models", return_value=list(models)))
+        stack.enter_context(patch.object(cro, "is_model_valid", return_value=True))
+        if not real_report:
+            stack.enter_context(
+                patch.object(cro, "generate_review_report", return_value="# report\n"))
+        try:
+            code = asyncio.run(cro.main())
+        except SystemExit as exc:
+            code = exc.code
+    return seen, code
+
+
+def _full_prompt(dispatch, plan) -> str:
+    """The prompt exactly as `invoke_with_file_output` would format it."""
+    kwargs = dispatch["kwargs"]
+    context = dict(kwargs["prompt_context"])
+    context["output_json_path"] = "<unused>"
+    context["output_location"] = _llm_client.render_output_location(
+        "<unused>", kwargs["model_spec"], anchor=str(plan)
+    )
+    context["working_limits"] = _llm_client.render_working_limits(kwargs["timeout"])
+    return kwargs["prompt_template"].format(**context)
+
+
+def _stem(spec):
+    return cro.sanitize_model_name(spec)
+
+
+class TestTheDiffSetIsWrittenBeforeDispatch:
+    def test_a_reviewer_finds_this_runs_set_even_over_an_earlier_one(
+        self, scope_repo, monkeypatch
+    ):
+        _record_scope(scope_repo.plan, scope_repo.base)
+        phase = _phase(scope_repo.plan)
+        (phase / "diff").mkdir(parents=True)
+        (phase / "diff" / "9-old.diff").write_text("old\n", encoding="utf-8")
+        (phase / _MANIFEST).write_text(
+            "# Review scope\n\n- Scope id: `0000000000aa`\n\nDiff coverage: complete\n"
+            "`diff/9-old.diff`\n",
+            encoding="utf-8",
+        )
+
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"])
+
+        assert len(seen) == 1
+        header = _read_review_scope_text(seen[0]["manifest"])
+        assert header != "0000000000aa"
+        assert seen[0]["ledger"] == {_stem("cursor-agent:auto"): header}
+        assert seen[0]["diff_files"] == ["1-src-app.py.diff", "2-tests-test_app.py.diff"]
+        assert "9-old.diff" not in seen[0]["diff_files"]
+
+    def test_the_prompt_names_both_paths_and_calls_the_list_a_head(
+        self, scope_repo, monkeypatch
+    ):
+        _record_scope(scope_repo.plan, scope_repo.base)
+
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"])
+
+        prompt = _full_prompt(seen[0], scope_repo.plan)
+        phase = _phase(scope_repo.plan)
+        assert str(phase / _MANIFEST) in prompt
+        assert str(phase / "diff") in prompt
+        assert "This list is only the head of the review scope." in prompt
+        assert f"The full scope is the scope manifest, {phase / _MANIFEST}" in prompt
+        assert "Focus your review on ONLY these files" not in prompt
+        assert "Where this list came from: recorded by the implement phase" in prompt
+
+    def test_a_cut_list_names_the_manifest_and_a_short_one_does_not(
+        self, scope_repo, monkeypatch
+    ):
+        many = [f"src/pkg_{i:03d}/" + "m" * 40 + ".py" for i in range(150)]
+        _record_scope(scope_repo.plan, scope_repo.base, paths=many)
+
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"])
+
+        listed = seen[0]["kwargs"]["prompt_context"]["tracked_files_list"]
+        manifest = _phase(scope_repo.plan) / _MANIFEST
+        assert "more files not shown" in listed
+        assert (f"Every path not shown is still in scope; the full list is "
+                f"{manifest}.") in listed
+
+        _record_scope(scope_repo.plan, scope_repo.base)
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"],
+                                force=True, rerun_all=True)
+        assert "Every path not shown" not in (
+            seen[0]["kwargs"]["prompt_context"]["tracked_files_list"]
+        )
+
+    @pytest.mark.parametrize("spec, capability", [
+        ("cursor-agent:auto", None),                     # paths
+        ("qwen-code:qwen3-coder", None),                  # inline
+        ("opencode:m", _Capability("any", None)),         # paths, unmeasured
+    ])
+    def test_the_shipped_template_formats_with_this_lanes_context(
+        self, scope_repo, monkeypatch, spec, capability
+    ):
+        _record_scope(scope_repo.plan, scope_repo.base)
+        capabilities = {spec.split(":")[0]: capability} if capability else None
+
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, [spec],
+                                capabilities=capabilities)
+
+        # `str.format` raises KeyError for a placeholder with no key, which is
+        # what would fail every slot with PROMPT_FORMAT_ERROR.
+        _full_prompt(seen[0], scope_repo.plan)
+
+    def test_the_static_template_names_no_shell_command(self):
+        template = cro.load_code_review_prompt()
+        for command in ("git diff", "git show", "git log", "cat "):
+            assert command not in template
+        assert template.startswith(
+            "You are reviewing code changes that implement a feature plan."
+        )
+        for placeholder in ("{scope_source}", "{scope_file}", "{diff_dir}",
+                            "{diff_access}", "{working_limits}"):
+            assert placeholder in template
+        assert template.index("{working_limits}") < template.index("## Output Format")
+
+
+def _read_review_scope_text(manifest_text):
+    """The scope id a manifest's header carries."""
+    match = re.search(r"^- Scope id: `([0-9a-f]+)`", manifest_text or "", re.M)
+    return match.group(1) if match else None
+
+
+class TestAResumeReusesOnlyResultsOfThisScope:
+    SPECS = ["cursor-agent:auto", "gemini:gemini-2.5-flash"]
+
+    def _first_run(self, scope_repo, monkeypatch):
+        _record_scope(scope_repo.plan, scope_repo.base)
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, self.SPECS)
+        assert len(seen) == 2
+        return _read_review_scope_text(seen[0]["manifest"])
+
+    def test_an_unchanged_scope_reuses_every_result_and_touches_nothing(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        first_id = self._first_run(scope_repo, monkeypatch)
+        phase = _phase(scope_repo.plan)
+        manifest = phase / _MANIFEST
+        ledger = phase / cro.REVIEW_SCOPE_LEDGER
+        before = (manifest.read_bytes(), manifest.stat().st_mtime_ns, ledger.read_bytes())
+        capsys.readouterr()
+
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, self.SPECS, force=True)
+
+        out = capsys.readouterr().out
+        assert seen == []
+        assert out.count("[SKIP]") == 2
+        assert "[SCOPE_CHANGED]" not in out
+        assert (manifest.read_bytes(), manifest.stat().st_mtime_ns,
+                ledger.read_bytes()) == before
+        assert set(cro.read_scope_ledger(phase).values()) == {first_id}
+
+    def test_a_changed_scope_re_runs_and_retires_the_old_results(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        first_id = self._first_run(scope_repo, monkeypatch)
+        _put(scope_repo.repo, "src/app.py", "def a():\n    return 3\n")
+        capsys.readouterr()
+
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, self.SPECS, force=True)
+
+        out = capsys.readouterr().out
+        phase = _phase(scope_repo.plan)
+        new_id = _read_review_scope_text((phase / _MANIFEST).read_text(encoding="utf-8"))
+        assert new_id != first_id
+        assert len(seen) == 2
+        for spec in self.SPECS:
+            display = spec
+            assert (f"[SCOPE_CHANGED] {display}: result reviewed scope {first_id}, "
+                    f"this run's is {new_id}; re-running") in out
+            assert (phase / f"{_stem(spec)}.json.stale-{first_id}").exists()
+            assert (phase / f"{_stem(spec)}.json").exists()
+        assert cro.read_scope_ledger(phase) == {_stem(s): new_id for s in self.SPECS}
+
+    def test_a_re_run_that_fails_leaves_no_old_scope_result_behind(
+        self, scope_repo, monkeypatch
+    ):
+        first_id = self._first_run(scope_repo, monkeypatch)
+        _put(scope_repo.repo, "src/app.py", "def a():\n    return 3\n")
+        failing = self.SPECS[1]
+
+        def respond(kwargs):
+            if kwargs["model_spec"] == failing:
+                return {"success": False, "error": "quota", "details": {}}
+            return {"success": True, "data": [], "source": "file",
+                    "output_file": "", "details": {}}
+
+        _scope_fanout(scope_repo.plan, monkeypatch, self.SPECS, respond=respond,
+                      force=True)
+
+        phase = _phase(scope_repo.plan)
+        assert not (phase / f"{_stem(failing)}.json").exists()
+        assert (phase / f"{_stem(failing)}.json.stale-{first_id}").exists()
+
+    def test_a_sandbox_refused_re_run_still_retires_the_old_scope_result(
+        self, scope_repo, monkeypatch
+    ):
+        """A refused slot starts no attempt, but a result from another scope is
+        no review of this change either: left in place, the next
+        `--reaggregate` would load it and move the model out of
+        `models_failed`."""
+        from utils import review_orchestrator_base as rob
+
+        first_id = self._first_run(scope_repo, monkeypatch)
+        _put(scope_repo.repo, "src/app.py", "def a():\n    return 3\n")
+        refused = self.SPECS[1]
+
+        def gate(provider_name, _cwd):
+            if provider_name == refused.split(":")[0]:
+                return rob.SandboxVerdict(
+                    rob.SANDBOX_REFUSE, "[SANDBOX_UNAVAILABLE] simulated"
+                )
+            return rob.SandboxVerdict(rob.SANDBOX_DISPATCH, None)
+
+        monkeypatch.setattr(cro, "sandbox_refusal", gate)
+
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, self.SPECS, force=True)
+
+        phase = _phase(scope_repo.plan)
+        assert [d["kwargs"]["model_spec"] for d in seen] == [self.SPECS[0]]
+        assert not (phase / f"{_stem(refused)}.json").exists()
+        assert (phase / f"{_stem(refused)}.json.stale-{first_id}").exists()
+        # No attempt started, so nothing claims this scope for the refused stem.
+        assert cro.read_scope_ledger(phase)[_stem(refused)] == first_id
+        status = json.loads((phase / ".status.json").read_text())
+        assert refused in status["models_failed"]
+
+    def test_a_result_with_no_ledger_entry_is_unknown_and_re_runs(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        self._first_run(scope_repo, monkeypatch)
+        phase = _phase(scope_repo.plan)
+        (phase / cro.REVIEW_SCOPE_LEDGER).unlink()
+        capsys.readouterr()
+
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, self.SPECS, force=True)
+
+        out = capsys.readouterr().out
+        assert len(seen) == 2
+        assert "result reviewed scope unknown" in out
+        for spec in self.SPECS:
+            assert (phase / f"{_stem(spec)}.json.stale-unknown").exists()
+
+
+class TestTheReportRecordsTheDiffCoverage:
+    def _report(self, plan):
+        phase = _phase(plan)
+        return (
+            (phase / "report.md").read_text(encoding="utf-8"),
+            json.loads((phase / "report_data.json").read_text(encoding="utf-8")),
+        )
+
+    def test_a_complete_set_records_complete(self, scope_repo, monkeypatch):
+        _record_scope(scope_repo.plan, scope_repo.base)
+
+        _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"],
+                      real_report=True)
+
+        report, data = self._report(scope_repo.plan)
+        assert "**Diff coverage:** complete" in report
+        assert "[`review-scope.md`](review-scope.md)" in report
+        assert data["diffCoverage"]["coverage"] == "complete"
+        assert data["diffCoverage"]["omitted"] == []
+        header = _read_review_scope(_phase(scope_repo.plan) / _MANIFEST)
+        assert data["reviewScope"]["scopeId"] == header.scope_id
+        assert data["reviewScope"]["writtenBy"] == "fan-out"
+        assert data["reviewScope"]["baseCommit"] == scope_repo.base
+
+    def test_a_partial_set_prints_the_marker_and_names_the_omitted_path(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        _record_scope(scope_repo.plan, scope_repo.base)
+        real = _git_utils._git_diff_output
+
+        def flaky(args, cwd):
+            if args[0] == "diff" and args[-1] == "tests/test_app.py" and "--numstat" not in args:
+                return None, "fatal: simulated"
+            return real(args, cwd)
+
+        monkeypatch.setattr(_git_utils, "_git_diff_output", flaky)
+
+        _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"],
+                      real_report=True)
+
+        assert "[DIFF_PARTIAL] 1 of 2 source and test files" in capsys.readouterr().out
+        report, data = self._report(scope_repo.plan)
+        assert "**Diff coverage:** partial" in report
+        assert "`tests/test_app.py` (git diff failed)" in report
+        assert data["diffCoverage"]["coverage"] == "partial"
+        assert data["diffCoverage"]["omitted"] == [
+            {"path": "tests/test_app.py", "reason": "git diff failed"}
+        ]
+
+    def test_an_unresolvable_base_ref_still_dispatches_every_reviewer(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        _record_scope(scope_repo.plan, scope_repo.base)
+        specs = ["cursor-agent:auto", "gemini:gemini-2.5-flash"]
+        monkeypatch.setattr(cro, "validate_git_ref", lambda ref: ref)
+
+        seen, code = _scope_fanout(scope_repo.plan, monkeypatch, specs,
+                                   real_report=True, base_ref="no-such-ref")
+
+        out = capsys.readouterr().out
+        assert "[DIFF_FAILED]" in out
+        assert "[REVIEW_UNSUPPORTED]" not in out
+        assert sorted(d["kwargs"]["model_spec"] for d in seen) == sorted(specs)
+        assert code == 0
+        _report, data = self._report(scope_repo.plan)
+        assert data["diffCoverage"]["coverage"] == "partial"
+
+
+class TestAReviewInvokedFromASubdirectory:
+    """The scope is repository-root-relative, so its git calls run at the root.
+
+    Run from the caller's cwd, a `review-code` started in a subdirectory had git
+    read every root-relative path relative to that subdirectory: each `git diff
+    <base> -- <path>` came back empty, the untracked file was never marked
+    intent-to-add, and the manifest recorded `no net change` under `complete`
+    coverage. Both entry points — the fan-out and a reaggregate that has to
+    regenerate the pair — now diff, classify and mark at the repository root.
+    """
+
+    _EXPECTED = [
+        "1-src-app.py.diff", "2-src-new_module.py.diff", "3-tests-test_app.py.diff",
+    ]
+
+    def _subdir_scope(self, scope_repo, monkeypatch):
+        _put(scope_repo.repo, "src/new_module.py", "def b():\n    return 3\n")
+        _record_scope(scope_repo.plan, scope_repo.base, paths=(
+            "src/app.py", "tests/test_app.py", "src/new_module.py",
+        ))
+        subdir = scope_repo.repo / "src"
+        monkeypatch.chdir(subdir)
+        return subdir
+
+    def _assert_full_set(self, phase, scope_repo):
+        manifest = (phase / _MANIFEST).read_text(encoding="utf-8")
+        assert "Diff coverage: complete" in manifest
+        assert "no net change" not in manifest
+        assert sorted(p.name for p in (phase / "diff").glob("*.diff")) == self._EXPECTED
+        new = (phase / "diff" / "2-src-new_module.py.diff").read_text(encoding="utf-8")
+        assert "new file mode" in new and "+def b():" in new
+        app = (phase / "diff" / "1-src-app.py.diff").read_text(encoding="utf-8")
+        assert "+    return 2" in app
+        # The intent-to-add entry was made at the root and undone there.
+        assert "src/new_module.py" in _git(
+            scope_repo.repo, "ls-files", "--others", "--exclude-standard"
+        )
+
+    def test_the_fanout_writes_every_diff(self, scope_repo, monkeypatch, capsys):
+        self._subdir_scope(scope_repo, monkeypatch)
+
+        seen, code = _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"])
+
+        assert code == 0
+        assert "[DIFF_" not in capsys.readouterr().out
+        assert seen[0]["diff_files"] == self._EXPECTED
+        self._assert_full_set(_phase(scope_repo.plan), scope_repo)
+
+    def test_a_regenerating_reaggregate_writes_every_diff(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        import shutil
+
+        self._subdir_scope(scope_repo, monkeypatch)
+        _scope_fanout(scope_repo.plan, monkeypatch, ["cursor-agent:auto"])
+        phase = _phase(scope_repo.plan)
+        (phase / _MANIFEST).unlink()
+        shutil.rmtree(phase / "diff")
+        capsys.readouterr()
+
+        args = _make_args(scope_repo.plan, reaggregate=True, files=[], files_from=None)
+        with patch.object(cro, "generate_review_report", return_value="# report\n"):
+            asyncio.run(cro.reaggregate_from_existing_files(
+                "plan", phase.parent, scope_repo.plan, args,
+            ))
+
+        out = capsys.readouterr().out
+        assert "[REVIEW_SCOPE_REGENERATED]" in out
+        assert "[DIFF_" not in out
+        self._assert_full_set(phase, scope_repo)
+
+
+class TestALaneThatCannotOpenTheArtifacts:
+    def test_qwen_code_gets_the_change_inline_and_no_path_it_cannot_open(
+        self, scope_repo, monkeypatch
+    ):
+        _record_scope(scope_repo.plan, scope_repo.base)
+
+        seen, _ = _scope_fanout(scope_repo.plan, monkeypatch, ["qwen-code:qwen3-coder"])
+
+        assert len(seen) == 1
+        prompt = _full_prompt(seen[0], scope_repo.plan)
+        assert "===== BEGIN review-scope.md =====" in prompt
+        assert "===== BEGIN plan =====" in prompt
+        assert "Make a() return 2." in prompt
+        assert "+    return 2" in prompt
+        assert "You cannot open files" in prompt
+        assert str(scope_repo.repo) not in prompt
+
+    def test_over_the_inline_cap_the_slot_is_not_dispatched(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        big = "".join(f"line_{i:06d} = {i}\n" for i in range(8000))
+        _put(scope_repo.repo, "src/big.py", big)
+        _record_scope(scope_repo.plan, scope_repo.base,
+                      paths=("src/app.py", "src/big.py"))
+        # `src/big.py` is new and untracked: main's own intent-to-add block is
+        # what makes `git diff` show it.
+        seen, _ = _scope_fanout(
+            scope_repo.plan, monkeypatch,
+            ["qwen-code:qwen3-coder", "cursor-agent:auto"],
+        )
+
+        out = capsys.readouterr().out
+        assert [d["kwargs"]["model_spec"] for d in seen] == ["cursor-agent:auto"]
+        assert ("[REVIEW_UNSUPPORTED] qwen-code:qwen3-coder: read scope none, inline "
+                in out)
+        assert "exceeds the 98304 B cap" in out
+        status = json.loads((_phase(scope_repo.plan) / ".status.json").read_text())
+        assert "qwen-code:qwen3-coder" in status["models_failed"]
+        assert status["models_failed"]["qwen-code:qwen3-coder"].startswith(
+            "review unsupported: read scope none"
+        )
+
+    def _block_under_the_cap_in_a_prompt_over_it(self, scope_repo, monkeypatch):
+        """An inline block under the 96 KiB cap, in a prompt whose multibyte
+        implementation record carries it past the argv ceiling."""
+        mid = "".join(f"line_{i:06d} = {i}\n" for i in range(3500))
+        _put(scope_repo.repo, "src/mid.py", mid)
+        _record_scope(scope_repo.plan, scope_repo.base,
+                      paths=("src/app.py", "src/mid.py"))
+        # 20 000 chars, the record's own bound, at three bytes each.
+        monkeypatch.setattr(cro, "build_implementation_record",
+                            lambda _plan: "記" * 20000)
+
+    def test_a_block_under_the_cap_in_a_prompt_over_argv_is_not_dispatched(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        self._block_under_the_cap_in_a_prompt_over_it(scope_repo, monkeypatch)
+
+        seen, _ = _scope_fanout(
+            scope_repo.plan, monkeypatch,
+            ["qwen-code:qwen3-coder", "cursor-agent:auto"],
+        )
+
+        out = capsys.readouterr().out
+        assert [d["kwargs"]["model_spec"] for d in seen] == ["cursor-agent:auto"]
+        line = next(text for text in out.splitlines()
+                    if text.startswith("[REVIEW_UNSUPPORTED] qwen-code:qwen3-coder"))
+        inline = int(re.search(r"inline (\d+) B", line).group(1))
+        assert inline <= _llm_client.INLINE_DIFF_CAP_BYTES
+        assert (f"exceeds the {_llm_client.INLINE_PROMPT_CAP_BYTES} B argv cap"
+                in line)
+        status = json.loads((_phase(scope_repo.plan) / ".status.json").read_text())
+        assert status["models_failed"]["qwen-code:qwen3-coder"].startswith(
+            "review unsupported: read scope none"
+        )
+
+    def test_a_lane_whose_prompt_travels_on_stdin_is_not_measured(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        self._block_under_the_cap_in_a_prompt_over_it(scope_repo, monkeypatch)
+        stdin_lane = _Capability("none", False)
+        stdin_lane.prompt_transport = "stdin"
+
+        seen, _ = _scope_fanout(
+            scope_repo.plan, monkeypatch, ["qwen-code:qwen3-coder"],
+            capabilities={"qwen-code": stdin_lane},
+        )
+
+        assert [d["kwargs"]["model_spec"] for d in seen] == ["qwen-code:qwen3-coder"]
+        assert "[REVIEW_UNSUPPORTED]" not in capsys.readouterr().out
+        assert "===== BEGIN review-scope.md =====" in _full_prompt(seen[0], scope_repo.plan)
+
+    def test_a_path_git_failed_for_makes_the_slot_unsupported(
+        self, scope_repo, monkeypatch, capsys
+    ):
+        _record_scope(scope_repo.plan, scope_repo.base)
+        real = _git_utils._git_diff_output
+
+        def flaky(args, cwd):
+            if args[0] == "diff" and args[-1] == "src/app.py" and "--numstat" not in args:
+                return None, "fatal: simulated"
+            return real(args, cwd)
+
+        monkeypatch.setattr(_git_utils, "_git_diff_output", flaky)
+
+        seen, _ = _scope_fanout(
+            scope_repo.plan, monkeypatch, ["qwen-code:qwen3-coder", "cursor-agent:auto"],
+        )
+
+        assert [d["kwargs"]["model_spec"] for d in seen] == ["cursor-agent:auto"]
+        assert "diff coverage is partial" in capsys.readouterr().out
+        status = json.loads((_phase(scope_repo.plan) / ".status.json").read_text())
+        assert "qwen-code:qwen3-coder" in status["models_failed"]
+
+
+class TestAPhaseDirOutsideTheRepository:
+    def test_cwd_lanes_go_inline_and_any_lanes_get_absolute_paths(
+        self, scope_repo, monkeypatch, tmp_path
+    ):
+        elsewhere = tmp_path / "elsewhere"
+        plan = elsewhere / "feature.md"
+        _put(elsewhere, "feature.md", "# Plan\n\nMake a() return 2.\n")
+        _record_scope(plan, scope_repo.base)
+        capabilities = {
+            "cursor-agent": _Capability("cwd", False),
+            "opencode": _Capability("any", None),
+        }
+
+        seen, _ = _scope_fanout(plan, monkeypatch, ["cursor-agent:auto", "opencode:m"],
+                                capabilities=capabilities)
+
+        phase = _phase(plan)
+        assert (phase / _MANIFEST).is_file()
+        assert sorted(p.name for p in (phase / "diff").glob("*.diff")) == [
+            "1-src-app.py.diff", "2-tests-test_app.py.diff",
+        ]
+        by_spec = {d["kwargs"]["model_spec"]: _full_prompt(d, plan) for d in seen}
+        inline = by_spec["cursor-agent:auto"]
+        assert "===== BEGIN review-scope.md =====" in inline
+        assert str(phase) not in inline
+        paths = by_spec["opencode:m"]
+        assert str(phase / _MANIFEST) in paths
+        assert str(phase / "diff") in paths
+        assert Path(str(phase / _MANIFEST)).is_absolute()
+        assert "===== BEGIN" not in paths
+
+
+class TestTheTwoRenderingsNeverDisagree:
+    """`{working_limits}` and `{diff_access}` in one prompt, per shell state."""
+
+    CAPABILITIES = {
+        "pi": _Capability("cwd", True),
+        "cursor-agent": _Capability("cwd", False),
+        "opencode": _Capability("cwd", None),
+    }
+    TEST_CLAIM = (
+        "Do NOT claim that a test passes or fails unless you ran it during this "
+        "review and saw its result."
+    )
+    CROSS_CHECK = "optional cross-check"
+    NO_SHELL = "You cannot run shell commands"
+
+    def test_each_shell_state(self, scope_repo, monkeypatch):
+        _record_scope(scope_repo.plan, scope_repo.base)
+
+        seen, _ = _scope_fanout(
+            scope_repo.plan, monkeypatch, ["pi:m", "cursor-agent:auto", "opencode:m"],
+            capabilities=self.CAPABILITIES,
+        )
+
+        block = _llm_client.render_working_limits(1200)
+        assert "git" not in block and "`" not in block
+        prompts = {
+            d["kwargs"]["model_spec"].split(":")[0]: _full_prompt(d, scope_repo.plan)
+            for d in seen
+        }
+        assert set(prompts) == {"pi", "cursor-agent", "opencode"}
+        for prompt in prompts.values():
+            assert self.TEST_CLAIM in prompt
+        shell, no_shell, unmeasured = (
+            prompts["pi"], prompts["cursor-agent"], prompts["opencode"],
+        )
+        assert self.CROSS_CHECK in shell and self.NO_SHELL not in shell
+        assert self.NO_SHELL in no_shell
+        for grant in ("git diff", "git show", "git log"):
+            assert grant not in no_shell
+            assert grant not in unmeasured
+        assert self.CROSS_CHECK not in no_shell and self.CROSS_CHECK not in unmeasured
+        assert self.NO_SHELL not in unmeasured

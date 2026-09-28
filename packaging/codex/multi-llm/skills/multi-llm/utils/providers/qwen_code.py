@@ -381,6 +381,20 @@ class QwenCodeProvider(LLMProvider):
     #: channel ``-o json`` gives and the one this adapter's parser already reads.
     supports_file_output = False
 
+    #: MEASURED, from the same zero budget (:data:`MAX_TOOL_CALLS`, rendered as
+    #: ``--max-tool-calls 0``): the abort fires *before* the first tool call
+    #: executes (``FatalBudgetExceededError``, exit 55, zero bytes on stdout,
+    #: ``plans/harness-expansion/probe-out/qwen-code/captures/block/``). A shell
+    #: is a tool call, so none runs in ``generate``…
+    runs_shell_in_generate = False
+
+    #: …and neither does a file read: this lane cannot open even the plan, let
+    #: alone the phase dir's diff files. ``"none"`` sends it down
+    #: ``render_diff_access``'s inline branch (plan, manifest and diffs in the
+    #: prompt, under the 96 KB argv-safe cap) or, over the cap or on partial
+    #: diff coverage, to an explicit ``[REVIEW_UNSUPPORTED]`` that costs nothing.
+    generate_read_scope = "none"
+
     version_cmd = ("qwen", "--version")
     #: 0.21.13 is where every fixture in ``tests/fixtures/qwen-code/`` was
     #: captured and the floor this parser is known to handle. qwen publishes

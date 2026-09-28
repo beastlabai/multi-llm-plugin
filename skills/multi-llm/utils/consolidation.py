@@ -1639,6 +1639,50 @@ def generate_consolidated_report(
     return str(output_path)
 
 
+def _failure_report_fields(phase_dir: str) -> Dict[str, Any]:
+    """``failedModels``, ``requestedModels`` and ``notices`` for the consolidated page.
+
+    The phase report's failure fields, read the same way a reaggregate reads
+    them: the checkpoint's failures plus any requested model with neither a
+    result nor a recorded failure (``remaining_failed_models``, against the
+    ``models_completed`` a reaggregate reconciled with the files), the recorded
+    requested set as the denominator, and the one warning notice whose
+    ``message`` is ``report.md``'s ``**Models failed:**`` line without its bold
+    markers. ``failedModels`` is always a dict (the template iterates it with
+    ``Object.keys``); ``requestedModels`` is left out when the checkpoint
+    records no requested set.
+
+    Imported here rather than at module level: ``review_orchestrator_base``
+    imports this package, and the consolidated page is generated long after
+    both are loaded.
+    """
+    try:
+        from .html_report_generator import build_report_notices
+        from .review_orchestrator_base import (
+            remaining_failed_models,
+            salvage_requested_models,
+        )
+    except ImportError:
+        from utils.html_report_generator import build_report_notices
+        from utils.review_orchestrator_base import (
+            remaining_failed_models,
+            salvage_requested_models,
+        )
+
+    failures, requested = remaining_failed_models(str(phase_dir))
+    requested_count = len(requested) if requested is not None else None
+    fields: Dict[str, Any] = {
+        "failedModels": failures,
+        "notices": build_report_notices(
+            [], failures, requested_count,
+            salvage_requested_models(str(phase_dir), list(failures)),
+        ),
+    }
+    if requested_count is not None:
+        fields["requestedModels"] = requested_count
+    return fields
+
+
 def generate_consolidated_html(
     consolidated_groups: List[Dict[str, Any]],
     groups: List[Dict[str, Any]],
@@ -1896,6 +1940,11 @@ def generate_consolidated_html(
         total_label = describe_usage(usage_total)
         if total_label:
             report_data["usageTotalLabel"] = total_label
+
+    # Decision 11.12: the consolidated page is a second front page for the
+    # same run, so a reviewer that produced nothing is named here as it is on
+    # report.html — the same failure map, denominator and warning notice.
+    report_data.update(_failure_report_fields(phase_dir))
 
     # --- Inject data into template ---
     json_payload = json.dumps(report_data, indent=2)

@@ -175,6 +175,32 @@
       color: var(--text-primary);
     }
 
+    /* A failed reviewer beside the models that answered: the same
+       `model: reason` entries as the PR report's "Failed models" row. */
+    .meta-failed {
+      color: var(--importance-high);
+    }
+
+    /* Notice / warning bars — the PR report's, so reportData.notices renders
+       the same in either report style (a failed reviewer included). */
+    .report-notice {
+      padding: 0.5rem 1rem;
+      font-size: 0.8125rem;
+      background: var(--importance-medium-bg);
+      color: var(--importance-medium);
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .report-notice.info {
+      background: var(--importance-low-bg);
+      color: var(--importance-low);
+    }
+
+    .report-notice.warning {
+      background: var(--importance-medium-bg);
+      color: var(--importance-medium);
+    }
+
     /* Filter Controls */
     .filter-controls {
       display: flex;
@@ -1158,6 +1184,10 @@
                fan-out reported usage — an empty "Usage: -" would read as a
                measurement that came back zero. -->
           <span id="meta-usage-wrap" style="display:none"><strong>Usage:</strong> <span id="meta-usage">-</span></span>
+          <!-- The models that produced nothing. `Models:` above is read off the
+               groups' suggestions, so a failed reviewer with no findings is
+               otherwise absent from this page; hidden when none failed. -->
+          <span id="meta-failed-wrap" class="meta-failed" style="display:none"><strong>Failed:</strong> <span id="meta-failed">-</span></span>
           <span><strong>Groups:</strong> <span id="meta-groups">-</span></span>
           <span><strong>Phase:</strong> <span id="meta-phase">-</span></span>
           <span><strong>Plan:</strong> <a id="meta-plan-link" href="#">-</a></span>
@@ -1229,6 +1259,10 @@
       </div>
     </div>
   </header>
+
+  <!-- Notice bar: data-source warnings and the failed-reviewer warning. Outside
+       the groups container, so the "No groups found" empty state cannot hide it. -->
+  <div id="report-notices"></div>
 
   <main id="groups-container">
     <div class="empty-state">
@@ -1459,6 +1493,26 @@
           usageWrap.style.display = 'none';
         }
       }
+      // `failedModels` is a {spec: reason} object: "N of M requested" when
+      // `requestedModels` is set, then one `model: reason` entry per model.
+      var failedWrap = document.getElementById('meta-failed-wrap');
+      if (failedWrap) {
+        var failedModels = reportData.failedModels || {};
+        var failedSpecs = Object.keys(failedModels);
+        if (failedSpecs.length > 0) {
+          var failedCount = (typeof reportData.requestedModels === 'number')
+            ? failedSpecs.length + ' of ' + reportData.requestedModels + ' requested'
+            : failedSpecs.length + (failedSpecs.length === 1 ? ' model' : ' models');
+          var failedEntries = failedSpecs.map(function(spec) {
+            return spec + ': ' + failedModels[spec];
+          });
+          document.getElementById('meta-failed').textContent =
+            failedCount + ' — ' + failedEntries.join('; ');
+          failedWrap.style.display = '';
+        } else {
+          failedWrap.style.display = 'none';
+        }
+      }
       document.getElementById('meta-groups').textContent = reportData.groups ? reportData.groups.length : 0;
       document.getElementById('meta-phase').textContent = reportData.phase || 'review';
 
@@ -1488,6 +1542,23 @@
         categories.map(function(cat) {
           return '<option value="' + escapeHtml(cat) + '">' + escapeHtml(cat) + '</option>';
         }).join('');
+    }
+
+    // Notices: identical to the PR report's `renderNotices`, so one
+    // `reportData.notices` list renders the same bar in either report style.
+    function renderNotices() {
+      if (!reportData) return;
+      var container = document.getElementById('report-notices');
+      if (!container) return;
+      var html = '';
+      var notices = reportData.notices || [];
+      notices.forEach(function(n) {
+        var cls = 'report-notice';
+        if (n.type === 'info') cls += ' info';
+        else if (n.type === 'warning') cls += ' warning';
+        html += '<div class="' + cls + '">' + escapeHtml(n.message) + '</div>';
+      });
+      container.innerHTML = html;
     }
 
     function renderGroups() {
@@ -2096,6 +2167,9 @@
       renderHeader();
       loadSelections();
       updateExportIndicator();
+      // Before the groups, and whatever they hold: a run whose only reviewer
+      // failed has no groups, and its warning must still show.
+      renderNotices();
       renderGroups();
       autoResizeAllTextareas();
 

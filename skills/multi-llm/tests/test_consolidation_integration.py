@@ -1019,3 +1019,105 @@ class TestConsolidatedClaudeDecide:
         # string (NOT flattened into a status).
         assert overrides.get(0) == "claude_decide"
         assert overrides.get(1) == "claude_decide"
+
+
+# ===========================================================================
+# Plan review-run-scope-salvage-and-failure-visibility §5 (T5.5, decision
+# 11.12): the consolidated page names a failed reviewer as report.html does
+# ===========================================================================
+
+
+_TEMPLATE = (
+    Path(__file__).resolve().parent.parent
+    / "templates" / "consolidated_report_template.html"
+)
+_PI_SPEC = "pi:openrouter/deepseek/deepseek-v4.1-flash"
+_PI_REASON = "pi timed out after 1200s (spent $0.09 est., 28,193 output tokens)"
+
+
+class TestTheConsolidatedPageNamesAFailedReviewer:
+    """The consolidated page builds its own ``reportData`` in a separate
+    invocation, so it gets the failure fields from the same checkpoint reads a
+    reaggregate uses — not from ``report_data.json``."""
+
+    def _consolidate(self, tmp_path, checkpoint=None):
+        from utils.status_file import write_status
+
+        phase_dir = tmp_path / "review-plan"
+        phase_dir.mkdir()
+        if checkpoint is not None:
+            write_status(str(phase_dir), checkpoint)
+        groups = [_make_group("Theme A", "Task 1"), _make_group("Theme B", "Task 1")]
+        ids = [generate_group_id(g) for g in groups]
+        consolidated = [{
+            "consolidated_id": generate_consolidated_id(ids),
+            "display_index": 1,
+            "title": "Combined",
+            "description": "d",
+            "importance": "MEDIUM",
+            "reference": "Task 1",
+            "type": "modification",
+            "underlying_group_indices": [0, 1],
+            "underlying_group_ids": ids,
+            "model_count": 1,
+            "is_singleton": False,
+        }]
+        plan = tmp_path / "plan.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        html = Path(generate_consolidated_html(
+            consolidated, groups, str(phase_dir), str(plan), ["model-a"],
+        )).read_text(encoding="utf-8")
+        body = html.split("var reportData = ", 1)[1]
+        return json.JSONDecoder().raw_decode(body)[0]
+
+    def test_one_failed_model_puts_the_entry_the_notice_and_the_count_in(
+        self, tmp_path
+    ):
+        data = self._consolidate(tmp_path, {
+            "phase": "review-plan",
+            "state": "complete",
+            "started_at": "2026-09-25T15:58:00",
+            "models_requested": ["model-a", _PI_SPEC],
+            "models_completed": ["model-a"],
+            "models_failed": {_PI_SPEC: _PI_REASON},
+        })
+
+        assert data["failedModels"] == {_PI_SPEC: _PI_REASON}
+        assert data["requestedModels"] == 2
+        [notice] = data["notices"]
+        assert notice["type"] == "warning"
+        assert notice["message"] == (
+            f"Models failed: 1 of 2 requested — {_PI_SPEC}: {_PI_REASON}"
+        )
+
+    def test_a_clean_phase_has_no_notice(self, tmp_path):
+        data = self._consolidate(tmp_path, {
+            "phase": "review-plan",
+            "state": "complete",
+            "models_requested": ["model-a"],
+            "models_completed": ["model-a"],
+            "models_failed": {},
+        })
+        assert data["failedModels"] == {}
+        assert data["notices"] == []
+        assert data["requestedModels"] == 1
+
+    def test_no_checkpoint_guesses_no_denominator(self, tmp_path):
+        data = self._consolidate(tmp_path)
+        assert data["failedModels"] == {}
+        assert data["notices"] == []
+        assert "requestedModels" not in data
+
+    def test_the_template_reads_failed_models_as_an_object(self):
+        """Static: the tests never run the template's JavaScript."""
+        template = _TEMPLATE.read_text(encoding="utf-8")
+        assert "failedModels.join" not in template
+        assert "failedModels.length" not in template
+        assert "Object.keys(failedModels)" in template
+        assert "requestedModels" in template
+        assert 'id="meta-failed-wrap"' in template
+        assert '<div id="report-notices"></div>' in template
+        assert "escapeHtml(n.message)" in template
+        init = template[template.index("function init()"):]
+        init = init[: init.index("function waitForDeps")]
+        assert init.index("renderNotices();") < init.index("renderGroups();")

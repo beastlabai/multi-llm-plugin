@@ -2874,6 +2874,51 @@ class LLMProvider(ABC):
     #: :meth:`widen_read_scope`.
     read_scope_flag: Optional[str] = None
 
+    # The two members below sit beside the agent-readonly read declarations
+    # above but describe a DIFFERENT invocation: the ``generate`` profile, i.e.
+    # ``build_command``, which is what every Lane A review/ask fan-out slot
+    # runs. ``supports_workspace_reads``/``reads_outside_cwd``/
+    # ``read_scope_flag`` say nothing about it, and neither does
+    # ``providers.yaml``'s ``read_only_modes`` (the record of write-restricting
+    # mechanisms). ``llm_client.render_diff_access`` renders the code-review
+    # prompt's ``{diff_access}`` block from these two, so the orchestrator never
+    # branches on a provider name (plan: review-run-scope-salvage-and-failure-
+    # visibility D2.3).
+    #
+    # A value leaves its default only with a measured source — a log, a probe
+    # or its argv — and the override's comment names that source.
+    # ``tests/test_provider_housekeeping.py``'s ``SHELL_EVIDENCE`` table holds
+    # each shell declaration to it.
+
+    #: Whether the ``generate`` profile can run a shell command. Three states:
+    #:
+    #: * ``True``  — a shell runs, measured (the prompt grants ``git diff``);
+    #: * ``False`` — no shell runs, measured (the prompt says so, and forbids
+    #:   test-result claims it cannot back);
+    #: * ``None``  — not measured. The default, and the safe one: its rendering
+    #:   neither grants nor denies a shell. A ``False`` default would be a claim
+    #:   too, and a wrong one — pi, omp and codex all run a shell on this path.
+    #:
+    #: This is the authoritative record of the fact. A ``read_only_modes``
+    #: ``probed:`` note that speaks about a shell cites this attribute rather
+    #: than restating it, so there is one value to change.
+    runs_shell_in_generate: Optional[bool] = None
+
+    #: Where the ``generate`` profile can read files. Three values:
+    #:
+    #: * ``"none"`` — no file tool at all (qwen-code's zero tool budget aborts
+    #:   before the first call runs, so it cannot read even the plan);
+    #: * ``"cwd"``  — reads under its working directory, the repo root. The
+    #:   default, because every Lane A prompt already hands over the plan by
+    #:   path and so already assumes it;
+    #: * ``"any"``  — reads absolute paths anywhere.
+    #:
+    #: A shell flag cannot stand in for this: a lane can read with no shell
+    #: (cursor ``--mode ask``) or have neither (qwen-code). A lane that cannot
+    #: open the phase dir — ``"none"``, or ``"cwd"`` with the phase dir outside
+    #: the repo — gets the diff inline, bounded, or is not dispatched.
+    generate_read_scope: str = "cwd"
+
     #: Declared usage fidelity (D3j): ``none`` | ``partial`` | ``full``.
     usage_support: str = USAGE_NONE
 
@@ -3529,6 +3574,39 @@ class LLMProvider(ABC):
         keep the porcelain check's fail-closed verdict unchanged. An override
         must fail closed on anything it cannot classify, and must never raise
         (the caller treats a raise as ``None``).
+        """
+        return None
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The assistant's answer text in a failed attempt's stdout, for salvage.
+
+        Called by ``llm_client`` on the attempt's **full** stdout at each of the
+        three failure sites (non-zero exit, exit-0 parse failure, timeout),
+        before any bounding, like :meth:`audit_readonly_stream`. The caller
+        redacts and caps what comes back and stores it as
+        ``details['salvage_text']``, which the salvage gate then reads *instead
+        of* the raw stream excerpt. That matters for a transport-stream adapter:
+        its events carry ``content`` arrays (``thinking``/``toolCall`` parts)
+        that pass ``has_salvageable_json`` as if they were findings, so a
+        reviewer killed mid-tool-call would otherwise be "salvaged" from pure
+        event data (plan: review-run-scope-salvage-and-failure-visibility §4).
+
+        The contract has three answers:
+
+        - ``None`` (this default): *no opinion*. No reducer applies, the key
+          stays absent, and the gate keeps reading ``stdout_excerpt`` then
+          stderr, as before.
+        - a non-empty string: *this is the answer text* — only the assistant's
+          own words, never tool output, thinking or event framing.
+        - ``""``: *nothing to salvage*. That verdict is final: the gate sees
+          ``""`` and no other channel, because an adapter that reduces its
+          stream has declared stdout a transport, and its stderr holds only
+          diagnostics (which can themselves look like a JSON array).
+
+        An override must never raise. If one does anyway, the caller records
+        ``""`` rather than ``None``: by overriding, the adapter declared its
+        stdout a transport stream, so falling back to that raw stream would
+        bring back the bug this hook exists to remove.
         """
         return None
 

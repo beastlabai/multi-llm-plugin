@@ -1160,6 +1160,27 @@ class CursorAgentProvider(LLMProvider):
     #: one :meth:`parse_output` already unwraps.
     supports_file_output = False
 
+    #: MEASURED FALSE, 2026-09-25: ``--mode ask`` refuses a shell. Both cursor
+    #: lanes of that day's ``review-code`` run said so in their own logs — kimi:
+    #: "Shell access is refused in this environment, so I'll review by reading
+    #: the plan fully and inspecting the current file contents directly" (it
+    #: returned ``[]``); grok: "Shell diffs are blocked in this mode". So this
+    #: lane cannot run ``git diff`` and reviews from the diff files the
+    #: orchestrator writes to the phase dir (``render_diff_access``'s ``False``
+    #: text). Whether another cursor mode grants a read-only shell is
+    #: unverified (plan: review-run-scope-salvage-and-failure-visibility T2.7).
+    #: ``read_only_modes.cursor-agent.probed`` cites this attribute rather than
+    #: restating it.
+    runs_shell_in_generate = False
+
+    #: MEASURED ``"cwd"`` (the default, declared because it is measured): ask
+    #: mode keeps ``Read`` and ``Grep`` — the same 2026-09-25 kimi and grok logs
+    #: read files under the repo root, and Q12 (2026-08-16) found ``Read``/
+    #: ``Grep`` ``tool_use`` entries under this exact argv. Whether it reads
+    #: OUTSIDE its working directory is **unverified**, so a phase dir outside
+    #: the repo sends this lane down the inline branch rather than betting on it.
+    generate_read_scope = "cwd"
+
     #: §7.2/§5.3 — cursor-agent exited **0 in all six auth states measured**, so
     #: for this CLI the exit code carries no verdict whatsoever and only a
     #: stream field does. Two shapes, both measured on 2026-08-16:
@@ -1342,9 +1363,18 @@ class CursorAgentProvider(LLMProvider):
         text-only ones. Q12 was answered at tool level on 2026-08-16: under this
         exact argv cursor's own agent transcript carries ``tool_use`` entries for
         ``Grep`` and ``Read``, and the run found a file by an unguessable token
-        it was never given. Ask mode keeps its read tools, so ``review-code`` and
-        ``review-tasks`` are not degraded by it and no ``--mode plan`` fallback is
-        needed.
+        it was never given. Ask mode keeps its read tools but **refuses a
+        shell** — measured 2026-09-25 in the kimi and grok ``review-code`` logs
+        ("Shell access is refused in this environment", "Shell diffs are blocked
+        in this mode") and recorded as :attr:`runs_shell_in_generate`. So
+        ``review-plan`` and ``review-tasks``, which read documents, are not
+        degraded by it, but ``review-code`` is: this lane cannot run ``git
+        diff``, and it depends on the scope manifest and per-file diffs the
+        orchestrator writes to the phase dir before dispatch
+        (``code-review/review-scope.md`` and ``code-review/diff/``), which the
+        prompt's ``{diff_access}`` block points it at. The argv does not change
+        for it: no ``--mode plan`` fallback is adopted, because whether any
+        cursor mode grants a shell without granting writes is unverified.
 
         Args:
             prompt: The prompt text to send to the LLM.

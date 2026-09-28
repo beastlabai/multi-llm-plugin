@@ -530,7 +530,7 @@ class TestModelLevelSkipCodeReview:
                 out_dir,
                 timeout=30,
                 max_parallel=3,
-                tracked_files=None,
+                changed_files=None,
                 base_ref="HEAD~1",
                 skip_existing=True
             ))
@@ -560,7 +560,7 @@ class TestModelLevelSkipCodeReview:
                 out_dir,
                 timeout=30,
                 max_parallel=3,
-                tracked_files=None,
+                changed_files=None,
                 base_ref="HEAD~1",
                 skip_existing=False
             ))
@@ -587,7 +587,7 @@ class TestModelLevelSkipCodeReview:
                 out_dir,
                 timeout=30,
                 max_parallel=3,
-                tracked_files=None,
+                changed_files=None,
                 base_ref="HEAD~1",
                 skip_existing=True
             ))

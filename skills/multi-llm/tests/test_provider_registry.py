@@ -1704,6 +1704,197 @@ class TestProgressBlockValidation:
 
 
 @pytest.mark.config_override
+class TestCodeReviewCollapsePathsBlock:
+    """`code_review.collapse_paths` — the configurable half of review-code's
+    path classifier (review-scope plan D2.1, decision 11.5).
+
+    Validated at load on OVERRIDE layers, like `progress:`: a malformed list
+    that silently fell back to the defaults would read exactly like the
+    repository's setting having worked while the review kept reading the diff
+    the user meant to collapse.
+    """
+
+    @staticmethod
+    def _override(monkeypatch, tmp_path, body):
+        override = _write_yaml(tmp_path / ".multi-llm" / "providers.yaml", body)
+        _set_project_config(monkeypatch, override)
+        return override
+
+    @pytest.fixture
+    def reg_with_base_block(self, monkeypatch):
+        """``reg``, over a base carrying the block the shipped one carries."""
+        base = copy.deepcopy(FIXED_BASE)
+        base["code_review"] = {
+            "collapse_paths": {
+                "generated": [],
+                "fixtures": ["**/tests/fixtures/**", "**/tests/golden/**"],
+            }
+        }
+        monkeypatch.setattr(registry, "_load_base_config", lambda: copy.deepcopy(base))
+        monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
+        _reset_cache()
+        yield registry
+        _reset_cache()
+
+    def test_the_shipped_block_is_the_classifier_default(self):
+        """One copy of the defaults: the base file must say what the code falls
+        back to, or an unconfigured repo and a fixture base would disagree."""
+        from utils.git_utils import DEFAULT_COLLAPSE_PATHS
+
+        shipped = registry._load_base_config()["code_review"]["collapse_paths"]
+        assert shipped == {key: list(value) for key, value in DEFAULT_COLLAPSE_PATHS.items()}
+        # ...and the shipped base passes its own validator.
+        registry.validate_code_review_block(registry._load_base_config()["code_review"])
+
+    def test_an_unconfigured_repo_classifies_as_today(self, reg):
+        """No block anywhere (FIXED_BASE predates it): the accessor answers with
+        the built-in rule, and the classifier groups exactly as with no config."""
+        from utils.git_utils import classify_review_paths
+
+        collapse = registry.get_collapse_paths()
+        assert collapse == {
+            "generated": [],
+            "fixtures": ["**/tests/fixtures/**", "**/tests/golden/**"],
+        }
+        paths = [
+            "src/a.py", "tests/test_a.py", "tests/fixtures/x.json",
+            "pkg/tests/golden/y.txt", "poetry.lock",
+        ]
+        assert classify_review_paths(paths, collapse) == classify_review_paths(paths)
+        assert classify_review_paths(paths, collapse)["poetry.lock"] == "source"
+
+    def test_an_added_lock_glob_collapses_poetry_lock_into_generated(
+        self, reg_with_base_block, monkeypatch, tmp_path
+    ):
+        from utils.git_utils import classify_review_paths
+
+        self._override(
+            monkeypatch, tmp_path,
+            'code_review:\n  collapse_paths:\n    generated: ["**/*.lock"]\n',
+        )
+        collapse = registry.get_collapse_paths(anchor=str(tmp_path))
+        # `generated` replaced, `fixtures` inherited from the base by the merge.
+        assert collapse == {
+            "generated": ["**/*.lock"],
+            "fixtures": ["**/tests/fixtures/**", "**/tests/golden/**"],
+        }
+        groups = classify_review_paths(
+            ["poetry.lock", "web/yarn.lock", "src/a.py", "tests/fixtures/f.json"],
+            collapse,
+        )
+        assert groups == {
+            "poetry.lock": "generated",
+            "web/yarn.lock": "generated",
+            "src/a.py": "source",
+            "tests/fixtures/f.json": "fixtures",
+        }
+
+    def test_an_empty_list_switches_a_rule_off(
+        self, reg_with_base_block, monkeypatch, tmp_path
+    ):
+        """`[]` is a deliberate wipe-out (lists replace on merge), not a blank."""
+        from utils.git_utils import classify_review_paths
+
+        self._override(
+            monkeypatch, tmp_path, "code_review:\n  collapse_paths:\n    fixtures: []\n",
+        )
+        collapse = registry.get_collapse_paths(anchor=str(tmp_path))
+        assert collapse["fixtures"] == []
+        assert classify_review_paths(["tests/fixtures/f.json"], collapse) == {
+            "tests/fixtures/f.json": "tests",
+        }
+
+    def test_a_blank_value_keeps_the_base_list(
+        self, reg_with_base_block, monkeypatch, tmp_path
+    ):
+        self._override(
+            monkeypatch, tmp_path,
+            "code_review:\n  collapse_paths:\n    fixtures:\n    generated: [dist/**]\n",
+        )
+        assert registry.get_collapse_paths(anchor=str(tmp_path)) == {
+            "generated": ["dist/**"],
+            "fixtures": ["**/tests/fixtures/**", "**/tests/golden/**"],
+        }
+
+    @pytest.mark.parametrize(
+        "body, fragments",
+        [
+            (
+                'code_review:\n  collapse_paths:\n    generated: "**/*.lock"\n',
+                ["code_review.collapse_paths.generated is '**/*.lock' —",
+                 "list of non-empty glob strings"],
+            ),
+            (
+                "code_review:\n  collapse_paths:\n    fixtures: 3\n",
+                ["code_review.collapse_paths.fixtures is 3 —"],
+            ),
+            (
+                'code_review:\n  collapse_paths:\n    fixtures: [""]\n',
+                ["code_review.collapse_paths.fixtures is [''] —"],
+            ),
+            (
+                'code_review:\n  collapse_paths: ["**/*.lock"]\n',
+                ["code_review.collapse_paths is ['**/*.lock'] —", "mapping"],
+            ),
+            (
+                "code_review: 5\n",
+                ["`code_review:` must be a mapping", "(5)"],
+            ),
+            (
+                "code_review:\n  collapse: {}\n",
+                ["unknown key(s) under `code_review:`: collapse", "collapse_paths"],
+            ),
+            (
+                "code_review:\n  collapse_paths:\n    vendored: []\n",
+                ["unknown key(s) under code_review.collapse_paths: vendored"],
+            ),
+            (
+                'code_review:\n  collapse_paths:\n    generated: ["/abs/dist/**"]\n',
+                ["code_review.collapse_paths.generated is '/abs/dist/**' —",
+                 "an absolute path"],
+            ),
+            (
+                'code_review:\n  collapse_paths:\n    generated: ["../dist/**"]\n',
+                ["parent-traversal"],
+            ),
+            (
+                'code_review:\n  collapse_paths:\n    generated: ["[z-a].lock"]\n',
+                ["code_review.collapse_paths.generated is '[z-a].lock' —",
+                 "not a valid glob"],
+            ),
+        ],
+        ids=[
+            "generated-bare-string", "fixtures-int", "fixtures-empty-entry",
+            "collapse_paths-a-list", "code_review-not-a-mapping",
+            "unknown-code_review-key", "unknown-collapse-key", "absolute-entry",
+            "parent-traversal-entry", "uncompilable-class",
+        ],
+    )
+    def test_a_malformed_value_fails_the_load_with_the_key_named(
+        self, reg_with_base_block, monkeypatch, tmp_path, body, fragments
+    ):
+        self._override(monkeypatch, tmp_path, body)
+        with pytest.raises(ConfigError) as exc:
+            load_config(anchor=str(tmp_path))
+        message = str(exc.value)
+        for fragment in fragments:
+            assert fragment in message, f"{fragment!r} missing from: {message}"
+
+    def test_permissive_mode_does_not_relax_the_rejection(
+        self, reg_with_base_block, monkeypatch, tmp_path
+    ):
+        self._override(
+            monkeypatch, tmp_path,
+            'code_review:\n  collapse_paths:\n    generated: "**/*.lock"\n',
+        )
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG_PERMISSIVE", "1")
+        _reset_cache()
+        with pytest.raises(ConfigError) as exc:
+            load_config(anchor=str(tmp_path))
+        assert "code_review.collapse_paths.generated" in str(exc.value)
+
+
+@pytest.mark.config_override
 class TestInitConfigScaffolder:
     """init_config.py scaffolding + packaging guard (template path / gitignore).
 
@@ -2433,6 +2624,8 @@ ANCHORED_ACCESSORS = frozenset({
     # ...and the `progress:` block's two.
     "get_progress_interval",
     "get_progress_poll",
+    # ...and the `code_review:` block's one.
+    "get_collapse_paths",
 })
 
 #: Directories that are not this skill's runtime source.

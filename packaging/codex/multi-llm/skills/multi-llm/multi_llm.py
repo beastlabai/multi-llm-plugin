@@ -468,12 +468,21 @@ def _load_target(module_path: str, attr: str) -> Callable[[Sequence[str]], int]:
 
 
 def _call_target(target: Callable[[Sequence[str]], int], argv: Sequence[str]) -> int:
-    """Call ``main(argv)``, awaiting it when the target is async."""
+    """Call ``main(argv)``, awaiting it when the target is async.
+
+    An async target runs under ``sweeping_live_clis_on_interrupt``, so a Ctrl-C
+    stops its fan-out's CLIs from inside the cancellation, before ``asyncio.run``
+    joins the worker threads waiting on them (decision 11.9).
+    """
     import asyncio
     import inspect
 
     if inspect.iscoroutinefunction(target):
-        result = asyncio.run(target(list(argv)))
+        from utils import process_control
+
+        result = asyncio.run(
+            process_control.sweeping_live_clis_on_interrupt(target(list(argv)))
+        )
     else:
         result = target(list(argv))
     return EXIT_OK if result is None else int(result)
@@ -833,6 +842,31 @@ def _is_argparse_usage_exit(exc: SystemExit) -> bool:
     return False
 
 
+def _sweep_live_clis_on_interrupt() -> None:
+    """Stop every Lane A CLI still registered when Ctrl-C reached the dispatcher.
+
+    A fan-out's slots wait on their CLIs from worker threads, where
+    ``KeyboardInterrupt`` is never raised, and an agent CLI's tool shells run in
+    sessions of their own that a terminal SIGINT does not reach (plan
+    review-run-scope-salvage-and-failure-visibility D3.3, decision 11.9). The
+    registry holds each live CLI with a refreshed snapshot of its descendants,
+    so this reaps what those slots started before the process exits.
+
+    The backstop, not the main path: an async target's fan-out is swept inside
+    its own cancellation (``_call_target``), because by the time
+    ``asyncio.run`` lets a ``KeyboardInterrupt`` reach this handler it has
+    already joined every worker thread. What is left for here is a sync
+    target's CLI. A no-op when nothing is registered, and it never raises: the
+    interrupt's own exit and result line must still happen.
+    """
+    try:
+        from utils import process_control
+    except Exception as exc:  # noqa: BLE001 - see above
+        print(f"[INTERRUPT_SWEEP] failed: {exc}", file=sys.stderr)
+        return
+    process_control.sweep_live_clis("INTERRUPT_SWEEP")
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     # Line buffering + UTF-8/replace stream encoding, once per invocation: there
     # is exactly one process per invocation, so this covers every mode and every
@@ -872,6 +906,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 exit_code = EXIT_NEEDS_HUMAN
         except KeyboardInterrupt:
             print("\nInterrupted.", file=sys.stderr)
+            _sweep_live_clis_on_interrupt()
             exit_code = EXIT_ERROR
         except Exception:
             # The machine-readable contract has to hold on a crash too, so the

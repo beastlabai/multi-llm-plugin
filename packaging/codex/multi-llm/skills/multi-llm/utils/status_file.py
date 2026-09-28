@@ -52,8 +52,17 @@ writing a second file with a private shape — ``run`` only ever on a detached r
   a phase dir written by a run that owns a different one gains the same.
   ``models`` is the per-model map the fan-out keeps, keyed by model spec —
   ``{state: queued|staggering|running|retrying|done|failed, started_at,
-  updated_at, ended_at, elapsed_s, timeout_s, attempt, retry_after_s,
-  stagger_until, error, source, warning, readonly_audit}`` — ``warning`` is a
+  dispatched_at, updated_at, ended_at, elapsed_s, queued_s, timeout_s,
+  attempt, retry_after_s, stagger_until, error, source, warning,
+  readonly_audit}`` — ``started_at`` is when the slot was admitted to the
+  fan-out, ``dispatched_at`` its **first** dispatch (a retry does not move
+  it), ``elapsed_s`` the run time frozen at the terminal transition and
+  counted from that first dispatch (``0`` for a slot that never dispatched),
+  and ``queued_s`` the wait between admission and dispatch — written at the
+  dispatch, or at the terminal transition for a slot that never dispatched,
+  and absent when the wait's end is unknown (a map written before the key
+  existed, or a never-dispatched row a ``--reaggregate`` closed out) — plan
+  review-run-scope-salvage-and-failure-visibility §6; ``warning`` is a
   non-fatal note on a slot that still counts (plan §4.3's
   ``[SANDBOX_BYPASSED] … not attributed``), ``readonly_audit`` the compact
   combined verdict of an uncontained slot's stream audit (``{clean, reason,

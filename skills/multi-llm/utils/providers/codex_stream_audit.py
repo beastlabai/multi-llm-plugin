@@ -293,7 +293,12 @@ _GIT = _FlagSpec(
 GIT_SUBCOMMANDS = frozenset({"log", "show", "diff", "status", "grep"})
 
 #: Verbs whose flags cannot write, whatever they are (step 4, first bullet).
-ANY_FLAG_VERBS = frozenset({"cat", "nl", "head", "tail", "wc", "ls"})
+#: ``pwd`` joined on 2026-09-28: its only flags (``-L``/``-P``) choose how the
+#: directory is spelled, and a real read-only review opened with ``pwd && rg
+#: --files …`` and was marked not clean for it, which costs the slot its
+#: unattributed-change exemption (plan: review-run-scope-salvage-and-failure-
+#: visibility §7.3).
+ANY_FLAG_VERBS = frozenset({"cat", "nl", "head", "tail", "wc", "ls", "pwd"})
 
 _SED_ADDR = r"(?:\d+|\$|/(?:[^/\\]|\\.)*/)"
 _SED_SCRIPT_PART = re.compile(rf"^\s*{_SED_ADDR}(?:\s*,\s*{_SED_ADDR})?\s*p\s*$")

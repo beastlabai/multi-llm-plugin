@@ -331,3 +331,162 @@ class TestSumUsage:
         ]
         usage = pfs.sum_usage(events, PI_LIKE)
         assert usage == {"input_tokens": 0, "output_tokens": 0}
+
+
+# --------------------------------------------------------------------------- #
+# assistant_text_of_stream — the salvage reducer (plan:
+# review-run-scope-salvage-and-failure-visibility §4, D4.2)
+# --------------------------------------------------------------------------- #
+
+def _assistant_turn(parts, *, stop="toolUse", finish=True):
+    """One assistant message as the pi family streams it.
+
+    ``parts`` is a list of ``("text"|"thinking"|"toolCall", payload)``. Each is
+    streamed as its ``*_start``/``*_delta``/``*_end`` updates; with
+    ``finish=False`` the stream stops after the last delta, the way a killed
+    process leaves it (no ``*_end``, no ``message_end``).
+    """
+    events = [{"type": "message_start",
+               "message": {"role": "assistant", "content": [], "stopReason": "pending"}}]
+    content = []
+    for index, (kind, payload) in enumerate(parts):
+        prefix = {"text": "text", "thinking": "thinking", "toolCall": "toolcall"}[kind]
+        events.append({"type": "message_update", "assistantMessageEvent":
+                       {"type": f"{prefix}_start", "contentIndex": index}})
+        streamed = json.dumps(payload) if kind == "toolCall" else payload
+        for cut in range(0, len(streamed), 7):
+            events.append({"type": "message_update", "assistantMessageEvent":
+                           {"type": f"{prefix}_delta", "contentIndex": index,
+                            "delta": streamed[cut:cut + 7]}})
+        if kind == "text":
+            content.append({"type": "text", "text": payload})
+        elif kind == "thinking":
+            content.append({"type": "thinking", "thinking": payload})
+        else:
+            content.append({"type": "toolCall", "id": f"call_{index}", "name": "bash",
+                            "arguments": payload})
+    if finish:
+        events.append({"type": "message_end",
+                       "message": {"role": "assistant", "content": content,
+                                   "stopReason": stop}})
+    return events
+
+
+def _tool_round_trip():
+    return [
+        {"type": "tool_execution_start", "toolCallId": "call_1", "toolName": "bash"},
+        {"type": "tool_execution_end", "toolCallId": "call_1", "toolName": "bash",
+         "result": {"content": [{"type": "text", "text": "[1, 2, 3]"}]}},
+    ]
+
+
+def _stream(*turns):
+    events = [{"type": "session", "version": 3}]
+    for turn in turns:
+        events.extend(turn)
+    return "\n".join(json.dumps(e) for e in events) + "\n"
+
+
+FINDINGS = '[\n  {"title": "Retry sleeps after the last attempt", "importance": "high"}\n]'
+
+
+class TestAssistantTextOfStream:
+    def test_only_the_text_parts_of_the_last_message_are_the_answer(self):
+        stdout = _stream(_assistant_turn(
+            [("thinking", "Reason about [1, 2] first."), ("text", FINDINGS)],
+            stop="stop",
+        ))
+
+        assert pfs.assistant_text_of_stream(stdout, PI_LIKE) == FINDINGS
+
+    def test_narration_turns_then_a_tool_call_only_message_give_nothing(self):
+        """The incident: earlier turns narrated, the last one only called a tool."""
+        stdout = _stream(
+            _assistant_turn([("text", "I'll open the plan first."),
+                             ("toolCall", {"path": "plan.md"})]),
+            _tool_round_trip(),
+            _assistant_turn([("text", "Now the diff."),
+                             ("toolCall", {"command": "git diff"})]),
+            _tool_round_trip(),
+            _assistant_turn([("thinking", "Run the tests."),
+                             ("toolCall", {"command": "pytest -q"})]),
+        )
+
+        assert pfs.assistant_text_of_stream(stdout, PI_LIKE) == ""
+
+    def test_an_example_array_in_an_earlier_turn_is_not_the_answer(self):
+        example = 'The shape I will use: [{"title": "example", "importance": "low"}]'
+        stdout = _stream(
+            _assistant_turn([("text", example), ("toolCall", {"path": "a.py"})]),
+            _tool_round_trip(),
+            _assistant_turn([("text", FINDINGS)], stop="stop"),
+        )
+
+        text = pfs.assistant_text_of_stream(stdout, PI_LIKE)
+
+        assert text == FINDINGS
+        assert "example" not in text
+
+    def test_a_stream_cut_inside_toolcall_deltas_gives_nothing(self):
+        stdout = _stream(
+            _assistant_turn([("text", "Checking the loop.")], stop="stop"),
+            _assistant_turn([("thinking", "One more check."),
+                             ("toolCall", {"command": "pytest tests/test_retry.py"})],
+                            finish=False),
+        )
+
+        assert pfs.assistant_text_of_stream(stdout, PI_LIKE) == ""
+
+    def test_a_stream_cut_inside_text_deltas_gives_the_partial_text_alone(self):
+        truncated = FINDINGS[:40]
+        stdout = _stream(
+            _assistant_turn([("text", "I'll read src/retry.py."),
+                             ("toolCall", {"path": "src/retry.py"})]),
+            _tool_round_trip(),
+            _assistant_turn([("thinking", "Write it."), ("text", truncated)],
+                            finish=False),
+        )
+
+        text = pfs.assistant_text_of_stream(stdout, PI_LIKE)
+
+        assert text == truncated
+        assert "I'll read" not in text
+
+    def test_turn_end_and_agent_end_repeats_are_not_read(self):
+        """``agent_end.messages`` repeats the whole conversation, our prompt too."""
+        stdout = _stream(
+            _assistant_turn([("text", FINDINGS)], stop="stop"),
+            [{"type": "agent_end", "messages": [
+                {"role": "user", "content": [{"type": "text", "text": "[1, 2]"}]},
+                {"role": "assistant", "content": [{"type": "text", "text": "[3]"}]},
+            ]}],
+        )
+
+        assert pfs.assistant_text_of_stream(stdout, PI_LIKE) == FINDINGS
+
+    @pytest.mark.parametrize("stdout", [
+        FINDINGS,
+        '{"answer": "OK"}',
+        "Here are the findings:\n" + FINDINGS,
+    ])
+    def test_a_stdout_that_is_not_a_stream_is_no_opinion(self, stdout):
+        assert pfs.assistant_text_of_stream(stdout, PI_LIKE) is None
+
+    @pytest.mark.parametrize("stdout", ["", "   ", "\n\n", " \t\n "])
+    def test_an_empty_stdout_is_nothing_to_salvage(self, stdout):
+        """Both adapters always render ``--mode json``, so a stdout with no bytes
+        is a transport that carried nothing, never a text-mode answer: ``""``
+        keeps the verdict final instead of sending the gate to stderr."""
+        assert pfs.assistant_text_of_stream(stdout, PI_LIKE) == ""
+        assert pi_module.PiProvider().salvage_text(stdout) == ""
+        assert OmpProvider().salvage_text(stdout) == ""
+
+    def test_a_header_only_stream_is_nothing_to_salvage(self):
+        assert pfs.assistant_text_of_stream(_stream(), PI_LIKE) == ""
+
+    def test_both_adapters_use_it(self):
+        stdout = _stream(_assistant_turn([("text", FINDINGS)], stop="stop"))
+
+        assert pi_module.PiProvider().salvage_text(stdout) == FINDINGS
+        assert OmpProvider().salvage_text(stdout) == FINDINGS
+        assert pi_module.PiProvider().salvage_text("prose answer") is None

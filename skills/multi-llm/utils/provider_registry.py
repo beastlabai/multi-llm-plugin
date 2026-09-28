@@ -24,12 +24,18 @@ is a deliberate wipe-out. See the per-project override docs in docs/configuratio
 import copy
 import math
 import os
+import re
 import sys
 import yaml
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Union
 
-from .git_utils import get_project_root_from_dir
+from .git_utils import (
+    COLLAPSE_PATH_KEYS,
+    DEFAULT_COLLAPSE_PATHS,
+    compile_path_glob,
+    get_project_root_from_dir,
+)
 from .providers.agy import AgyProvider
 from .providers.aider import AiderProvider
 from .providers.claude_code import ClaudeCodeProvider
@@ -458,6 +464,7 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
     driver_overridden = False
     git_env_overridden = False
     progress_overridden = False
+    code_review_overridden = False
     for layer_name, path in _override_paths(anchor):
         data = _load_override_layer(layer_name, path, permissive)
         if data:
@@ -465,6 +472,8 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
                 driver_overridden = True
             if "progress" in data:
                 progress_overridden = True
+            if "code_review" in data:
+                code_review_overridden = True
             layer_providers = data.get("providers")
             if "git_env" in data or (
                 isinstance(layer_providers, dict)
@@ -498,6 +507,15 @@ def load_config(anchor: Optional[Union[str, Path]] = None,
     # the command the user typed.
     if progress_overridden:
         validate_progress_block(config.get("progress"))
+
+    # `code_review:` follows the same rule, for the same reason: a collapse
+    # glob list that was silently dropped degrades to the shipped rule, which
+    # reads exactly like the repository's setting having worked — while the
+    # review reads the `poetry.lock` diff the user meant to collapse
+    # (decision 11.5 of the review-scope plan: a malformed key is a config
+    # error at load time, never a silent fallback).
+    if code_review_overridden:
+        validate_code_review_block(config.get("code_review"))
 
     # §2.2: `git_env:` follows the identical rule — validated only when an
     # override layer asked for it, rejected rather than ignored, because
@@ -1643,6 +1661,138 @@ def validate_progress_block(progress: object) -> None:
                     f"rather than a poll that is switched off"
                 )
             raise ConfigError(_progress_error(key, value, reason))
+
+
+# ---------------------------------------------------------------------------
+# code_review: — how `review-code` groups the paths in its scope
+# ---------------------------------------------------------------------------
+
+#: The closed key set under `code_review:`. CLOSED, like `progress:`: a typo
+#: (`collapse:`) would otherwise be a silent no-op that keeps the shipped rule
+#: while the config reads as if it had been changed.
+CODE_REVIEW_KEYS = ("collapse_paths",)
+
+
+def _code_review_error(where: str, value: object, reason: str) -> str:
+    """One rejection surface for a bad `code_review.*` value: key, value, reason."""
+    return f"multi-llm config error: code_review.{where} is {value!r} — {reason}."
+
+
+def validate_code_review_block(code_review: object) -> None:
+    """Validate a merged ``code_review:`` block, raising :class:`ConfigError`.
+
+    ``collapse_paths`` holds two glob lists, ``generated`` and ``fixtures``,
+    that feed :func:`utils.git_utils.classify_review_paths` (the review-scope
+    plan's D2.1 rules 1 and 2). Every message names the key. Checked here:
+
+    * the block, and ``collapse_paths`` under it, are mappings with only the
+      known keys;
+    * each list is a list of non-empty strings — a bare string would otherwise
+      be iterated character by character, a glob per letter;
+    * no entry is absolute or holds a ``..`` segment: patterns match
+      repo-relative paths, so such an entry can never match and the rule would
+      silently be no rule at all (the same reasoning as ``driver.write_paths``);
+    * every entry compiles, so a malformed character class is reported now
+      rather than in the middle of a review.
+
+    Called from :func:`load_config` whenever an **override** layer carried a
+    ``code_review:`` key; the base is ours, and permissive mode does not relax
+    it (a dropped list degrades to the default, which is the failure this
+    check exists for).
+    """
+    if code_review is None:
+        return
+    if not isinstance(code_review, dict):
+        raise ConfigError(
+            f"multi-llm config error: `code_review:` must be a mapping of "
+            f"{' / '.join(CODE_REVIEW_KEYS)}, got {type(code_review).__name__} "
+            f"({code_review!r})"
+        )
+    unknown = sorted(str(key) for key in code_review if key not in CODE_REVIEW_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"multi-llm config error: unknown key(s) under `code_review:`: "
+            f"{', '.join(unknown)}. Known keys: {', '.join(CODE_REVIEW_KEYS)}."
+        )
+    collapse = code_review.get("collapse_paths")
+    if collapse is None:
+        return
+    if not isinstance(collapse, dict):
+        raise ConfigError(_code_review_error(
+            "collapse_paths", collapse,
+            f"expected a mapping with `{'`/`'.join(COLLAPSE_PATH_KEYS)}` glob lists",
+        ))
+    unknown = sorted(str(key) for key in collapse if key not in COLLAPSE_PATH_KEYS)
+    if unknown:
+        raise ConfigError(
+            f"multi-llm config error: unknown key(s) under "
+            f"code_review.collapse_paths: {', '.join(unknown)}. Known keys: "
+            f"{', '.join(COLLAPSE_PATH_KEYS)}."
+        )
+    for name in COLLAPSE_PATH_KEYS:
+        if name not in collapse or collapse[name] is None:
+            continue
+        patterns = collapse[name]
+        where = f"collapse_paths.{name}"
+        if not isinstance(patterns, list) or not all(
+            isinstance(item, str) and item.strip() for item in patterns
+        ):
+            raise ConfigError(_code_review_error(
+                where, patterns,
+                'expected a list of non-empty glob strings (e.g. ["**/*.lock", '
+                '"dist/**"]); an empty list switches the rule off',
+            ))
+        for pattern in patterns:
+            normalized = pattern.strip().replace("\\", "/")
+            drive_prefixed = (
+                len(normalized) >= 2 and normalized[1] == ":"
+                and normalized[0].isalpha()
+            )
+            if normalized.startswith("/") or drive_prefixed:
+                reason = "an absolute path"
+            elif ".." in normalized.split("/"):
+                reason = "a parent-traversal ('..') path"
+            else:
+                reason = None
+            if reason is not None:
+                raise ConfigError(_code_review_error(
+                    where, pattern,
+                    f"{reason}; entries match repo-relative paths, so it could "
+                    f"never match. Write it relative to the repository root "
+                    f'(e.g. "dist/**", "**/*.lock")',
+                ))
+            try:
+                compile_path_glob(pattern)
+            except re.error as exc:
+                raise ConfigError(_code_review_error(
+                    where, pattern, f"not a valid glob ({exc})",
+                )) from exc
+
+
+def get_collapse_paths(
+    anchor: Optional[Union[str, Path]] = None,
+) -> Dict[str, List[str]]:
+    """``code_review.collapse_paths`` — both glob lists, always present.
+
+    What :func:`utils.git_utils.classify_review_paths` is handed. Each list
+    falls back to :data:`utils.git_utils.DEFAULT_COLLAPSE_PATHS` per key when
+    the merged config has none (a fixture base, or a base predating the block),
+    so a layer that set only ``generated`` keeps the default fixture rule. An
+    explicit ``[]`` is kept as written: that is how a repository switches a
+    rule off.
+    """
+    config = load_config(anchor=anchor)
+    block = config.get("code_review")
+    collapse = block.get("collapse_paths") if isinstance(block, dict) else None
+    collapse = collapse if isinstance(collapse, dict) else {}
+    resolved: Dict[str, List[str]] = {}
+    for name in COLLAPSE_PATH_KEYS:
+        patterns = collapse.get(name)
+        if isinstance(patterns, list):
+            resolved[name] = [str(item) for item in patterns]
+        else:
+            resolved[name] = list(DEFAULT_COLLAPSE_PATHS[name])
+    return resolved
 
 
 # ---------------------------------------------------------------------------

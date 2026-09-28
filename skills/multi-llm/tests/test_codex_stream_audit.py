@@ -349,6 +349,39 @@ class TestTheClassifier:
         assert classify_command(None) is not None
         assert classify_command("") is not None
 
+    @pytest.mark.parametrize("inner", [
+        "pwd",
+        "pwd -L",
+        "pwd -P",
+        # The command a real read-only code review opened with, marked not
+        # clean for `pwd` alone (review-run-scope-salvage-and-failure-visibility
+        # §7.3, T7.6).
+        "pwd && rg --files -g AGENTS.md -g '*opencode*' -g '*validator*' "
+        "-g '*test*' -g 'package.json' -g 'pyproject.toml' -g 'README*' "
+        "-g '*rate*' -g '*denied*'",
+    ])
+    @pytest.mark.parametrize("wrap", [False, True], ids=["bare", "bash-lc"])
+    def test_pwd_is_accepted_with_either_flag(self, inner, wrap):
+        """`pwd`'s only flags choose how the directory is spelled; none writes."""
+        command = _wrapped(inner) if wrap else inner
+        assert classify_command(command) is None, (command, classify_command(command))
+
+    @pytest.mark.parametrize("inner", [
+        # Exactly what the same run's codex slot ran, and was refused for.
+        'for p in /AGENTS.md ~ ~/AGENTS.md ~/code/AGENTS.md; do '
+        'if [ -f "$p" ]; then cat "$p"; fi; done',
+        # The `&&` spelling of the same loop.
+        'for p in /AGENTS.md ~/AGENTS.md; do [ -f "$p" ] && cat "$p"; done',
+    ])
+    @pytest.mark.parametrize("wrap", [False, True], ids=["bare", "bash-lc"])
+    def test_a_for_loop_over_a_shell_variable_stays_rejected(self, inner, wrap):
+        """T7.7, decision 11.15: a loop reading `$p` is the shell
+        programmability the fail-closed classifier exists to refuse, and every
+        cell of it only reads. Pinned so accepting `pwd` never grows into
+        accepting this; no prompt guidance steers codex away from it."""
+        command = _wrapped(inner) if wrap else inner
+        assert classify_command(command) is not None, command
+
     def test_every_0c477c4d_command_passes(self):
         """The acceptance stream's own commands are all read-only."""
         commands = [e["item"]["command"] for e in _events("run_0c477c4d_partial.jsonl")

@@ -1215,7 +1215,7 @@ def parse_result_line(text: str) -> Optional[Dict[str, Any]]:
 #: parser argparse will really use: a name missing here just keeps the old
 #: over-reporting, which leaves a guard closed rather than open.
 _EXACT_OPTIONS: FrozenSet[str] = frozenset({
-    "--all", "--approve-all", "--consolidate", "--dry-run", "--force",
+    "--all", "--approve-all", "--consolidate", "--dry-run", "--files", "--force",
     "--host", "--mode", "--output", "--phase", "--project", "--question",
     "--reaggregate", "--revalidate", "--skip", "--summary", "--task",
 })

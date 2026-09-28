@@ -64,6 +64,8 @@ After completing coverage analysis, also review the tasks for:
 - Is each task assigned to the right subagent type (general-purpose or human)?
 - Are any human tasks that could be automated, or automated tasks that require manual action?
 
+{working_limits}
+
 ## Output Format
 Return ONLY a valid JSON array with no additional text. Each element must have exactly these fields:
 - "title": string (5-10 word summary of the issue)

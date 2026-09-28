@@ -266,3 +266,55 @@ class TestLoadPromptEdgeCases:
 
         loaded_content = load_prompt("special.txt")
         assert loaded_content == special_content
+
+
+#: What each review fan-out really formats its template with: the phase's own
+#: `prompt_context_factory` keys, plus the three the dispatch layer injects
+#: (`invoke_with_file_output`, and `run_single_model`'s reconstruction sites).
+_REVIEW_CONTEXT = {
+    "plan_review.txt": {"plan_path": "/work/plans/p.md", "prefix": "p"},
+    "task_review.txt": {
+        "plan_path": "/work/plans/p.md",
+        "tasks_path": "/work/plans/p/tasks/tasks.md",
+        "prefix": "p",
+    },
+}
+
+
+class TestReviewTemplatesCarryWorkingLimits:
+    """The plan and task review prompts state the attempt's time budget and
+    limits (plan: review-run-scope-salvage-and-failure-visibility D3.2), and
+    only the review prompts do: `ask.txt` keeps its own read-only section
+    (decision 11.7)."""
+
+    def setup_method(self):
+        clear_cache()
+
+    @pytest.mark.parametrize("name", sorted(_REVIEW_CONTEXT))
+    def test_the_placeholder_sits_above_the_output_sections(self, name):
+        template = load_prompt(name)
+
+        assert template.count("{working_limits}") == 1
+        # "the output file named below" has to be true of the rendered prompt.
+        assert (
+            template.index("{working_limits}")
+            < template.index("## Output Format")
+            < template.index("{output_location}")
+        )
+
+    @pytest.mark.parametrize("name", sorted(_REVIEW_CONTEXT))
+    def test_the_template_formats_without_a_key_error(self, name):
+        from utils.llm_client import STDOUT_OUTPUT_LOCATION, render_working_limits
+
+        rendered = load_prompt(name).format(
+            **_REVIEW_CONTEXT[name],
+            output_json_path="",
+            output_location=STDOUT_OUTPUT_LOCATION,
+            working_limits=render_working_limits(1200),
+        )
+
+        assert render_working_limits(1200) in rendered
+        assert "{working_limits}" not in rendered
+
+    def test_the_ask_template_does_not_get_the_block(self):
+        assert "{working_limits}" not in load_prompt("ask.txt")

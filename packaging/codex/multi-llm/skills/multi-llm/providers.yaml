@@ -1024,7 +1024,11 @@ read_only_modes:
       writes ("I'm in Ask mode, so I can't create or edit files"), re-confirmed
       2026-08-18 over three identical runs. Q12 separately confirmed it keeps
       its read tools (Grep/Read tool_use entries in the same transcript): a
-      positive row means read-ONLY, not read-LESS.
+      positive row means read-ONLY, not read-LESS. What ask mode does about a
+      shell is not restated here: it is recorded once, with its measurement,
+      as CursorAgentProvider.runs_shell_in_generate in
+      utils/providers/cursor_agent.py, which the review-code prompt renders
+      from — so that attribute is the one value to change if a probe moves it.
   gemini:
     # Not a `null`-by-oversight: gemini ships no write_file tool at all under
     # this adapter's argv (MEASURED 2026-08-19, tests/test_provider_housekeeping
@@ -1103,6 +1107,16 @@ read_only_modes:
     mechanism: null
     probed: null
   pi:
+    # NOT a read-only mode, and deliberately still `null`. Every `generate`
+    # dispatch pins `--tools read,grep,find,bash,write` (utils/providers/pi.py
+    # PI_TOOLS, decision 11.6): the allow-list keeps `edit` out and stops the
+    # user's settings or a trusted project's `.pi/settings.json` from choosing
+    # which tool NAMES are active, but `bash` stays (the code-review prompt runs
+    # `git diff`), so the model can still run any command and write through it.
+    # It also pins names, not implementations: an extension that registers one
+    # of those names replaces the built-in (extension isolation is deferred,
+    # decision 11.8). This row moves only if `bash` leaves the list once the
+    # diff reaches reviewers by file, with its own probe transcript.
     mechanism: null
     probed: null
   qwen-code:
@@ -1269,6 +1283,35 @@ progress:
 # error and the model continues the turn. Fast and legible, never a hang.
 git_env:
   credential_helper: auto
+
+# ---------------------------------------------------------------------------
+# code_review: how `review-code` groups the paths in its scope
+# ---------------------------------------------------------------------------
+# Every path under review lands in one of four groups — source, tests,
+# fixtures, generated — tried in this order, first match wins:
+#   1. generated: the path has git's `linguist-generated` attribute (always
+#      checked, from .gitattributes), or it matches a `generated` glob below;
+#   2. fixtures:  it matches a `fixtures` glob below;
+#   3. tests:     a `tests/` or `test/` directory at any depth, or a file name
+#                 starting `test_` or containing `_test.`, `.test.`, `.spec.`;
+#   4. source:    everything else.
+# Reviewers get the list in that order, so when the prompt's file list is cut
+# for length the fixtures and generated files go first, never the source.
+#
+# collapse_paths holds the two configurable rules as glob lists matched
+# against repo-relative paths. `**/` is zero or more directories, a trailing
+# `/**` is everything beneath, `*` and `?` stay inside one directory, and a
+# pattern with no `/` matches the file name at any depth (`*.lock`). The
+# defaults reproduce the built-in rule exactly; a project layer can add e.g.
+# `**/*.lock` or `dist/**` to `generated`, and `[]` switches a rule off.
+# A malformed value (not a list of relative glob strings, or an unknown key)
+# is a config error at load time, never a silent fallback to these defaults.
+code_review:
+  collapse_paths:
+    generated: []
+    fixtures:
+      - "**/tests/fixtures/**"
+      - "**/tests/golden/**"
 
 # env_allowlist: off | on   (default: off — and it SHIPS off)
 #

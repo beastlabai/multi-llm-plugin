@@ -697,3 +697,54 @@ class TestAnApprovalDenialKeepsToolContentsOutOfTheError:
 
         assert "was denied approval" in reason
         assert "rate limit" not in reason.lower()
+
+
+# --------------------------------------------------------------------------- #
+# salvage_text: every committed omp row against its own `expect.salvage` label
+# (plan: review-run-scope-salvage-and-failure-visibility §4, T4.1). The sweep's
+# plumbing and label rule are pi's, imported so the two adapters are graded by
+# one rule.
+# --------------------------------------------------------------------------- #
+
+from tests.test_pi_json_mode import (  # noqa: E402
+    _labelled_rows,
+    assert_meets_salvage_label,
+    salvage_gate_input,
+)
+
+OMP_FIXTURES = Path(__file__).parent / "fixtures" / "omp"
+OMP_SALVAGE_ROWS = _labelled_rows(OMP_FIXTURES)
+
+
+class TestOmpSalvageTextMeetsEveryRowsLabel:
+    """Every omp row with files, through ``OmpProvider.salvage_text`` and the gate.
+
+    The §4.1 baseline was 24 of 28 omp captures passing the gate on the raw
+    stream (``aborted``, ``approval-denied``, ``auth-error`` …). ``--max-time``
+    makes an exit-0 ``toolUse``/``aborted`` stream that the parse-failure site
+    excerpts, which is how omp reached the gate.
+    """
+
+    def test_every_row_is_swept(self):
+        assert len(OMP_SALVAGE_ROWS) == 27
+
+    @pytest.mark.parametrize(
+        "name,row", OMP_SALVAGE_ROWS, ids=[name for name, _row in OMP_SALVAGE_ROWS]
+    )
+    def test_row(self, name, row):
+        assert_meets_salvage_label(
+            name, row, salvage_gate_input(OmpProvider(), OMP_FIXTURES, row)
+        )
+
+    def test_a_deadline_inside_a_tool_call_reduces_to_nothing(self):
+        """``exit-zero-failure`` is ``--max-time`` landing inside a ``bash`` call."""
+        stdout = (OMP_FIXTURES / "exit-zero-failure.stdout.txt").read_text(encoding="utf-8")
+
+        assert OmpProvider().salvage_text(stdout) == ""
+
+    def test_an_empty_stdout_is_nothing_to_salvage(self):
+        """``invalid-model`` writes nothing on stdout. ``--mode json`` is a
+        required flag, so that is a transport that carried nothing: ``""`` is the
+        final verdict and stderr's diagnostics never reach the gate."""
+        assert OmpProvider().salvage_text("") == ""
+        assert OmpProvider().salvage_text("  \n") == ""

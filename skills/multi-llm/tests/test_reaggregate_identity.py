@@ -565,7 +565,7 @@ def _run_cro_reaggregate(
             patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
         stack.enter_context(
             patch.object(cro, "intent_to_add_untracked",
-                         side_effect=lambda files: contextlib.nullcontext()))
+                         side_effect=lambda files, **_: contextlib.nullcontext()))
         if not render_report:
             stack.enter_context(patch.object(cro, "generate_review_report", report))
         for extra in extra_patches:
@@ -799,7 +799,7 @@ def _run_cro_fanout(tmp_path, issues_by_model, *, skip_validation=True,
             patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
         stack.enter_context(
             patch.object(cro, "intent_to_add_untracked",
-                         side_effect=lambda files: contextlib.nullcontext()))
+                         side_effect=lambda files, **_: contextlib.nullcontext()))
         stack.enter_context(
             patch.object(cro, "run_all_reviews", new=AsyncMock(return_value=results)))
         stack.enter_context(
@@ -1327,6 +1327,209 @@ class TestTheDocumentedValidateThenReaggregateFlowCompletes:
 
 
 # ---------------------------------------------------------------------------
+# Plan review-run-scope-salvage-and-failure-visibility §5 (T5.1): the
+# reaggregate reads the failure map back
+# ---------------------------------------------------------------------------
+#
+# The code-review reaggregate used to derive its failure map from `results`,
+# which holds only models with a file on disk — so the map was always `{}` and
+# a reviewer that timed out vanished from every report rebuilt after it. The
+# facts were on disk all along: `.status.json.models_failed`, reconciled with
+# the files by `record_models_present`.
+
+_LOST_SPEC = _REAL_SPECS[1]
+_LOST_REASON = "cursor-agent timed out after 1200s"
+
+
+def _cro_report_md(plan):
+    """`report.md` where the code-review reaggregate writes it: the plan-derived
+    phase dir (`get_output_paths`), whatever `get_phase_dir` was patched to."""
+    path = cro.get_output_paths(plan, "code_review", phase="code-review")
+    return path.with_suffix(".md").read_text(encoding="utf-8")
+
+
+def _line_after_models(report):
+    lines = report.splitlines()
+    index = next(i for i, line in enumerate(lines) if line.startswith("**Models:**"))
+    return lines[index + 1]
+
+
+#: Five specs whose stems invert through the recorded checkpoint.
+_FIVE = [f"claude-code:model-{letter}" for letter in "abcde"]
+
+
+def _five_spec_phase(tmp_path, checkpoint_extra=None, **fields):
+    """A code-review dir with result files for a, b, c and a checkpoint."""
+    plan, phase_dir = _cro_phase(
+        tmp_path,
+        {cro.sanitize_model_name(spec): _issues([f"Issue {spec}"]) for spec in _FIVE[:3]},
+    )
+    checkpoint = {
+        "phase": "code-review",
+        "state": "models_complete",
+        "started_at": "2026-01-01T00:00:00",
+        **fields,
+        **(checkpoint_extra or {}),
+    }
+    write_status(str(phase_dir), checkpoint)
+    return plan, phase_dir
+
+
+class TestTheCodeReviewReaggregateNamesTheModelsThatProducedNothing:
+    def test_the_documented_flow_names_the_recorded_failure(self, tmp_path, capsys):
+        plan, phase_dir, _exit = _run_cro_fanout(
+            tmp_path,
+            {_REAL_SPECS[0]: _unrelated_issues(_A_ONLY + _SHARED)},
+            skip_validation=False,
+            failed={_LOST_SPEC: _LOST_REASON},
+        )
+        _complete_validation_batches(phase_dir)
+        capsys.readouterr()
+
+        _run_cro_reaggregate(
+            plan, phase_dir, skip_validation=False, render_report=True,
+        )
+        out = capsys.readouterr().out
+
+        report = _cro_report_md(plan)
+        assert _line_after_models(report) == (
+            f"**Models failed:** 1 of 2 requested — {_LOST_SPEC}: {_LOST_REASON}"
+        )
+        assert f"- **{_LOST_SPEC}**: {_LOST_REASON}" in report
+        # T5.4a/T5.4b: named to the host, and the run reads partial.
+        assert f"[MODEL_FAILED] {_LOST_SPEC}: {_LOST_REASON}" in out
+        assert f"[PARTIAL_RESULTS: {_LOST_SPEC}]" in out
+        data = json.loads((phase_dir / "report_data.json").read_text(encoding="utf-8"))
+        assert data["failedModels"] == {_LOST_SPEC: _LOST_REASON}
+        assert data["requestedModels"] == 2
+
+    def test_a_model_whose_file_appeared_is_not_reported(self, tmp_path, capsys):
+        plan, phase_dir, _exit = _run_cro_fanout(
+            tmp_path,
+            {_REAL_SPECS[0]: _issues(["Issue A"])},
+            failed={_LOST_SPEC: _LOST_REASON},
+        )
+        # A salvage (or an out-of-band result) lands before the reaggregate.
+        (phase_dir / f"{cro.sanitize_model_name(_LOST_SPEC)}.json").write_text(
+            json.dumps(_issues(["Issue B"])), encoding="utf-8"
+        )
+        capsys.readouterr()
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+        out = capsys.readouterr().out
+
+        assert f"[{_LOST_SPEC}] result file present; recorded as completed" in out
+        assert "[MODEL_FAILED]" not in out
+        assert "[PARTIAL_RESULTS:" not in out
+        report = _cro_report_md(plan)
+        assert "**Models failed:**" not in report
+        assert "## Failed Reviews" not in report
+
+    def test_the_denominator_is_the_requested_set_not_success_plus_failure(
+        self, tmp_path, capsys
+    ):
+        """Five requested, three with files, one recorded failed, one with
+        neither: the fifth is named with the fixed gap reason, so N = M minus
+        the models under **Models:**."""
+        plan, phase_dir = _five_spec_phase(
+            tmp_path,
+            models_requested=list(_FIVE),
+            models_completed=list(_FIVE[:3]),
+            models_failed={_FIVE[3]: "exited with code 1"},
+        )
+        assert rob.recorded_requested_models(str(phase_dir), _FIVE[:3]) == _FIVE
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+        out = capsys.readouterr().out
+
+        assert _line_after_models(_cro_report_md(plan)) == (
+            f"**Models failed:** 2 of 5 requested — {_FIVE[3]}: exited with code 1; "
+            f"{_FIVE[4]}: {rob.UNACCOUNTED_MODEL_REASON}"
+        )
+        assert f"[MODEL_FAILED] {_FIVE[4]}: no result file and no recorded failure" in out
+
+    def test_a_dropped_progress_object_reads_the_same_five(self, tmp_path):
+        """A detached reaggregate's claim drops `progress` wholesale."""
+        fields = dict(
+            models_requested=list(_FIVE),
+            models_completed=list(_FIVE[:3]),
+            models_failed={_FIVE[3]: "exited with code 1"},
+        )
+        with_progress = tmp_path / "with"
+        without = tmp_path / "without"
+        with_progress.mkdir()
+        without.mkdir()
+        _p1, dir_with = _five_spec_phase(with_progress, checkpoint_extra={
+            "progress": {"models_total": 5, "models_done": 5,
+                         "models": {spec: {"state": "done"} for spec in _FIVE}},
+        }, **fields)
+        _p2, dir_without = _five_spec_phase(without, **fields)
+
+        assert rob.remaining_failed_models(str(dir_with), _FIVE[:3]) == (
+            rob.remaining_failed_models(str(dir_without), _FIVE[:3])
+        )
+        failures, requested = rob.remaining_failed_models(str(dir_without), _FIVE[:3])
+        assert requested == _FIVE
+        assert failures == {
+            _FIVE[3]: "exited with code 1",
+            _FIVE[4]: rob.UNACCOUNTED_MODEL_REASON,
+        }
+
+    def test_no_models_requested_falls_back_to_the_union_of_the_rest(self, tmp_path):
+        plan, phase_dir = _five_spec_phase(
+            tmp_path,
+            models_completed=list(_FIVE[:3]),
+            models_failed={_FIVE[3]: "exited with code 1"},
+        )
+        failures, requested = rob.remaining_failed_models(str(phase_dir), _FIVE[:3])
+        assert requested == _FIVE[:4]
+        assert failures == {_FIVE[3]: "exited with code 1"}
+
+    def test_an_old_file_from_a_dropped_model_counts_once_on_each_side(
+        self, tmp_path, capsys
+    ):
+        """A model the latest run did not request, whose old result file is
+        still in the dir: loaded, recorded completed, counted as succeeded and
+        once in the denominator — so the numbers still add up."""
+        plan, phase_dir = _five_spec_phase(
+            tmp_path,
+            models_requested=list(_FIVE[:2]) + [_FIVE[3]],
+            models_completed=list(_FIVE[:2]),
+            models_failed={_FIVE[3]: "exited with code 1"},
+        )
+        # _FIVE[2]'s file is on disk (written by the fixture) but unrequested.
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+        capsys.readouterr()
+
+        report = _cro_report_md(plan)
+        models_line = next(
+            line for line in report.splitlines() if line.startswith("**Models:**")
+        )
+        succeeded = [spec for spec in _FIVE if spec in models_line]
+        assert len(succeeded) == 2  # a, b by spec; c by its stem
+        assert cro.sanitize_model_name(_FIVE[2]) in models_line
+        assert _line_after_models(report) == (
+            f"**Models failed:** 1 of 4 requested — {_FIVE[3]}: exited with code 1"
+        )
+
+    def test_a_checkpoint_with_none_of_the_fields_writes_no_line(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir = _cro_phase(
+            tmp_path, {"claude-code_sonnet": _issues(["Issue 0"])},
+        )
+        assert rob.recorded_requested_models(str(phase_dir), ["claude-code_sonnet"]) is None
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+        capsys.readouterr()
+
+        assert "**Models failed:**" not in _cro_report_md(plan)
+        data = json.loads((phase_dir / "report_data.json").read_text(encoding="utf-8"))
+        assert "requestedModels" not in data
+        assert data["failedModels"] == {}
+
+
+# ---------------------------------------------------------------------------
 # A checkpoint that could not be written stops being a silent degradation
 # ---------------------------------------------------------------------------
 #
@@ -1608,7 +1811,7 @@ def _run_cro_fanout_resolving_models(tmp_path, models):
             patch.object(cro, "validate_git_ref", side_effect=lambda r: r or "HEAD~1"))
         stack.enter_context(
             patch.object(cro, "intent_to_add_untracked",
-                         side_effect=lambda files: contextlib.nullcontext()))
+                         side_effect=lambda files, **_: contextlib.nullcontext()))
         stack.enter_context(
             patch.object(cro, "run_all_reviews",
                          new=AsyncMock(side_effect=AssertionError(
@@ -2773,34 +2976,87 @@ class TestFlippingALiveRowStopsItsClock:
         assert progress_tracker.entry_elapsed_s(entry, time.time() + 3600) == frozen
 
     def test_a_queued_row_never_dispatched_is_closed_out_too(self):
-        """The other live state a killed run leaves behind, and the clamp.
+        """The other live state a killed run leaves behind.
 
         Ten hours against a 30-minute budget is what the pre-fix row rendered
-        forever: the live branch clamps at ``timeout_s``, so the clock stopped
+        forever: the live branch clamped at ``timeout_s``, so the clock stopped
         moving but the number was the budget rather than anything the slot did.
-        Frozen, it is still the budget — the honest reading of a row nobody
-        closed out — but it is frozen, and it lands as a bare int the way every
-        other duration in the checkpoint does.
+        It used to freeze at that budget (1800). A slot that never dispatched
+        ran for no time at all, so it now freezes ``elapsed_s: 0`` — a bare
+        int, like every other duration in the checkpoint — and **no**
+        ``queued_s``: a ``--reaggregate`` can run hours after the kill, so "now"
+        is not when the wait ended and its length is unknown (plan
+        review-run-scope-salvage-and-failure-visibility §6.2). The rule reads
+        ``state``, so this row — which, like a pre-upgrade map's, carries no
+        ``dispatched_at`` — lands at 0 too.
         """
         models_map = {self.SPEC: self._live("queued", ago_s=10 * 3600)}
 
         rob.flip_map_entries_to_done(models_map, [self.SPEC])
 
         entry = models_map[self.SPEC]
-        assert entry["elapsed_s"] == 1800, entry
+        assert entry["elapsed_s"] == 0, entry
         assert isinstance(entry["elapsed_s"], int), entry
-        assert progress_tracker.entry_elapsed_s(entry, time.time() + 86400) == 1800
+        assert "queued_s" not in entry, entry
+        assert entry["ended_at"], entry
+        assert progress_tracker.entry_elapsed_s(entry, time.time() + 86400) == 0
+        assert progress_tracker.entry_queued_s(entry, time.time() + 86400) is None
+
+    def test_a_dispatched_row_freezes_its_wait_from_the_two_exact_stamps(self):
+        """Both stamps are exact, so the wait is ``dispatched_at - started_at``
+        whenever the reaggregate runs; the run time counts from the dispatch."""
+        entry = self._live("running", ago_s=300)
+        started = datetime.fromisoformat(entry["started_at"])
+        entry["dispatched_at"] = (started + timedelta(seconds=120)).isoformat()
+        models_map = {self.SPEC: entry}
+
+        rob.flip_map_entries_to_done(models_map, [self.SPEC])
+
+        assert entry["state"] == "done", entry
+        assert entry["queued_s"] == 120, entry
+        # 300 s since admission, 120 of them queued: about 180 s of run time,
+        # not the 300 the clock read when it counted from admission.
+        assert 175 <= entry["elapsed_s"] <= 240, entry
+        later = time.time() + 3600
+        assert progress_tracker.entry_elapsed_s(entry, later) == entry["elapsed_s"]
+        assert progress_tracker.entry_queued_s(entry, later) == 120
+
+    def test_a_dispatched_row_keeps_the_wait_its_fanout_measured(self):
+        """The monotonic figure the first dispatch stored is the same quantity,
+        measured more exactly, so it is what freezes."""
+        entry = self._live("running", ago_s=300)
+        started = datetime.fromisoformat(entry["started_at"])
+        entry["dispatched_at"] = (started + timedelta(seconds=120)).isoformat()
+        entry["queued_s"] = 119.6
+        models_map = {self.SPEC: entry}
+
+        rob.flip_map_entries_to_done(models_map, [self.SPEC])
+
+        assert entry["queued_s"] == 119.6, entry
 
     def test_an_already_terminal_row_keeps_the_ending_the_fanout_gave_it(self):
         """The freeze rule the helper was written for is untouched."""
-        models_map = {self.SPEC: _terminal("failed")}
+        models_map = {
+            self.SPEC: _terminal("failed"),
+            # A slot an abort retired before it ever dispatched: no run time,
+            # its whole wait in `queued_s` (plan review-run-scope-salvage-and-
+            # failure-visibility §6.3). A later flip changes the verdict only.
+            self.OTHER: _terminal("failed", elapsed_s=0, queued_s=300,
+                                  error="cancelled"),
+        }
 
-        rob.flip_map_entries_to_done(models_map, [self.SPEC])
+        rob.flip_map_entries_to_done(models_map, [self.SPEC, self.OTHER])
 
         entry = models_map[self.SPEC]
         assert entry["state"] == "done", entry
         assert entry["ended_at"] == "2026-09-17T10:04:00Z", entry
         assert entry["elapsed_s"] == 240, entry
+        assert "queued_s" not in entry, entry
+
+        retired = models_map[self.OTHER]
+        assert retired["state"] == "done", retired
+        assert retired["ended_at"] == "2026-09-17T10:04:00Z", retired
+        assert (retired["elapsed_s"], retired["queued_s"]) == (0, 300), retired
 
     def test_a_reaggregate_over_an_unclosed_map_writes_a_finished_row(
         self, tmp_path
@@ -2969,3 +3225,409 @@ class TestResolveChangedFiles:
             )
         assert files == ["x.py", "y.py"]
         assert "Filtered out 1 pre-existing files" in capsys.readouterr().out
+
+
+# ---------------------------------------------------------------------------
+# `resolve_review_scope`: the same resolution, labelled by the branch that
+# picked the paths (review-scope plan §2 D2.1, T2.1)
+# ---------------------------------------------------------------------------
+
+
+def _dict_state(values):
+    """A state stand-in answering `.get` from *values* (absent keys → default)."""
+    state = MagicMock()
+    state.get = MagicMock(side_effect=lambda k, d=None: values.get(k, d))
+    return state
+
+
+class TestResolveReviewScopeLabelsItsBranch:
+    def test_the_tracked_files_branch_carries_each_entrys_task_id(self, capsys):
+        state = _dict_state({
+            "tracked_files": [
+                {"path": "a.py", "task_id": "T001"},
+                {"path": "b.py", "task_id": "implementation"},
+                {"path": "a.py", "task_id": "T009"},   # first entry wins
+                {"path": "c.py"},                      # no id → no attribution
+                {},
+            ],
+        })
+
+        scope = cro.resolve_review_scope(state, "abc123")
+
+        assert scope.source == "tracked_files"
+        assert sorted(scope.paths) == sorted(cro.resolve_changed_files(state, "abc123"))
+        assert sorted(scope.paths) == ["a.py", "b.py", "c.py"]
+        assert scope.task_ids == {"a.py": "T001", "b.py": "implementation"}
+
+    def test_the_git_diff_branch(self, capsys):
+        state = _state_without_tracked_files(pre_existing=["plans/"])
+        with patch.object(
+            cro, "get_files_changed_since_ref", return_value=["x.py", "plans/p.md", "y.py"]
+        ), patch.object(cro, "list_worktree_untracked_files", return_value=[]):
+            scope = cro.resolve_review_scope(state, "abc123")
+            paths = cro.resolve_changed_files(state, "abc123")
+
+        assert scope.source == "git_diff"
+        assert scope.paths == paths == ["x.py", "y.py"]
+        assert scope.task_ids == {}
+
+    def test_the_none_branch(self, capsys):
+        state = _state_without_tracked_files()
+        scope = cro.resolve_review_scope(state, "")
+        assert scope == cro.ReviewScope([], "none", {})
+        assert scope.paths == cro.resolve_changed_files(state, "")
+
+    def test_a_recorded_files_scope_wins_over_tracked_files(self, capsys):
+        """`--files` (decision 11.1) is checked first, whatever else state holds."""
+        state = _dict_state({
+            "review_scope_files": ["b.py", "a.py", "b.py"],
+            "tracked_files": [{"path": "src/other.py", "task_id": "T001"}],
+        })
+        with patch.object(cro, "get_files_changed_since_ref", side_effect=AssertionError(
+            "the diff must not be consulted when --files named the scope"
+        )):
+            scope = cro.resolve_review_scope(state, "abc123")
+
+        assert scope == cro.ReviewScope(["b.py", "a.py"], "files_flag", {})
+        assert "Using 2 files given with --files" in capsys.readouterr().out
+        assert cro.resolve_changed_files(state, "abc123") == ["b.py", "a.py"]
+
+    def test_an_empty_recorded_files_scope_falls_through(self, capsys):
+        state = _dict_state({
+            "review_scope_files": [],
+            "tracked_files": [{"path": "src/a.py", "task_id": "T001"}],
+        })
+        assert cro.resolve_review_scope(state, "abc123").source == "tracked_files"
+
+
+# ---------------------------------------------------------------------------
+# The git-diff fallback is loud and bounded (review-scope plan §2 D2.5, T2.5)
+# ---------------------------------------------------------------------------
+
+
+def _fallback_output(capsys, diffed, untracked, *, pre_existing=None, base_ref="abc123"):
+    """Resolve a fallback scope over *diffed*; return (scope, stdout)."""
+    values = {"tracked_files": [], "head_at_start": base_ref}
+    if pre_existing is not None:
+        values["pre_existing_changes"] = list(pre_existing)
+    capsys.readouterr()
+    with patch.object(cro, "get_files_changed_since_ref", return_value=list(diffed)), \
+         patch.object(cro, "list_worktree_untracked_files", return_value=untracked):
+        scope = cro.resolve_review_scope(_dict_state(values), base_ref)
+    return scope, capsys.readouterr().out
+
+
+class TestTheFallbackScopeIsLoud:
+    def test_scope_fallback_names_the_ref_the_count_the_groups_and_the_baseline(
+        self, capsys
+    ):
+        diffed = [
+            "src/a.py", "src/b.py", "tests/test_a.py",
+            "tests/fixtures/opencode/one.json", "tests/fixtures/opencode/two.json",
+        ]
+        scope, out = _fallback_output(capsys, diffed, [])
+
+        assert scope.source == "git_diff"
+        line = next(l for l in out.splitlines() if l.startswith("[SCOPE_FALLBACK] no implement"))
+        assert "`git diff --name-only abc123`" in line
+        assert "5 files (source 2, tests 1, fixtures 2, generated 0)" in line
+        assert "baseline: none recorded" in line
+        assert "[SCOPE_LARGE]" not in out
+
+    def test_a_recorded_baseline_is_named_with_what_it_subtracted(self, capsys):
+        _scope, out = _fallback_output(
+            capsys, ["src/a.py", "plans/p.md"], [], pre_existing=["plans/"]
+        )
+        assert (
+            "baseline: pre_existing_changes recorded (1 entries), 1 path(s) subtracted"
+            in out
+        )
+
+    def test_the_untracked_sample_is_capped_worktree_wide_and_leads_with_neighbours(
+        self, capsys
+    ):
+        diffed = ["pkg/mod.py", "README.md"]
+        # 24 unrelated untracked files that sort BEFORE the neighbour, plus the
+        # one untracked file that sits beside a diffed file.
+        untracked = [f"aaa/build/out_{i:02d}.o" for i in range(24)] + ["pkg/new_helper.py"]
+
+        scope, out = _fallback_output(capsys, diffed, untracked)
+
+        assert "[SCOPE_FALLBACK] untracked in worktree, not reviewed: 25" in out
+        assert "worktree-wide" in out
+        named = [l for l in out.splitlines() if l.startswith("  - ")]
+        assert len(named) == 10
+        assert named[0] == "  - pkg/new_helper.py (beside a diffed file)"
+        assert named[1:] == [f"  - aaa/build/out_{i:02d}.o" for i in range(9)]
+        assert "  … and 15 more" in out.splitlines()
+        # Decision 11.2: untracked files are counted, never added to the scope.
+        assert not set(untracked) & set(scope.paths)
+
+    def test_an_unknown_untracked_count_says_so(self, capsys):
+        _scope, out = _fallback_output(capsys, ["src/a.py"], None)
+        assert "untracked in worktree, not reviewed: unknown" in out
+
+    @pytest.mark.parametrize("reviewed, fires", [(200, False), (201, True)])
+    def test_scope_large_fires_above_200_source_and_test_files(
+        self, capsys, reviewed, fires
+    ):
+        source = [f"src/m_{i:03d}.py" for i in range(reviewed - 1)]
+        diffed = source + ["tests/test_m.py"] + [
+            f"tests/fixtures/f_{i:03d}.json" for i in range(300)
+        ]
+        _scope, out = _fallback_output(capsys, diffed, [])
+
+        large = [l for l in out.splitlines() if l.startswith("[SCOPE_LARGE]")]
+        assert bool(large) is fires
+        if fires:
+            text = large[0]
+            assert text.startswith("[SCOPE_LARGE] 201 source and test files")
+            assert "fixtures and generated files not counted" in text
+            assert "nothing is dropped" in text
+            # Both remedies, each with its condition.
+            assert "If the implementation is uncommitted, re-run with `--base-ref HEAD`" in text
+            assert "Otherwise" in text
+            assert "finalize-tracking" in text and "--only-touched --touched" in text
+            assert "`git diff HEAD` sees only uncommitted changes" in text
+
+    def test_the_tracked_files_branch_prints_no_fallback_marker(self, capsys):
+        state = _dict_state({"tracked_files": [{"path": "a.py", "task_id": "T1"}]})
+        cro.resolve_review_scope(state, "abc123")
+        assert "[SCOPE_FALLBACK]" not in capsys.readouterr().out
+
+    def test_the_reaggregate_prints_the_same_lines(self, tmp_path, capsys):
+        plan, phase_dir = _cro_phase(
+            tmp_path,
+            {cro.sanitize_model_name(_REAL_SPECS[0]): _issues(["Issue A"])},
+            models_requested=[_REAL_SPECS[0]],
+        )
+        capsys.readouterr()
+
+        _run_cro_reaggregate(
+            plan,
+            phase_dir,
+            extra_patches=[
+                patch.object(
+                    cro, "get_or_create_state",
+                    return_value=_state_without_tracked_files(),
+                ),
+                patch.object(
+                    cro, "get_files_changed_since_ref",
+                    return_value=["apps/web/a.tsx", "apps/web/b.tsx"],
+                ),
+                patch.object(
+                    cro, "list_worktree_untracked_files",
+                    return_value=["apps/web/c.tsx"],
+                ),
+            ],
+        )
+        out = capsys.readouterr().out
+
+        assert "[SCOPE_FALLBACK] no implement phase recorded the files under review" in out
+        assert "2 files (source 2, tests 0, fixtures 0, generated 0)" in out
+        assert "[SCOPE_FALLBACK] untracked in worktree, not reviewed: 1" in out
+        assert "  - apps/web/c.tsx (beside a diffed file)" in out
+
+
+class TestNoUntrackedPathEntersTheFallbackDiff:
+    """Real git: the fallback's paths are the diff, and an untracked file — even
+    one beside a changed file — is counted and named, never reviewed."""
+
+    def test_in_a_real_repository(self, tmp_path, monkeypatch, capsys):
+        import subprocess
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        for args in (
+            ["init", "--quiet"],
+            ["config", "user.email", "t@example.com"],
+            ["config", "user.name", "T"],
+            ["config", "commit.gpgsign", "false"],
+        ):
+            subprocess.run(["git", *args], cwd=repo, check=True, capture_output=True)
+        (repo / "src").mkdir()
+        (repo / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")
+        subprocess.run(["git", "add", "."], cwd=repo, check=True, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "--quiet", "-m", "init"], cwd=repo, check=True,
+            capture_output=True,
+        )
+        (repo / "src" / "a.py").write_text("a = 2\n", encoding="utf-8")
+        (repo / "src" / "new.py").write_text("n = 1\n", encoding="utf-8")
+        monkeypatch.chdir(repo)
+        capsys.readouterr()
+
+        scope = cro.resolve_review_scope(_state_without_tracked_files(), "HEAD")
+        out = capsys.readouterr().out
+
+        assert scope == cro.ReviewScope(["src/a.py"], "git_diff", {})
+        assert "untracked in worktree, not reviewed: 1" in out
+        assert "  - src/new.py (beside a diffed file)" in out
+
+
+# ---------------------------------------------------------------------------
+# `--reaggregate` after a `--files` fan-out (decision 11.1, T2.6)
+# ---------------------------------------------------------------------------
+
+
+class TestReaggregateResolvesTheFilesScopeTheFanOutRecorded:
+    def test_the_recorded_scope_wins_over_tracked_files(self, tmp_path, capsys):
+        plan, phase_dir = _cro_phase(
+            tmp_path,
+            {cro.sanitize_model_name(_REAL_SPECS[0]): _issues(["Issue A"])},
+            models_requested=[_REAL_SPECS[0]],
+        )
+        state = _dict_state({
+            "review_scope_files": ["lib/one.py", "lib/two.py"],
+            "tracked_files": [{"path": "src/a.py", "task_id": "implementation"}],
+            "head_at_start": "abc123",
+        })
+        capsys.readouterr()
+
+        _run_cro_reaggregate(
+            plan,
+            phase_dir,
+            render_report=True,
+            extra_patches=[
+                patch.object(cro, "get_or_create_state", return_value=state),
+                patch.object(cro, "get_files_changed_since_ref", side_effect=AssertionError(
+                    "a recorded --files scope must not fall back to the diff"
+                )),
+            ],
+        )
+        out = capsys.readouterr().out
+
+        assert "Using 2 files given with --files" in out
+        assert "Files to review: 2" in out
+        report = _rendered_report(plan)
+        assert "**Files Changed:** 2" in report
+        assert "- `lib/one.py`" in report
+        assert "- `lib/two.py`" in report
+
+
+# ---------------------------------------------------------------------------
+# The reaggregate reports the scope that was actually reviewed (review-scope
+# plan §2, D2.2/T2.2)
+# ---------------------------------------------------------------------------
+#
+# The reaggregate never enters the fan-out block, so it writes `review-scope.md`
+# and `diff/` only when the pair is missing, and then from the current tree;
+# otherwise it reads the header back. Each loaded result is checked against the
+# scope ledger (`.review-scope.json`). The harness's base ref (`abc123`)
+# resolves nowhere, so every set here is the degraded one — which is also what
+# makes a regenerated set's id reproducible from outside.
+
+_SCOPE_SPECS = ["claude-code:sonnet", "cursor-agent:auto", "gemini:flash"]
+_REGENERATED = "reaggregate (regenerated from the current tree)"
+
+
+def _scope_phase(tmp_path):
+    return _cro_phase(
+        tmp_path,
+        {
+            cro.sanitize_model_name(spec): _issues([f"Issue {index}"])
+            for index, spec in enumerate(_SCOPE_SPECS)
+        },
+        models_requested=_SCOPE_SPECS,
+    )
+
+
+def _report_data(phase_dir):
+    return json.loads((phase_dir / "report_data.json").read_text(encoding="utf-8"))
+
+
+def _write_ledger(phase_dir, entries):
+    (phase_dir / cro.REVIEW_SCOPE_LEDGER).write_text(json.dumps(entries), encoding="utf-8")
+
+
+class TestTheReaggregateReportsTheScopeThatWasReviewed:
+    def test_a_missing_pair_is_regenerated_and_the_report_says_so(
+        self, tmp_path, capsys
+    ):
+        plan, phase_dir = _scope_phase(tmp_path)
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+
+        out = capsys.readouterr().out
+        assert "[REVIEW_SCOPE_REGENERATED]" in out
+        manifest = (phase_dir / "review-scope.md").read_text(encoding="utf-8")
+        assert f"- Written by: {_REGENERATED}" in manifest
+        assert (phase_dir / "diff" / ".gitignore").is_file()
+        report = _cro_report_md(plan)
+        assert f"written by {_REGENERATED}" in report
+        assert "not a record of what the reviewers read" in report
+        data = _report_data(phase_dir)
+        assert data["reviewScope"]["writtenBy"] == _REGENERATED
+        assert data["reviewScope"]["regenerated"] is True
+        assert data["diffCoverage"]["coverage"] == "partial"
+
+    def test_a_whole_pair_is_read_back_and_left_untouched(self, tmp_path, capsys):
+        plan, phase_dir = _scope_phase(tmp_path)
+        written = cro.write_review_diff("abc123", ["src/a.py"], phase_dir)
+        manifest = phase_dir / "review-scope.md"
+        before = (manifest.read_bytes(), manifest.stat().st_mtime_ns)
+        capsys.readouterr()
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+
+        assert (manifest.read_bytes(), manifest.stat().st_mtime_ns) == before
+        assert "[REVIEW_SCOPE_REGENERATED]" not in capsys.readouterr().out
+        data = _report_data(phase_dir)
+        assert data["reviewScope"]["scopeId"] == written.scope_id
+        assert data["reviewScope"]["writtenBy"] == "fan-out"
+        assert data["reviewScope"]["regenerated"] is False
+        assert data["diffCoverage"]["coverage"] == written.coverage
+        assert data["diffCoverage"]["omitted"] == [
+            {"path": "src/a.py", "reason": "git diff failed"}
+        ]
+
+    def test_each_result_is_named_by_what_the_ledger_records(self, tmp_path, capsys):
+        plan, phase_dir = _scope_phase(tmp_path)
+        written = cro.write_review_diff("abc123", ["src/a.py"], phase_dir)
+        stems = [cro.sanitize_model_name(spec) for spec in _SCOPE_SPECS]
+        _write_ledger(phase_dir, {stems[0]: written.scope_id, stems[1]: "0123456789ab"})
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+
+        out = capsys.readouterr().out
+        # Their findings stay: three models, three issues.
+        assert "Re-aggregating 3 issues from 3 models" in out
+        report = _cro_report_md(plan)
+        assert "`cursor-agent:auto` reviewed another scope (0123456789ab)" in report
+        assert "`gemini:flash` scope unknown" in report
+        assert "`claude-code:sonnet` reviewed" not in report
+        assert _report_data(phase_dir)["reviewScope"]["results"] == {
+            "cursor-agent:auto": "reviewed another scope (0123456789ab)",
+            "gemini:flash": "scope unknown",
+        }
+
+    def test_a_regenerated_set_every_ledger_entry_matches_is_the_one_reviewed(
+        self, tmp_path
+    ):
+        plan, phase_dir = _scope_phase(tmp_path)
+        # The id is content-derived, so the same inputs elsewhere give the id a
+        # regeneration of this phase dir will compute.
+        expected = cro.write_review_diff("abc123", ["src/a.py"], tmp_path / "scratch")
+        _write_ledger(phase_dir, {
+            cro.sanitize_model_name(spec): expected.scope_id for spec in _SCOPE_SPECS
+        })
+
+        _run_cro_reaggregate(plan, phase_dir, render_report=True)
+
+        report = _cro_report_md(plan)
+        assert "every result's recorded scope matches it" in report
+        data = _report_data(phase_dir)
+        assert data["reviewScope"]["scopeId"] == expected.scope_id
+        assert data["reviewScope"]["resultsMatch"] is True
+        assert data["reviewScope"]["results"] == {}
+
+    def test_the_ledger_is_never_loaded_as_a_model_result(self, tmp_path, capsys):
+        plan, phase_dir = _scope_phase(tmp_path)
+        _write_ledger(phase_dir, {
+            cro.sanitize_model_name(spec): "0123456789ab" for spec in _SCOPE_SPECS
+        })
+
+        report = _run_cro_reaggregate(plan, phase_dir)
+
+        assert sorted(_reported_results(report)) == sorted(_SCOPE_SPECS)
+        assert "Re-aggregating 3 issues from 3 models" in capsys.readouterr().out

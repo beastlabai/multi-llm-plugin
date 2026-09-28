@@ -116,9 +116,23 @@ KILOCODE = KiloCodeProvider()
 
 
 def _capture_rows(provider):
-    """Every committed capture row for ``provider``, by name."""
+    """Every committed capture row for ``provider``, by name.
+
+    A row its manifest marks ``synthesized: true`` is not a capture — pi's
+    ``killed-mid-*`` streams are hand-built from a deadline kill the stub rig
+    cannot produce (plan: review-run-scope-salvage-and-failure-visibility §4) —
+    so the tier tables, which grade what the CLI itself wrote, leave it out.
+    """
     directory = FIXTURES / provider
-    return sorted({path.name.split(".")[0] for path in directory.glob("*.txt")})
+    synthesized = set()
+    if (directory / "manifest.yaml").is_file():
+        synthesized = {
+            name for name, row in (_manifest(provider).get("rows") or {}).items()
+            if isinstance(row, dict) and row.get("synthesized")
+        }
+    return sorted(
+        {path.name.split(".")[0] for path in directory.glob("*.txt")} - synthesized
+    )
 
 
 def _streams(provider, row):
@@ -261,6 +275,10 @@ PI_CLASSIFY = {
     "preflight-no-key": "auth_failed",
     "length": None,
     "length-recovery": None,
+    # Synthetic (`synthesized: true`): a reviewer killed at its deadline, whose
+    # last finished assistant message is a `toolUse` — structurally a timeout.
+    "killed-mid-toolcall": "timeout",
+    "killed-mid-text": "timeout",
 }
 
 #: The 0.80.6 text-mode cells, verbatim from before the move (T7.6's floor):

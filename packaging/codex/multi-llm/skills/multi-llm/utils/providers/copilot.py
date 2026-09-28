@@ -99,7 +99,7 @@ import shutil
 import sys
 import tempfile
 import threading
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple
 
 from ..json_extractor import extract_json_from_text
 from .base import (
@@ -228,6 +228,107 @@ _STRIPPED_VENDOR_VARS: Tuple[str, ...] = (
 #: (``{"type":"user.message",`` and ``{"type": "user.message",``) match. Used by
 #: :meth:`CopilotProvider.vendor_text` only, and only to REMOVE a line.
 _CUT_USER_MESSAGE = re.compile(r'^\{\s*"type"\s*:\s*"user\.message"\s*[,}]')
+
+
+class _CopilotRecords(NamedTuple):
+    """What one pass over copilot's JSONL collected (:func:`_scan_copilot_records`)."""
+
+    #: Whether any line parsed as a JSON object (``parse_output``'s test).
+    saw_record: bool
+    #: Whether any line was a copilot record: a string ``type`` beside a
+    #: ``data`` object, or the ``result`` record. A bare answer object on a line
+    #: of its own (the ``-s`` shape in ``success-silent.txt``) is neither.
+    saw_envelope: bool
+    #: Every ``assistant.message`` record's ``data.content``, in order.
+    assistant_contents: List[str]
+    #: The last ``session.error`` record's ``data``, if any.
+    session_error: Optional[Dict[str, Any]]
+    #: The last assistant message's text (see :func:`_scan_copilot_records`),
+    #: or ``None`` when the stream holds no assistant message at all.
+    last_message: Optional[str]
+
+
+def _is_copilot_record(record: Dict[str, Any]) -> bool:
+    """A record of copilot's own envelope, as opposed to a bare JSON answer."""
+    kind = record.get("type")
+    if not isinstance(kind, str):
+        return False
+    return isinstance(record.get("data"), dict) or kind == "result"
+
+
+def _scan_copilot_records(text: str) -> _CopilotRecords:
+    """Walk the JSONL once, keyed on record ``type`` (plan: review-run-scope-
+    salvage-and-failure-visibility §4, D4.4 — shared by ``parse_output`` and
+    ``salvage_text``).
+
+    ``assistant_contents`` and ``session_error`` are ``parse_output``'s inputs,
+    collected exactly as before. ``last_message`` is salvage's: the text of the
+    most recent assistant message, which is the last ``assistant.message``'s
+    ``data.content`` — unless a streamed message (``--stream on``:
+    ``assistant.message_start`` / ``assistant.message_delta``, keyed by
+    ``data.messageId``) came after it and never closed. A stream killed while
+    the answer was printing is that case, and the answer is its
+    ``deltaContent``s joined in order. The shipped argv is ``--stream off``, so
+    this branch only matters to a stream mode nobody ships yet; it costs a dict.
+    """
+    assistant_contents: List[str] = []
+    session_error: Optional[Dict[str, Any]] = None
+    saw_record = False
+    saw_envelope = False
+    open_deltas: Dict[str, List[str]] = {}
+    closed: Set[str] = set()
+    latest: Optional[Tuple[str, str]] = None
+
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            # A partial trailing line is what a truncated stream looks like;
+            # it is not on its own a reason to fail a run that already
+            # produced an answer.
+            continue
+        if not isinstance(record, dict):
+            continue
+        saw_record = True
+        if _is_copilot_record(record):
+            saw_envelope = True
+        kind = record.get("type")
+        data = record.get("data")
+        if kind == "session.error" and isinstance(data, dict):
+            session_error = data
+        elif kind == "assistant.message" and isinstance(data, dict):
+            content = data.get("content")
+            if isinstance(content, str):
+                assistant_contents.append(content)
+                latest = ("done", content)
+                message_id = data.get("messageId")
+                if isinstance(message_id, str):
+                    closed.add(message_id)
+                    open_deltas.pop(message_id, None)
+        elif kind in ("assistant.message_start", "assistant.message_delta") \
+                and isinstance(data, dict):
+            # Only a string id can be matched to its closing record (and only
+            # a hashable one can key the dict — this walk also serves
+            # `parse_output`, which must not start raising on a garbage id).
+            message_id = data.get("messageId")
+            if not isinstance(message_id, str) or message_id in closed:
+                continue
+            chunks = open_deltas.setdefault(message_id, [])
+            delta = data.get("deltaContent")
+            if kind == "assistant.message_delta" and isinstance(delta, str):
+                chunks.append(delta)
+            latest = ("open", message_id)
+
+    last_message: Optional[str] = None
+    if latest is not None:
+        state, value = latest
+        last_message = value if state == "done" else "".join(open_deltas.get(value, []))
+    return _CopilotRecords(
+        saw_record, saw_envelope, assistant_contents, session_error, last_message
+    )
 
 
 def token_limits_for(model: str) -> Tuple[int, int]:
@@ -655,6 +756,9 @@ class CopilotProvider(LLMProvider):
         **Step 2** runs :func:`extract_json_from_text` over that text with
         ``prefer_arrays=True``, which lifts the model's document out of the
         fenced block the captured answer really uses.
+
+        Step 1's walk is :func:`_scan_copilot_records`, shared with
+        :meth:`salvage_text`.
         """
         text = (stdout or "").strip()
         if not text:
@@ -665,32 +769,10 @@ class CopilotProvider(LLMProvider):
                 "data": None,
             }
 
-        assistant_contents: List[str] = []
-        session_error: Optional[Dict[str, Any]] = None
-        saw_record = False
-
-        for line in text.splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except ValueError:
-                # A partial trailing line is what a truncated stream looks like;
-                # it is not on its own a reason to fail a run that already
-                # produced an answer.
-                continue
-            if not isinstance(record, dict):
-                continue
-            saw_record = True
-            kind = record.get("type")
-            data = record.get("data")
-            if kind == "session.error" and isinstance(data, dict):
-                session_error = data
-            elif kind == "assistant.message" and isinstance(data, dict):
-                content = data.get("content")
-                if isinstance(content, str):
-                    assistant_contents.append(content)
+        scan = _scan_copilot_records(text)
+        assistant_contents = scan.assistant_contents
+        session_error = scan.session_error
+        saw_record = scan.saw_record
 
         if not saw_record:
             return {
@@ -741,6 +823,42 @@ class CopilotProvider(LLMProvider):
             }
 
         return extract_json_from_text(answer, prefer_arrays=True)
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The last assistant message's text, for the salvage gate (D4.1/D4.4).
+
+        copilot's stdout is an envelope of typed records, and one of them is
+        our own prompt: the non-ephemeral ``user.message`` echo, 30 412 bytes of
+        plan text in ``success.jsonl``. Judged whole by
+        ``has_salvageable_json``, that echo and the arrays in copilot's own
+        bookkeeping records (``session.mcp_servers_loaded``,
+        ``session.skills_loaded``, ``result``) passed the gate on 11 of the 12
+        committed ``.jsonl`` captures, the 401 and the 429 among them, so a
+        credential failure was sent to a JSON repair.
+
+        The answer is the text :meth:`parse_output` reads: the **last**
+        ``assistant.message``'s ``data.content`` (last-wins, as the
+        ``multi-assistant`` row pins), or an unfinished streamed message's
+        deltas when one came after it (:func:`_scan_copilot_records`). A
+        ``session.error`` does not change the reading: the label is what the
+        stream holds, not how the run ended.
+
+        * ``None`` when no line is a copilot record — an empty stdout, or the
+          ``-s`` bare-text shape, which is an answer and not a stream;
+        * ``""`` when the stream holds no assistant message, or an empty one
+          (the exit-0 failure) — a verdict, final;
+        * otherwise that message's text.
+
+        Never raises: a failed walk is ``""``, the reading the caller would give
+        a raise anyway.
+        """
+        try:
+            scan = _scan_copilot_records(stdout or "")
+            if not scan.saw_envelope:
+                return None
+            return scan.last_message or ""
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""
 
     @staticmethod
     def _empty_stdout_reason(stderr: str) -> str:

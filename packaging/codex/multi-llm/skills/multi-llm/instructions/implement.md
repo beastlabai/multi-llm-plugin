@@ -460,7 +460,7 @@ your host.
        --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
        --total-batches {total_tasks} --batch-index {N}
      ```
-     Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based task index across all batches. Omit any flag it does not report. The script prints an `[ETA]` line to stderr after each call.
+     Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based task index across all batches. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
 
    **The last subagent returning is not the end of the phase.** Steps 6 through 11
    still owe work — the finalization that computes which files this phase

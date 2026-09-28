@@ -298,7 +298,14 @@ class FullWorkflow:
             if inspect.iscoroutinefunction(target):
                 import asyncio
 
-                result = asyncio.run(target(argv))
+                from utils import process_control
+
+                # As the dispatcher's `_call_target` does: a Ctrl-C stops the
+                # phase's CLIs inside the cancellation, before `asyncio.run`
+                # joins the worker threads that are waiting on them.
+                result = asyncio.run(
+                    process_control.sweeping_live_clis_on_interrupt(target(argv))
+                )
             else:
                 result = target(argv)
         except SystemExit as exc:

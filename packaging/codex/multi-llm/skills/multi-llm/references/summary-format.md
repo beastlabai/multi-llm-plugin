@@ -27,7 +27,7 @@ After any mode completes, report:
 - [Recommended actions, if any]
 ```
 
-Every mode ends with this report. Two rules:
+Every mode ends with this report. Three rules:
 
 - **Paths come from the run, never from memory.** Take them from the orchestrator's
   own output — the `[OUTPUT_FILE]` lines, the paths a phase printed, and
@@ -35,3 +35,12 @@ Every mode ends with this report. Two rules:
 - **Report the one follow-up the run owes, verbatim.** `MULTI_LLM_RESULT.next` is
   the command to run next when it is not `null`; copy it exactly, and report nothing
   as a next step that the run did not name.
+- **Name every model that produced nothing, with its reason.** A review
+  phase's `report.md` lists them on its `**Models failed:** N of M requested — …`
+  line, directly under `**Models:**`, on the fan-out and after `--reaggregate`
+  alike; a `--reaggregate` also prints one `[MODEL_FAILED] <model>: <reason>`
+  line per requested model that still has no result. When
+  `MULTI_LLM_RESULT.state` is `"partial"`, the same models and reasons are the
+  `failed` rows of `progress.models` (a `status` poll carries them). List each
+  one under Results with its reason; never report the run as if only the models
+  that answered had been requested.

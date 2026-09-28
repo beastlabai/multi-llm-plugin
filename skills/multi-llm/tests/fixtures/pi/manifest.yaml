@@ -3,8 +3,10 @@
 # docstring is the spec).
 #
 # Every byte under this directory's top level is raw pi 0.87.1 stdout/stderr as
-# the CLI wrote it inside the container. No row is synthesized and nothing was
-# scrubbed: the run never left 127.0.0.1, so there is no credential, no host
+# the CLI wrote it inside the container, EXCEPT the two `killed-mid-*` rows at the
+# end, which are synthetic (`synthesized: true`, provenance on the row): a
+# reviewer killed at its deadline cannot be captured by the stub rig. Nothing
+# was scrubbed: the run never left 127.0.0.1, so there is no credential, no host
 # path and no OpenRouter generation id to scrub (`responseId` is the stub's
 # `chatcmpl-stub`). Every stderr file but one is ZERO BYTES and is committed
 # anyway, because "pi wrote nothing on stderr" is half of this set's finding.
@@ -84,6 +86,7 @@ rows:
         - {id: "S002", title: "Strip the vendor token", severity: "medium"}
       raw_contains: ['"type":"session","version":3', '"stopReason":"stop"']
       classify_failure: null
+      salvage: answer
 
   truncated:
     stdout: truncated.stdout.txt
@@ -101,6 +104,7 @@ rows:
       error_contains: ["Stream ended without finish_reason"]
       raw_contains: ['"type":"auto_retry_end","success":false']
       classify_failure: null
+      salvage: none
 
   ephemeral-only:
     not_applicable: >-
@@ -129,6 +133,7 @@ rows:
         - {id: "S002", title: "Strip the vendor token", severity: "medium"}
       raw_contains: ['"stopReason":"toolUse"', '"type":"tool_execution_end"']
       classify_failure: null
+      salvage: answer
 
   error-envelope:
     stdout: error-envelope.stdout.txt
@@ -144,6 +149,7 @@ rows:
       success: false
       error_contains: ["Stream ended without finish_reason"]
       classify_failure: null
+      salvage: none
 
   exit-zero-failure:
     stdout: exit-zero-failure.stdout.txt
@@ -162,6 +168,7 @@ rows:
       success: false
       error_contains: ["Server error: 500: The server had an error while processing your request"]
       classify_failure: "server_error"
+      salvage: none
 
   stdout-error:
     not_applicable: >-
@@ -191,6 +198,7 @@ rows:
       success: false
       error_contains: ["Empty output"]
       classify_failure: null
+      salvage: none
 
   auth-error:
     stdout: auth-error.stdout.txt
@@ -207,6 +215,7 @@ rows:
       error_contains: ["401: Incorrect API key provided", "(invalid_api_key)"]
       raw_contains: ['401: {\"message\":\"Incorrect API key provided']
       classify_failure: "auth_failed"
+      salvage: none
 
   rate-limit:
     stdout: rate-limit.stdout.txt
@@ -223,6 +232,7 @@ rows:
       error_contains: ["429: Rate limit reached for stub-model", "(rate_limit_exceeded)"]
       raw_contains: ['"type":"auto_retry_start","attempt":3,"maxAttempts":3']
       classify_failure: "rate_limited"
+      salvage: none
 
   invalid-model:
     stdout: invalid-model.stdout.txt
@@ -238,6 +248,7 @@ rows:
       success: false
       error_contains: ["404: The model `stub-model` does not exist", "(model_not_found)"]
       classify_failure: "invalid_model"
+      salvage: none
 
   context-overflow:
     stdout: context-overflow.stdout.txt
@@ -259,6 +270,7 @@ rows:
       error_contains: ["400: This model's maximum context length is 8192 tokens"]
       raw_contains: ['context_length_exceeded']
       classify_failure: "context_length_exceeded"
+      salvage: none
 
   # ----- beyond §6.2's twelve, graded the same way -------------------------- #
 
@@ -276,6 +288,7 @@ rows:
       success: false
       error_contains: ["Connection error."]
       classify_failure: "connection_error"
+      salvage: none
 
   server-error:
     stdout: server-error.stdout.txt
@@ -292,6 +305,7 @@ rows:
       success: false
       error_contains: ["Server error: 500: The server had an error while processing your request"]
       classify_failure: "server_error"
+      salvage: none
 
   preflight-no-key:
     stdout: preflight-no-key.stdout.txt
@@ -313,6 +327,7 @@ rows:
         - "run ended before any assistant message (last event: session, 1 events)"
         - "stderr: No API key found for stub."
       classify_failure: "auth_failed"
+      salvage: none
 
   length:
     stdout: length.stdout.txt
@@ -330,6 +345,7 @@ rows:
       error_contains: ["Truncated output (stopReason length: the model hit its output limit after 44 characters)"]
       raw_contains: ['"stopReason":"length"']
       classify_failure: null
+      salvage: partial
 
   length-recovery:
     stdout: length-recovery.stdout.txt
@@ -349,6 +365,7 @@ rows:
       success: false
       error_contains: ["Truncated output (stopReason length"]
       classify_failure: null
+      salvage: partial
 
   markers-in-tool-result:
     stdout: markers-in-tool-result.stdout.txt
@@ -370,6 +387,7 @@ rows:
         - "401 Unauthorized: Incorrect API key provided"
         - "Rate limit reached for requests per min"
       classify_failure: null
+      salvage: answer
 
   context-overflow-compacted:
     stdout: context-overflow-compacted.stdout.txt
@@ -395,3 +413,66 @@ rows:
         - {id: "S002", title: "Strip the vendor token", severity: "medium"}
       raw_contains: ['"type":"compaction_end","reason":"overflow"']
       classify_failure: null
+      salvage: answer
+
+  # ----- synthetic: a reviewer killed at its deadline ----------------------- #
+
+  killed-mid-toolcall:
+    stdout: killed-mid-toolcall.stdout.txt
+    stderr: killed-mid-toolcall.stderr.txt
+    exit_code: -9
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-09-28 for plans/review-run-scope-salvage-and-failure-visibility.md
+      §4 (T4.1). Lines 1-7 (the `session` header, pi's system message and our
+      prompt's echo) are `multi-assistant.stdout.txt`'s own bytes; every
+      assistant turn after them is hand-built from the event shapes of the
+      2026-09-25 code-review incident's pi stream (openrouter
+      deepseek-v4.1-flash, killed at the slot deadline): per turn a `thinking`
+      part streamed as `thinking_start`/`_delta`/`_end`, a narration `text`
+      part, and one `toolCall` streamed as `toolcall_*`, ending `toolUse`. Three
+      such turns complete (`tool_execution_end`, `toolResult` messages,
+      `turn_end`), and their narration quotes an example array (`[2, 4, 8]`).
+      The FOURTH is the incident: a `thinking` part and a `bash` `toolCall`, no
+      text, `tool_execution_start` and an empty-`partialResult`
+      `tool_execution_update`, then nothing — no `tool_execution_end`,
+      `turn_end` or `agent_end`, because the process was killed. `exit_code:
+      -9` is the SIGKILL returncode. The incident itself cannot be captured by
+      the stub rig: its deadline kill is the harness's, not pi's.
+    notes: >-
+      The stream the old salvage gate passed: every assistant `message_end`
+      carries a `content` array, so `has_salvageable_json` over the raw stream
+      accepted `thinking`/`toolCall` parts as findings, and joining every
+      message's text would make the narration (and its example array) the
+      salvage text. `salvage_text` reads only the LAST assistant message, which
+      has no text part, so the reduction is `""` — nothing to salvage.
+    expect:
+      success: false
+      error_contains: ["Deadline exceeded: run ended inside a tool call: bash"]
+      classify_failure: "timeout"
+      salvage: none
+
+  killed-mid-text:
+    stdout: killed-mid-text.stdout.txt
+    stderr: killed-mid-text.stderr.txt
+    exit_code: -9
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built 2026-09-28 with `killed-mid-toolcall` (same lines 1-7 from
+      `multi-assistant.stdout.txt`, the same three completed narration +
+      tool-call turns). The fourth assistant message streams a `thinking` part
+      and then its findings array as `text_delta`s, and the process is killed
+      mid-array: no `text_end`, no `message_end`, no `turn_end`. `exit_code:
+      -9` is the SIGKILL returncode.
+    notes: >-
+      The case salvage exists for: a reviewer killed while printing its answer.
+      The unfinished message's `text_delta`s, joined in order, are the reduced
+      text — a truncated array that opens `[\n  {` and holds one whole finding —
+      and none of the earlier turns' narration is in it. `parse_output` still
+      reads the last FINISHED message (a `toolUse`), so the error names a tool
+      call; the parser's verdict is not this row's point.
+    expect:
+      success: false
+      error_contains: ["Deadline exceeded: run ended inside a tool call: bash"]
+      classify_failure: "timeout"
+      salvage: partial

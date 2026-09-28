@@ -5,14 +5,16 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from . import structured_output
+from . import process_control
 from . import readonly_audit as _readonly_audit_mod
 from .metrics import describe_usage as _describe_usage
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
@@ -527,6 +529,131 @@ def _attach_stdout_excerpt(details: Dict[str, Any], stdout: Optional[str]) -> No
         details["stdout_excerpt"] = excerpt
 
 
+#: The key :func:`_attach_salvage_text` writes. Its *presence* is a verdict:
+#: ``""`` means "the adapter read its stream and found no answer text", and an
+#: absent key means "no reducer applies" (``salvage_source`` then falls back to
+#: ``stdout_excerpt`` and stderr).
+SALVAGE_TEXT_KEY = "salvage_text"
+
+#: A salvage request's record of *how* the run it came from was lost, and the
+#: one value it takes today. Only a run cut by a deadline carries it: a salvaged
+#: ``[]`` from such a run is refused (``subagent_executor._salvage_gave_up``),
+#: because a reviewer killed mid-review never said "I found nothing", while a
+#: ``[]`` from a run that finished and then exited non-zero is still a genuine
+#: empty review (plan: review-run-scope-salvage-and-failure-visibility D4.5,
+#: decision 11.10). Here because every lane that writes or reads a request
+#: already imports this module, and ``ERROR_TIMEOUT`` is what decides it.
+SALVAGE_FAILURE_KEY = "failure"
+SALVAGE_FAILURE_TIMEOUT = "timeout"
+
+
+def _answer_window_start(text: str) -> Optional[int]:
+    """Where the answer's JSON document opens, by a string-aware bracket walk.
+
+    The depth-0 ``[`` or ``{`` that is **never closed** (the answer was cut
+    mid-document) when there is one; otherwise the first depth-0 ``[``/``{``;
+    ``None`` when the text has no bracket at all. Quotes toggle string state
+    only inside a container, so an apostrophe or a quoted word in the prose
+    ahead of the array cannot hide its bracket. Nesting is tracked with a stack
+    of openers (the same string-aware walk as ``_unclosed_container`` in
+    ``utils/providers/pi_family_stream.py``, over the whole text rather than
+    from its first character).
+    """
+    first: Optional[int] = None
+    open_at: Optional[int] = None
+    stack: List[str] = []
+    in_string = False
+    escape_next = False
+    pairs = {"]": "[", "}": "{"}
+    for index, char in enumerate(text):
+        if stack:
+            if escape_next:
+                escape_next = False
+                continue
+            if in_string:
+                if char == "\\":
+                    escape_next = True
+                elif char == '"':
+                    in_string = False
+                continue
+            if char == '"':
+                in_string = True
+            elif char in "[{":
+                stack.append(char)
+            elif char in pairs and stack[-1] == pairs[char]:
+                stack.pop()
+                if not stack:
+                    open_at = None
+        elif char in "[{":
+            stack.append(char)
+            open_at = index
+            if first is None:
+                first = index
+    if stack and open_at is not None:
+        return open_at
+    return first
+
+
+def _bound_salvage_text(text: str) -> str:
+    """Salvage text capped at ``MAX_LOG_STREAM_BYTES``, **never cut before the answer**.
+
+    ``_bound_stream``'s last-20-lines rule is the wrong bound here: it would cut
+    the opening bracket off a pretty-printed array, which is the one part a
+    repair pass cannot reconstruct. So text within the cap is kept whole — the
+    usual case, since an adapter's reducer returns only the last message's text
+    — and longer text is windowed forward from the answer's opening bracket
+    (:func:`_answer_window_start`), then cut at the end with a marker charged
+    against the cap. Text with no bracket keeps its head.
+    """
+    if len(text.encode("utf-8", errors="replace")) <= MAX_LOG_STREAM_BYTES:
+        return text
+    start = _answer_window_start(text)
+    window = text[start:] if start is not None else text
+    return _cut_bytes(
+        window,
+        MAX_LOG_STREAM_BYTES,
+        f"\n... [salvage text truncated at {MAX_LOG_STREAM_BYTES} B]",
+    )
+
+
+def _attach_salvage_text(details: Dict[str, Any], provider: Any, stdout: Optional[str]) -> None:
+    """Put the adapter's answer text on ``details['salvage_text']``, redacted then bounded.
+
+    The salvage gate used to judge ``stdout_excerpt`` — the raw stream's last
+    20 lines — and on a transport-stream adapter (pi, omp) those lines are
+    event data whose ``content`` arrays pass ``has_salvageable_json``: a
+    reviewer killed mid-tool-call was sent to salvage over its own
+    ``thinking``/``toolCall`` parts (plan:
+    review-run-scope-salvage-and-failure-visibility §4). The adapter's
+    :meth:`~utils.providers.base.LLMProvider.salvage_text` hook reads the
+    **full** stdout, before any bounding, and says which words are the answer.
+
+    Called beside :func:`_attach_stdout_excerpt` at the same three losing
+    sites, and — like it — one helper so the redact-then-bound order cannot
+    drift between them. What it records:
+
+    * the hook returned a string → that string, redacted, then bounded by
+      :func:`_bound_salvage_text`, **even when it is ``""``**: "present and
+      empty" is the adapter's verdict that there is nothing to salvage;
+    * the hook raised → ``""``: by overriding, the adapter declared its stdout
+      a transport, so falling back to the raw stream would restore the bug;
+    * the hook returned ``None`` (the base default, "no opinion") or anything
+      that is not a string → the key stays **absent**, and the gate keeps its
+      old input.
+    """
+    hook = getattr(provider, "salvage_text", None)
+    if not callable(hook):
+        return
+    try:
+        text = hook(stdout or "")
+    except Exception:  # noqa: BLE001 - a reducer may never break a run
+        details[SALVAGE_TEXT_KEY] = ""
+        return
+    if not isinstance(text, str):
+        return
+    details[SALVAGE_TEXT_KEY] = _bound_salvage_text(_redact(text)).strip()
+
+
 _READONLY_AUDIT_KEY = _readonly_audit_mod.DETAILS_KEY
 
 
@@ -804,6 +931,174 @@ def _served_model_attribution(
         return None
 
 
+# ---------------------------------------------------------------------------
+# The Lane A spawn: `subprocess.run`'s contract, plus the tree sweep (plan:
+# review-run-scope-salvage-and-failure-visibility D3.3)
+# ---------------------------------------------------------------------------
+
+#: SIGTERM → SIGKILL grace for a stopped Lane A CLI and for each process group
+#: its snapshot recorded. SIGTERM first because pi reaps its own detached shells
+#: only from its SIGTERM handler; the bare SIGKILL `subprocess.run` sent skipped
+#: it.
+LANE_A_TERMINATE_GRACE_S = process_control.DEFAULT_TERMINATE_GRACE_S
+
+#: Ceiling on the post-sweep drain. A second ``communicate()`` collects whatever
+#: the CLI wrote before it died, but a grandchild the sweep did not reach would
+#: keep the inherited pipe open for ever — the reason
+#: ``write_batch_scheduler._run_verify_command`` captures to a file — so a
+#: drain that outlives this falls back to the output already read.
+LANE_A_DRAIN_S = 5.0
+
+#: A CLI that died of one of these was stopped from outside the slot — a
+#: terminal Ctrl-C reaches the whole foreground group, an abort SIGTERMs the
+#: worker's — and its detached children were not told. Named so a fan-out slot
+#: running on a worker thread, where no ``KeyboardInterrupt`` is ever raised,
+#: still sweeps what its CLI left behind.
+_STOP_SIGNALS = frozenset(
+    int(sig) for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None))
+    if sig is not None
+)
+
+#: The same stops as a CLI that *handled* the signal reports them: ``128 + N``,
+#: the shell's convention. pi installs its own SIGTERM handler, reaps its shell
+#: and exits 143 — never dying of the signal — while a ``timeout`` inside that
+#: shell leads a group of its own and survives it.
+_STOP_EXIT_CODES = frozenset(128 + sig for sig in _STOP_SIGNALS)
+
+
+def _stopped_from_outside(returncode: Optional[int]) -> bool:
+    """Whether a CLI that returned on its own was stopped by a signal from outside.
+
+    Either it died of one of :data:`_STOP_SIGNALS` (``-N``) or its own handler
+    exited with ``128 + N`` for it (:data:`_STOP_EXIT_CODES`).
+    """
+    if returncode is None:
+        return False
+    return -returncode in _STOP_SIGNALS or returncode in _STOP_EXIT_CODES
+
+
+def _stop_cli_tree(proc: "subprocess.Popen[Any]") -> Optional[process_control.TreeSweep]:
+    """Snapshot *proc*'s descendants, then stop it and every snapshotted group.
+
+    The snapshot merges a fresh walk (taken now, while *proc* is un-reaped, so
+    its parent links still lead to its children) with the registry's last
+    refreshed one (which still holds them when *proc* itself died first). Never
+    raises: teardown must not mask the timeout or the interrupt that asked for
+    it, so a failed sweep falls back to a plain kill of the CLI.
+    """
+    try:
+        snapshot = process_control.live_cli_registry.snapshot_for(proc)
+        return process_control.terminate_timed_out(
+            proc, snapshot, LANE_A_TERMINATE_GRACE_S
+        )
+    except Exception:  # noqa: BLE001 - see above
+        try:
+            proc.kill()
+        except OSError:
+            pass
+        return None
+
+
+def _drain_after_stop(
+    proc: "subprocess.Popen[Any]", expired: subprocess.TimeoutExpired
+) -> Tuple[Any, Any]:
+    """Everything the stopped CLI wrote, without ever hanging on a survivor.
+
+    The second ``communicate()`` returns the whole capture (what the first call
+    had read before the deadline included). If even that blocks, the newest
+    partial capture is used and the pipes are let go.
+    """
+    try:
+        return proc.communicate(timeout=LANE_A_DRAIN_S)
+    except subprocess.TimeoutExpired as drained:
+        return drained.stdout, drained.stderr
+    except (OSError, ValueError):
+        return expired.stdout, expired.stderr
+
+
+def _release_pipes(proc: "subprocess.Popen[Any]") -> None:
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        try:
+            if stream is not None:
+                stream.close()
+        except (OSError, ValueError):  # pragma: no cover - best effort
+            pass
+
+
+def _run_provider_cli(
+    cmd: List[str],
+    *,
+    input: Optional[str] = None,
+    timeout: Optional[float] = None,
+    capture_output: bool = False,
+    **popen_kwargs: Any,
+) -> subprocess.CompletedProcess:
+    """Run one Lane A provider CLI: ``subprocess.run``'s contract, and its tree.
+
+    Same arguments, same ``CompletedProcess``, and the same ``TimeoutExpired``
+    carrying the output so far — the ``TimeoutExpired`` handler in
+    :func:`invoke_with_provider` and §4's salvage read that partial stdout. What
+    changes is what a stop does. ``subprocess.run`` SIGKILLs the direct child
+    only, which skips pi's own cleanup and leaves every child in a session of its
+    own running (pi's detached shells, and a ``timeout`` inside one, which leads
+    a group of its own). Here, on the deadline:
+
+    1. the CLI's descendants are snapshotted while it is still alive;
+    2. the CLI is SIGTERMed, given :data:`LANE_A_TERMINATE_GRACE_S`, then
+       SIGKILLed; every snapshotted process group is swept through
+       ``process_control.terminate_timed_out``;
+    3. a bounded second ``communicate()`` collects the rest of the output; and
+    4. a ``TimeoutExpired`` is re-raised with it and with the per-group verdicts
+       as ``tree_sweep``, which the handler writes into the provider log.
+
+    A ``KeyboardInterrupt`` (or anything else) raised while waiting does the same
+    sweep and is re-raised, so the interrupt still ends the run (decision 11.9).
+    The CLI is registered in ``process_control.live_cli_registry`` for exactly as
+    long as it is waited on, so an aborted detached worker can sweep it too. The
+    CLI is **not** moved into a session of its own: a terminal Ctrl-C must still
+    reach it.
+    """
+    if capture_output:
+        popen_kwargs["stdout"] = subprocess.PIPE
+        popen_kwargs["stderr"] = subprocess.PIPE
+    if input is not None:
+        popen_kwargs["stdin"] = subprocess.PIPE
+    proc = subprocess.Popen(cmd, **popen_kwargs)
+    try:
+        with process_control.live_cli_registry.tracking(proc):
+            try:
+                stdout, stderr = proc.communicate(input=input, timeout=timeout)
+            except subprocess.TimeoutExpired as exc:
+                sweep = _stop_cli_tree(proc)
+                out, err = _drain_after_stop(proc, exc)
+                expired = subprocess.TimeoutExpired(
+                    proc.args, exc.timeout, output=out, stderr=err
+                )
+                expired.tree_sweep = sweep
+                raise expired from None
+            except BaseException:
+                _stop_cli_tree(proc)
+                raise
+            if _stopped_from_outside(proc.returncode):
+                # Dead already, and its detached children may not be: only the
+                # registry's snapshot still links them to this slot.
+                _stop_cli_tree(proc)
+    finally:
+        _release_pipes(proc)
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
+
+
+def _describe_tree_sweep(expired: BaseException) -> str:
+    """``"; <verdicts>"`` for a timeout's log line, or ``""`` when none ran."""
+    sweep = getattr(expired, "tree_sweep", None)
+    if sweep is None:
+        return ""
+    try:
+        return f"; {sweep.describe()}"
+    except Exception:  # noqa: BLE001 - a log suffix never fails the timeout path
+        return ""
+
+
 def invoke_with_provider(
     prompt: str,
     model_spec: str,
@@ -1036,7 +1331,7 @@ def invoke_with_provider(
         # `timeout_s=effective_timeout` is L5's one call site (§9.6.b): the number is
         # already resolved here, so an adapter with an internal cutoff of its own
         # (agy's `--print-timeout`) can hold it under the deadline this same call
-        # passes to `subprocess.run` below, instead of hardcoding a value that has to
+        # passes to `_run_provider_cli` below, instead of hardcoding a value that has to
         # be kept in sync by hand. Twelve of the thirteen adapters ignore it, and
         # dropping the keyword restores every rendered argv byte-for-byte.
         try:
@@ -1118,7 +1413,11 @@ def invoke_with_provider(
         schema_cleanup = setup_cleanup.pop_all()
 
     try:
-        result = subprocess.run(
+        # `subprocess.run`'s contract and arguments, but a `Popen` underneath:
+        # on the deadline, a Ctrl-C or an abort the CLI is SIGTERMed first and
+        # every process group it spawned is swept, instead of `run`'s bare
+        # SIGKILL of the CLI alone (D3.3; see `_run_provider_cli`).
+        result = _run_provider_cli(
             cmd,
             capture_output=True,
             text=True,
@@ -1226,6 +1525,7 @@ def invoke_with_provider(
             # The child ran, so the D6 provenance rides a failure too.
             _attach_sandbox_word(details, sandbox_fallback)
             _attach_stdout_excerpt(details, result.stdout)
+            _attach_salvage_text(details, provider, result.stdout)
             # A failed run still spent what its envelope records, and this lane
             # never read it: `parse_usage` was Lane B's (`subagent_executor`)
             # and the audit log's, so the fan-out carried usage for NO slot,
@@ -1374,6 +1674,7 @@ def invoke_with_provider(
         # the run was lost.
         if not parsed.get("success", False):
             _attach_stdout_excerpt(parsed.setdefault("details", {}), result.stdout)
+            _attach_salvage_text(parsed["details"], provider, result.stdout)
 
         # Save log if requested. §Fix1/F13: a deferring caller (invoke_with_file_output)
         # gets the raw capture on `details` instead of an immediate write, on
@@ -1442,7 +1743,13 @@ def invoke_with_provider(
                 stderr=stderr,
                 returncode=-1,
                 success=False,
-                error=f"{provider_name} timed out after {effective_timeout}s",
+                # Plus what the sweep did to the CLI and to each process group
+                # it had spawned, so a `survived` group is named where the
+                # timeout is (D3.3).
+                error=(
+                    f"{provider_name} timed out after {effective_timeout}s"
+                    f"{_describe_tree_sweep(e)}"
+                ),
                 duration_seconds=duration,
                 readonly_audit=audit,
             )
@@ -1456,11 +1763,10 @@ def invoke_with_provider(
         # A TIMEOUT KILL DOES RECOVER PARTIAL STDOUT, so this return no longer
         # throws it away — checked rather than assumed, because attaching a key
         # that is empty by construction would be worse than attaching nothing.
-        # `subprocess.run` re-raises a `TimeoutExpired` that already carries the
-        # bytes read off the pipe before the deadline: on POSIX
-        # `Popen._communicate` populates the exception as it raises, and on
-        # Windows `run` kills the child and calls `communicate()` again to collect
-        # them. That is the `e.stdout` the decode a few lines above has just
+        # `_run_provider_cli` re-raises a `TimeoutExpired` carrying what the CLI
+        # wrote: the bytes read before the deadline plus whatever a bounded
+        # second `communicate()` collected after the sweep stopped it. That is
+        # the `e.stdout` the decode a few lines above has just
         # turned into the `stdout` local — the same local `_save_log` is handed,
         # so the log file has always kept this text and only the returned envelope
         # did not. The envelope is the half a caller can act on.
@@ -1483,6 +1789,7 @@ def invoke_with_provider(
         # A killed child ran too, and ran under whatever rung it was given.
         _attach_sandbox_word(details, sandbox_fallback)
         _attach_stdout_excerpt(details, stdout)
+        _attach_salvage_text(details, provider, stdout)
         # AND THE SAME PARTIAL STDOUT IS WHAT USAGE IS PARSED OUT OF. This is
         # the third of the three outcomes `_attach_usage` is documented to
         # cover, and it was the one that never called it — so the run killed at
@@ -1638,6 +1945,423 @@ def render_output_location(
     return FILE_OUTPUT_LOCATION.format(path=output_json_path)
 
 
+# ---------------------------------------------------------------------------
+# The ``{diff_access}`` block of the code-review prompt
+# ---------------------------------------------------------------------------
+#
+# Measured on the 2026-09-25 review run (plan: review-run-scope-salvage-and-
+# failure-visibility §2.1): the code-review prompt only told reviewers to run
+# `git diff`, and the two cursor-agent lanes run `--mode ask`, which has no
+# shell — kimi returned `[]` having never seen a diff, and grok reported a test
+# failure it could not have run. The orchestrator now writes the scope manifest
+# and one diff per file into the phase dir before dispatch, and this block tells
+# each lane how to reach them, rendered from the adapter's two `generate`
+# declarations (`generate_read_scope`, `runs_shell_in_generate`) so the
+# orchestrator never names a provider. It is the ONLY block of the prompt that
+# may grant a shell command, and only its `True` text does.
+
+#: The one size cap decision 11.4 keeps. It bounds only the INLINE branch — a
+#: lane that cannot open the phase dir gets the plan, the manifest and every
+#: diff in the prompt itself — and it is physical, not a guess at a context
+#: window: an argv lane's whole prompt is one argument, Linux caps one argument
+#: at ``MAX_ARG_STRLEN`` (131072 bytes), and 96 KB leaves room for the template.
+INLINE_DIFF_CAP_BYTES = 96 * 1024
+
+#: The same physical limit applied to the WHOLE rendered prompt of an inline
+#: slot, not only its ``{diff_access}`` block: the template around that block
+#: also carries the implementation record (up to 20 000 chars, UTF-8 widens it),
+#: the file list and the working limits, so a block under
+#: :data:`INLINE_DIFF_CAP_BYTES` can still sit in a prompt past
+#: ``MAX_ARG_STRLEN`` and die as an ``E2BIG`` spawn failure. 4 KB under the
+#: kernel's number, for its NUL and an adapter's own wrapping of the prompt
+#: argument (aider's ``/ask `` prefix) — the ceiling ``ask_orchestrator``'s
+#: ``MAX_PROMPT_BYTES`` uses for the same reason. Measured with
+#: :func:`argv_prompt_bytes`.
+INLINE_PROMPT_CAP_BYTES = 124 * 1024
+
+#: The values ``LLMProvider.generate_read_scope`` may take.
+GENERATE_READ_SCOPES = ("none", "cwd", "any")
+
+#: What the inline branch calls the manifest block. A lane on that branch
+#: cannot open the file, so this is the name a truncated file-list notice can
+#: point it at ("the ``review-scope.md`` block below") instead of a path.
+INLINE_MANIFEST_LABEL = "review-scope.md"
+
+#: Shared by the three path texts. Deliberately names no command: only the
+#: ``True`` text may.
+_MANIFEST_SENTENCE = (
+    "The scope manifest at {scope_file} lists every in-scope file with its "
+    "status, and names each file's diff file (relative to the manifest) and "
+    "its size."
+)
+
+#: ``runs_shell_in_generate is True`` — a shell runs, measured. Carries the
+#: guidance ``prompts/code_review.txt`` used to hold in its static text, now an
+#: optional cross-check rather than the only way to see the change.
+DIFF_ACCESS_SHELL_TEXT = (
+    "The diff files in {diff_dir} are the authoritative record of the change. "
+    + _MANIFEST_SENTENCE
+    + " Read the manifest first, then each entry's diff file, with your file "
+    "tools.\n"
+    "\n"
+    "You can also run shell commands. `git diff {base_ref}`, `git show` and "
+    "`git log` are an optional cross-check of the diff files, never a "
+    "replacement for reading them:\n"
+    "1. **All changes at once:** `git diff {base_ref} -- <file1> <file2> ...`\n"
+    "2. **One file's changes:** `git diff {base_ref} -- path/to/file`\n"
+    "3. **A file's current content:** `cat path/to/file`, or your file-read "
+    "tool\n"
+    "\n"
+    "`git diff {base_ref} -- <path>` is required for any file the manifest "
+    "marks `omitted`: it has no diff file, so that command's output is the only "
+    "record of its change you can review."
+)
+
+#: ``runs_shell_in_generate is False`` — no shell, measured. The first
+#: paragraph is plan D2.3's text, word for word.
+DIFF_ACCESS_NO_SHELL_TEXT = (
+    "You cannot run shell commands. The diff is at {diff_dir}; read it with "
+    "your file tools. Do not claim a test passes or fails, because you cannot "
+    "run it.\n"
+    "\n"
+    + _MANIFEST_SENTENCE
+    + " The diff files are the authoritative record of the change: read the "
+    "manifest first, then each entry's diff file."
+)
+
+#: ``runs_shell_in_generate is None`` — not measured. It neither grants nor
+#: denies a shell; the first paragraph is plan D2.3's text, word for word.
+DIFF_ACCESS_UNMEASURED_TEXT = (
+    "The diff files at {diff_dir} are the authoritative record of the change; "
+    "read them with your file tools. Do not claim a test passes or fails unless "
+    "you actually ran it and saw the result.\n"
+    "\n"
+    + _MANIFEST_SENTENCE
+    + " Read the manifest first, then each entry's diff file."
+)
+
+#: What each state adds when ``write_review_diff``'s coverage is ``partial``
+#: (git produced no diff for some in-scope path). ``False`` and ``None`` are
+#: plan D2.3's text, word for word. ``None``'s names ``git diff`` only as the
+#: command the MANIFEST gives, conditionally — it grants nothing.
+DIFF_ACCESS_SHELL_PARTIAL = (
+    "Diff coverage for this change is partial: git produced no diff file for "
+    "the files the manifest marks `omitted`. Run `git diff {base_ref} -- "
+    "<path>` for each of them and review it from that output; if the command "
+    "fails, list the file as not reviewed. Do not review their current "
+    "contents as if they were the change."
+)
+DIFF_ACCESS_NO_SHELL_PARTIAL = (
+    "Files the manifest marks `omitted` have no diff you can read. List them as "
+    "not reviewed. Do not review their current contents as if they were the "
+    "change."
+)
+DIFF_ACCESS_UNMEASURED_PARTIAL = (
+    "Files the manifest marks `omitted` have no diff file. If you can run the "
+    "`git diff` command the manifest gives for one, review it from that output; "
+    "otherwise list it as not reviewed. Do not review their current contents as "
+    "if they were the change."
+)
+
+#: The inline branch's opening, by read scope. It names no path: the lane
+#: cannot open the phase dir, so every block below is labelled with the name
+#: the manifest uses for it, never an address.
+_INLINE_HEAD_BY_SCOPE = {
+    "none": "You cannot open files in this review, so everything you need is "
+    "inline below:",
+    "cwd": "The review's artifacts sit outside the directory you can read, so "
+    "everything you need is inline below:",
+}
+_INLINE_HEAD_TAIL = (
+    " the plan, the scope manifest (`" + INLINE_MANIFEST_LABEL + "`) and one "
+    "diff per in-scope source and test file. The diffs are the authoritative "
+    "record of the change. Each block is labelled with the name the manifest "
+    "uses for it; the labels are names, not files you can open."
+)
+
+#: The inline branch's shell sentence, by ``runs_shell_in_generate``. Only the
+#: ``True`` one names a command, as on the path branch.
+_INLINE_SHELL_BY_STATE = {
+    True: (
+        "You can also run shell commands. `git diff {base_ref}`, `git show` and "
+        "`git log` are an optional cross-check of the inline diffs, never a "
+        "replacement for reading them."
+    ),
+    False: (
+        "You cannot run shell commands. Do not claim a test passes or fails, "
+        "because you cannot run it."
+    ),
+    None: (
+        "Do not claim a test passes or fails unless you actually ran it and saw "
+        "the result."
+    ),
+}
+
+#: A diff file name as ``write_review_diff`` writes it (``<n>-<slug>.diff``),
+#: as the manifest cites it (relative to itself, under ``diff/``).
+_MANIFEST_DIFF_REF_RE = re.compile(r"\bdiff/(\d+-[A-Za-z0-9._-]+\.diff)")
+
+
+class DiffAccess(NamedTuple):
+    """What :func:`render_diff_access` decided for one code-review slot."""
+
+    #: ``"paths"`` (the lane reads the artifacts by absolute path),
+    #: ``"inline"`` (they are in :attr:`text`) or ``"unsupported"`` (the slot
+    #: must not be dispatched; :attr:`reason` says why).
+    mode: str
+    #: The rendered ``{diff_access}`` block; ``""`` when unsupported.
+    text: str
+    #: The adapter's ``generate_read_scope`` (``"cwd"`` for an unknown adapter).
+    read_scope: str
+    #: The adapter's ``runs_shell_in_generate`` (``None`` for an unknown one).
+    #: Not spelled ``shell``: a ``shell: <value>`` line is the identity-text
+    #: shape ``write_safety.redact_text`` redacts (``tests/test_redaction.py``'s
+    #: source-tree tripwire).
+    runs_shell: Optional[bool]
+    #: UTF-8 size of the inline block measured against
+    #: :data:`INLINE_DIFF_CAP_BYTES`; ``0`` on the path branch.
+    inline_bytes: int
+    #: Why the slot is unsupported; ``""`` otherwise.
+    reason: str
+
+
+def _lies_within(path: Union[str, Path], root: Union[str, Path]) -> bool:
+    """True when ``path`` resolves to ``root`` or somewhere beneath it."""
+    try:
+        resolved = os.path.realpath(str(path))
+        base = os.path.realpath(str(root))
+        return os.path.commonpath([resolved, base]) == base
+    except (OSError, ValueError):  # ValueError: different drives on Windows
+        return False
+
+
+def _read_inline_text(path: Union[str, Path]) -> Optional[str]:
+    """``path``'s text, or ``None`` when it cannot be read. Never raises."""
+    try:
+        return Path(path).read_text(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return None
+
+
+def _inline_block(label: str, body: str) -> str:
+    """One labelled block of the inline payload.
+
+    Delimited rather than fenced: a plan or a diff routinely carries its own
+    triple-backtick fences, which would close a fence early.
+    """
+    content = body.rstrip("\n")
+    return f"===== BEGIN {label} =====\n{content}\n===== END {label} ====="
+
+
+def _render_inline_diff_access(
+    *,
+    read_scope: str,
+    runs_shell: Optional[bool],
+    scope_file: str,
+    diff_dir: str,
+    plan_path: str,
+    base_ref: str,
+    partial: bool,
+) -> DiffAccess:
+    """The bounded inline branch, or an explicit unsupported outcome.
+
+    The payload is the plan, the whole manifest and every file in ``diff_dir``
+    except ``.gitignore``, in name order (``<n>`` is zero-padded, so name order
+    is review order). It is offered only when ALL of it fits
+    :data:`INLINE_DIFF_CAP_BYTES` and the coverage is complete: a partial
+    inline review would read as a review of the whole change. A missing
+    manifest, plan or cited diff file is a reason, never an exception.
+    """
+    reasons: List[str] = []
+    blocks: List[str] = []
+
+    plan_text = _read_inline_text(plan_path)
+    if plan_text is None:
+        reasons.append(f"plan file not readable: {plan_path}")
+    else:
+        blocks.append(_inline_block("plan", plan_text))
+
+    manifest = _read_inline_text(scope_file)
+    if manifest is None:
+        reasons.append(f"scope manifest not readable: {scope_file}")
+    else:
+        blocks.append(_inline_block(INLINE_MANIFEST_LABEL, manifest))
+
+    try:
+        names = sorted(
+            entry.name
+            for entry in os.scandir(diff_dir)
+            if entry.is_file() and entry.name != ".gitignore"
+        )
+    except OSError:
+        names = []
+    unreadable: List[str] = []
+    for name in names:
+        body = _read_inline_text(os.path.join(diff_dir, name))
+        if body is None:
+            unreadable.append(name)
+            continue
+        blocks.append(_inline_block(f"diff/{name}", body))
+    if unreadable:
+        reasons.append(f"diff files not readable: {', '.join(unreadable)}")
+    if manifest is not None:
+        cited = set(_MANIFEST_DIFF_REF_RE.findall(manifest))
+        absent = sorted(cited - set(names))
+        if absent:
+            reasons.append(
+                f"the manifest names {len(absent)} diff file(s) that do not "
+                f"exist: {', '.join(absent[:3])}"
+                + (f" (+{len(absent) - 3} more)" if len(absent) > 3 else "")
+            )
+
+    if partial:
+        reasons.append("diff coverage is partial")
+
+    head = _INLINE_HEAD_BY_SCOPE.get(read_scope, _INLINE_HEAD_BY_SCOPE["none"])
+    shell_sentence = _INLINE_SHELL_BY_STATE.get(runs_shell, _INLINE_SHELL_BY_STATE[None])
+    text = "\n\n".join(
+        [head + _INLINE_HEAD_TAIL, shell_sentence.format(base_ref=base_ref)] + blocks
+    )
+    size = len(text.encode("utf-8"))
+    if size > INLINE_DIFF_CAP_BYTES:
+        reasons.append(
+            f"inline context {size} B exceeds the {INLINE_DIFF_CAP_BYTES} B cap"
+        )
+
+    if reasons:
+        return DiffAccess("unsupported", "", read_scope, runs_shell, size, "; ".join(reasons))
+    return DiffAccess("inline", text, read_scope, runs_shell, size, "")
+
+
+def render_diff_access(
+    model_spec: str,
+    scope_file: Union[str, Path],
+    diff_dir: Union[str, Path],
+    phase_dir: Union[str, Path],
+    cwd: Union[str, Path],
+    *,
+    base_ref: str,
+    coverage: str,
+    plan_path: Union[str, Path],
+    anchor: Optional[Union[str, Path]] = None,
+) -> DiffAccess:
+    """Decide how ``model_spec``'s lane reaches the change, and render the block.
+
+    ``scope_file`` is ``code-review/review-scope.md``, ``diff_dir`` is
+    ``code-review/diff/``, ``phase_dir`` is the code-review phase dir and
+    ``cwd`` is the directory the lane runs in (the repo root), all absolute.
+    ``coverage`` is ``write_review_diff``'s ``"complete"`` or ``"partial"``;
+    anything but ``"complete"`` is treated as partial, the conservative reading.
+
+    The adapter is resolved exactly as :func:`render_output_location` resolves
+    it (``anchor`` is the run's plan path). An unknown adapter reads as
+    ``generate_read_scope="cwd"``, ``runs_shell_in_generate=None`` — the base
+    defaults, which assert nothing about a shell.
+
+    * **Usable file reads** — ``"any"``, or ``"cwd"`` with ``phase_dir``
+      resolving inside ``cwd`` — give ``mode="paths"``: one of three texts
+      chosen by ``runs_shell_in_generate``, each naming both absolute paths and
+      calling the diff files the authoritative record, plus that state's
+      partial-coverage sentence when coverage is partial.
+    * **No usable reads** — ``"none"``, or ``"cwd"`` with the phase dir outside
+      the repo — give the bounded inline branch, whatever the shell state:
+      ``mode="inline"`` when coverage is complete and the whole block fits
+      :data:`INLINE_DIFF_CAP_BYTES`, otherwise ``mode="unsupported"`` with an
+      empty ``text`` and the reason, so the caller dispatches nothing.
+
+    Never raises for a missing manifest, diff or plan file.
+    """
+    provider_name, _ = parse_model_spec(model_spec, anchor=anchor)
+    provider = get_provider(provider_name)
+    read_scope = (
+        getattr(provider, "generate_read_scope", "cwd") if provider is not None else "cwd"
+    )
+    shell = (
+        getattr(provider, "runs_shell_in_generate", None)
+        if provider is not None
+        else None
+    )
+    partial = coverage != "complete"
+    scope_file = os.path.abspath(str(scope_file))
+    diff_dir = os.path.abspath(str(diff_dir))
+    # An empty base ref (no resolvable ref, e.g. an initial commit) fails the
+    # whole diff set, so coverage is partial; the command text still has to
+    # read as a command with a slot in it rather than `git diff  -- <path>`.
+    ref = base_ref or "<base_ref>"
+
+    reads = read_scope == "any" or (
+        read_scope == "cwd" and _lies_within(phase_dir, cwd)
+    )
+    if not reads:
+        return _render_inline_diff_access(
+            read_scope=read_scope,
+            runs_shell=shell,
+            scope_file=scope_file,
+            diff_dir=diff_dir,
+            plan_path=str(plan_path),
+            base_ref=ref,
+            partial=partial,
+        )
+
+    if shell is True:
+        text, extra = DIFF_ACCESS_SHELL_TEXT, DIFF_ACCESS_SHELL_PARTIAL
+    elif shell is False:
+        text, extra = DIFF_ACCESS_NO_SHELL_TEXT, DIFF_ACCESS_NO_SHELL_PARTIAL
+    else:
+        text, extra = DIFF_ACCESS_UNMEASURED_TEXT, DIFF_ACCESS_UNMEASURED_PARTIAL
+    if partial:
+        text = text + "\n\n" + extra
+    rendered = text.format(scope_file=scope_file, diff_dir=diff_dir, base_ref=ref)
+    return DiffAccess("paths", rendered, read_scope, shell, 0, "")
+
+
+#: The ``{working_limits}`` block the review templates carry just above their
+#: output sections (plan: review-run-scope-salvage-and-failure-visibility D3.2).
+#: Measured on the 2026-09-25 review run: a pi code-review slot with a 1200 s
+#: budget started ``timeout 1700 python -m pytest tests`` and was killed
+#: mid-suite, having written nothing — nothing in the prompt told it how long it
+#: had or that the suite was off limits. So the block states the real number of minutes and
+#: forbids long commands, while still allowing ONE narrowly scoped test file
+#: (decision 11.7, the same allowance ``prompts/implementation_task.txt`` makes).
+#:
+#: It deliberately names no shell command: it reaches every Lane A lane,
+#: cursor-agent and claude-code included, which have no shell, so a "use
+#: ``git diff``" line here would grant what ``{diff_access}`` denies in the same
+#: prompt. The test-claim line is here rather than only in ``{diff_access}``
+#: because the false HIGH finding in that run's evidence was a model asserting
+#: a test result it had not run, and every lane can make that claim. Advisory
+#: text only — what bounds a model that ignores it is the slot's kill.
+WORKING_LIMITS_BLOCK = (
+    "## Working limits\n"
+    "- This review is stopped after about {minutes}. Anything unfinished at "
+    "that point is lost, so write your answer well before then.\n"
+    "- Do NOT run the project's test suite, builds, linters, installers, or any "
+    "other long-running command. This is a read-only review. If a finding "
+    "depends on a test's result, you may run that ONE narrowly scoped test "
+    "file, and only if you can run commands at all.\n"
+    "- Do NOT modify, create or delete any file except the output file named "
+    "below.\n"
+    "- Do NOT claim that a test passes or fails unless you ran it during this "
+    "review and saw its result. Say what a test covers, not what it would "
+    "report."
+)
+
+
+def render_working_limits(timeout_s: Union[int, float]) -> str:
+    """The ``{working_limits}`` block for an attempt with ``timeout_s`` seconds.
+
+    ``timeout_s`` must be the budget THIS attempt is really spawned with — the
+    ``timeout`` handed to :func:`invoke_with_file_output`, or the ladder's slice
+    on the review-plan/review-tasks fan-out — because the number is the point:
+    the incident's model chose ``timeout 1700`` inside a 1200 s slot. Minutes are
+    floored (never promise time the kill will not honour) and never below 1, so
+    a sub-minute slot still reads as a deadline rather than "about 0 minutes".
+    """
+    minutes = max(1, int(timeout_s // 60))
+    unit = "minute" if minutes == 1 else "minutes"
+    return WORKING_LIMITS_BLOCK.format(minutes=f"{minutes} {unit}")
+
+
 #: `result["source"]` values where the file on disk is what the model itself
 #: produced. Anything else (chiefly `stdout_fallback`) means the answer came
 #: over stdout and `output_file` is only where THIS PROCESS intends to persist
@@ -1712,6 +2436,82 @@ def _finalize_file_output_log(
     )
 
 
+def _file_output_context(
+    model_spec: str,
+    prompt_context: Dict[str, Any],
+    output_dir: Union[str, Path],
+    phase: str,
+    timeout: Optional[int],
+    anchor: Optional[Union[str, Path]],
+) -> Tuple[Dict[str, Any], Path]:
+    """The context :func:`invoke_with_file_output` formats its template with.
+
+    Returns ``(full_context, output_json_path)``. One owner, so the prompt
+    :func:`argv_prompt_bytes` measures is the prompt that is dispatched.
+    """
+    from .json_extractor import generate_output_path
+
+    # Generate output file path
+    prefix = prompt_context.get("prefix", "output")
+    output_json_path = generate_output_path(Path(output_dir), prefix, phase, model_spec)
+
+    # Inject output path into prompt context, plus the channel instruction that
+    # path belongs to: an adapter whose CLI cannot write files is asked for the
+    # array on stdout instead of being asked for a file it will refuse. The path
+    # itself is still handed over (a template may name it outside the block, and
+    # every caller-supplied template in the test suite does), and the file is
+    # still read first below, so a provider that writes one anyway is unaffected.
+    full_context = {
+        **prompt_context,
+        "output_json_path": str(output_json_path),
+        "output_location": render_output_location(
+            output_json_path, model_spec, anchor=anchor
+        ),
+        # The minutes this call will really be allowed: a missing `timeout` is
+        # resolved exactly as `invoke_with_provider` resolves it below, so the
+        # deadline the prompt states is the one the kill honours. A template
+        # without the placeholder ignores the key (`str.format` drops extras).
+        "working_limits": render_working_limits(
+            timeout or get_provider_timeout(
+                parse_model_spec(model_spec, anchor=anchor)[0], anchor=anchor
+            )
+        ),
+    }
+    return full_context, output_json_path
+
+
+def argv_prompt_bytes(
+    prompt_template: str,
+    model_spec: str,
+    prompt_context: Dict[str, Any],
+    output_dir: Union[str, Path],
+    phase: str,
+    timeout: Optional[int] = None,
+    anchor: Optional[Union[str, Path]] = None,
+) -> Optional[int]:
+    """UTF-8 size of the prompt :func:`invoke_with_file_output` would put on argv.
+
+    Takes that function's own arguments and renders the same prompt, so a
+    caller can refuse a slot whose prompt would exceed the single-argument
+    ceiling (:data:`INLINE_PROMPT_CAP_BYTES`) before anything is spawned.
+    ``None`` when the prompt would not travel on argv at all — an adapter
+    whose default ``prompt_transport`` is not ``argv``, an unknown adapter
+    (nothing is spawned for it) — or when the template does not format, which
+    the dispatch itself reports as ``PROMPT_FORMAT_ERROR``. Never raises.
+    """
+    try:
+        provider = get_provider(parse_model_spec(model_spec, anchor=anchor)[0])
+        if provider is None or getattr(provider, "prompt_transport", "argv") != "argv":
+            return None
+        full_context, _ = _file_output_context(
+            model_spec, prompt_context, output_dir, phase, timeout, anchor
+        )
+        prompt = prompt_template.format(**full_context)
+    except Exception:  # noqa: BLE001 - a measurement never fails the slot
+        return None
+    return len(prompt.encode("utf-8"))
+
+
 def invoke_with_file_output(
     prompt_template: str,
     model_spec: str,
@@ -1770,27 +2570,11 @@ def invoke_with_file_output(
           ``served_model_is_fallback``, so the JSON's origin travels with it
           whichever channel (file, extracted file, stdout) supplied it
     """
-    from .json_extractor import generate_output_path, read_json_from_file
+    from .json_extractor import read_json_from_file
 
-    output_dir = Path(output_dir)
-
-    # Generate output file path
-    prefix = prompt_context.get("prefix", "output")
-    output_json_path = generate_output_path(output_dir, prefix, phase, model_spec)
-
-    # Inject output path into prompt context, plus the channel instruction that
-    # path belongs to: an adapter whose CLI cannot write files is asked for the
-    # array on stdout instead of being asked for a file it will refuse. The path
-    # itself is still handed over (a template may name it outside the block, and
-    # every caller-supplied template in the test suite does), and the file is
-    # still read first below, so a provider that writes one anyway is unaffected.
-    full_context = {
-        **prompt_context,
-        "output_json_path": str(output_json_path),
-        "output_location": render_output_location(
-            output_json_path, model_spec, anchor=anchor
-        ),
-    }
+    full_context, output_json_path = _file_output_context(
+        model_spec, prompt_context, output_dir, phase, timeout, anchor
+    )
 
     # Format prompt
     try:
