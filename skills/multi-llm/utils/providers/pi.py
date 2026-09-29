@@ -839,11 +839,21 @@ class PiProvider(LLMProvider):
         if reason == "length":
             # No `error_code`: omp's unclosed-container disposition — a findings
             # file the model wrote before the cut may still be recovered.
+            #
+            # `incomplete` instead says what the code must not: the stream's own
+            # terminal state is an output-limit cut, so the answer did not
+            # finish, whether or not its text parses. The ask lane reads it
+            # (as `details["incomplete"]`) and keeps the cut text as a partial
+            # rather than counting it (plans/ask-answer-recovery-and-false-
+            # success.md D3.1). The `stop` branch's unclosed-container refusal
+            # above does not set it: there the model ended its turn, and the
+            # refusal is a verdict on JSON, which an ask answer need not be.
             return {
                 "success": False,
                 "error": with_junk(terminal_verdict(raw)),
                 "raw": _answer_text(final),
                 "data": None,
+                "incomplete": True,
             }
 
         if reason == "toolUse":

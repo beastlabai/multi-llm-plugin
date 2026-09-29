@@ -321,9 +321,15 @@ class _AskInvoker:
         self.seen = []
 
     def __call__(self, prompt, model_spec, timeout=None, log_file=None, cwd=None,
-                 anchor=None, **kwargs):
+                 anchor=None, want_answer_text=False, **kwargs):
+        # Every ask dispatch asks for the reduced answer text and step 2 reads
+        # only that key (plans/ask-answer-recovery-and-false-success.md D2.3),
+        # so the answer rides `details["answer_text"]` as it does for real;
+        # `seen` keeps only the sandbox kwargs this test is about.
+        assert want_answer_text is True
         self.seen.append(kwargs)
-        return {"success": True, "data": "An answer.", "details": {}}
+        return {"success": True, "data": "An answer.",
+                "details": {"answer_text": "An answer."}}
 
 
 class TestTheAskLaneSplitsTheRungs:

@@ -202,3 +202,33 @@ class GrokProvider(LLMProvider):
             if fallback.get("success"):
                 return fallback
             return {"success": False, "error": f"JSON parse error: {e}", "raw": stdout, "data": None}
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The wrapper's ``text``, never the wrapper or grok's error body (D2.5).
+
+        The text :meth:`parse_output` unwraps first: ``wrapper["text"]``,
+        stripped, when stdout is one JSON object whose ``type`` is not
+        ``"error"``. So the ask lane's answer text and the review lanes'
+        salvage read what the parser treats as the answer
+        (plans/ask-answer-recovery-and-false-success.md D2.5), and grok's
+        ``{"type":"error","message":…}`` body — every one of the ten measured
+        failures, and the 2026-09-22 body the ask lane once saved as an answer
+        — gives ``""``, a final verdict. So does anything that is not one whole
+        wrapper: ``generate`` always renders ``--output-format json``.
+
+        ``text`` joins every turn of the run, so an answer carries any earlier
+        narration with it; nothing in the output separates the two (§14).
+        """
+        try:
+            if not isinstance(stdout, str):
+                return ""
+            try:
+                wrapper = json.loads(stdout.strip())
+            except ValueError:
+                return ""
+            if not isinstance(wrapper, dict) or wrapper.get("type") == "error":
+                return ""
+            text = wrapper.get("text")
+            return text.strip() if isinstance(text, str) else ""
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""

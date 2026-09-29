@@ -11,22 +11,26 @@ import sys
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
+from typing import Any, Collection, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from . import structured_output
 from . import process_control
 from . import readonly_audit as _readonly_audit_mod
 from .metrics import describe_usage as _describe_usage
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
+from .json_extractor import _ANSI_ESCAPE, looks_like_ndjson
 from .providers.base import (
     PROFILE_GENERATE,
     SANDBOX_RUNG_LANDLOCK,
     SANDBOX_RUNG_UNSANDBOXED,
+    ReadOnlyInvocationRefused,
     StructuredOutputUnavailable,
+    _matches_marker,
     availability_from_failure,
     build_child_env,
     sandbox_rung_id,
 )
+from .providers.result_envelope import is_clean_envelope
 
 
 class LLMClientError(Exception):
@@ -616,7 +620,42 @@ def _bound_salvage_text(text: str) -> str:
     )
 
 
-def _attach_salvage_text(details: Dict[str, Any], provider: Any, stdout: Optional[str]) -> None:
+#: Sentinel for "the caller has not read the hook yet": ``None`` is taken, it is
+#: the hook's own "no opinion".
+_HOOK_UNREAD: Any = object()
+
+
+def _salvage_hook_text(provider: Any, stdout: Optional[str]) -> Optional[str]:
+    """The adapter's :meth:`~utils.providers.base.LLMProvider.salvage_text` reading, once.
+
+    The one place the hook's three-answer contract is read, so
+    ``salvage_text`` and ``answer_text`` can never disagree about what the
+    hook said, and a losing path that attaches both runs the hook once
+    (plans/ask-answer-recovery-and-false-success.md D2.2):
+
+    * the hook's string, as it returned it (``""`` included: "nothing there");
+    * ``""`` when the hook raised: by overriding, the adapter declared its
+      stdout a transport, so falling back to the raw stream would restore the
+      bug the hook removes;
+    * ``None`` for "no opinion": the base default, a provider with no callable
+      hook, or a return that is not a string.
+    """
+    hook = getattr(provider, "salvage_text", None)
+    if not callable(hook):
+        return None
+    try:
+        text = hook(stdout or "")
+    except Exception:  # noqa: BLE001 - a reducer may never break a run
+        return ""
+    return text if isinstance(text, str) else None
+
+
+def _attach_salvage_text(
+    details: Dict[str, Any],
+    provider: Any,
+    stdout: Optional[str],
+    hook_text: Any = _HOOK_UNREAD,
+) -> None:
     """Put the adapter's answer text on ``details['salvage_text']``, redacted then bounded.
 
     The salvage gate used to judge ``stdout_excerpt`` — the raw stream's last
@@ -640,18 +679,178 @@ def _attach_salvage_text(details: Dict[str, Any], provider: Any, stdout: Optiona
     * the hook returned ``None`` (the base default, "no opinion") or anything
       that is not a string → the key stays **absent**, and the gate keeps its
       old input.
+
+    ``hook_text`` is :func:`_salvage_hook_text`'s reading when the caller has
+    already taken it (a losing path that also attaches ``answer_text`` passes
+    the one reading to both); left out, this helper reads the hook itself.
     """
-    hook = getattr(provider, "salvage_text", None)
-    if not callable(hook):
+    if hook_text is _HOOK_UNREAD:
+        hook_text = _salvage_hook_text(provider, stdout)
+    if hook_text is None:
         return
-    try:
-        text = hook(stdout or "")
-    except Exception:  # noqa: BLE001 - a reducer may never break a run
-        details[SALVAGE_TEXT_KEY] = ""
+    details[SALVAGE_TEXT_KEY] = _bound_salvage_text(_redact(hook_text)).strip()
+
+
+#: The key :func:`_attach_answer_text` writes, and only when the caller passed
+#: ``want_answer_text=True`` to :func:`invoke_with_provider` (the ask lane).
+#: Its value is the model's **whole** answer text, reduced from the full stdout,
+#: redacted and head-capped. It goes to that caller alone — never into
+#: ``.status.json``, a result record or the log
+#: (plans/ask-answer-recovery-and-false-success.md D2.2).
+ANSWER_TEXT_KEY = "answer_text"
+
+#: ``answer_text``'s cap. An answer is read from the top, so the **head** is
+#: kept and a marker appended (:func:`_cut_bytes`), never the tail-bound of the
+#: log nor ``_bound_salvage_text``'s bracket window (D2.2).
+MAX_ANSWER_TEXT_BYTES = 1024 * 1024
+
+
+def _clean_envelope_answer(value: Any, text: str) -> str:
+    """Rule 2 of :func:`generic_answer_text`: a clean envelope's inner answer, else ``""``.
+
+    Clean means one of the two measured shapes (D2.2):
+
+    * ``{"type": "result", …}`` that
+      :func:`~utils.providers.result_envelope.is_clean_envelope` passes
+      (claude-code, cursor-agent): its ``result`` string;
+    * ``{"response": "<string>"}`` with no ``error`` and a ``status`` that is
+      absent or ``"SUCCESS"`` (gemini, agy). Without the ``status`` test an
+      agy failure that carries no ``error`` would pass. An ``error`` that is
+      present but empty (``null``, ``""``) says no error either: agy's success
+      shape is uncaptured (§14), and an answer lost to an empty field is the
+      loss this plan fixes.
+
+    Any other JSON value — a refusing envelope, grok's ``{"type":"error",…}``
+    body, a record array, a bare number — is transport, never the answer.
+    """
+    if not isinstance(value, dict):
+        return ""
+    if value.get("type") == "result":
+        if not is_clean_envelope(text):
+            return ""
+        inner = value.get("result")
+        return inner if isinstance(inner, str) else ""
+    response = value.get("response")
+    if (
+        isinstance(response, str)
+        and not value.get("error")
+        and value.get("status", "SUCCESS") == "SUCCESS"
+    ):
+        return response
+    return ""
+
+
+def generic_answer_text(
+    stdout: Optional[str],
+    *,
+    framing: str = "auto",
+    exit_zero_markers: Collection["re.Pattern[str]"] = (),
+) -> str:
+    """The answer text of a stdout whose adapter's hook has no opinion (D2.2).
+
+    A conservative default, not a parser. It serves the adapters without a
+    :meth:`~utils.providers.base.LLMProvider.salvage_text` hook
+    (claude-code, cursor-agent, gemini, agy, kilocode) and any adapter added
+    later without one. ``framing`` is the adapter's declared
+    ``answer_framing``; the reducer never guesses it.
+
+    Under ``"auto"`` the first rule that applies decides:
+
+    1. an event stream (:func:`~utils.json_extractor.looks_like_ndjson`) → ``""``;
+    2. a stdout that parses whole as one JSON value → the inner answer of a
+       clean result envelope (:func:`_clean_envelope_answer`), ``""`` for any
+       other JSON value: a provider's error body is never an answer;
+    3. anything else is plain text: the whole stdout, ANSI escapes removed.
+
+    Under ``"plain"`` (the stdout *is* the reply: kilocode) only rule 3 runs,
+    so a direct JSON object, a JSON array or NDJSON the question asked for
+    comes back whole.
+
+    **Rule 3's exit-zero check.** Rule 3 cannot tell a prose answer from a
+    prose error, and every exit-0 ``PARSE_ERROR`` may reach it (D3.1). So when
+    one of the adapter's own ``exit_zero_markers`` matches the lowercased
+    stdout (:func:`~utils.providers.base._matches_marker`, as step 6 of
+    ``classify_streams`` does), rule 3 gives ``""`` — on every path, success
+    included, under both framings. Only the adapter's markers: the shared
+    auth, rate-limit and context tables match words an answer *about* auth or
+    rate limits uses. The haystack is the stdout both as captured and with its
+    ANSI escapes removed, so a painted ``Error:`` still matches a marker.
+
+    Whitespace-only text is ``""``. Text is otherwise returned as is, not
+    stripped: the caller redacts and caps it.
+    """
+    raw = stdout or ""
+    text = _ANSI_ESCAPE.sub("", raw)
+    if not text.strip():
+        return ""
+    if framing != "plain":
+        if looks_like_ndjson(text):
+            return ""
+        try:
+            value = json.loads(text)
+        except ValueError:
+            pass
+        else:
+            answer = _clean_envelope_answer(value, text)
+            return answer if answer.strip() else ""
+    if exit_zero_markers and (
+        _matches_marker(exit_zero_markers, raw.lower())
+        or _matches_marker(exit_zero_markers, text.lower())
+    ):
+        return ""
+    return text
+
+
+def _attach_answer_text(
+    details: Dict[str, Any],
+    provider: Any,
+    stdout: Optional[str],
+    hook_text: Any = _HOOK_UNREAD,
+) -> None:
+    """Put the model's whole answer text on ``details['answer_text']`` (D2.2).
+
+    Set on every :func:`invoke_with_provider` exit that ran the child — the
+    success return, the exit-0 parse failure, the non-zero exit and the
+    timeout — when the caller asked for it, from the **full** stdout:
+
+    * the hook returned a string → used as is; ``""`` stays ``""``, a final
+      "nothing to recover" (so does a hook that raised, and whitespace alone);
+    * the hook had no opinion → :func:`generic_answer_text` under the
+      adapter's ``answer_framing`` and ``exit_zero_failure_markers``.
+
+    Then :func:`_redact` and the :data:`MAX_ANSWER_TEXT_BYTES` head-kept cap —
+    nothing else. Hook text **never** goes through :func:`_bound_salvage_text`:
+    its 45 KB window, forward from the first unclosed bracket, is built for a
+    findings array and would cut the head off a long prose answer. The two
+    keys read one hook result and each cuts its own copy, differently on
+    purpose.
+
+    ``hook_text`` is :func:`_salvage_hook_text`'s reading when the caller has
+    already taken it for ``salvage_text``; left out, it is read here.
+    """
+    if hook_text is _HOOK_UNREAD:
+        hook_text = _salvage_hook_text(provider, stdout)
+    if hook_text is None:
+        try:
+            text = generic_answer_text(
+                stdout,
+                framing=getattr(provider, "answer_framing", "auto"),
+                exit_zero_markers=tuple(
+                    getattr(provider, "exit_zero_failure_markers", ()) or ()
+                ),
+            )
+        except Exception:  # noqa: BLE001 - a reducer may never break a run
+            text = ""
+    else:
+        text = hook_text
+    if not text.strip():
+        details[ANSWER_TEXT_KEY] = ""
         return
-    if not isinstance(text, str):
-        return
-    details[SALVAGE_TEXT_KEY] = _bound_salvage_text(_redact(text)).strip()
+    details[ANSWER_TEXT_KEY] = _cut_bytes(
+        _redact(text),
+        MAX_ANSWER_TEXT_BYTES,
+        f"\n... [answer text truncated at {MAX_ANSWER_TEXT_BYTES} B]",
+    )
 
 
 _READONLY_AUDIT_KEY = _readonly_audit_mod.DETAILS_KEY
@@ -1110,6 +1309,7 @@ def invoke_with_provider(
     schema_phase: Optional[str] = None,
     _defer_parse_failure_log: bool = False,
     sandbox_fallback: Optional[str] = None,
+    want_answer_text: bool = False,
 ) -> Dict[str, Any]:
     """Invoke an LLM using the provider abstraction.
 
@@ -1199,6 +1399,16 @@ def invoke_with_provider(
             contained one — so the provenance rides the same dict
             ``served_model`` does. The default renders every argv
             byte-for-byte as before and adds no key.
+        want_answer_text: The ask lane's request for the model's **whole**
+            answer text (plans/ask-answer-recovery-and-false-success.md D2.2).
+            When True, every exit that ran the child — success, exit-0 parse
+            failure, non-zero exit, timeout — sets ``details["answer_text"]``
+            from the full stdout (:func:`_attach_answer_text`: the adapter's
+            ``salvage_text`` hook, else :func:`generic_answer_text`; redacted,
+            head-capped at 1 MiB). The returns before the spawn and the launch
+            failure carry no key, which a reader treats like ``""``. The
+            default adds no key and leaves ``salvage_text`` as it was, so the
+            review lanes are unchanged.
 
     Returns:
         Dict with 'success' key and either:
@@ -1349,9 +1559,13 @@ def invoke_with_provider(
                 prompt, model, transport, timeout_s=effective_timeout, schema=schema,
                 sandbox_fallback=sandbox_fallback, cwd=cwd,
             )
-        except StructuredOutputUnavailable as exc:
+        except (StructuredOutputUnavailable, ReadOnlyInvocationRefused) as exc:
             # §4.2.1's sixth case: fails BEFORE spawn, so no partial argv reaches
-            # the CLI. A configuration error, never retried.
+            # the CLI. A configuration error, never retried. The same for an
+            # adapter refusing an invocation the user's own config makes unsafe
+            # (plans/ask-answer-recovery-and-false-success.md D4.2: aider with
+            # yes-always on in an `.aider.conf.yml` or `.env`): re-running
+            # reads the same file, and the error names it.
             return {
                 "success": False,
                 "error": str(exc),
@@ -1431,7 +1645,10 @@ def invoke_with_provider(
             timeout=effective_timeout,
             env=env,
             cwd=cwd,
-            # Under the argv transport no provider reads stdin, and closing it
+            # Under the argv transport the one provider that reads stdin is
+            # aider, which reads its decline supply there (D4.2: `s` answers to
+            # the "Add file to the chat?" prompts, handed back as `stdin_text`
+            # and closed at EOF once written). For every other one, closing it
             # prevents CLIs that poll stdin for piped input (e.g. agy) from
             # blocking forever when the orchestrator's stdin is a non-EOF pipe.
             # Under the stdin transport the prompt IS the child's stdin, and it
@@ -1525,7 +1742,11 @@ def invoke_with_provider(
             # The child ran, so the D6 provenance rides a failure too.
             _attach_sandbox_word(details, sandbox_fallback)
             _attach_stdout_excerpt(details, result.stdout)
-            _attach_salvage_text(details, provider, result.stdout)
+            # One hook reading for both keys (D2.2): each cuts its own copy.
+            hook_text = _salvage_hook_text(provider, result.stdout)
+            _attach_salvage_text(details, provider, result.stdout, hook_text=hook_text)
+            if want_answer_text:
+                _attach_answer_text(details, provider, result.stdout, hook_text=hook_text)
             # A failed run still spent what its envelope records, and this lane
             # never read it: `parse_usage` was Lane B's (`subagent_executor`)
             # and the audit log's, so the fan-out carried usage for NO slot,
@@ -1573,6 +1794,16 @@ def invoke_with_provider(
             "model": model,
             "duration_seconds": duration
         }
+        # The adapter's completion verdict moves onto `details` straight after
+        # the parse (plans/ask-answer-recovery-and-false-success.md D3.1):
+        # `incomplete` says the stream's own terminal state shows the answer did
+        # not finish (pi's `stopReason: "length"`), whether or not the text
+        # parsed. On `details` it survives the schema-verdict rebuild below,
+        # which keeps only `details`, and the `PARSE_ERROR` stamp. It is not an
+        # `error_code`, so `invoke_with_file_output`'s hard-failure gate — and
+        # with it the findings-file channel — is unchanged.
+        if parsed.pop("incomplete", False):
+            parsed["details"]["incomplete"] = True
         # EXTRACT BEFORE DISCARDING. `parse_output` above has just unwrapped the
         # answer out of the provider's envelope and thrown the envelope away —
         # and the envelope is where the token counts and the catalog cost live.
@@ -1672,9 +1903,13 @@ def invoke_with_provider(
         # all of them, and the two hard-failure returns above and below join it,
         # so `details.get("stdout_excerpt")` means the same thing whichever way
         # the run was lost.
+        hook_text = _HOOK_UNREAD
         if not parsed.get("success", False):
             _attach_stdout_excerpt(parsed.setdefault("details", {}), result.stdout)
-            _attach_salvage_text(parsed["details"], provider, result.stdout)
+            hook_text = _salvage_hook_text(provider, result.stdout)
+            _attach_salvage_text(
+                parsed["details"], provider, result.stdout, hook_text=hook_text
+            )
 
         # Save log if requested. §Fix1/F13: a deferring caller (invoke_with_file_output)
         # gets the raw capture on `details` instead of an immediate write, on
@@ -1708,6 +1943,16 @@ def invoke_with_provider(
                     duration_seconds=duration,
                     readonly_audit=audit,
                 )
+
+        # D2.2: the whole answer on the success return too — the path
+        # nemotron's 124-line answer was lost on, since `data` was a dict and
+        # the full stdout existed only here. A failed parse reuses the hook
+        # reading `salvage_text` took above; a success reads it now, once.
+        if want_answer_text:
+            _attach_answer_text(
+                parsed.setdefault("details", {}), provider, result.stdout,
+                hook_text=hook_text,
+            )
 
         return parsed
 
@@ -1789,7 +2034,11 @@ def invoke_with_provider(
         # A killed child ran too, and ran under whatever rung it was given.
         _attach_sandbox_word(details, sandbox_fallback)
         _attach_stdout_excerpt(details, stdout)
-        _attach_salvage_text(details, provider, stdout)
+        # One hook reading for both keys (D2.2): each cuts its own copy.
+        hook_text = _salvage_hook_text(provider, stdout)
+        _attach_salvage_text(details, provider, stdout, hook_text=hook_text)
+        if want_answer_text:
+            _attach_answer_text(details, provider, stdout, hook_text=hook_text)
         # AND THE SAME PARTIAL STDOUT IS WHAT USAGE IS PARSED OUT OF. This is
         # the third of the three outcomes `_attach_usage` is documented to
         # cover, and it was the one that never called it — so the run killed at

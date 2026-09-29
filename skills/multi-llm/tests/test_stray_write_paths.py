@@ -695,11 +695,15 @@ class TestAnErrorPayloadDoesNotCountAsAResult:
 
     `runs/20260922T084502Z`: grok failed on all six opencode fan-out rows.
     Four went red. `opencode-ask` and `opencode-package-ask` went GREEN,
-    because `ask_orchestrator.recover_answer_text` falls back to the
-    provider's raw stdout when it can recover no text, and a failed grok run's
-    stdout is its error envelope — which landed at grok's own exact expected
-    filename and satisfied the fact whose whole job is to prove the provider
-    produced something.
+    because `ask_orchestrator.recover_answer_text` then fell back to the
+    provider's raw stdout when it could recover no text, and a failed grok
+    run's stdout is its error envelope — which landed at grok's own exact
+    expected filename and satisfied the fact whose whole job is to prove the
+    provider produced something. The ask lane no longer reads `raw`: it reads
+    only the adapter's reduced `answer_text`, which is `""` for that body
+    (plans/ask-answer-recovery-and-false-success.md D2.3, D3.1). This harness
+    check does not depend on that fix and stays as the independent second
+    gate.
 
     The discriminators are the CLIs' own, already measured inside this repo:
     `type: "error"` (`utils/providers/grok.py:186-192`, ten distinct injected

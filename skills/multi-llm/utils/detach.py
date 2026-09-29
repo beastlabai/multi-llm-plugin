@@ -655,6 +655,14 @@ def classify_run(
         # poll's result line, and a host's summary left out the groups the
         # user still has to decide.
         "validation_counts": status.get("validation_counts"),
+        # plans/ask-answer-recovery-and-false-success.md D7.2: present on every
+        # ask run that reached its closing report and on no other phase —
+        # `{answered, file, stdout, fallback, accepted, unrecorded, kept,
+        # warn_all_fallback}`, written in the same `update_status` as `state`.
+        # Same route as `validation_counts`: an ask is polled through `status`,
+        # and without this entry a detached ask's all-fallback flag never
+        # reached the host.
+        "answer_origins": status.get("answer_origins"),
         # F4: optional, and present only on a finished code-review run —
         # `{count}`, written once by that phase's own `[HIGH_PRIORITY_ISSUES]`
         # site. Same reasoning as `consolidation_recommended` just above: a

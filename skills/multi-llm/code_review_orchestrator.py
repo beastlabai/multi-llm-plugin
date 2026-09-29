@@ -100,7 +100,7 @@ from utils.review_orchestrator_base import (
     materialization_read_refusal,
     verify_round_context,
     announce_retired_rungs,
-    bypass_ignore_prefixes,
+    fanout_ignore_prefixes,
     boundaryless_sibling_count,
     bypass_stream_audit_clears,
     bypass_write_not_attributed,
@@ -2153,9 +2153,14 @@ async def run_single_review(
     if sandbox.fallback:
         print(f"[{display_name}] {sandbox.reason}")
     if porcelain_check_applies(sandbox):
+        # Roster-aware (plans/ask-answer-recovery-and-false-success.md D4.3):
+        # evaluated here in the slot's task, where the fan-out roster lives, so
+        # an aider sibling's tag cache is exempt; the after check matches it.
         tree_before = await asyncio.to_thread(
             porcelain_snapshot, project_root,
-            ignore_prefixes=bypass_ignore_prefixes(plan_path, project_root),
+            ignore_prefixes=fanout_ignore_prefixes(
+                plan_path, project_root, anchor=plan_path
+            ),
         )
 
     # Generate log file path for debugging
@@ -2405,7 +2410,9 @@ async def run_single_review(
     # invocation reported — nothing is restored, and nothing it returned is
     # parsed as a review. Skipped entirely (no git call) for a sandboxed slot.
     if porcelain_check_applies(sandbox):
-        ignore_prefixes = bypass_ignore_prefixes(plan_path, project_root)
+        ignore_prefixes = fanout_ignore_prefixes(
+            plan_path, project_root, anchor=plan_path
+        )
         # Plan §4.3: one `invoke_with_file_output` call per slot, so its one
         # attempt's verdict is the whole window's.
         audits = [details.get("readonly_audit")]

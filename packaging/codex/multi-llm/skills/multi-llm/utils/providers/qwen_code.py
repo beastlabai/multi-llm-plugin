@@ -153,7 +153,7 @@ from .base import (
     ReasoningLadder,
     StructuredSchema,
 )
-from .result_envelope import parse_result_envelope
+from .result_envelope import envelope_verdict, parse_result_envelope
 
 #: M12 (§6.1): qwen-code's position on the ladder is *declined*, carrying the
 #: module docstring's measurement. There is no ``--effort``, thinking-level or
@@ -667,6 +667,58 @@ class QwenCodeProvider(LLMProvider):
             }
 
         return parse_result_envelope(json.dumps(record))
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The last ``result`` record's answer, when the record is clean (D2.5).
+
+        The text :meth:`parse_output` serves: the last ``type == "result"``
+        record's ``result`` string, and only when every check the parser makes
+        before delegating passes — rule 1 (``is_error`` not true, ``subtype``
+        absent or ``"success"``), a string ``result``, no ``[API Error:``
+        marker (:data:`_API_ERROR_MARKER`), not blank — plus the verdict
+        :func:`parse_result_envelope` reads (``envelope_verdict``). So the ask
+        lane's answer text and the review lanes' salvage read what the parser
+        treats as the answer (plans/ask-answer-recovery-and-false-success.md
+        D2.5).
+
+        The marker test is the one that matters: qwen reports its API failures
+        **inside a record marked clean** (``is_error: false``,
+        ``subtype: "success"``, ``result: "[API Error: 401 …]"``), so without it
+        seven of the eight committed error captures would be saved as answers,
+        two of them with partial text in front (``OKOKOKOKOK[API Error: …]``).
+        ``""`` — a final verdict — for those, for an error-shaped record, and
+        for any stdout that is not one JSON array of records (a wall-clock or
+        tool-budget abort prints nothing).
+        """
+        try:
+            if not isinstance(stdout, str):
+                return ""
+            try:
+                records = json.loads(stdout.strip())
+            except ValueError:
+                return ""
+            if not isinstance(records, list):
+                return ""
+            results = [
+                record for record in records
+                if isinstance(record, dict) and record.get("type") == "result"
+            ]
+            if not results:
+                return ""
+            record = results[-1]
+            subtype = record.get("subtype")
+            if record.get("is_error") or (subtype is not None and subtype != "success"):
+                return ""
+            if envelope_verdict(record):
+                return ""
+            answer = record.get("result")
+            if not isinstance(answer, str) or not answer.strip():
+                return ""
+            if _API_ERROR_MARKER.search(answer):
+                return ""
+            return answer
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""
 
     @staticmethod
     def _empty_stdout_reason(stderr: str) -> str:

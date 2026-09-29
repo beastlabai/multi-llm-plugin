@@ -261,6 +261,39 @@ def cleanup_home_dirs() -> None:
         shutil.rmtree(path, ignore_errors=True)
 
 
+def last_assistant_content(stdout: str) -> Optional[str]:
+    """Step 1 of :meth:`KimiProvider.parse_output`: the answer text, or ``None``.
+
+    The **last** ``role: "assistant"`` record's string ``content``, and
+    ``None`` when the stream has no such record (meta records only). Filtering
+    on ``role`` is the point: the trailing ``session.resume_hint`` meta record
+    also carries ``content``. Shared by the parser and :meth:`salvage_text`, so
+    the ask lane's answer text is the text the parser reads
+    (plans/ask-answer-recovery-and-false-success.md D2.5). Never raises; a
+    non-string is read as an empty stream.
+    """
+    answer: Optional[str] = None
+    # Split on "\n" only: `str.splitlines` also breaks on U+2028/U+2029 and
+    # U+0085, which JSON leaves unescaped inside a string, so an answer holding
+    # one would tear its own record in two and read as no answer at all.
+    lines = stdout.split("\n") if isinstance(stdout, str) else []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            record = json.loads(line)
+        except ValueError:
+            # A truncated final line is expected when a stream is cut
+            # mid-record; earlier complete records still count.
+            continue
+        if isinstance(record, dict) and record.get("role") == "assistant":
+            content = record.get("content")
+            if isinstance(content, str):
+                answer = content
+    return answer
+
+
 def reset_home_dirs() -> None:
     """Drop this process's tracking list without removing anything (tests)."""
     with _HOME_LOCK:
@@ -389,21 +422,7 @@ class KimiProvider(LLMProvider):
         an un-unwrapped stream would let it find the *envelope's* braces and
         serve kimi's bookkeeping to reaggregation as the model's answer.
         """
-        answer: Optional[str] = None
-        for line in (stdout or "").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                record = json.loads(line)
-            except ValueError:
-                # A truncated final line is expected when a stream is cut
-                # mid-record; earlier complete records still count.
-                continue
-            if isinstance(record, dict) and record.get("role") == "assistant":
-                content = record.get("content")
-                if isinstance(content, str):
-                    answer = content
+        answer = last_assistant_content(stdout)
 
         if answer is None:
             return {
@@ -423,6 +442,24 @@ class KimiProvider(LLMProvider):
                 "data": None,
             }
         return extract_json_from_text(answer, prefer_arrays=True)
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The last assistant record's ``content``, never the JSONL stream.
+
+        Step 1 of :meth:`parse_output` (:func:`last_assistant_content`), so the
+        ask lane's answer text and the review lanes' salvage read what the
+        parser treats as the answer (plans/ask-answer-recovery-and-false-
+        success.md D2.5). ``""`` when there is no assistant record or its
+        content is blank: a stream of meta records only, the resume hint whose
+        ``content`` is not an answer, a text-mode stdout the adapter never asks
+        for. ``generate`` always renders ``--output-format stream-json``, so the
+        verdict is final and stderr's diagnostics never stand in for it.
+        """
+        try:
+            answer = last_assistant_content(stdout)
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""
+        return answer if answer is not None and answer.strip() else ""
 
     # describe_failure is deliberately NOT overridden. That hook exists for a CLI
     # that reports its errors on *stdout*, where a non-zero exit would otherwise

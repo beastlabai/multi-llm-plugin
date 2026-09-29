@@ -83,6 +83,7 @@ rows:
       real completion — all three are in the committed server log beside these
       bytes.
     expect:
+      salvage: answer
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -107,6 +108,7 @@ rows:
       is itself the measurement and a future divergence should show up as a
       diff on the row that changed.
     expect:
+      salvage: none
       # THE RUN FAILED. `true` is what the parser says — see `notes` at the top.
       success: false
       error_contains: ['empty response from model (no_visible_content)']
@@ -127,6 +129,7 @@ rows:
       reports that verdict as a successful answer. Byte-identical to `truncated`
       and `error-envelope`.
     expect:
+      salvage: none
       success: false
       # `data` is None now, not the envelope: the envelope IS the failure.
       error_contains: ['empty response from model (no_visible_content)']
@@ -150,6 +153,7 @@ rows:
       §6.2 shape (two assistant *messages*) is unreachable: grok concatenates
       every turn into one `text` before printing.
     expect:
+      salvage: answer
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -172,6 +176,7 @@ rows:
       mis-served: nothing from the error object reaches any pattern table, which
       is why `classify_failure` is `null` here.
     expect:
+      salvage: none
       success: false
       error_contains: ['empty response from model (no_visible_content)']
       raw_contains: ["no_visible_content"]
@@ -208,6 +213,7 @@ rows:
       §6.1.1 measurement for a 5xx, and the capture happens to record the
       response headers grok echoes back, which name the failserver.
     expect:
+      salvage: none
       success: false
       raw_contains:
         - "API error (status 500 Internal Server Error)"
@@ -243,6 +249,7 @@ rows:
       categories this CLI's failures land on, and it is the one that matters
       most, since no retry fixes a credential.
     expect:
+      salvage: none
       success: false
       raw_contains:
         - "Unauthorized (401)"
@@ -265,6 +272,7 @@ rows:
       (10): an executor-level re-dispatch here doubles two requests, not ten.
       Note the apostrophe in `You’ve` is U+2019, not ASCII.
     expect:
+      salvage: none
       success: false
       raw_contains:
         - "hit the rate limit for your plan"
@@ -290,6 +298,7 @@ rows:
       404 is strictly more specific than "api error" — and this cell is one of
       the three that moved. See README, defect 3.
     expect:
+      salvage: none
       success: false
       raw_contains:
         - "The model `stub-model` does not exist or you do not have access to it."
@@ -313,6 +322,7 @@ rows:
       INVALID_MODEL_MARKERS entry) — which is the opposite of the upstream-404
       row above, and the reason both are committed.
     expect:
+      salvage: none
       success: false
       error_contains: ["unknown model id", "no-such-model-9999"]
       raw_contains: ["unknown model id", "no-such-model-9999"]
@@ -333,6 +343,7 @@ rows:
       otherwise have made this `server_error` like the 404 row. **One** chat
       request: not retried, which is what §7.2 wants.
     expect:
+      salvage: none
       success: false
       raw_contains:
         - "maximum context length is 8192 tokens"
@@ -356,6 +367,7 @@ rows:
       distinguishes at all — and it still classifies as `null`, because
       `error sending request` matches nothing in CONNECTION_ERROR_MARKERS.
     expect:
+      salvage: none
       success: false
       raw_contains:
         - "reqwest error stream: error sending request for url"

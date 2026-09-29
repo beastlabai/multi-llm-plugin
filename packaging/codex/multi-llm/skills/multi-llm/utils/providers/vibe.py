@@ -615,6 +615,36 @@ class VibeProvider(LLMProvider):
             answer = "".join(parts)
         return answer
 
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The last assistant message's text, never the transcript (D2.5).
+
+        The text :meth:`parse_output` reads: :meth:`_last_assistant_text` over
+        the ``--output json`` array. So the ask lane's answer text and the
+        review lanes' salvage read what the parser treats as the answer
+        (plans/ask-answer-recovery-and-false-success.md D2.5).
+
+        ``""`` — a final verdict — for everything else: no assistant entry, a
+        blank one, and any stdout that is not one JSON array. That last case is
+        load-bearing: vibe prints its config-validation diagnostics on stdout
+        as plain prose (the ``stdout-error`` fixture), which the generic
+        plain-text rule would save as the answer. ``generate`` always renders
+        ``--output json``, so a streamed or text-mode stdout is not an answer
+        this adapter asked for either.
+        """
+        try:
+            if not isinstance(stdout, str):
+                return ""
+            try:
+                entries = json.loads(stdout.strip())
+            except ValueError:
+                return ""
+            if not isinstance(entries, list):
+                return ""
+            answer = self._last_assistant_text(entries)
+            return answer if answer is not None and answer.strip() else ""
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""
+
     @staticmethod
     def _empty_stdout_reason(stderr: str) -> str:
         """Name the cause of a zero-byte stdout rather than restating the symptom."""

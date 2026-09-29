@@ -13,8 +13,9 @@ an overlay"). Relaxing the scrub to let a live key through would leave
 which is precisely what it exists to prevent. So this lane bypasses the wrapper
 and invokes the real binary at ``/opt/mllm/real/<binary>`` directly.
 
-WHAT IT MUST NOT BECOME. Not a hand-written command. Argv comes from the shipped
-adapter's ``build_command`` and the environment from its
+WHAT IT MUST NOT BECOME. Not a hand-written command. Argv and stdin come from the
+shipped adapter's ``build_command_for_transport(..., "argv")`` (aider's decline
+supply rides stdin) and the environment from its
 ``resolve_env``/``get_env``/``get_remove_env``, so the smoke exercises what a user
 actually runs. A bespoke command line here would green a lane while the adapter
 was broken.
@@ -637,8 +638,23 @@ def main() -> int:
         evidence["declared_supports_file_output"] = declared
         evidence["channel_path"] = str(channel_path)
 
-        argv = list(provider.build_command(prompt, args.model,
-                                           timeout_s=args.timeout_s))
+        # The ARGV TRANSPORT's pair, never `build_command` alone: for aider the
+        # read-only invocation is argv PLUS the decline supply it reads on stdin
+        # (plans/ask-answer-recovery-and-false-success.md D4.2). Spawned from
+        # `build_command` with no input, aider's "Add file to the chat?" prompts
+        # read EOF, EOF means yes, and the mention auto-add this lane must not
+        # pay for comes back silently. Every other adapter returns
+        # `stdin_text=None`, and `input=None` below leaves its spawn as it was.
+        from utils.providers.base import ReadOnlyInvocationRefused
+
+        try:
+            argv, stdin_text = provider.build_command_for_transport(
+                prompt, args.model, "argv", timeout_s=args.timeout_s,
+                cwd=str(workdir))
+        except ReadOnlyInvocationRefused as exc:
+            return bail(f"{args.cli} refused before spawn: {exc}",
+                        EXIT_CONTROL_UNAVAILABLE)
+        argv = list(argv)
         binary = args.binary or args.cli
         real = Path("/opt/mllm/real") / binary
         if not real.exists():
@@ -710,6 +726,7 @@ def main() -> int:
         try:
             proc = subprocess.run(argv, cwd=str(workdir), env=child,
                                   capture_output=True, text=True,
+                                  input=stdin_text,
                                   timeout=args.timeout_s)
             code, out, err = proc.returncode, proc.stdout, proc.stderr
         except subprocess.TimeoutExpired as exc:

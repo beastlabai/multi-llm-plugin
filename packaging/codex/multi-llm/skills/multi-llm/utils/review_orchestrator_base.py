@@ -3237,6 +3237,9 @@ def unexpected_writes(
     ran, and a check that blamed the model for them would fire on every run.
     :func:`porcelain_snapshot` already drops them before hashing; they are
     filtered again here so a snapshot taken without them still compares right.
+    The fan-out call sites pass :func:`fanout_ignore_prefixes`, which also
+    lists a declared workspace cache of an adapter in the same fan-out
+    (aider's tag cache; plans/ask-answer-recovery-and-false-success.md D4.3).
     Either snapshot ``None`` means the check was not run, and the answer is
     "nothing to report". Sorted by path, for the record.
     """
@@ -3429,6 +3432,53 @@ def bypass_ignore_prefixes(
     return prefixes
 
 
+def fanout_workspace_caches(anchor: Optional[Union[str, Path]] = None) -> List[str]:
+    """The ``workspace_caches`` every adapter in this slot's fan-out declares.
+
+    Read off the fan-out's roster (:data:`_FANOUT_ROSTER`, the source
+    :func:`boundaryless_sibling_count` reads), so aider's
+    ``.aider.tags.cache.v4/`` is exempt **only** when an aider slot was
+    scheduled beside this one (plans/ask-answer-recovery-and-false-success.md
+    D4.3, mirroring the container harness's per-CLI ``tool_artifacts``). A slot
+    run outside a fan-out has an empty roster and exempts nothing, and a
+    roster entry that cannot be resolved contributes nothing — the
+    conservative reading, since a change there then still counts.
+    """
+    caches: List[str] = []
+    for spec in _FANOUT_ROSTER.get():
+        try:
+            provider_name, _model = parse_model_spec(spec, anchor=anchor)
+            provider = get_provider(provider_name)
+        except Exception:  # noqa: BLE001 - an exemption may never end a slot
+            continue
+        for cache in getattr(provider, "workspace_caches", ()) or ():
+            if isinstance(cache, str) and cache.strip("/") and cache not in caches:
+                caches.append(cache)
+    return caches
+
+
+def fanout_ignore_prefixes(
+    plan_path: Union[str, Path],
+    project_root: Optional[str],
+    anchor: Optional[Union[str, Path]] = None,
+) -> List[str]:
+    """:func:`bypass_ignore_prefixes`, plus the fan-out's declared workspace caches.
+
+    The roster-aware form every porcelain call site uses (D4.3): the plugin's
+    own trees, then each ``workspace_caches`` entry of an adapter in this
+    slot's fan-out (:func:`fanout_workspace_caches`). Must be evaluated inside
+    the slot's task — where the roster context lives — not in a worker thread
+    started without it (``asyncio.to_thread`` copies the context, so either is
+    fine there). ``anchor`` resolves bare model specs; it defaults to
+    ``plan_path``.
+    """
+    prefixes = bypass_ignore_prefixes(plan_path, project_root)
+    for cache in fanout_workspace_caches(anchor if anchor is not None else plan_path):
+        if cache not in prefixes:
+            prefixes.append(cache)
+    return prefixes
+
+
 async def run_single_model(
     model_spec: str,
     plan_path: str,
@@ -3585,7 +3635,12 @@ async def run_single_model(
             "source": "not-dispatched",
         }
     tree_before: Optional[PorcelainSnapshot] = None
-    ignore_prefixes = bypass_ignore_prefixes(plan_path, project_root)
+    # The roster-aware form (plans/ask-answer-recovery-and-false-success.md
+    # D4.3): an aider sibling's `.aider.tags.cache.v4/` is not this slot's
+    # write. Computed here, in the slot's task, where the fan-out roster lives;
+    # the before snapshot, `_bypass_write_check` and `unexpected_writes` all
+    # read this one list.
+    ignore_prefixes = fanout_ignore_prefixes(plan_path, project_root, anchor=plan_path)
     if sandbox.fallback:
         print(f"[{display_name}] {sandbox.reason}")
     if porcelain_check_applies(sandbox):

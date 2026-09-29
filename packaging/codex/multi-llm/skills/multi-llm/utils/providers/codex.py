@@ -809,6 +809,17 @@ class CodexProvider(LLMProvider):
         "exceeded retry limit, last status: 429",
     )
 
+    # A stderr line that is deliberately NOT a verdict, recorded rather than
+    # fixed (plans/ask-answer-recovery-and-false-success.md T5.2):
+    #   ERROR codex_core::tools::router: error=collab spawn failed: no thread with id: <uuid>
+    # A `spawn_agent` (collab) sub-agent spawn failed inside the slot. Seen once
+    # on the 2026-09-26 ask run whose 734 s codex answer was discarded, and
+    # twice on the 2026-09-28 re-run of that question, where the slot still
+    # ended `done`. Observed, non-fatal, and not the cause of the discard (the
+    # `pwd` audit false alarm and aider's tag cache were: T5.1, T4.3). It
+    # matches none of the patterns above, so `classify_failure` gives it no
+    # verdict. Watch for recurrence; if it recurs, open a task.
+
     # §7.6(b). A constant, not a property: nothing about this envelope moves with
     # the resolved slot timeout — codex takes no timeout flag and this adapter
     # sets no env at all, so `configurable_by` is empty *from the harness's side*

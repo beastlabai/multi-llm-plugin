@@ -1209,7 +1209,9 @@ class TestSalvageTextOnTheLosingPaths:
         seen = []
         with patch.object(
             llm_client, "_attach_salvage_text",
-            side_effect=lambda details, provider, stdout: seen.append(stdout),
+            # `**_`: the sites now pass the one hook reading as `hook_text`
+            # (plans/ask-answer-recovery-and-false-success.md D2.2).
+            side_effect=lambda details, provider, stdout, **_: seen.append(stdout),
         ):
             self._invoke(return_value=self._run("nonzero stdout"))
             self._invoke(return_value=self._run("unparseable", 0))
@@ -1271,6 +1273,722 @@ class TestSalvageTextOnTheLosingPaths:
         text = details[SALVAGE_TEXT_KEY]
         assert text.startswith("line 0 of a long refusal")
         assert len(text.encode("utf-8")) <= MAX_LOG_STREAM_BYTES
+
+
+# --------------------------------------------------------------------------- #
+# `details["answer_text"]`: the ask lane's whole answer
+# (plans/ask-answer-recovery-and-false-success.md D2.2, T2.1), and the
+# `incomplete` verdict riding on `details` (D3.1, T3.1's llm_client half).
+# --------------------------------------------------------------------------- #
+
+import re  # noqa: E402
+from typing import Any, List, Tuple  # noqa: E402
+
+from utils.json_extractor import looks_like_ndjson  # noqa: E402
+from utils.llm_client import (  # noqa: E402
+    ANSWER_TEXT_KEY,
+    MAX_ANSWER_TEXT_BYTES,
+    _attach_answer_text,
+    _salvage_hook_text,
+    generic_answer_text,
+)
+from utils.provider_registry import _PROVIDERS, get_provider  # noqa: E402
+from utils.providers.base import classify_streams  # noqa: E402
+from utils.providers.kilocode import KiloCodeProvider  # noqa: E402
+
+from .test_provider_fixture_rows import MANIFESTS  # noqa: E402
+from .test_salvage_text import (  # noqa: E402
+    _codex_stdout_captures,
+    _opencode_stdout_captures,
+)
+
+FIXTURES = Path(__file__).parent / "fixtures"
+KILO_SPEC = "kilocode:moonshotai/kimi-k3"
+ANSWER_CAP_MARKER = f"\n... [answer text truncated at {MAX_ANSWER_TEXT_BYTES} B]"
+
+#: One spec per adapter that `invoke_with_provider` renders offline.
+SPECS = {
+    "agy": "agy:stub-model",
+    "aider": "aider:openai/stub-model",
+    "claude-code": "claude-code:haiku",
+    "cline": "cline:stub-model",
+    "codex": "codex:gpt-5",
+    "copilot": "copilot:gpt-5",
+    "cursor-agent": "cursor-agent:gpt-4",
+    "gemini": "gemini:gemini-2.5-flash",
+    "goose": "goose:stub-model",
+    "grok": "grok:stub-model",
+    "kilocode": KILO_SPEC,
+    "kimi": "kimi:stub-model",
+    "muse": "muse:stub-model",
+    "omp": "omp:stub/stub-model",
+    "opencode": "opencode:openrouter/stub",
+    "pi": PI_SPEC,
+    "qwen-code": "qwen-code:stub-model",
+    "vibe": "vibe:stub-model",
+}
+
+#: grok's answer file from `runs/20260922T084502Z/opencode-ask`, byte for byte:
+#: the error body the ask fallback once saved as an answer (§3.1). Same bytes as
+#: `tests/test_stray_write_paths.py`'s `GROK_ERROR_BODY`.
+GROK_ERROR_BODY = (
+    '{"type":"error","message":"Not signed in. To authenticate without a '
+    'browser, run:\\n  grok login --device-code\\n\\nAlternatively, set the '
+    'XAI_API_KEY environment variable or run `grok login` on a machine with '
+    'a browser."}'
+)
+
+#: Three direct answers a question may ask for, which a `"plain"` adapter
+#: returns whole and an `"auto"` one reads as transport.
+DIRECT_JSON_ANSWERS = {
+    "object": '{"recommendation":"retry"}',
+    "array": "[1, 2, 3]",
+    "ndjson": (
+        '{"type":"a","n":1}\n'
+        '{"type":"b","n":2}\n'
+        '{"type":"c","n":3}\n'
+    ),
+}
+
+#: A prose answer about auth and rate limits: the shared classifier tables match
+#: it, an adapter's own exit-zero markers do not.
+AUTH_PROSE = (
+    "Short answer: the service returns 401 Unauthorized when the key is wrong, "
+    "and 429 Too Many Requests once you hit the rate limit."
+)
+
+
+def _fixture(relative: str) -> str:
+    return (FIXTURES / relative).read_bytes().decode("utf-8")
+
+
+def _spawn_returning(stdout, *, returncode=0, timeout=False, stderr=""):
+    """A stand-in for `_run_provider_cli`: the child printed ``stdout``."""
+    def spawn(cmd, **_kwargs):
+        if timeout:
+            exc = subprocess.TimeoutExpired(cmd=cmd, timeout=600)
+            exc.stdout = stdout
+            exc.stderr = stderr
+            raise exc
+        return subprocess.CompletedProcess(cmd, returncode, stdout, stderr)
+    return spawn
+
+
+def _invoke_answer(spec, stdout, *, returncode=0, timeout=False, want=True, **kwargs):
+    """`invoke_with_provider` over the real adapter, only the subprocess stubbed."""
+    binary = spec.split(":", 1)[0]
+    with patch.object(
+        llm_client, "_run_provider_cli",
+        side_effect=_spawn_returning(stdout, returncode=returncode, timeout=timeout),
+    ), patch("shutil.which", return_value=f"/usr/bin/{binary}"):
+        return invoke_with_provider("Q", spec, want_answer_text=want, **kwargs)
+
+
+def _nemotron_markdown() -> str:
+    """A 124-line markdown answer holding a fenced JSON block (§2.1's shape).
+
+    kilocode's parser finds the block, so the parse is ``success: True`` with a
+    dict ``data`` and no ``raw`` — the run whose other 104 lines were lost.
+    """
+    lines = ["# Additional findings beyond the existing audit", ""]
+    finding = 0
+    while len(lines) < 100:
+        finding += 1
+        lines += [
+            f"## Finding {finding}: session token reuse in path {finding}",
+            "",
+            f"The handler at step {finding} reads the token before it is refreshed.",
+            "- Impact: a stale token is accepted for one more request.",
+            "- Fix: refresh before the read, not after.",
+            "",
+        ]
+    lines += ["## Summary as data", "", "```json"]
+    lines += ['{"findings": %d, "highest": "medium"}' % finding, "```", ""]
+    while len(lines) < 124:
+        lines.append(f"- Follow-up {len(lines)}: re-check the audit's scope notes.")
+    return "\n".join(lines[:124]) + "\n"
+
+
+def _long_prose_with_fenced_json(approx_bytes: int) -> str:
+    """A prose answer over the salvage window, with a fenced JSON block in it."""
+    head = "The first line of a long answer: the plan is sound with two gaps.\n\n"
+    paragraph = (
+        "The retry ladder is described twice with different budgets, and the "
+        "second description is the one the tasks implement. " * 4
+    ) + "\n\n"
+    body = paragraph * max(1, approx_bytes // (2 * len(paragraph)))
+    block = '```json\n{"gaps": 2, "severity": "medium"}\n```\n\n'
+    return head + body + block + body + "That is the whole answer."
+
+
+class TestAnswerTextOnEveryExitThatRanTheChild:
+    """``want_answer_text=True`` puts the whole answer on ``details["answer_text"]``."""
+
+    KILLED_MID_TOOLCALL = _fixture("pi/killed-mid-toolcall.stdout.txt")
+    KILLED_MID_TEXT = _fixture("pi/killed-mid-text.stdout.txt")
+
+    def test_the_124_line_kilocode_answer_survives_byte_for_byte(self):
+        stdout = _nemotron_markdown()
+        assert len(stdout.splitlines()) == 124
+        parsed = KiloCodeProvider().parse_output(stdout, "")
+        assert parsed["success"] is True
+        assert isinstance(parsed["data"], dict) and "raw" not in parsed
+
+        result = _invoke_answer(KILO_SPEC, stdout)
+
+        assert result["success"] is True
+        assert result["details"][ANSWER_TEXT_KEY] == stdout
+
+    @pytest.mark.parametrize("path", ["exit-0 parse failure", "non-zero exit", "timeout"])
+    def test_a_killed_tool_call_gives_empty_answer_text(self, path):
+        result = _invoke_answer(
+            PI_SPEC, self.KILLED_MID_TOOLCALL,
+            returncode=1 if path == "non-zero exit" else 0,
+            timeout=path == "timeout",
+        )
+
+        assert result["success"] is False
+        assert result["details"][ANSWER_TEXT_KEY] == ""
+
+    def test_a_secret_in_a_plain_answer_is_redacted(self):
+        secret = _synthesize("anthropic-api-key", "llm-client-answer-text-plain")
+        stdout = f"The config you pasted leaks a key: {secret}\nRotate it first.\n"
+
+        result = _invoke_answer(KILO_SPEC, stdout)
+
+        answer = result["details"][ANSWER_TEXT_KEY]
+        assert secret not in answer
+        assert "<redacted:" in answer
+        assert answer.startswith("The config you pasted leaks a key: ")
+
+    def test_a_secret_in_a_hooked_answer_is_redacted(self):
+        """pi's success keeps ``raw`` unredacted; ``answer_text`` never is."""
+        secret = _synthesize("anthropic-api-key", "llm-client-answer-text-pi")
+        answer_in = f"Rotate the key {secret} before anything else."
+        stdout = _pi_stream(final_text=answer_in, final_finished=True)
+
+        result = _invoke_answer(PI_SPEC, stdout)
+
+        answer = result["details"][ANSWER_TEXT_KEY]
+        assert secret not in answer
+        assert "<redacted:" in answer
+        assert answer.startswith("Rotate the key ")
+
+    def test_a_2_mib_stdout_keeps_its_first_mib(self):
+        stdout = "".join(f"line {i} of a very long answer\n" for i in range(80_000))
+        assert len(stdout.encode("utf-8")) > 2 * MAX_ANSWER_TEXT_BYTES
+
+        result = _invoke_answer(KILO_SPEC, stdout)
+
+        answer = result["details"][ANSWER_TEXT_KEY]
+        assert len(answer.encode("utf-8")) <= MAX_ANSWER_TEXT_BYTES
+        assert answer.startswith("line 0 of a very long answer\n")
+        assert answer.endswith(ANSWER_CAP_MARKER)
+        assert stdout.startswith(answer[: -len(ANSWER_CAP_MARKER)])
+
+    def test_a_60_kb_plain_answer_keeps_its_first_line(self):
+        """The cut ``_bound_salvage_text`` would make — from the block's ``{`` —
+        is never made on ``answer_text``."""
+        prose = _long_prose_with_fenced_json(60 * 1024)
+        assert len(prose.encode("utf-8")) > MAX_LOG_STREAM_BYTES
+        assert not llm_client._bound_salvage_text(prose).startswith("The first line")
+
+        assert generic_answer_text(prose) == prose
+        result = _invoke_answer(KILO_SPEC, prose)
+        assert result["details"][ANSWER_TEXT_KEY] == prose
+
+    def test_a_60_kb_hooked_answer_keeps_its_first_line_and_salvage_keeps_its_window(self):
+        prose = _long_prose_with_fenced_json(60 * 1024)
+        stdout = _pi_stream(final_text=prose, final_finished=True)
+
+        success = _invoke_answer(PI_SPEC, stdout)
+        losing = _invoke_answer(PI_SPEC, stdout, returncode=1)
+
+        assert success["success"] is True
+        assert success["details"][ANSWER_TEXT_KEY] == prose
+        assert losing["details"][ANSWER_TEXT_KEY] == prose
+        # The same hook reading, cut the other way for salvage (D2.2).
+        salvage = losing["details"][SALVAGE_TEXT_KEY]
+        assert salvage.startswith('{"gaps": 2')
+        assert len(salvage.encode("utf-8")) <= MAX_LOG_STREAM_BYTES
+
+    #: Every pi and omp manifest row the adapter itself parses as a success.
+    PI_OMP_SUCCESS_ROWS = sorted(
+        (provider, row)
+        for provider in ("pi", "omp")
+        for row, body in MANIFESTS[provider]["rows"].items()
+        if body.get("stdout")
+        and get_provider(provider).parse_output(
+            _fixture(f"{provider}/{body['stdout']}"), ""
+        ).get("success")
+    )
+
+    def test_pi_and_omp_both_have_success_rows(self):
+        assert {provider for provider, _ in self.PI_OMP_SUCCESS_ROWS} == {"pi", "omp"}
+
+    @pytest.mark.parametrize(
+        "row", PI_OMP_SUCCESS_ROWS, ids=[f"{p}/{r}" for p, r in PI_OMP_SUCCESS_ROWS]
+    )
+    def test_pi_and_omp_keep_their_answers_without_raw(self, row):
+        """On every row the adapter parses as a success, ``answer_text`` is the
+        text it puts in ``raw`` (redaction aside): ask stops reading ``raw``
+        (D2.3), so this is what keeps those answers."""
+        provider, name = row
+        stdout = _fixture(f"{provider}/{MANIFESTS[provider]['rows'][name]['stdout']}")
+        parsed = get_provider(provider).parse_output(stdout, "")
+
+        result = _invoke_answer(SPECS[provider], stdout)
+
+        assert result["success"] is True
+        assert parsed["raw"].strip()
+        assert result["details"][ANSWER_TEXT_KEY] == llm_client._redact(parsed["raw"])
+
+    # -- the one hook reading ------------------------------------------------
+
+    def _pi_path_stdout(self, path):
+        if path == "success":
+            return _pi_stream(final_text="[]", final_finished=True)
+        return self.KILLED_MID_TEXT
+
+    @staticmethod
+    def _path_kwargs(path):
+        return {
+            "returncode": 1 if path == "non-zero exit" else 0,
+            "timeout": path == "timeout",
+        }
+
+    EXIT_PATHS = ("success", "exit-0 parse failure", "non-zero exit", "timeout")
+
+    @pytest.mark.parametrize("path", EXIT_PATHS)
+    def test_a_raising_hook_gives_empty_for_both_keys_and_runs_once(self, path):
+        with patch.object(
+            PiProvider, "salvage_text", side_effect=RuntimeError("boom")
+        ) as hook:
+            result = _invoke_answer(
+                PI_SPEC, self._pi_path_stdout(path), **self._path_kwargs(path)
+            )
+
+        assert hook.call_count == 1
+        assert result["details"][ANSWER_TEXT_KEY] == ""
+        if path == "success":
+            assert result["success"] is True
+            assert SALVAGE_TEXT_KEY not in result["details"]
+        else:
+            assert result["details"][SALVAGE_TEXT_KEY] == ""
+
+    @pytest.mark.parametrize("path", EXIT_PATHS)
+    def test_without_the_flag_no_key_and_salvage_text_is_unchanged(self, path):
+        stdout = self._pi_path_stdout(path)
+
+        without = _invoke_answer(PI_SPEC, stdout, want=False, **self._path_kwargs(path))
+        with_flag = _invoke_answer(PI_SPEC, stdout, **self._path_kwargs(path))
+
+        assert ANSWER_TEXT_KEY not in without["details"]
+        assert ANSWER_TEXT_KEY in with_flag["details"]
+        assert without["details"].get(SALVAGE_TEXT_KEY) == with_flag["details"].get(
+            SALVAGE_TEXT_KEY
+        )
+
+    def test_the_hook_reading_helper_reads_the_three_answers(self):
+        stub = MagicMock()
+        stub.salvage_text.return_value = "text"
+        assert _salvage_hook_text(stub, "x") == "text"
+        stub.salvage_text.return_value = ["not", "text"]
+        assert _salvage_hook_text(stub, "x") is None
+        stub.salvage_text.side_effect = RuntimeError("boom")
+        assert _salvage_hook_text(stub, "x") == ""
+        assert _salvage_hook_text(object(), "x") is None
+
+    # -- the returns that never ran the child --------------------------------
+
+    def test_no_key_when_the_binary_is_missing(self):
+        with patch("shutil.which", return_value=None):
+            result = invoke_with_provider("Q", PI_SPEC, want_answer_text=True)
+
+        assert result["error_code"] == ERROR_BINARY_NOT_FOUND
+        assert ANSWER_TEXT_KEY not in result["details"]
+
+    def test_no_key_on_a_launch_failure(self):
+        with patch.object(
+            llm_client, "_run_provider_cli", side_effect=PermissionError("denied")
+        ), patch("shutil.which", return_value="/usr/bin/pi"):
+            result = invoke_with_provider("Q", PI_SPEC, want_answer_text=True)
+
+        assert result["error_code"] == ERROR_SUBPROCESS_FAILED
+        assert ANSWER_TEXT_KEY not in result["details"]
+
+    def test_answer_text_never_reaches_the_log(self, tmp_path):
+        log = tmp_path / "log.txt"
+        stdout = _nemotron_markdown()
+        binary = "kilocode"
+        with patch.object(
+            llm_client, "_run_provider_cli", side_effect=_spawn_returning(stdout)
+        ), patch("shutil.which", return_value=f"/usr/bin/{binary}"):
+            result = invoke_with_provider(
+                "Q", KILO_SPEC, log_file=log, want_answer_text=True
+            )
+
+        assert result["details"][ANSWER_TEXT_KEY] == stdout
+        text = log.read_text(encoding="utf-8")
+        assert "answer_text" not in text
+        # The log keeps its own bound: the answer's head is not in it.
+        assert "# Additional findings beyond the existing audit" not in text
+
+
+class TestGenericAnswerText:
+    """The reducer for an adapter whose hook has no opinion (D2.2, rules 1-3)."""
+
+    def test_a_clean_claude_code_envelope_unwraps(self):
+        stdout = _fixture("claude-code/success.stdout.txt")
+        assert generic_answer_text(stdout) == json.loads(stdout)["result"]
+
+    def test_a_clean_cursor_agent_envelope_unwraps(self):
+        assert generic_answer_text(_fixture("cursor-agent/success.stdout.txt")) == '["ok"]'
+
+    @pytest.mark.parametrize("relative", [
+        "claude-code/error-envelope.stdout.txt",
+        "cursor-agent/exit-zero-failure.stdout.txt",
+    ])
+    def test_an_is_error_envelope_gives_nothing(self, relative):
+        stdout = _fixture(relative)
+        assert json.loads(stdout)["is_error"] is True
+        assert generic_answer_text(stdout) == ""
+
+    def test_groks_error_body_gives_nothing(self):
+        assert generic_answer_text(GROK_ERROR_BODY) == ""
+
+    def test_an_ndjson_stream_gives_nothing(self):
+        stdout = _fixture("pi/killed-mid-toolcall.stdout.txt")
+        assert looks_like_ndjson(stdout)
+        assert generic_answer_text(stdout) == ""
+
+    def test_a_gemini_response_unwraps(self):
+        stdout = _fixture("gemini/success.stdout.txt")
+        assert generic_answer_text(stdout) == json.loads(stdout)["response"]
+
+    def test_an_agy_error_status_without_an_error_key_gives_nothing(self):
+        stdout = json.dumps({
+            "conversation_id": "", "status": "ERROR",
+            "response": "Partial words before the failure.",
+        })
+        assert generic_answer_text(stdout) == ""
+
+    def test_an_agy_success_envelope_unwraps(self):
+        stdout = json.dumps({
+            "conversation_id": "conv-1", "status": "SUCCESS",
+            "response": "The plan is fine.",
+        })
+        assert generic_answer_text(stdout) == "The plan is fine."
+
+    def test_an_ansi_coloured_plain_stdout_comes_back_without_escapes(self):
+        stdout = "\x1b[1mBold heading\x1b[0m\nThe \x1b[32mplan\x1b[0m is fine.\n"
+        assert generic_answer_text(stdout) == "Bold heading\nThe plan is fine.\n"
+
+    @pytest.mark.parametrize("name", sorted(DIRECT_JSON_ANSWERS))
+    def test_plain_framing_returns_a_direct_json_answer_whole(self, name):
+        stdout = DIRECT_JSON_ANSWERS[name]
+        assert generic_answer_text(stdout, framing="plain") == stdout
+        assert generic_answer_text(stdout, framing="auto") == ""
+
+    @pytest.mark.parametrize("framing", ["auto", "plain"])
+    def test_an_adapter_marker_turns_rule_3_into_nothing(self, framing):
+        markers = (re.compile(r"error: 401 unauthorized"),)
+        stdout = "\x1b[91mError: 401 Unauthorized\x1b[0m: invalid API key\n"
+
+        assert generic_answer_text(
+            stdout, framing=framing, exit_zero_markers=markers
+        ) == ""
+        assert generic_answer_text(
+            "The plan is sound.\n", framing=framing, exit_zero_markers=markers
+        ) == "The plan is sound.\n"
+
+    @pytest.mark.parametrize("framing", ["auto", "plain"])
+    def test_only_the_adapters_markers_never_the_shared_tables(self, framing):
+        """A prose answer about 401s and rate limits trips the shared classifier
+        tables, and still comes back whole: they are never consulted here."""
+        assert classify_streams(AUTH_PROSE, "") is not None
+        markers = (re.compile(r"error: 401 unauthorized"),)
+
+        assert generic_answer_text(
+            AUTH_PROSE, framing=framing, exit_zero_markers=markers
+        ) == AUTH_PROSE
+
+    def test_whitespace_is_nothing(self):
+        assert generic_answer_text("  \n\t\n") == ""
+        assert generic_answer_text(None) == ""
+
+    @pytest.mark.parametrize("name", sorted(DIRECT_JSON_ANSWERS))
+    def test_a_direct_json_answer_survives_the_real_kilocode_adapter(self, name):
+        """kilocode's parser makes each of these non-string ``data`` with no
+        ``raw``; ``"plain"`` framing is what keeps the answer (D2.2)."""
+        stdout = DIRECT_JSON_ANSWERS[name]
+        parsed = KiloCodeProvider().parse_output(stdout, "")
+        assert not isinstance(parsed.get("data"), str)
+        assert "raw" not in parsed
+
+        result = _invoke_answer(KILO_SPEC, stdout)
+
+        assert result["details"][ANSWER_TEXT_KEY] == stdout
+
+
+# --------------------------------------------------------------------------- #
+# Goal 3 as a sweep: over every adapter's committed stdout captures,
+# `answer_text` is never transport.
+# --------------------------------------------------------------------------- #
+
+#: Keys only a transport envelope or record carries, never a model's answer.
+_ENVELOPE_KEYS = frozenset({
+    "is_error", "session_id", "sessionId", "conversation_id", "role",
+    "stopReason", "subtype",
+})
+_NO_JSON = object()
+
+
+def _whole_json(text: str) -> Any:
+    try:
+        return json.loads(text)
+    except ValueError:
+        return _NO_JSON
+
+
+def _stdout_captures() -> List[Tuple[str, str]]:
+    """(provider, path under ``tests/fixtures/<provider>/``) for every capture."""
+    rows = []
+    for directory in sorted(p for p in FIXTURES.iterdir() if p.is_dir()):
+        provider = directory.name
+        if provider not in _PROVIDERS:
+            continue
+        if provider == "codex":
+            found = set(_codex_stdout_captures())
+        elif provider == "opencode":
+            found = set(_opencode_stdout_captures())
+        else:
+            found = {
+                body["stdout"]
+                for body in ((MANIFESTS.get(provider) or {}).get("rows") or {}).values()
+                if body.get("stdout") and "not_applicable" not in body
+            }
+            found |= {
+                path.relative_to(directory).as_posix()
+                for path in directory.rglob("*")
+                if path.is_file() and ".stdout." in path.name
+            }
+        rows += [(provider, relative) for relative in sorted(found)]
+    return rows
+
+
+def _transport_records(stdout: str) -> List[Any]:
+    """The stdout's own JSON records: the whole value and its elements, or —
+    for a stream (two or more lines that are JSON objects) — each line.
+
+    A plain-text stdout has no records: aider prints its reply as a bare line,
+    and a reply that is a JSON array is the answer, not a transport record.
+    """
+    records = []
+    whole = _whole_json(stdout)
+    if whole is not _NO_JSON:
+        records.append(whole)
+        if isinstance(whole, list):
+            records.extend(whole)
+    lines = [_whole_json(line) for line in stdout.splitlines()]
+    if sum(isinstance(value, dict) for value in lines) >= 2:
+        records.extend(value for value in lines if value is not _NO_JSON)
+    return [record for record in records if isinstance(record, (dict, list))]
+
+
+def _is_envelope(value: Any) -> bool:
+    if isinstance(value, dict):
+        return value.get("type") in ("result", "error") or bool(
+            _ENVELOPE_KEYS & value.keys()
+        )
+    if isinstance(value, list):
+        return any(_is_envelope(item) for item in value if isinstance(item, dict))
+    return False
+
+
+GOAL_3_ROWS = _stdout_captures()
+
+
+@pytest.mark.parametrize(
+    "provider,relative", GOAL_3_ROWS, ids=[f"{p}/{r}" for p, r in GOAL_3_ROWS]
+)
+def test_goal_3_answer_text_is_never_transport(provider, relative):
+    """Never an event stream, never the raw stdout when that is one JSON value,
+    never an envelope or record object.
+
+    A correct answer may itself be a JSON document (claude-code's and gemini's
+    ``success`` rows unwrap to a findings array), so "never parses as JSON"
+    would fail on correct output. A ``"plain"``-framed adapter's JSON or NDJSON
+    answer *is* its raw stdout, so it is exempt from the first two clauses and
+    from matching its own records; the envelope-key clause still holds. No
+    ``"plain"`` adapter has a committed capture today (kilocode has none), so
+    the exemption covers no row yet.
+    """
+    stdout = _fixture(f"{provider}/{relative}")
+    adapter = get_provider(provider)
+    details = {}
+
+    _attach_answer_text(details, adapter, stdout)
+
+    answer = details[ANSWER_TEXT_KEY]
+    plain = getattr(adapter, "answer_framing", "auto") == "plain"
+    if not plain:
+        assert not looks_like_ndjson(answer), f"an event stream: {answer[:200]!r}"
+        if _whole_json(stdout) is not _NO_JSON:
+            assert answer.strip() != stdout.strip(), "the raw JSON stdout"
+    value = _whole_json(answer)
+    if value is _NO_JSON:
+        return
+    assert not _is_envelope(value), f"an envelope or record: {answer[:200]!r}"
+    if not plain:
+        assert value not in _transport_records(stdout), f"a record: {answer[:200]!r}"
+
+
+def test_the_goal_3_checks_catch_what_they_guard_against():
+    """The sweep's predicates are live: each flags the transport it names."""
+    envelope = _fixture("claude-code/success.stdout.txt")
+    stream = _fixture("pi/killed-mid-toolcall.stdout.txt")
+    first_event = stream.splitlines()[0]
+
+    assert _is_envelope(json.loads(envelope))
+    assert _is_envelope(json.loads(GROK_ERROR_BODY))
+    assert looks_like_ndjson(stream)
+    assert json.loads(first_event) in _transport_records(stream)
+    # A plain-text reply line that is JSON is not a record of anything.
+    assert _transport_records("Banner\n\n[1, 2]\n\nTokens: 1 sent.\n") == []
+
+
+def test_the_goal_3_sweep_covers_every_adapter_with_captures():
+    swept = {provider for provider, _ in GOAL_3_ROWS}
+    with_dirs = {
+        p.name for p in FIXTURES.iterdir() if p.is_dir() and p.name in _PROVIDERS
+    }
+    # kilocode's directory holds only its model catalog (§14).
+    assert swept == with_dirs - {"kilocode"}
+    assert len(GOAL_3_ROWS) > 300
+
+
+# --------------------------------------------------------------------------- #
+# `incomplete` rides on `details` (D3.1).
+# --------------------------------------------------------------------------- #
+
+class TestIncompleteRidesOnDetails:
+    """``parse_output``'s ``incomplete`` moves to ``details["incomplete"]``.
+
+    It is a completion verdict, not an ``error_code``: pi's ``length`` rows
+    still end ``PARSE_ERROR`` with no code of the adapter's own, so
+    ``invoke_with_file_output`` still looks for a findings file.
+    """
+
+    LENGTH_ROWS = ("length", "length-recovery")
+
+    @staticmethod
+    def _pi(row):
+        return _fixture(f"pi/{MANIFESTS['pi']['rows'][row]['stdout']}")
+
+    @pytest.mark.parametrize("row", LENGTH_ROWS)
+    def test_a_length_stop_is_incomplete_beside_parse_error(self, row):
+        result = _invoke_answer(PI_SPEC, self._pi(row), want=False)
+
+        assert result["success"] is False
+        assert result["error_code"] == ERROR_PARSE_ERROR
+        assert result["details"].get("incomplete") is True
+        assert "incomplete" not in result  # moved, not copied
+
+    @pytest.mark.parametrize("case", ["success", "multi-assistant", "prose"])
+    def test_a_finished_answer_carries_no_incomplete(self, case):
+        if case == "prose":
+            stdout = _pi_stream(
+                final_text="The plan is sound; ship it.", final_finished=True
+            )
+        else:
+            stdout = self._pi(case)
+
+        result = _invoke_answer(PI_SPEC, stdout, want=False)
+
+        if case == "prose":
+            assert result["error_code"] == ERROR_PARSE_ERROR
+        else:
+            assert result["success"] is True
+        assert "incomplete" not in result["details"]
+
+    def test_the_schema_verdict_rebuild_keeps_it(self):
+        """The rebuild keeps only ``details``; the key is already there."""
+        from types import SimpleNamespace
+
+        parsed = {"success": False, "error": "Truncated output", "raw": "x",
+                  "data": None, "incomplete": True}
+        verdict = SimpleNamespace(warning=None, failure_reason="schema_violation",
+                                  retryable=True, marker=None, data=None)
+        with patch.object(PiProvider, "parse_output", return_value=parsed), \
+             patch.object(llm_client.structured_output, "schema_for_dispatch",
+                          return_value=(None, "unvalidated")), \
+             patch.object(llm_client.structured_output, "classify_attempt",
+                          return_value=verdict):
+            result = _invoke_answer(
+                PI_SPEC, "anything", want=False, schema_phase="review-plan"
+            )
+
+        assert result["error_code"] == ERROR_PARSE_ERROR
+        assert result["details"]["failure_reason"] == "schema_violation"
+        assert result["details"]["incomplete"] is True
+
+    @pytest.mark.parametrize("row", LENGTH_ROWS)
+    def test_the_file_channel_still_looks_for_a_findings_file(self, row, tmp_path):
+        findings = [{"title": "Written before the cut", "desc": "d",
+                     "importance": "high"}]
+        stdout = self._pi(row)
+
+        def spawn(cmd, **kwargs):
+            text = " ".join(map(str, cmd)) + str(kwargs.get("input") or "")
+            target = Path(re.search(r"WRITE-TO (\S+\.json)", text).group(1))
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(json.dumps(findings), encoding="utf-8")
+            return subprocess.CompletedProcess(cmd, 0, stdout, "")
+
+        with patch.object(llm_client, "_run_provider_cli", side_effect=spawn), \
+             patch("shutil.which", return_value="/usr/bin/pi"):
+            result = invoke_with_file_output(
+                prompt_template="WRITE-TO {output_json_path}",
+                model_spec=PI_SPEC,
+                prompt_context={},
+                output_dir=tmp_path,
+                phase="review-plan",
+            )
+
+        assert result["success"] is True
+        assert result["source"] == "file"
+        assert result["data"] == findings
+        assert result["details"].get("incomplete") is True
+
+    EXIT_ZERO_LABELLED = sorted(
+        (provider, row)
+        for provider, manifest in MANIFESTS.items()
+        for row, body in (manifest.get("rows") or {}).items()
+        if body.get("exit_code") == 0 and body.get("stdout")
+        and (body.get("expect") or {}).get("salvage") in ("partial", "answer")
+    )
+
+    @pytest.mark.parametrize(
+        "provider,row", EXIT_ZERO_LABELLED,
+        ids=[f"{p}/{r}" for p, r in EXIT_ZERO_LABELLED],
+    )
+    def test_the_labels_and_the_key_agree(self, provider, row):
+        """Every exit-0 row labelled ``partial`` is incomplete; no ``answer`` is."""
+        body = MANIFESTS[provider]["rows"][row]
+        stdout = _fixture(f"{provider}/{body['stdout']}")
+
+        result = _invoke_answer(SPECS[provider], stdout, want=False)
+
+        expected = body["expect"]["salvage"] == "partial"
+        assert bool(result["details"].get("incomplete")) is expected
+
+    def test_the_label_sweep_has_both_kinds(self):
+        labels = {
+            MANIFESTS[p]["rows"][r]["expect"]["salvage"]
+            for p, r in self.EXIT_ZERO_LABELLED
+        }
+        assert labels == {"partial", "answer"}
 
 
 class TestIsValidParsedData:
@@ -2282,6 +3000,30 @@ class TestDiffAccessBlock:
 
         assert access.mode == "inline"
         assert str(art.root) not in access.text
+
+    def test_aider_gets_the_change_inline_even_with_the_phase_dir_in_the_repo(self, art):
+        """aider's `/ask` has no file tool and its stdin supply declines every
+        mention add, so a path prompt would leave it with neither the diff files
+        (`{diff_dir}` is a directory, never passed by `--read`) nor the changed
+        code. Its slot takes the inline branch whatever the phase dir's place
+        (plan: ask-answer-recovery-and-false-success D4.2)."""
+        assert str(art.phase).startswith(str(art.repo))
+
+        access = self.render("aider:openrouter/some/model", art)
+
+        assert (access.mode, access.read_scope) == ("inline", "none")
+        for body in (self.PLAN_TEXT, self.MANIFEST_TEXT, self.SOURCE_DIFF, self.TEST_DIFF):
+            assert body.rstrip("\n") in access.text
+        assert str(art.diff_dir) not in access.text
+
+    def test_aider_over_the_cap_is_unsupported_not_a_path_prompt(self, art):
+        (art.diff_dir / "3-utils-big.py.diff").write_text(
+            "+" + "x" * (100 * 1024) + "\n", encoding="utf-8"
+        )
+
+        access = self.render("aider:openrouter/some/model", art)
+
+        assert (access.mode, access.text) == ("unsupported", "")
 
     def test_the_cap_leaves_room_under_one_argv_string(self):
         from utils.llm_client import INLINE_DIFF_CAP_BYTES

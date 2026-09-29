@@ -2729,6 +2729,38 @@ class OpenCodeProvider(LLMProvider):
         return None
 
     def parse_output(self, stdout: str, stderr: str) -> Dict[str, Any]:
+        """:meth:`_parse_answer`, plus ``incomplete`` on a turn cut short.
+
+        ``parse_output`` is only reached on exit 0, and one measured exit-0
+        stream ends before its answer: the turn ``run`` ended on an
+        auto-rejected permission (:meth:`classify_structural`, 1.18.32's
+        ``denied_permission_turn_end``). Its last message is narration ("I'll
+        read the exact plan rows …"), which the ask lane would otherwise count
+        as the answer. The adapter already calls that ending a failure, so the
+        parse result says the answer did not finish, ``"incomplete": True``
+        (plans/ask-answer-recovery-and-false-success.md D3.1: any adapter that
+        fails an exit-0 run on how its stream ended sets it). It is not an
+        ``error_code``, so the findings-file channel is unchanged.
+
+        The result also fails with the adapter's own sentence
+        (``success: False``, ``error`` from :meth:`classify_structural`,
+        ``data: None``), not whatever :meth:`_parse_answer` made of the
+        narration ("No valid JSON found in text", or a success). D3.1 sends an
+        incomplete run to the ask lane's step 3, which writes ``result["error"]``
+        to ``error_<model>.log`` and the ``## Failed Models`` line, so that line
+        names the denied permission rather than a JSON miss. ``raw`` is kept.
+        """
+        result = self._parse_answer(stdout, stderr)
+        denied = self.classify_structural(stdout, stderr, 0)
+        if denied is not None:
+            result = dict(result)
+            result["success"] = False
+            result["error"] = denied[1]
+            result["data"] = None
+            result["incomplete"] = True
+        return result
+
+    def _parse_answer(self, stdout: str, stderr: str) -> Dict[str, Any]:
         """Parse NDJSON event stream output from OpenCode.
 
         OpenCode emits one assistant message per step, so a run that uses

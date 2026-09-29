@@ -1,10 +1,16 @@
 # The §6.2 fixture manifest for aider. Graded by tests/test_provider_fixture_rows.py,
 # which owns the format (its module docstring is the spec).
 #
-# Every byte under this directory is raw aider stdout/stderr as the CLI wrote it.
-# No row here is synthesized; where a row's ANSWER text came from the stub rather
-# than a real model, the bytes on disk are still aider's own rendering of it, and
-# `notes:` says so.
+# Every byte under this directory is raw aider stdout/stderr as the CLI wrote it,
+# except the two rows marked `synthesized: true` (`incident-400`,
+# `incident-400-array`), whose `provenance:` says what was built and from what.
+# Where a real row's ANSWER text came from the stub rather than a real model, the
+# bytes on disk are still aider's own rendering of it, and `notes:` says so.
+#
+# `expect.error_contains` on the failure rows is D4.1's error
+# (plans/ask-answer-recovery-and-false-success.md): an exit-0 failure on a
+# diagnostic line wins before any JSON is extracted, and the error is that line,
+# or the context-overflow sentence.
 schema_version: 1
 provider: aider
 cli_version: "0.86.2"
@@ -58,6 +64,7 @@ rows:
         - "model_prices_and_context_window.json"
         - "Temporary failure in name resolution"
       classify_failure: null
+      salvage: answer
 
   truncated:
     stdout: truncated.stdout.txt
@@ -78,7 +85,8 @@ rows:
       on it.
     expect:
       success: false
-      error_contains: ["No JSON found in aider output"]
+      # D4.1: the litellm line itself, not "No JSON found".
+      error_contains: ["litellm.InternalServerError: InternalServerError: OpenAIException - Connection error."]
       raw_contains:
         - "litellm.InternalServerError"
         - "Connection error."
@@ -94,6 +102,7 @@ rows:
       # answer. Removing the excision puts this cell straight back on
       # rate_limited, which is what makes the row a pin rather than a record.
       classify_failure: "connection_error"
+      salvage: none
 
   ephemeral-only:
     stdout: ephemeral-only.stdout.txt
@@ -116,6 +125,7 @@ rows:
       error_contains: ["Empty answer after ANSWER marker"]
       raw_contains: ["► **THINKING**", "► **ANSWER**", "Tokens: 1 sent"]
       classify_failure: null
+      salvage: none
 
   multi-assistant:
     stdout: multi-assistant.stdout.txt
@@ -136,6 +146,7 @@ rows:
         - {id: "S002", title: "Strip the vendor token", severity: "medium"}
       raw_contains: ["FIRST ANSWER (must NOT be selected)"]
       classify_failure: null
+      salvage: answer
 
   error-envelope:
     stdout: error-envelope.stdout.txt
@@ -154,9 +165,10 @@ rows:
       load-bearing**, and it is consulted last by construction (§7.2 step 6).
     expect:
       success: false
-      error_contains: ["No JSON found in aider output"]
+      error_contains: ["litellm.APIError: APIError: OpenAIException -"]
       raw_contains: ["litellm.APIError: APIError: OpenAIException - "]
       classify_failure: "runner_error"
+      salvage: none
 
   exit-zero-failure:
     stdout: exit-zero-failure.stdout.txt
@@ -181,6 +193,7 @@ rows:
       residual is the `Reason:` line's specificity, not the ladder.
     expect:
       success: false
+      error_contains: ["litellm.InternalServerError: InternalServerError: OpenAIException - The server had an error"]
       raw_contains:
         - "litellm.InternalServerError"
         - "The server had an error while processing your request."
@@ -189,6 +202,7 @@ rows:
         # classification time and never touches a capture.
         - "The API provider's servers are down or overloaded."
       classify_failure: "runner_error"
+      salvage: none
 
   stdout-error:
     not_applicable: >-
@@ -226,10 +240,12 @@ rows:
       patterns are for.
     expect:
       success: false
+      error_contains: ["litellm.AuthenticationError: AuthenticationError: OpenAIException - Incorrect API key provided"]
       raw_contains:
         - "litellm.AuthenticationError"
         - "not able to authenticate"
       classify_failure: "auth_failed"
+      salvage: none
 
   rate-limit:
     stdout: rate-limit.stdout.txt
@@ -244,10 +260,12 @@ rows:
       that already ran for a minute and a quarter (§7.6(b)'s rule 6b).
     expect:
       success: false
+      error_contains: ["litellm.RateLimitError: RateLimitError: OpenAIException - Rate limit reached"]
       raw_contains:
         - "litellm.RateLimitError"
         - "has rate limited you"
       classify_failure: "rate_limited"
+      salvage: none
 
   invalid-model:
     stdout: invalid-model.stdout.txt
@@ -263,10 +281,12 @@ rows:
       all, and it is why the assertion below is on the bare slug.
     expect:
       success: false
+      error_contains: ["litellm.NotFoundError: OpenAIException - The model `stub-model` does not exist"]
       raw_contains:
         - "litellm.NotFoundError"
         - "The model `stub-model` does not exist or you do not have access to it."
       classify_failure: "invalid_model"
+      salvage: none
 
   context-overflow:
     stdout: context-overflow.stdout.txt
@@ -289,8 +309,108 @@ rows:
       only the expectation moved, and it moved because the product did.
     expect:
       success: false
-      error_contains: ["No JSON found in aider output"]
+      # D4.1's fallback wording, exactly: aider's own block states no counts,
+      # and its `~103 of 0` lines are approximate, so neither number is used.
+      error_contains: ["aider: prompt exceeds the model's context window (token count not reported)"]
       raw_contains:
         - "has hit a token limit!"
         - "possibly exhausted context window"
       classify_failure: context_length_exceeded
+      salvage: none
+
+
+  incident-400:
+    stdout: incident-400.stdout.txt
+    stderr: incident-400.stderr.txt
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      SYNTHETIC, built for plans/ask-answer-recovery-and-false-success.md T4.1
+      from the 2026-09-26 `--ask` incident (aider on
+      openrouter/minimax/minimax-m3:xhigh, rc 0 in 16 s, logged `Success: True`).
+      Only the incident's last 20 lines survived its bounded log, so the head is
+      reconstructed: the online banner (no litellm cost-map line) in 0.86.2's own
+      format — `get_announcements` prints the two large-repo lines above 1,000
+      tracked files — and `Added plans/audit.md … (read-only)` for the plan the
+      adapter passes by `--read`. The tail is the incident's own shape and
+      wording: the path list `--yes-always` printed as confirm subjects (paths
+      renamed to neutral ones), `Initial repo scan …`, the context warning
+      (1,159,634 > 1,048,576) with its help lines, and the verbatim
+      `litellm.BadRequestError: OpenrouterException - {"error":{…"code":400…}}`
+      line whose body states a DIFFERENT count (1,083,501 > 1,048,576). stderr is
+      0 bytes, as on every aider capture.
+    notes: >-
+      The row that parsed `success: True`: the body is JSON, so the old no-marker
+      fallback extracted it as the answer. D4.1 fails it on the diagnostic lines
+      first, and the error carries the BODY's counts — the count the endpoint
+      rejected — not aider's own estimate. No `Tokens:` line: the request never
+      completed, so every line is scanned.
+    expect:
+      success: false
+      error_contains:
+        - "aider: prompt exceeds the model's context window (1,083,501 > 1,048,576 tokens)"
+      raw_contains:
+        - "Your estimated chat context of 1,159,634 tokens exceeds the 1,048,576 token limit"
+        - 'litellm.BadRequestError: OpenrouterException - {"error":{"message":"This endpoint''s maximum context length is 1048576 tokens.'
+      classify_failure: context_length_exceeded
+      salvage: none
+
+  incident-400-array:
+    stdout: incident-400-array.stdout.txt
+    stderr: incident-400-array.stderr.txt
+    exit_code: 0
+    synthesized: true
+    provenance: >-
+      SYNTHETIC: `incident-400` byte for byte, except that the 400 body's
+      `metadata` is `{"providers":["a"]}` in place of `{"provider_name":null}` —
+      the fixture survey's Task 6 variant (2026-09-29). Built for T4.1.
+    notes: >-
+      The review-plan `[]` case. A body carrying ANY array passed
+      `extract_json_array` in `save_model_result`, every element then failed
+      `validate_suggestion`, and `[]` was written as a clean review. It is also
+      the aider row whose RAW stdout passes the salvage gate (the array), so the
+      `none` label is what shows the hook moved it.
+    expect:
+      success: false
+      error_contains:
+        - "aider: prompt exceeds the model's context window (1,083,501 > 1,048,576 tokens)"
+      raw_contains:
+        - '"metadata":{"providers":["a"]}'
+      classify_failure: context_length_exceeded
+      salvage: none
+
+  declined-mentions:
+    stdout: declined-mentions.stdout.txt
+    stderr: declined-mentions.stderr.txt
+    exit_code: 0
+    wall_s: 3.0
+    requests: 1
+    notes: >-
+      A REAL capture against a stub, the same kind as the rows above, but on the
+      host (aider 0.86.2 at ~/.local/bin/aider, the investigation's localhost stub
+      on 127.0.0.1:18765, online, so no cost-map line) rather than in the image.
+      Provenance: plans/ask-answer-recovery-and-false-success/investigation/
+      captures/aider/e5_noyes_s_abs_pathsbig.{argv.json,requests.jsonl,stdout,stderr}
+      (T4.2's `s` re-probe, 2026-09-29; the write-up is
+      investigation/aider-mention-autoadd-2026-09-29.md). argv is
+      `build_command`'s with no `--yes-always` (plus `--openai-api-base` and
+      `--env-file /dev/null`), stdin is exactly `"s\n" * 64` — the D4.2 decline
+      supply — the plan reaches aider only by `--read`, and the stub reply names
+      10 repo paths including a 2.9 MB `uv.lock`. Two mention scans: the
+      prompt's (2 files) and the reply's (8 files). Each group's first prompt
+      reads one `s`; every later file prints its prompt with `skip` appended and
+      reads nothing — 10 prompt lines, 2 lines read, against a bound of 11. One
+      request of 3,207 bytes, and nothing added but the plan `(read-only)`:
+      with `--yes-always` the same reply re-sent 3.05 MB. The answer is prose,
+      so the parse is the ordinary no-JSON failure and the gate cannot grade it
+      (`none`); tests/test_aider_provider.py pins that the hook returns the
+      answer whole with no prompt text.
+    expect:
+      success: false
+      error_contains: ["No JSON found in aider output", "Relevant files:"]
+      raw_contains:
+        - "Add file to the chat? (Y)es/(N)o/(A)ll/(S)kip all/(D)on't ask again [Yes]: skip"
+        - "Added plans/myplan.md to the chat (read-only)."
+        - "Tokens: 801 sent, 20 received."
+      classify_failure: null
+      salvage: none

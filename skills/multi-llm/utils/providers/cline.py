@@ -2,7 +2,7 @@
 import json
 import re
 import shutil
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, NamedTuple, Optional
 
 from ..json_extractor import extract_json_from_text
 from .base import (
@@ -24,6 +24,129 @@ EFFORT_LADDER = ReasoningLadder(
     rungs=("none", "low", "medium", "high", "xhigh"),
 )
 REASONING_EFFORTS = EFFORT_LADDER.accepted
+
+
+class ClineStreamReading(NamedTuple):
+    """What :func:`read_cline_stream` found in one ``cline --json`` stdout."""
+
+    #: The answer text (D2.5's five steps), or ``""`` for "nothing there".
+    text: str
+    #: The last ``run_result`` event, or ``None`` when the stream has none.
+    run_result: Optional[Dict[str, Any]]
+    #: Whether the stream says its turn finished: a ``run_result`` exists, or
+    #: the last iteration closed with a ``done`` event whose ``reason`` is
+    #: ``completed``. ``False`` for a stream cut before either.
+    finished: bool
+
+
+def read_cline_stream(stdout: str) -> ClineStreamReading:
+    """The cline answer reducer: one walk of the JSONL event stream.
+
+    The one implementation of plans/ask-answer-recovery-and-false-success.md
+    D2.5's cline reducer, factored out of :meth:`ClineProvider.parse_output`
+    (D4.4) so that the parser's no-``run_result`` branch and the
+    ``salvage_text`` hook read the same text. Validated by the preflight survey
+    on all 11 committed rows, the incident's cut tail and synthetic cuts:
+
+    1. Unparsable lines are ignored (a stream cut mid-line ends on a torn one).
+    2. With a ``run_result``: the last one's ``text``, stripped; ``""`` when its
+       ``finishReason`` is ``error`` (``text`` is then cline's error sentence,
+       never an answer).
+    3. Otherwise track the **last iteration** (everything since the last
+       ``iteration_start``). A ``done`` event with ``reason: "completed"`` and a
+       string ``text`` gives that text.
+    4. If the last iteration has any ``contentType: "tool"`` event, ``""``: any
+       text there is narration between tool calls.
+    5. Otherwise the last ``contentType: "text"`` event's ``accumulated``, else
+       its ``text``, else ``""``.
+
+    So a stream cut while the model reasoned after its tool calls — the
+    2026-09-26 incident's tail — gives ``""``: nothing the model wrote is an
+    answer. ``finished`` records whether step 2 or 3 supplied the text, which
+    is what the stream says about the turn ending (D3.1). A live answer
+    streamed as per-delta text events is unmeasured (only the stub's one-event
+    answer is captured); ``accumulated`` is the running total such a stream
+    would carry.
+
+    Never raises on any input; a non-string is read as an empty stream.
+    """
+    run_result: Optional[Dict[str, Any]] = None
+    iteration_text: Optional[str] = None
+    iteration_tool = False
+    done_text: Optional[str] = None
+    # Split on "\n" only, as the parser always has: `str.splitlines` also
+    # breaks on U+2028/U+2029 and U+0085, which JSON leaves unescaped inside a
+    # string, so an answer holding one would tear its own `run_result` line.
+    lines = stdout.split("\n") if isinstance(stdout, str) else []
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(event, dict):
+            continue
+        kind = event.get("type")
+        if kind == "run_result":
+            run_result = event
+            continue
+        if kind != "agent_event":
+            continue
+        inner = event.get("event")
+        if not isinstance(inner, dict):
+            continue
+        inner_kind = inner.get("type")
+        if inner_kind == "iteration_start":
+            iteration_text, iteration_tool, done_text = None, False, None
+        elif inner_kind in ("content_start", "content_update", "content_end"):
+            content_type = inner.get("contentType")
+            if content_type == "tool":
+                iteration_tool = True
+            elif content_type == "text":
+                value = inner.get("accumulated")
+                if not isinstance(value, str):
+                    value = inner.get("text")
+                if isinstance(value, str) and value:
+                    iteration_text = value
+        elif (
+            inner_kind == "done"
+            and inner.get("reason") == "completed"
+            and isinstance(inner.get("text"), str)
+        ):
+            done_text = inner["text"]
+
+    if run_result is not None:
+        if run_result.get("finishReason") == "error":
+            return ClineStreamReading("", run_result, True)
+        text = run_result.get("text")
+        return ClineStreamReading(
+            text.strip() if isinstance(text, str) else "", run_result, True
+        )
+    # A completed `done` ends the turn even when its text is empty; only a
+    # non-empty one supplies the answer (the survey's reducer, step 3).
+    finished = done_text is not None
+    if done_text:
+        return ClineStreamReading(done_text.strip(), None, True)
+    if iteration_tool:
+        return ClineStreamReading("", None, finished)
+    return ClineStreamReading((iteration_text or "").strip(), None, finished)
+
+
+def cline_answer_text(stdout: str) -> str:
+    """The reducer's text alone: :func:`read_cline_stream`'s ``text`` (D2.5)."""
+    return read_cline_stream(stdout).text
+
+
+def _unwrap_answer_text(text: str) -> Dict[str, Any]:
+    """The answer text to a parse result, as the ``run_result`` branch does."""
+    if text.startswith(("[", "{")):
+        try:
+            return {"success": True, "data": json.loads(text)}
+        except json.JSONDecodeError:
+            pass
+    return extract_json_from_text(text, prefer_arrays=True)
 
 
 class ClineProvider(LLMProvider):
@@ -174,25 +297,34 @@ class ClineProvider(LLMProvider):
         2. finishReason == "error" -> explicit failure with the error text
         3. Unwrap "text" and parse it as JSON, with fallback extraction for
            code blocks and JSON embedded in prose
+
+        **With no ``run_result``, only the reducer's text is parsed, never the
+        raw stream** (plans/ask-answer-recovery-and-false-success.md D4.4).
+        The old fallback ran ``extract_json_from_text`` over the whole stream
+        and found the event lines themselves: every failure fixture with its
+        ``run_result`` removed came back ``success: True`` with the ``error``
+        event as ``data``, and the incident's cut tail with a tool call's
+        ``input`` list. Now a ``completed`` ``done`` still carries the answer;
+        a stream with no answer text is ``success: False``, ``No run_result
+        event found in output``.
+
+        Such a stream also says its turn did not finish, unless a completed
+        ``done`` closed it, so the result carries ``"incomplete": True`` (D3.1):
+        the ask lane then keeps any text as a partial rather than counting it.
+        Measured on 3.0.55, cline writes a ``run_result`` on every exit, so
+        only a stream cut short (a kill, a crash) reaches this branch.
         """
-        run_result = None
-        for line in stdout.strip().split('\n'):
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(event, dict) and event.get("type") == "run_result":
-                run_result = event
+        reading = read_cline_stream(stdout)
+        run_result = reading.run_result
 
         if run_result is None:
-            # Try fallback extraction on raw stdout
-            fallback = extract_json_from_text(stdout, prefer_arrays=True)
-            if fallback.get("success"):
-                return fallback
-            return {"success": False, "error": "No run_result event found in output", "raw": stdout, "data": None}
+            if reading.text:
+                result = dict(_unwrap_answer_text(reading.text))
+            else:
+                result = {"success": False, "error": "No run_result event found in output", "raw": stdout, "data": None}
+            if not reading.finished:
+                result["incomplete"] = True
+            return result
 
         text = run_result.get("text")
         text = text.strip() if isinstance(text, str) else ""
@@ -203,9 +335,26 @@ class ClineProvider(LLMProvider):
         if not text:
             return {"success": False, "error": "Empty text response", "raw": stdout, "data": None}
 
-        if text.startswith(("[", "{")):
-            try:
-                return {"success": True, "data": json.loads(text)}
-            except json.JSONDecodeError:
-                pass
-        return extract_json_from_text(text, prefer_arrays=True)
+        return _unwrap_answer_text(text)
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The reducer's answer text, never the event stream (D2.5).
+
+        cline's ``--json`` stdout is transport: ``hook_event`` bookkeeping,
+        ``reasoning`` and ``tool`` content (a tool's ``input`` is a JSON list),
+        usage, and a ``run_result`` whose ``text`` is cline's error sentence
+        when ``finishReason`` is ``error``. This returns exactly
+        :func:`read_cline_stream`'s text — the one reducer, shared with
+        :meth:`parse_output`'s no-``run_result`` branch — so the ask lane's
+        ``answer_text`` and the review lanes' salvage read what the parser
+        treats as the answer.
+
+        Always a string: ``generate`` always renders ``--json``, so a stdout
+        with no answer text in it (empty, prose, a bare JSON value) is a
+        transport that carried none, and ``""`` keeps that verdict final rather
+        than sending the caller to stderr's diagnostics.
+        """
+        try:
+            return cline_answer_text(stdout)
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""

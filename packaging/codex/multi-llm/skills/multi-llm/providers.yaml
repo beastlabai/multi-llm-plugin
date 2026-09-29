@@ -970,28 +970,30 @@ read_only_modes:
         deleted with it — the guard fails on a stale exception, so the two
         cannot drift apart.
   aider:
-    mechanism: null
-    probed: null
-    bypass_exception:
-      token: "--yes-always"
-      profile: generate
-      reason: >-
-        Found by this guard, not by the plan. §3.5 names two live violations
-        (cursor's `-f`, agy's `--dangerously-skip-permissions`) and misses this
-        third one, even though `--yes-always` is in its own negative set and the
-        donor table it rejected proposed exactly this flag. It is real:
-        utils/providers/aider.py's build_command emits it on the `generate`
-        fan-out. It is also narrower than it reads — the prompt is prefixed
-        `/ask `, aider's read-only chat mode (adjudicated in
-        tests/test_provider_housekeeping.py's STOPS_FILE_WRITES), and the flag's
-        live job there is to suppress interactive prompts and to auto-add the
-        in-repo files the model asks to read. Narrower is not exempt, so it is
-        recorded rather than excluded by hand.
-      retires_when: >-
-        aider's own read-only mechanism is probed — whether `/ask ` plus
-        `--no-auto-commits` already IS one, or a flag replaces `--yes-always` —
-        and whoever takes that probe is scoped to edit utils/providers/aider.py,
-        which M15's file scope was not.
+    # `/ask `, the start of `--message`'s value (aider's read-only chat mode),
+    # plus the decline supply the argv transport writes to stdin. Neither is a
+    # whole argv token, so tests/test_read_only_modes.py checks a `message:`
+    # entry against the rendered `--message` value and a `stdin:` entry against
+    # the `stdin_text` `build_command_for_transport` returns on "argv".
+    mechanism: ["message:/ask ", "stdin:s"]
+    probed: >-
+      Measured offline against aider 0.86.2 and a localhost stub
+      (plans/ask-answer-recovery-and-false-success/investigation/
+      aider-mention-autoadd-2026-09-29.md, and the T4.2 `s` re-run
+      e5_noyes_s_abs_pathsbig beside it). `/ask ` keeps aider in chat mode, where
+      it writes no file (tests/test_provider_housekeeping.py's
+      STOPS_FILE_WRITES). What `/ask ` does not stop is aider adding every
+      repo-relative path the prompt or a reply names to its context, asking
+      "Add file to the chat?" for each: answered yes — which `--yes-always` did
+      until 2026-09-29, and which EOF on stdin does — a reply naming a 2.9 MB
+      uv.lock re-sent 3.05 MB, and the 2026-09-26 incident sent 1.08M tokens.
+      With no `--yes-always` and `"s\n" * 64` on stdin (utils/providers/aider.py
+      AIDER_DECLINE_LINES), the same run read 2 lines for 10 prompts, added
+      nothing and sent one 3,207-byte request. The `--yes-always`
+      `bypass_exception` this row held was deleted with the flag (its own
+      `retires_when`); an `.aider.conf.yml` or `.env` that turns yes-always back
+      on is refused before spawn, and `AIDER_YES_ALWAYS` is stripped from the
+      child's environment.
   claude-code:
     # `--allowed-tools` / `--disallowed-tools`, the deny-all tool list.
     mechanism: ["--allowed-tools", "--disallowed-tools"]

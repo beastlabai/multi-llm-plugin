@@ -406,6 +406,60 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
 #: the provider layer and importing upward would invert the dependency.
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
 
+#: The first line ``utils.llm_client._bound_stream`` writes when it tail-bounds a
+#: debug-log stream: ``... [N earlier line(s) truncated; last 20 kept]``. It is
+#: prose, so before it was skipped it made every bounded event stream read as a
+#: markdown answer (plans/ask-answer-recovery-and-false-success.md D2.4) — the
+#: marker must never vouch for the lines under it.
+_LOG_TRUNCATION_MARKER = re.compile(r"^\.\.\. \[\d+ earlier line\(s\) truncated")
+
+
+def looks_like_ndjson(text: str) -> bool:
+    """Heuristic: True if *text* looks like an NDJSON event stream.
+
+    Several providers (e.g. codex's "No text events" failure) set ``raw`` to the
+    full NDJSON event stream. We must never paste that verbatim into
+    ``answers.md`` as if it were the answer. A genuine markdown answer contains
+    prose lines that do not parse as JSON, so the first non-JSON line short
+    circuits this to False.
+
+    Three things are not held against a stream (D2.4):
+
+    - **The log's truncation marker** as the first line is skipped, so a
+      bounded stream is judged on its events, not on the marker's prose.
+    - **A torn final line** — a stream cut mid-line — is ignored when it is
+      the stream's last line and inside the judged window (the first 25 lines).
+      A prose answer still fails on its first prose line, so an answer whose
+      last line happens to be ``{`` stays prose.
+    - **``role`` counts as a typed key** beside ``type``/``msg``/``event``, so an
+      assistant-only kimi stream (``{"role","content"}`` lines) is a stream.
+
+    Moved here from ``ask_orchestrator`` so ``utils.llm_client`` can use it; this
+    module imports only the standard library.
+    """
+    lines = [ln for ln in text.strip().split("\n") if ln.strip()]
+    if lines and _LOG_TRUNCATION_MARKER.match(lines[0].strip()):
+        lines = lines[1:]
+    if len(lines) < 2:
+        return False
+    parsed_dicts = 0
+    typed_events = 0
+    last_index = len(lines) - 1
+    for index, ln in enumerate(lines[:25]):
+        try:
+            obj = json.loads(ln)
+        except (json.JSONDecodeError, ValueError):
+            if index == last_index:
+                # A torn final line: the stream was cut mid-write.
+                continue
+            return False
+        if not isinstance(obj, dict):
+            return False
+        parsed_dicts += 1
+        if "type" in obj or "msg" in obj or "event" in obj or "role" in obj:
+            typed_events += 1
+    return parsed_dicts >= 2 and typed_events >= 1
+
 #: The field names a model *answer* record carries and a failure envelope does
 #: not. Both shipped answer schemas require ``title``, ``desc`` and
 #: ``importance`` on every record (``schemas/review_suggestions.schema.json``
