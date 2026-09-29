@@ -15,6 +15,7 @@ from utils.json_extractor import (
     has_salvageable_json,
     is_answer_shaped,
     is_refused_result_envelope,
+    looks_like_ndjson,
     sanitize_model_name,
 )
 from utils.providers.result_envelope import parse_result_envelope
@@ -756,3 +757,50 @@ class TestBuildUnsanitizeMapReportsStemCollisions:
         assert build_unsanitize_map(str(tmp_path)) == {}
         assert capsys.readouterr().err == ""
 
+
+
+class TestLooksLikeNdjson:
+    """D2.4 (plans/ask-answer-recovery-and-false-success.md): the truncation
+    marker, a torn last line and ``role`` no longer let a stream pass as prose.
+    """
+
+    def test_the_log_truncation_marker_does_not_vouch_for_a_stream(self):
+        """A bounded log's marker is prose; the 20 events under it are a stream."""
+        events = "\n".join(
+            json.dumps({"type": "thinking_delta", "delta": f"d{i}"}) for i in range(20)
+        )
+        text = "... [63073 earlier line(s) truncated; last 20 kept]\n" + events
+        assert looks_like_ndjson(text) is True
+
+    def test_a_torn_final_line_does_not_make_a_short_stream_prose(self):
+        """Five cline event lines plus a sixth cut mid-write is still a stream."""
+        lines = [
+            json.dumps({"type": "content_start", "contentType": "text", "i": i})
+            for i in range(5)
+        ]
+        lines.append('{"type":"content_delta","contentType":"text","te')
+        assert looks_like_ndjson("\n".join(lines)) is True
+
+    def test_role_counts_as_a_typed_key(self):
+        """An assistant-only kimi stream has no ``type`` on any record."""
+        text = (
+            json.dumps({"role": "assistant", "content": "one"})
+            + "\n"
+            + json.dumps({"role": "assistant", "content": "two"})
+        )
+        assert looks_like_ndjson(text) is True
+
+    def test_a_prose_answer_ending_in_a_lone_brace_is_still_prose(self):
+        """Only the *last* line is forgiven; the first prose line still decides."""
+        text = "# Answer\n\nSome prose about the plan.\nMore prose.\n{"
+        assert looks_like_ndjson(text) is False
+
+    def test_a_single_event_after_the_marker_is_not_a_stream(self):
+        text = "... [5 earlier line(s) truncated; last 20 kept]\n" + json.dumps(
+            {"type": "x"}
+        )
+        assert looks_like_ndjson(text) is False
+
+    def test_a_torn_line_outside_the_last_position_is_prose(self):
+        text = '{"type":"a"}\n{"type":"b"\n{"type":"c"}'
+        assert looks_like_ndjson(text) is False

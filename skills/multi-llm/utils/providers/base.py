@@ -1291,6 +1291,30 @@ class StructuredOutputUnavailable(Exception):
         self.schema = schema
 
 
+class ReadOnlyInvocationRefused(Exception):
+    """The user's own configuration defeats an adapter's read-only invocation.
+
+    Raised by ``build_command_for_transport`` **before spawn**, like
+    :class:`StructuredOutputUnavailable`, and handled beside it in
+    ``llm_client.invoke_with_provider``: a configuration error, never retried,
+    because re-running the same dispatch reads the same file again. aider is
+    the one raiser (plans/ask-answer-recovery-and-false-success.md D4.2): a
+    ``yes-always`` in an ``.aider.conf.yml``, or ``AIDER_YES_ALWAYS`` in a
+    ``.env`` aider loads, answers every confirmation "y" before aider reads the
+    decline supply on stdin, and ``--yes-always`` has no negative form, so
+    nothing on argv can turn it back off. ``path`` names the file a human has
+    to edit; editing the user's config is not the adapter's job.
+    """
+
+    exit_code = 3
+
+    def __init__(self, message: str, provider: str = "", path: str = "") -> None:
+        super().__init__(message)
+        self.message = message
+        self.provider = provider
+        self.path = path
+
+
 class ProfileUnsupported(Exception):
     """This adapter cannot honor the requested invocation profile (D3e).
 
@@ -2836,6 +2860,38 @@ class LLMProvider(ABC):
     # first, so an adapter that writes one anyway is still served from it.
     supports_file_output: bool = True
 
+    #: Whether the ask lane inlines the plan's body into this adapter's prompt
+    #: (``prompts/ask.txt``'s ``{plan_block}``). ``True`` is the default and
+    #: keeps every adapter's ask prompt byte-identical to the inline template.
+    #: ``False`` promises that the adapter passes the plan **by another route**,
+    #: so the inline copy would only duplicate it — aider attaches every
+    #: absolute path its prompt names as a ``--read`` file, and an inlined body
+    #: also feeds aider's mention scan, which auto-adds every repo path the plan
+    #: names (plans/ask-answer-recovery-and-false-success.md D4.2). An adapter
+    #: that declares ``False`` with no such route would get no plan at all, and
+    #: ``tests/test_provider_housekeeping.py`` fails it by name.
+    wants_inline_plan: bool = True
+
+    #: How ``utils.llm_client.generic_answer_text`` reads this adapter's stdout
+    #: when :meth:`salvage_text` has no opinion (D2.2). ``"auto"`` (the default)
+    #: treats a whole-stdout event stream or a JSON value that is not a clean
+    #: result envelope as transport, never as the answer. ``"plain"`` declares
+    #: that the stdout **is** the model's reply, so a direct JSON or NDJSON
+    #: answer comes back whole; only the ANSI strip and the adapter's own
+    #: exit-zero markers apply. Read only by the answer-text reducer, never by
+    #: the review lanes' salvage.
+    answer_framing: str = "auto"
+
+    #: Repo-relative directory prefixes (trailing ``/``) this adapter's CLI
+    #: writes into the working tree as its own cache on every run — aider's repo
+    #: map, ``.aider.tags.cache.v4/``. The porcelain write check ignores them
+    #: **only when an adapter declaring them is in the same fan-out**
+    #: (``review_orchestrator_base.fanout_ignore_prefixes``, D4.3), so a
+    #: sibling's cache is never blamed on an uncontained slot, and without such
+    #: a sibling a change there still counts. Each entry is the measured version,
+    #: never a glob: a version bump must force a re-measurement.
+    workspace_caches: Tuple[str, ...] = ()
+
     # ------------------------------------------------------------------
     # Subagent-runner capability declarations (D3/D3e/D3j/D3m)
     #
@@ -3794,8 +3850,12 @@ class LLMProvider(ABC):
                 ``build_command``.
 
         Returns:
-            ``(argv, stdin_text)``; ``stdin_text`` is ``None`` unless the
-            transport is ``"stdin"``.
+            ``(argv, stdin_text)``; ``stdin_text`` is the text to write to the
+            child's stdin. That is the prompt under ``"stdin"``; on ``"argv"``
+            it is ``None`` unless the adapter feeds the child interactive
+            answers — aider, whose decline supply answers its "Add file to the
+            chat?" prompts (plans/ask-answer-recovery-and-false-success.md
+            D4.2). This base composition returns ``None`` on ``"argv"``.
 
         Raises:
             ValueError: when this adapter does not support ``transport``.

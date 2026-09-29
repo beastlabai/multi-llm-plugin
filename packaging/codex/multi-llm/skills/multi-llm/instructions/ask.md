@@ -8,7 +8,7 @@ state-machine phases.
 ## Usage
 
 ```bash
-/multi-llm:multi-llm --ask <plan_path> "<free text question>" [--models provider:model ...] [--quick] [--interactive] [--force] [--rerun-all]
+/multi-llm:multi-llm --ask <plan_path> "<free text question>" [--models provider:model ...] [--quick] [--interactive] [--force] [--rerun-all] [--accept-partial <model> ...]
 ```
 
 - `--force` bypasses the resume guards (e.g. acts on a stale-plan warning) but
@@ -16,6 +16,23 @@ state-machine phases.
   are asked.
 - `--rerun-all` re-asks **all** models, discarding existing per-model answers
   (use after editing the plan, or to get a fresh round of opinions).
+- `--accept-partial <model> [<model> …]` counts a **failed** run's kept text as
+  that model's answer, with the identical question. It asks no model: it moves
+  each `partial_<model>.md` to `answer_<model>.md`, regenerates `answers.md` and
+  reports the run again. It refuses, changing nothing, when any named model has
+  no partial or already has an answer, while this question's run is still
+  running, or with `--detach` (it runs in the foreground only). Run it only when
+  the user has read the partial and judged it whole.
+
+## A question that is really a task
+
+Ask mode is built for a question a model answers by reading the plan. A
+question that asks each model to *perform* a large task — a whole-repository
+audit, a full review — routinely outruns the per-model budget, and a model cut
+off at its deadline is a failed slot, not an answer. When the question reads
+that way, say so before launching: it needs a larger `--timeout`, or is better
+run as `review-code` / `review-plan`, which are built for that work. This is
+advice for the user to weigh, not a check the orchestrator makes.
 
 ## Question argument parsing rule (exact)
 
@@ -312,6 +329,28 @@ with the offending token named.
    (`{plan}/ask/<question-slug>-<hash8>/orchestrator-run.log`, final line, or the
    path `status` printed), then read `answers.md` and present a brief summary per
    model plus the output file path, following `references/summary-format.md`.
+   Three more things in the run are yours to relay:
+
+   - **Every failed model, with its reason**, from `answers.md`'s
+     `## Failed Models` section. A model whose run timed out or failed after
+     leaving some text has that text kept in `partial_<model>.md`, and its line
+     names the file and the command that counts it. A partial is not counted,
+     and a resume re-asks that model. You may **offer** `--accept-partial
+     <model>` — the step 2 command with the identical question and that flag
+     appended — for a partial the user has read and judged whole. Never run it
+     unasked.
+   - **The `answered: …` counts line** the run printed, verbatim: how many
+     answers came from answer files, on stdout as the adapter is asked to,
+     recovered from stdout, accepted from failed runs, and how many were kept
+     from an earlier run. Each answer in `answers.md` carries the same fact as
+     one italic line under its heading.
+   - **The all-fallback `[WARN]`**, when it printed: every model that was asked
+     to write an answer file answered on stdout instead, so the answer-file
+     channel is not working for this roster. Those answers are whole and count;
+     the warning is about the channel.
+
+   A host that reads only the result line takes the counts and the warning from
+   `MULTI_LLM_RESULT.answer_origins` (see Exit Status below).
 
 ## Output Files
 
@@ -319,10 +358,18 @@ with the offending token named.
 plans/todo/my-feature/ask/<question-slug>-<hash8>/
 ├── answers.md            # aggregated markdown answers (regenerated each run)
 ├── answer_<model>.md     # per-model raw markdown answer
-├── log_<model>.txt       # per-model provider debug log
+├── origin_<model>.txt    # how that answer was obtained: file, stdout, fallback or accepted
+├── partial_<model>.md    # text a failed run left (not counted; --accept-partial counts it)
+├── log_<model>.txt       # per-model provider debug log (bounded; never read as an answer)
 ├── error_<model>.log     # per-model error log (only on failure)
 └── .status.json          # resume detection + collision/freshness guard
 ```
+
+An answer counts only when its model's run ended by itself with a finished
+answer. A run that timed out, exited non-zero or reported a cut answer is a
+failed slot whichever channel carried its text — an answer file it wrote
+included, since nothing shows that file is finished — and the text is kept as
+`partial_<model>.md` under `## Failed Models`.
 
 ## Resume & Freshness
 
@@ -334,6 +381,11 @@ plans/todo/my-feature/ask/<question-slug>-<hash8>/
 - On resume, if the plan file changed since the answers were generated, the
   orchestrator prints a stale-plan warning recommending `--rerun-all` (it does
   not auto-invalidate answers).
+- A model that only has a `partial_<model>.md` is re-asked on resume; the
+  re-ask replaces or removes that partial, so the one a `## Failed Models` line
+  names is always from the model's latest run. An answer keeps its
+  `origin_<model>.txt` across any number of resumes, so its provenance line
+  never turns into "resumed".
 
 ## Exit Status
 
@@ -344,10 +396,30 @@ without a question, so this mode is unattended on every host:
 - **Exit 3** when zero models succeed (all failed): there is nothing to
   aggregate, so this is "needs a human", not a generic error. The retry command
   is named on stdout, and `answers.md` / `.status.json` are still written (with a
-  `## Failed Models` section) so the failure is diagnosable.
+  `## Failed Models` section) so the failure is diagnosable. A run that timed
+  out or failed never counts as an answer, whatever text it left, so a run in
+  which every slot timed out is exit 3 too.
 - **Exit 0** on partial success (≥ 1 model answered): `[PARTIAL_RESULTS: <model>,…]`
   on stdout, `MULTI_LLM_RESULT.state: "partial"`, and the `## Failed Models`
   section enumerating the failures. A partial answer set is usable output, so it
   is deliberately never exit 3 (D6 row 3).
 - **Exit 3** when models cannot be resolved (no `--models`, no `--quick`, no
   `defaults.models`) — never a rendered picker (D6 row 2).
+- **`--accept-partial`** ends with the same report and the same codes once it
+  has counted the partials; a refusal (a named model with no partial or with an
+  answer already, a run still in progress, or `--detach`) is exit 3 and changes
+  nothing.
+- **`MULTI_LLM_RESULT.answer_origins`** is on the result line of every `ask` run
+  that reaches its report, a zero-answer run included (all zeros, flag
+  `false`), and on the `status … --question … --view run` poll of a finished
+  detached run. No other mode carries it. Its keys are `answered`, `file`,
+  `stdout`, `fallback`, `accepted`, `unrecorded`, `kept` and
+  `warn_all_fallback`. The integers are the counts line's numbers: answers from
+  an answer file, answered on stdout by an adapter that is asked for stdout,
+  recovered from the stdout of a model that was asked for the file and did not
+  write it, counted by `--accept-partial`, with no origin record, and — across
+  all of those — kept from an earlier run rather than produced by this one.
+  `warn_all_fallback` is the `[WARN]`'s own predicate. **An all-fallback run
+  does not change the exit code**: its answers are whole answers from runs that
+  ended cleanly, so it stays `done` or `partial`, exit 0, and this field is how
+  a host or CI tells it apart.

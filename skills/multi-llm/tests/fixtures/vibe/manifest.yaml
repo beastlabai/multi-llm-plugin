@@ -61,6 +61,7 @@ rows:
       `VibeProvider.vendor_text`; the bytes still carry the whole prompt, so a
       regression fails here.
     expect:
+      salvage: answer
       success: true
       data:
         - id: "S001"
@@ -93,6 +94,7 @@ rows:
       reason" matches no member of `base.CONNECTION_ERROR_MARKERS`. Recorded,
       not fixed: the run falls to the executor's bounded transport retry.
     expect:
+      salvage: none
       success: false
       error_contains: ["ended without a finish reason"]
       classify_failure: null
@@ -115,6 +117,7 @@ rows:
       to be called rate-limited was our own plan text is precisely the live
       hazard, and this is the row that pins it.
     expect:
+      salvage: none
       success: false
       error_contains: ["no assistant message in vibe's transcript"]
       raw_contains: ['"role": "user"']
@@ -137,6 +140,7 @@ rows:
       This capture carries the echoed user entry too, so it is the second vibe
       row whose classification moved from `rate_limited` to `null`.
     expect:
+      salvage: answer
       success: true
       data:
         - id: "S001"
@@ -167,6 +171,7 @@ rows:
       pinned with it: three distinct upstream conditions are indistinguishable
       here, and all three classify `None`.
     expect:
+      salvage: none
       success: false
       error_contains: ["ended without a finish reason"]
       classify_failure: null
@@ -194,6 +199,7 @@ rows:
       one place the reason exists. The classification is `None`: a rejected
       `thinking` level is not a transport condition and matches no table.
     expect:
+      salvage: none
       success: false
       error_contains:
         - "vibe produced non-JSON output on stdout"
@@ -213,6 +219,7 @@ rows:
       text to quote. The classifier answers `None` on an empty haystack by
       construction.
     expect:
+      salvage: none
       success: false
       error_contains: ["Empty output from vibe"]
       classify_failure: null
@@ -227,6 +234,7 @@ rows:
       `base.auth_error_patterns`, so the credential failure lands on rung 1 where
       it belongs. Nothing adapter-specific is needed for it.
     expect:
+      salvage: none
       success: false
       error_contains: ["Invalid API key"]
       raw_contains: ["Please check your API key and try again."]
@@ -241,6 +249,7 @@ rows:
       because `rate limit` is matched through `stream_pattern` rather than as a
       bare substring, so the plural survives.
     expect:
+      salvage: none
       success: false
       error_contains: ["Rate limits exceeded"]
       classify_failure: "rate_limited"
@@ -264,6 +273,7 @@ rows:
       one of the three that moved; claude-code's own invalid-model row matches
       neither table and is C5's `api_error_status` map to fix, not C2's.
     expect:
+      salvage: none
       success: false
       error_contains: ["The model `stub-model` does not exist"]
       raw_contains:
@@ -284,6 +294,7 @@ rows:
       400 is swallowed into a compaction report that matches nothing and burns
       the whole retry budget on the one condition §7.2 calls terminal.
     expect:
+      salvage: none
       success: false
       error_contains: ["The conversation context exceeds the model's maximum limit."]
       classify_failure: "context_length_exceeded"
@@ -300,6 +311,7 @@ rows:
       `server_error` is the correct answer and the same `API error` prefix
       produces it.
     expect:
+      salvage: none
       success: false
       error_contains: ["500 Internal Server Error"]
       raw_contains: ["provider_message: upstream boom"]
@@ -315,6 +327,7 @@ rows:
       vibe collapses three distinct upstream conditions onto one message, so no
       classifier reading stderr can tell them apart, and all three answer `None`.
     expect:
+      salvage: none
       success: false
       error_contains: ["ended without a finish reason"]
       classify_failure: null
@@ -333,6 +346,7 @@ rows:
       before and after, because this capture's echoed prompt is a two-word test
       prompt rather than a plan.
     expect:
+      salvage: none
       success: false
       error_contains: ["vibe produced non-JSON output on stdout"]
       raw_contains:
@@ -349,6 +363,7 @@ rows:
       of why `--output json` is what ships, and graded as the failure it is
       through the shipped adapter rather than left as an untested cell.
     expect:
+      salvage: none
       success: false
       error_contains: ["vibe produced non-JSON output on stdout"]
       raw_contains: ["OK"]

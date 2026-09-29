@@ -56,6 +56,7 @@ rows:
       and that classify_failure is None — the assertion that catches an adapter
       reading its own happy path as a failure.
     expect:
+      salvage: answer
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -80,6 +81,7 @@ rows:
       the partial frame) are not written at all. Byte-shape identical to
       `error-envelope` and `ephemeral-only`; see the README.
     expect:
+      salvage: none
       success: false
       error_contains: ["Model returned empty response"]
       raw_contains:
@@ -105,6 +107,7 @@ rows:
       an answer: it retries three times and then classifies it exactly as it
       classifies a truncated body.
     expect:
+      salvage: none
       success: false
       error_contains: ["Model returned empty response"]
       raw_contains:
@@ -134,6 +137,7 @@ rows:
       carries `FIRST ANSWER (must NOT be selected)`; a first-wins parser returns
       the D999 document and a concatenating one returns neither.
     expect:
+      salvage: answer
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -156,6 +160,7 @@ rows:
       one byte of the provider's message reaches any pattern table. The only
       thing that says this run failed is the adapter's own `finishReason` marker.
     expect:
+      salvage: none
       success: false
       error_contains: ["Model returned empty response"]
       raw_contains:
@@ -226,6 +231,7 @@ rows:
       directory — the phrase occurs here and nowhere else, so no other cell
       moves.
     expect:
+      salvage: none
       success: false
       error_contains: ["Incorrect API key provided"]
       raw_contains:
@@ -246,6 +252,7 @@ rows:
       (§7.6(b)'s rule 6b). The upstream text survives, so `rate limit` in
       base.rate_limit_patterns matches before the exit-0 marker gets its turn.
     expect:
+      salvage: none
       success: false
       error_contains: ["Rate limit reached"]
       raw_contains:
@@ -265,6 +272,7 @@ rows:
       the `openai/stub-model` spec the config used — which is the asymmetry that
       makes a stray `:effort` suffix findable at all.
     expect:
+      salvage: none
       success: false
       raw_contains:
         - "The model `stub-model` does not exist or you do not have access to it."
@@ -287,6 +295,7 @@ rows:
       CONTEXT_OVERFLOW_MARKERS matches and the terminal classification is
       reached with no retry budget spent — one request, 1.9 s.
     expect:
+      salvage: none
       success: false
       error_contains: ["exceeds the model's context window"]
       raw_contains:
@@ -330,6 +339,7 @@ rows:
       `Reason:` line does move, "the runner reported a failure" →
       "Connection/network error", which is the point.
     expect:
+      salvage: none
       success: false
       error_contains: ["Cannot connect to API"]
       raw_contains:
@@ -353,6 +363,7 @@ rows:
       base.SERVER_ERROR_MARKERS — every entry there wants the literal words
       "server error", "internal server error" or "api error".
     expect:
+      salvage: none
       success: false
       error_contains: ["The server had an error while processing your request"]
       raw_contains:

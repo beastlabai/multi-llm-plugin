@@ -27,7 +27,7 @@ After any mode completes, report:
 - [Recommended actions, if any]
 ```
 
-Every mode ends with this report. Three rules:
+Every mode ends with this report. Three rules, and a fourth for `ask`:
 
 - **Paths come from the run, never from memory.** Take them from the orchestrator's
   own output — the `[OUTPUT_FILE]` lines, the paths a phase printed, and
@@ -43,4 +43,14 @@ Every mode ends with this report. Three rules:
   `MULTI_LLM_RESULT.state` is `"partial"`, the same models and reasons are the
   `failed` rows of `progress.models` (a `status` poll carries them). List each
   one under Results with its reason; never report the run as if only the models
-  that answered had been requested.
+  that answered had been requested. **In `ask` mode** they are the
+  `## Failed Models` section of `answers.md`. A failed model whose run left some
+  text has it kept in a `partial_<model>.md` that its line names; say so, since
+  a partial is not counted and a resume re-asks the model. You may offer
+  `--accept-partial <model>` for a partial the user has read and judged whole —
+  never run it unasked.
+- **In `ask` mode, say how the answers were obtained.** Report the run's
+  `answered: …` counts line verbatim, and the `[WARN]` it prints when every
+  model asked to write an answer file answered on stdout instead. A host that
+  reads only the result line takes both from `MULTI_LLM_RESULT.answer_origins`
+  (its integers are the counts line's; `warn_all_fallback` is the warning).

@@ -200,6 +200,15 @@ class KiloCodeProvider(LLMProvider):
     ``tests/test_stderr_diagnosis.py`` beside ``pi``'s and ``gemini``'s.
     """
 
+    #: stdout **is** the model's reply — plain text, never a transport — and the
+    #: diagnosis is stderr (:meth:`_diagnose`, rung 1). So the ask lane's
+    #: answer-text reducer returns a direct JSON, array or NDJSON answer whole
+    #: instead of reading it as an envelope (plans/ask-answer-recovery-and-false-
+    #: success.md D2.2). A flag rather than a :meth:`salvage_text` override: the
+    #: hook also feeds the review lanes' salvage, and kilocode has no captures to
+    #: label that change against.
+    answer_framing = "plain"
+
     @property
     def name(self) -> str:
         return "kilocode"

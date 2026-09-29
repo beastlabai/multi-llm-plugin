@@ -69,6 +69,7 @@ from .cli_common import (
     STATE_RUNNING,
     build_parent_parser,
     dispatcher_command,
+    record_answer_origins,
     record_artifact,
     record_consolidation_recommended,
     record_mode_phase,
@@ -2440,6 +2441,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     if counts:
         record_validation_counts(counts)
+    # plans/ask-answer-recovery-and-false-success.md D7.2: a finished ask's
+    # answer counts by origin, re-recorded under the same pinned-run rule and
+    # for the same reason — a detached ask's own result line never reached the
+    # host, and its all-fallback `[WARN]` is prose the poll does not relay.
+    # Only an ask dir carries the key, so every other view's line is unchanged.
+    origins = (
+        views[0].get("answer_origins")
+        if len(views) == 1 and (args.phase or args.question or args.run_id)
+        else None
+    )
+    if isinstance(origins, dict):
+        record_answer_origins(origins)
     if exit_code == EXIT_NOTHING_TO_DO and views:
         # `views[0]` is `discover_phase_dirs`' alphabetical order, not "the run
         # that made the exit code 2" — with several phases listed, a finished

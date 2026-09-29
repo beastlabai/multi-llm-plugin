@@ -665,6 +665,92 @@ class TestReadOnlyArgvMatchesTheDeclaration:
 
 
 # ---------------------------------------------------------------------------
+# `wants_inline_plan` against the route that replaces the inline copy
+# (plans/ask-answer-recovery-and-false-success.md D4.2)
+# ---------------------------------------------------------------------------
+#
+# An adapter that declares `False` gets an ask prompt that names the plan's path
+# and says its content is attached above. That sentence is true only if the
+# adapter's own argv attaches the file; otherwise the model answers a question
+# about a plan it was never shown.
+
+PLAN_BODY = "PLAN BODY SENTINEL"
+
+
+def _path_only_ask_prompt(name, plan_path):
+    """The ask prompt a path-only adapter is meant to get: the path block and no
+    size note. Built from the template directly, so the route is checked even
+    where `render_plan_fields` would fall back to the inline block."""
+    from ask_orchestrator import PATH_PLAN_BLOCK, render_output_fields
+    from utils.prompt_loader import load_prompt
+
+    return load_prompt("ask.txt").format(
+        question=PROMPT,
+        plan_block=PATH_PLAN_BLOCK.format(plan_path=plan_path),
+        plan_size_note="",
+        **render_output_fields(name, "/out/answer.md"),
+    )
+
+
+def assert_path_only_plan_has_a_route(name, provider, model, plan_path):
+    argv = provider.build_command(_path_only_ask_prompt(name, plan_path), model)
+    assert ("--read", plan_path) in list(zip(argv, argv[1:])), (
+        f"{name} declares wants_inline_plan = False, but the argv it renders "
+        f"for its path-only ask prompt carries no `--read {plan_path}`, so the "
+        f"ask lane would send its model no plan at all. Give it a route that "
+        f"attaches the plan, or declare wants_inline_plan = True."
+    )
+
+
+class TestPathOnlyAskPromptHasARoute:
+    """D4.2 — `wants_inline_plan = False` is checked against the argv that
+    replaces the inline copy."""
+
+    @pytest.mark.parametrize("name", sorted(_PROVIDERS))
+    def test_every_adapter_gets_the_plan_by_one_route(self, name, tmp_path):
+        from ask_orchestrator import render_prompt
+        from utils.prompt_loader import load_prompt
+
+        plan = tmp_path / "plan.md"
+        plan.write_text(PLAN_BODY, encoding="utf-8")
+        plan_path = str(plan.resolve())
+        assert re.fullmatch(r"/[\w.\-/]+", plan_path), (
+            f"precondition: {plan_path} must be a path aider's extractor matches whole"
+        )
+        rendered = render_prompt(
+            load_prompt("ask.txt"), PROMPT, plan_path, PLAN_BODY,
+            "/out/answer.md", name,
+        )
+
+        if _PROVIDERS[name].wants_inline_plan:
+            assert PLAN_BODY in rendered
+            return
+        # The path-only prompt is what the renderer really sends, not a
+        # fallback it happens to take on this path ...
+        assert rendered == _path_only_ask_prompt(name, plan_path)
+        assert PLAN_BODY not in rendered
+        # ... and the argv built from it attaches the plan.
+        assert_path_only_plan_has_a_route(
+            name, _PROVIDERS[name], MODELS[name], plan_path
+        )
+
+    def test_a_path_only_declaration_with_no_route_fails_by_name(self, tmp_path):
+        from utils.providers.claude_code import ClaudeCodeProvider
+
+        class NoRouteAdapter(ClaudeCodeProvider):
+            wants_inline_plan = False
+
+        plan = tmp_path / "plan.md"
+        plan.write_text(PLAN_BODY, encoding="utf-8")
+
+        with pytest.raises(AssertionError, match="no-route-adapter"):
+            assert_path_only_plan_has_a_route(
+                "no-route-adapter", NoRouteAdapter(), MODELS["claude-code"],
+                str(plan.resolve()),
+            )
+
+
+# ---------------------------------------------------------------------------
 # `runs_shell_in_generate` against its evidence (plan: review-run-scope-
 # salvage-and-failure-visibility D2.3)
 # ---------------------------------------------------------------------------

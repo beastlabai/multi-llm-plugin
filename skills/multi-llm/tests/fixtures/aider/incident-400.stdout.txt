@@ -1,0 +1,29 @@
+
+Aider v0.86.2
+Model: openrouter/minimax/minimax-m3 with whole edit format, reasoning xhigh
+Git repo: .git with 14,420 files
+Warning: For large repos, consider using --subtree-only and .aiderignore
+See: https://aider.chat/docs/faq.html#can-i-use-aider-in-a-large-mono-repo
+Repo-map: using 1024 tokens, auto refresh
+Added plans/audit.md to the chat (read-only).
+
+
+plans/z_done/x/backup.md
+
+plans/z_done/x/report.html
+
+portal/utils.py
+
+pyproject.toml
+
+src/app/core/client.py
+
+uv.lock
+Initial repo scan can be slow in larger repos, but only happens once.
+Your estimated chat context of 1,159,634 tokens exceeds the 1,048,576 token limit for openrouter/minimax/minimax-m3!
+To reduce the chat context:
+- Use /drop to remove unneeded files from the chat
+- Use /clear to clear the chat history
+- Break your code into smaller files
+It's probably safe to try and send the request, most providers won't charge if the context limit is exceeded.
+litellm.BadRequestError: OpenrouterException - {"error":{"message":"This endpoint's maximum context length is 1048576 tokens. However, you requested about 1083501 tokens (1083501 of text input). Please reduce the length of either one, or use the context-compression plugin to compress your prompt automatically.","code":400,"metadata":{"provider_name":null}}}

@@ -5,8 +5,10 @@ streams under the argv `AiderProvider.build_command` emits, taken against a stub
 in the containerized §6 probe (`aider-chat 0.86.2`, `--network none`, **no
 credential** — `OPENAI_API_KEY` was the literal string
 `stub-key-not-a-credential`, which litellm only requires to be non-empty). They
-are raw bytes as aider wrote them; nothing here is hand-authored, and there is no
-synthesized row.
+are raw bytes as aider wrote them; nothing here is hand-authored — except the
+two rows marked `synthesized: true` below (`incident-400`, `incident-400-array`),
+and `declined-mentions` is a real capture taken on the host rather than in the
+image (see the table).
 
 They are graded by `tests/test_provider_fixture_rows.py` through
 `manifest.yaml` — the generic §6.2 harness, not a hand-written class. The
@@ -39,6 +41,9 @@ assertions look the way they do:
 | `rate-limit` | 429-forever → aider **does** retry rate limits internally: 27 requests over 78.7 s, so an executor-level re-dispatch doubles a wait that already ran for a minute and a quarter |
 | `invalid-model` | 404 **naming the model** — and naming it `stub-model`, not the `openai/stub-model` spec that was passed to `--model`, because litellm strips the provider prefix before dispatch. That is the shape a stray `:effort` suffix produces |
 | `context-overflow` | 400 context-length, **swallowed**: aider catches litellm's `ContextWindowExceededError` and prints its own token-limit help, so `maximum context length` never appears. Measured classification: **`None`** — see below |
+| `incident-400` | **synthetic** (plans/ask-answer-recovery-and-false-success.md T4.1): the 2026-09-26 `--ask` incident's shape — banner, the path list `--yes-always` printed, aider's context warning (1,159,634 > 1,048,576), then `litellm.BadRequestError` carrying OpenRouter's JSON 400 body (1,083,501 > 1,048,576), exit 0. The old no-marker fallback extracted the body as the answer (`success: True`); D4.1 fails it on aider's diagnostic lines first, with the **body's** counts |
+| `incident-400-array` | **synthetic**: the same bytes with an array in the body's `metadata` — the review-plan `[]` case (an array passed `extract_json_array`, every element failed validation, `[]` was written as a clean review), and the aider row whose raw stdout passes the salvage gate |
+| `declined-mentions` | a **real** host capture against the investigation's localhost stub (T4.2's `e5_noyes_s_abs_pathsbig`): no `--yes-always`, `"s\n" * 64` on stdin. The prompt scan and the reply scan each read one `s`; every later file prints its prompt with `skip` appended and reads nothing — 10 prompt lines, 2 lines read — and one 3,207-byte request adds nothing. The answer is prose, so the gate cannot grade it; `tests/test_aider_provider.py` pins the hook's reduction |
 
 ## Two rows that are "not applicable, because …"
 

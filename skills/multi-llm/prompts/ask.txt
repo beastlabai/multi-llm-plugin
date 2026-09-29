@@ -4,17 +4,7 @@ You are answering a question about an implementation plan.
 {question}
 
 ## Plan File (read-only context)
-The full plan content is inlined below. The plan also lives on disk at this
-absolute path, which you may read directly for additional context if needed:
-
-{plan_path}
-
-If the inlined content below appears truncated (you will see a truncation
-marker), read the full plan from the path above.
-
---- BEGIN PLAN CONTENT (read-only) ---
-{plan_content}
---- END PLAN CONTENT (read-only) ---
+{plan_block}
 
 ## Read-only constraints (MANDATORY)
 This is a read-only question-and-answer task. You are NOT implementing anything.
@@ -32,10 +22,4 @@ Answer the question above using the plan as context. Be specific, concrete, and
 actionable. If the plan does not contain enough information to answer fully, say
 so and explain what is missing.
 
-{output_location}
-
-## Note on plan size
-The inlined plan content above may have been truncated if the plan is very large
-(roughly above 100 KB), because the prompt is delivered as a single command-line
-argument with an OS size limit. When you see a truncation marker, rely on the
-plan path above to read the remainder from disk.
+{output_location}{plan_size_note}

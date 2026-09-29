@@ -69,7 +69,6 @@ entries:
       "--no-show-release-notes": null
       "--no-stream": null
       "--read": "<path>"
-      "--yes-always": null
     tail: []
     prompt: argv
     min_records: 1
@@ -95,7 +94,6 @@ entries:
       "--no-show-release-notes": null
       "--no-stream": null
       "--read": "<path>+"
-      "--yes-always": null
     tail: []
     prompt: argv
     min_records: 1

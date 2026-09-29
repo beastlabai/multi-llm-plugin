@@ -4709,14 +4709,21 @@ class TestClineProvider:
         assert result["error"] == "Provider quota exceeded"
         assert result["data"] is None
 
-    def test_cline_parse_non_jsonl_fallback(self, provider):
-        """Fallback extraction when stdout is not JSONL but embeds JSON."""
+    def test_cline_parse_non_jsonl_is_not_extracted_raw(self, provider):
+        """No ``run_result``: only the reducer's text is parsed, never the raw
+        stdout (plans/ask-answer-recovery-and-false-success.md D4.4).
+
+        This used to pin the opposite — a raw-stdout extraction that found
+        ``[1, 2, 3]`` in a banner. The same fallback found the event lines of a
+        cut stream and returned them as ``success: True`` data.
+        """
         stdout = "Some banner text [1, 2, 3] trailing text"
 
         result = provider.parse_output(stdout, "")
 
-        assert result["success"] is True
-        assert result["data"] == [1, 2, 3]
+        assert result["success"] is False
+        assert result["error"] == "No run_result event found in output"
+        assert result["incomplete"] is True
 
     def test_cline_parse_garbage_stdout(self, provider):
         """Handle stdout with no run_result and no extractable JSON."""
@@ -5429,7 +5436,6 @@ class TestAiderProvider:
             "openrouter/z-ai/glm-5.2",
             "--message",
             "/ask Analyze this",
-            "--yes-always",
             "--no-auto-commits",
             "--no-pretty",
             "--no-stream",
@@ -5505,7 +5511,6 @@ class TestAiderProvider:
             "high",
             "--message",
             "/ask Analyze this",
-            "--yes-always",
             "--no-auto-commits",
             "--no-pretty",
             "--no-stream",
@@ -5535,7 +5540,6 @@ class TestAiderProvider:
                 effort,
                 "--message",
                 "/ask Analyze this",
-                "--yes-always",
                 "--no-auto-commits",
                 "--no-pretty",
                 "--no-stream",
@@ -5567,7 +5571,6 @@ class TestAiderProvider:
                 model,
                 "--message",
                 "/ask Analyze this",
-                "--yes-always",
                 "--no-auto-commits",
                 "--no-pretty",
                 "--no-stream",
@@ -6158,6 +6161,48 @@ class TestDeclaredOutputChannel:
         assert "/out/result.json" not in block
 
 
+class TestDeclaredPlanRoute:
+    """`wants_inline_plan`: does the ask lane inline the plan's body into this
+    adapter's prompt (plans/ask-answer-recovery-and-false-success.md D4.2)?
+
+    Measured 2026-09-26: aider already received the plan by `--read`, so the
+    inlined copy only doubled its prompt and fed its mention scan, which
+    auto-added every repo path the plan named — a 1.08M-token request.
+    """
+
+    #: Pinned like `CANNOT_WRITE_FILES`, and each member names the route that
+    #: replaces the inline copy: an adapter declaring `False` without one would
+    #: send its model no plan at all. `TestPathOnlyAskPromptHasARoute` in
+    #: `test_provider_housekeeping.py` checks the route against the argv the
+    #: adapter really renders — this map is the *what*, that test is the *why*.
+    #:
+    #:   aider   `--read <plan_path>`   every absolute path the prompt names is
+    #:                                  attached read-only (`_extract_read_files`)
+    PATH_ONLY_PLAN_ROUTES = {"aider": "--read"}
+
+    @pytest.mark.parametrize("name", sorted(_registered_provider_names()))
+    def test_every_adapter_declares_a_bool(self, name):
+        from utils.provider_registry import _PROVIDERS
+
+        assert isinstance(_PROVIDERS[name].wants_inline_plan, bool)
+
+    def test_the_path_only_roster_is_exactly_the_declared_set(self):
+        from utils.provider_registry import _PROVIDERS
+
+        declared = {
+            name
+            for name, provider in _PROVIDERS.items()
+            if not provider.wants_inline_plan
+        }
+        assert declared == set(self.PATH_ONLY_PLAN_ROUTES)
+
+    def test_inlining_is_still_the_default(self):
+        from utils.provider_registry import get_provider
+
+        assert base_module.LLMProvider.wants_inline_plan is True
+        assert get_provider("claude-code").wants_inline_plan is True
+
+
 class TestDeclaredGenerateShellAndReadScope:
     """`runs_shell_in_generate` and `generate_read_scope`: what a fan-out slot
     can do to reach the change (plan: review-run-scope-salvage-and-failure-
@@ -6194,8 +6239,10 @@ class TestDeclaredGenerateShellAndReadScope:
     }
     #: The adapters whose read scope is measured away from the `"cwd"` default.
     #: cursor-agent declares `"cwd"` explicitly (measured, and equal to the
-    #: default), so it is not a departure.
-    READ_SCOPE_DEPARTURES = {"qwen-code": "none"}
+    #: default), so it is not a departure. aider's is read from its argv:
+    #: `/ask` has no file tool, and the stdin decline supply refuses the
+    #: mention adds that once brought review-code the changed files.
+    READ_SCOPE_DEPARTURES = {"qwen-code": "none", "aider": "none"}
 
     def test_the_base_defaults_assert_nothing(self):
         assert LLMProvider.runs_shell_in_generate is None
@@ -9748,7 +9795,9 @@ PRE_L5_ARGV = {
     "aider": [
         "aider", "--model", "openrouter/z-ai/glm-5.2",
         "--message", f"/ask {PRE_L5_ARGV_PROMPT}",
-        "--yes-always", "--no-auto-commits", "--no-pretty", "--no-stream",
+        # No `--yes-always` since plans/ask-answer-recovery-and-false-success.md
+        # T4.2: the decline supply on stdin answers aider's prompts instead.
+        "--no-auto-commits", "--no-pretty", "--no-stream",
         "--no-check-update", "--no-show-model-warnings", "--no-analytics",
         "--no-gitignore", "--no-show-release-notes", "--no-detect-urls",
         "--no-fancy-input",
@@ -11815,7 +11864,11 @@ class TestOpenCodeStreamCapturesAcrossThePin:
         )
         result = provider.parse_output(stdout, stderr)
         assert result["success"] is False
-        assert result["error"] == "No text events found in output" or (
-            "No valid JSON" in str(result["error"])
+        # The adapter's own denied-turn sentence, not the parser's verdict on
+        # the narration (plans/ask-answer-recovery-and-false-success.md D3.1).
+        assert result["error"] == (
+            "opencode ended the turn after an auto-rejected permission "
+            "(external_directory /etc/*); no final answer"
         )
+        assert result["incomplete"] is True
         assert provider.classify_failure(stdout, stderr, 0) == "runner_error"

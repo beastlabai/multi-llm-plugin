@@ -398,18 +398,59 @@ class TestAnUnprobedRowIsNull:
         )
 
     @pytest.mark.parametrize("name", _registered_provider_names())
-    def test_a_probed_mechanism_is_really_in_the_argv(self, name):
-        """A recorded mechanism is a fact about this repo's code, not a note."""
+    def test_a_probed_mechanism_is_really_in_the_argv(self, name, tmp_path, monkeypatch):
+        """A recorded mechanism is a fact about this repo's code, not a note.
+
+        An entry is a whole argv token, with two narrow extensions
+        (plans/ask-answer-recovery-and-false-success.md T4.2), because aider's
+        measured mechanism has neither part as a token of its own:
+
+        * ``message:<prefix>`` — ``--message``'s rendered value starts with
+          ``<prefix>`` (aider's ``/ask ``, which rides inside that value);
+        * ``stdin:<answer>`` — on the argv transport,
+          ``build_command_for_transport`` returns a ``stdin_text`` that is one
+          or more lines, every one exactly ``<answer>`` (aider's decline supply;
+          its count is pinned in ``tests/test_aider_provider.py``).
+
+        Neither starts with ``-``, so :meth:`_borrowable` never turns one into a
+        flag another row could be accused of borrowing.
+        """
         mechanism = read_only_modes()[name]["mechanism"]
         if mechanism is None:
             pytest.skip(f"{name} is a null row — the probe queue, not a claim")
 
-        rendered = set(_generate_argv(name))
+        generate = _generate_argv(name)
+        rendered = set(generate)
         readonly = _profile_argv(name, PROFILE_AGENT_READONLY)
         if readonly is not None:
             rendered |= set(readonly)
 
-        missing = [token for token in mechanism if token not in rendered]
+        def present(entry):
+            if entry.startswith("message:"):
+                prefix = entry[len("message:"):]
+                values = [
+                    generate[index + 1]
+                    for index, token in enumerate(generate[:-1])
+                    if token == "--message"
+                ]
+                return any(value.startswith(prefix) for value in values)
+            if entry.startswith("stdin:"):
+                # A hermetic cwd and $HOME: aider refuses before spawn when a
+                # config file there turns yes-always on (D4.2), and this guard
+                # is about the adapter's code, not the machine it runs on.
+                monkeypatch.setenv("HOME", str(tmp_path))
+                _argv, stdin_text = _PROVIDERS[name].build_command_for_transport(
+                    PROMPT, _model_for(name), "argv", cwd=str(tmp_path)
+                )
+                answer = entry[len("stdin:"):]
+                return (
+                    isinstance(stdin_text, str)
+                    and stdin_text.endswith("\n")
+                    and set(stdin_text[:-1].split("\n")) == {answer}
+                )
+            return entry in rendered
+
+        missing = [token for token in mechanism if not present(token)]
         assert not missing, (
             f"{name}: read_only_modes records {mechanism} but the adapter renders "
             f"none of {missing} in its `generate` or `agent-readonly` argv. Either "

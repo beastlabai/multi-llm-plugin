@@ -768,3 +768,179 @@ class TestPiSalvageTextMeetsEveryRowsLabel:
         assert details[llm_client.SALVAGE_TEXT_KEY] == ""
         assert salvage_source(details) == ""
         assert not has_salvageable_json(salvage_source(details))
+
+
+# --------------------------------------------------------------------------- #
+# `incomplete`: the stream's own verdict that the answer did not finish
+# (plans/ask-answer-recovery-and-false-success.md D3.1, T3.1's provider half).
+# `invoke_with_provider` moving it to `details["incomplete"]` is tested in
+# tests/test_llm_client.py.
+# --------------------------------------------------------------------------- #
+
+#: A findings array cut after one whole record, on a `stop` (the model ended
+#: its turn): the unclosed-container refusal's input.
+_CUT_ARRAY = (
+    '[\n  {\n    "title": "Off-by-one in the lap counter",\n'
+    '    "file": "src/laps.py",\n    "line_range": [10, 15],\n'
+    '    "importance": "high",\n    "type": "bug"\n  },\n'
+    '  {\n    "title": "The stream stops he'
+)
+
+
+def _with_stop_answer(stdout, answer):
+    """A committed stream whose terminal assistant ``stop`` carries ``answer``.
+
+    One ``message_end`` line re-serialized, nothing else moved (the mutation
+    ``test_omp_stream_reading`` makes for the same shape).
+    """
+    lines = stdout.splitlines()
+    target = None
+    for index, line in enumerate(lines):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        message = event.get("message") or {}
+        if (
+            event.get("type") == "message_end"
+            and message.get("role") == "assistant"
+            and message.get("stopReason") == "stop"
+        ):
+            target = index
+    assert target is not None, "the row ends in a terminal `stop`"
+    event = json.loads(lines[target])
+    event["message"]["content"] = [{"type": "text", "text": answer}]
+    lines[target] = json.dumps(event)
+    return "\n".join(lines) + "\n"
+
+
+class TestIncompleteRidesTheLengthStop:
+    @pytest.mark.parametrize("row", ["length", "length-recovery"])
+    def test_a_length_row_parses_incomplete(self, row):
+        result = PI.parse_output(*_row(row))
+        assert result["success"] is False
+        assert result["incomplete"] is True
+        # Beside no `error_code`: the file channel may still look (D3.1).
+        assert "error_code" not in result
+        assert "Truncated output (stopReason length" in result["error"]
+
+    def test_a_synthetic_length_stop_parses_incomplete(self):
+        result = PI.parse_output(_stream(stop_reason="length", text="[{\"a\": 1}]"), "")
+        assert result["incomplete"] is True
+
+    @pytest.mark.parametrize("row", ["success", "multi-assistant"])
+    def test_a_finished_answer_carries_none(self, row):
+        result = PI.parse_output(*_row(row))
+        assert result["success"] is True
+        assert "incomplete" not in result
+
+    def test_a_prose_answer_with_no_json_carries_none(self):
+        prose = "The plan is sound. Step 2 should bound the retry ladder."
+        result = PI.parse_output(_stream(text=prose, plant_markers=False), "")
+        assert result["success"] is False
+        assert result["raw"] == prose
+        assert "incomplete" not in result
+
+    @pytest.mark.parametrize("provider,fixtures", [
+        (PI, PI_FIXTURES), (OmpProvider(), OMP_FIXTURES),
+    ], ids=["pi", "omp"])
+    def test_the_unclosed_container_refusal_on_a_stop_carries_none(self, provider, fixtures):
+        """The model ended its turn; the refusal is a verdict on JSON, which an
+        ask answer need not be (D3.1)."""
+        stdout = (fixtures / "success.stdout.txt").read_text(encoding="utf-8")
+        result = provider.parse_output(_with_stop_answer(stdout, _CUT_ARRAY), "")
+        assert result["success"] is False
+        assert "Truncated output (the answer opens a JSON document" in result["error"]
+        assert "incomplete" not in result
+
+
+class TestOtherAdaptersThatEndATurnShort:
+    """D3.1: any adapter that fails an exit-0 run on how its stream ended, with
+    no hard ``error_code``, sets ``incomplete`` too. Surveyed 2026-09-29: omp
+    fails every non-``stop`` ending with a hard code, and muse's non-completed
+    terminal is measured only at exit 1. cline's cut stream is pinned in
+    ``tests/test_cline_reducer.py``; opencode's denied turn is here."""
+
+    OPENCODE = SKILL_ROOT / "tests" / "fixtures" / "opencode" / "1.18.32"
+
+    def _opencode(self, name):
+        from utils.providers.opencode import OpenCodeProvider
+
+        stdout = (self.OPENCODE / f"{name}.jsonl").read_text(encoding="utf-8")
+        stderr = (self.OPENCODE / f"{name}.stderr.txt").read_text(encoding="utf-8")
+        return OpenCodeProvider(), stdout, stderr
+
+    def test_opencodes_denied_turn_is_incomplete(self):
+        provider, stdout, stderr = self._opencode("denied_permission_turn_end")
+        # The pin is live: the last message is narration the hook would hand
+        # the ask lane as its answer text.
+        assert provider.salvage_text(stdout).startswith("I'll read")
+        result = provider.parse_output(stdout, stderr)
+        assert result["success"] is False
+        assert result["incomplete"] is True
+        assert "error_code" not in result
+        # The ask lane's step 3 writes this error to `error_<model>.log` and the
+        # `## Failed Models` line: the adapter's denied-turn sentence, not the
+        # parser's verdict on the narration ("No valid JSON found in text").
+        assert result["error"] == provider.classify_structural(stdout, stderr, 0)[1]
+        assert "auto-rejected permission" in result["error"]
+        assert result["data"] is None
+
+    def test_opencodes_turn_that_continued_past_a_deny_is_not(self):
+        # `continue_loop_on_deny`: the same auto-reject, then a final answer and
+        # a `stop`.
+        provider, stdout, stderr = self._opencode("continue_loop_on_deny")
+        assert "auto-rejecting" in stderr
+        assert "incomplete" not in provider.parse_output(stdout, stderr)
+
+
+def _exit_zero_labelled_rows():
+    """``(provider, row, body)`` for every manifest row that exits 0 with a label."""
+    from tests.test_provider_fixture_rows import MANIFESTS
+
+    return [
+        (provider, name, body)
+        for provider, manifest in sorted(MANIFESTS.items())
+        for name, body in (manifest.get("rows") or {}).items()
+        if "not_applicable" not in body
+        and body.get("exit_code") == 0
+        and (body.get("expect") or {}).get("salvage") in ("partial", "answer")
+    ]
+
+
+EXIT_ZERO_LABELLED_ROWS = _exit_zero_labelled_rows()
+
+
+class TestTheLabelsAndTheKeyAgree:
+    """Every manifest row that exits 0: ``salvage: partial`` ⇔ ``incomplete``.
+
+    A ``partial`` row that ended by itself at exit 0 is an answer cut short
+    (pi's ``length`` rows are the only ones committed), so its parse must carry
+    ``incomplete`` or the ask lane counts it as answered. An ``answer`` row is a
+    finished answer and must not. ``none`` rows hold no text either way.
+    """
+
+    def test_the_sweep_covers_both_labels(self):
+        labels = {body["expect"]["salvage"] for _p, _n, body in EXIT_ZERO_LABELLED_ROWS}
+        assert labels == {"partial", "answer"}
+        assert {(p, n) for p, n, _b in EXIT_ZERO_LABELLED_ROWS} >= {
+            ("pi", "length"), ("pi", "length-recovery"), ("pi", "success"),
+        }
+
+    @pytest.mark.parametrize(
+        "provider,name,body", EXIT_ZERO_LABELLED_ROWS,
+        ids=[f"{p}/{n}" for p, n, _b in EXIT_ZERO_LABELLED_ROWS],
+    )
+    def test_row(self, provider, name, body):
+        from utils.provider_registry import _PROVIDERS
+
+        fixtures = SKILL_ROOT / "tests" / "fixtures" / provider
+
+        def read(key):
+            return (fixtures / body[key]).read_text(encoding="utf-8") if body.get(key) else ""
+
+        result = _PROVIDERS[provider].parse_output(read("stdout"), read("stderr"))
+        if body["expect"]["salvage"] == "partial":
+            assert result.get("incomplete") is True, f"{provider}/{name}"
+        else:
+            assert "incomplete" not in result, f"{provider}/{name}"

@@ -1501,7 +1501,11 @@ class TestTheFanOutNeverWentLive:
                         # `ask_orchestrator.recover_answer_text` falling back
                         # to the provider's raw stdout — and both rows went
                         # GREEN on this assertion while grok was failing on
-                        # all six of that host's fan-out rows.
+                        # all six of that host's fan-out rows. The ask lane
+                        # no longer reads `raw` (it reads only the reduced
+                        # `answer_text`, `""` for that body — plans/ask-answer-
+                        # recovery-and-false-success.md D2.3); this check does
+                        # not rely on that and stays as the second gate.
                         # `harness.error_envelope_reason` reads the CLIs' own
                         # measured discriminators (`type: "error"`,
                         # `is_error: true`) off a body that parses WHOLE as a

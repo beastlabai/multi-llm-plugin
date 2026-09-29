@@ -143,7 +143,6 @@ clis:
       # mention auto-add never matches absolute paths). expected_argv.yaml
       # asserts it on BOTH aider rows, so it is dispatched on every real run.
       - "--read"
-      - "--yes-always"
 
   - cli: claude-code
     binary: claude

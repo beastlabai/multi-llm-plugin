@@ -578,6 +578,7 @@ class ResultContext:
         self.high_priority_groups: Optional[Dict[str, Any]] = None
         self.validation_context: Optional[Dict[str, Any]] = None
         self.validation_counts: Optional[Dict[str, int]] = None
+        self.answer_origins: Optional[Dict[str, Any]] = None
         self.notice: Optional[str] = None
         self.progress: Optional[Dict[str, Any]] = None
         self.progress_lines: Optional[List[str]] = None
@@ -648,6 +649,23 @@ class ResultContext:
         validation ran) leaves the line byte-for-byte what it was.
         """
         self.validation_counts = dict(counts) if counts else None
+
+    def set_answer_origins(self, origins: Optional[Dict[str, Any]]) -> None:
+        """Record an ask run's answer counts by origin (plans/ask-answer-
+        recovery-and-false-success.md D7.2), if this is one.
+
+        ``{answered, file, stdout, fallback, accepted, unrecorded, kept,
+        warn_all_fallback}`` — the numbers of the ask closing report's
+        ``answered: …`` line and its ``[WARN]``'s predicate, computed once by
+        ``ask_orchestrator.answer_origins`` so the prose and this field cannot
+        disagree. It follows ``set_validation_counts``' route (``.status.json``,
+        ``detach.classify_run``, a pinned ``status --view run``) because the
+        ``[WARN]`` is prose and a host reading only the result line would miss
+        an all-fallback run. Unlike the counts above it is present on a
+        zero-answer run too (all zeros, flag ``false``), so only ``None`` — every
+        other mode — leaves the line byte-for-byte what it was.
+        """
+        self.answer_origins = dict(origins) if origins is not None else None
 
     def set_notice(self, text: Optional[str]) -> None:
         """Record the workflow-level notice a terminal ``status`` run carries.
@@ -747,6 +765,8 @@ class ResultContext:
             payload["validation_context"] = dict(self.validation_context)
         if self.validation_counts:
             payload["validation_counts"] = dict(self.validation_counts)
+        if self.answer_origins is not None:
+            payload["answer_origins"] = dict(self.answer_origins)
         if self.notice:
             payload["notice"] = self.notice
         if self.progress:
@@ -867,6 +887,12 @@ def record_validation_counts(counts: Optional[Dict[str, int]]) -> None:
     """Record the per-verdict group counts, if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_validation_counts(counts)
+
+
+def record_answer_origins(origins: Optional[Dict[str, Any]]) -> None:
+    """Record an ask run's ``answer_origins``, if a dispatcher run is active."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_answer_origins(origins)
 
 
 def record_notice(text: Optional[str]) -> None:

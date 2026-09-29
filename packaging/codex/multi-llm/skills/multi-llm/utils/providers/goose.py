@@ -289,21 +289,7 @@ class GooseProvider(LLMProvider):
                 return fallback
             return {"success": False, "error": f"JSON parse error: {e}", "raw": stdout, "data": None}
 
-        messages = envelope.get("messages") if isinstance(envelope, dict) else None
-        if not isinstance(messages, list):
-            messages = []
-
-        text = None
-        for message in messages:
-            if isinstance(message, dict) and message.get("role") == "assistant":
-                parts = [
-                    part.get("text")
-                    for part in message.get("content", [])
-                    if isinstance(part, dict)
-                    and part.get("type") == "text"
-                    and isinstance(part.get("text"), str)
-                ]
-                text = "\n".join(parts)
+        text = last_assistant_text(envelope)
 
         if text is None:
             return {"success": False, "error": "No assistant message in output", "raw": stdout, "data": None}
@@ -322,3 +308,67 @@ class GooseProvider(LLMProvider):
             except json.JSONDecodeError:
                 pass
         return extract_json_from_text(text, prefer_arrays=True)
+
+    def salvage_text(self, stdout: str) -> Optional[str]:
+        """The last assistant message's text, never the envelope (D2.5).
+
+        The text :meth:`parse_output` reads (:func:`last_assistant_text`,
+        stripped), so the ask lane's answer text and the review lanes' salvage
+        read what the parser treats as the answer
+        (plans/ask-answer-recovery-and-false-success.md D2.5). ``""`` — a final
+        verdict — for goose's own failures, which ride inside that same text
+        because goose exits 0 on all of them:
+
+        * ``Ran into this error`` anywhere: the marker the parser fails on, and
+          also ``Ran into this error trying to compact:`` (``context-overflow``),
+          which the parser's colon-anchored test misses;
+        * text that starts with ``Network error`` — the un-prefixed stream
+          failure prose of ``truncated`` and ``zero-body``, which would
+          otherwise be saved as an answer.
+
+        Also ``""`` when stdout is not one whole envelope (a killed process's
+        partial one) or holds no assistant message (an empty completion echoes
+        only the user turn).
+        """
+        try:
+            if not isinstance(stdout, str):
+                return ""
+            try:
+                envelope = json.loads(stdout.strip())
+            except ValueError:
+                return ""
+            text = last_assistant_text(envelope)
+            if text is None:
+                return ""
+            text = text.strip()
+            if "Ran into this error" in text or text.startswith("Network error"):
+                return ""
+            return text
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return ""
+
+
+def last_assistant_text(envelope: Any) -> Optional[str]:
+    """The last ``role: "assistant"`` message's ``text`` parts, newline-joined.
+
+    ``None`` when the envelope holds no assistant message (or is not an
+    envelope at all). Shared by :meth:`GooseProvider.parse_output` and
+    :meth:`GooseProvider.salvage_text`, so both read one text. Never raises: a
+    message whose ``content`` is not a list contributes no parts.
+    """
+    messages = envelope.get("messages") if isinstance(envelope, dict) else None
+    if not isinstance(messages, list):
+        return None
+    text: Optional[str] = None
+    for message in messages:
+        if isinstance(message, dict) and message.get("role") == "assistant":
+            content = message.get("content")
+            parts = [
+                part.get("text")
+                for part in (content if isinstance(content, list) else [])
+                if isinstance(part, dict)
+                and part.get("type") == "text"
+                and isinstance(part.get("text"), str)
+            ]
+            text = "\n".join(parts)
+    return text

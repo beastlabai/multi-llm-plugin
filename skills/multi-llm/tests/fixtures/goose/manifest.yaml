@@ -63,6 +63,7 @@ rows:
       caught the prompt-echo defect (see the `prompt-echo` row) if this row still
       used the product's own prompt.
     expect:
+      salvage: answer
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -90,6 +91,7 @@ rows:
       base.CONNECTION_ERROR_MARKERS, so the classification is None. Recorded, not
       fixed — see the README.
     expect:
+      salvage: none
       success: false
       error_contains: ["No valid JSON found in text"]
       raw_contains:
@@ -113,6 +115,7 @@ rows:
       envelope is byte-shape identical to `error-envelope` below, which is itself
       the finding recorded there.
     expect:
+      salvage: none
       success: false
       error_contains: ["No assistant message in output"]
       raw_contains:
@@ -141,6 +144,7 @@ rows:
       message carries `FIRST ANSWER (must NOT be selected)`; a first-wins parser
       returns the D999 document and a concatenating one returns neither.
     expect:
+      salvage: answer
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
@@ -164,6 +168,7 @@ rows:
       timestamp). Nothing distinguishes a 200-carrying-an-error from a model that
       said nothing, and no vendor text reaches any pattern table.
     expect:
+      salvage: none
       success: false
       error_contains: ["No assistant message in output"]
       raw_contains:
@@ -189,6 +194,7 @@ rows:
       (`500 Internal Server Error`), which base.SERVER_ERROR_MARKERS matches, and
       the exit-0 marker is consulted last by construction (§7.2 step 6).
     expect:
+      salvage: none
       success: false
       error_contains: ["Ran into this error:"]
       raw_contains:
@@ -235,6 +241,7 @@ rows:
       "Incorrect API key provided: …" matches nothing there, which is exactly the
       hole that leaves cline's identical 401 classified as `runner_error`.
     expect:
+      salvage: none
       success: false
       error_contains: ["Ran into this error:", "Authentication error"]
       raw_contains:
@@ -254,6 +261,7 @@ rows:
       an executor-level re-dispatch of a rate-limited goose slot doubles a wait
       the CLI already served (§7.6(b)'s rule 6b).
     expect:
+      salvage: none
       success: false
       error_contains: ["Rate limit exceeded"]
       raw_contains:
@@ -275,6 +283,7 @@ rows:
       makes a stray `:effort` suffix findable; the retry ladder above it is the
       cost, and it is recorded in `requests: 9`.
     expect:
+      salvage: none
       success: false
       raw_contains:
         - "The model `stub-model` does not exist or you do not have access to it."
@@ -303,6 +312,7 @@ rows:
       declares terminal. Five compaction retries in 0.26 s are inside the capture
       (requests 4-8), so goose burned its own budget on it first.
     expect:
+      salvage: none
       success: false
       error_contains: ["No valid JSON found in text"]
       raw_contains:
@@ -329,6 +339,7 @@ rows:
       an extraction failure, and `Network error` matches nothing in
       base.CONNECTION_ERROR_MARKERS, so the classification is None.
     expect:
+      salvage: none
       success: false
       error_contains: ["No valid JSON found in text"]
       raw_contains: ["Network error — check your network connection"]
@@ -358,6 +369,7 @@ rows:
       product's own prompt, so a regression that puts the echo back in the
       haystack fails here.
     expect:
+      salvage: answer
       success: true
       data:
         - {id: "S001", title: "Bound the retry ladder", severity: "high"}
