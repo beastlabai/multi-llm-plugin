@@ -996,22 +996,179 @@ def discovery_step(host: str, home: Path) -> dict:
 #: `CREDENTIAL_VARS`; the stub accepts anything.
 STUB_PLACEHOLDER_KEY = "stub-not-a-credential"
 
-#: Escape sequences a full-screen TUI writes, stripped before anything is matched
-#: or written to the bundle. A TUI transcript is a repaint stream, so this makes
-#: it readable rather than parseable: nothing in this module ever asserts on the
-#: transcript's *content* except a host's own refusal line, which both hosts emit
-#: as plain text.
-_ANSI = re.compile(
-    r"\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)"    # OSC … BEL / ST
-    r"|\x1bP[^\x1b]*\x1b\\"                 # DCS … ST
-    r"|\x1b\[[0-9;?<>=]*[ -/]*[@-~]"        # CSI
-    r"|\x1b[()][A-Za-z0-9]"                 # designate charset
-    r"|\x1b[=>NOMc78]"                      # single-character escapes
+#: The pty window size `drive_documented_invocation` sets (`TIOCSWINSZ`, below)
+#: and the grid `_render_screen` renders onto — one pair of numbers, not two,
+#: so the emulator can never disagree with the terminal it is reading.
+_TUI_ROWS = 50
+_TUI_COLS = 200
+
+#: One token per iteration of `_render_screen`'s walk: an OSC/DCS/charset/
+#: single-char escape (no grid effect — title changes, charset designation,
+#: DEC private modes), a CSI sequence (`_apply_csi` decides whether it moves
+#: the cursor or is inert), a bare control character, or a run of plain text.
+#: `finditer` tries each alternative in order and reports which one matched via
+#: `lastgroup`, which is what lets `_render_screen` stay a single dispatch
+#: table instead of six separate regexes each re-scanning the same bytes.
+_TUI_TOKEN_RE = re.compile(
+    r"(?P<osc>\x1b\][^\x07\x1b]*(?:\x07|\x1b\\))"    # OSC … BEL / ST
+    r"|(?P<dcs>\x1bP[^\x1b]*\x1b\\)"                 # DCS … ST
+    r"|(?P<csi>\x1b\[[0-9;?<>=]*[ -/]*[@-~])"        # CSI
+    r"|(?P<charset>\x1b[()][A-Za-z0-9])"             # designate charset
+    r"|(?P<single>\x1b[=>NOMc78])"                   # single-character escapes
+    r"|(?P<cr>\r)"
+    r"|(?P<lf>\n)"
+    r"|(?P<bs>\x08)"
+    r"|(?P<bel>\x07)"
+    r"|(?P<text>[^\x1b\r\n\x08\x07]+)"
 )
+
+#: Pulls the parameter string and final byte back out of one matched CSI token
+#: (`_TUI_TOKEN_RE`'s `csi` group), so `_apply_csi` never re-derives what the
+#: outer regex already found.
+_CSI_PARSE_RE = re.compile(r"\x1b\[([0-9;?<>=]*)[ -/]*([@-~])")
+
+
+def _csi_params(token: str) -> tuple[list[int], str]:
+    """``("\\x1b[8;16H", ...)`` -> ``([8, 16], "H")``.
+
+    Non-numeric leaders (``?``, ``<``, ``>``, ``=`` — DEC private-mode markers)
+    are dropped rather than rejected, so ``\\x1b[?25h`` parses to ``([25], "h")``
+    instead of raising: harmless, because ``h``/``l`` are not one of the finals
+    `_apply_csi` interprets, so the (unused) numbers never matter.
+    """
+    match = _CSI_PARSE_RE.match(token)
+    if not match:
+        return [], ""
+    params, final = match.group(1), match.group(2)
+    numbers = [int(digits) if (digits := "".join(c for c in part if c.isdigit()))
+               else 0
+               for part in params.split(";")]
+    return numbers, final
+
+
+def _apply_csi(grid: list, cursor: list, token: str) -> None:
+    """Interpret one CSI token against ``grid``, moving or clearing through
+    ``cursor`` (``[row, col]``, 0-indexed, mutated in place).
+
+    Only the finals that move the cursor or erase cells are interpreted —
+    cursor position/HVP (`H`/`f`), the four relative moves (`A`/`B`/`C`/`D`),
+    column-absolute (`G`), erase-in-line (`K`) and erase-in-display (`J`).
+    Everything else this full-screen TUI sends — SGR colour, DEC private
+    mode toggles, synchronized-update markers — has no textual effect and is
+    consumed with no change to the grid, exactly as the old blanket strip
+    dropped it.
+    """
+    numbers, final = _csi_params(token)
+    rows, cols = len(grid), (len(grid[0]) if grid else 0)
+
+    def clamp_row(r: int) -> int:
+        return max(0, min(rows - 1, r))
+
+    def clamp_col(c: int) -> int:
+        return max(0, min(cols - 1, c))
+
+    def param(index: int, default: int = 1) -> int:
+        return numbers[index] if len(numbers) > index and numbers[index] else default
+
+    if final in ("H", "f"):
+        cursor[0] = clamp_row(param(0) - 1)
+        cursor[1] = clamp_col(param(1) - 1)
+    elif final in ("A", "B", "C", "D"):
+        n = param(0)
+        if final == "A":
+            cursor[0] = clamp_row(cursor[0] - n)
+        elif final == "B":
+            cursor[0] = clamp_row(cursor[0] + n)
+        elif final == "C":
+            cursor[1] = clamp_col(cursor[1] + n)
+        else:
+            cursor[1] = clamp_col(cursor[1] - n)
+    elif final == "G":
+        cursor[1] = clamp_col(param(0) - 1)
+    elif final == "K":
+        mode = numbers[0] if numbers else 0
+        row = grid[cursor[0]]
+        if mode == 0:
+            for c in range(cursor[1], cols):
+                row[c] = " "
+        elif mode == 1:
+            for c in range(0, cursor[1] + 1):
+                row[c] = " "
+        elif mode == 2:
+            grid[cursor[0]] = [" "] * cols
+    elif final == "J":
+        mode = numbers[0] if numbers else 0
+        if mode == 0:
+            for c in range(cursor[1], cols):
+                grid[cursor[0]][c] = " "
+            for r in range(cursor[0] + 1, rows):
+                grid[r] = [" "] * cols
+        elif mode == 1:
+            for r in range(0, cursor[0]):
+                grid[r] = [" "] * cols
+            for c in range(0, cursor[1] + 1):
+                grid[cursor[0]][c] = " "
+        else:
+            for r in range(rows):
+                grid[r] = [" "] * cols
+    # else: SGR, DEC private modes, synchronized-update markers, … — inert.
+
+
+def _render_screen(text: str) -> str:
+    """Render a full-screen TUI's repaint stream into readable text.
+
+    A modern ratatui/ink-style TUI redraws by **positioning the cursor and
+    overwriting only the cells that changed** — it does not reprint a whole
+    line with real space characters between words. Measured on codex 0.159.2's
+    refusal line: the six words arrive as six separate `text` runs, each
+    preceded by its own absolute `CSI row;colH`, and the one-column gap between
+    each pair of words is never a byte on the wire — it is the *distance*
+    between where one run ends and the next one's `H` places the cursor. The
+    old approach — `_ANSI.sub("", …)`, deleting every escape sequence with no
+    memory of what it did — deleted that distance along with the sequence that
+    encoded it, so `Unrecognized` and `command` landed adjacent with nothing
+    between them. Concatenating bytes in wire order can never recover a
+    position-encoded gap; only tracking where each run actually lands can.
+
+    So this walks the stream on a `_TUI_ROWS` x `_TUI_COLS` grid — the same
+    dimensions the pty is opened with — moving a cursor for CR/LF/backspace and
+    for the CSI moves `_apply_csi` interprets, and writing each run of plain
+    text at the cursor's current cell, advancing one column per character. The
+    result is column-accurate for exactly the case that matters here (words
+    placed apart on one row), and degrades no worse than the old strip for
+    everything else: a CLI that writes contiguous runs with real space
+    characters (opencode's ready banner, measured 2026-08-24) renders
+    identically either way, because contiguous same-row text with no
+    repositioning is the trivial case both approaches already agreed on.
+    """
+    grid = [[" "] * _TUI_COLS for _ in range(_TUI_ROWS)]
+    cursor = [0, 0]  # [row, col], 0-indexed
+
+    for match in _TUI_TOKEN_RE.finditer(text):
+        kind = match.lastgroup
+        token = match.group()
+        if kind == "text":
+            for ch in token:
+                if cursor[1] >= _TUI_COLS:
+                    cursor[1] = 0
+                    cursor[0] = min(_TUI_ROWS - 1, cursor[0] + 1)
+                grid[cursor[0]][cursor[1]] = ch
+                cursor[1] += 1
+        elif kind == "cr":
+            cursor[1] = 0
+        elif kind == "lf":
+            cursor[0] = min(_TUI_ROWS - 1, cursor[0] + 1)
+        elif kind == "bs":
+            cursor[1] = max(0, cursor[1] - 1)
+        elif kind == "csi":
+            _apply_csi(grid, cursor, token)
+        # osc / dcs / charset / single / bel: no grid effect.
+
+    return "\n".join("".join(row).rstrip() for row in grid).strip("\n")
 
 
 def _plain(raw: bytes) -> str:
-    return _ANSI.sub("", raw.decode("utf-8", "replace"))
+    return _render_screen(raw.decode("utf-8", "replace"))
 
 
 def invocation_facts(host: str, typed: str, plan_rel: str,
@@ -1285,7 +1442,8 @@ def drive_documented_invocation(host: str, entry: dict, home: Path,
             os.execve(argv[0], argv, env)
         finally:
             os._exit(127)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 50, 200, 0, 0))
+    fcntl.ioctl(fd, termios.TIOCSWINSZ,
+                struct.pack("HHHH", _TUI_ROWS, _TUI_COLS, 0, 0))
 
     captured = bytearray()
     ready_at: float | None = None
