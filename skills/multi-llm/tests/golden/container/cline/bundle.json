@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-09-25T09:11:17Z",
+    "captured_at": "2026-09-30T19:07:03Z",
     "cli": "cline",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -61,7 +61,7 @@
     "image": "mllm-e2e:local",
     "reviewer": "cline",
     "row_id": "chain-cline",
-    "run_bundle": "20260925T084935Z"
+    "run_bundle": "20260930T184423Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -85,6 +85,7 @@
     "[PROGRESS]",
     "[PROGRESS]",
     "[PROGRESS]",
+    "[WARN]",
     "[OUTPUT_FILE]",
     "[WARN]",
     "[OUTPUT_FILE]",
@@ -97,22 +98,28 @@
       ],
       "<items>": [
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
@@ -126,29 +133,37 @@
       ],
       "<items>": [
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
@@ -162,22 +177,28 @@
       ],
       "<items>": [
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
@@ -191,22 +212,28 @@
       ],
       "<items>": [
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": "<int>",
           "duration_ms": "<int>",
           "label": "<str>",
+          "run_id": "<str>",
           "subagent_type": "<str>",
           "timestamp": "<str>",
           "token_count": "<int>"
@@ -303,21 +330,28 @@
     "apply-task-suggestions/write_tasks.json",
     "ask/",
     "ask/what-is-the-weakest-part-of-the-rate-limiter-da40cb4f/",
+    "ask/what-is-the-weakest-part-of-the-rate-limiter-da40cb4f/.lock",
     "ask/what-is-the-weakest-part-of-the-rate-limiter-da40cb4f/.status.json",
     "ask/what-is-the-weakest-part-of-the-rate-limiter-da40cb4f/.status.lock",
     "ask/what-is-the-weakest-part-of-the-rate-limiter-da40cb4f/answer_cline_openai_stub-model.md",
     "ask/what-is-the-weakest-part-of-the-rate-limiter-da40cb4f/answers.md",
     "ask/what-is-the-weakest-part-of-the-rate-limiter-da40cb4f/log_cline_openai_stub-model.txt",
+    "ask/what-is-the-weakest-part-of-the-rate-limiter-da40cb4f/origin_cline_openai_stub-model.txt",
     "code-review/",
+    "code-review/.review-scope.json",
     "code-review/.status.json",
     "code-review/.status.lock",
     "code-review/cline_openai_stub-model.json",
+    "code-review/diff/",
+    "code-review/diff/.gitignore",
+    "code-review/diff/1-plans-auth-feature.md.diff",
     "code-review/grouped.json",
     "code-review/issues.json",
     "code-review/log_cline_openai_stub-model.txt",
     "code-review/report.html",
     "code-review/report.md",
     "code-review/report_data.json",
+    "code-review/review-scope.md",
     "code-review/subagent_batch_report.json",
     "code-review/validation-snapshot.md",
     "code-review/validation.json",
@@ -3144,8 +3178,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:04d5fa4c71ee:13450>",
-              "prompt_lines": 396,
+              "prompt": "<text:sha256:ec4240927a10:13627>",
+              "prompt_lines": 400,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -3177,8 +3211,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:e2e4a53bcaed:11361>",
-              "prompt_lines": 331,
+              "prompt": "<text:sha256:185e86a41fe3:11538>",
+              "prompt_lines": 335,
               "prompt_path": "<run-root>/plans/auth-feature/code-review/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4178,8 +4212,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:40fc765f4574:7061>",
-              "prompt_lines": 214,
+              "prompt": "<text:sha256:b8317f0dd134:7238>",
+              "prompt_lines": 218,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4209,8 +4243,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:b818938ffa9c:7017>",
-              "prompt_lines": 214,
+              "prompt": "<text:sha256:dd6aa7292257:7194>",
+              "prompt_lines": 218,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4242,8 +4276,8 @@
               "output_name": "validation_batch_2.json",
               "output_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:5176fb43ac60:7661>",
-              "prompt_lines": 232,
+              "prompt": "<text:sha256:ab8296360d96:7838>",
+              "prompt_lines": 236,
               "prompt_path": "<run-root>/plans/auth-feature/review-plan/validation_batch_2.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4557,8 +4591,8 @@
               "output_name": "validation_batch_0.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:6df87ed6afdc:9304>",
-              "prompt_lines": 294,
+              "prompt": "<text:sha256:8813eb22e5f0:9481>",
+              "prompt_lines": 298,
               "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_0.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4591,8 +4625,8 @@
               "output_name": "validation_batch_1.json",
               "output_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.json",
               "plan_file": "<run-root>/plans/auth-feature.md",
-              "prompt": "<text:sha256:cf6e89cda1f4:9984>",
-              "prompt_lines": 312,
+              "prompt": "<text:sha256:89e723645b87:10161>",
+              "prompt_lines": 316,
               "prompt_path": "<run-root>/plans/auth-feature/review-tasks/validation_batch_1.prompt.txt",
               "result_channel": "file",
               "subagent_type": "general-purpose",
@@ -4668,9 +4702,25 @@
       "mode": "full",
       "next": null,
       "phase": "full",
-      "state": "done"
+      "state": "done",
+      "validation_counts": {
+        "invalid": 0,
+        "needs_human_decision": 0,
+        "valid": 5,
+        "validation_failed": 0
+      }
     },
     {
+      "answer_origins": {
+        "accepted": 0,
+        "answered": 1,
+        "fallback": 1,
+        "file": 0,
+        "kept": 0,
+        "stdout": 0,
+        "unrecorded": 0,
+        "warn_all_fallback": true
+      },
       "artifacts": [],
       "exit": 0,
       "mode": "ask",
@@ -4710,22 +4760,28 @@
     "metrics": {
       "apply-code-fixes": [
         {
+          "batch_index": 1,
           "duration_ms": "<int>",
           "label": "apply-fix-batch-0: apply 3 fix(es) to src/security.py [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": 2,
           "duration_ms": "<int>",
           "label": "apply-fix-batch-1: apply 1 fix(es) to src/auth.py [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": 3,
           "duration_ms": "<int>",
           "label": "apply-fix-batch-2: apply 1 fix(es) to src/security.py [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
@@ -4733,29 +4789,37 @@
       ],
       "apply-suggestions": [
         {
+          "batch_index": 1,
           "duration_ms": "<int>",
           "label": "apply-batch-0: apply 1 suggestion(s) to step_1 [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": 2,
           "duration_ms": "<int>",
           "label": "apply-batch-1: apply 1 suggestion(s) to step_6 [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": 3,
           "duration_ms": "<int>",
           "label": "apply-batch-2: apply 1 suggestion(s) to step_2 [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": 4,
           "duration_ms": "<int>",
           "label": "apply-batch-3: apply 1 suggestion(s) to step_3 [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
@@ -4763,22 +4827,28 @@
       ],
       "apply-task-suggestions": [
         {
+          "batch_index": 1,
           "duration_ms": "<int>",
           "label": "apply-task-batch-0: apply 1 task suggestion(s) to section:plan_coverage [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": 2,
           "duration_ms": "<int>",
           "label": "apply-task-batch-1: apply 1 task suggestion(s) to section:t002 [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": 3,
           "duration_ms": "<int>",
           "label": "apply-task-batch-2: apply 1 task suggestion(s) to section:t003 [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
@@ -4786,22 +4856,28 @@
       ],
       "implement": [
         {
+          "batch_index": 1,
           "duration_ms": "<int>",
           "label": "T001: Make token comparison constant time [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": 2,
           "duration_ms": "<int>",
           "label": "T002: Bound the login attempt store [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
         },
         {
+          "batch_index": 3,
           "duration_ms": "<int>",
           "label": "T003: Add regression tests for lockout [no-op]",
+          "run_id": "<str>",
           "subagent_type": "opencode:stub/stub-model",
           "timestamp": "<str>",
           "token_count": "<int>"
@@ -4881,22 +4957,28 @@
         ],
         "<items>": [
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
           },
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
           },
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
@@ -4910,29 +4992,37 @@
         ],
         "<items>": [
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
           },
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
           },
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
           },
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
@@ -4946,22 +5036,28 @@
         ],
         "<items>": [
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
           },
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
           },
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
@@ -4975,22 +5071,28 @@
         ],
         "<items>": [
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
           },
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
           },
           {
+            "batch_index": "<int>",
             "duration_ms": "<int>",
             "label": "<str>",
+            "run_id": "<str>",
             "subagent_type": "<str>",
             "timestamp": "<str>",
             "token_count": "<int>"
@@ -5378,6 +5480,16 @@
     },
     "ask/what-is-the-weakest-part-of-the-rate-limiter-da40cb4f/.status.json": {
       "shape": {
+        "answer_origins": {
+          "accepted": "<int>",
+          "answered": "<int>",
+          "fallback": "<int>",
+          "file": "<int>",
+          "kept": "<int>",
+          "stdout": "<int>",
+          "unrecorded": "<int>",
+          "warn_all_fallback": "<bool>"
+        },
         "answers_md": "<str>",
         "models_completed": {
           "<item-types>": [
@@ -5405,8 +5517,10 @@
           "models": {
             "cline:openai/stub-model": {
               "attempt": "<int>",
+              "dispatched_at": "<str>",
               "elapsed_s": "<number>",
               "ended_at": "<str>",
+              "queued_s": "<number>",
               "source": "<str>",
               "started_at": "<str>",
               "state": "<str>",
@@ -5464,8 +5578,10 @@
           "models": {
             "cline:openai/stub-model": {
               "attempt": "<int>",
+              "dispatched_at": "<str>",
               "elapsed_s": "<number>",
               "ended_at": "<str>",
+              "queued_s": "<number>",
               "source": "<str>",
               "started_at": "<str>",
               "state": "<str>",
@@ -5498,7 +5614,13 @@
         },
         "started_at": "<str>",
         "state": "<str>",
-        "updated_at": "<str>"
+        "updated_at": "<str>",
+        "validation_counts": {
+          "invalid": "<int>",
+          "needs_human_decision": "<int>",
+          "valid": "<int>",
+          "validation_failed": "<int>"
+        }
       },
       "steps": [
         "phase=code-review",
@@ -5681,8 +5803,10 @@
           "models": {
             "cline:openai/stub-model": {
               "attempt": "<int>",
+              "dispatched_at": "<str>",
               "elapsed_s": "<number>",
               "ended_at": "<str>",
+              "queued_s": "<number>",
               "source": "<str>",
               "started_at": "<str>",
               "state": "<str>",
@@ -5717,7 +5841,13 @@
         "state": "<str>",
         "total_groups": "<int>",
         "total_suggestions": "<int>",
-        "updated_at": "<str>"
+        "updated_at": "<str>",
+        "validation_counts": {
+          "invalid": "<int>",
+          "needs_human_decision": "<int>",
+          "valid": "<int>",
+          "validation_failed": "<int>"
+        }
       },
       "steps": [
         "phase=review-plan",
@@ -5762,8 +5892,10 @@
           "models": {
             "cline:openai/stub-model": {
               "attempt": "<int>",
+              "dispatched_at": "<str>",
               "elapsed_s": "<number>",
               "ended_at": "<str>",
+              "queued_s": "<number>",
               "source": "<str>",
               "started_at": "<str>",
               "state": "<str>",
@@ -5798,7 +5930,13 @@
         "state": "<str>",
         "total_groups": "<int>",
         "total_suggestions": "<int>",
-        "updated_at": "<str>"
+        "updated_at": "<str>",
+        "validation_counts": {
+          "invalid": "<int>",
+          "needs_human_decision": "<int>",
+          "valid": "<int>",
+          "validation_failed": "<int>"
+        }
       },
       "steps": [
         "phase=review-tasks",
