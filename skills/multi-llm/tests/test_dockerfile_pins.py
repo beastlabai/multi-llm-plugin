@@ -325,12 +325,25 @@ def test_npm_rows_match_package_json(lock):
 #: mechanism. `lock_update.py` refuses to move the npm layer while they are
 #: unlisted, which is what surfaced the decision rather than letting the pin move
 #: carry it silently; it is recorded here as a decision taken, with a date.
+#:
+#: WIDENED 5 -> 7 on 2026-09-30, for the pi 0.87.1 -> 0.99.1 bump. `pi-codemode`
+#: and `pi-mcp` are two more siblings of the same vendor, nested in the same
+#: shrinkwrap at the same 0.99.1 version as the five already listed -- no new
+#: publisher (same `@earendil-works` maintainers as the hashed parent) and no new
+#: mechanism (`npm view @earendil-works/pi-codemode@0.99.1 dist.integrity` and the
+#: `pi-mcp` equivalent both return a sha512, confirming the registry publishes an
+#: integrity for each; the shrinkwrap just omits it). Checked before widening, per
+#: this file's own rule: the registry-hash and same-publisher facts were verified
+#: against the real `@latest` image before this change, not assumed from the
+#: pattern.
 UNHASHED_BY_UPSTREAM = {
     "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core",
     "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai",
     "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui",
     "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/chord",
     "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-telemetry",
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-codemode",
+    "node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-mcp",
 }
 
 
