@@ -303,7 +303,7 @@ clis:
     binary: claude
     install: npm
     package: "@anthropic-ai/claude-code"
-    version: "2.1.280"
+    version: "2.1.285"
     verify:
       command: ["claude", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+) \\(Claude Code\\)$"
@@ -312,7 +312,7 @@ clis:
     binary: gemini
     install: npm
     package: "@google/gemini-cli"
-    version: "0.60.0"
+    version: "0.62.0"
     verify:
       command: ["gemini", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -321,7 +321,7 @@ clis:
     binary: opencode
     install: npm
     package: "opencode-ai"
-    version: "1.18.32"
+    version: "1.18.33"
     verify:
       command: ["opencode", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -330,7 +330,7 @@ clis:
     binary: cline
     install: npm
     package: "cline"
-    version: "3.0.64"
+    version: "3.0.66"
     verify:
       command: ["cline", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -346,7 +346,7 @@ clis:
     binary: kilocode
     install: npm
     package: "@kilocode/cli"
-    version: "7.7.9"
+    version: "7.8.1"
     verify:
       command: ["kilocode", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -358,7 +358,7 @@ clis:
     binary: kimi
     install: npm
     package: "@moonshot-ai/kimi-code"
-    version: "2.0.2"
+    version: "2.1.1"
     verify:
       command: ["kimi", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"
@@ -372,7 +372,7 @@ clis:
     binary: copilot
     install: npm
     package: "@github/copilot"
-    version: "1.0.86"
+    version: "1.0.89"
     verify:
       command: ["copilot", "--version"]
       # MEASURED, and the anchoring is the whole point: `copilot --version`
@@ -402,7 +402,7 @@ clis:
     binary: qwen
     install: npm
     package: "@qwen-code/qwen-code"
-    version: "0.24.1"
+    version: "0.24.7"
     verify:
       command: ["qwen", "--version"]
       # MEASURED, not guessed: `qwen --version` prints a BARE semver with no
@@ -422,7 +422,7 @@ clis:
     binary: pi
     install: npm
     package: "@earendil-works/pi-coding-agent"
-    version: "0.87.1"
+    version: "0.99.1"
     verify:
       command: ["pi", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"

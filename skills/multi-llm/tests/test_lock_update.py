@@ -128,8 +128,8 @@ class TestTheNpmLayerMovesAsOneTree:
         assert rows["codex"] == "0.147.0" and rows["gemini"] == "0.55.1"
         # Untouched rows keep their pin: the drift probe said nothing about them.
         # RESTATED, not read from the lock — the point is to disagree with a bad
-        # edit, so it moves by hand when the pin does (2026-09-23: 3.0.62 -> 3.0.64).
-        assert rows["cline"] == "3.0.64"
+        # edit, so it moves by hand when the pin does (2026-09-30: 3.0.64 -> 3.0.66).
+        assert rows["cline"] == "3.0.66"
 
         manifest = json.loads((container_dir / "package.json").read_text("utf-8"))
         assert manifest["dependencies"]["@openai/codex"] == "0.147.0"
