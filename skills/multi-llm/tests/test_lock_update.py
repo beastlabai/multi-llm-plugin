@@ -160,7 +160,7 @@ class TestTheNpmLayerMovesAsOneTree:
         root = evidence({"codex": "0.147.0"}, npm_versions={"codex": "0.148.0"})
         assert _apply(container_dir, root, tmp_path) == 2
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
-        assert {row["id"]: row["version"] for row in lock["clis"]}["codex"] == "0.156.1"
+        assert {row["id"]: row["version"] for row in lock["clis"]}["codex"] == "0.159.2"
 
     def test_a_new_unhashed_dependency_stops_the_layer_but_not_the_run(
             self, container_dir, evidence, tmp_path):
@@ -172,7 +172,7 @@ class TestTheNpmLayerMovesAsOneTree:
 
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
         rows = {row["id"]: row["version"] for row in lock["clis"]}
-        assert rows["codex"] == "0.156.1", "the npm layer must not have moved"
+        assert rows["codex"] == "0.159.2", "the npm layer must not have moved"
         assert rows["grok"] == "1.0.3", (
             "the artifact rows are independent files and must still move"
         )
@@ -233,7 +233,7 @@ class TestTheNpmLayerMovesAsOneTree:
 
         lock = yaml.safe_load((container_dir / "cli-versions.lock").read_text("utf-8"))
         rows = {row["id"]: row["version"] for row in lock["clis"]}
-        assert rows["codex"] == "0.156.1", "the npm layer must not have moved"
+        assert rows["codex"] == "0.159.2", "the npm layer must not have moved"
         assert rows["grok"] == "1.0.3", "and the artifact rows must still move"
         record = json.loads((tmp_path / "record.json").read_text("utf-8"))
         assert any(entry["row"] == "npm layer" for entry in record["not_moved"])

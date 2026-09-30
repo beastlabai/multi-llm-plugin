@@ -238,6 +238,16 @@ toolchain:
     verify:
       command: ["git", "--version"]
       pattern: "^git version (?P<version>\\S+)"
+  # Added moving the codex pin to 0.159.2: its managed app-server daemon shells
+  # out to `ps` to record its own pid, and bookworm-slim ships no procps.
+  - id: procps
+    binary: ps
+    install: base
+    version: "4.0.2"
+    enforce: false
+    verify:
+      command: ["ps", "--version"]
+      pattern: "^ps from procps-ng (?P<version>\\S+)$"
 
 # The drift target -- which is NOT the same set as the provider lane, and this is
 # the file where the two part company.
@@ -291,7 +301,7 @@ clis:
     binary: codex
     install: npm
     package: "@openai/codex"
-    version: "0.156.1"
+    version: "0.159.2"
     verify:
       command: ["codex", "--version"]
       pattern: "^codex-cli (?P<version>\\S+)$"
@@ -452,7 +462,7 @@ clis:
     install: pypi
     package: "mistral-vibe"
     version: "2.25.8"
-    # A `--generate-hashes` lock of the WHOLE transitive tree (93 packages),
+    # A `--generate-hashes` lock of the WHOLE transitive tree (96 packages),
     # installed with --require-hashes, on the pinned CPython 3.12 above rather
     # than the base image's 3.11.2.
     requirements: "vibe-requirements.txt"

@@ -10,7 +10,7 @@
     "@google/gemini-cli": "0.62.0",
     "@kilocode/cli": "7.8.1",
     "@moonshot-ai/kimi-code": "2.1.1",
-    "@openai/codex": "0.156.1",
+    "@openai/codex": "0.159.2",
     "@qwen-code/qwen-code": "0.24.7",
     "cline": "3.0.66",
     "opencode-ai": "1.18.33"

@@ -167,12 +167,20 @@ RUN groupadd --gid 10001 e2e \
  && chmod 0700 /home/e2e
 
 # --------------------------------------------------------------------------- #
-# 2. The two things the base digest does not ship.
+# 2. The three things the base digest does not ship.
 #
 # `python3` runs the whole rig (entrypoint, stub, wrapper -- all stdlib) and
 # backs both uv environments; `git` is what seed_workspace.py initializes the
 # sample project with and what the product's own write-safety pin
 # (`git rev-parse --show-toplevel`) calls. bzip2 unpacks the goose release.
+#
+# `procps` (for `ps`) is codex-specific and was added moving the pin to 0.159.2:
+# that release manages its own background app-server daemon and calls `ps` to
+# record its pid on startup, dying with `failed to invoke ps for pid-managed
+# app server: No such file or directory` on a bookworm-slim base, which ships
+# no procps -- every host codex row exited before printing anything at all
+# (measured 2026-09-30, `documented-invocation-codex`). A real developer
+# machine always has `ps`; the image is the one place it was missing.
 #
 # These come from the base image's own signed, checksummed apt indexes, and their
 # versions are recorded in cli-versions.lock as `enforce: false`: a Debian
@@ -185,6 +193,7 @@ RUN apt-get update \
       ca-certificates \
       curl \
       git \
+      procps \
       python3 \
  && rm -rf /var/lib/apt/lists/*
 
