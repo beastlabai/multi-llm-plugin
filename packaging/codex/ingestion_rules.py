@@ -17,6 +17,24 @@ ingestion-rules drift row goes red when the installed file no longer hashes to
 ``SOURCE_SHA256``. Whoever moves the pin re-reads the file, fixes the rules
 here, and re-stamps, in one commit.
 
+**2026-09-30 (0.156.1 -> 0.159.2): the file is gone, not just moved.**
+``validate_plugin.py`` no longer ships anywhere reachable: it is absent from
+this machine's installed codex 0.159.2 (``$CODEX_HOME/skills/.system/`` unpacks
+``imagegen``, ``openai-docs``, ``review-agent``, ``skill-creator`` and
+``skill-installer`` -- no ``plugin-creator`` at all), and the public mirror
+(``github.com/openai/skills``, tip ``49f948f``) still carries a
+``skills/.system/plugin-creator/`` skill but only ``scripts/create_basic_plugin.py``
+and ``references/plugin-json-spec.md`` -- no ``validate_plugin.py`` in that
+repo's history at any commit. There is therefore nothing left to re-read or
+re-hash: ``SOURCE_SHA256`` below is carried forward unchanged from the 0.156.1
+read (the last time the file was known to exist) rather than restamped against
+a live file. The reference doc that replaced it (``plugin-json-spec.md``, a
+generation guide, not a validator) contradicts none of the rules below -- same
+top-level keys, same ``interface`` keys, same marketplace shape -- so nothing
+here is known to have drifted; only the standalone checker is confirmed gone.
+``SOURCE_CODEX_VERSION``/``SOURCE_READ_DATE`` move to record *this* re-check,
+which is a version-floor bump and an absence confirmation, not a fresh read.
+
 **The validator is stricter than local ingestion (R5).** ``codex plugin add``
 installs a manifest carrying ``hooks`` that the validator rejects by name. What
 ships is held to the validator's stricter rules anyway, so the tree is clean if
@@ -38,20 +56,25 @@ from typing import Any, Dict, List, Mapping, Optional, Tuple
 # The provenance stamp
 # ---------------------------------------------------------------------------
 
-#: The codex release whose ``plugin-creator`` skill the rules were read from.
-#: At or above the container pin (``tests/container/package.json``), asserted.
-SOURCE_CODEX_VERSION = "0.156.1"
+#: The codex release the rules were last checked against. At or above the
+#: container pin (``tests/container/package.json``), asserted. As of this
+#: value the file at SOURCE_PATH is confirmed ABSENT (see the module
+#: docstring's 2026-09-30 note) -- the version records the check, not a read.
+SOURCE_CODEX_VERSION = "0.159.2"
 
-#: Where that file lives, relative to ``$CODEX_HOME``. The container drift row
-#: looks here; off the image it is legitimately absent and that row skips
-#: naming this path.
+#: Where that file used to live, relative to ``$CODEX_HOME``. The container
+#: drift row looks here; off the image, or on any codex build that no longer
+#: ships it, it is legitimately absent and that row skips naming this path.
 SOURCE_PATH = "skills/.system/plugin-creator/scripts/validate_plugin.py"
 
-#: SHA-256 of those bytes, as read.
+#: SHA-256 of those bytes, as read at 0.156.1 -- carried forward unchanged
+#: since no later build ships the file to re-hash (module docstring).
 SOURCE_SHA256 = "f4eeadb733b28b0c3e714de263a76d6542866a672f3e99bdffcf4dbcdf85e944"
 
-#: The day it was read, ISO 8601.
-SOURCE_READ_DATE = "2026-09-23"
+#: The day this stamp was last checked, ISO 8601 (an absence re-confirmation
+#: on 2026-09-30, not a fresh read -- the file has had no bytes to read since
+#: at least 0.156.1's successor).
+SOURCE_READ_DATE = "2026-09-30"
 
 # ---------------------------------------------------------------------------
 # The server's own interpreter floor
