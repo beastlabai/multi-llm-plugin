@@ -98,7 +98,25 @@ mounts:
     mode: "rw,mode=0700,uid=10001,gid=10001"
     note: >-
       the HOST process's home on a host-lane row: synthesized configs and the
-      copied-in credential, all dying with the container (C6a rule 3)
+      copied-in credential, all dying with the container (C6a rule 3). NOEXEC
+      (docker's tmpfs default, unstated here) like every other mount, `/home/
+      e2e/.codex` below excepted.
+  - target: /home/e2e/.codex
+    type: tmpfs
+    mode: "rw,exec,mode=0700,uid=10001,gid=10001"
+    note: >-
+      the ONE exec-enabled mount in this posture, nested inside /home/e2e
+      rather than widening it. codex >=0.157ish self-manages an
+      app-server-daemon it stages and re-execs from
+      $CODEX_HOME/packages/app-server-daemon/releases/.staging.*/bin/codex on
+      first launch; under the parent's noexec that exec(2) fails EACCES
+      ("Permission denied") before the CLI does anything else, on every host
+      lane row (codex is a `host`) and not only the package route. Scoped to
+      this one directory — never all of $HOME — because nothing else a codex
+      host process writes under its home needs to be executable, and widening
+      further was never asked for (user-approved, host-harness-portability).
+      `_assert_declared_mounts` checks uid/gid/mode, not the exec bit, so this
+      needs no entrypoint-side assertion beyond the existing ones.
   - target: /tmp
     type: tmpfs
     mode: "rw,mode=1777"
