@@ -85,20 +85,20 @@ ARG UV_SHA256=e490a6464492183c5d4534a5527fb4440f7f2bb2f228162ad7e4afe076dc0224
 ARG GOOSE_VERSION=1.52.0
 ARG GOOSE_URL=https://github.com/aaif-goose/goose/releases/download/v1.52.0/goose-x86_64-unknown-linux-gnu.tar.bz2
 ARG GOOSE_SHA256=2609109a43012ddece0f78e1e4a179b82749c424f2164b97186d3ad38518d262
-ARG GROK_VERSION=1.0.41
-ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.41-linux-x86_64
-ARG GROK_SHA256=9ce03ed23e16ea01072b4496263d6213a27899e1e3e107f008d36edf82e70407
-ARG MUSE_VERSION=1.3.0-R3401.1
-ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.3.0-R3401.1&file=muse-x86-linux
-ARG MUSE_SHA256=71b089d055dfe6e4562092bc484896b61bd96fd6ef9fef9da54a14aa174e2a33
+ARG GROK_VERSION=1.0.44
+ARG GROK_URL=https://storage.googleapis.com/grok-build-public-artifacts/cli/grok-1.0.44-linux-x86_64
+ARG GROK_SHA256=f76431873efc5c8a50892d1e1247eaee23f6664bca385fbd55a06a8e7d3caedc
+ARG MUSE_VERSION=1.4.1-R4503.1
+ARG MUSE_URL=https://lookaside.facebook.com/lookaside/muse/download/?channel=muse&version=1.4.1-R4503.1&file=muse-x86-linux
+ARG MUSE_SHA256=8b53c9cdbc025bc2d9068bc7016e2c1e51c3a0c608821da17528ad23be900a12
 # The documented install is `curl https://cursor.com/install | bash`, and that
 # script is SERVER-RENDERED: it bakes the current version into its body as a
 # literal DOWNLOAD_URL, so the URL is stable while what it installs is not.
 # Piping it into a shell would pin nothing, so the tarball is named by its bytes
 # here instead. The sha256 is ours -- Cursor publishes none.
-ARG CURSOR_AGENT_VERSION=2026.09.18-9a7762b
-ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.09.18-9a7762b/linux/x64/agent-cli-package.tar.gz
-ARG CURSOR_AGENT_SHA256=b1308f5a2fc05458b9d8966752986bb23a971bbcc67c842c1df94c4b8132bad9
+ARG CURSOR_AGENT_VERSION=2026.09.28-64d2043
+ARG CURSOR_AGENT_URL=https://downloads.cursor.com/lab/2026.09.28-64d2043/linux/x64/agent-cli-package.tar.gz
+ARG CURSOR_AGENT_SHA256=6e4cd936a4866b8a77c50ff51a564460d715772fabc477a01aa0f0455d9559f0
 # Google's Antigravity CLI. The sha256 is UPSTREAM'S OWN -- the GitHub release
 # API publishes a `digest` per asset -- unlike cursor-agent's, which is ours
 # because Cursor publishes none. The build checks it anyway: a published digest
@@ -106,9 +106,9 @@ ARG CURSOR_AGENT_SHA256=b1308f5a2fc05458b9d8966752986bb23a971bbcc67c842c1df94c4b
 #
 # agy RELEASES DAILY (1.1.15 on 2026-08-19, 1.2.7 on 2026-09-19), so this is a
 # pin to re-confirm whenever this file is touched.
-ARG AGY_VERSION=1.2.9
-ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.2.9/agy_cli_linux_x64.tar.gz
-ARG AGY_SHA256=d9850373f3df866011024a961fa9740cc4adaac060eebe9c70fbf263ac6b2624
+ARG AGY_VERSION=1.2.14
+ARG AGY_URL=https://github.com/google-antigravity/antigravity-cli/releases/download/1.2.14/agy_cli_linux_x64.tar.gz
+ARG AGY_SHA256=68cf4d221cb62e0289245439d3d37f599bdc8e0c4e1e3dae03f326463a0c26dc
 # oh-my-pi. A DOWNLOAD, never the npm layer: the npm package
 # `@oh-my-pi/pi-coding-agent` needs Bun >= 1.3.14 and does not run under node at
 # all, so `npm ci` cannot install it into this image. What ships instead is the
@@ -120,9 +120,9 @@ ARG AGY_SHA256=d9850373f3df866011024a961fa9740cc4adaac060eebe9c70fbf263ac6b2624
 # OWN: the release publishes a SHA256SUMS.txt naming it against
 # `omp-linux-x64`. Confirmed on 2026-09-17 to agree with sha256sum over the
 # fetched file -- which is the point of checking it below anyway.
-ARG OMP_VERSION=18.2.11
-ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.2.11/omp-linux-x64
-ARG OMP_SHA256=97cf39557bf3d98327dd4c9814380b7e6bcb76e41169edd9b0ff30424c733a2a
+ARG OMP_VERSION=18.4.4
+ARG OMP_URL=https://github.com/can1357/oh-my-pi/releases/download/v18.4.4/omp-linux-x64
+ARG OMP_SHA256=24c830fceb0bd6884bf5bf2c7a2b7407bc23fafe655e924c695ef9be308e46f3
 # vibe's interpreter, NOT the product's. `mistral-vibe` declares
 # `requires_python >=3.12` and bookworm-slim ships 3.11.2 -- and this file sets
 # `UV_PYTHON_DOWNLOADS=never`, so `uv venv --python 3.12` cannot fetch one
