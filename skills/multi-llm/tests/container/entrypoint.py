@@ -1061,6 +1061,38 @@ RESOLVED_FACTS = ("shim_body", "shim_dispatcher_block",
 UNRESOLVED_FACT = "skill_dir_placeholder_unfilled"
 
 
+def _declare_opencode_config_provider(base_url: str) -> None:
+    """Declare the container's `stub` provider the way a hermetic opencode
+    dispatch can actually see it: `providers.opencode.config_providers` in
+    the row's own `.multi-llm/providers.yaml` (the project config layer
+    `provider_registry.load_config` deep-merges onto base), never opencode's
+    own `opencode.json` — which a hermetic run replaces before the CLI ever
+    reads it (`utils/providers/opencode.py`'s `_hermetic_config_content`).
+
+    No credential here, matching `providers.yaml`'s own documentation of the
+    key ("credentials excluded ... they stay in auth.json"): the container's
+    stub takes none at all, so there is nothing to carry and nothing for
+    `wrapper.py`'s `carried_config_violation` to have to catch later.
+    """
+    path = WORKSPACE / ".multi-llm" / "providers.yaml"
+    text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    if text and not text.endswith("\n"):
+        text += "\n"
+    path.write_text(
+        text
+        + "providers:\n"
+        + "  opencode:\n"
+        + "    config_providers:\n"
+        + "      stub:\n"
+        + '        npm: "@ai-sdk/openai-compatible"\n'
+        + '        name: "Stub"\n'
+        + "        options:\n"
+        + f"          baseURL: {json.dumps(base_url)}\n"
+        + "        models:\n"
+        + '          stub-model: {"name": "Stub Model"}\n',
+        encoding="utf-8")
+
+
 def wire_stub_host(host: str, home: Path, base_url: str,
                    route: str = "file") -> dict:
     """Point the HOST's own model at the container stub. No credential, no route.
@@ -1117,6 +1149,26 @@ def wire_stub_host(host: str, home: Path, base_url: str,
             }},
             "permission": {"bash": "allow", "edit": "allow", "webfetch": "deny"},
         }, indent=2), encoding="utf-8")
+        # The block above is what opencode's OWN interactive session reads for
+        # its top-level chat model — it is NOT what the plugin's own hermetic
+        # opencode dispatch reads. `providers.opencode.hermetic` defaults to
+        # `on`, and this row's `driver.subagent_runner` names
+        # `opencode:stub/stub-model` (host_matrix.yaml), so `install-host
+        # opencode --check`'s row 5 resolves that runner through
+        # `OpenCodeProvider.describe_unresolvable_model`, which runs opencode
+        # under an empty `XDG_CONFIG_HOME` and rebuilds `OPENCODE_CONFIG_CONTENT`
+        # from `providers.opencode.config_providers` alone. The moment the file
+        # above exists, the CLI's OWN resolved config declares a `stub`
+        # provider that config_providers does not — "defined only in your own
+        # opencode config, which a hermetic run replaces" — and the row is
+        # refused before the shim can be typed into. The refusal names its own
+        # fix: declare the same provider under `config_providers`, credentials
+        # excluded (this stub takes none at all). Appended text, not a YAML
+        # round-trip, matching `_workspace_config_with`'s idiom elsewhere in
+        # this file — `.multi-llm/providers.yaml` is `seed_workspace.py`'s
+        # freshly rendered `providers.tmpl.yaml`, a `str.replace` render with
+        # no `providers:` top-level key of its own to merge into.
+        _declare_opencode_config_provider(base_url)
     else:
         raise SystemExit(
             f"entrypoint: no stub wiring for host {host!r} — the "

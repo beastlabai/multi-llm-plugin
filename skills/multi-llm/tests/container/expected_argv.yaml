@@ -681,6 +681,29 @@ entries:
     prompt: stdin
     min_records: 1
 
+  # §8's hermetic reconstructibility leg (T8.2/T8.5):
+  # `read_user_declared_config`/`_user_defines_provider` resolve the user's OWN
+  # opencode config through `opencode [--pure] debug config` whenever the file
+  # read alone is inconclusive (`_user_config_files_conclusive`) — an
+  # `OPENCODE_CONFIG*` env var, a project config on the walk up from `cwd`, or a
+  # `.jsonc`/`config.json` global file. It answers "does the user's config define
+  # this provider?" for a model naming a prefix `providers.opencode.
+  # config_providers` does not declare, ahead of the refusal that spawn exists to
+  # prevent. No credential and no prompt travel on this call. Pre-existing
+  # machinery (`utils/providers/opencode.py`'s §8 leg), observed here from
+  # `driver.subagent_runner`'s own preflight (`subagent_executor.
+  # describe_unresolvable`) on every chain row that shares `opencode` as its
+  # write runner.
+  - provider: opencode
+    profile: probe
+    transport: stdin
+    binary: opencode
+    subcommands: ["debug", "config"]
+    options: {}
+    tail: []
+    prompt: stdin
+    min_records: 1
+
   # M4's flag gate: opencode is asked once per process whether it advertises
   # `--pure` before the flag is emitted, so an older opencode degrades to a
   # non-hermetic run instead of dying on an unknown flag. One help spawn per
