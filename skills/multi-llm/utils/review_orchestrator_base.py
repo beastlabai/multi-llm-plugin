@@ -69,13 +69,16 @@ from .json_extractor import (
 from .schema_validator import drop_non_record_entries
 from .llm_client import (
     ERROR_TIMEOUT,
+    FAILURE_JAIL_DENIED,
     SALVAGE_FAILURE_KEY,
     SALVAGE_FAILURE_TIMEOUT,
     SALVAGE_TEXT_KEY,
     SANDBOX_BYPASSED,
     STDOUT_OUTPUT_LOCATION,
+    _INCIDENTAL_RUNG_IDS,
     sandbox_fallback_rung_of,
     sandbox_record_word,
+    sandbox_word_is_incidental,
     describe_output_file,
     invoke_with_provider,
     invoke_with_file_output,
@@ -88,6 +91,9 @@ from .providers.base import (
     CATEGORY_PERMISSION_DENIED,
     CATEGORY_SANDBOX_UNAVAILABLE,
     CATEGORY_SERVER_ERROR,
+    CODEX_HOME_CHECK_MARKER,
+    INCIDENTAL_LANE_FANOUT,
+    MODE_CHECK_MARKER,
     PROFILE_GENERATE,
     SANDBOX_BYPASSED_MARKER,
     SANDBOX_FALLBACK_AUTO,
@@ -95,9 +101,12 @@ from .providers.base import (
     LLMProvider,
     SandboxRung,
     classify_streams,
+    rung_is_incidental,
     sandbox_bypassed_notice_text,
     sandbox_fallback_notice_text,
+    sandbox_incidental_notice_text,
     sandbox_rung_retired_notice,
+    sandbox_walk_clause,
     context_length_message,
 )
 from .retry_ladder import (
@@ -1891,6 +1900,13 @@ _LADDER_STATUS_BY_CATEGORY = {
     CATEGORY_SERVER_ERROR: STATUS_RUNNER_ERROR,
 }
 
+#: The ladder status of an attempt the plugin's jail denied (plan
+#: codex-sandbox-unavailable F1 item 6, 2026-09-30). Not one of the ladder's
+#: own statuses on purpose: ``RetryLadder.record`` treats every status it does
+#: not know as "never retried", and a jail denial must never be re-dispatched —
+#: nor moved to another rung.
+STATUS_JAIL_DENIED = "jail_denied"
+
 
 def _get_tail_output(text: str, max_lines: int = 20) -> str:
     """Get the last N lines of text for error context."""
@@ -2004,7 +2020,13 @@ def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
     two facts can travel alone or together. A slot on a **contained** rung
     (landlock rung, 2026-09-22) carries the rung id there instead, and the
     record says ``fallback-<rung>`` (``sandbox_record_word``) — only the
-    uncontained rung is ever recorded as ``bypassed``.
+    uncontained rung is ever recorded as ``bypassed``. A slot on the plugin's
+    own jail records ``fallback-plugin-landlock`` the same way (2026-09-30).
+
+    A slot the plugin's jail failed also carries :func:`jail_record_fields`'
+    two keys, so ``status`` and the report can say "denied by the plugin's
+    jail: <path>" after the log is gone (plan codex-sandbox-unavailable F1
+    item 6).
     """
     fields: Dict[str, Any] = {}
     served = (details or {}).get("served_model")
@@ -2016,7 +2038,37 @@ def served_model_fields(details: Dict[str, Any]) -> Dict[str, Any]:
     word = sandbox_record_word((details or {}).get("sandbox"))
     if word:
         fields["sandbox"] = word
+    fields.update(jail_record_fields(details))
     return fields
+
+
+#: The per-slot record keys of a slot the plugin's jail failed (plan
+#: codex-sandbox-unavailable-findings-and-fixes §6 F1 item 6, 2026-09-30):
+#: ``failure_reason: "jail-denied"`` and the denied path (``$HOME`` shown as
+#: ``~``; ``None`` when codex did not name it). They ride the per-model result
+#: record, ``models_served`` in ``.status.json`` and so ``--reaggregate``, the
+#: hops the ``sandbox`` word takes.
+RECORD_FAILURE_REASON = "failure_reason"
+RECORD_JAIL_DENIED_PATH = "jail_denied_path"
+
+
+def jail_record_fields(details: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """``{failure_reason, jail_denied_path}`` for a jail-denied slot, else ``{}``."""
+    if (details or {}).get("failure_reason") != FAILURE_JAIL_DENIED:
+        return {}
+    evidence = (details or {}).get("jail_failure")
+    path = evidence.get("path") if isinstance(evidence, dict) else None
+    return {
+        RECORD_FAILURE_REASON: FAILURE_JAIL_DENIED,
+        RECORD_JAIL_DENIED_PATH: _render_home(path) if path else None,
+    }
+
+
+def _render_home(path: Optional[str]) -> str:
+    """``path`` with ``$HOME`` shown as ``~`` (``landlock_dispatch``'s rule)."""
+    from .landlock_dispatch import render_home
+
+    return render_home(path)
 
 
 def usage_fields(details: Dict[str, Any]) -> Dict[str, Any]:
@@ -2140,6 +2192,11 @@ def collect_served_models(
         word = sandbox_record_word(result.get("sandbox"))
         if word:
             entry["sandbox"] = word
+        # A jail-denied slot keeps its reason and path on the durable record
+        # (F1 item 6): `models_served` is what `--reaggregate` reads back.
+        if result.get(RECORD_FAILURE_REASON) == FAILURE_JAIL_DENIED:
+            entry[RECORD_FAILURE_REASON] = FAILURE_JAIL_DENIED
+            entry[RECORD_JAIL_DENIED_PATH] = result.get(RECORD_JAIL_DENIED_PATH)
         if entry:
             served[model_spec] = entry
     return served
@@ -2169,7 +2226,10 @@ def record_sandbox_bypassed(
     # A contained rung (landlock rung, 2026-09-22) is a sandbox, not a bypass:
     # it never joins the list above, and the poller is told which rung each
     # such slot ran on under its own key, `progress.sandbox_fallback`
-    # (`{spec: rung}`), which `status --view run` renders by rung name.
+    # (`{spec: rung}`), which `status --view run` renders by rung name. The
+    # plugin's own jail (`plugin-landlock`, 2026-09-30) rides the same key:
+    # it is not a bypass either, and the status renderer names its grade
+    # (stray writes only) from the rung name.
     contained = {
         spec: rung for spec, rung in sorted(
             (spec, sandbox_fallback_rung_of(entry.get("sandbox")))
@@ -2222,6 +2282,12 @@ def announce_retired_rungs(
 
     # (provider, rung id) -> {"specs": [...], "measured": bool, "version": str}
     groups: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    # (provider, incidental rung id) -> [specs]: the plugin's own jail last run,
+    # no sandbox this run (plan codex-sandbox-unavailable §7 step-2 subtask
+    # item 3, 2026-09-30). Named with THIS run's rung-probe outcome — never the
+    # legacy rung's retirement wording, which would blame a codex upgrade for
+    # what is usually a skip switch, a kernel or a failed self-test.
+    left_jail: Dict[Tuple[str, str], List[str]] = {}
     retirements: Dict[str, List[Tuple[str, str]]] = {}
     for spec in sorted(served_models or {}):
         entry = (served_models or {}).get(spec)
@@ -2231,6 +2297,14 @@ def announce_retired_rungs(
             provider_name = parse_model_spec(spec, anchor=anchor)[0]
         except Exception:  # noqa: BLE001 - a notice may never end a fan-out
             provider_name = spec.split(":", 1)[0]
+        before = (prior_served or {}).get(spec)
+        prior_rung = (
+            sandbox_fallback_rung_of(before.get("sandbox"))
+            if isinstance(before, dict) else None
+        )
+        if prior_rung and sandbox_word_is_incidental(prior_rung):
+            left_jail.setdefault((provider_name, prior_rung), []).append(spec)
+            continue
         if provider_name not in retirements:
             try:
                 retirements[provider_name] = (
@@ -2248,11 +2322,7 @@ def announce_retired_rungs(
             group["version"] = group.get("version") or version
             if spec not in group["specs"]:
                 group["specs"].append(spec)
-        before = (prior_served or {}).get(spec)
-        rung_id = (
-            sandbox_fallback_rung_of(before.get("sandbox"))
-            if isinstance(before, dict) else None
-        )
+        rung_id = prior_rung
         if not rung_id:
             continue
         group = groups.setdefault(
@@ -2282,7 +2352,83 @@ def announce_retired_rungs(
         )
         print(line)
         lines.append(line)
+    for (provider_name, rung_id), specs in left_jail.items():
+        line = sandbox_rung_left_notice(provider_name, specs, rung_id)
+        print(line)
+        lines.append(line)
     return lines
+
+
+#: The once-per-run line for specs that ran on the plugin's jail last run and
+#: without any sandbox this one. Its own marker: ``[SANDBOX_BYPASSED]`` keeps
+#: counting uncontained slots only, and ``[SANDBOX_RUNG_RETIRED]`` means a rung
+#: a codex build removed — never the plugin's own rung.
+SANDBOX_RUNG_CHANGED_MARKER = "[SANDBOX_RUNG_CHANGED]"
+
+
+def _recorded_rung_outcome(
+    provider_name: str, rung_id: str,
+) -> Optional[Tuple[str, str, str]]:
+    """``(outcome, probe tail, version)`` this process's probe cache recorded
+    for ``rung_id`` of ``provider_name`` this run, or ``None``."""
+    try:
+        from . import subagent_executor as _executor
+    except Exception:  # noqa: BLE001 - a notice may never end a fan-out
+        return None
+    cache = getattr(_executor, "_SANDBOX_PROBE_CACHE", None)
+    lock = getattr(_executor, "_SANDBOX_PROBE_LOCK", None)
+    if not isinstance(cache, dict):
+        return None
+    try:
+        if lock is not None:
+            with lock:
+                items = list(cache.items())
+        else:
+            items = list(cache.items())
+    except Exception:  # noqa: BLE001
+        return None
+    for key, verdict in items:
+        if not isinstance(key, tuple) or len(key) < 3 or key[0] != "verdict":
+            continue
+        if key[2] != provider_name:
+            continue
+        for name, outcome in getattr(verdict, "walk", ()) or ():
+            if name == rung_id:
+                tails = dict(getattr(verdict, "rung_tails", ()) or ())
+                return outcome, tails.get(name, ""), getattr(verdict, "version", "") or ""
+    return None
+
+
+def sandbox_rung_left_notice(provider_name: str, specs: Sequence[str], rung_id: str) -> str:
+    """The line for specs that left the plugin's jail since the last run,
+    naming this run's rung-probe outcome (the walk clause's own wording)."""
+    recorded = _recorded_rung_outcome(provider_name, rung_id)
+    if recorded is None:
+        outcome = (
+            f"this run's probe recorded no outcome for fallback rung {rung_id!r}"
+        )
+    else:
+        state, tail, version = recorded
+        rungs: Tuple[Any, ...] = ()
+        try:
+            hook = getattr(get_provider(provider_name), "sandbox_fallback_rungs", None)
+            rungs = tuple(hook(PROFILE_GENERATE) or ()) if callable(hook) else ()
+        except Exception:  # noqa: BLE001 - a notice may never end a fan-out
+            rungs = ()
+        try:
+            outcome = sandbox_walk_clause(
+                provider_name, ((rung_id, state),), ((rung_id, tail),) if tail else (),
+                version or None, rungs,
+            )
+        except Exception:  # noqa: BLE001
+            outcome = ""
+        outcome = outcome or f"fallback rung {rung_id!r} {state} this run"
+    return (
+        f"{SANDBOX_RUNG_CHANGED_MARKER} {provider_name}: {', '.join(specs)} ran on "
+        f"fallback rung {rung_id!r} (the plugin's Landlock jail, which stops "
+        f"stray writes, not the model) last run and without any sandbox this "
+        f"run: {outcome}"
+    )
 
 
 def recorded_served_models(phase_dir: str) -> Optional[Dict[str, Dict[str, Any]]]:
@@ -2727,7 +2873,9 @@ class SandboxVerdict(NamedTuple):
     2026-09-22), which is what :func:`sandbox_fallback_kwargs` hands the
     invoker. ``reason`` is then the one line the lane prints: the
     ``[SANDBOX_BYPASSED]`` line for the uncontained rung, a
-    ``[SANDBOX_FALLBACK]`` line for a contained one. ``bypass`` means the
+    ``[SANDBOX_FALLBACK]`` line for a contained one, a
+    ``[SANDBOX_INCIDENTAL]`` line for the plugin's own jail (``incidental``
+    grade, 2026-09-30). ``bypass`` means the
     uncontained rung **exactly** — it is what the lanes gate the
     ``[SANDBOX_BYPASSED]`` print on (the porcelain detective check reads the
     rung id itself, :func:`porcelain_check_applies`), and a contained rung is
@@ -2742,6 +2890,11 @@ class SandboxVerdict(NamedTuple):
     #: this slot (2026-09-24), so a reader of the verdict can tell a contained
     #: rung that was tried and failed from one never measured.
     walk: Tuple[Tuple[str, str], ...] = ()
+    #: The selected rung carries the ``incidental`` grade (the plugin's own
+    #: Landlock jail, 2026-09-30): what :func:`mode_check_applies` and
+    #: :func:`home_check_applies` key on. A trailing default, so every
+    #: positional construction keeps its meaning.
+    incidental: bool = False
 
     @property
     def refused(self) -> bool:
@@ -2807,6 +2960,44 @@ def sandbox_fallback_notice(provider_name: str, rung: Any, policy: str) -> str:
     return sandbox_fallback_notice_text(provider_name, rung, policy)
 
 
+def sandbox_incidental_notice(
+    provider_name: str, rung: Any, policy: Optional[str], probe: Any,
+) -> str:
+    """The one ``[SANDBOX_INCIDENTAL]`` line a fan-out slot on the plugin's
+    jail prints (plan codex-sandbox-unavailable §7 "Step 2 subtask" item 2).
+
+    Built by ``base.sandbox_incidental_notice_text`` — the one builder both
+    lanes share — with the standard probe's tail and the walk clause of the
+    rungs tried **before** this one (the legacy rung skipped by version), so
+    the run log names the rung and why codex's own sandbox was not used.
+    """
+    walk = tuple(getattr(probe, "walk", ()) or ())
+    before: List[Tuple[str, str]] = []
+    for name, outcome in walk:
+        if name == rung.name:
+            break
+        before.append((name, outcome))
+    clause = ""
+    if before:
+        rungs: Tuple[Any, ...] = ()
+        try:
+            hook = getattr(get_provider(provider_name), "sandbox_fallback_rungs", None)
+            rungs = tuple(hook(PROFILE_GENERATE) or ()) if callable(hook) else ()
+        except Exception:  # noqa: BLE001 - a notice may never end a fan-out
+            rungs = ()
+        try:
+            clause = sandbox_walk_clause(
+                provider_name, before, tuple(getattr(probe, "rung_tails", ()) or ()),
+                getattr(probe, "version", "") or None, rungs,
+            )
+        except Exception:  # noqa: BLE001
+            clause = ""
+    return sandbox_incidental_notice_text(
+        provider_name, rung, policy, getattr(probe, "tail", "") or "",
+        walk_clause=clause, lane=INCIDENTAL_LANE_FANOUT,
+    )
+
+
 def _fanout_sandbox_fallback(provider_name: str, cwd: Optional[str]) -> Optional[str]:
     """The adapter's resolved ``sandbox_fallback`` policy for ``generate``, or
     ``None`` for an adapter that declares no fallback at all.
@@ -2847,7 +3038,9 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
     ``providers.<name>.sandbox_fallback`` permits that rung. The key gates
     **every** rung: ``auto`` (the shipped default) takes whichever rung the
     walk selected — the contained ``landlock`` rung first, the uncontained
-    ``unsandboxed`` rung only when the contained one's probe failed;
+    ``unsandboxed`` rung only when the contained one's probe failed (and,
+    since 2026-09-30, the plugin's own ``incidental``-grade jail between them,
+    announced with ``[SANDBOX_INCIDENTAL]``, never ``[SANDBOX_BYPASSED]``);
     ``contained`` takes a contained rung and **never** the uncontained one;
     ``off`` takes none. The verdict carries the rung id, which is what
     :func:`sandbox_fallback_kwargs` hands the invoker. ``refuse`` — the
@@ -2872,10 +3065,19 @@ def sandbox_refusal(provider_name: str, cwd: Optional[str]) -> SandboxVerdict:
     if rung is not None:
         if rung.contained:
             notice = sandbox_fallback_notice(provider_name, rung, policy or "")
+        elif rung_is_incidental(rung):
+            # The plugin's own jail (plan codex-sandbox-unavailable §7 "Step 2
+            # subtask" items 1-2, 2026-09-30): `[SANDBOX_INCIDENTAL]`, never
+            # `[SANDBOX_BYPASSED]` (whose count must stay the uncontained
+            # slots) nor `[SANDBOX_FALLBACK]` (a real OS boundary). The walk
+            # clause covers the rungs tried before it — the legacy rung
+            # skipped by version — with the standard probe's tail.
+            notice = sandbox_incidental_notice(provider_name, rung, policy, probe)
         else:
             notice = sandbox_bypassed_notice(provider_name, probe)
         return SandboxVerdict(
             SANDBOX_DISPATCH_UNSANDBOXED, notice, rung.name, tuple(probe.walk or ()),
+            incidental=rung_is_incidental(rung),
         )
     reason = sandbox_unavailable_reason(provider_name, probe.tail)
     try:
@@ -3266,6 +3468,18 @@ def porcelain_check_applies(verdict: SandboxVerdict) -> bool:
     the uncontained rung — :data:`SANDBOX_RUNG_UNSANDBOXED` — alone. A slot on
     a contained rung is fenced by the kernel and has nothing to detect after
     the fact; a sandboxed or ``not-required`` slot never took a rung at all.
+
+    **The plugin's own jail (``plugin-landlock``) skips it too, and that is an
+    accepted trade-off, not a claim that the kernel fences everything** (plan
+    codex-sandbox-unavailable-findings-and-fixes §6 F1 "What it fixes",
+    2026-09-30). The jail stops content writes outside its allow-list; what it
+    does not stop — a flipped executable bit (checked instead by
+    :func:`mode_check_applies`' mode check), ``$CODEX_HOME`` (checked by the
+    home check), writes through a pathname Unix socket and timestamps (neither
+    checked, by decision) — a whole-tree snapshot could not attribute anyway:
+    on the host this was written for, every user edit and every sibling run's
+    log in the window failed a codex review (§2a). Leaving this predicate
+    unchanged *is* that decision; reversing it means changing the code here.
     """
     return (
         verdict.verdict == SANDBOX_DISPATCH_UNSANDBOXED
@@ -3309,7 +3523,11 @@ def boundaryless_sibling_count(
     claude-code, …) and a sibling that also took the uncontained rung. A count
     taken from the uncontained verdicts alone would have read zero on the
     2026-09-22 run that misfired. A sandboxed, contained-rung, ``unknown`` or
-    refused sibling does not count. Derived from the answers the fan-out's own
+    refused sibling does not count, and neither does a sibling on the plugin's
+    own jail (``plugin-landlock``, 2026-09-30): the jail denies it every
+    content write into the tree, which is what this count is about — its one
+    residual there, a ``chmod``, is what :func:`mode_check_sibling_count`
+    counts for the mode check. Derived from the answers the fan-out's own
     gate already gave (:func:`sandbox_refusal` and its cached probe, asked by
     every lane for every roster model), so it costs no new bookkeeping; the
     roster is what the fan-out *scheduled*, so under a ``max_parallel`` smaller
@@ -3400,6 +3618,422 @@ def bypass_write_not_attributed(provider_name: str, paths: Sequence[str]) -> str
         f"this slot's own action stream shows only read-only actions, so its "
         f"output is kept"
     )
+
+
+# ---------------------------------------------------------------------------
+# A fan-out slot on the plugin's own jail: the mode check, the home check,
+# the jail's own lines, and the run's closing summary (plan
+# codex-sandbox-unavailable-findings-and-fixes §6 F1 "What it fixes" and
+# Limits, 2026-09-30)
+# ---------------------------------------------------------------------------
+#
+# A slot on `plugin-landlock` skips the porcelain check (the predicate above is
+# unchanged, by decision): the kernel denies every content write outside the
+# allow-list, so what is left to detect after the fact is narrow and
+# attributable. Two checks cover it, both keyed on the `incidental` grade:
+#
+# * the **mode check** — a flipped owner-execute bit on a tracked file breaks
+#   the read-only contract (`git status` shows it, `git commit -a` records it)
+#   and Landlock has no right for `chmod`. One `lstat` per tracked path, twice
+#   per slot, no hashing and no size cap, so I3 does not return; and nothing
+#   that fired the porcelain check without the slot's doing (editor saves,
+#   builds, sibling runs' logs) flips the bit of an existing tracked file;
+# * the **home check** — a write to `$CODEX_HOME`'s configuration, instruction
+#   or plugin files persists into the user's later Codex sessions, outside any
+#   jail. The invoker (`llm_client.invoke_with_provider`) fingerprints the set
+#   around the child and hands the comparison back on `details["home_check"]`;
+#   the lane applies the verdict here.
+#
+# Both take today's verdict on a narrower signal: fail closed, output
+# discarded, unless `bypass_stream_audit_clears` accepts the slot's own stream
+# — then a not-attributed warning and the output is kept. Neither ever reverts
+# what it found: the user may be the one who changed it. Neither prints
+# `[SANDBOX_BYPASSED]`, which keeps counting uncontained slots only.
+
+#: The two modes git records for a regular file.
+GIT_MODE_REGULAR = "100644"
+GIT_MODE_EXECUTABLE = "100755"
+
+
+def mode_check_applies(verdict: SandboxVerdict) -> bool:
+    """Whether this slot is bracketed by the mode check: the ``incidental``
+    grade (the plugin's own jail) alone — the mirror image of
+    :func:`porcelain_check_applies`, which keeps ``unsandboxed``. A plain
+    dispatch, a refusal, a contained rung and the uncontained rung never."""
+    if verdict.verdict != SANDBOX_DISPATCH_UNSANDBOXED:
+        return False
+    return bool(getattr(verdict, "incidental", False)) or verdict.rung in _INCIDENTAL_RUNG_IDS
+
+
+def home_check_applies(verdict: SandboxVerdict) -> bool:
+    """Whether the fan-out applies the home check's verdict to this slot: the
+    ``incidental`` grade, exactly as :func:`mode_check_applies`. A separate
+    predicate so either decision can move without the other."""
+    return mode_check_applies(verdict)
+
+
+def mode_snapshot(repo_root: Optional[str]) -> Optional[Dict[str, str]]:
+    """``{tracked path: "100644" | "100755"}`` for every tracked regular file,
+    read from ``lstat``'s owner-execute bit; ``None`` when the check is off.
+
+    ``None`` when there is no repository to ask, git cannot answer, or
+    ``core.fileMode`` is false — git then reports no mode change, so a
+    flipped bit does not break the read-only contract. A tracked path that is
+    missing or not a regular file (a symlink, a submodule) is left out: its
+    content and existence are the kernel's to protect, not this check's.
+    Blocking; the lanes hand it to a thread. It never raises: a check that
+    could not read the tree is a check that did not run.
+    """
+    try:
+        return _mode_snapshot(repo_root)
+    except Exception:  # noqa: BLE001 - a check may never end a slot
+        return None
+
+
+def _mode_snapshot(repo_root: Optional[str]) -> Optional[Dict[str, str]]:
+    if not repo_root:
+        return None
+    try:
+        top = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=repo_root, timeout=30,
+        )
+        if top.returncode != 0:
+            return None
+        root = top.stdout.strip() or repo_root
+        file_mode = subprocess.run(
+            ["git", "config", "--bool", "core.fileMode"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=root, timeout=30,
+        )
+        if file_mode.returncode == 0 and file_mode.stdout.strip() == "false":
+            return None
+        listed = subprocess.run(
+            ["git", "ls-files", "-z"], capture_output=True, cwd=root, timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0 or not isinstance(listed.stdout, bytes):
+        return None
+    if not isinstance(root, str) or not os.path.isdir(root):
+        return None
+    modes: Dict[str, str] = {}
+    for raw in listed.stdout.split(b"\0"):
+        if not raw:
+            continue
+        rel = os.fsdecode(raw)
+        try:
+            info = os.lstat(os.path.join(root, rel))
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
+            continue
+        modes[rel] = GIT_MODE_EXECUTABLE if info.st_mode & stat.S_IXUSR else GIT_MODE_REGULAR
+    return modes
+
+
+def mode_changes(
+    before: Optional[Dict[str, str]], after: Optional[Dict[str, str]],
+) -> List[Tuple[str, str, str]]:
+    """``[(path, old mode, new mode), …]`` for every tracked path present in
+    both snapshots whose executable bit flipped; ``[]`` when either side is
+    ``None`` (the check did not run)."""
+    if before is None or after is None:
+        return []
+    return [
+        (path, before[path], after[path])
+        for path in sorted(set(before) & set(after))
+        if before[path] != after[path]
+    ]
+
+
+def _describe_mode_changes(changes: Sequence[Tuple[str, str, str]]) -> str:
+    return ", ".join(f"{path} {old} → {new}" for path, old, new in changes)
+
+
+def mode_check_sibling_count(
+    model_spec: str, cwd: Optional[str], anchor: Optional[Union[str, Path]] = None
+) -> int:
+    """How many **other** slots of this fan-out could also have changed a
+    file mode: the kinds :func:`boundaryless_sibling_count` counts, plus a
+    sibling on the plugin's own jail — which does not stop ``chmod`` either.
+    Blocking; the caller hands it to a thread."""
+    siblings = list(_FANOUT_ROSTER.get())
+    if model_spec in siblings:
+        siblings.remove(model_spec)
+    count = 0
+    for spec in siblings:
+        try:
+            provider_name, _model = parse_model_spec(spec, anchor=anchor)
+            if _fanout_sandbox_verdict(provider_name, cwd).state == "not-required":
+                count += 1
+                continue
+            verdict = sandbox_refusal(provider_name, cwd)
+            if porcelain_check_applies(verdict) or mode_check_applies(verdict):
+                count += 1
+        except Exception:  # noqa: BLE001 - a count may never end a fan-out
+            continue
+    return count
+
+
+def mode_check_violation(
+    provider_name: str, changes: Sequence[Tuple[str, str, str]], *, other_slots: int
+) -> str:
+    """The reason a slot on the plugin's jail fails with when a tracked file's
+    executable bit flipped in its window — what was **observed**, never who
+    did it (F1 "What it fixes"). ``other_slots`` is
+    :func:`mode_check_sibling_count`'s answer; keyword-only and required."""
+    plural = "slot" if other_slots == 1 else "slots"
+    return (
+        f"{MODE_CHECK_MARKER} {provider_name}: a tracked file's executable bit "
+        f"changed during this slot on the plugin's Landlock jail, which does not "
+        f"stop chmod ({_describe_mode_changes(changes)}), while {other_slots} "
+        f"other {plural} in this fan-out that could also change a file mode, or "
+        f"any other process writing to this repository, could also have made "
+        f"the change; the mode check cannot tell who made it, so this slot "
+        f"fails closed and its output is discarded (the mode is left as found)"
+    )
+
+
+def mode_check_not_attributed(
+    provider_name: str, changes: Sequence[Tuple[str, str, str]]
+) -> str:
+    """The warning a slot keeps its output under when its own audited stream
+    shows only read-only actions."""
+    return (
+        f"{MODE_CHECK_MARKER} {provider_name}: a tracked file's executable bit "
+        f"changed during this slot's window ({_describe_mode_changes(changes)}) "
+        f"— not attributed: this slot's own action stream shows only read-only "
+        f"actions, so its output is kept (the mode is left as found)"
+    )
+
+
+def merge_home_checks(records: Sequence[Any]) -> Optional[Dict[str, Any]]:
+    """Every attempt's ``details["home_check"]`` of one slot, folded into one
+    record: changed files, config key names and foreign trust tables unioned
+    in order, the most other live children any attempt saw. ``None`` when no
+    attempt carried one."""
+    merged: Optional[Dict[str, Any]] = None
+    for record in records or ():
+        if not isinstance(record, dict):
+            continue
+        if merged is None:
+            merged = {
+                "home": record.get("home") or "$CODEX_HOME",
+                "changed": [], "config_keys": [], "foreign_trust": [],
+                "other_live_children": 0,
+            }
+        for key in ("changed", "config_keys", "foreign_trust"):
+            for item in record.get(key) or ():
+                if item not in merged[key]:
+                    merged[key].append(item)
+        merged["other_live_children"] = max(
+            int(merged["other_live_children"] or 0),
+            int(record.get("other_live_children") or 0),
+        )
+    return merged
+
+
+def _describe_home_change(record: Dict[str, Any]) -> str:
+    parts: List[str] = []
+    for name in record.get("changed") or ():
+        if name == "config.toml" and record.get("config_keys"):
+            parts.append(f"{name} ({', '.join(record['config_keys'])})")
+        else:
+            parts.append(str(name))
+    return ", ".join(parts)
+
+
+def home_check_line(provider_name: str, record: Dict[str, Any], *, kept: bool) -> str:
+    """The one ``[CODEX_HOME_CHECK]`` line for a slot whose ``$CODEX_HOME``
+    security-relevant set changed (F1 Limits): each changed file, and for
+    ``config.toml`` the changed table or key names — never a value, the file
+    can hold MCP server tokens — how many other children of this run were live
+    in the window, and the verdict."""
+    n = int(record.get("other_live_children") or 0)
+    others = (
+        f"{n} other {provider_name} child{'ren' if n != 1 else ''} of this run "
+        f"{'was' if n == 1 else 'were'} live in the window"
+    )
+    line = (
+        f"{CODEX_HOME_CHECK_MARKER} {provider_name}: {record.get('home') or '$CODEX_HOME'} "
+        f"changed during this slot on the plugin's Landlock jail, which does not "
+        f"stop writes there: {_describe_home_change(record)}; {others}; the "
+        f"change persists into later {provider_name} sessions and was not "
+        f"reverted — review those files"
+    )
+    if kept:
+        return line + (
+            "; not attributed: this slot's own action stream shows only "
+            "read-only actions, so its output is kept"
+        )
+    return line + "; this slot fails closed and its output is discarded"
+
+
+def foreign_trust_line(provider_name: str, record: Dict[str, Any]) -> str:
+    """The closing-summary-only note for trust tables another run added to
+    ``config.toml`` in a slot's window (I12's entries; never a failure)."""
+    return (
+        f"{CODEX_HOME_CHECK_MARKER} {provider_name}: trust entries for other "
+        f"paths appeared in {record.get('home') or '$CODEX_HOME'}/config.toml "
+        f"during this run ({', '.join(record.get('foreign_trust') or ())}) — "
+        f"another run's, not a failure of this one"
+    )
+
+
+#: Lines a run repeats in its closing summary, keyed by the run's phase (or
+#: question) directory: every ``[CODEX_HOME_CHECK]`` and ``[JAIL_DENIED]``
+#: line, and the foreign-trust notes that appear only there — the change
+#: outlives the run, so the last thing it prints names it again.
+_CLOSING_LINES: Dict[str, List[str]] = {}
+_CLOSING_LOCK = threading.Lock()
+
+
+def _closing_key(key: Any) -> str:
+    return os.path.realpath(str(key)) if key else ""
+
+
+def phase_summary_key(plan_path: Union[str, Path], phase_name: str) -> str:
+    """The closing-summary key of a plan's phase: its phase directory,
+    computed and never created (``output_dir_path``, not ``get_phase_dir``)."""
+    try:
+        from .output_handler import PHASE_DIRECTORIES, output_dir_path
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.output_handler import PHASE_DIRECTORIES, output_dir_path  # type: ignore[no-redef]
+    return str(
+        output_dir_path(Path(plan_path)) / PHASE_DIRECTORIES.get(phase_name, phase_name)
+    )
+
+
+def note_for_closing_summary(key: Any, line: str) -> None:
+    """Keep ``line`` for the closing summary of the run keyed by ``key``."""
+    if not line:
+        return
+    with _CLOSING_LOCK:
+        lines = _CLOSING_LINES.setdefault(_closing_key(key), [])
+        if line not in lines:
+            lines.append(line)
+
+
+def print_closing_summary(key: Any) -> List[str]:
+    """Print, once, the lines :func:`note_for_closing_summary` kept for this
+    run, under one heading; returns them (``[]`` prints nothing)."""
+    with _CLOSING_LOCK:
+        lines = _CLOSING_LINES.pop(_closing_key(key), [])
+    if lines:
+        print("\n=== Sandbox and jail checks (repeated from this run) ===")
+        for line in lines:
+            print(line)
+    return lines
+
+
+def report_jail_outcome(display_name: str, details: Optional[Dict[str, Any]], summary_key: Any) -> None:
+    """Print a jailed attempt's own lines, once: its ``[JAIL_DENIED]`` line
+    (built by the invoker, noted for the closing summary) and the count and
+    first three paths of the writes the jail denied inside the model's own
+    commands — which fail nothing: that is the jail stopping a stray write,
+    and it lets a review that calls a tool broken be traced to the jail."""
+    details = details or {}
+    failure = details.get("jail_failure")
+    if isinstance(failure, dict) and failure.get("notice"):
+        line = str(failure["notice"])
+        print(f"[{display_name}] {line}")
+        note_for_closing_summary(summary_key, line)
+    denials = details.get("jail_denials")
+    if isinstance(denials, dict) and denials.get("total"):
+        paths = [_render_home(p) for p in denials.get("paths") or () if p]
+        total = int(denials["total"])
+        print(
+            f"[{display_name}] the plugin's Landlock jail denied {total} "
+            f"write{'s' if total != 1 else ''} inside the model's own commands "
+            f"(not a failure)" + (f": {', '.join(paths)}" if paths else "")
+        )
+
+
+#: ``details["failure_reason"]`` for a jailed slot whose jail could not be set
+#: up — no declared wrapping rung, or no scratch directory outside the repo —
+#: so nothing was spawned (``llm_client`` writes it). Non-retryable like
+#: ``FAILURE_JAIL_DENIED``, and never moved to another rung.
+FAILURE_JAIL_SETUP_FAILED = "jail-setup-failed"
+
+#: Both fan-out failure reasons of the plugin's jail; each gets the ladder
+#: status ``STATUS_JAIL_DENIED`` (plan codex-sandbox-unavailable Implementation
+#: Notes: "never retried"), whatever its error text classifies as.
+_JAIL_FAILURE_REASONS = frozenset({FAILURE_JAIL_DENIED, FAILURE_JAIL_SETUP_FAILED})
+
+
+def is_jail_denied(details: Optional[Dict[str, Any]]) -> bool:
+    """Whether an attempt failed on the plugin's jail (``jail-denied`` or
+    ``jail-setup-failed``) — non-retryable, and never moved to another rung."""
+    return (details or {}).get("failure_reason") in _JAIL_FAILURE_REASONS
+
+
+async def run_incidental_checks(
+    sandbox: SandboxVerdict,
+    *,
+    provider_name: str,
+    display_name: str,
+    model_spec: str,
+    project_root: Optional[str],
+    plan_path: Union[str, Path],
+    mode_before: Optional[Dict[str, str]],
+    home_checks: Sequence[Any],
+    audits: Sequence[Any],
+    tracker: Optional[Any] = None,
+    summary_key: Any = None,
+) -> Optional[str]:
+    """Apply the mode check and the home check to one fan-out slot on the
+    plugin's jail, after its last attempt; the fail-closed reason, or ``None``.
+
+    The shared verdict of all three fan-out lanes (``run_single_model``,
+    ``code_review_orchestrator.run_single_review``, ``ask_orchestrator``'s
+    ``ask_one``), so they print one wording. ``None`` for a slot not on the
+    ``incidental`` grade — no git call at all.
+    """
+    if not mode_check_applies(sandbox):
+        return None
+    if tracker is not None:
+        try:
+            tracker.record_readonly_audit(
+                model_spec, _readonly_audit.combine_audits(audits).to_dict()
+            )
+        except Exception:  # noqa: BLE001 - bookkeeping never ends a slot
+            pass
+    violations: List[str] = []
+    if mode_before is not None:
+        mode_after = await asyncio.to_thread(mode_snapshot, project_root)
+        changes = mode_changes(mode_before, mode_after)
+        if changes:
+            if bypass_stream_audit_clears(audits):
+                warning = mode_check_not_attributed(provider_name, changes)
+                print(f"[{display_name}] {warning}")
+                if tracker is not None:
+                    tracker.warn(model_spec, warning)
+            else:
+                siblings = await asyncio.to_thread(
+                    mode_check_sibling_count, model_spec, project_root, plan_path
+                )
+                violation = mode_check_violation(
+                    provider_name, changes, other_slots=siblings
+                )
+                print(f"[{display_name}] {violation}")
+                violations.append(violation)
+    if home_check_applies(sandbox):
+        record = merge_home_checks(home_checks)
+        if record is not None and record.get("changed"):
+            kept = bypass_stream_audit_clears(audits)
+            line = home_check_line(provider_name, record, kept=kept)
+            print(f"[{display_name}] {line}")
+            note_for_closing_summary(summary_key, line)
+            if kept:
+                if tracker is not None:
+                    tracker.warn(model_spec, line)
+            else:
+                violations.append(line)
+        if record is not None and record.get("foreign_trust"):
+            note_for_closing_summary(summary_key, foreign_trust_line(provider_name, record))
+    return "; ".join(violations) or None
 
 
 def bypass_ignore_prefixes(
@@ -3647,6 +4281,26 @@ async def run_single_model(
         tree_before = await asyncio.to_thread(
             porcelain_snapshot, project_root, ignore_prefixes=ignore_prefixes
         )
+    # The plugin's own jail (plan codex-sandbox-unavailable §6 F1, 2026-09-30):
+    # no porcelain check (above, unchanged by decision), the mode check's
+    # before-snapshot instead, and this run's closing-summary key for the home
+    # check's and the jail's lines.
+    summary_key = phase_summary_key(plan_path, phase_name)
+    mode_before: Optional[Dict[str, str]] = None
+    if mode_check_applies(sandbox):
+        mode_before = await asyncio.to_thread(mode_snapshot, project_root)
+
+    async def _incidental_check(
+        home_checks: Sequence[Any], audits: Sequence[Any]
+    ) -> Optional[str]:
+        """The mode check and the home check's verdict for a slot on the
+        plugin's jail, once, after the last attempt (``None`` elsewhere)."""
+        return await run_incidental_checks(
+            sandbox, provider_name=provider_name, display_name=display_name,
+            model_spec=model_spec, project_root=project_root, plan_path=plan_path,
+            mode_before=mode_before, home_checks=home_checks, audits=audits,
+            tracker=tracker, summary_key=summary_key,
+        )
 
     async def _bypass_write_check(audits: Sequence[Any]) -> Optional[str]:
         """The reason to fail a bypassed slot whose run changed the tree, or ``None``.
@@ -3737,8 +4391,13 @@ async def run_single_model(
             duration = time.time() - start_time
             details = result.get("details", {})
             stderr_text = details.get("stderr", "")
+            report_jail_outcome(display_name, details, summary_key)
 
             violation = await _bypass_write_check([details.get("readonly_audit")])
+            if violation is None:
+                violation = await _incidental_check(
+                    [details.get("home_check")], [details.get("readonly_audit")]
+                )
             if violation is not None:
                 return {
                     "success": False, "output": None, "error": violation,
@@ -3837,6 +4496,8 @@ async def run_single_model(
     slot_usage: Optional[Dict[str, Any]] = None
     #: Every attempt's `details['readonly_audit']` (plan §4.3), `None` included.
     slot_audits: List[Any] = []
+    #: Every attempt's `details['home_check']` on the plugin's jail (F1 Limits).
+    slot_home_checks: List[Any] = []
     stderr_text = ""
     source = "unknown"
     status: Optional[str] = None
@@ -3924,6 +4585,10 @@ async def run_single_model(
             # end — a retry replaces `details`, so the last one alone would let
             # a clean retry excuse an earlier attempt that wrote.
             slot_audits.append(details.get("readonly_audit"))
+            slot_home_checks.append(details.get("home_check"))
+            # The jail's own lines for this attempt: its `[JAIL_DENIED]` line
+            # (kept for the closing summary) and the in-stream denial count.
+            report_jail_outcome(display_name, details, summary_key)
             stderr_text = details.get("stderr", "")
             source = result.get("source", "unknown")
             output_file = result.get("output_file", "")
@@ -3970,6 +4635,12 @@ async def run_single_model(
                 STATUS_OK if result.get("success")
                 else _LADDER_STATUS_BY_CATEGORY.get(failure_category, failure_category)
             )
+            if not result.get("success") and is_jail_denied(details):
+                # F1 item 6: the plugin's jail denied the turn, or could not
+                # be set up for it. Non-retryable and never moved to another
+                # rung — a status the ladder does not know is "never retried",
+                # whatever the text classifies as.
+                status = STATUS_JAIL_DENIED
 
             # One `record` call is the whole retry decision, identical to Lane
             # B's: rung 1 is terminal, rung 3 backs off with jitter at most three
@@ -4032,6 +4703,11 @@ async def run_single_model(
         # `output` is dropped so `save_model_result` never parses it. Placed
         # after the `result is None` return because nothing ran on that path.
         violation = await _bypass_write_check(slot_audits)
+        if violation is None:
+            # The plugin's jail: the mode check and the home check, once,
+            # after the last attempt, ahead of every branch below — the same
+            # fail-closed place the porcelain check's verdict takes.
+            violation = await _incidental_check(slot_home_checks, slot_audits)
         if violation is not None:
             return {
                 "success": False, "output": None, "error": violation,
@@ -5280,8 +5956,11 @@ def aggregate_results(
     # fold, and a reaggregate never wrote it. The same salvage answer goes to
     # the HTML notice below, so the two surfaces render one string.
     salvage_requested = salvage_requested_models(phase_dir, list(failed_models or {}))
+    # A jail-denied slot's `models_served` entry makes the line say "denied by
+    # the plugin's jail: <path>" (plan codex-sandbox-unavailable F1 item 6).
     failure_line = failed_models_line(
-        failed_models, requested_models, salvage_requested
+        failed_models, requested_models, salvage_requested,
+        served_models=served_models,
     )
     if failure_line:
         report_lines.append(failure_line)
@@ -6828,6 +7507,9 @@ async def run_review_orchestration(
         print("\nERROR: All models failed")
         for model_spec, reason in failed_models.items():
             print(f"  - {model_spec}: {reason}")
+        # The home check's and the jail's lines, repeated (F1, 2026-09-30):
+        # this exit is the run's last word, so the summary goes here too.
+        print_closing_summary(phase_dir)
         sys.exit(_unattended.report_partial_results(
             completed=completed_models,
             failed=list(failed_models),
@@ -7147,3 +7829,9 @@ async def run_review_orchestration(
         # because on Claude Code that return IS the background job's completion
         # signal.
         await phase_ticker.stop_ticker()
+        # Plan codex-sandbox-unavailable F1 (2026-09-30): every
+        # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's slots,
+        # and the foreign trust tables that appear only here, repeated as the
+        # run's last word — the home change outlives the run. On every ending
+        # this `finally` covers: complete, validation handed back, exception.
+        print_closing_summary(phase_dir)

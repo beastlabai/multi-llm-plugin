@@ -88,6 +88,30 @@ def _row(report, name):
     return next(r for r in report["providers"] if r["provider"] == name)
 
 
+def _fake_wrapper(directory: Path, log: Path, *, passes: bool) -> Path:
+    """A stand-in for `utils/landlock_exec.py` (plan §8.1: tests point
+    `landlock_dispatch.WRAPPER_PATHS` at a fake under tmp_path, which runs for
+    real). It logs every invocation to ``log``, then either answers as a jail
+    whose canary held (exit 0, the affirmative marker, the seeded file left
+    alone) or as a kernel without Landlock (the wrapper's own exit 126)."""
+    from utils.providers.base import SANDBOX_CANARY_DENIED
+
+    target = directory / "fake_landlock_exec.py"
+    body = (
+        "import sys\n"
+        f"open({str(log)!r}, 'a').write(' '.join(sys.argv[1:]) + '\\n')\n"
+    )
+    if passes:
+        body += f"print({SANDBOX_CANARY_DENIED!r})\nsys.exit(0)\n"
+    else:
+        body += (
+            "sys.stderr.write('landlock_exec: unavailable: Landlock ABI 0 "
+            "found, the floor is 3\\n')\nsys.exit(126)\n"
+        )
+    target.write_text(body, encoding="utf-8")
+    return target
+
+
 class TestDoctorOnABrokenSandbox:
 
     def test_json_names_the_bwrap_line_prints_the_profile_and_exits_3(
@@ -146,8 +170,16 @@ class TestDoctorOnABrokenSandbox:
         nothing pinned here, the base config is what `doctor` reads — renders
         its note on the BROKEN row so the operator sees what the next run will
         do on this machine, and nothing else moves: the row is still a failure
-        (the write profile is refused whatever the key says), the repair is
-        still printed, the exit is still 3."""
+        (codex's own sandbox cannot start), the repair is still printed, the
+        exit is still 3.
+
+        Rewritten 2026-09-30 (plan codex-sandbox-unavailable §8.2): the ladder
+        has three rungs now. The plugin-landlock rung is walked between the two
+        — and is absent here (this fixture's codex home sits inside the probe's
+        repo root, a grant the jail refuses before any spawn; the default
+        suite answers the production wrapper exit 126 anyway) — so the walk
+        still ends on rung 2, the row names the jail it could not use, and the
+        repair keeps today's heading."""
         monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
         _broken_bwrap(monkeypatch)
         assert doctor.main(["--budget", "10"]) == 3
@@ -162,8 +194,12 @@ class TestDoctorOnABrokenSandbox:
             "codex 0.155.1: "
         ) in out
         assert "→ landlock" not in out
+        assert "; rung plugin-landlock is not usable here (absent)" in out
+        assert "    plugin-landlock: absent: the plugin's Landlock jail cannot run here" in out
         assert "FAIL: codex: sandbox" in out
         assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
+        assert doctor.REPAIR_HEADING in out
+        assert doctor.REPAIR_HEADING_SYSTEM_ALTERNATIVE not in out
 
         assert doctor.main(["--json", "--budget", "10"]) == 3
         report = json.loads(capsys.readouterr().out)
@@ -172,19 +208,42 @@ class TestDoctorOnABrokenSandbox:
         assert codex["sandbox"]["fallback"] == "auto"
         assert codex["sandbox"]["fallback_rung"] == "unsandboxed"
         assert codex["sandbox"]["fallback_walk"] == [
-            ["landlock", "unavailable"], ["unsandboxed", "taken"],
+            ["landlock", "unavailable"], ["plugin-landlock", "absent"],
+            ["unsandboxed", "taken"],
         ]
         assert codex["sandbox"]["ok"] is False
+        assert codex["sandbox"]["plugin_landlock"]["outcome"] == "absent"
+        assert report["repair"] == doctor._repair_block()
+        assert report["repair_is_system_alternative"] is False
+        assert report["repair_heading"] == doctor.REPAIR_HEADING
 
     def test_off_says_refused_by_config_and_probes_no_rung(
-        self, clinic, monkeypatch, capsys
+        self, clinic, monkeypatch, capsys, tmp_path
     ):
         """Landlock rung (2026-09-22): `off` is still a refusal, and the row
         now says so — refused by config, not merely unavailable. No rung is
-        reachable under `off`, so the read-only probe is never spent."""
+        reachable under `off`, so the read-only probe is never spent.
+
+        Extended 2026-09-30 (plan §8.2 "off never reaches the rung"): with a
+        fake plugin-landlock wrapper scripted to pass, `off` still spawns no
+        rung probe — the wrapper's log stays empty, neither the read-only walk
+        nor the agent-write probe walks — and the agent-write row says refused
+        by config without naming a rung."""
+        from utils import landlock_dispatch
         from utils.providers import codex as codex_module
         from utils.providers.base import PROFILE_GENERATE
 
+        # The probe's repo root is a directory the codex home is outside of,
+        # so a rung probe — were one spawned — would reach the fake wrapper
+        # rather than be refused before the spawn.
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        monkeypatch.chdir(repo)
+        wrapper_log = tmp_path / "wrapper.log"
+        monkeypatch.setitem(
+            landlock_dispatch.WRAPPER_PATHS, "landlock_exec",
+            str(_fake_wrapper(tmp_path, wrapper_log, passes=True)),
+        )
         monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
         _broken_bwrap(monkeypatch)
         monkeypatch.setattr(
@@ -208,10 +267,22 @@ class TestDoctorOnABrokenSandbox:
         assert "unsandboxed" not in out
         assert "landlock" not in out
         assert PROFILE_GENERATE not in profiles
+        assert (
+            "    agent-write: refused by config (sandbox_fallback: off); the row "
+            "stays BROKEN (exit 3 without --warn-only): codex's own sandbox "
+            "cannot start"
+        ) in out
+        assert doctor.REPAIR_HEADING in out
 
         assert doctor.main(["--json", "--budget", "10"]) == 3
         report = json.loads(capsys.readouterr().out)
-        assert _row(report, "codex")["sandbox"]["fallback"] == "off"
+        sandbox = _row(report, "codex")["sandbox"]
+        assert sandbox["fallback"] == "off"
+        assert "plugin_landlock" not in sandbox
+        assert sandbox["agent_write"]["status"] == doctor.WRITE_REFUSED_BY_CONFIG
+        assert report["repair_is_system_alternative"] is False
+        # No rung probe spawned: the wrapper that would have passed never ran.
+        assert not wrapper_log.exists() or wrapper_log.read_text() == ""
 
     def test_a_bypassed_sandbox_is_reported_never_failed(self, clinic, monkeypatch, capsys):
         """muse names bubblewrap but runs `--disable-sandbox`: the broken
@@ -391,6 +462,12 @@ class TestDoctorReportsTheLadder:
     def test_a_rung_1_verdict_is_what_puts_landlock_on_screen(
         self, clinic, monkeypatch, capsys
     ):
+        """Rewritten 2026-09-30 (plan §7.1 step 3, `utils/doctor.py:36, :383,
+        :445`): the line no longer says "agent-write still refused" — writes
+        now have a rung of their own (plugin-landlock, plan-file and tasks
+        scopes) — and points at the agent-write row, which names that rung and
+        its probe result. The verdict rule is restated, not changed: BROKEN
+        and exit 3, because codex's own sandbox cannot start."""
         _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
             "unavailable", BWRAP_BROKEN_LINE, "landlock", (("landlock", "taken"),),
         ))
@@ -399,13 +476,28 @@ class TestDoctorReportsTheLadder:
         line = _codex_line(out)
         assert (
             "sandbox BROKEN: " + BWRAP_BROKEN_LINE + " (fallback: auto → landlock — "
-            "codex runs read-only phases under a real sandbox; agent-write still refused"
+            "codex runs read-only phases under a real sandbox; writes: see the "
+            "agent-write row"
         ) in line
+        assert "agent-write still refused" not in out
         # `deprecated_at` rides the row: the version it was measured at and the
         # sentence upstream prints.
         assert "measured at codex 0.155.1: " + LANDLOCK_SENTENCE in line
         assert "unsandboxed" not in line
-        # The verdict and the exit code do not move: agent-write is refused.
+        # The walk stopped at rung 1, so the write rung was never measured
+        # here: the agent-write row says so and names it, never "refused".
+        write_row = next(ln for ln in out.splitlines() if ln.startswith("    agent-write:"))
+        assert write_row.startswith(
+            "    agent-write: plugin-landlock not measured here (not probed: the "
+            "read-only walk stopped before it)"
+        )
+        assert "each write phase probes it at its own preflight" in write_row
+        assert "repo-wide edits (apply-code-fixes, implement) stay refused (step 3b)" in write_row
+        assert write_row.endswith(
+            "the row stays BROKEN (exit 3 without --warn-only): codex's own "
+            "sandbox cannot start"
+        )
+        # The verdict and the exit code do not move.
         assert "FAIL: codex: sandbox" in out
         assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
 
@@ -427,25 +519,33 @@ class TestDoctorReportsTheLadder:
         never the word `landlock →`."""
         _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
             "unavailable", BWRAP_BROKEN_LINE, "unsandboxed",
-            (("landlock", "absent"), ("unsandboxed", "taken")),
+            (("landlock", "absent"), ("plugin-landlock", "absent"), ("unsandboxed", "taken")),
         ))
         assert doctor.main(["--budget", "10"]) == 3
-        line = _codex_line(capsys.readouterr().out)
+        out = capsys.readouterr().out
+        line = _codex_line(out)
         assert "(fallback: auto — codex runs unsandboxed for read-only phases" in line
         assert "→ landlock" not in line
+        assert "→ plugin-landlock" not in line
         assert "rung landlock is not usable here (absent)" in line
+        # The ladder's middle rung (2026-09-30) is named with its outcome.
+        assert "rung plugin-landlock is not usable here (absent)" in line
+        assert "    plugin-landlock: absent: the plugin's Landlock jail cannot run here" in out
 
     def test_a_none_rung_after_a_complete_walk_is_a_refusal_not_a_bypass(
         self, clinic, monkeypatch, capsys
     ):
         _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
-            "unavailable", BWRAP_BROKEN_LINE, None, (("landlock", "rejected"),),
+            "unavailable", BWRAP_BROKEN_LINE, None,
+            (("landlock", "rejected"), ("plugin-landlock", "rejected")),
         ))
         assert doctor.main(["--budget", "10"]) == 3
         line = _codex_line(capsys.readouterr().out)
         assert "(fallback: auto — no rung usable here: codex is refused" in line
+        assert "rung plugin-landlock is not usable here (rejected)" in line
         assert "runs unsandboxed" not in line
         assert "→ landlock" not in line
+        assert "→ plugin-landlock" not in line
 
     def test_an_unprobed_rung_is_its_own_row(self, clinic, monkeypatch, capsys):
         """Unprobed and unavailable are different rows: one says this machine
@@ -454,11 +554,28 @@ class TestDoctorReportsTheLadder:
             "unavailable", BWRAP_BROKEN_LINE, None, (("landlock", "unprobed"),),
         ))
         assert doctor.main(["--budget", "10"]) == 3
-        line = _codex_line(capsys.readouterr().out)
+        out = capsys.readouterr().out
+        line = _codex_line(out)
         assert line.endswith(
             "(fallback: auto — rung unprobed: the report budget was exhausted)"
         )
         assert "unsandboxed" not in line and "not usable" not in line
+        # 2026-09-30: the budget ran out before the middle rung, and its own
+        # row says so — unprobed, never absent or failed.
+        assert "    plugin-landlock: unprobed: the report budget was exhausted" in out
+
+        # And when the budget ran out *on* the middle rung.
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, None,
+            (("landlock", "retired"), ("plugin-landlock", "unprobed")),
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        out = capsys.readouterr().out
+        assert _codex_line(out).endswith(
+            "(fallback: auto — rung unprobed: the report budget was exhausted)"
+        )
+        assert "    plugin-landlock: unprobed: the report budget was exhausted" in out
+        assert doctor.REPAIR_HEADING in out
 
     def test_contained_names_the_disabled_bypass_and_its_own_rung(
         self, clinic, monkeypatch, capsys
@@ -468,10 +585,10 @@ class TestDoctorReportsTheLadder:
         monkeypatch.setattr(
             codex_module, "sandbox_fallback_policy", lambda anchor=None: "contained"
         )
-        # The walk is policy-blind: it reaches rung 2 — which `contained` never takes.
+        # The walk is policy-blind: it reaches rung 3 — which `contained` never takes.
         _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
             "unavailable", BWRAP_BROKEN_LINE, "unsandboxed",
-            (("landlock", "unavailable"), ("unsandboxed", "taken")),
+            (("landlock", "unavailable"), ("plugin-landlock", "absent"), ("unsandboxed", "taken")),
         ))
         assert doctor.main(["--budget", "10"]) == 3
         line = _codex_line(capsys.readouterr().out)
@@ -483,6 +600,28 @@ class TestDoctorReportsTheLadder:
         ))
         assert doctor.main(["--budget", "10"]) == 3
         assert "(fallback: contained → landlock — " in _codex_line(capsys.readouterr().out)
+
+        # 2026-09-30: the plugin's jail probes ok, and `contained` still does
+        # not take it (F1 item 4: it stops stray writes only). The row says
+        # both, names no bypass, and the repair keeps today's heading — the
+        # jail runs nothing under `contained`. agent-write is refused too.
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "plugin-landlock",
+            (("landlock", "retired"), ("plugin-landlock", "taken")),
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        out = capsys.readouterr().out
+        line = _codex_line(out)
+        assert "(fallback: contained — bypass disabled: no contained rung is usable here" in line
+        assert (
+            "plugin-landlock probed ok, but it stops stray writes, not the model, "
+            "which `sandbox_fallback: contained` does not accept (`auto` takes it)"
+        ) in line
+        assert "→ plugin-landlock" not in line
+        assert "    plugin-landlock: probe ok" in out
+        assert "    agent-write: refused — `sandbox_fallback: contained` never reaches plugin-landlock" in out
+        assert doctor.REPAIR_HEADING in out
+        assert doctor.REPAIR_HEADING_SYSTEM_ALTERNATIVE not in out
 
     def test_the_second_probe_gets_only_what_is_left_of_the_budget(self, monkeypatch):
         """A slow `agent-write` probe truncates the read-only probe rather than
@@ -540,17 +679,25 @@ class TestDoctorNamesTheRetiredRung:
     )
 
     def _repair_is_unchanged(self, out, report):
+        """Today's repair block and heading. Holds only while the
+        plugin-landlock rung is unusable (absent, failed, skipped, not probed):
+        where it probes ok under `auto` the heading becomes the system-level
+        alternative (plan §7 step 2, rewritten 2026-09-30) — that case is
+        `test_plugin_landlock_surfaces.py`'s and
+        `test_a_passing_jail_names_itself_in_the_read_phase_choice` below."""
         assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
         assert "Repair (yours to install, with sudo — the plugin only prints it):" in out
+        assert doctor.REPAIR_HEADING_SYSTEM_ALTERNATIVE not in out
         assert report["repair"] == doctor._repair_block()
         assert report["repair"]["sysctl_alternative_recommended"] is False
+        assert report["repair_is_system_alternative"] is False
 
     def test_a_retired_rung_names_the_measured_version_and_the_choice(
         self, clinic, monkeypatch, capsys
     ):
         _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
             "unavailable", BWRAP_BROKEN_LINE, "unsandboxed",
-            (("landlock", "retired"), ("unsandboxed", "taken")),
+            (("landlock", "retired"), ("plugin-landlock", "absent"), ("unsandboxed", "taken")),
             (("landlock", self.PANIC),), "0.156.1",
         ))
         assert doctor.main(["--budget", "10"]) == 3
@@ -560,7 +707,10 @@ class TestDoctorNamesTheRetiredRung:
         assert "(fallback: auto — codex runs unsandboxed for read-only phases" in line
         assert "→ landlock unavailable: measured unavailable from codex 0.156.1" in line
         assert "`sandbox_fallback: contained` refuses them like writes" in line
+        # The plugin's jail is absent here, so the read-phase choice is still
+        # today's (2026-09-30: it names plugin-landlock only when that probes ok).
         assert "`auto` runs them under --sandbox danger-full-access" in line
+        assert "[SANDBOX_INCIDENTAL]" not in line
         # The clause carries no AppArmor or /etc advice; the repair block does.
         clause = line.split("(fallback:", 1)[1]
         assert "apparmor" not in clause.lower() and "/etc" not in clause
@@ -578,11 +728,48 @@ class TestDoctorNamesTheRetiredRung:
             "\n".join(doctor.render_text(report, warn_only=False)), report,
         )
 
+    def test_a_passing_jail_names_itself_in_the_read_phase_choice(
+        self, clinic, monkeypatch, capsys
+    ):
+        """Plan §7, "Step 2 subtask: messaging and markers", item 3 (doctor's
+        read-phase clause, 2026-09-30): where the plugin-landlock rung probes
+        ok, `auto` runs read phases there — the clause names the rung and
+        `[SANDBOX_INCIDENTAL]`, never danger-full-access or
+        `[SANDBOX_BYPASSED]` — and the repair is re-headed as a system-level
+        alternative, printed in full, with the verdict and the exit unchanged."""
+        _fake_verdicts(monkeypatch, executor.SandboxProbeResult(
+            "unavailable", BWRAP_BROKEN_LINE, "plugin-landlock",
+            (("landlock", "retired"), ("plugin-landlock", "taken")),
+            (("landlock", self.PANIC),), "0.156.1",
+        ))
+        assert doctor.main(["--budget", "10"]) == 3
+        out = capsys.readouterr().out
+        line = _codex_line(out)
+        assert (
+            "(fallback: auto → plugin-landlock — codex runs read-only phases on "
+            "the plugin's Landlock jail, which stops stray writes, not the model"
+        ) in line
+        assert "→ landlock unavailable: measured unavailable from codex 0.156.1" in line
+        assert (
+            "; read phases: `sandbox_fallback: contained` refuses them like "
+            "writes, `auto` runs them on plugin-landlock (the [SANDBOX_INCIDENTAL] line)"
+        ) in line
+        assert "danger-full-access" not in line and "[SANDBOX_BYPASSED]" not in line
+        assert "FAIL: codex: sandbox" in out
+        assert doctor.REPAIR_HEADING_SYSTEM_ALTERNATIVE in out
+        assert doctor.REPAIR_HEADING not in out
+        for text in doctor.APPARMOR_PROFILE.rstrip("\n").splitlines():
+            assert text in out
+        assert doctor.APPARMOR_LOAD_COMMAND in out and doctor.SYSCTL_ALTERNATIVE in out
+
     @pytest.mark.parametrize("walk, shown", [
         ((("landlock", "unprobed"),), "rung unprobed: the report budget was exhausted"),
         ((("landlock", "unknown"),), "a rung probe gave no answer"),
-        ((("landlock", "unavailable"), ("unsandboxed", "taken")),
+        ((("landlock", "unavailable"), ("plugin-landlock", "absent"), ("unsandboxed", "taken")),
          "rung landlock is not usable here (unavailable)"),
+        # 2026-09-30: the middle rung's probe gave no answer — the walk stops.
+        ((("landlock", "unavailable"), ("plugin-landlock", "unknown")),
+         "a rung probe gave no answer"),
     ])
     def test_a_timeout_or_other_failure_is_shown_as_itself(
         self, clinic, monkeypatch, capsys, walk, shown

@@ -488,6 +488,23 @@ def _call_target(target: Callable[[Sequence[str]], int], argv: Sequence[str]) ->
     return EXIT_OK if result is None else int(result)
 
 
+def _validate_skip_rung(mode_name: str) -> None:
+    """Reject a bad ``MULTI_LLM_CODEX_SKIP_RUNG`` before any mode runs (plan
+    codex-sandbox-unavailable-findings-and-fixes §6 F1 "Where it sits" item 6,
+    2026-09-30): any value but ``plugin-landlock`` is exit 3 naming the
+    variable and the accepted value, never silently ignored. ``doctor`` is
+    exempt — it is where a user looks when something is wrong, so it reports
+    the bad value on its ``plugin-landlock`` row instead of dying on it."""
+    if mode_name == "doctor":
+        return
+    from utils.providers.base import skip_rung_requested
+
+    try:
+        skip_rung_requested()
+    except ValueError as exc:
+        raise DispatchError(f"ERROR: {exc}") from exc
+
+
 def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
     mode = mode_table.resolve(word)
     if mode is None:
@@ -523,6 +540,7 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
         # unrecognized decision value and a missing `uv` are the two failures a
         # mode must never discover halfway through a phase dir.
         validate_decision_flags(flags)
+        _validate_skip_rung(mode.name)
         if mode.requires_uv:
             # The two install modes opt out (modes.py): `install-host --check` is
             # layer 1 of the same uv bootstrap and reports a miss as one of its
@@ -876,6 +894,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     ctx = activate_result(ResultContext())
     crash: Optional[str] = None
     exit_code = EXIT_ERROR
+    previous_sigterm = _install_foreground_sigterm()
     try:
         try:
             exit_code = _dispatch(argv, ctx)
@@ -918,6 +937,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         ctx.emit(exit_code)
         return exit_code
     finally:
+        # Plan codex-sandbox-unavailable I12 (option B, 2026-09-30): every codex
+        # child of this run has exited by now, so remove the
+        # `[projects."<repo>"] trust_level = "trusted"` tables they added to the
+        # user's codex config — and nothing else. A detached worker's `--abort`
+        # and heartbeat-lost endings `os._exit` without reaching this line, so
+        # `utils/detach.py` restores on those two paths itself.
+        _restore_codex_trust()
+        _uninstall_foreground_sigterm(previous_sigterm)
         # If this process is a detached worker, it is the only thing that can
         # ever observe its own exit status (after the double-spawn nothing is its
         # parent), so it records its own outcome before exiting. A no-op in every
@@ -925,6 +952,63 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _close_detached_run(exit_code, crash, ctx.state)
         deactivate_result()
         clear_invocation()
+
+
+def _raise_on_sigterm(signum, frame):  # pragma: no cover - exercised in a subprocess
+    """SIGTERM → ``SystemExit(128 + signum)``, so ``main``'s ``finally`` runs."""
+    raise SystemExit(128 + signum)
+
+
+def _install_foreground_sigterm():
+    """Make a foreground SIGTERM run ``main``'s ``finally`` (plan I12).
+
+    A foreground run had no SIGTERM handler, so the default action killed the
+    process with no cleanup — and the trust entries its codex children wrote
+    stayed in the user's config. Installed only when nothing else owns the
+    signal (the default disposition) and only on the main thread; the detached
+    worker installs its own handler later, which takes precedence. Returns the
+    previous handler for :func:`_uninstall_foreground_sigterm`, or ``None``
+    when nothing was installed.
+    """
+    try:
+        import signal
+        import threading
+
+        if threading.current_thread() is not threading.main_thread():
+            return None
+        if signal.getsignal(signal.SIGTERM) is not signal.SIG_DFL:
+            return None
+        signal.signal(signal.SIGTERM, _raise_on_sigterm)
+        return signal.SIG_DFL
+    except (ImportError, ValueError, OSError, AttributeError):  # pragma: no cover
+        return None
+
+
+def _uninstall_foreground_sigterm(previous) -> None:
+    """Put back the disposition :func:`_install_foreground_sigterm` replaced,
+    only if our handler is still the one installed."""
+    if previous is None:
+        return
+    try:
+        import signal
+
+        if signal.getsignal(signal.SIGTERM) is _raise_on_sigterm:
+            signal.signal(signal.SIGTERM, previous)
+    except (ValueError, OSError):  # pragma: no cover
+        pass
+
+
+def _restore_codex_trust() -> None:
+    """Remove the codex trust entries this run's children added (plan I12).
+    Never raises: close-out must never mask the run's result."""
+    try:
+        from utils import codex_trust
+    except Exception:  # noqa: BLE001 - see above
+        return
+    try:
+        codex_trust.restore_all()
+    except Exception:  # noqa: BLE001 - see above  # pragma: no cover
+        traceback.print_exc()
 
 
 def _crash_summary(limit: int = 2000) -> str:

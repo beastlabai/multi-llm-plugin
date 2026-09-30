@@ -15,8 +15,17 @@ from .base import (
     SANDBOX_CANARY_DENIED,
     SANDBOX_CANARY_NOT_DENIED,
     SANDBOX_FALLBACK_PROFILES,
+    SANDBOX_WRITE_FALLBACK_PROFILES,
+    SANDBOX_CONTAINMENT_INCIDENTAL,
     SANDBOX_RUNG_LANDLOCK,
+    SANDBOX_RUNG_PLUGIN_LANDLOCK,
     SANDBOX_RUNG_UNSANDBOXED,
+    WRITE_SCOPE_PLAN_FILE,
+    WRITE_SCOPE_TASKS,
+    WRITE_SCOPES_ON_RUNG,
+    HOST_POSTURE_FULL_ACCESS,
+    JailContext,
+    WritePostureConsent,
     USAGE_FULL,
     REASONING_LADDER,
     InternalRetryEnvelope,
@@ -294,9 +303,228 @@ UNSANDBOXED_RUNG = SandboxRung(
     contained=False,
 )
 
-#: The ladder, in walk order.
-SANDBOX_FALLBACK_RUNGS: Tuple[SandboxRung, ...] = (LANDLOCK_RUNG, UNSANDBOXED_RUNG)
+# ─────────────────────────────────────────────────────────────────────────────
+# The plugin-landlock rung (plan codex-sandbox-unavailable-findings-and-fixes
+# §6 F1, steps 2 and 3; 2026-09-30).
+#
+# When codex's own sandbox cannot start (bwrap blocked by
+# `apparmor_restrict_unprivileged_userns=1`) and only then, the plugin launches
+# codex through `utils/landlock_exec.py`: the wrapper applies a Landlock ruleset
+# to itself and `exec`s codex under `--sandbox danger-full-access`. Codex runs
+# none of its own sandbox code, and the kernel still refuses every write
+# outside the allow-list, for codex and every process it spawns. Measured
+# 2026-09-29 (preflight step 1, codex 0.158.0): codex starts and finishes a turn
+# inside the jail, writes only beneath $CODEX_HOME (+ /dev/null, /dev/ptmx,
+# /dev/pts), and `apply_patch` rewrites a file in place.
+#
+# Grade `incidental`, never `contained`: `systemd-run --user` wrote through the
+# jail (Landlock does not mediate `connect()` to pathname Unix sockets), writes
+# to $CODEX_HOME are allowed, `chmod`/`utimes` pass, and the network is not
+# confined. So `sandbox_fallback: contained` never reaches it, and every
+# artifact says it stops stray writes, not the model.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: The wrapper id the rung names (`SandboxRung.wrapper`); the path is resolved by
+#: `utils/landlock_dispatch.WRAPPER_PATHS`, never from PATH or the cwd.
+PLUGIN_LANDLOCK_WRAPPER = "landlock_exec"
+
+#: The newest codex the rung's allow-list was measured against. Render-only:
+#: `doctor` shows it beside the installed version, and a `[JAIL_DENIED]` line
+#: names a newer installed codex as the likely cause. Raising it needs the
+#: allow-list re-measurement (plan §8.2) to pass on the newer build.
+PLUGIN_LANDLOCK_MEASURED_THROUGH: Tuple[str, str] = (
+    "0.159.2",
+    "measured 2026-09-29 on 0.158.0 (preflight step 1), re-measured "
+    "2026-09-30 on 0.159.0 and 0.159.1 (step 1c) and on 0.159.2 "
+    "(tests/test_codex_jail_rig.py, the promoted rig): a read-only turn, a "
+    "code-mode turn and a plan-file edit completed inside the jail; every "
+    "write outside the allow-list denied; codex writes nothing new outside "
+    "$CODEX_HOME",
+)
+
+#: The env names the rung's canary reads. The targets reach the script through
+#: the env so the probe tail stays pinned text (plan F1 "Where it sits" item 3).
+CANARY_ENV_SEEDED = "MULTI_LLM_CANARY_SEEDED"
+CANARY_ENV_PYTHON = "MULTI_LLM_CANARY_PYTHON"
+CANARY_ENV_WRITE_FILE = "MULTI_LLM_CANARY_WRITE_FILE"
+CANARY_ENV_WRITE_DIR = "MULTI_LLM_CANARY_WRITE_DIR"
+
+#: What the rung's canary prints (stderr, exit 5) when a write it must be able
+#: to make — in its own $TMPDIR, or a write profile's own target — failed: a
+#: jail that denies everything is not a usable rung.
+SANDBOX_CANARY_POSITIVE_FAILED = (
+    "multi-llm sandbox canary: an allowed write failed"
+)
+PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT = 5
+
+#: The truncation control's interpreter snippet: the path-based `truncate(2)`
+#: (a shell `: >` redirect opens for writing, which WRITE_FILE refuses on every
+#: ABI, so it cannot tell a jail that stops truncation from one that does not —
+#: Appendix A). Exit 7 is a denial, 8 any other error (a setup failure, never a
+#: pass), 0 a truncation that landed.
+_TRUNCATE_SNIPPET = (
+    "import os, sys\n"
+    "try:\n"
+    "    os.truncate(sys.argv[1], 0)\n"
+    "except PermissionError:\n"
+    "    sys.exit(7)\n"
+    "except OSError:\n"
+    "    sys.exit(8)\n"
+)
+
+#: The plugin-landlock rung's canary (run by `codex sandbox` under
+#: `sandbox_mode="danger-full-access"`, inside the jail). Controls, in order:
+#: negative — creating a file in `.multi-llm/tmp` (prepared and proven writable
+#: *outside* the jail by the walk) must be denied; truncation — the seeded file
+#: (`$MULTI_LLM_CANARY_SEEDED`, in the same negative target) must not be
+#: truncatable, and the parent compares its bytes afterwards too; positive — a
+#: file created and removed in `$TMPDIR`, and for a write profile its own target
+#: (`: >> <file>` opens the plan or tasks file for writing without changing it;
+#: a tasks dir gets a file created and removed). Only when every control holds
+#: does it print SANDBOX_CANARY_DENIED (split, so an echoing CLI cannot forge it)
+#: and exit 0.
+PLUGIN_LANDLOCK_CANARY_SCRIPT = (
+    f'd={LANDLOCK_CANARY_WORKDIR}; f="$d/sandbox-canary-$$"; '
+    f'if [ ! -d "$d" ] || [ -z "${CANARY_ENV_SEEDED}" ] '
+    f'|| [ -z "${CANARY_ENV_PYTHON}" ] || [ -z "$TMPDIR" ]; then '
+    f'echo "{LANDLOCK_CANARY_SETUP_FAILED}" >&2; exit {LANDLOCK_CANARY_SETUP_EXIT}; fi; '
+    'rc=0; '
+    'if (: > "$f") 2>/dev/null; then rm -f "$f"; rc=3; fi; '
+    '[ -e "$f" ] && rc=3; '
+    f'"${CANARY_ENV_PYTHON}" -I -S -c \'{_TRUNCATE_SNIPPET}\' "${CANARY_ENV_SEEDED}" '
+    '2>/dev/null; t=$?; '
+    'if [ "$t" -eq 0 ]; then rc=3; '
+    'elif [ "$t" -ne 7 ]; then '
+    f'echo "{LANDLOCK_CANARY_SETUP_FAILED}" >&2; exit {LANDLOCK_CANARY_SETUP_EXIT}; fi; '
+    f'if [ "$rc" -ne 0 ]; then echo "{SANDBOX_CANARY_NOT_DENIED}" >&2; exit 3; fi; '
+    'p="$TMPDIR/sandbox-canary-ok-$$"; '
+    f'if ! (: > "$p") 2>/dev/null || ! rm -f "$p"; then '
+    f'echo "{SANDBOX_CANARY_POSITIVE_FAILED}" >&2; exit {PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT}; fi; '
+    f'if [ -n "${CANARY_ENV_WRITE_FILE}" ] && ! (: >> "${CANARY_ENV_WRITE_FILE}") 2>/dev/null; then '
+    f'echo "{SANDBOX_CANARY_POSITIVE_FAILED}" >&2; exit {PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT}; fi; '
+    f'if [ -n "${CANARY_ENV_WRITE_DIR}" ]; then q="${CANARY_ENV_WRITE_DIR}/.multi-llm-canary-$$"; '
+    f'if ! (: > "$q") 2>/dev/null || ! rm -f "$q"; then '
+    f'echo "{SANDBOX_CANARY_POSITIVE_FAILED}" >&2; exit {PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT}; fi; fi; '
+    f'echo {canary_marker_shell_words(SANDBOX_CANARY_DENIED)}; exit 0'
+)
+
+#: The rung's probe tail, pinned verbatim: codex itself, under the dispatch's own
+#: `danger-full-access` value, running the canary. The wrapper prefix and the
+#: allow-list belong to `landlock_dispatch.wrap_argv`, never to this tuple, so
+#: the "pinned verbatim" rule still holds. Exercising codex (config load,
+#: state-db init) rather than a bare `sh` is the point: a codex build that
+#: writes a new path outside the allow-list at start-up fails the probe instead
+#: of every dispatch. This shape ran on 0.158.0 as preflight step 0's fail-open
+#: control (outside a jail: exit 3, "the write was not denied").
+PLUGIN_LANDLOCK_PROBE_ARGV: Tuple[str, ...] = (
+    "codex", "sandbox", "-c", f'sandbox_mode="{SANDBOX_FALLBACK_VALUE}"',
+    "--", "sh", "-c", PLUGIN_LANDLOCK_CANARY_SCRIPT,
+)
+
+#: The plugin-landlock rung. `argv_rewrite` holds only the in-codex atoms; the
+#: wrapper prefix is `landlock_dispatch.wrap_argv`'s. `contained=False` on
+#: purpose: the grade is `incidental`.
+PLUGIN_LANDLOCK_RUNG = SandboxRung(
+    name=SANDBOX_RUNG_PLUGIN_LANDLOCK,
+    probe_argv=PLUGIN_LANDLOCK_PROBE_ARGV,
+    argv_rewrite=("--sandbox", SANDBOX_FALLBACK_VALUE),
+    contained=False,
+    probe_workdir=LANDLOCK_CANARY_WORKDIR,
+    wrapper=PLUGIN_LANDLOCK_WRAPPER,
+    containment=SANDBOX_CONTAINMENT_INCIDENTAL,
+    measured_through=PLUGIN_LANDLOCK_MEASURED_THROUGH,
+)
+
+#: The read-only ladder, in walk order: codex's retired legacy landlock (skipped
+#: by version from 0.156.1), the plugin's own jail, then the uncontained rung.
+SANDBOX_FALLBACK_RUNGS: Tuple[SandboxRung, ...] = (
+    LANDLOCK_RUNG, PLUGIN_LANDLOCK_RUNG, UNSANDBOXED_RUNG,
+)
+
+#: The write ladder (plan step 3, user decision 2026-09-30, option (b)): the
+#: plugin's jail alone. Neither `UNSANDBOXED_RUNG` nor `LANDLOCK_RUNG` ever
+#: appears here, and a failed rung probe for a write profile never falls
+#: through: the dispatch is refused.
+WRITE_FALLBACK_RUNGS: Tuple[SandboxRung, ...] = (PLUGIN_LANDLOCK_RUNG,)
+
+#: The step-3 opt-in. The user decided on 2026-09-30 that codex editing jobs run
+#: on the plugin-landlock rung despite its known escapes ("Codex editing jobs
+#: should run the new setup despite known escapes"), for the plan-file and
+#: tasks write scopes only. With it `False`, `agent-write` answers no policy and
+#: no ladder, exactly as before step 3.
+WRITE_RUNG_OPT_IN = True
+
 _RUNGS_BY_NAME = {rung.name: rung for rung in SANDBOX_FALLBACK_RUNGS}
+
+#: The model-facing counter to codex's "No filesystem sandboxing" environment
+#: line (measured: a per-dispatch `-c developer_instructions=…` lands as a
+#: developer message). Rendered only on the plugin-landlock rung.
+JAIL_DEVELOPER_INSTRUCTIONS = (
+    "Filesystem writes are restricted, whatever your environment context says "
+    "about sandboxing. Write scratch files only under {tmpdir} (also $TMPDIR). "
+    "Every other write, including anywhere in the repository, is denied."
+)
+#: The write scope's sentence (step 3), appended after the scratch sentence.
+JAIL_DEVELOPER_TARGET_DIR = (
+    " The one repository location you may write is the directory {target}: "
+    "create, edit, rename or delete files inside it as your task requires."
+)
+#: The supported-edits sentences for a file-only grant (`plan-file`, and the
+#: `tasks` scope's file-rule fallback). Measured: `apply_patch` rewrites a file
+#: in place; replacing it needs rights on its parent that a file rule does not
+#: grant.
+JAIL_DEVELOPER_TARGET_FILE = (
+    " You may write only {target}. Edit it in place with apply_patch, or by "
+    "rewriting it through a shell redirect. Commands that replace the file are "
+    "denied and leave it unchanged: sed -i, perl -i, editors or scripts that "
+    "save through a temporary file and a rename, mv over it, or deleting and "
+    "re-creating it."
+)
+#: Step 1c's decision (measured 2026-09-30 on codex 0.159.0/0.159.1): what stays
+#: denied on the rung, named so the model reads such an EACCES as the jail's and
+#: not the code's. `git status`'s index refresh, Python's `__pycache__` and
+#: npm's cache are redirected instead (`landlock_dispatch.child_env_redirects`);
+#: git commands that write `.git/` stay denied, and npm's own EACCES advice
+#: ("sudo chown -R … ~/.npm") is wrong under the jail, hence the last sentence.
+JAIL_DEVELOPER_DENIED_PATHS = (
+    " Git commands that write .git/ (add, commit, stash, checkout, restore, "
+    "fetch) are denied. npm and npx use a per-dispatch cache under $TMPDIR. A "
+    "Permission denied error here comes from this restriction, not from file "
+    "ownership: never try sudo or chown to work around it."
+)
+
+#: The `-c` key the rung's developer message rides on.
+DEVELOPER_INSTRUCTIONS_KEY = "developer_instructions"
+
+
+def jail_developer_instructions(context: JailContext) -> str:
+    """The rendered developer message for one jailed dispatch.
+
+    The scratch sentence names this attempt's ``tmpdir``; a write scope adds its
+    target: the dir sentence naming ``target_dir`` when the grant is a dir rule
+    (the ``tasks`` scope in its default directory), else the supported-edits
+    sentences naming the file (``plan-file``, and the ``tasks`` file-rule
+    fallback). The lane decided ``target_dir``; nothing is guessed here.
+    """
+    text = JAIL_DEVELOPER_INSTRUCTIONS.format(tmpdir=context.tmpdir)
+    if context.write_scope and context.target:
+        if context.target_dir:
+            text += JAIL_DEVELOPER_TARGET_DIR.format(target=context.target_dir)
+        else:
+            text += JAIL_DEVELOPER_TARGET_FILE.format(target=context.target)
+    if JAIL_DEVELOPER_DENIED_PATHS:
+        text += JAIL_DEVELOPER_DENIED_PATHS
+    return text
+
+
+def _toml_basic_string(value: str) -> str:
+    """``value`` as a TOML basic string for a ``-c key=<value>`` override, so a
+    path with a space, a quote or a backslash survives codex's TOML parse."""
+    escaped = (
+        value.replace("\\", "\\\\").replace('"', '\\"')
+        .replace("\n", "\\n").replace("\t", "\\t")
+    )
+    return f'"{escaped}"'
 
 #: Constraint 2 of the landlock rung, as codex 0.155.1 reports it: a
 #: `workspace-write` dispatch on a machine whose **own** codex config enables
@@ -665,6 +893,46 @@ def _scan_codex_stream(stdout: str) -> _CodexStream:
     return _CodexStream(messages, legacy_parts, fatal_errors, item_errors, saw_event)
 
 
+def _require_write_context(profile: str, context: Optional[JailContext]) -> None:
+    """Raise unless ``context`` carries a write scope the rung serves and its
+    target (plan step 3). A write dispatch with no grant is refused, never
+    narrowed to the base entries or widened."""
+    scope = getattr(context, "write_scope", None) if context is not None else None
+    if context is None or not scope:
+        raise ValueError(
+            f"codex never runs the {profile!r} profile on "
+            f"{SANDBOX_RUNG_PLUGIN_LANDLOCK!r} without a jail context carrying a "
+            f"write scope (the grant is missing)"
+        )
+    if scope not in WRITE_SCOPES_ON_RUNG:
+        raise ValueError(
+            f"codex's {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung does not serve the "
+            f"{scope!r} write scope (served: {', '.join(WRITE_SCOPES_ON_RUNG)})"
+        )
+    if not getattr(context, "target", None):
+        raise ValueError(
+            f"codex's {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung needs the {scope!r} "
+            f"scope's target (the grant names no path)"
+        )
+
+
+def _splice_developer_instructions(cmd: List[str], context: JailContext) -> None:
+    """Splice ``-c developer_instructions=…`` right after
+    ``--skip-git-repo-check`` (the landlock pair's measured site), once: an
+    agent leg passes through ``_apply_sandbox`` twice, and the pair must not be
+    rendered twice. ``--sandbox`` stays at index 2 and the prompt last."""
+    value = (
+        f"{DEVELOPER_INSTRUCTIONS_KEY}="
+        f"{_toml_basic_string(jail_developer_instructions(context))}"
+    )
+    for i in range(len(cmd) - 2):
+        if cmd[i] == "-c" and cmd[i + 1].startswith(f"{DEVELOPER_INSTRUCTIONS_KEY}="):
+            cmd[i + 1] = value
+            return
+    splice = cmd.index("--skip-git-repo-check") + 1
+    cmd[splice:splice] = ["-c", value]
+
+
 class CodexProvider(LLMProvider):
     """Provider for OpenAI Codex CLI tool.
 
@@ -990,6 +1258,7 @@ class CodexProvider(LLMProvider):
         schema: Optional[StructuredSchema] = None,
         sandbox_fallback: Optional[str] = None,
         cwd: Optional[str] = None,
+        jail_context: Optional[JailContext] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """Deliver the prompt on argv or on stdin (prompt omitted from argv).
 
@@ -1003,55 +1272,121 @@ class CodexProvider(LLMProvider):
             return super().build_command_for_transport(
                 prompt, model, transport, prompt_file, timeout_s=timeout_s,
                 schema=schema, sandbox_fallback=sandbox_fallback,
+                jail_context=jail_context,
             )
         cmd = self.build_command(prompt, model, timeout_s=timeout_s, schema=schema)
         rung = sandbox_rung_id(sandbox_fallback)
         if rung:
-            cmd = self.apply_sandbox_fallback(cmd, PROFILE_GENERATE, rung)
+            cmd = self.apply_sandbox_fallback(
+                cmd, PROFILE_GENERATE, rung, context=jail_context,
+            )
         return cmd[:-1], prompt
 
     def sandbox_fallback_policy(
         self, profile: str, anchor: Optional[str] = None
     ) -> Optional[str]:
-        """``providers.codex.sandbox_fallback`` for a read-only profile; else ``None``.
+        """``providers.codex.sandbox_fallback`` for a profile that has a ladder; else ``None``.
 
         The profile gate is answered *here*, in the adapter, and not only at
-        the call sites: ``agent-write`` comes back ``None`` whatever the config
-        says, so no gate that consults this hook can be talked into widening a
-        write dispatch by a config line. The two read-only profiles return the
-        resolved policy (``auto`` by default), which the gates then match
-        against the rung the walk selected — ``auto`` takes either rung,
-        ``contained`` the landlock rung only — beside the probe verdict
-        ``unavailable``; ``off`` is the one word that puts the refusal back.
+        the call sites. The two read-only profiles return the resolved policy
+        (``auto`` by default), which the gates then match against the rung the
+        walk selected. ``agent-write`` (plan step 3, user decision 2026-09-30)
+        returns the resolved policy only while :data:`WRITE_RUNG_OPT_IN` is in
+        force, and the gates read it through ``write_rung_allowed``: the
+        plugin-landlock rung under ``auto`` alone — never ``contained``, never
+        ``off``, never another rung. Without the opt-in it is ``None`` whatever
+        the config says.
         """
+        if profile in SANDBOX_WRITE_FALLBACK_PROFILES:
+            return sandbox_fallback_policy(anchor) if WRITE_RUNG_OPT_IN else None
         if profile not in SANDBOX_FALLBACK_PROFILES:
             return None
         return sandbox_fallback_policy(anchor)
 
     def sandbox_fallback_rungs(self, profile: str) -> Tuple[SandboxRung, ...]:
-        """``(landlock, unsandboxed)`` for a read-only profile; ``()`` otherwise.
+        """The read-only ladder ``(landlock, plugin-landlock, unsandboxed)``,
+        the write ladder ``(plugin-landlock,)`` while the step-3 opt-in is in
+        force, and ``()`` otherwise.
 
-        ``agent-write`` has no ladder at all: the landlock rung panics under
-        ``workspace-write`` and the uncontained rung never reaches a write
-        profile.
+        The write ladder never holds the uncontained rung or the legacy landlock
+        rung (which panics under ``workspace-write`` anyway), and a failed
+        plugin-landlock probe for a write profile never falls through.
         """
+        if profile in SANDBOX_WRITE_FALLBACK_PROFILES:
+            return WRITE_FALLBACK_RUNGS if WRITE_RUNG_OPT_IN else ()
         if profile not in SANDBOX_FALLBACK_PROFILES:
             return ()
         return SANDBOX_FALLBACK_RUNGS
 
     def apply_sandbox_fallback(
-        self, argv: List[str], profile: str, rung: Optional[str] = None
+        self,
+        argv: List[str],
+        profile: str,
+        rung: Optional[str] = None,
+        context: Optional[JailContext] = None,
+        consent: Optional[WritePostureConsent] = None,
     ) -> List[str]:
-        """Render fallback ``rung`` onto ``argv`` (D6 override, landlock rung).
+        """Render fallback ``rung`` onto ``argv`` (D6 override, landlock rung,
+        plugin-landlock rung).
 
         ``landlock`` writes ``read-only`` into the ``--sandbox`` slot and adds
         ``-c features.use_legacy_landlock=true`` once; ``unsandboxed`` writes
-        ``danger-full-access``. Structural, not policy: a profile outside
-        ``SANDBOX_FALLBACK_PROFILES`` raises rather than rendering, so the write
-        profile cannot reach either rung even from a caller that got every
-        other gate wrong — and so does a missing or unknown rung, because a
-        caller that forgot to say *which* rung must not get the widest one.
+        ``danger-full-access``; ``plugin-landlock`` writes
+        ``danger-full-access`` and splices ``-c developer_instructions=…`` for
+        this attempt's ``context`` — the wrapper prefix that makes it a jail is
+        added after executable resolution by ``landlock_dispatch.wrap_argv``,
+        never here. Structural, not policy:
+
+        * a read-only profile takes any declared rung; ``plugin-landlock``
+          needs a ``context`` (raises without one, never renders the bare
+          atoms);
+        * ``agent-write`` takes ``plugin-landlock`` alone, and only with a
+          ``context`` whose ``write_scope`` the rung serves and which names its
+          target — every other rung (``None``, ``landlock``, ``unsandboxed``,
+          an unknown id) raises the same ``ValueError`` as before step 3;
+        * any other profile, a missing or an unknown rung raises.
+
+        F5 (plan step 6, user decision 2026-09-30) adds one route: ``agent-write``
+        on ``unsandboxed`` renders only with a ``consent`` whose posture is
+        ``danger-full-access`` — the chat's own full-access mode, exported per
+        call — and whose ``write_scope`` the rung serves
+        (:data:`WRITE_SCOPES_ON_RUNG`: ``repo-wide``, or no scope at all,
+        raises here whatever the gates decided), and the gates hand it over
+        only after the plugin-landlock rung could not take the dispatch.
         """
+        if (
+            profile in SANDBOX_WRITE_FALLBACK_PROFILES
+            and rung == SANDBOX_RUNG_UNSANDBOXED
+            and consent is not None
+        ):
+            if consent.posture != HOST_POSTURE_FULL_ACCESS:
+                raise ValueError(
+                    f"codex runs the {profile!r} profile unsandboxed only with "
+                    f"the chat's {HOST_POSTURE_FULL_ACCESS!r} posture (got "
+                    f"{consent.posture!r})"
+                )
+            scope = getattr(consent, "write_scope", None)
+            if scope not in WRITE_SCOPES_ON_RUNG:
+                raise ValueError(
+                    f"codex runs the {profile!r} profile unsandboxed under the "
+                    f"chat's {HOST_POSTURE_FULL_ACCESS!r} posture only for the "
+                    f"write scopes the {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung "
+                    f"serves ({', '.join(WRITE_SCOPES_ON_RUNG)}); got "
+                    f"{scope!r}"
+                )
+            cmd = argv
+            cmd[cmd.index("--sandbox") + 1] = SANDBOX_FALLBACK_VALUE
+            return cmd
+        if profile in SANDBOX_WRITE_FALLBACK_PROFILES and WRITE_RUNG_OPT_IN:
+            if rung != SANDBOX_RUNG_PLUGIN_LANDLOCK:
+                raise ValueError(
+                    f"codex never runs the {profile!r} profile on sandbox "
+                    f"fallback rung {rung!r}: the only rung a write profile may "
+                    f"take is {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} (the plugin's "
+                    f"Landlock jail)"
+                )
+            _require_write_context(profile, context)
+            return self._apply_sandbox(argv, profile, rung=rung, context=context)
         if profile not in SANDBOX_FALLBACK_PROFILES:
             raise ValueError(
                 f"codex never runs the {profile!r} profile on a sandbox "
@@ -1063,7 +1398,7 @@ class CodexProvider(LLMProvider):
                 f"codex has no sandbox fallback rung {rung!r} (declared: "
                 f"{', '.join(_RUNGS_BY_NAME)})"
             )
-        return self._apply_sandbox(argv, profile, rung=rung)
+        return self._apply_sandbox(argv, profile, rung=rung, context=context)
 
     def build_agent_command(
         self,
@@ -1123,7 +1458,11 @@ class CodexProvider(LLMProvider):
 
     @staticmethod
     def _apply_sandbox(
-        cmd: List[str], profile: str, *, rung: Optional[str] = None
+        cmd: List[str],
+        profile: str,
+        *,
+        rung: Optional[str] = None,
+        context: Optional[JailContext] = None,
     ) -> List[str]:
         """Point ``cmd``'s ``--sandbox`` value at ``profile``'s policy (M5).
 
@@ -1160,11 +1499,19 @@ class CodexProvider(LLMProvider):
         sandbox_at = cmd.index("--sandbox")
         policy = _sandbox_for(profile)
         if rung is not None:
-            if profile not in SANDBOX_FALLBACK_PROFILES:
+            write_on_rung = (
+                profile in SANDBOX_WRITE_FALLBACK_PROFILES
+                and WRITE_RUNG_OPT_IN
+                and rung == SANDBOX_RUNG_PLUGIN_LANDLOCK
+            )
+            if profile not in SANDBOX_FALLBACK_PROFILES and not write_on_rung:
                 raise ValueError(
                     f"codex never runs the {profile!r} profile on a sandbox "
-                    f"fallback"
+                    f"fallback (a write profile takes only "
+                    f"{SANDBOX_RUNG_PLUGIN_LANDLOCK!r})"
                 )
+            if write_on_rung:
+                _require_write_context(profile, context)
             if rung == SANDBOX_RUNG_UNSANDBOXED:
                 policy = SANDBOX_FALLBACK_VALUE
             elif rung == SANDBOX_RUNG_LANDLOCK:
@@ -1172,10 +1519,55 @@ class CodexProvider(LLMProvider):
                 if not _has_pair(cmd, LANDLOCK_FEATURE_PAIR):
                     splice = cmd.index("--skip-git-repo-check") + 1
                     cmd[splice:splice] = list(LANDLOCK_FEATURE_PAIR)
+            elif rung == SANDBOX_RUNG_PLUGIN_LANDLOCK:
+                if context is None:
+                    raise ValueError(
+                        "codex's plugin-landlock rung needs the attempt's jail "
+                        "context (its scratch directory and write scope); it is "
+                        "never rendered without one"
+                    )
+                policy = SANDBOX_FALLBACK_VALUE
+                _splice_developer_instructions(cmd, context)
             else:
                 raise ValueError(f"codex has no sandbox fallback rung {rung!r}")
         cmd[sandbox_at + 1] = policy
         return cmd
+
+    def note_dispatch(
+        self,
+        profile: str,
+        model: str = "",
+        *,
+        anchor: Optional[str] = None,
+    ) -> None:
+        """Record codex's trust state before a child starts (plan I12, option B).
+
+        Both spawn sites call this through ``llm_client.provider_dispatch_context``
+        before any codex child runs. It arms ``utils.codex_trust`` for the home the
+        child will see (``CODEX_HOME`` from this adapter's env delta, else the
+        inherited one, else ``~/.codex``) and the repository the dispatch is
+        anchored in, so ``multi_llm.main``'s ``finally`` can remove only the
+        ``[projects."<repo>"] trust_level = "trusted"`` tables this run's
+        children added. It never refuses and never changes the argv or env:
+        option A's override was measured to narrow what the child loads (the
+        repo's ``AGENTS.md``), so it is not used.
+        """
+        try:
+            from .. import codex_trust
+            env = dict(os.environ)
+            try:
+                delta = self.resolve_env(model, profile, anchor=anchor)
+            except Exception:  # noqa: BLE001 - bookkeeping may never block a dispatch
+                delta = {}
+            for key, value in (delta or {}).items():
+                if isinstance(value, str):
+                    env[key] = os.path.expanduser(value)
+            home = (env.get("CODEX_HOME") or "").strip() or os.path.join(
+                env.get("HOME") or os.path.expanduser("~"), ".codex"
+            )
+            codex_trust.arm(home, [anchor, os.getcwd()])
+        except Exception:  # noqa: BLE001 - bookkeeping may never block a dispatch
+            pass
 
     def describe_failure(self, stdout: str, stderr: str) -> Optional[str]:
         """Name constraint 2's panic by its cause; nothing to add otherwise.

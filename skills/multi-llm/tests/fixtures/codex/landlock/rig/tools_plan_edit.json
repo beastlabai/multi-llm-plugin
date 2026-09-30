@@ -1,0 +1,62 @@
+[
+ [
+  {
+   "id": "ctc_1",
+   "type": "custom_tool_call",
+   "status": "completed",
+   "call_id": "call_1",
+   "name": "apply_patch",
+   "input": "*** Begin Patch\n*** Update File: plans/p.md\n@@\n step one\n-step two\n+step 2\n*** End Patch\n"
+  }
+ ],
+ [
+  {
+   "id": "fc_2",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_2",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"git status\"}"
+  }
+ ],
+ [
+  {
+   "id": "fc_3",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_3",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"git diff\"}"
+  }
+ ],
+ [
+  {
+   "id": "fc_4",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_4",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"npm ls --depth=0 --no-update-notifier\", \"yield_time_ms\": 30000}"
+  }
+ ],
+ [
+  {
+   "id": "fc_5",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_5",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"python3 -c 'import helper; print(helper.VALUE)'\"}"
+  }
+ ],
+ [
+  {
+   "id": "fc_6",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_6",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"ls -a; ls -a __pycache__ 2>&1 | head -3; git status --porcelain --untracked-files=all\"}"
+  }
+ ]
+]

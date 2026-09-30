@@ -376,7 +376,8 @@ providers:
       - gpt-5.6-sol:xhigh
     # sandbox_fallback: auto | contained | off   (default: auto)
     #
-    # D6 (2026-09-17; ladder 2026-09-22) — the ONE dispatch-time override of a
+    # D6 (2026-09-17; ladder 2026-09-22; plugin-landlock 2026-09-30) — the ONE
+    # dispatch-time override of a
     # sandbox refusal. codex is the only reviewer on this roster that insists
     # on its own OS sandbox: `codex exec` runs the model's shell through
     # bubblewrap, and on a stock Ubuntu 24.04
@@ -387,7 +388,7 @@ providers:
     # boundary at all, and always has.
     #
     # Once the D6 probe says the sandbox cannot start (verdict `unavailable`;
-    # never on `unknown`), codex's read-only phases walk a two-rung ladder.
+    # never on `unknown`), codex's read-only phases walk a three-rung ladder.
     # Read-only means the review/ask fan-out and the executor's read kinds:
     # validation, revalidation, consolidation, salvage, task generation, the
     # human-decision judge. On a machine where bwrap starts, no rung is ever
@@ -401,18 +402,28 @@ providers:
     #           network, reads are unrestricted. Reported as a sandbox, not a
     #           bypass: a `[SANDBOX_FALLBACK]` line and
     #           `sandbox: fallback-landlock` in `models_served`.
-    #   rung 2  `unsandboxed` — `--sandbox danger-full-access` in the real repo
+    #           Retired from codex 0.156.1 (skipped by version, measured).
+    #   rung 2  `plugin-landlock` — the plugin's own Landlock jail
+    #           (utils/landlock_exec.py, 2026-09-30): codex runs under
+    #           `--sandbox danger-full-access` inside a Landlock ruleset that
+    #           lets it write only $CODEX_HOME, a per-attempt TMPDIR and a few
+    #           devices. Grade `incidental`, NOT contained: it stops stray
+    #           writes, not a model set on escaping (pathname Unix sockets,
+    #           $CODEX_HOME, chmod and the network are not confined). Reported
+    #           `[SANDBOX_INCIDENTAL]` / `sandbox: fallback-plugin-landlock`;
+    #           needs Landlock ABI >= 3 (absent in the Docker image).
+    #   rung 3  `unsandboxed` — `--sandbox danger-full-access` in the real repo
     #           root, no OS boundary at all. Reported loudly: one
     #           `[SANDBOX_BYPASSED]` line on stdout, `sandbox: bypassed` in
     #           `models_served`, `(ran unsandboxed: sandbox_fallback=auto)` on
     #           the report's model labels, and a `git status` taken before and
     #           after the slot that fails it by path if the tree changed.
     #
-    #   auto       (default) rung 1, then rung 2 when rung 1's probe fails: a
-    #              real boundary first, the bypass last.
-    #   contained  rung 1 only — yes to a real boundary, no to the bypass,
-    #              ever. Where rung 1 is unusable (or gone upstream) codex is
-    #              refused, never quietly handed rung 2.
+    #   auto       (default) rung 1, then rung 2, then rung 3, each only when
+    #              the one before it is unusable: the bypass last.
+    #   contained  rung 1 only — yes to a real boundary, no to the jail's
+    #              incidental grade or the bypass, ever. Where rung 1 is
+    #              unusable (or gone upstream) codex is refused.
     #   off        No rung: refuse. On such a machine codex is left out of the
     #              fan-out and every read batch until the AppArmor repair
     #              `multi_llm.py doctor` prints is installed. Unchanged by the
@@ -437,11 +448,17 @@ providers:
     # trigger, and `codex features list` no longer naming the flag retires the
     # rung (auto falls back to rung 2, contained to refusal).
     #
-    # The write profile (`agent-write`, every apply/implement kind) is refused
-    # under a broken sandbox whatever this key says — no rung serves it. The
-    # AppArmor repair is still the real fix for codex's writes.
+    # Write profiles (user decision 2026-09-30): under `auto`, and only when
+    # codex's own workspace-write sandbox cannot start, `apply-suggestions`
+    # (the plan file, in place) and `apply-task-suggestions` (the tasks dir or
+    # file) run on rung 2 and no other rung; `contained` and `off` refuse them,
+    # and `apply-code-fixes`/`implement` stay refused. One exception (F5): a
+    # codex chat that is itself in `danger-full-access` lets such a plan-file or
+    # tasks write the jail could not take run on rung 3. The AppArmor repair
+    # restores codex's own sandbox (network confined) and is still the only
+    # route for the repo-wide write phases.
     #
-    # What rung 2 gives up, in plain words: for a codex read-only slot, no OS
+    # What rung 3 gives up, in plain words: for a codex read-only slot, no OS
     # boundary of any kind between the model's shell and this machine — reads
     # and writes anywhere you can, network from model commands, and no
     # prompt-injection resistance for a validation batch beyond the detective

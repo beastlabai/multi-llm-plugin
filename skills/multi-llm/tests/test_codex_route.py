@@ -686,6 +686,31 @@ class TestDocs:
         assert "codex plugin list" in section
         assert "MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1" in section
 
+    def test_every_lever_passage_says_what_the_lever_does_not_lift(self):
+        """I8: the lever keeps its name, so each place that names it says its reach.
+
+        The same two sentences follow the lever sentence in all four passages.
+        The generated block spells the host the way the rest of its paragraph
+        does (``codex``), so its copy is compared with that spelling.
+        """
+        lever = "`MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1`"
+        template = (
+            f"Despite its name, {lever} lifts only this tool's own refusal of "
+            "write-capable modes under a read-only or unreadable session posture. "
+            "It never lets the {host} processes the orchestrator starts write "
+            "without a sandbox, and it does not change which sandbox they run "
+            "under: a {host} editing job refused because {host}'s own sandbox "
+            "cannot start on this host stays refused with it set."
+        )
+        for name, text in _codex_docs().items():
+            host = "codex" if name == "docs/hosts.md (codex block)" else "Codex"
+            expected = template.format(host=host)
+            flat = " ".join(text.replace("\n>", "\n").split())
+            assert flat.count(expected) == 1, f"{name}: {expected!r} missing"
+            assert flat.index(lever) < flat.index(expected), (
+                f"{name}: the two sentences precede the lever sentence"
+            )
+
 
 def test_plugin_skill_description_budget_is_declared():
     """D3e's constant lives beside the renderer, for TestPluginSkill to import."""

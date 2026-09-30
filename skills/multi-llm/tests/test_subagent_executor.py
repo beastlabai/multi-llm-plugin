@@ -651,6 +651,43 @@ class TestFailureLadder:
         assert "pgid" in kwargs
         assert kwargs["start_time"] is None  # an unverified kill, requested
 
+    def test_an_interrupt_in_the_wait_stops_and_reaps_the_group_then_propagates(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """The foreground SIGTERM handler raises `SystemExit` mid-wait.
+
+        Neither kill branch catches it, and the child runs in a group of its
+        own, so before the fix it outlived the unwind — past the caller's
+        cleanup of the jail's TMPDIR and trust state. The group is killed and
+        the child reaped first; the interrupt still ends the run.
+        """
+        runner_env.use("codex:gpt-5.5")
+
+        class _InterruptedPopen(_NeverFinishingPopen):
+            def communicate(self, input=None, timeout=None):
+                self.drains += 1
+                if self.drains == 1:
+                    raise SystemExit(143)
+                return ("", "")
+
+        _NeverFinishingPopen.spawned = []
+        monkeypatch.setattr(executor.subprocess, "Popen", _InterruptedPopen)
+        killed = []
+        monkeypatch.setattr(
+            executor.process_control,
+            "kill_tree",
+            lambda pid, **kwargs: (killed.append((pid, kwargs)), "killed")[1],
+        )
+        with pytest.raises(SystemExit):
+            self._dispatch(tmp_path, runner_env, retries=0)
+
+        child = _NeverFinishingPopen.spawned[0]
+        assert killed, "the interrupted child was never killed"
+        pid, kwargs = killed[0]
+        assert pid == child.pid
+        assert "pgid" in kwargs
+        assert child.drains == 2, "the killed child was never reaped"
+
     def test_a_timed_out_dispatch_never_hangs_on_a_surviving_grandchild(
         self, tmp_path, runner_env
     ):
@@ -4715,6 +4752,13 @@ class TestSandboxUnavailable:
         assert "AppArmor user-namespace restriction" in rejected.message
         assert "multi_llm.py doctor" in rejected.message
         assert "Nothing was dispatched." in rejected.message
+        # Step 4 (plan codex-sandbox-unavailable, 2026-09-30): the F6 line comes
+        # first, ahead of the reason and the doctor pointer, and the old sudo
+        # "Fix:" sentence is gone.
+        f6 = rejected.message.index("To run this now, set `driver.subagent_runner`")
+        assert f6 == 0
+        assert f6 < rejected.message.index("AppArmor user-namespace restriction")
+        assert "install the AppArmor profile it prints" not in rejected.message
         assert "sandbox_unavailable" in executor._REASON_EXPLANATION
         assert executor._NESTED_CACHE == {}
 
@@ -4889,40 +4933,144 @@ class TestSandboxUnavailable:
         assert refusal is None
         assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
 
-    @pytest.mark.parametrize("policy", ["auto", "off"])
-    def test_a_write_batch_is_refused_under_both_values_exactly_as_before(
-        self, tmp_path, runner_env, monkeypatch, capsys, policy
-    ):
-        """WRITE_KINDS run `agent-write`, and neither value reaches it: exit 3,
-        nothing cached, no marker — under the shipped `auto` and under `off`."""
-        runner_env.use("codex:gpt-5.5")
-        if policy == "off":
+    #: The step-4 F6 lead every `sandbox_unavailable` refusal opens with
+    #: (plan codex-sandbox-unavailable §7, 2026-09-30).
+    F6_LEAD = (
+        "To run this now, set `driver.subagent_runner` to a runner that is not "
+        "Codex (for example `claude-code:<model>`) in `.multi-llm/providers.yaml`."
+    )
+
+    #: One rung sentence per refusal leg (plan §7 "Step 4").
+    WRITE_LEGS = {
+        "off": "does not take this job: providers.codex.sandbox_fallback=off",
+        "opt-in-off": "does not take this job: write jobs are not enabled on it",
+        "landlock-absent": "cannot run here either: this kernel or container lacks Landlock",
+    }
+
+    @staticmethod
+    def _write_grant(tmp_path, monkeypatch):
+        """A plan-file grant in a scratch repo, with an existing `$CODEX_HOME`
+        outside it (the jail refuses a missing or in-repo home)."""
+        from utils.providers.base import JailRequest
+
+        repo = tmp_path / "repo"
+        plan = repo / "plans" / "plan.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Plan\n", encoding="utf-8")
+        home = tmp_path / "codex-home"
+        home.mkdir()
+        monkeypatch.setenv("CODEX_HOME", str(home))
+        monkeypatch.delenv("MULTI_LLM_HOST_SANDBOX_POSTURE", raising=False)
+        monkeypatch.delenv("MULTI_LLM_CODEX_SKIP_RUNG", raising=False)
+        return JailRequest(str(repo), "apply_suggestions", "plan-file", str(plan))
+
+    def _arrange_write_leg(self, leg, tmp_path, runner_env, monkeypatch):
+        from tests.test_plugin_landlock_executor import install_fake_wrapper
+        from utils.providers import codex as codex_module
+
+        if leg == "off":
             self._fallback_off(runner_env)
+        elif leg == "opt-in-off":
+            monkeypatch.setattr(codex_module, "WRITE_RUNG_OPT_IN", False)
+        # The wrapper answers as a kernel with no Landlock (its own exit 126);
+        # under `off` and with the opt-in off it must never even be asked.
+        return install_fake_wrapper(tmp_path / "wrapper", monkeypatch, probe="absent")
+
+    @pytest.mark.parametrize("leg", ["off", "opt-in-off", "landlock-absent"])
+    def test_a_write_batch_is_refused_under_each_leg_the_jail_cannot_serve(
+        self, tmp_path, runner_env, monkeypatch, capsys, leg
+    ):
+        """Rewritten 2026-09-30 (plan codex-sandbox-unavailable step 3): WRITE_KINDS
+        run `agent-write`, which may now take the plugin's Landlock jail — and
+        only it. Each leg the jail cannot serve stays exit 3 with nothing cached
+        and no marker: `off`, the step-3 opt-in off, and a host without Landlock
+        (the wrapper's exit 126). The refusal leads with F6 and names its case."""
+        runner_env.use("codex:gpt-5.5")
         monkeypatch.chdir(tmp_path)
+        request = self._write_grant(tmp_path, monkeypatch)
+        wrapper = self._arrange_write_leg(leg, tmp_path, runner_env, monkeypatch)
         provider = registry.get_provider("codex")
-        assert provider.sandbox_fallback_policy(PROFILE_AGENT_READONLY) == policy
         monkeypatch.setattr(
             type(provider), "sandbox_probe_command",
             self._broken_probe_for(PROFILE_AGENT_WRITE),
         )
         self._no_dispatch(monkeypatch)
         with pytest.raises(executor.RunnerRejected) as excinfo:
-            executor.preflight_runner("codex:gpt-5.5", profile=PROFILE_AGENT_WRITE)
-        assert excinfo.value.reason_code == "sandbox_unavailable"
-        assert excinfo.value.exit_code == 3
+            executor.preflight_runner(
+                "codex:gpt-5.5", profile=PROFILE_AGENT_WRITE, jail_request=request,
+            )
+        rejected = excinfo.value
+        assert rejected.reason_code == "sandbox_unavailable"
+        assert rejected.exit_code == 3
+        assert rejected.message.startswith(self.F6_LEAD)
+        assert self.WRITE_LEGS[leg] in rejected.message
         assert executor._SANDBOX_DECISIONS == {}
-        assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
-        assert provider.sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
+        out = capsys.readouterr().out
+        assert "[SANDBOX_BYPASSED]" not in out and "[SANDBOX_INCIDENTAL]" not in out
+        if leg in ("off", "opt-in-off"):
+            assert wrapper.records() == []
+        if leg == "opt-in-off":
+            assert provider.sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
 
-    def test_a_codex_session_model_write_falls_to_the_floor_which_is_refused_too(
+    def test_a_write_batch_takes_the_plugin_landlock_rung(
         self, tmp_path, runner_env, monkeypatch, capsys
     ):
-        """No bwrap: the session rung falls through by name, then the floor refuses."""
+        """The new sibling (plan step 3): under the shipped `auto`, with the
+        step-3 opt-in and a jail that passes its self-test, the write batch's
+        preflight records `plugin-landlock` for its scope — never `bypassed` —
+        and the scheduler's per-batch line names the scope and the target."""
+        from tests.test_plugin_landlock_executor import install_fake_wrapper
+
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.chdir(tmp_path)
+        request = self._write_grant(tmp_path, monkeypatch)
+        wrapper = install_fake_wrapper(tmp_path / "wrapper", monkeypatch, probe="deny")
+        provider = registry.get_provider("codex")
+        monkeypatch.setattr(
+            type(provider), "sandbox_probe_command",
+            self._broken_probe_for(PROFILE_AGENT_WRITE),
+        )
+        info = executor.preflight_runner(
+            "codex:gpt-5.5", profile=PROFILE_AGENT_WRITE, jail_request=request,
+        )
+        assert info["sandbox"] == "plugin-landlock"
+        assert executor.sandbox_rung(
+            "codex:gpt-5.5", PROFILE_AGENT_WRITE, write_scope="plan-file",
+        ) == "plugin-landlock"
+        assert not executor.sandbox_bypassed("codex:gpt-5.5", PROFILE_AGENT_WRITE)
+        assert len(wrapper.records(probe=True)) == 1
+        assert "[SANDBOX_BYPASSED]" not in capsys.readouterr().out
+        line = executor.write_rung_notice("codex:gpt-5.5", request)
+        assert line.startswith("[SANDBOX_INCIDENTAL] codex:")
+        assert "scope plan-file" in line and "plan.md" in line
+
+    @pytest.mark.parametrize("leg", ["off", "opt-in-off", "landlock-absent"])
+    def test_a_codex_session_model_write_falls_to_the_floor_which_is_refused_too(
+        self, tmp_path, runner_env, monkeypatch, capsys, leg
+    ):
+        """No bwrap: the session rung falls through by name, then the floor refuses
+        — under each leg the jail cannot serve (rewritten 2026-09-30)."""
         _no_driver_layer(monkeypatch)
         monkeypatch.setattr(registry, "_find_project_config", lambda anchor=None: None)
         monkeypatch.setenv("MULTI_LLM_HOST", "codex")
         monkeypatch.setenv(registry.HOST_SESSION_MODEL_ENV, "gpt-5.5")
         monkeypatch.chdir(tmp_path)
+        request = self._write_grant(tmp_path, monkeypatch)
+        if leg == "off":
+            # The operator's layer, via the env override (the driver layer is
+            # stubbed out above; `providers:` still merges from this file).
+            path = tmp_path / "off.yaml"
+            path.write_text("providers:\n  codex:\n    sandbox_fallback: off\n", encoding="utf-8")
+            monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(path))
+            registry._config = None
+            registry._config_key = None
+        elif leg == "opt-in-off":
+            from utils.providers import codex as codex_module
+
+            monkeypatch.setattr(codex_module, "WRITE_RUNG_OPT_IN", False)
+        from tests.test_plugin_landlock_executor import install_fake_wrapper
+
+        install_fake_wrapper(tmp_path / "wrapper", monkeypatch, probe="absent")
         provider = registry.get_provider("codex")
         monkeypatch.setattr(
             type(provider), "sandbox_probe_command",
@@ -4934,14 +5082,19 @@ class TestSandboxUnavailable:
         assert resolved[task["task_id"]][::2] == ("codex:gpt-5.5", registry.SESSION_LAYER)
         with pytest.raises(executor.RunnerRejected) as excinfo:
             executor._preflight_batch_runners(
-                resolved, {task["task_id"]: task}, profile=PROFILE_AGENT_WRITE)
+                resolved, {task["task_id"]: task}, profile=PROFILE_AGENT_WRITE,
+                jail_request=request,
+            )
         assert excinfo.value.reason_code == "sandbox_unavailable"
         assert excinfo.value.spec == "codex:gpt-6-astra"
+        assert excinfo.value.message.startswith(self.F6_LEAD)
+        assert self.WRITE_LEGS[leg] in excinfo.value.message
         assert (
             "[exec-subagents] session model codex:gpt-5.5 failed preflight "
             "(sandbox_unavailable); falling back to codex:gpt-6-astra "
             f"({registry.HOST_DEFAULT_LAYER})"
         ) in capsys.readouterr().out
+        assert "unsandboxed" not in executor._SANDBOX_DECISIONS.values()
 
     def test_an_unknown_verdict_never_widens_under_auto(
         self, tmp_path, runner_env, monkeypatch, capsys

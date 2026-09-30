@@ -107,6 +107,14 @@ from utils.review_orchestrator_base import (
     bypass_write_violation,
     porcelain_check_applies,
     porcelain_snapshot,
+    # Plan codex-sandbox-unavailable §6 F1 (2026-09-30): a slot on the
+    # plugin's own jail runs the mode check and the home check instead.
+    jail_record_fields,
+    mode_check_applies,
+    mode_snapshot,
+    print_closing_summary,
+    report_jail_outcome,
+    run_incidental_checks,
     record_sandbox_bypassed,
     recorded_served_models,
     recorded_usage,
@@ -2162,6 +2170,12 @@ async def run_single_review(
                 plan_path, project_root, anchor=plan_path
             ),
         )
+    # The plugin's own jail (F1 "What it fixes", 2026-09-30): the porcelain
+    # check above is skipped for it by decision; the mode check's
+    # before-snapshot is taken instead, as `run_single_model` does.
+    mode_before = None
+    if mode_check_applies(sandbox):
+        mode_before = await asyncio.to_thread(mode_snapshot, project_root)
 
     # Generate log file path for debugging
     sanitized_model = sanitize_model_name(model_spec)
@@ -2394,6 +2408,9 @@ async def run_single_review(
         word = sandbox_record_word(details.get("sandbox"))
         if word:
             entry["sandbox"] = word
+        # A slot the plugin's jail failed keeps `failure_reason: jail-denied`
+        # and the path on the durable record (F1 item 6, 2026-09-30).
+        entry.update(jail_record_fields(details))
         if entry:
             served_models[model_spec] = entry
     # Stage U: and what it spent, recorded here for the same reason and before
@@ -2445,6 +2462,22 @@ async def run_single_review(
             if tracker is not None:
                 tracker.failed(model_spec, error=violation, source=source)
             return False, None, violation
+
+    # The plugin's own jail: its `[JAIL_DENIED]` line and in-stream denial
+    # count, then the mode check and the home check's verdict — fail closed
+    # unless the slot's own audited stream clears it, exactly as above.
+    report_jail_outcome(display_name, details, phase_dir)
+    incidental = await run_incidental_checks(
+        sandbox, provider_name=provider_name, display_name=display_name,
+        model_spec=model_spec, project_root=project_root, plan_path=plan_path,
+        mode_before=mode_before, home_checks=[details.get("home_check")],
+        audits=[details.get("readonly_audit")], tracker=tracker,
+        summary_key=phase_dir,
+    )
+    if incidental is not None:
+        if tracker is not None:
+            tracker.failed(model_spec, error=incidental, source=source)
+        return False, None, incidental
 
     print(f"[{display_name}] Log saved to: {log_file}")
     # Only for a slot that answered: a failed invocation carries `output_file`
@@ -3150,8 +3183,11 @@ def generate_review_report(
     salvage_requested = salvage_requested_models(
         str(phase_dir) if phase_dir is not None else None, list(failed_models)
     )
+    # A jail-denied slot's `models_served` entry makes the line say "denied by
+    # the plugin's jail: <path>" (plan codex-sandbox-unavailable F1 item 6).
     failure_line = failed_models_line(
-        failed_models, requested_models, salvage_requested
+        failed_models, requested_models, salvage_requested,
+        served_models=served_models,
     )
     if failure_line:
         lines.append(failure_line)
@@ -4752,6 +4788,9 @@ async def main(argv: Optional[List[str]] = None) -> int:
             print("\nERROR: All models failed")
             for model_spec, reason in failed_models.items():
                 print(f"  - {model_spec}: {reason}")
+            # The home check's and the jail's lines, repeated (F1): this exit
+            # is the run's last word.
+            print_closing_summary(str(phase_dir))
             sys.exit(unattended_mod.report_partial_results(
                 completed=completed_models,
                 failed=list(failed_models),
@@ -5125,6 +5164,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
             report_progress(str(phase_dir), step="complete")
         finally:
             await phase_ticker.stop_ticker()
+            # Plan codex-sandbox-unavailable F1 (2026-09-30): every
+            # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's
+            # slots, repeated — on every ending this `finally` covers.
+            print_closing_summary(str(phase_dir))
 
     # Summary
     # F4: distinct HIGH-importance *groups*, not raw issues (the old per-issue

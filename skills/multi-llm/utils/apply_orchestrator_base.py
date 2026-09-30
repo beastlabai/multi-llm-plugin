@@ -2727,6 +2727,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if not self.batches:
             return None
 
+        from .subagent_executor import ExecutorError
         from .write_batch_scheduler import WriteBatchScheduler
         from .write_phase_bridge import (
             materialize_write_tasks,
@@ -2765,17 +2766,33 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # into the run's diff.
         self._record_pre_existing_changes()
 
-        scheduler = WriteBatchScheduler(
-            tasks=tasks,
-            phase_dir=phase_dir,
-            kind=self.write_kind,
-            output_dir=self.out_dir,
-            state=self.state,
-            plan_file=self.plan_path,
-            anchor=self.plan_path,
-            resume=True,
-            dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
-        )
+        # Plan step 3 (codex-sandbox-unavailable-findings-and-fixes, F1 "How a
+        # dispatch receives its grant", 2026-09-30): the phase's one write
+        # target — the plan, or the tasks file — is the grant a dispatch on
+        # the plugin-landlock rung carries, and every task's declared set is
+        # checked against it. A phase with no single target (apply-code-fixes,
+        # `repo-wide`) passes none; its entries come from step 3b's
+        # enumeration, never from a target.
+        write_target = artifact if self.has_single_write_target else None
+        try:
+            scheduler = WriteBatchScheduler(
+                tasks=tasks,
+                phase_dir=phase_dir,
+                kind=self.write_kind,
+                output_dir=self.out_dir,
+                state=self.state,
+                plan_file=self.plan_path,
+                anchor=self.plan_path,
+                resume=True,
+                dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
+                write_target=write_target,
+            )
+        except ExecutorError as exc:
+            # A target that cannot be granted (gone, a symlink, not a regular
+            # file, outside the repo) is refused at construction: exit 3 with
+            # the scheduler's own words, never the generic handler's exit 1.
+            print(f"ERROR: {exc.message}", file=sys.stderr)
+            return int(getattr(exc, "exit_code", 3) or 3)
         self.write_tasks = list(tasks)
         result = scheduler.run()
         self.write_result = result

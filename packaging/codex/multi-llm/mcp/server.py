@@ -161,6 +161,17 @@ NO_BYTECODE_ENV = "PYTHONDONTWRITEBYTECODE"
 #: What this server exports for the child (D9 layer 2), beside the resolved uv.
 SKILL_DIR_ENV = "MULTI_LLM_SKILL_DIR"
 
+#: Plan codex-sandbox-unavailable step 6 (F5, user decision 2026-09-30): the
+#: chat's own sandbox posture — the turn metadata's ``sandbox_mode`` — exported
+#: to the dispatcher per call, so a write job whose Codex children cannot get
+#: a sandbox may run uncontained only when the chat itself runs with
+#: ``danger-full-access``, and only after the plugin's Landlock jail could not
+#: take it. The same name as ``utils.providers.base.HOST_SANDBOX_POSTURE_ENV``
+#: (this server imports nothing from the payload). Set only to a posture word
+#: this server knows, and removed on every call that carries none, so a posture
+#: is never carried over from one call to the next.
+HOST_SANDBOX_POSTURE_ENV = "MULTI_LLM_HOST_SANDBOX_POSTURE"
+
 #: The four argument properties: the shared contract's field names (rule 1).
 PROPERTIES = ("mode", "plan", "question", "extra_flags")
 
@@ -1382,6 +1393,7 @@ class Server:
         if NO_BYTECODE_ENV not in os.environ:
             os.environ[NO_BYTECODE_ENV] = "1"
         model = self.export_session_model(call)
+        self.export_host_posture(call)
         values = {"word": args["mode"], "plan": self.normalize_plan(args["plan"], call),
                   "question": args["question"], "extra": list(args["extra_flags"])}
         outcome = self.run_workflow(call, row, values)
@@ -1419,6 +1431,22 @@ class Server:
                     if name in self.layer1
                     else "the subagent runner falls back past the session rung"))
         return model
+
+    def export_host_posture(self, call: Call):
+        """F5 (plan step 6): this turn's sandbox posture for the dispatcher, or ``None``.
+
+        Per call, because ``os.environ`` outlives the call: the value is the
+        turn metadata's ``sandbox_mode`` when it is one of codex's own posture
+        words (``session_posture`` validates it), and otherwise the variable is
+        removed — never inherited from an earlier call or from what codex
+        forwarded, since only the chat's own posture is consent.
+        """
+        posture = session_posture(call.meta)
+        if posture is not None:
+            os.environ[HOST_SANDBOX_POSTURE_ENV] = posture
+        else:
+            os.environ.pop(HOST_SANDBOX_POSTURE_ENV, None)
+        return posture
 
     def find_shell(self):
         found = shutil.which(SHELL_NAME, path=self.layer1.get("PATH") or os.defpath)

@@ -11369,11 +11369,16 @@ T3_CODEX_CORPUS = (
     ("0.156.1/web_search_hosted_replay.jsonl",     None,                 None),
     ("0.156.1/web_search_probe_replay.jsonl",      None,                 None),
     ("0.156.1/writes_patches_sessions.jsonl",      None,                 None),
+    # Plan codex-sandbox-unavailable (2026-09-30): the preflight's `jail_writes`
+    # turn on 0.158.0 inside the plugin-landlock jail — every write denied, so
+    # the commands' own output is full of `Permission denied`, none of it the
+    # vendor's. Graded `permission_denied` without the hook, nothing with it.
+    ("landlock/jail_writes.out.jsonl",             "permission_denied",  None),
 )
 
 #: Subdirectories of `tests/fixtures/codex/` that hold rig scripts, schemas and
 #: plugin-route data rather than a codex stdout capture.
-_T3_CODEX_NOT_CAPTURES = ("capture", "schemas", "plugin-route")
+_T3_CODEX_NOT_CAPTURES = ("capture", "schemas", "plugin-route", "rig")
 
 
 def _t3_codex_item(item_type, **fields):

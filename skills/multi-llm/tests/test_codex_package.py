@@ -330,6 +330,10 @@ NON_MULTI_LLM_FORWARDED = frozenset({
 NOT_FORWARDED = frozenset({
     # The server sets it per call from the turn metadata; a forwarded one would outlive the turn.
     "MULTI_LLM_HOST_SESSION_MODEL",
+    # The same rule for the chat's sandbox posture (plan codex-sandbox-unavailable
+    # step 6, F5, 2026-09-30): set or removed on every call, never inherited —
+    # a forwarded one would hand F5's consent to a chat that never gave it.
+    "MULTI_LLM_HOST_SANDBOX_POSTURE",
     # A test switch, but read by shipped code, so the walk finds it.
     "MULTI_LLM_TEST_FAST_BACKOFF",
     # The parent->worker handshake; an inherited stale one is a bug.
@@ -687,13 +691,22 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/process_control.py": {
         "/dev/fd", "/dev/null", "/proc", "/proc/self/fd"},
     f"{PAYLOAD}/utils/run_registry.py": {"/proc"},
-    f"{PAYLOAD}/utils/providers/codex.py": {"/dev/null", "/tmp"},
+    f"{PAYLOAD}/utils/providers/codex.py": {"/dev/null", "/tmp", "/dev/ptmx", "/dev/pts"},
     # the shell wrappers codex puts around each command (plan §4.2 step 2) and
     # the ``2>/dev/null`` suffix the read-only classifier admits.
     f"{PAYLOAD}/utils/providers/codex_stream_audit.py": {
         "/bin/bash", "/bin/sh", "/dev/null", "/usr/bin/bash", "/usr/bin/sh"},
     # (4) the sandbox names.
-    f"{PAYLOAD}/utils/doctor.py": _SANDBOX | {"/bin/true", "/dev"},
+    # `/etc` in the plugin-landlock rung's "System-level alternative (needs
+    # /etc and sudo …)" repair heading (plan codex-sandbox-unavailable step 2).
+    f"{PAYLOAD}/utils/doctor.py": _SANDBOX | {"/bin/true", "/dev", "/etc"},
+    # the plugin-landlock wrapper's device entries: `/dev/null` is a required
+    # file rule, `/dev/ptmx` and `/dev/pts` the optional tty entries it notes.
+    f"{PAYLOAD}/utils/landlock_exec.py": {"/dev/null", "/dev/ptmx", "/dev/pts"},
+    # its dispatch half: the same device entries, `/dev/tty` in the step-1c
+    # note, and the scratch directory's name pattern in a docstring.
+    f"{PAYLOAD}/utils/landlock_dispatch.py": {
+        "/dev/null", "/dev/ptmx", "/dev/pts", "/dev/tty", "/tmp/multi-llm-slot-"},
     f"{PAYLOAD}/utils/providers/base.py": {"/usr/bin/bwrap", "/dev/tty", "/tmp"},
     # (5) the container image's paths, in provider docstrings.
     f"{PAYLOAD}/hosts/capabilities.yaml": {"/opt/mllm/opencode-plugin"},
@@ -1116,6 +1129,28 @@ class TestBuild:
             payload._assert_inventory(  # noqa: SLF001
                 tmp_path, staged, payload.REQUIRED_INVENTORY, ()
             )
+
+    def test_a_payload_without_the_landlock_wrapper_fails_the_inventory(self, tmp_path):
+        """(src) The ``plugin-landlock`` rung runs ``utils/landlock_exec.py``
+        by path. A payload short of it alone must fail the build, not exit 2
+        (``can't open file``) at every jailed launch, where a packaging fault
+        reads as a probe result (plan codex-sandbox-unavailable-findings-and-
+        fixes §7.1)."""
+        wrapper = "utils/landlock_exec.py"
+        assert wrapper in payload.REQUIRED_INVENTORY
+        short = [name for name in payload.REQUIRED_INVENTORY if name != wrapper]
+        with pytest.raises(payload.PayloadError) as excinfo:
+            payload._assert_inventory(  # noqa: SLF001
+                tmp_path, short, payload.REQUIRED_INVENTORY, ()
+            )
+        missing = [
+            line.strip() for line in str(excinfo.value).splitlines()
+            if line.startswith("    ")
+        ]
+        assert missing == [wrapper]
+        payload._assert_inventory(  # noqa: SLF001
+            tmp_path, [*short, wrapper], payload.REQUIRED_INVENTORY, ()
+        )
 
 
 @pytest.mark.package

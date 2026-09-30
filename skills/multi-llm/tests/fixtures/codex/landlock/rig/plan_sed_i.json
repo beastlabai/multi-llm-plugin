@@ -1,0 +1,22 @@
+[
+ [
+  {
+   "id": "fc_1",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_1",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"sed -i 's/step two/step 2/' plans/p.md\"}"
+  }
+ ],
+ [
+  {
+   "id": "fc_2",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_2",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"cat plans/p.md\"}"
+  }
+ ]
+]

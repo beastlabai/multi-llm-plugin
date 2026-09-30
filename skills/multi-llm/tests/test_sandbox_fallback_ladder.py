@@ -49,9 +49,13 @@ from utils.providers.codex import (  # noqa: E402
     LANDLOCK_FEATURE_PAIR,
     LANDLOCK_PROBE_ARGV,
     LANDLOCK_RUNG,
+    PLUGIN_LANDLOCK_RUNG,
     UNSANDBOXED_RUNG,
+    WRITE_FALLBACK_RUNGS,
     CodexProvider,
 )
+from utils import landlock_dispatch  # noqa: E402
+from utils.providers.base import JailContext, JailRequest  # noqa: E402
 
 BWRAP_LINE = "bwrap: loopback: Failed RTM_NEWADDR: Operation not permitted"
 PROMPT = "Review the plan. PROMPT-SENTINEL"
@@ -72,6 +76,33 @@ SANDBOX_BROKEN = f"echo '{BWRAP_LINE}' >&2; exit 1"
 FLAG_UNKNOWN = "echo 'error: unexpected argument --enable found' >&2; exit 2"
 HANGS = "sleep 5"
 
+#: What the suite's probe guard answers for the production Landlock wrapper
+#: (tests/conftest.py): the wrapper's own exit 126, so the plugin-landlock rung
+#: records `absent` and the ladder falls through exactly as before it existed
+#: (plan codex-sandbox-unavailable §8.1, 2026-09-30).
+GUARD_NOTE = (
+    "landlock_exec: unavailable: the default suite never runs the production "
+    "Landlock wrapper (plugin-landlock rung absent)"
+)
+#: The plugin-landlock step every read-only walk that reaches it now records
+#: under that guard.
+JAIL_ABSENT = ("plugin-landlock", "absent")
+
+
+@pytest.fixture(autouse=True)
+def _scratch_repo_and_codex_home(tmp_path_factory, monkeypatch):
+    """Every walk here reaches the plugin-landlock rung, whose probe prepares
+    `.multi-llm/tmp` under the probe cwd and reads `$CODEX_HOME`: run from a
+    scratch dir with an existing temp home, so the guard's `absent` answer is
+    deterministic and nothing lands in the checkout (plan §8, 2026-09-30)."""
+    # Outside `tmp_path`, which several tests below assert is left empty.
+    scratch = tmp_path_factory.mktemp("scratch-repo")
+    home = tmp_path_factory.mktemp("codex-home")
+    monkeypatch.chdir(scratch)
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.delenv("MULTI_LLM_CODEX_SKIP_RUNG", raising=False)
+    monkeypatch.delenv("MULTI_LLM_HOST_SANDBOX_POSTURE", raising=False)
+
 
 def _landlock_stand_in(script: str) -> SandboxRung:
     """Codex's rung 1 with its probe swapped for ``script`` — same name, same
@@ -89,25 +120,36 @@ def _landlock_stand_in(script: str) -> SandboxRung:
 
 class _Ladder:
     """An adapter whose own probe fails like codex's does where bwrap cannot
-    start, declaring codex's two-rung ladder with a scripted rung-1 probe."""
+    start, declaring codex's three-rung read ladder (2026-09-30) with a
+    scripted rung-1 probe, and codex's one-rung write ladder while the step-3
+    opt-in is in force. The plugin-landlock rung is codex's own, so under the
+    suite's guard its probe answers the production wrapper's exit 126."""
 
     internal_retries = None
 
-    def __init__(self, policy="auto", landlock=CANARY_DENIED, profile_probe=SANDBOX_BROKEN):
+    def __init__(self, policy="auto", landlock=CANARY_DENIED, profile_probe=SANDBOX_BROKEN,
+                 write_opt_in=True):
         self.policy = policy
         self.landlock = landlock
         self.profile_probe = profile_probe
+        self.write_opt_in = write_opt_in
 
     def sandbox_probe_command(self, profile):
         return ["sh", "-c", self.profile_probe]
 
     def sandbox_fallback_policy(self, profile, anchor=None):
-        return self.policy if profile in SANDBOX_FALLBACK_PROFILES else None
+        if profile in SANDBOX_FALLBACK_PROFILES:
+            return self.policy
+        if profile == PROFILE_AGENT_WRITE and self.write_opt_in:
+            return self.policy
+        return None
 
     def sandbox_fallback_rungs(self, profile):
+        if profile == PROFILE_AGENT_WRITE:
+            return WRITE_FALLBACK_RUNGS if self.write_opt_in else ()
         if profile not in SANDBOX_FALLBACK_PROFILES:
             return ()
-        return (_landlock_stand_in(self.landlock), UNSANDBOXED_RUNG)
+        return (_landlock_stand_in(self.landlock), PLUGIN_LANDLOCK_RUNG, UNSANDBOXED_RUNG)
 
 
 # ---------------------------------------------------------------------------
@@ -165,18 +207,38 @@ class TestTheRungVocabulary:
 
 
 # ---------------------------------------------------------------------------
-# T2 — codex's two rungs and the argv they render
+# T2 — codex's three read rungs, its one write rung, and the argv they render
 # ---------------------------------------------------------------------------
 
 
-class TestCodexDeclaresTwoRungs:
-    def test_the_ladder_is_landlock_then_unsandboxed_for_the_read_only_profiles(self):
+class TestCodexDeclaresThreeRungs:
+    """Plan codex-sandbox-unavailable §6 F1 "Where it sits" item 2 (rewritten
+    2026-09-30 from the two-rung ladder): `landlock`, then `plugin-landlock`
+    (the plugin's own jail, `incidental` grade), then `unsandboxed`."""
+
+    def test_the_ladder_is_landlock_plugin_landlock_then_unsandboxed(self, monkeypatch):
         provider = CodexProvider()
         for profile in (PROFILE_GENERATE, PROFILE_AGENT_READONLY):
             assert [r.name for r in provider.sandbox_fallback_rungs(profile)] == [
-                "landlock", "unsandboxed",
+                "landlock", "plugin-landlock", "unsandboxed",
             ]
+        # The write ladder (step 3) is the jail alone — never the uncontained
+        # rung, never the legacy one — and nothing without the opt-in.
+        assert [r.name for r in provider.sandbox_fallback_rungs(PROFILE_AGENT_WRITE)] == [
+            "plugin-landlock",
+        ]
+        monkeypatch.setattr(codex_module, "WRITE_RUNG_OPT_IN", False)
         assert provider.sandbox_fallback_rungs(PROFILE_AGENT_WRITE) == ()
+
+    def test_the_plugin_rung_wraps_and_is_incidental_not_contained(self):
+        assert PLUGIN_LANDLOCK_RUNG.contained is False
+        assert PLUGIN_LANDLOCK_RUNG.containment == "incidental"
+        assert PLUGIN_LANDLOCK_RUNG.wrapper == "landlock_exec"
+        assert PLUGIN_LANDLOCK_RUNG.argv_rewrite == ("--sandbox", "danger-full-access")
+        assert PLUGIN_LANDLOCK_RUNG.probe_workdir == codex_module.LANDLOCK_CANARY_WORKDIR
+        # `contained` never reaches it; `auto` does.
+        assert not sandbox_rung_allowed(PLUGIN_LANDLOCK_RUNG, "contained")
+        assert sandbox_rung_allowed(PLUGIN_LANDLOCK_RUNG, "auto")
 
     def test_rung_one_is_contained_and_says_when_it_retires(self):
         assert LANDLOCK_RUNG.contained is True
@@ -400,7 +462,9 @@ class TestTheRungArgvInvariants:
             provider.apply_sandbox_fallback(argv, PROFILE_GENERATE, rung)
 
     @pytest.mark.parametrize("rung", ["landlock", "unsandboxed"])
-    def test_the_write_profile_reaches_no_rung(self, rung):
+    def test_the_write_profile_reaches_no_rung_but_the_jail(self, rung):
+        """Rewritten 2026-09-30 (plan step 3): the write profile still raises
+        on every rung but the plugin's jail, which it takes only with a grant."""
         provider = CodexProvider()
         argv = provider.build_command(PROMPT, "gpt-5.5")
         with pytest.raises(ValueError, match="agent-write"):
@@ -409,6 +473,34 @@ class TestTheRungArgvInvariants:
             provider.build_agent_command_for_transport(
                 PROMPT, "gpt-5.5", PROFILE_AGENT_WRITE, "argv", sandbox_fallback=rung,
             )
+
+    def test_the_write_profile_takes_the_jail_only_with_its_grant(self, tmp_path):
+        provider = CodexProvider()
+        with pytest.raises(ValueError, match="agent-write"):
+            provider.build_agent_command_for_transport(
+                PROMPT, "gpt-5.5", PROFILE_AGENT_WRITE, "argv",
+                sandbox_fallback="plugin-landlock",
+            )
+        read_only = JailContext(JailRequest(str(tmp_path), "apply_suggestions"), str(tmp_path))
+        with pytest.raises(ValueError, match="write scope"):
+            provider.build_agent_command_for_transport(
+                PROMPT, "gpt-5.5", PROFILE_AGENT_WRITE, "argv",
+                sandbox_fallback="plugin-landlock", jail_context=read_only,
+            )
+        plan = tmp_path / "plan.md"
+        granted = JailContext(
+            JailRequest(str(tmp_path), "apply_suggestions", "plan-file", str(plan)),
+            str(tmp_path / "slot"),
+        )
+        argv, _ = provider.build_agent_command_for_transport(
+            PROMPT, "gpt-5.5", PROFILE_AGENT_WRITE, "argv",
+            sandbox_fallback="plugin-landlock", jail_context=granted,
+        )
+        assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+        assert argv[-1] == PROMPT
+        # The in-CLI half only: the wrapper prefix is added after resolution by
+        # `landlock_dispatch.wrap_argv`, never by the adapter.
+        assert not landlock_dispatch.is_wrapped(argv)
 
 
 # ---------------------------------------------------------------------------
@@ -428,7 +520,9 @@ class TestTheWalkTable:
     def test_a_canary_whose_write_landed_rejects_the_rung_and_moves_on(self):
         verdict = executor.sandbox_verdict(_Ladder(landlock=CANARY_LANDED), PROFILE_GENERATE)
         assert verdict.rung == "unsandboxed"
-        assert verdict.walk == (("landlock", "rejected"), ("unsandboxed", "taken"))
+        assert verdict.walk == (
+            ("landlock", "rejected"), JAIL_ABSENT, ("unsandboxed", "taken"),
+        )
 
     @pytest.mark.parametrize("script", [USAGE_EXIT_0, BARE_EXIT_0])
     def test_an_exit_0_without_the_canary_marker_is_not_containment(self, script):
@@ -437,7 +531,9 @@ class TestTheWalkTable:
         taken and the walk moves on exactly as for a probe it did not understand."""
         verdict = executor.sandbox_verdict(_Ladder(landlock=script), PROFILE_GENERATE)
         assert verdict.rung == "unsandboxed"
-        assert verdict.walk == (("landlock", "absent"), ("unsandboxed", "taken"))
+        assert verdict.walk == (
+            ("landlock", "absent"), JAIL_ABSENT, ("unsandboxed", "taken"),
+        )
 
     def test_an_echoed_canary_script_cannot_forge_the_marker(self):
         """A CLI that prints its argv (the canary's source) and exits 0 ran
@@ -452,13 +548,17 @@ class TestTheWalkTable:
     def test_a_real_sandbox_failure_moves_on(self):
         verdict = executor.sandbox_verdict(_Ladder(landlock=SANDBOX_BROKEN), PROFILE_GENERATE)
         assert verdict.rung == "unsandboxed"
-        assert verdict.walk == (("landlock", "unavailable"), ("unsandboxed", "taken"))
+        assert verdict.walk == (
+            ("landlock", "unavailable"), JAIL_ABSENT, ("unsandboxed", "taken"),
+        )
 
     def test_an_inconclusive_tail_skips_that_rung_only(self):
         """An older codex that does not know the flag reaches rung 2 — today."""
         verdict = executor.sandbox_verdict(_Ladder(landlock=FLAG_UNKNOWN), PROFILE_GENERATE)
         assert verdict.rung == "unsandboxed"
-        assert verdict.walk == (("landlock", "absent"), ("unsandboxed", "taken"))
+        assert verdict.walk == (
+            ("landlock", "absent"), JAIL_ABSENT, ("unsandboxed", "taken"),
+        )
 
     def test_a_timeout_stops_the_walk_with_no_rung(self):
         verdict = executor.sandbox_verdict(
@@ -577,8 +677,17 @@ class TestTheWalkTable:
         assert (verdict.state, verdict.rung, verdict.walk) == (state, None, ())
         assert len(calls) == 1
 
-    def test_the_write_profile_walks_nothing(self):
+    def test_the_write_profile_walks_the_jail_alone_and_never_falls_through(self):
+        """Rewritten 2026-09-30 (plan step 3): the write profile walks its
+        one-rung write ladder. Where the jail is absent (the suite's guard
+        answers the production wrapper's 126) nothing is taken — there is no
+        next rung to fall to — and without the opt-in nothing is walked."""
         verdict = executor.sandbox_verdict(_Ladder(), PROFILE_AGENT_WRITE)
+        assert (verdict.state, verdict.rung, verdict.walk) == (
+            "unavailable", None, (JAIL_ABSENT,),
+        )
+        assert dict(verdict.rung_tails)["plugin-landlock"] == GUARD_NOTE
+        verdict = executor.sandbox_verdict(_Ladder(write_opt_in=False), PROFILE_AGENT_WRITE)
         assert (verdict.state, verdict.rung, verdict.walk) == ("unavailable", None, ())
 
 
@@ -635,9 +744,11 @@ class TestTheWalkSharesOneDeadline:
         assert started == []
 
     def test_the_default_budget_is_one_probe_timeout_for_the_whole_walk(self, monkeypatch):
+        """Three probes now (the profile's, rung 1's and the jail's, 2026-09-30),
+        and still one budget: every rung probe gets what is left of it."""
         seen = []
 
-        def recording(argv, *, cwd=None, timeout=None):
+        def recording(argv, *, cwd=None, timeout=None, env=None):
             seen.append(timeout)
             return subprocess.CompletedProcess(argv, 1, "", BWRAP_LINE)
 
@@ -645,8 +756,8 @@ class TestTheWalkSharesOneDeadline:
         monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 10.0)
         executor.sandbox_verdict(_Ladder(landlock=SANDBOX_BROKEN), PROFILE_GENERATE)
         assert seen[0] == 10.0
-        assert 0 < seen[1] <= 10.0
-        assert len(seen) == 2
+        assert 0 < seen[2] <= seen[1] <= 10.0
+        assert len(seen) == 3
 
 
 # ---------------------------------------------------------------------------
@@ -659,11 +770,12 @@ def executor_gate(monkeypatch):
     """`_detect_sandbox` with a stand-in adapter and a clean cache."""
     monkeypatch.setattr(executor, "_SANDBOX_DECISIONS", {})
 
-    def run(adapter, profile=PROFILE_AGENT_READONLY):
+    def run(adapter, profile=PROFILE_AGENT_READONLY, request=None):
         monkeypatch.setattr(executor, "get_provider", lambda _name: adapter)
         return executor._detect_sandbox(
             "fakecodex", key="driver.subagent_runner", spec="fakecodex:m",
             profile=profile,
+            **({"jail_request": request} if request is not None else {}),
         )
     return run
 
@@ -718,11 +830,40 @@ class TestTheExecutorGate:
             executor_gate(_Ladder(policy="auto", landlock=HANGS))
         assert "'landlock' was unprobed" in str(excinfo.value)
 
-    @pytest.mark.parametrize("policy", ["auto", "contained"])
-    def test_agent_write_reaches_no_rung(self, executor_gate, policy):
-        with pytest.raises(executor.RunnerRejected):
-            executor_gate(_Ladder(policy=policy), profile=PROFILE_AGENT_WRITE)
+    @pytest.mark.parametrize("leg", ["auto-no-grant", "auto-jail-absent", "contained", "off", "opt-in-off"])
+    def test_agent_write_reaches_no_rung_but_the_jail(self, executor_gate, leg, tmp_path):
+        """Rewritten 2026-09-30 (plan step 3): `agent-write` may take the
+        plugin's jail under `auto` with a grant the rung serves, and nothing
+        else. Every refusal leg stays: no grant, the jail absent (the suite's
+        guard answers 126), `contained`, `off` and the opt-in off — and no
+        refusal ever records the uncontained or the legacy rung."""
+        policy = {"contained": "contained", "off": "off"}.get(leg, "auto")
+        adapter = _Ladder(policy=policy, write_opt_in=leg != "opt-in-off")
+        plan = tmp_path / "plans" / "p.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# p\n", encoding="utf-8")
+        request = None if leg == "auto-no-grant" else JailRequest(
+            str(tmp_path), "apply_suggestions", "plan-file", str(plan),
+        )
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            executor_gate(adapter, profile=PROFILE_AGENT_WRITE, request=request)
+        assert excinfo.value.reason_code == "sandbox_unavailable"
+        assert "The plugin's Landlock jail" in excinfo.value.message
         assert executor._SANDBOX_DECISIONS == {}
+
+    def test_agent_write_takes_the_jail_under_auto(self, executor_gate, tmp_path, monkeypatch):
+        from tests.test_plugin_landlock_executor import install_fake_wrapper
+
+        install_fake_wrapper(tmp_path / "wrapper", monkeypatch, probe="deny")
+        repo = tmp_path / "repo"
+        plan = repo / "plans" / "p.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# p\n", encoding="utf-8")
+        request = JailRequest(str(repo), "apply_suggestions", "plan-file", str(plan))
+        assert executor_gate(_Ladder(), profile=PROFILE_AGENT_WRITE, request=request) == (
+            "plugin-landlock"
+        )
+        assert set(executor._SANDBOX_DECISIONS.values()) == {"plugin-landlock"}
 
 
 @pytest.fixture
@@ -751,8 +892,12 @@ class TestTheFanoutGate:
         assert verdict.reason == (
             rob.sandbox_bypassed_notice("fakecodex")
             + f"; fallback rung 'landlock' unavailable (probe: \"{BWRAP_LINE}\")"
+            + "; fallback rung 'plugin-landlock' absent: the plugin's Landlock "
+            + f"jail cannot run here (\"{GUARD_NOTE}\")"
         )
-        assert verdict.walk == (("landlock", "unavailable"), ("unsandboxed", "taken"))
+        assert verdict.walk == (
+            ("landlock", "unavailable"), JAIL_ABSENT, ("unsandboxed", "taken"),
+        )
         assert rob.sandbox_fallback_kwargs(verdict) == {"sandbox_fallback": "unsandboxed"}
 
     def test_contained_takes_rung_one(self, fanout_gate):
@@ -834,9 +979,12 @@ class TestTheRungSurvivesTheCarriers:
         calls = []
         real = CodexProvider.apply_sandbox_fallback
 
-        def recording(self, argv, profile, rung=None):
+        def recording(self, argv, profile, rung=None, **kwargs):
+            # 2026-09-30: codex's own stdin leg now always hands on its
+            # `context=` (the plugin's jail); it is `None` off that rung.
+            assert kwargs.get("context") is None
             calls.append(rung)
-            return real(self, argv, profile, rung)
+            return real(self, argv, profile, rung, **kwargs)
 
         monkeypatch.setattr(CodexProvider, "apply_sandbox_fallback", recording)
         provider = CodexProvider()

@@ -108,6 +108,12 @@ _BLOCK_END = "--- the rig that drives it ---"
 #:   launch — which is why it is named here and not left to the allowlist
 #:   pair alone: that pair is what *copies* the file, this is what fails the
 #:   build when a short payload ships without it.
+#: * ``utils/landlock_exec.py`` — the ``plugin-landlock`` sandbox rung runs it
+#:   *by path* as ``sys.executable -I -S <path> … -- codex …``. Absent, the
+#:   interpreter exits 2 (``can't open file``) and a packaging fault reads as a
+#:   probe result. The container image must carry it too even though Landlock
+#:   is ENOSYS there: the image's ``absent`` record rests on the wrapper's own
+#:   exit 126, which only a present wrapper can give.
 REQUIRED_INVENTORY: Tuple[str, ...] = (
     "multi_llm.py",
     "modes.py",
@@ -122,6 +128,7 @@ REQUIRED_INVENTORY: Tuple[str, ...] = (
     "templates/config/providers.override.yaml",
     "templates/consolidated_report_template.html",
     "assets/omp/overlay.yml",
+    "utils/landlock_exec.py",
 )
 
 #: Directories the payload must not be missing. Checked as "at least one file

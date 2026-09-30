@@ -37,6 +37,7 @@ The write path (``agent-write``, D3f/D3g/D3h/D3l/D3n) is deliberately not here:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import inspect
 import json
 import os
@@ -80,7 +81,30 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         parse_model_spec,
         resolve_subagent_runner,
     )
+    from . import landlock_dispatch
     from .providers.base import (
+        CODEX_HOME_CHECK_MARKER,
+        HOST_POSTURE_FULL_ACCESS,
+        HOST_SANDBOX_POSTURE_ENV,
+        INCIDENTAL_LANE_EXECUTOR,
+        JAIL_DENIED_MARKER,
+        JailContext,
+        JailRequest,
+        SANDBOX_WRITE_FALLBACK_PROFILES,
+        SKIP_RUNG_ENV,
+        WALK_OUTCOME_SKIPPED_BY_SWITCH,
+        WRITE_SCOPE_PLAN_FILE,
+        WRITE_SCOPE_REPO_WIDE,
+        WRITE_SCOPE_TASKS,
+        WRITE_SCOPES_ON_RUNG,
+        WritePostureConsent,
+        host_write_posture_consent,
+        rung_is_incidental,
+        sandbox_incidental_notice_text,
+        skip_rung_requested,
+        version_tuple,
+        write_consent_allows,
+        write_rung_allowed,
         LLMProvider,
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
@@ -177,7 +201,30 @@ except ImportError:  # pragma: no cover - direct-script import shim
         parse_model_spec,
         resolve_subagent_runner,
     )
+    from utils import landlock_dispatch  # type: ignore[no-redef]
     from utils.providers.base import (
+        CODEX_HOME_CHECK_MARKER,
+        HOST_POSTURE_FULL_ACCESS,
+        HOST_SANDBOX_POSTURE_ENV,
+        INCIDENTAL_LANE_EXECUTOR,
+        JAIL_DENIED_MARKER,
+        JailContext,
+        JailRequest,
+        SANDBOX_WRITE_FALLBACK_PROFILES,
+        SKIP_RUNG_ENV,
+        WALK_OUTCOME_SKIPPED_BY_SWITCH,
+        WRITE_SCOPE_PLAN_FILE,
+        WRITE_SCOPE_REPO_WIDE,
+        WRITE_SCOPE_TASKS,
+        WRITE_SCOPES_ON_RUNG,
+        WritePostureConsent,
+        host_write_posture_consent,
+        rung_is_incidental,
+        sandbox_incidental_notice_text,
+        skip_rung_requested,
+        version_tuple,
+        write_consent_allows,
+        write_rung_allowed,
         LLMProvider,
         PROFILE_AGENT_READONLY,
         PROFILE_AGENT_WRITE,
@@ -308,6 +355,13 @@ __all__ = [
     "continue_past_marker",
     "dry_run_report",
     "preflight_runner",
+    "sandbox_rung",
+    "write_rung_notice",
+    "jail_summary_lines",
+    "WRITE_SCOPE_BY_KIND",
+    "RUNG_SKIPPED_BY_SWITCH",
+    "SANDBOX_DECISION_WRITE_BY_CONSENT",
+    "SandboxBackstopViolation",
 ]
 
 
@@ -435,6 +489,21 @@ STATUS_BATCH_FAILED = "batch_failed"
 PROFILE_BY_KIND = {
     **{kind: PROFILE_AGENT_READONLY for kind in READ_KINDS},
     **{kind: PROFILE_AGENT_WRITE for kind in WRITE_KINDS},
+}
+
+#: Every write kind maps to ``agent-write`` above, so the profile cannot tell a
+#: plan edit from a code edit. The grant the plugin's Landlock jail gives a
+#: write dispatch is therefore keyed by the KIND here, beside the profile map
+#: and derived the same way — never read from the task JSON (plan
+#: codex-sandbox-unavailable §6 F1 "How a dispatch receives its grant",
+#: 2026-09-30). ``plan-file`` is one file rule on the plan, ``tasks`` the tasks
+#: directory (or file); ``repo-wide`` waits for plan step 3b and is refused on
+#: the rung. A write kind missing from this map is refused, never widened.
+WRITE_SCOPE_BY_KIND = {
+    "apply_suggestions": WRITE_SCOPE_PLAN_FILE,
+    "apply_task_suggestions": WRITE_SCOPE_TASKS,
+    "apply_code_fixes": WRITE_SCOPE_REPO_WIDE,
+    "implement": WRITE_SCOPE_REPO_WIDE,
 }
 
 #: §4.2.2's phase → schema table is keyed by **phase**; a Lane B dispatch's
@@ -1365,6 +1434,7 @@ def preflight_runner(
     check_auth: bool = True,
     check_nested: bool = True,
     probe_nested: bool = True,
+    jail_request: Optional[JailRequest] = None,
 ) -> Dict[str, Any]:
     """Validate one runner spec; detect version, auth and nested-exec (D3c/D3m).
 
@@ -1410,6 +1480,12 @@ def preflight_runner(
     the repository it was sent to read — and a non-zero exit is exit 3 here,
     ``sandbox_unavailable``, before the first dispatch of that profile. Cached
     per host/spec/profile; a timeout is ``unknown`` and dispatches.
+
+    ``jail_request`` (plan codex-sandbox-unavailable step 3, 2026-09-30) is a
+    write dispatch's grant — its kind, write scope and target — which the
+    sandbox leg needs to decide whether the plugin's Landlock jail may take
+    the dispatch: the scope joins the decision key, and the rung probe's
+    positive control writes the target. Read profiles need none.
 
     Returns:
         ``{"provider", "model", "version", "auth", "nested_exec", "sandbox",
@@ -1536,7 +1612,8 @@ def preflight_runner(
         # everything else records `not-required`. Same gate as the catalog
         # leg: a caller that asked for no CLI spawn gets none.
         info["sandbox"] = _detect_sandbox(
-            provider_name, key=key, spec=spec, profile=profile, anchor=anchor
+            provider_name, key=key, spec=spec, profile=profile, anchor=anchor,
+            **({"jail_request": jail_request} if jail_request is not None else {}),
         )
     if check_nested:
         info["nested_exec"] = _detect_nested_exec(
@@ -1639,8 +1716,63 @@ SANDBOX_STATE_BYPASSED = "bypassed"
 #: The recorded states that are **not** a rung id.
 _PLAIN_SANDBOX_STATES = frozenset({"ok", "unknown", "not-required"})
 
+#: The decision word for plan step 6 (F5, user decision 2026-09-30): a WRITE
+#: dispatch on the uncontained rung, taken only because the chat itself runs
+#: with the ``danger-full-access`` posture and the plugin-landlock rung could
+#: not take the dispatch. Its own word, never the rung id, so nothing that
+#: replays a decision can mistake it for a read phase's bypass; it is stored
+#: only under a key that carries the posture (:func:`_sandbox_decision_key`),
+#: so a later call without that posture never finds it. :func:`sandbox_rung`
+#: hands the dispatch ``unsandboxed`` for it.
+SANDBOX_DECISION_WRITE_BY_CONSENT = "unsandboxed-by-consent"
 
-def sandbox_rung(spec: str, profile: str) -> Optional[str]:
+#: Per decision key, what the executor-lane ``[SANDBOX_INCIDENTAL]`` line of a
+#: write dispatch on the plugin-landlock rung is built from — ``(provider,
+#: rung id, policy, standard probe tail, walk clause)`` — so the scheduler can
+#: print it before each batch (:func:`write_rung_notice`). No path: the write
+#: target is rendered from the caller's request at print time.
+_SANDBOX_NOTICE_PARTS: Dict[str, Tuple[str, str, Optional[str], str, str]] = {}
+
+#: Lines the run's closing summary repeats (F1 item 6 and Limits): every
+#: ``[JAIL_DENIED]`` and ``[CODEX_HOME_CHECK]`` line this process printed.
+#: Per process, like the probe cache; :func:`jail_summary_lines` reads it and
+#: :func:`run_tasks` prints the ones its own batch added.
+_JAIL_SUMMARY_LINES: List[str] = []
+_JAIL_SUMMARY_LOCK = threading.Lock()
+
+#: How many jailed codex children of this process are live, and how many have
+#: started, so a ``[CODEX_HOME_CHECK]`` line can say how many *other* children
+#: could also have made the change it reports.
+_JAILED_CHILDREN = {"live": 0, "started": 0}
+
+
+def _sandbox_decision_key(
+    spec: str,
+    profile: str,
+    write_scope: Optional[str] = None,
+    consent: Optional[WritePostureConsent] = None,
+) -> str:
+    """``<host>|<spec>|<profile>``, plus ``|<scope>`` for a write profile that
+    carries one, plus ``|<posture>`` when the chat's F5 consent is present.
+
+    The scope keeps a ``plan-file`` decision from ever being replayed for a
+    ``repo-wide`` dispatch of the same runner; the posture keeps an F5
+    decision from ever being replayed for a call without the posture (it is
+    read per call from ``os.environ``, plan step 6). Read-only keys are
+    unchanged. Never a path.
+    """
+    key = f"{_current_host_id()}|{spec}|{profile}"
+    if profile in SANDBOX_WRITE_FALLBACK_PROFILES:
+        if write_scope:
+            key += f"|{write_scope}"
+        if consent is not None:
+            key += f"|{consent.posture}"
+    return key
+
+
+def sandbox_rung(
+    spec: str, profile: str, write_scope: Optional[str] = None
+) -> Optional[str]:
     """The fallback rung id the preflight recorded for this runner and profile,
     or ``None``.
 
@@ -1650,11 +1782,46 @@ def sandbox_rung(spec: str, profile: str) -> Optional[str]:
     taken once, in :func:`_detect_sandbox`, with every gate in hand, and a
     dispatch may only replay it. A runner the preflight never saw (or saw
     under another profile) is ``None`` and renders the argv it always did.
+
+    ``write_scope`` (plan step 3, 2026-09-30) selects a write profile's
+    decision: one taken for ``plan-file`` is never replayed for ``repo-wide``.
+    An F5 decision (plan step 6) is found only while the chat's
+    ``danger-full-access`` posture is in this process's environment, and is
+    handed out as ``unsandboxed``.
     """
-    recorded = _SANDBOX_DECISIONS.get(f"{_current_host_id()}|{spec}|{profile}")
-    if not recorded or recorded in _PLAIN_SANDBOX_STATES:
-        return None
-    return recorded
+    consent = (
+        host_write_posture_consent()
+        if profile in SANDBOX_WRITE_FALLBACK_PROFILES else None
+    )
+    keys = [_sandbox_decision_key(spec, profile, write_scope, consent)]
+    if consent is not None:
+        # A decision taken without the posture (the plugin-landlock rung, say)
+        # is valid with it too; the reverse never holds, and the F5 word is
+        # only ever stored under a key that carries the posture.
+        keys.append(_sandbox_decision_key(spec, profile, write_scope, None))
+    for key in keys:
+        recorded = _SANDBOX_DECISIONS.get(key)
+        if not recorded or recorded in _PLAIN_SANDBOX_STATES:
+            continue
+        if recorded == SANDBOX_DECISION_WRITE_BY_CONSENT:
+            return SANDBOX_RUNG_UNSANDBOXED if consent is not None else None
+        return recorded
+    return None
+
+
+def jail_summary_lines() -> List[str]:
+    """Every ``[JAIL_DENIED]`` / ``[CODEX_HOME_CHECK]`` line this process
+    printed, in order, for a run's closing summary (plan F1 item 6, Limits)."""
+    with _JAIL_SUMMARY_LOCK:
+        return list(_JAIL_SUMMARY_LINES)
+
+
+def _record_jail_line(line: str, *, echo: bool = True) -> None:
+    """Print ``line`` (the run log) and keep it for the closing summary."""
+    with _JAIL_SUMMARY_LOCK:
+        _JAIL_SUMMARY_LINES.append(line)
+    if echo:
+        print(f"[exec-subagents] {line}")
 
 
 def sandbox_bypassed(spec: str, profile: str) -> bool:
@@ -1665,8 +1832,11 @@ def sandbox_bypassed(spec: str, profile: str) -> bool:
 
 def _sandbox_state_word(recorded: str) -> str:
     """The ``info["sandbox"]`` word for a cached state: ``bypassed`` for the
-    uncontained rung (unchanged since D6), the recorded value otherwise."""
-    return SANDBOX_STATE_BYPASSED if recorded == SANDBOX_RUNG_UNSANDBOXED else recorded
+    uncontained rung (unchanged since D6) — an F5 write decision included,
+    since that is the same rung — the recorded value otherwise."""
+    if recorded in (SANDBOX_RUNG_UNSANDBOXED, SANDBOX_DECISION_WRITE_BY_CONSENT):
+        return SANDBOX_STATE_BYPASSED
+    return recorded
 
 
 def reset_version_cache() -> None:
@@ -1682,6 +1852,9 @@ def reset_version_cache() -> None:
 def reset_sandbox_cache() -> None:
     """Clear the per-process sandbox probe cache and decisions (tests)."""
     _SANDBOX_DECISIONS.clear()
+    _SANDBOX_NOTICE_PARTS.clear()
+    with _JAIL_SUMMARY_LOCK:
+        _JAIL_SUMMARY_LINES.clear()
     _SANDBOX_PROBE_CACHE.clear()
     _SANDBOX_PROBE_KEY_LOCKS.clear()
     _PROBE_VERSION_CACHE.clear()
@@ -2133,7 +2306,11 @@ def _detect_auth(
 
 
 def _run_sandbox_probe(
-    argv: Sequence[str], *, cwd: Optional[str], timeout: float
+    argv: Sequence[str],
+    *,
+    cwd: Optional[str],
+    timeout: float,
+    env: Optional[Mapping[str, str]] = None,
 ) -> Optional["subprocess.CompletedProcess"]:
     """Run one ``sandbox_probe_command`` argv (D6 step 3).
 
@@ -2145,8 +2322,16 @@ def _run_sandbox_probe(
     caller reads it as ``unknown``: a preflight probe reports, it never blocks
     on its own failure.
     A timeout is ``None`` too, for the same reason.
+
+    ``env`` (plan codex-sandbox-unavailable §6 F1, 2026-09-30) is the wrapped
+    rung probe's own environment — the probe's ``TMPDIR`` and the canary's
+    seeded file and targets — from ``landlock_dispatch.rung_probe``; ``None``
+    inherits this process's, as every other probe does.
     """
     launcher, _ = _resolve_executable(argv[0])
+    kwargs: Dict[str, Any] = {}
+    if env is not None:
+        kwargs["env"] = dict(env)
     try:
         return subprocess.run(
             [*launcher, *argv[1:]],
@@ -2157,6 +2342,7 @@ def _run_sandbox_probe(
             timeout=timeout,
             stdin=subprocess.DEVNULL,
             cwd=cwd,
+            **kwargs,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -2192,6 +2378,11 @@ RUNG_UNKNOWN = "unknown"
 #: never either of them.
 RUNG_SKIPPED = "skipped"
 RUNG_RETIRED = "retired"
+#: 2026-09-30 (plan codex-sandbox-unavailable §6 F1 item 6): the process was
+#: told to skip this rung (``MULTI_LLM_CODEX_SKIP_RUNG=plugin-landlock``). Not
+#: probed, the walk moves on — and never a retirement, so it earns no
+#: retirement line. Base's word, so the walk clause renders it.
+RUNG_SKIPPED_BY_SWITCH = WALK_OUTCOME_SKIPPED_BY_SWITCH
 
 
 class SandboxProbeResult(NamedTuple):
@@ -2317,6 +2508,144 @@ def _rung_probe_tail(rung: SandboxRung, completed: Any) -> str:
     return _redact_probe_tail(source[-1] if source else "", 500)
 
 
+def _scrub_probe_paths(text: str, *paths: Optional[str]) -> str:
+    """``text`` with the rung probe's own per-attempt paths replaced by
+    placeholders, so no cached tail holds a slot ``TMPDIR`` or a seeded file
+    (plan F1 "Task-specific paths stay out of shared state and caches")."""
+    for path in paths:
+        if path:
+            text = text.replace(path, landlock_dispatch.PLACEHOLDER_TMPDIR)
+    return text
+
+
+def _walk_wrapped_rung(
+    rung: SandboxRung,
+    *,
+    cwd: Optional[str],
+    deadline: float,
+    request: Optional[JailRequest],
+    tails: Optional[List[Tuple[str, str]]],
+) -> Tuple[str, bool]:
+    """One wrapping rung's turn in the walk: ``(outcome, stop the walk)``.
+
+    Plan codex-sandbox-unavailable §6 F1 "Where it sits" item 3 (2026-09-30).
+    The rung has three kinds of result, and the walk keeps its old rule for
+    each: a probe that measured nothing never counts as a failed rung.
+
+    * **Skipped** (``MULTI_LLM_CODEX_SKIP_RUNG=plugin-landlock``): not probed,
+      the walk moves on, never a retirement. A value the switch does not
+      accept stops the walk (never ignored, never a widening).
+    * **Stops the walk with no rung**: the deadline was already spent
+      (``unprobed``), the negative target, seeded file or probe ``TMPDIR``
+      could not be prepared outside the jail (``unknown``), or the probe
+      produced no exit status (``unknown``/``unprobed``).
+    * **Measured**, from the wrapper's exit and the canary: exit 126 (no
+      Landlock, an ABI below 3) or 125 (a required allow entry missing) —
+      and a required entry refused before the spawn (``JailRefused``, e.g.
+      ``$CODEX_HOME`` missing) — are ``absent``; a write or truncation that
+      landed (``SANDBOX_CANARY_NOT_DENIED``, or the parent's byte comparison
+      of the seeded file) is ``rejected``; a failed positive control (exit 5)
+      is ``unavailable``; exit 0 with ``SANDBOX_CANARY_DENIED`` and the seed
+      intact is ``taken``; exit 0 without the marker is ``absent``; any other
+      exit reads through the existing branches.
+
+    The probe gets only what is left of the walk's one shared deadline, never
+    a timeout of its own.
+    """
+    try:
+        skipped = skip_rung_requested()
+    except ValueError as exc:
+        if tails is not None:
+            tails.append((rung.name, _redact_probe_tail(str(exc), 500)))
+        return RUNG_UNKNOWN, True
+    if skipped == rung.name:
+        return RUNG_SKIPPED_BY_SWITCH, False
+    if deadline - time.monotonic() <= 0:
+        return RUNG_UNPROBED, True
+    created = _prepare_probe_workdir(cwd, rung.probe_workdir) if rung.probe_workdir else []
+    if created is None:
+        return RUNG_UNKNOWN, True
+    if request is None:
+        request = JailRequest(
+            repo_root=os.path.realpath(cwd or os.getcwd()), kind=PROFILE_AGENT_READONLY,
+        )
+    launcher, _ = _resolve_executable(str(rung.probe_argv[0]))
+    resolved = [*launcher, *(str(a) for a in rung.probe_argv[1:])]
+    completed = None
+    seed_intact = True
+    scrub: Tuple[Optional[str], ...] = ()
+    try:
+        with landlock_dispatch.rung_probe(rung, request, resolved, cwd=cwd) as probe:
+            scrub = (probe.env.get("TMPDIR"), probe.seeded)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return RUNG_UNPROBED, True
+            completed = _run_sandbox_probe(
+                probe.argv, cwd=cwd, timeout=remaining, env=probe.env,
+            )
+            seed_intact = probe.seed_intact()
+    except landlock_dispatch.ProbeSetupFailed as exc:
+        if tails is not None:
+            tails.append((rung.name, _redact_probe_tail(str(exc), 500)))
+        return RUNG_UNKNOWN, True
+    except landlock_dispatch.JailRefused as exc:
+        # A required entry the probe (and so every dispatch it gates) cannot
+        # be granted: the rung is not usable here, measured before any spawn.
+        if tails is not None:
+            tails.append((rung.name, _redact_probe_tail(exc.message, 500)))
+        return RUNG_ABSENT, False
+    finally:
+        _remove_created_dirs(created)
+    if completed is None:
+        ran_out = time.monotonic() >= deadline
+        return (RUNG_UNPROBED if ran_out else RUNG_UNKNOWN), True
+    said = f"{completed.stdout}\n{completed.stderr}"
+    note = landlock_dispatch.wrapper_note(completed.stderr)
+    if tails is not None:
+        if not seed_intact and SANDBOX_CANARY_NOT_DENIED not in said:
+            # The parent's byte comparison caught what the canary did not: the
+            # canary's last line is its DENIED marker, which would read as the
+            # opposite of the verdict (acceptance review, 2026-09-30).
+            tail = "the truncation control changed the seeded file (truncate(2) was not denied)"
+        else:
+            tail = _redact_probe_tail(note, 500) if note else _rung_probe_tail(rung, completed)
+        tails.append((rung.name, _scrub_probe_paths(tail, *scrub)))
+    if SANDBOX_CANARY_NOT_DENIED in said or not seed_intact:
+        # Checked first: a write or truncation that landed rejects the rung
+        # whatever the exit status says — the canary's own word, or the
+        # parent's byte comparison of the seeded file.
+        return RUNG_REJECTED, False
+    if completed.returncode in (
+        landlock_dispatch.EXIT_UNAVAILABLE, landlock_dispatch.EXIT_REQUIRED_ENTRY,
+    ):
+        return RUNG_ABSENT, False
+    positive_exit = _plugin_landlock_positive_exit()
+    if completed.returncode == positive_exit:
+        return RUNG_UNAVAILABLE, False
+    if completed.returncode == 0 and SANDBOX_CANARY_DENIED in said:
+        return RUNG_TAKEN, False
+    if completed.returncode == 0:
+        return RUNG_ABSENT, False
+    if rung_probe_said_removed(rung, said):
+        return RUNG_RETIRED, False
+    if _sandbox_probe_inconclusive(said):
+        return RUNG_ABSENT, False
+    return RUNG_UNAVAILABLE, False
+
+
+def _plugin_landlock_positive_exit() -> int:
+    """The rung canary's positive-control exit (5), read from the adapter
+    module so the two cannot drift; 5 when the adapter cannot be imported."""
+    try:  # pragma: no cover - import shim mirrors the rest of utils/
+        from .providers.codex import PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT
+    except ImportError:  # pragma: no cover - direct-script import shim
+        try:
+            from utils.providers.codex import PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT
+        except ImportError:
+            return 5
+    return int(PLUGIN_LANDLOCK_CANARY_POSITIVE_EXIT)
+
+
 def _walk_fallback_rungs(
     rungs: Sequence[SandboxRung],
     *,
@@ -2324,6 +2653,7 @@ def _walk_fallback_rungs(
     deadline: float,
     version: Optional[str] = None,
     tails: Optional[List[Tuple[str, str]]] = None,
+    jail_request: Optional[JailRequest] = None,
 ) -> Tuple[Optional[str], Tuple[Tuple[str, str], ...]]:
     """Walk ``rungs`` in order under one shared ``deadline`` (T3's walk table).
 
@@ -2337,6 +2667,11 @@ def _walk_fallback_rungs(
     is not probed at all — recorded ``skipped`` — and the walk moves on. An
     unread version never skips. ``tails``, when given, receives ``(rung id,
     probe tail)`` for every rung whose probe ran.
+
+    A wrapping rung (the plugin's Landlock jail, 2026-09-30) is probed by
+    :func:`_walk_wrapped_rung` under ``jail_request`` — the grant the dispatch
+    it gates would carry, so a write profile's positive control writes that
+    dispatch's own target. ``None`` builds the read-only request for ``cwd``.
     """
     walk: List[Tuple[str, str]] = []
     for rung in rungs:
@@ -2347,6 +2682,20 @@ def _walk_fallback_rungs(
             # Nothing to measure (the uncontained rung): reaching it is taking it.
             walk.append((rung.name, RUNG_TAKEN))
             return rung.name, tuple(walk)
+        if getattr(rung, "wrapper", None):
+            # The plugin's own Landlock jail (plan codex-sandbox-unavailable
+            # §6 F1 item 3, 2026-09-30): its probe is wrapped, seeded and
+            # read with its own outcome table, under the same deadline.
+            outcome, stop = _walk_wrapped_rung(
+                rung, cwd=cwd, deadline=deadline, request=jail_request,
+                tails=tails,
+            )
+            walk.append((rung.name, outcome))
+            if outcome == RUNG_TAKEN:
+                return rung.name, tuple(walk)
+            if stop:
+                return None, tuple(walk)
+            continue
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             walk.append((rung.name, RUNG_UNPROBED))
@@ -2410,6 +2759,8 @@ def sandbox_verdict(
     timeout: Optional[float] = None,
     version: Optional[str] = None,
     walk_key: Optional[Tuple[str, ...]] = None,
+    jail_request: Optional[JailRequest] = None,
+    walk: bool = True,
 ) -> SandboxProbeResult:
     """One adapter's sandbox self-test (D6 step 3), plus its fallback walk.
 
@@ -2439,6 +2790,14 @@ def sandbox_verdict(
     given, is the :data:`_SANDBOX_PROBE_CACHE` key the walk is shared under:
     a walk already recorded there is reused rather than re-probed, and a fresh
     one is stored there.
+
+    ``jail_request`` (plan codex-sandbox-unavailable §6 F1, 2026-09-30) is the
+    grant a wrapping rung's probe is prepared under; ``None`` is the read-only
+    request for ``cwd`` (``kind`` = ``profile``). A write profile's request
+    carries its scope and target, which the rung canary's positive control
+    writes. ``walk=False`` runs the profile's own probe and walks no rung — a
+    caller that already knows no rung can take this dispatch (the ``off``
+    policy, a write scope the rung does not serve) spawns no rung probe.
     """
     try:
         argv = provider.sandbox_probe_command(profile)
@@ -2460,9 +2819,13 @@ def sandbox_verdict(
         # The CLI did not understand the probe (a build older than its
         # `sandbox` subcommand): nothing about the sandbox was learned.
         return SandboxProbeResult("unknown", tail)
-    rungs = _fallback_rungs(provider, profile)
+    rungs = _fallback_rungs(provider, profile) if walk else ()
     if not rungs:
         return SandboxProbeResult("unavailable", tail)
+    if jail_request is None:
+        jail_request = JailRequest(
+            repo_root=os.path.realpath(cwd or os.getcwd()), kind=profile,
+        )
     shared = None
     if walk_key is not None:
         with _SANDBOX_PROBE_LOCK:
@@ -2473,13 +2836,14 @@ def sandbox_verdict(
             version or "",
         )
     tails: List[Tuple[str, str]] = []
-    rung, walk = _walk_fallback_rungs(
+    rung, walked = _walk_fallback_rungs(
         rungs, cwd=cwd, deadline=deadline, version=version, tails=tails,
+        jail_request=jail_request,
     )
     result = SandboxProbeResult(
-        "unavailable", tail, rung, walk, tuple(tails), version or "",
+        "unavailable", tail, rung, walked, tuple(tails), version or "",
     )
-    stopped = any(outcome in (RUNG_UNPROBED, RUNG_UNKNOWN) for _, outcome in walk)
+    stopped = any(outcome in (RUNG_UNPROBED, RUNG_UNKNOWN) for _, outcome in walked)
     if walk_key is not None and not stopped:
         # A walk that stopped on "nothing learned" is not shared: another
         # profile's probe, with its own budget, may yet get an answer.
@@ -2551,8 +2915,23 @@ def sandbox_fallback_rung(
     actually declares for that profile, and :func:`sandbox_rung_allowed` says
     the key permits it — ``auto`` any rung, ``contained`` a contained one only,
     ``off`` none. The probe verdict ``unavailable`` is the caller's gate.
+
+    A write profile (plan step 3, user decision 2026-09-30) is answered
+    separately: it reaches a rung its adapter declares in the write ladder, and
+    only through :func:`write_rung_allowed` — a wrapping ``incidental``-grade
+    rung (the plugin's Landlock jail) under ``auto``. Never the uncontained or
+    the legacy ``landlock`` rung, under any policy word. Two places still have
+    to agree (the adapter's write ladder and this gate) before a write
+    dispatch widens.
     """
-    if profile not in SANDBOX_FALLBACK_PROFILES or not rung_id:
+    if not rung_id:
+        return None
+    if profile in SANDBOX_WRITE_FALLBACK_PROFILES:
+        for rung in _fallback_rungs(provider, profile):
+            if rung.name == rung_id:
+                return rung if write_rung_allowed(rung, policy) else None
+        return None
+    if profile not in SANDBOX_FALLBACK_PROFILES:
         return None
     for rung in _fallback_rungs(provider, profile):
         if rung.name == rung_id:
@@ -2677,6 +3056,7 @@ def cached_sandbox_verdict(
     *,
     cwd: Optional[str],
     policy: Optional[str],
+    jail_request: Optional[JailRequest] = None,
 ) -> SandboxProbeResult:
     """Run — or recall — ``provider``'s sandbox self-test for ``profile``: the
     one per-process probe cache both lanes share (plan §3.6, 2026-09-24).
@@ -2696,13 +3076,40 @@ def cached_sandbox_verdict(
     the dict read and write only; the probe runs under a per-key lock, so two
     slots of one provider share a probe and a slow provider never holds up
     another (F5, 2026-09-17).
+
+    Plan codex-sandbox-unavailable §6 F1 (2026-09-30):
+
+    * ``off`` walks no rung: the policy takes none, so no rung probe spawns.
+    * ``MULTI_LLM_CODEX_SKIP_RUNG``, when set, joins both keys, so a walk taken
+      without the switch is never replayed with it (or the reverse).
+    * For a write profile, ``jail_request`` is the dispatch's grant. Both the
+      ``verdict`` and the ``walk`` key add its scope and — for ``plan-file``
+      and ``tasks``, whose positive control writes it — its target; never a
+      per-task declared path, a slot ``TMPDIR`` or an allow list. A write
+      scope the rung does not serve (``repo-wide`` before step 3b, or none)
+      walks no rung. Read-only keys are unchanged.
     """
     host = _current_host_id()
     version = (
         _sandbox_cli_version(provider_name, provider)
         if _ladder_has_removed_at(provider, profile) else ""
     )
-    key = ("verdict", host, provider_name, profile, cwd or "", version, policy or "")
+    write = profile in SANDBOX_WRITE_FALLBACK_PROFILES
+    scope = getattr(jail_request, "write_scope", None) if write else None
+    target = (
+        getattr(jail_request, "target", None)
+        if write and scope in WRITE_SCOPES_ON_RUNG else None
+    )
+    try:
+        switch = skip_rung_requested() or ""
+    except ValueError:
+        switch = "invalid"
+    extra: Tuple[str, ...] = ()
+    if write:
+        extra += (f"scope={scope or ''}", f"target={target or ''}")
+    if switch:
+        extra += (f"skip={switch}",)
+    key = ("verdict", host, provider_name, profile, cwd or "", version, policy or "") + extra
     with _SANDBOX_PROBE_LOCK:
         cached = _SANDBOX_PROBE_CACHE.get(key)
     if cached is not None:
@@ -2714,20 +3121,28 @@ def cached_sandbox_verdict(
             cached = _SANDBOX_PROBE_CACHE.get(key)
         if cached is not None:
             return cached
-        rungs = _fallback_rungs(provider, profile)
+        walk = policy != SANDBOX_FALLBACK_OFF and not (
+            write and scope not in WRITE_SCOPES_ON_RUNG
+        )
+        rungs = _fallback_rungs(provider, profile) if walk else ()
         walk_key = (
             ("walk", host, provider_name, cwd or "", version,
-             ",".join(rung.name for rung in rungs))
+             ",".join(rung.name for rung in rungs)) + extra
             if rungs else None
         )
+        kwargs: Dict[str, Any] = {}
+        if write and jail_request is not None:
+            kwargs["jail_request"] = jail_request
+        if not walk:
+            kwargs["walk"] = False
         try:
             if walk_key is not None or version:
                 verdict = sandbox_verdict(
                     provider, profile, cwd=cwd, version=version or None,
-                    walk_key=walk_key,
+                    walk_key=walk_key, **kwargs,
                 )
             else:
-                verdict = sandbox_verdict(provider, profile, cwd=cwd)
+                verdict = sandbox_verdict(provider, profile, cwd=cwd, **kwargs)
         except Exception:  # noqa: BLE001 - a diagnostic may never end a run
             verdict = SandboxProbeResult("unknown", "")
         with _SANDBOX_PROBE_LOCK:
@@ -2778,6 +3193,292 @@ def sandbox_bypass_line(
     )
 
 
+#: Plan codex-sandbox-unavailable §7 "Step 4: the refusal's wording in each
+#: state" (2026-09-30): every ``sandbox_unavailable`` refusal leads with an
+#: option that works on this host today (F6), before it says why Codex cannot
+#: run here. ``{key}`` is the refused key — ``driver.subagent_runner`` for
+#: editing jobs.
+F6_LEAD = (
+    "To run this now, set `{key}` to a runner that is not Codex (for example "
+    "`claude-code:<model>`) in `.multi-llm/providers.yaml`."
+)
+
+#: The three rung sentences of the step-4 refusal, picked from the walk.
+JAIL_KEPT_OFF_SENTENCE = "The plugin's Landlock jail does not take this job: {case}."
+JAIL_UNAVAILABLE_SENTENCE = (
+    "The plugin's Landlock jail cannot run here either: this kernel or "
+    "container lacks Landlock ({note}). Only a system-level change gives Codex "
+    "a sandbox here: the AppArmor or sysctl repair `multi_llm.py doctor` "
+    "prints, which needs sudo."
+)
+JAIL_SELF_TEST_SENTENCE = (
+    "The plugin's Landlock jail is present but failed its self-test ({what}). "
+    "Run `multi_llm.py doctor`: its `plugin-landlock` row shows the probe "
+    "result."
+)
+
+
+def _f6_key(key: str) -> str:
+    """The ``providers.yaml`` key the F6 lead names: the refused ``driver.*``
+    key without its layer note, else ``driver.subagent_runner`` (a recorded or
+    task-level spec is still replaced there)."""
+    base = (key or "").split(" (", 1)[0].strip()
+    return base if base.startswith("driver.") else "driver.subagent_runner"
+
+
+def _f6_lead(key: str) -> str:
+    return F6_LEAD.format(key=_f6_key(key))
+
+
+def _sandbox_unavailable_rejection(
+    *,
+    key: str,
+    spec: str,
+    tail: str,
+    rung_sentence: str = "",
+    note: str = "",
+    trailer: str = "",
+) -> RunnerRejected:
+    """The one ``sandbox_unavailable`` refusal text (plan §7 step 4): the F6
+    lead; why Codex cannot run here (today's reason, then one rung sentence);
+    the probe tail and the ladder note; "Nothing was dispatched." No sudo
+    "Fix:" sentence — the AppArmor text lives in the reason, the
+    Landlock-unavailable sentence and ``doctor``'s repair block only."""
+    message = (
+        f"{_f6_lead(key)} Refusing to dispatch: {key} is {spec!r} (reason: "
+        f"sandbox_unavailable) — {_REASON_EXPLANATION['sandbox_unavailable']}. "
+        + (f"{rung_sentence} " if rung_sentence else "")
+        + f"Probe tail: {tail!r}. "
+        + (trailer if trailer else "")
+        + (f"Fallback ladder: {note}. " if note else "")
+        + "Nothing was dispatched."
+    )
+    return RunnerRejected(
+        message, key=key, spec=spec, reason_code="sandbox_unavailable", detail=tail,
+    )
+
+
+def _jail_rung(provider: Any) -> Optional[SandboxRung]:
+    """The adapter's wrapping rung (the plugin's Landlock jail), from either
+    ladder, or ``None`` when it declares none."""
+    for profile in (*SANDBOX_FALLBACK_PROFILES, *SANDBOX_WRITE_FALLBACK_PROFILES):
+        for rung in _fallback_rungs(provider, profile):
+            if getattr(rung, "wrapper", None):
+                return rung
+    return None
+
+
+def _installed_cli_version(provider_name: str, verdict: SandboxProbeResult) -> str:
+    """The CLI version the preflight or the probe read, or ``""``."""
+    for value in (
+        verdict.version, _VERSION_CACHE.get(provider_name),
+        _PROBE_VERSION_CACHE.get(provider_name),
+    ):
+        if value and value != "unknown":
+            return str(value)
+    return ""
+
+
+def _newer_than(installed: str, measured: str) -> bool:
+    """Whether ``installed`` is a newer version than ``measured``."""
+    found = re.search(r"\d+(?:\.\d+)+", installed or "")
+    if not found or not measured:
+        return False
+    try:
+        return version_tuple(found.group(0)) > version_tuple(measured)
+    except Exception:  # noqa: BLE001 - a wording choice never ends a refusal
+        return False
+
+
+def _jail_versions_clause(provider_name: str, rung: SandboxRung, verdict: SandboxProbeResult) -> str:
+    """" Codex X is installed, newer than Y …" when it is, else ``""``."""
+    measured = (getattr(rung, "measured_through", None) or ("",))[0]
+    installed = _installed_cli_version(provider_name, verdict)
+    if measured and _newer_than(installed, measured):
+        return (
+            f" Codex {installed} is installed, newer than {measured}, the "
+            f"version the jail was measured through; a changed start-up write "
+            f"list is the likely cause."
+        )
+    return ""
+
+
+def _jail_rung_sentence(
+    provider_name: str,
+    provider: Any,
+    profile: str,
+    policy: Optional[str],
+    verdict: SandboxProbeResult,
+    write_scope: Optional[str],
+) -> str:
+    """The step-4 rung sentence for one refusal, picked from the walk's record
+    (plan §7 "Step 4: the refusal's wording in each state").
+
+    Kept off the rung (whatever the rung's state): a write profile with the
+    step-3 opt-in off, a write dispatch with no grant, ``repo-wide`` before
+    step 3b, a ``sandbox_fallback`` value that does not reach the rung, or
+    ``MULTI_LLM_CODEX_SKIP_RUNG``. Otherwise the rung's own outcome: Landlock
+    unavailable (the wrapper's exit 126 and its note), or a failed self-test
+    (the failing control or path, and both codex versions when the installed
+    one is newer than the rung was measured through). ``""`` for an adapter
+    with no jail.
+    """
+    jail = _jail_rung(provider)
+    if jail is None:
+        return ""
+    kept_off = JAIL_KEPT_OFF_SENTENCE.format
+    if profile in SANDBOX_WRITE_FALLBACK_PROFILES:
+        if not any(
+            r.name == jail.name for r in _fallback_rungs(provider, profile)
+        ):
+            return kept_off(case=(
+                "write jobs are not enabled on it (the step-3 opt-in is off)"
+            ))
+        if not write_scope:
+            return kept_off(case=(
+                "the write dispatch carries no write grant (no write scope)"
+            ))
+        if write_scope not in WRITE_SCOPES_ON_RUNG:
+            return kept_off(case=(
+                f"{write_scope} edits (apply-code-fixes, implement) wait for "
+                f"plan step 3b; until then they need a non-Codex runner (F6, "
+                f"as above)"
+            ))
+    if policy == SANDBOX_FALLBACK_OFF:
+        return kept_off(case=(
+            f"providers.{provider_name}.sandbox_fallback=off reaches no "
+            f"fallback rung"
+        ))
+    if policy == SANDBOX_FALLBACK_CONTAINED:
+        return kept_off(case=(
+            f"providers.{provider_name}.sandbox_fallback=contained does not "
+            f"reach it: that value promises a real OS boundary, and the jail "
+            f"stops stray writes, not the model"
+        ))
+    outcome = dict(verdict.walk or ()).get(jail.name)
+    tail = dict(verdict.rung_tails or ()).get(jail.name, "")
+    if outcome == RUNG_SKIPPED_BY_SWITCH:
+        return kept_off(case=f"skipped by {SKIP_RUNG_ENV}")
+    if outcome is None:
+        return ""
+    if outcome == RUNG_ABSENT and tail.startswith(
+        landlock_dispatch.NOTE_PREFIX + "unavailable"
+    ):
+        note = tail[len(landlock_dispatch.NOTE_PREFIX):].strip()
+        return JAIL_UNAVAILABLE_SENTENCE.format(note=note)
+    if outcome in (RUNG_UNKNOWN, RUNG_UNPROBED):
+        what = f"its probe gave no answer ({outcome})"
+    elif outcome == RUNG_REJECTED:
+        what = "a write or truncation its canary made was not denied"
+    elif outcome == RUNG_ABSENT:
+        # A required allow entry (the wrapper's own code, or a grant refused
+        # before the spawn) names itself; otherwise the canary never finished.
+        what = "" if tail else "the canary never reported a denied write"
+    else:
+        what = "an allowed write failed, or Codex did not start under the allow-list"
+    if tail:
+        what = f"{what}: {tail}" if what else tail
+    return (
+        JAIL_SELF_TEST_SENTENCE.format(what=what)
+        + _jail_versions_clause(provider_name, jail, verdict)
+    )
+
+
+def _write_consent_bypass_line(
+    provider_name: str,
+    verdict: SandboxProbeResult,
+    rungs: Sequence[SandboxRung],
+    policy: Optional[str],
+    write_scope: Optional[str],
+) -> str:
+    """The ``[SANDBOX_BYPASSED]`` line for an F5 write dispatch (plan step 6).
+
+    Built here rather than through ``sandbox_bypassed_notice_text``, whose
+    stem says "read-only phase": this is a WRITE phase, uncontained because
+    the chat itself runs with ``danger-full-access`` and the plugin's jail
+    could not take it. It keeps the marker, so counting ``[SANDBOX_BYPASSED]``
+    still counts every uncontained dispatch."""
+    clause = sandbox_walk_clause(
+        provider_name, verdict.walk, verdict.rung_tails,
+        verdict.version or None, rungs,
+    )
+    said = " ".join((verdict.tail or "").split())
+    if len(said) > 160:
+        said = said[:157].rstrip() + " …"
+    text = f"{SANDBOX_BYPASSED_MARKER} {provider_name}: its own sandbox cannot start here"
+    if said:
+        text += f" ({said})"
+    if clause:
+        text += f"; {clause}"
+    text += (
+        f"; running this write phase (scope {write_scope or 'none'}) under "
+        f"--sandbox danger-full-access because the chat itself runs with the "
+        f"{HOST_POSTURE_FULL_ACCESS} sandbox posture ({HOST_SANDBOX_POSTURE_ENV}; "
+        f"F5, plan step 6) and the plugin's Landlock jail could not take this "
+        f"job, under providers.{provider_name}.sandbox_fallback="
+        f"{policy or SANDBOX_FALLBACK_AUTO}: no OS boundary between the model's "
+        f"shell and this machine"
+    )
+    return text
+
+
+def _render_target(request: Optional[JailRequest]) -> Optional[str]:
+    """The write target a notice names: the tasks directory under a dir rule,
+    else the file, with ``$HOME`` as ``~``."""
+    if request is None:
+        return None
+    shown = request.target_dir or request.target
+    return landlock_dispatch.render_home(shown) if shown else None
+
+
+def write_rung_notice(spec: str, jail_request: Optional[JailRequest]) -> Optional[str]:
+    """The executor-lane ``[SANDBOX_INCIDENTAL]`` line for a write dispatch of
+    ``spec`` that will run on the plugin's Landlock jail, or ``None``.
+
+    Plan codex-sandbox-unavailable §6 F1 item 4 (2026-09-30): "a write
+    dispatch on the rung prints that line before its batch starts". The
+    scheduler prints it once before each batch on the rung; it is built with
+    the same builder as every other ``[SANDBOX_INCIDENTAL]`` line, from what
+    :func:`_detect_sandbox` recorded for this runner and scope, and names the
+    scope and target from ``jail_request``. ``None`` for a batch on Codex's
+    own sandbox, on no rung, or with no request.
+    """
+    if jail_request is None or not jail_request.write_scope:
+        return None
+    scope = jail_request.write_scope
+    rung_id = sandbox_rung(spec, PROFILE_AGENT_WRITE, write_scope=scope)
+    if not rung_id:
+        return None
+    parts = _SANDBOX_NOTICE_PARTS.get(
+        _sandbox_decision_key(spec, PROFILE_AGENT_WRITE, scope, None)
+    )
+    if parts is None:
+        return None
+    provider_name, recorded_rung, policy, tail, clause = parts
+    if recorded_rung != rung_id:
+        return None
+    provider = get_provider(provider_name)
+    rung = next(
+        (r for r in _fallback_rungs(provider, PROFILE_AGENT_WRITE) if r.name == rung_id),
+        None,
+    )
+    if rung is None or not rung_is_incidental(rung):
+        return None
+    return sandbox_incidental_notice_text(
+        provider_name, rung, policy, tail, walk_clause=clause,
+        lane=INCIDENTAL_LANE_EXECUTOR, write_scope=scope,
+        target=_render_target(jail_request),
+    )
+
+
+def _uncontained_rung(provider: Any) -> Optional[SandboxRung]:
+    """The adapter's uncontained rung (read ladder), for F5's consent check."""
+    for rung in _fallback_rungs(provider, PROFILE_AGENT_READONLY):
+        if rung.name == SANDBOX_RUNG_UNSANDBOXED:
+            return rung
+    return None
+
+
 def _detect_sandbox(
     provider_name: str,
     *,
@@ -2785,29 +3486,51 @@ def _detect_sandbox(
     spec: str,
     profile: str,
     anchor: Optional[str] = None,
+    jail_request: Optional[JailRequest] = None,
 ) -> str:
     """Run the adapter's model-free sandbox self-test once per host/spec/profile
     and refuse a runner whose own sandbox cannot run (D6 step 3).
 
-    Returns ``ok`` | ``unknown`` | ``not-required`` | ``bypassed`` | a contained
-    rung id (``landlock``); a non-zero exit with no permitted rung raises,
-    because bubblewrap failing to start is a property of the machine — every
-    sibling on this runner would fail identically, and the fix (an AppArmor
-    profile ``multi_llm.py doctor`` prints) is never a retry. A timeout or a
-    command that could not run records ``unknown`` and dispatches, exactly
-    like the nested-exec probe's inconclusive branch.
+    Returns ``ok`` | ``unknown`` | ``not-required`` | ``bypassed`` | a rung id
+    (``landlock``, ``plugin-landlock``); a non-zero exit with no permitted
+    rung raises, because bubblewrap failing to start is a property of the
+    machine — every sibling on this runner would fail identically, and a retry
+    never changes it (the system-level AppArmor or sysctl repair ``multi_llm.py
+    doctor`` prints is one way out, and needs sudo; a non-Codex runner is the
+    other — the refusal leads with it, plan §7 step 4). A timeout or a command
+    that could not run records ``unknown`` and dispatches, exactly like the
+    nested-exec probe's inconclusive branch.
 
     A **rung** (D6 override 2026-09-17, landlock rung 2026-09-22) is the *only*
     way an ``unavailable`` verdict does not raise here: the adapter's ladder
     walk selected one, the adapter declares it for this profile, and the
     ``sandbox_fallback`` key permits it — a contained rung under ``auto`` or
-    ``contained``, the uncontained rung under ``auto`` alone, nothing under
-    ``off`` — and the profile is ``agent-readonly``, the one executor profile
-    in ``SANDBOX_FALLBACK_PROFILES``. Every WRITE kind runs ``agent-write``,
-    which has no ladder whatever the config says, so a write batch under a
-    broken sandbox is exit 3 exactly as before. The selected rung's **id** is
-    what gets recorded — never the old constant — so :func:`sandbox_rung` hands
-    the dispatch the rung it must render.
+    ``contained``, the uncontained and the incidental rung under ``auto``
+    alone, nothing under ``off``. The selected rung's **id** is what gets
+    recorded, so :func:`sandbox_rung` hands the dispatch the rung it must
+    render.
+
+    Plan codex-sandbox-unavailable (2026-09-30):
+
+    * **Write profiles (step 3).** ``agent-write`` computes its policy too, and
+      reaches exactly one rung, the plugin's Landlock jail, through
+      :func:`write_rung_allowed` — ``auto`` alone, and only for a
+      ``jail_request`` whose scope the rung serves (``plan-file``, ``tasks``).
+      ``repo-wide`` (and a write dispatch with no scope) walks no rung and is
+      refused naming the case, step 3b and F6. A failed rung probe is refused,
+      never walked on. The decision key adds the scope.
+    * **The incidental grade.** A rung of the ``incidental`` grade prints one
+      ``[SANDBOX_INCIDENTAL]`` line (executor lane: no mode check, a warn-only
+      home check), never ``[SANDBOX_BYPASSED]`` or ``[SANDBOX_FALLBACK]``.
+    * **F5 (step 6).** Only when the plugin's jail could NOT take a write
+      dispatch and the chat's own posture, read per call from this process's
+      environment, is ``danger-full-access`` under ``auto``, the write takes
+      the uncontained rung: a ``[SANDBOX_BYPASSED]`` line naming F5, and a
+      decision word of its own stored under a key that carries the posture.
+      Never under ``contained`` or ``off``, never ahead of the jail, never on a
+      walk that measured nothing.
+    * **Refusals (step 4)** lead with F6 and add one rung sentence picked from
+      the walk.
 
     The measurement comes from the probe cache the fan-out shares
     (:func:`cached_sandbox_verdict`, 2026-09-24); the uncontained rung's line
@@ -2816,26 +3539,70 @@ def _detect_sandbox(
     line once per process.
     """
     provider = get_provider(provider_name)
-    cache_key = f"{_current_host_id()}|{spec}|{profile}"
+    write = profile in SANDBOX_WRITE_FALLBACK_PROFILES
+    scope = getattr(jail_request, "write_scope", None) if write else None
+    consent = host_write_posture_consent() if write else None
+    cache_key = _sandbox_decision_key(spec, profile, scope, consent)
     if cache_key in _SANDBOX_DECISIONS:
         return _sandbox_state_word(_SANDBOX_DECISIONS[cache_key])
+    if consent is not None:
+        # A rung taken without the posture stands with it too (the jail is
+        # always preferred to F5); only the F5 word is posture-bound.
+        recorded = _SANDBOX_DECISIONS.get(
+            _sandbox_decision_key(spec, profile, scope, None)
+        )
+        if recorded and recorded not in _PLAIN_SANDBOX_STATES:
+            return _sandbox_state_word(recorded)
+    try:
+        skip_rung_requested()
+    except ValueError as exc:
+        # Rejected at start-up, never silently ignored (F1 item 6).
+        raise RunnerRejected(
+            f"Refusing to dispatch: {exc}. Nothing was dispatched.",
+            key=SKIP_RUNG_ENV, spec=spec, reason_code="invalid_skip_rung",
+        ) from None
 
     policy: Optional[str] = (
         _sandbox_fallback_policy(provider, profile, anchor=anchor)
-        if profile in SANDBOX_FALLBACK_PROFILES else None
+        if profile in SANDBOX_FALLBACK_PROFILES or write else None
     )
     verdict = cached_sandbox_verdict(
         provider_name, provider, profile, cwd=_probe_cwd(anchor), policy=policy,
+        **({"jail_request": jail_request} if write and jail_request is not None else {}),
     )
     state, tail = verdict.state, verdict.tail
     if state == "unavailable":
-        rung = sandbox_fallback_rung(provider, profile, verdict.rung, policy)
+        rung = None
+        if not write or scope in WRITE_SCOPES_ON_RUNG:
+            rung = sandbox_fallback_rung(provider, profile, verdict.rung, policy)
         if rung is not None:
+            declared = _fallback_rungs(provider, profile)
             # One line per runner per process, on stdout beside the other
             # preflight lines, in the same words the fan-out prints — the
             # reader greps one marker across the run. `unknown` never reaches
             # here: no rung widens anything on a probe that was not read.
-            if rung.contained:
+            if rung_is_incidental(rung):
+                clause = sandbox_walk_clause(
+                    provider_name, verdict.walk, verdict.rung_tails,
+                    verdict.version or None, declared,
+                )
+                if write:
+                    # A write dispatch's line is the scheduler's to print, once
+                    # before EACH batch on the rung (`write_rung_notice`, the
+                    # same builder); printing it here too would show batch 0
+                    # twice. What it is built from is kept, path-free.
+                    _SANDBOX_NOTICE_PARTS[
+                        _sandbox_decision_key(spec, profile, scope, None)
+                    ] = (provider_name, rung.name, policy, tail, clause)
+                else:
+                    print(
+                        "[exec-subagents] "
+                        + sandbox_incidental_notice_text(
+                            provider_name, rung, policy, tail, walk_clause=clause,
+                            lane=INCIDENTAL_LANE_EXECUTOR,
+                        )
+                    )
+            elif rung.contained:
                 print(
                     "[exec-subagents] "
                     + sandbox_fallback_notice_text(provider_name, rung, policy)
@@ -2843,13 +3610,35 @@ def _detect_sandbox(
             else:
                 print(
                     "[exec-subagents] "
-                    + sandbox_bypass_line(
-                        provider_name, verdict, _fallback_rungs(provider, profile),
-                    )
+                    + sandbox_bypass_line(provider_name, verdict, declared)
                 )
                 _announce_executor_retirements(provider_name, provider, spec, profile, verdict)
-            _SANDBOX_DECISIONS[cache_key] = rung.name
+            # A decision without the posture is valid with it too: stored
+            # under the posture-free key (`sandbox_rung` looks there second).
+            _SANDBOX_DECISIONS[
+                _sandbox_decision_key(spec, profile, scope, None)
+            ] = rung.name
             return _sandbox_state_word(rung.name)
+        # F5 serves the scopes the rung serves and no wider: repo-wide edits
+        # (`apply-code-fixes`, `implement`) stay refused on this host until
+        # plan step 3b, whatever the chat's posture (conductor decision
+        # 2026-09-30, from the run's scope: "repo-wide stays refused").
+        if write and consent is not None and scope in WRITE_SCOPES_ON_RUNG:
+            stopped = any(
+                outcome in (RUNG_UNPROBED, RUNG_UNKNOWN)
+                for _, outcome in (verdict.walk or ())
+            )
+            floor = _uncontained_rung(provider)
+            if not stopped and write_consent_allows(floor, policy, consent):
+                print(
+                    "[exec-subagents] "
+                    + _write_consent_bypass_line(
+                        provider_name, verdict, _fallback_rungs(provider, profile),
+                        policy, scope,
+                    )
+                )
+                _SANDBOX_DECISIONS[cache_key] = SANDBOX_DECISION_WRITE_BY_CONSENT
+                return SANDBOX_STATE_BYPASSED
     if state == "unavailable":
         declared = _fallback_rungs(provider, profile)
         if policy == SANDBOX_FALLBACK_CONTAINED:
@@ -2862,19 +3651,12 @@ def _detect_sandbox(
         note = sandbox_walk_note(
             verdict, policy, provider_name=provider_name, rungs=declared,
         )
-        raise RunnerRejected(
-            f"Refusing to dispatch: {key} is {spec!r} (reason: "
-            f"sandbox_unavailable) — "
-            f"{_REASON_EXPLANATION['sandbox_unavailable']}. "
-            f"Probe tail: {tail!r}. "
-            + (f"Fallback ladder: {note}. " if note else "")
-            + "Fix: run `multi_llm.py doctor` and install the AppArmor profile it "
-            "prints (or use a runner without an OS sandbox). Nothing was "
-            "dispatched.",
-            key=key,
-            spec=spec,
-            reason_code="sandbox_unavailable",
-            detail=tail,
+        raise _sandbox_unavailable_rejection(
+            key=key, spec=spec, tail=tail,
+            rung_sentence=_jail_rung_sentence(
+                provider_name, provider, profile, policy, verdict, scope,
+            ),
+            note=note,
         )
     if state == "unknown":
         print(
@@ -3301,22 +4083,15 @@ def _probe_nested_exec(
         # any bubblewrap user whose adapter declares no `sandbox_probe_command`
         # — and, like the D4 branch below, opportunistic: it runs only where a
         # leg was unresolved and a probe therefore happened. A `bwrap:` line is
-        # a fact about the machine, so every sibling fails identically and the
-        # fix is the AppArmor profile `doctor` prints, never a retry.
+        # a fact about the machine, so every sibling fails identically and a
+        # retry never changes it. The way out that works today is a non-Codex
+        # runner (F6), which the refusal leads with; the AppArmor or sysctl
+        # repair `doctor` prints is a system-level alternative that needs sudo
+        # (plan codex-sandbox-unavailable §7 step 4, 2026-09-30). This
+        # refusal walks no rung, so it carries no rung sentence.
         tail = _redact_probe_tail(capture.stderr or capture.stdout, 500)
-        raise RunnerRejected(
-            f"Refusing to dispatch: {key} is {spec!r} (reason: "
-            f"sandbox_unavailable) — "
-            f"{_REASON_EXPLANATION['sandbox_unavailable']}. "
-            f"Probe tail: {tail!r}. "
-            f"{trailer}"
-            f"Fix: run `multi_llm.py doctor` and install the AppArmor profile it "
-            f"prints, or use a runner without an OS sandbox. Nothing was "
-            f"dispatched.",
-            key=key,
-            spec=spec,
-            reason_code="sandbox_unavailable",
-            detail=tail,
+        raise _sandbox_unavailable_rejection(
+            key=key, spec=spec, tail=tail, trailer=trailer,
         )
 
     if classified is not None and classified[0] == STATUS_INVALID_MODEL:
@@ -4320,6 +5095,67 @@ class _Capture:
     timed_out: bool = False
     launch_error: Optional[str] = None
     argv: List[str] = field(default_factory=list)
+    #: Plan codex-sandbox-unavailable §6 F1 (2026-09-30), set only for an
+    #: attempt on a wrapping rung (the plugin's Landlock jail). Paths, classes
+    #: and counts only — never output text beyond the ≤300-char excerpt the
+    #: ``[JAIL_DENIED]`` line quotes.
+    #: The rung id the attempt ran on.
+    sandbox_rung: Optional[str] = None
+    #: ``JailEvidence.to_dict()`` for a codex-internal EACCES (any class).
+    jail_evidence: Optional[Dict[str, Any]] = None
+    #: The one ``[JAIL_DENIED]`` line when the attempt failed on the jail
+    #: (class ``jail`` or ``probable``, or a grant refused before the spawn):
+    #: a non-retryable failure that never moves to another rung.
+    jail_denied_line: Optional[str] = None
+    #: The stream's denials (``landlock_dispatch.JailDenials``), read from the
+    #: FULL stdout before any excerpt is bounded.
+    jail_denials: Optional[Any] = None
+    #: ``HomeChange.to_dict()`` when ``$CODEX_HOME``'s security-relevant set
+    #: changed during the attempt (warn-only in this lane).
+    home_change: Optional[Dict[str, Any]] = None
+
+
+@dataclass(frozen=True)
+class _JailSpawn:
+    """What a spawn on a wrapping rung carries from :func:`_spawn` down to
+    :func:`_spawn_in_context`: the rung, the lane's request and this attempt's
+    scratch directory. An argument, dropped with the attempt — never stored."""
+
+    rung: SandboxRung
+    request: JailRequest
+    tmpdir: str
+
+
+class SandboxBackstopViolation(ExecutorError):
+    """An ``agent-write`` argv carrying ``danger-full-access`` reached the spawn
+    without the jail's wrapper prefix or an F5 consent, or with one whose write
+    scope the rung does not serve (plan step 3's backstop). Raised before
+    ``Popen``: a write profile never renders the uncontained value unwrapped,
+    nor for a ``repo-wide`` scope, whatever a gate above got wrong."""
+
+
+def _wrapping_rung(provider: Any, profile: str, rung_id: Optional[str]) -> Optional[SandboxRung]:
+    """The declared rung ``rung_id`` of ``profile``'s ladder when it wraps the
+    CLI (the plugin's Landlock jail), else ``None``."""
+    if not rung_id:
+        return None
+    for rung in _fallback_rungs(provider, profile):
+        if rung.name == rung_id and getattr(rung, "wrapper", None):
+            return rung
+    return None
+
+
+def _carries_full_access(argv: Sequence[str]) -> bool:
+    """Whether ``argv`` renders codex's ``danger-full-access`` value — as the
+    ``--sandbox`` value or a ``sandbox_mode`` override, never as prose inside
+    a prompt."""
+    for item in argv:
+        text = str(item)
+        if text == HOST_POSTURE_FULL_ACCESS:
+            return True
+        if text.startswith("sandbox_mode=") and HOST_POSTURE_FULL_ACCESS in text:
+            return True
+    return False
 
 
 def _spawn(
@@ -4335,6 +5171,8 @@ def _spawn(
     anchor: Optional[str] = None,
     sandbox_fallback: Optional[str] = None,
     read_dirs: Sequence[str] = (),
+    jail_request: Optional[JailRequest] = None,
+    write_consent: Optional[WritePostureConsent] = None,
 ) -> _Capture:
     """Run one dispatch, materializing ``schema`` for the CLIs that take a file.
 
@@ -4362,22 +5200,76 @@ def _spawn(
 
     ``schema=None`` — every kind with no schema phase, and every adapter that
     declined the flag — skips all of it and renders the argv it always did.
+
+    **The jailed attempt's scratch directory** (plan codex-sandbox-unavailable
+    §6 F1 "How a dispatch receives its grant", 2026-09-30). When
+    ``sandbox_fallback`` names a wrapping rung, this ``with`` also owns the
+    attempt's ``TMPDIR`` (``landlock_dispatch.slot_tmpdir``), beside the schema
+    sidecar and for the same reason: made before any rule is applied, removed
+    after the child exits — on a clean exit, a timeout's group kill,
+    ``KeyboardInterrupt`` and the teardown alike — and fresh on every retry,
+    so no attempt inherits another's scratch files. A dispatch on the rung with
+    no ``jail_request`` is refused here with nothing made and nothing spawned
+    (never rendered with the base entries alone), and a directory that cannot
+    be made is a launch error, never a model error.
     """
+    wrap = _wrapping_rung(provider, profile, sandbox_fallback)
+    common: Dict[str, Any] = {
+        "provider": provider, "model": model, "prompt": prompt, "profile": profile,
+        "transport": transport, "timeout": timeout, "cwd": cwd, "schema": schema,
+        "anchor": anchor, "sandbox_fallback": sandbox_fallback,
+        "read_dirs": read_dirs, "write_consent": write_consent,
+    }
+    if wrap is None:
+        return _spawn_with_schema(jail=None, **common)
+    if jail_request is None:
+        refused = _Capture(sandbox_rung=wrap.name)
+        refused.launch_error = (
+            f"the plugin's Landlock jail ({wrap.name}) needs this dispatch's "
+            f"grant and none was handed to the spawn; nothing was made or "
+            f"spawned"
+        )
+        return refused
+    with contextlib.ExitStack() as stack:
+        try:
+            tmpdir = stack.enter_context(
+                landlock_dispatch.slot_tmpdir(jail_request.repo_root)
+            )
+        except (landlock_dispatch.JailRefused, OSError) as exc:
+            refused = _Capture(sandbox_rung=wrap.name)
+            refused.launch_error = (
+                f"the plugin's Landlock jail could not make this attempt's "
+                f"scratch directory: {getattr(exc, 'message', None) or exc}"
+            )
+            return refused
+        return _spawn_with_schema(
+            jail=_JailSpawn(rung=wrap, request=jail_request, tmpdir=tmpdir),
+            **common,
+        )
+
+
+def _spawn_with_schema(*, jail: Optional[_JailSpawn], **common: Any) -> _Capture:
+    """:func:`_spawn`'s sidecar leg: the schema file for a file-transport CLI,
+    removed in the same ``with`` that spawned the child. ``jail`` and
+    ``write_consent`` reach :func:`_spawn_child` only when set, so a stand-in
+    with the historical keyword set is called as it always was."""
+    extra: Dict[str, Any] = {}
+    if jail is not None:
+        extra["jail"] = jail
+    consent = common.pop("write_consent", None)
+    if consent is not None:
+        extra["write_consent"] = consent
+    read_dirs = common.pop("read_dirs", ())
+    provider = common["provider"]
+    schema = common.pop("schema", None)
     if schema is not None and getattr(
         provider, "structured_output_transport", "inline"
     ) == "file":
         with structured_output.schema_sidecar(schema) as materialized:
             return _spawn_child(
-                provider=provider, model=model, prompt=prompt, profile=profile,
-                transport=transport, timeout=timeout, cwd=cwd,
-                schema=materialized, anchor=anchor,
-                sandbox_fallback=sandbox_fallback, read_dirs=read_dirs,
+                schema=materialized, read_dirs=read_dirs, **common, **extra,
             )
-    return _spawn_child(
-        provider=provider, model=model, prompt=prompt, profile=profile,
-        transport=transport, timeout=timeout, cwd=cwd, schema=schema,
-        anchor=anchor, sandbox_fallback=sandbox_fallback, read_dirs=read_dirs,
-    )
+    return _spawn_child(schema=schema, read_dirs=read_dirs, **common, **extra)
 
 
 def _spawn_child(
@@ -4393,6 +5285,8 @@ def _spawn_child(
     anchor: Optional[str] = None,
     sandbox_fallback: Optional[str] = None,
     read_dirs: Sequence[str] = (),
+    jail: Optional[_JailSpawn] = None,
+    write_consent: Optional[WritePostureConsent] = None,
 ) -> _Capture:
     """Run one dispatch: build argv for the profile, spawn, capture everything.
 
@@ -4422,7 +5316,15 @@ def _spawn_child(
     its ``XDG_CONFIG_HOME``). The ``with`` is the ``finally`` half of that
     lifecycle — it is left on a clean return, on a per-slot timeout, on
     ``KeyboardInterrupt`` and on the §8 process-group teardown alike.
+
+    ``jail`` (a wrapping rung's attempt) and ``write_consent`` (F5) are
+    handed on to :func:`_spawn_in_context` only when set.
     """
+    extra: Dict[str, Any] = {}
+    if jail is not None:
+        extra["jail"] = jail
+    if write_consent is not None:
+        extra["write_consent"] = write_consent
     with provider_dispatch_context(
         provider, model, profile, anchor=anchor,
         runner_version=_preflight_version(provider),
@@ -4438,8 +5340,111 @@ def _spawn_child(
             provider=provider, model=model, prompt=prompt, profile=profile,
             transport=transport, timeout=timeout, cwd=cwd, schema=schema,
             anchor=anchor, sandbox_fallback=sandbox_fallback,
-            read_dirs=read_dirs,
+            read_dirs=read_dirs, **extra,
         )
+
+
+def _codex_versions_text(provider_name: str, rung: SandboxRung) -> Tuple[str, bool]:
+    """``("codex X installed, jail measured through Y", newer)``."""
+    measured = (getattr(rung, "measured_through", None) or ("",))[0] or "unknown"
+    installed = (
+        _VERSION_CACHE.get(provider_name) or _PROBE_VERSION_CACHE.get(provider_name)
+        or "unknown"
+    )
+    newer = _newer_than(installed, measured)
+    text = (
+        f"{provider_name} {installed} installed, the jail measured through "
+        f"{measured}"
+    )
+    if newer:
+        text += (
+            "; Codex is newer than the jail was measured with, the likely cause"
+        )
+    return text, newer
+
+
+def _render_home_text(text: str) -> str:
+    """``text`` with every ``$HOME`` prefix shown as ``~`` (paste-ready)."""
+    home = os.path.expanduser("~")
+    if not home or home in ("~", os.sep):
+        return text
+    return text.replace(home + os.sep, "~" + os.sep).replace(home + "'", "~'")
+
+
+def jail_denied_line(
+    *,
+    spec: str,
+    rung: SandboxRung,
+    path: Optional[str],
+    excerpt: str,
+    allow_list: str,
+    profile: Optional[str] = None,
+    write_scope: Optional[str] = None,
+) -> str:
+    """The one ``[JAIL_DENIED]`` line for a dispatch the plugin's jail failed
+    (plan codex-sandbox-unavailable §6 F1 item 6, 2026-09-30).
+
+    It names the runner and spec, the rung, the denied path (or "path not
+    named"), the ≤300-char excerpt, the allow-list, the installed and
+    measured-through Codex versions — adding "Codex is newer than the jail was
+    measured with, the likely cause" when it is — and the next steps. ``$HOME``
+    renders as ``~``, so the line can be pasted into an issue as it is.
+
+    The skip step is worded per lane (``profile``/``write_scope``): for a read
+    dispatch, skipping the rung runs the job on the next rung for one run; for
+    an ``agent-write`` dispatch the jail is the only write rung, so skipping it
+    is a refusal unless F5's consent (the chat's own ``danger-full-access``
+    posture, under ``sandbox_fallback=auto``) is present — the line says so
+    rather than advising a switch that does not run the job.
+    """
+    provider_name = spec.split(":", 1)[0]
+    versions, _newer = _codex_versions_text(provider_name, rung)
+    where = (
+        landlock_dispatch.render_home(path) if path
+        else "path not named (Codex did not name the path; a probable jail denial)"
+    )
+    shown = _render_home_text(" ".join((excerpt or "").split())[:300])
+    if profile in SANDBOX_WRITE_FALLBACK_PROFILES:
+        skip = (
+            f"to run the job anyway, set `driver.subagent_runner` to a runner "
+            f"that is not Codex (F6). Setting {SKIP_RUNG_ENV}={rung.name} does "
+            f"not run it: this is a write dispatch (scope "
+            f"{write_scope or 'none'}) and {rung.name!r} is its only write "
+            f"rung, so with it skipped the write is refused unless the chat "
+            f"itself runs in {HOST_POSTURE_FULL_ACCESS} "
+            f"({HOST_SANDBOX_POSTURE_ENV}; F5, under "
+            f"sandbox_fallback={SANDBOX_FALLBACK_AUTO}), which then runs it with "
+            f"no OS boundary."
+        )
+    else:
+        skip = (
+            f"to run the job anyway, set `driver.subagent_runner` to a runner "
+            f"that is not Codex (F6), or else set {SKIP_RUNG_ENV}={rung.name} "
+            f"for one run."
+        )
+    return (
+        f"{JAIL_DENIED_MARKER} {spec} on rung {rung.name!r}: denied {where}; "
+        f"excerpt: {shown!r}; allow-list: {allow_list or '(not computed)'}; "
+        f"{versions}. This is a jail failure, not a model error, and is not "
+        f"retried on another rung. Next: compare with `multi_llm.py doctor`'s "
+        f"`{rung.name}` row; report it at "
+        f"github.com/beastlabai/multi-llm-plugin/issues with this line and that "
+        f"row; {skip}"
+    )
+
+
+def _home_check_line(spec: str, rung: SandboxRung, change: Any, others: int) -> str:
+    """The warn-only ``[CODEX_HOME_CHECK]`` line of the executor lane: the
+    changed files and, for ``config.toml``, the changed key names — never a
+    value — and how many other codex children of this run were live."""
+    return (
+        f"{CODEX_HOME_CHECK_MARKER} {spec} on rung {rung.name!r}: $CODEX_HOME "
+        f"changed during this dispatch: {change.describe()}; {others} other "
+        f"codex child(ren) of this run were live in the window, so any of them "
+        f"may have made it. Review the file(s): the plugin does not revert "
+        f"them. Warn-only in the executor lane: this dispatch's verdict is "
+        f"unchanged."
+    )
 
 
 def _spawn_in_context(
@@ -4455,6 +5460,8 @@ def _spawn_in_context(
     anchor: Optional[str] = None,
     sandbox_fallback: Optional[str] = None,
     read_dirs: Sequence[str] = (),
+    jail: Optional[_JailSpawn] = None,
+    write_consent: Optional[WritePostureConsent] = None,
 ) -> _Capture:
     """:func:`_spawn_child`'s body, inside the adapter's dispatch context.
 
@@ -4463,11 +5470,39 @@ def _spawn_in_context(
     profile (:func:`sandbox_rung`), or ``None``; the adapter's
     ``apply_sandbox_fallback`` is what turns that rung into argv, and every
     adapter without one ignores it.
+
+    **On the plugin's Landlock jail** (``jail`` set; plan codex-sandbox-
+    unavailable §6 F1 "How a dispatch receives its grant", 2026-09-30), in this
+    order: render the codex argv with ``JailContext(request, tmpdir)`` (the
+    ``--sandbox`` slot and ``-c developer_instructions=…``); resolve the
+    executable; compose the child env as today; complete the context with the
+    ``$CODEX_HOME`` that env names (a missing or in-repo home refuses here —
+    reported as a jail failure naming the path, nothing spawned); add the
+    wrapper prefix through ``landlock_dispatch.wrap_argv``, the only site that
+    does; snapshot the home, spawn in a new process group (the wrapper
+    ``exec``s codex, so the PID and the group are codex's own and a timeout's
+    group kill reaches it and everything it started), and snapshot again.
+    While the context is alive the parent reads the outcome: a codex-internal
+    EACCES (``is_jail_failure``), the stream's denials (``jail_denied_edits``,
+    on the full stdout) and the home comparison. Only paths, classes and
+    counts travel back, on the capture.
+
+    **Backstop** (plan step 3): an ``agent-write`` argv carrying
+    ``danger-full-access`` that is neither wrapped nor backed by an F5 consent
+    — or whose jail grant or consent names a write scope outside
+    :data:`WRITE_SCOPES_ON_RUNG` — raises :class:`SandboxBackstopViolation`
+    before ``Popen``.
     """
     capture = _Capture()
+    render: Dict[str, Any] = {}
+    if jail is not None:
+        render["jail_context"] = JailContext(request=jail.request, tmpdir=jail.tmpdir)
+        capture.sandbox_rung = jail.rung.name
+    if write_consent is not None:
+        render["write_consent"] = write_consent
     argv, stdin_text = provider.build_agent_command_for_transport(
         prompt, model, profile, transport, schema=schema,
-        sandbox_fallback=sandbox_fallback,
+        sandbox_fallback=sandbox_fallback, **render,
     )
     if read_dirs:
         # The adapter's own read-scope flag (claude-code `--add-dir`), for the
@@ -4503,6 +5538,61 @@ def _spawn_in_context(
     # preflight shares, so the probe and the dispatch cannot compose it apart.
     env = dispatch_child_env(provider, model, profile, anchor=anchor, cwd=cwd)
 
+    spec = f"{getattr(provider, 'name', 'runner')}:{model}"
+    context: Optional[JailContext] = None
+    if jail is not None:
+        composed = dict(os.environ) if env is None else dict(env)
+        try:
+            context = landlock_dispatch.complete_context(jail.request, jail.tmpdir, composed)
+            argv, env = landlock_dispatch.wrap_argv(argv, jail.rung, context, composed)
+        except landlock_dispatch.JailRefused as exc:
+            # Between the probe and this dispatch a required entry vanished (or
+            # the home is unusable): a jail failure naming the path, never a
+            # model error, never retried on another rung, nothing spawned.
+            capture.launch_error = exc.message
+            capture.jail_evidence = {
+                "where": "setup", "line": exc.message[:300], "path": exc.path,
+                "class": landlock_dispatch.JAIL_CLASS_JAIL, "reason": exc.reason,
+            }
+            capture.jail_denied_line = jail_denied_line(
+                spec=spec, rung=jail.rung, path=exc.path, excerpt=exc.message,
+                allow_list="", profile=profile,
+                write_scope=jail.request.write_scope,
+            )
+            return capture
+        capture.argv = list(argv)
+    if profile == PROFILE_AGENT_WRITE and _carries_full_access(argv):
+        wrapped = landlock_dispatch.is_wrapped(argv)
+        if not wrapped and write_consent is None:
+            raise SandboxBackstopViolation(
+                f"Refusing to spawn {spec}: an agent-write argv carries "
+                f"{HOST_POSTURE_FULL_ACCESS} without the plugin's Landlock wrapper "
+                f"prefix or the chat's F5 consent. A write profile never runs "
+                f"uncontained unwrapped. Nothing was spawned."
+            )
+        # The grant's scope, not only its presence: the jail and F5 serve the
+        # scopes in WRITE_SCOPES_ON_RUNG alone, so a repo-wide (or unscoped)
+        # write is refused here even if a gate upstream let it through.
+        if wrapped:
+            grant = "the plugin's Landlock jail"
+            scope = getattr(getattr(jail, "request", None), "write_scope", None)
+        else:
+            grant = "the chat's F5 consent"
+            scope = getattr(write_consent, "write_scope", None)
+        if scope not in WRITE_SCOPES_ON_RUNG:
+            raise SandboxBackstopViolation(
+                f"Refusing to spawn {spec}: an agent-write argv carries "
+                f"{HOST_POSTURE_FULL_ACCESS} under {grant} for write scope "
+                f"{scope!r}, which it does not serve (served: "
+                f"{', '.join(WRITE_SCOPES_ON_RUNG)}; repo-wide edits stay "
+                f"refused). Nothing was spawned."
+            )
+
+    home_before = None
+    run_cwds = [os.path.realpath(cwd or os.getcwd())]
+    if context is not None:
+        home_before = landlock_dispatch.home_snapshot(context.codex_home, run_cwds)
+
     start = time.time()
     # `Popen`, not `subprocess.run`: the timeout has to kill the child *with its
     # process group* (D3k rung 2), and `run` neither hands out the pid nor kills
@@ -4511,7 +5601,8 @@ def _spawn_in_context(
     # stdout pipe — so `run`'s leader-only kill leaves them running against a
     # task nobody is reading, and its own post-kill drain is unbounded on
     # Windows: a timed-out task wedges the whole batch instead of failing on
-    # rung 2.
+    # rung 2. On the jail the leader is the wrapper, which `exec`s codex: the
+    # PID and the group recorded here are codex's own.
     try:
         proc = subprocess.Popen(
             argv,
@@ -4530,32 +5621,131 @@ def _spawn_in_context(
         capture.launch_error = str(exc)
         return capture
 
-    # Read the group now, while the child is alive: `os.getpgid` stops answering
-    # the moment the leader is reaped, and the group — the thing that still holds
-    # the tool children — outlives it. `None` on Windows, where `kill_tree` walks
-    # the tree instead.
-    pgid = process_control.process_group_id(proc.pid)
+    if context is not None:
+        with _JAIL_SUMMARY_LOCK:
+            live_before = _JAILED_CHILDREN["live"]
+            started_before = _JAILED_CHILDREN["started"]
+            _JAILED_CHILDREN["live"] += 1
+            _JAILED_CHILDREN["started"] += 1
     try:
-        stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
-        capture.duration = time.time() - start
-        capture.stdout = _decode(stdout)
-        capture.stderr = _decode(stderr)
-        capture.exit_code = proc.returncode
-        return capture
-    except subprocess.TimeoutExpired as exc:
-        _kill_timed_out(proc, pgid)
-        stdout, stderr = _drain_after_kill(proc, exc)
-        capture.duration = time.time() - start
-        capture.timed_out = True
-        capture.stdout = stdout
-        capture.stderr = stderr
-        return capture
-    except OSError as exc:
-        _kill_timed_out(proc, pgid)
-        _drain_after_kill(proc, None)
-        capture.duration = time.time() - start
-        capture.launch_error = str(exc)
-        return capture
+        # Read the group now, while the child is alive: `os.getpgid` stops
+        # answering the moment the leader is reaped, and the group — the thing
+        # that still holds the tool children — outlives it. `None` on Windows,
+        # where `kill_tree` walks the tree instead.
+        pgid = process_control.process_group_id(proc.pid)
+        try:
+            stdout, stderr = proc.communicate(input=stdin_text, timeout=timeout)
+            capture.duration = time.time() - start
+            capture.stdout = _decode(stdout)
+            capture.stderr = _decode(stderr)
+            capture.exit_code = proc.returncode
+        except subprocess.TimeoutExpired as exc:
+            _kill_timed_out(proc, pgid)
+            stdout, stderr = _drain_after_kill(proc, exc)
+            capture.duration = time.time() - start
+            capture.timed_out = True
+            capture.stdout = stdout
+            capture.stderr = stderr
+        except OSError as exc:
+            _kill_timed_out(proc, pgid)
+            _drain_after_kill(proc, None)
+            capture.duration = time.time() - start
+            capture.launch_error = str(exc)
+            return capture
+        except BaseException:
+            # The foreground SIGTERM handler's `SystemExit` (or a Ctrl-C) landing
+            # in the wait: the child runs in a group of its own, so nothing else
+            # reaches it. Stop and reap the group *before* unwinding — the
+            # callers' cleanup removes the jail's TMPDIR and restores the trust
+            # state, which a still-running codex could otherwise write the plan
+            # into or rewrite behind it. Then re-raise, so the signal still ends
+            # the run; a teardown failure never masks it.
+            _kill_timed_out(proc, pgid)
+            try:
+                _drain_after_kill(proc, None)
+            except Exception:  # noqa: BLE001 - the interrupt is what propagates
+                pass
+            raise
+    finally:
+        if context is not None:
+            with _JAIL_SUMMARY_LOCK:
+                _JAILED_CHILDREN["live"] -= 1
+                others = live_before + (
+                    _JAILED_CHILDREN["started"] - started_before - 1
+                )
+    if context is not None and jail is not None:
+        _read_jailed_outcome(
+            capture, jail=jail, context=context, spec=spec, cwd=cwd,
+            home_before=home_before, run_cwds=run_cwds, others=others,
+            profile=profile,
+        )
+    return capture
+
+
+def _read_jailed_outcome(
+    capture: _Capture,
+    *,
+    jail: _JailSpawn,
+    context: JailContext,
+    spec: str,
+    cwd: Optional[str],
+    home_before: Any,
+    run_cwds: Sequence[str],
+    others: int,
+    profile: Optional[str] = None,
+) -> None:
+    """After a jailed child exits, while its context is alive: the jail
+    failure, the stream's denials and the home check (plan F1 item 6,
+    Limits). Only paths, classes and counts are kept on ``capture``.
+
+    The exit code goes in too: the wrapper's own refusal at dispatch (exit
+    125/126 with its ``landlock_exec:`` note — a required entry gone or a
+    symlink since the probe, or Landlock failing after a good ABI query) is
+    a jail failure, and the ``[JAIL_DENIED]`` line it sets rejects the
+    attempt before any output is parsed — never retried, as on the fan-out
+    lane."""
+    evidence = landlock_dispatch.is_jail_failure(
+        capture.stderr, capture.stdout, context, returncode=capture.exit_code,
+    )
+    if evidence is not None:
+        capture.jail_evidence = evidence.to_dict()
+        failed_turn = evidence.where == "event" or capture.exit_code not in (0, None)
+        if (
+            failed_turn
+            and not capture.timed_out
+            and evidence.klass in (
+                landlock_dispatch.JAIL_CLASS_JAIL, landlock_dispatch.JAIL_CLASS_PROBABLE,
+            )
+        ):
+            try:
+                allow = landlock_dispatch.render_allow_list(
+                    landlock_dispatch.allow_entries(context)
+                )
+            except landlock_dispatch.JailRefused:
+                allow = ""
+            capture.jail_denied_line = jail_denied_line(
+                spec=spec, rung=jail.rung, path=evidence.path, excerpt=evidence.line,
+                allow_list=allow, profile=profile,
+                write_scope=jail.request.write_scope,
+            )
+    capture.jail_denials = landlock_dispatch.jail_denied_edits(
+        capture.stdout, context, cwd=cwd,
+    )
+    home_after = landlock_dispatch.home_snapshot(context.codex_home, run_cwds)
+    change = landlock_dispatch.compare_home(home_before, home_after)
+    if change is not None:
+        if change.any:
+            capture.home_change = change.to_dict()
+            _record_jail_line(_home_check_line(spec, jail.rung, change, others))
+        if change.foreign_trust:
+            # Concurrent runs in other repos add their own trust tables (I12):
+            # named in the closing summary only, never a warning per dispatch.
+            _record_jail_line(
+                f"{CODEX_HOME_CHECK_MARKER} trust entries for other paths "
+                f"appeared in $CODEX_HOME/config.toml during this run: "
+                f"{', '.join(landlock_dispatch.render_home(p) for p in change.foreign_trust)}",
+                echo=False,
+            )
 
 
 def _kill_timed_out(proc: Any, pgid: Optional[int]) -> None:
@@ -4637,6 +5827,136 @@ def _context_read_dirs(task: Dict[str, Any], cwd: Optional[str]) -> List[str]:
     return dirs
 
 
+def _missing_write_grant(
+    request: Optional[JailRequest], *, kind: str, scope: str
+) -> Optional[str]:
+    """Why ``request`` is not a complete grant for a ``kind`` write dispatch on
+    the plugin's jail, or ``None`` (plan F1 "A missing grant is refused, never
+    narrowed or widened")."""
+    if request is None:
+        return "no grant was handed to the dispatch"
+    if request.kind != kind:
+        return f"its grant names kind {request.kind!r}, not the task's {kind!r}"
+    if request.write_scope != scope:
+        return (
+            f"its grant's write scope is {request.write_scope!r}, not "
+            f"{scope!r} (the scope of kind {kind!r})"
+        )
+    if not request.target:
+        return f"its {scope} grant names no target"
+    return None
+
+
+def _dispatch_grant(
+    task: Dict[str, Any],
+    *,
+    kind: str,
+    profile: str,
+    runner: str,
+    cwd: Optional[str],
+    provider: Any,
+    jail_request: Optional[JailRequest],
+) -> Tuple[Optional[str], Optional[JailRequest], Optional[str]]:
+    """``(refusal, request, rung id)`` for one dispatch (plan
+    codex-sandbox-unavailable §6 F1 "How a dispatch receives its grant",
+    2026-09-30).
+
+    The rung is the preflight's decision, replayed: for a write kind, the one
+    taken for the kind's own write scope (:data:`WRITE_SCOPE_BY_KIND`, never
+    the task JSON). A read kind gets a request built from ``cwd`` when it has
+    none, and is refused if handed one that carries a scope or a target. A
+    write kind on the jail is refused unless its request is complete for the
+    task. An unmapped write kind is refused outright. Every refusal is rung 7
+    with nothing spawned.
+    """
+    task_id = str(task.get("task_id", ""))
+    if kind in WRITE_KINDS:
+        scope = WRITE_SCOPE_BY_KIND.get(kind)
+        if scope is None:
+            return (
+                f"Task {task_id}: write kind {kind!r} has no write scope "
+                f"(WRITE_SCOPE_BY_KIND), so it is refused rather than given a "
+                f"wider grant. Nothing was dispatched."
+            ), jail_request, None
+        fallback = sandbox_rung(runner, profile, write_scope=scope)
+        wrap = _wrapping_rung(provider, profile, fallback)
+        if wrap is not None:
+            missing = _missing_write_grant(jail_request, kind=kind, scope=scope)
+            if missing is not None:
+                return (
+                    f"Task {task_id}: the plugin's Landlock jail ({wrap.name}) "
+                    f"needs this write dispatch's grant, and {missing}; a "
+                    f"missing grant is refused, never narrowed or widened. "
+                    f"Nothing was dispatched."
+                ), jail_request, fallback
+        return None, jail_request, fallback
+    if jail_request is not None and (
+        jail_request.write_scope or jail_request.target or jail_request.target_dir
+    ):
+        return (
+            f"Task {task_id}: this read-only {kind} dispatch was handed a write "
+            f"grant (scope {jail_request.write_scope!r}); a read kind never "
+            f"carries one. Nothing was dispatched."
+        ), jail_request, None
+    if jail_request is None:
+        jail_request = JailRequest(
+            repo_root=os.path.realpath(cwd or os.getcwd()), kind=kind,
+        )
+    return None, jail_request, sandbox_rung(runner, profile)
+
+
+def _jail_hook_context(
+    capture: Any, request: Optional[JailRequest], fallback: Optional[str],
+) -> Dict[str, Any]:
+    """The keys ``after_result`` and ``changed_files`` gain (plan step 3):
+    the rung the attempt ran on, the stream's denials for a write dispatch on
+    the jail (``landlock_dispatch.JailDenials``; ``None`` otherwise), and the
+    jail evidence (a dict, or ``None``). Paths, kinds and counts only."""
+    denials = getattr(capture, "jail_denials", None)
+    on_jail = getattr(capture, "sandbox_rung", None) is not None
+    return {
+        "sandbox_rung": fallback,
+        "jail_denials": (
+            denials if on_jail and request is not None and request.write_scope
+            else None
+        ),
+        "jail_evidence": getattr(capture, "jail_evidence", None),
+    }
+
+
+def _report_jail_outcome(task_id: str, capture: Any) -> None:
+    """Print what the parent read off a jailed attempt (plan F1 item 6): the
+    ``[JAIL_DENIED]`` line (kept for the closing summary), and — on every
+    dispatch on the rung — the count and first three paths of the command
+    writes the jail stopped, which fail nothing."""
+    line = getattr(capture, "jail_denied_line", None)
+    if line:
+        _record_jail_line(line)
+    denials = getattr(capture, "jail_denials", None)
+    if denials is None:
+        return
+    stray = getattr(denials, "out_of_scope_count", 0) or 0
+    failed = len(getattr(denials, "failed_file_changes", ()) or ())
+    if not stray and not failed:
+        return
+    shown = ", ".join(
+        landlock_dispatch.render_home(p)
+        for p in (getattr(denials, "out_of_scope_paths", ()) or ())[:3]
+    )
+    parts = []
+    if stray:
+        parts.append(
+            f"{stray} command write(s) outside the grant denied"
+            + (f" ({shown})" if shown else "")
+        )
+    if failed:
+        parts.append(f"{failed} failed file_change item(s)")
+    print(
+        f"[exec-subagents] {task_id}: the plugin's Landlock jail stopped "
+        f"{'; '.join(parts)} — stray writes stopped by the jail"
+    )
+
+
 def dispatch_task(
     task: Dict[str, Any],
     *,
@@ -4652,6 +5972,7 @@ def dispatch_task(
     after_result: Optional[Callable[[Dict[str, Any]], None]] = None,
     after_attempt: Optional[Callable[[Attempt], None]] = None,
     changed_files: Optional[Callable[[Dict[str, Any]], Sequence[str]]] = None,
+    jail_request: Optional[JailRequest] = None,
 ) -> TaskOutcome:
     """Dispatch one task and return its :class:`TaskOutcome` (D3k classified).
 
@@ -4719,6 +6040,21 @@ def dispatch_task(
             the unsafe case. None → it stays ``runner_error`` and is retried like
             any other. A hook that raises is read as "could not tell", which
             fails closed the same way as a non-empty answer.
+        jail_request: The grant a dispatch on the plugin's Landlock jail
+            carries (plan codex-sandbox-unavailable §6 F1 "How a dispatch
+            receives its grant", 2026-09-30). A read kind needs none — one is
+            built from ``cwd`` — and is refused (rung 7, nothing spawned) if
+            handed one that carries a write scope or target: a read kind never
+            carries a grant. A write kind on the rung must carry one whose
+            ``kind`` is the task's, whose ``write_scope`` is
+            :data:`WRITE_SCOPE_BY_KIND`'s for it, and which names its target;
+            anything else is refused on rung 7 naming the missing grant, never
+            narrowed or widened. ``after_result`` and ``changed_files`` then
+            see ``sandbox_rung``, ``jail_denials`` (a write dispatch on the
+            rung) and ``jail_evidence``. A jail failure — a codex-internal
+            EACCES the parent classifies as the jail's — is recorded rejected
+            with one ``[JAIL_DENIED]`` line, never retried and never moved to
+            another rung.
     """
     task_id = str(task.get("task_id", ""))
     kind = str(task.get("kind", ""))
@@ -4751,6 +6087,26 @@ def dispatch_task(
             f"invocation, so this fails dispatch"
         )
         return outcome
+    # D6 override (2026-09-17): replay the preflight's decision, never re-take
+    # it here. A read kind reads the id of the rung its argv must render
+    # (landlock rung); a write kind reads the decision taken for its own write
+    # scope (plan step 3, 2026-09-30) — the plugin's jail, the F5 floor, or
+    # none, in which case its argv renders unchanged.
+    grant_refusal, jail_request, fallback = _dispatch_grant(
+        task, kind=kind, profile=profile, runner=runner, cwd=cwd,
+        provider=provider, jail_request=jail_request,
+    )
+    if grant_refusal is not None:
+        outcome.reason = grant_refusal
+        return outcome
+    wrapping = _wrapping_rung(provider, profile, fallback)
+    # The consent carries the kind's own write scope down to the render and the
+    # backstop, which both refuse a scope the jail does not serve.
+    write_consent = (
+        host_write_posture_consent(write_scope=WRITE_SCOPE_BY_KIND.get(kind))
+        if profile == PROFILE_AGENT_WRITE and fallback == SANDBOX_RUNG_UNSANDBOXED
+        else None
+    )
     # §2.2 (validation context by path): a snapshot named by path may sit in a
     # phase dir outside the runner's cwd. A runner that reads anywhere needs
     # nothing; one that can widen its read scope gets the flag for exactly
@@ -4795,7 +6151,11 @@ def dispatch_task(
     # D2d/D3: refuse an over-budget prompt HERE rather than letting llm_client's
     # Windows command-line guard fail it late with PROMPT_TOO_LONG. A stdin/file
     # transport is unbounded, so this only ever fires for an argv-only runner.
-    over_budget = _prompt_over_budget(provider, model, prompt, transport, profile)
+    over_budget = _prompt_over_budget(
+        provider, model, prompt, transport, profile,
+        **({"sandbox_fallback": fallback, "jail_request": jail_request}
+           if wrapping is not None else {}),
+    )
     if over_budget is not None:
         outcome.reason = f"Task {task_id}: {over_budget}"
         return outcome
@@ -4807,11 +6167,6 @@ def dispatch_task(
     effective_timeout = timeout or get_subagent_timeout(provider_name, anchor=anchor)
     budget = retries if retries is not None else get_subagent_retries(anchor=anchor)
     napper = sleep or time.sleep
-    # D6 override (2026-09-17): replay the preflight's decision, never re-take
-    # it here. A rung id is only ever recorded for `agent-readonly`, so a WRITE
-    # kind reads `None` by construction and renders its argv unchanged; a read
-    # kind reads the id of the rung its argv must render (landlock rung).
-    fallback = sandbox_rung(runner, profile)
 
     # §4.2.2's "the caller reads the flag before dispatch", on this lane and once
     # per dispatch — the schema file is read here, not per attempt, and the
@@ -4948,6 +6303,10 @@ def dispatch_task(
                 # Only when there is something to widen, so a stand-in `_spawn`
                 # with the historical keyword set is called as it always was.
                 **({"read_dirs": read_dirs} if read_dirs else {}),
+                # The same rule for the jail's grant and F5's consent: handed
+                # on only to a dispatch on the rung that needs them.
+                **({"jail_request": jail_request} if wrapping is not None else {}),
+                **({"write_consent": write_consent} if write_consent is not None else {}),
             )
         except (
             StructuredOutputUnavailable, structured_output.SchemaConfigError
@@ -4959,8 +6318,28 @@ def dispatch_task(
             # same missing file.
             status, error = STATUS_REJECTED, f"structured output: {exc}"
             break
+        except SandboxBackstopViolation as exc:
+            # Plan step 3's backstop: nothing was spawned. Rung 7, never retried.
+            status, error = STATUS_REJECTED, exc.message
+            _record_unspawned_attempt(outcome, attempt_index, error, after_attempt)
+            break
+        except ValueError as exc:
+            if not fallback:
+                raise
+            # An adapter refusing to render a rung without its grant (the
+            # plugin's jail with no context): nothing was spawned. Rung 7.
+            status, error = STATUS_REJECTED, str(exc)
+            _record_unspawned_attempt(outcome, attempt_index, error, after_attempt)
+            break
         usage = _safe_parse_usage(provider, capture)
-        status, error = _classify_pre_parse(capture)
+        _report_jail_outcome(task_id, capture)
+        denied_line = getattr(capture, "jail_denied_line", None)
+        if denied_line:
+            # A jail failure (plan F1 item 6): not a model error, never
+            # retried, never moved to another rung.
+            status, error = STATUS_REJECTED, denied_line
+        else:
+            status, error = _classify_pre_parse(capture)
 
         if status == STATUS_OK:
             status, error, data, marker = _parse_with_schema_policy(
@@ -5019,6 +6398,7 @@ def dispatch_task(
                             "usage": usage,
                             "duration_seconds": outcome.duration_seconds,
                             "outcome": outcome,
+                            **_jail_hook_context(capture, jail_request, fallback),
                         })
                         if not outcome.ok:
                             return outcome
@@ -5062,9 +6442,23 @@ def dispatch_task(
                                 "attempt": attempt_index,
                                 "cwd": cwd,
                                 "outcome": outcome,
+                                **_jail_hook_context(capture, jail_request, fallback),
                             },
                         )
 
+        evidence = getattr(capture, "jail_evidence", None) or {}
+        if (
+            status != STATUS_OK
+            and not getattr(capture, "jail_denied_line", None)
+            and evidence.get("class") == landlock_dispatch.JAIL_CLASS_ORDINARY
+        ):
+            # An EACCES the parent classified as an ordinary permission error
+            # (inside an allow entry, or unwritable by the user too): the
+            # attempt fails as it always did, and says why it is not the jail.
+            error = (
+                f"{error} (not a jail denial: "
+                f"{evidence.get('reason') or 'ordinary permission error'})"
+            )
         capture_path = _write_failure_capture(
             phase_dir=phase_dir,
             task=task,
@@ -5161,7 +6555,14 @@ def _denied_write_turn(
 
 
 def _prompt_over_budget(
-    provider: Any, model: str, prompt: str, transport: str, profile: str
+    provider: Any,
+    model: str,
+    prompt: str,
+    transport: str,
+    profile: str,
+    *,
+    sandbox_fallback: Optional[str] = None,
+    jail_request: Optional[JailRequest] = None,
 ) -> Optional[str]:
     """Why ``prompt`` cannot travel this runner's argv, or ``None`` (D2d).
 
@@ -5175,6 +6576,13 @@ def _prompt_over_budget(
     metacharacter-bearing prompt is refused here rather than handed to that
     reparse (BatBadBut / CVE-2024-24576 class), mirroring ``llm_client``'s guard
     on the fan-out path.
+
+    On the plugin's Landlock jail (``sandbox_fallback`` a wrapping rung; plan
+    codex-sandbox-unavailable §6 F1 "Dispatch shape" item 4, 2026-09-30) the
+    argv measured is the WRAPPED one — the interpreter, the wrapper, the
+    ``--allow`` entries and the rung's in-CLI atoms — rendered with
+    placeholder paths (``landlock_dispatch.preview_wrap_argv``), creating
+    nothing.
     """
     try:
         from .subagent_tasks import prompt_budget_utf16, utf16_units
@@ -5183,14 +6591,22 @@ def _prompt_over_budget(
 
     if transport in ("stdin", "file"):
         return None
+    wrap = _wrapping_rung(provider, profile, sandbox_fallback)
     try:
         argv = provider.build_agent_command(prompt, model, profile)
+        if wrap is not None and jail_request is not None:
+            argv = provider.apply_sandbox_fallback(
+                argv, profile, wrap.name,
+                context=landlock_dispatch.preview_context(jail_request),
+            )
     except Exception:  # noqa: BLE001 - a budget probe must not mask a refusal
         return None
     try:
         launcher, is_batch_shim = _resolve_executable(argv[0])
     except OSError:  # pragma: no cover - PATH probe failure is not a refusal
         launcher, is_batch_shim = [argv[0]], False
+    if wrap is not None and jail_request is not None:
+        launcher = landlock_dispatch.preview_wrap_argv(launcher, wrap, jail_request)
     if is_batch_shim:
         unsafe = sorted(set(prompt) & _CMD_UNSAFE_CHARS)
         if unsafe:
@@ -5287,6 +6703,33 @@ def _notify_after_attempt(
             f"{attempt.index} ({type(exc).__name__}: {exc})",
             file=sys.stderr,
         )
+
+
+def _record_unspawned_attempt(
+    outcome: TaskOutcome,
+    attempt_index: int,
+    error: str,
+    after_attempt: Optional[Callable[[Attempt], None]],
+) -> None:
+    """Record a rejected attempt that ``before_attempt`` admitted but that
+    spawned nothing (the step-3 backstop, or a rung refused for want of its
+    grant).
+
+    ``before_attempt`` has already written the audit's ``dispatched`` line by
+    then, and the write scheduler's ``_audit_terminal`` closes that line only
+    when ``outcome.attempts`` is non-empty — its early return reads an empty
+    list as "refused before the first ``before_attempt``". Without this row the
+    ``dispatched`` entry would stay open for good, breaking D3l's one line
+    before dispatch, one line after. ``exit_code`` is ``None``: no child ran.
+    """
+    outcome.attempts.append(Attempt(
+        index=attempt_index,
+        status=STATUS_REJECTED,
+        exit_code=None,
+        duration_seconds=0.0,
+        error=error,
+    ))
+    _notify_after_attempt(after_attempt, outcome.attempts[-1])
 
 
 def _accumulate_usage(outcome: TaskOutcome, usage: Optional[Dict[str, Any]]) -> None:
@@ -5785,6 +7228,7 @@ def _preflight_batch_runners(
     profile: str,
     anchor: Optional[str] = None,
     recorded: Optional[Dict[str, str]] = None,
+    jail_request: Optional[JailRequest] = None,
 ) -> Tuple[Dict[str, str], Optional[Dict[str, str]]]:
     """Preflight each DISTINCT runner once; return its versions and any fallback.
 
@@ -5810,6 +7254,10 @@ def _preflight_batch_runners(
     ``resolved`` is mutated in place, so the caller's runner map is the map the
     fallback produced.
 
+    ``jail_request`` (plan codex-sandbox-unavailable step 3, 2026-09-30) is a
+    write batch's grant, handed to every preflight so the sandbox leg decides
+    for that scope; a read batch passes none.
+
     Returns:
         ``({spec: version}, fallback)`` where *fallback* is ``None`` or
         ``{"from", "reason", "to", "layer"}`` — the record
@@ -5831,7 +7279,8 @@ def _preflight_batch_runners(
         spec, (task_id, key, layer) = pending[0]
         try:
             versions[spec] = preflight_runner(
-                spec, profile=profile, anchor=anchor, key=key, layer=layer
+                spec, profile=profile, anchor=anchor, key=key, layer=layer,
+                **({"jail_request": jail_request} if jail_request is not None else {}),
             )["version"]
             continue
         except RunnerRejected as exc:
@@ -6030,6 +7479,10 @@ def run_tasks(
             total=len(selected),
         )
 
+    # Plan codex-sandbox-unavailable §6 F1 item 6 / Limits (2026-09-30): the
+    # `[JAIL_DENIED]` and `[CODEX_HOME_CHECK]` lines this batch prints are
+    # repeated at its close, because a home change outlives the run.
+    jail_lines_before = len(jail_summary_lines())
     outcomes = _run_sync(_gather(
         _dispatch_order(selected),
         runners=runners,
@@ -6069,6 +7522,8 @@ def run_tasks(
     if write_report:
         report.write()
     _mirror_status(phase_dir, report)
+    for line in jail_summary_lines()[jail_lines_before:]:
+        print(f"[exec-subagents] closing summary: {line}")
     return report
 
 
@@ -6933,6 +8388,7 @@ def _preview_argv(
     schema: Optional[Any],
     anchor: Optional[str] = None,
     sandbox_fallback: Optional[str] = None,
+    jail_request: Optional[JailRequest] = None,
 ) -> Tuple[Optional[List[str]], Optional[str]]:
     """The argv a dispatch WOULD render, built the way a dispatch builds it.
 
@@ -6963,13 +8419,29 @@ def _preview_argv(
     ``None``): a dry run's argv has to show the rung a real dispatch would
     render — ``danger-full-access``, or ``read-only`` plus the landlock feature
     — or the preview would be the one artifact that hid it.
+
+    On the plugin's Landlock jail (plan codex-sandbox-unavailable §6 F1,
+    2026-09-30) the preview shows the wrapped shape — the interpreter, the
+    wrapper, the ``--allow`` entries and ``-c developer_instructions=…`` —
+    with placeholder paths, and creates nothing: no scratch directory, no
+    home lookup. ``jail_request`` is the dispatch's grant; a read kind's is
+    built from the process cwd when none is given.
     """
     rung = sandbox_rung_id(sandbox_fallback)
+    wrap = _wrapping_rung(provider, profile, rung)
+    if wrap is not None and jail_request is None:
+        jail_request = JailRequest(repo_root=os.path.realpath(os.getcwd()), kind=profile)
 
     def _render(materialized_schema: Optional[Any]) -> List[str]:
         argv = provider.build_agent_command(
             prompt, model, profile, schema=materialized_schema
         )
+        if wrap is not None and jail_request is not None:
+            argv = provider.apply_sandbox_fallback(
+                argv, profile, rung,
+                context=landlock_dispatch.preview_context(jail_request),
+            )
+            return landlock_dispatch.preview_wrap_argv(argv, wrap, jail_request)
         if rung:
             argv = provider.apply_sandbox_fallback(argv, profile, rung)
         return argv
@@ -7066,8 +8538,13 @@ def dry_run_report(
             except ResultRejected as exc:
                 reason = exc.message
         if reason is None and provider is not None:
+            fallback = sandbox_rung(runner, entry["profile"])
             reason = _prompt_over_budget(
-                provider, model, prompt, transport, entry["profile"]
+                provider, model, prompt, transport, entry["profile"],
+                **({"sandbox_fallback": fallback, "jail_request": JailRequest(
+                    repo_root=os.path.realpath(cwd or os.getcwd()),
+                    kind=entry["kind"],
+                )} if _wrapping_rung(provider, entry["profile"], fallback) else {}),
             )
         if reason is None:
             try:
@@ -7116,10 +8593,15 @@ def dry_run_report(
                 entries.append(entry)
                 continue
         try:
+            fallback = sandbox_rung(runner, entry["profile"])
             argv, refusal = _preview_argv(
                 provider, prompt=prompt, model=model, profile=entry["profile"],
                 schema=schema, anchor=anchor,
-                sandbox_fallback=sandbox_rung(runner, entry["profile"]),
+                sandbox_fallback=fallback,
+                **({"jail_request": JailRequest(
+                    repo_root=os.path.realpath(cwd or os.getcwd()),
+                    kind=entry["kind"],
+                )} if _wrapping_rung(provider, entry["profile"], fallback) else {}),
             )
         except Exception as exc:  # noqa: BLE001 - a preflight must not raise
             entry["would_dispatch"] = False

@@ -61,8 +61,13 @@ The tool starts the orchestrator from a server Codex launches **outside its own 
 sandbox**, so the session's `--sandbox` posture does not govern it: installing this plugin
 gives a Codex session a write path it did not have. So under a read-only posture, or one it
 cannot read, the tool **refuses write-capable modes** before it spawns anything, unless
-`MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is in the environment that starts Codex. Provider
-CLIs the orchestrator dispatches stay under their own sandboxes.
+`MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is in the environment that starts Codex. Despite
+its name, `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` lifts only this tool's own refusal of
+write-capable modes under a read-only or unreadable session posture. It never lets the
+Codex processes the orchestrator starts write without a sandbox, and it does not change
+which sandbox they run under: a Codex editing job refused because Codex's own sandbox
+cannot start on this host stays refused with it set. Provider CLIs the orchestrator
+dispatches stay under their own sandboxes.
 
 **The plugin pre-approves its own tool** (`"default_tools_approval_mode": "approve"` in its `.mcp.json`), so Codex calls it without asking — without that, a headless `codex exec` under a sandbox refuses the call outright. To be asked before every call, set `default_tools_approval_mode = "prompt"` under `[plugins."multi-llm@beastlabai".mcp_servers.multi_llm]` in `$CODEX_HOME/config.toml` (measured on codex 0.156.1: the call then needs approval again).
 

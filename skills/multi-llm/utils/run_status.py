@@ -935,8 +935,47 @@ def _progress_text(progress: Dict[str, Any]) -> str:
         for spec, rung in contained.items():
             by_rung.setdefault(str(rung), []).append(str(spec))
         for rung in sorted(by_rung):
-            parts.append(f"sandbox-fallback {rung} {', '.join(sorted(by_rung[rung]))}")
+            parts.append(
+                f"{_fallback_clause_head(rung)} {rung} {', '.join(sorted(by_rung[rung]))}"
+            )
     return ", ".join(parts) or NO_PROGRESS_RECORDED
+
+
+#: The rung ids of an **incidental** grade (plan codex-sandbox-unavailable-
+#: findings-and-fixes §7, "Step 2 subtask: messaging and markers", item 3;
+#: 2026-09-30). A closed set spelled here — `status` reads recorded data and
+#: imports no provider code — whose slots render as `stray-writes-only <rung>`:
+#: the plugin's Landlock jail stops stray writes, not the model, so the one
+#: word a real OS boundary earns (`sandbox-fallback`) is never its word. The
+#: clause names no phase, so a read-only slot and a write dispatch share it.
+INCIDENTAL_RUNG_IDS = frozenset({"plugin-landlock"})
+
+
+def _fallback_clause_head(rung: str) -> str:
+    """``stray-writes-only`` for an incidental rung, ``sandbox-fallback`` for a
+    contained one (the legacy ``landlock`` renders exactly as before)."""
+    return "stray-writes-only" if rung in INCIDENTAL_RUNG_IDS else "sandbox-fallback"
+
+
+#: A jailed slot's recorded failure reason and the key carrying its denied path
+#: (plan §6 F1 "Where it sits" item 6, "When the jail denies a turn"). The
+#: fan-out records both on the slot's row, so this view says what failed after
+#: the log that printed the `[JAIL_DENIED]` line is gone.
+JAIL_DENIED_REASON = "jail-denied"
+JAIL_DENIED_PATH_KEY = "jail_denied_path"
+
+
+def _entry_error_text(entry: Any) -> Optional[str]:
+    """The one failure text a model row carries: ``denied by the plugin's
+    jail: <path>`` for a ``jail-denied`` row (``path not named`` when codex
+    named none), else the row's own ``error``, else ``None``."""
+    if not isinstance(entry, dict):
+        return None
+    if entry.get("failure_reason") == JAIL_DENIED_REASON:
+        path = entry.get(JAIL_DENIED_PATH_KEY)
+        return f"denied by the plugin's jail: {path or 'path not named'}"
+    error = entry.get("error")
+    return str(error) if error else None
 
 
 #: ``source`` values meaning "this model never dispatched on this run — its
@@ -1090,7 +1129,8 @@ def _model_detail_text(entry: Dict[str, Any]) -> str:
     remaining = entry_stagger_remaining_s(entry)
     if remaining is not None:
         details.append(f"starts in {math.ceil(remaining)}s")
-    error = entry.get("error")
+    # A jailed slot's `jail-denied` row names the denied path (2026-09-30).
+    error = _entry_error_text(entry)
     if error:
         details.append(_one_line(error))
     return ", ".join(details)
@@ -1602,12 +1642,12 @@ def _attach_finished_during_wait(
                 elapsed = None
             if isinstance(elapsed, bool) or not isinstance(elapsed, (int, float)):
                 elapsed = None
-            error = entry.get("error")
+            error = _entry_error_text(entry)
             finished.append({
                 "spec": spec,
                 "state": _model_state_label(entry),
                 "elapsed_s": float(elapsed) if elapsed is not None else None,
-                "error": str(error) if error else None,
+                "error": error,
             })
         if finished:
             view["finished_during_wait"] = finished

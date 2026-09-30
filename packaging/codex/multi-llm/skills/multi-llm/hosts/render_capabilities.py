@@ -411,8 +411,14 @@ _WRITE_POSTURE_FORMS: Dict[str, str] = {
         "have. So under a read-only posture, or one it cannot read, the tool "
         "**refuses write-capable modes** before it spawns anything, unless "
         "`MULTI_LLM_{host_upper}_UNSANDBOXED_WRITES=1` is in the environment "
-        "that starts {host}. Provider CLIs the orchestrator dispatches stay "
-        "under their own sandboxes."
+        "that starts {host}. Despite its name, "
+        "`MULTI_LLM_{host_upper}_UNSANDBOXED_WRITES=1` lifts only this tool's "
+        "own refusal of write-capable modes under a read-only or unreadable "
+        "session posture. It never lets the {host} processes the orchestrator "
+        "starts write without a sandbox, and it does not change which sandbox "
+        "they run under: a {host} editing job refused because {host}'s own "
+        "sandbox cannot start on this host stays refused with it set. Provider "
+        "CLIs the orchestrator dispatches stay under their own sandboxes."
     ),
 }
 

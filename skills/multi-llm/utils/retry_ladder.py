@@ -70,8 +70,11 @@ STATUS_INVALID_MODEL = "invalid_model"
 #: denies it the user namespace it needs. The same string as the classifier's
 #: ``CATEGORY_SANDBOX_UNAVAILABLE`` on D4's reasoning: a property of the
 #: *machine*, not of the turn, so every sibling on that runner fails
-#: identically and the fix (an AppArmor profile, ``multi_llm.py doctor`` prints
-#: it) is never a retry.
+#: identically and a retry never changes it. The ways out are a non-Codex
+#: runner (the refusal leads with it), the plugin's Landlock jail where the
+#: kernel has one, or the system-level AppArmor/sysctl repair ``multi_llm.py
+#: doctor`` prints, which needs sudo (plan codex-sandbox-unavailable §7 step 4,
+#: reworded 2026-09-30: that repair is not "the fix" on a host that forbids it).
 STATUS_SANDBOX_UNAVAILABLE = "sandbox_unavailable"
 #: Not a dispatch outcome: a task with no result file at all (an orphan from a
 #: run killed mid-batch). Defined by artifacts, never by memory (D3i).

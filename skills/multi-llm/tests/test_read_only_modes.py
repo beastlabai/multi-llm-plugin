@@ -47,6 +47,8 @@ from utils.providers.base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
+    JailContext,
+    JailRequest,
 )
 
 PROMPT = "Analyze this plan carefully"
@@ -124,9 +126,19 @@ NEGATIVE_VALUE_TOKENS = frozenset(
 #: both sides — the default argv stays clean of it, the override renders exactly
 #: this rewrite on exactly these profiles, the write profile raises — and pins
 #: this declaration against the adapter's own `SANDBOX_FALLBACK_RUNGS`.
+#:
+#: Since the plugin-landlock rung (plan codex-sandbox-unavailable §6 F1,
+#: 2026-09-30) every row also carries the rung's `wrapper` (the launcher its
+#: dispatch is prefixed with, `None` for a rung rendered wholly inside the CLI
+#: argv) and its `containment` grade (`None`, or `incidental` for the plugin's
+#: jail, which is `contained=False`: it stops stray writes, not the model). And
+#: the write profile has a ladder of its own, declared separately under
+#: `write_profiles` so `profiles` can never quietly grow a third (write)
+#: profile: `agent-write` reaches the plugin's jail and nothing else (step 3).
 DISPATCH_TIME_OVERRIDE = {
     "provider": "codex",
     "profiles": (PROFILE_GENERATE, PROFILE_AGENT_READONLY),
+    "write_profiles": {PROFILE_AGENT_WRITE: ("plugin-landlock",)},
     "rungs": (
         {
             "rung": "landlock",
@@ -135,6 +147,8 @@ DISPATCH_TIME_OVERRIDE = {
             ),
             "token": None,
             "contained": True,
+            "wrapper": None,
+            "containment": None,
             "reason": (
                 "landlock rung (2026-09-22): codex 0.155.1 still ships a second "
                 "Linux sandbox backend that needs no user namespace, so on a "
@@ -151,10 +165,38 @@ DISPATCH_TIME_OVERRIDE = {
             ),
         },
         {
+            "rung": "plugin-landlock",
+            "rewrite": ("--sandbox", "danger-full-access"),
+            "token": "danger-full-access",
+            "contained": False,
+            "wrapper": "landlock_exec",
+            "containment": "incidental",
+            "reason": (
+                "plugin-landlock rung (plan codex-sandbox-unavailable §6 F1, "
+                "2026-09-30): where codex's own sandbox cannot start, the plugin "
+                "launches codex through `utils/landlock_exec.py`, which applies a "
+                "Landlock ruleset to itself and execs codex under "
+                "`danger-full-access` — codex runs none of its own sandbox code "
+                "and the kernel still refuses every content write outside the "
+                "allow-list. The token is the in-CLI value; it is never rendered "
+                "without the wrapper prefix, which `landlock_dispatch.wrap_argv` "
+                "adds after executable resolution. Grade `incidental`: it stops "
+                "stray writes, not a model set on escaping, so `contained` never "
+                "reaches it."
+            ),
+            "retires_when": (
+                "codex's own sandbox starts on the hosts this runs on (the "
+                "standard probe passes, so the ladder is never walked), or codex "
+                "ships a sandbox that needs no user namespace."
+            ),
+        },
+        {
             "rung": "unsandboxed",
             "rewrite": ("--sandbox", "danger-full-access"),
             "token": "danger-full-access",
             "contained": False,
+            "wrapper": None,
+            "containment": None,
             "reason": (
                 "D6 (2026-09-17): on a machine where bubblewrap cannot start, "
                 "codex — the one reviewer that insists on its own OS sandbox — "
@@ -780,26 +822,56 @@ class TestTheOneDispatchTimeOverride:
     exactly the declared profiles, is unreachable from the write profile, is
     absent from every default argv, and is a no-op on every adapter that is not
     the declared one — so the ladder cannot quietly grow a second adapter, a
-    third profile or a third rung without this file changing. Rung 1 gets the
+    third profile or a fourth rung without this file changing. Rung 1 gets the
     one assertion that is its own: it ALWAYS renders `--sandbox read-only`
     beside its feature and never `workspace-write`, because that pairing is the
     exit-101 panic.
+
+    Since 2026-09-30 (plan codex-sandbox-unavailable §6 F1, step 3) the ladder
+    holds the plugin's Landlock jail between the two, and the write profile has
+    one rung of its own — that jail — declared under `write_profiles` rather
+    than by widening `profiles`: every other rung still raises for a write, and
+    the jail renders a write only with its grant.
     """
 
     FEATURE = "features.use_legacy_landlock"
 
     @staticmethod
-    def _override_argv(name, profile, rung, transport="argv"):
+    def _jail_context(profile, write_scope=None):
+        """A rendered-only context for the plugin's jail (plan F1, 2026-09-30):
+        placeholder paths, nothing created. A write profile's carries a
+        plan-file grant, the one shape the rung renders a write with."""
+        request = JailRequest(
+            repo_root="/repo", kind="apply_suggestions" if write_scope else "validation",
+            write_scope=write_scope,
+            target="/repo/plans/plan.md" if write_scope else None,
+        )
+        return JailContext(request=request, tmpdir="/tmp/multi-llm-slot-1-2-x")
+
+    @classmethod
+    def _override_argv(cls, name, profile, rung, transport="argv", *, grant=True):
+        """The argv under ``rung``. On a wrapping rung the declared adapter is
+        handed the attempt's jail context (it raises without one); no other
+        adapter's builder takes the keyword, and none is handed it."""
         provider = _PROVIDERS[name]
+        row = next((r for r in DISPATCH_TIME_OVERRIDE["rungs"] if r["rung"] == rung), None)
+        extra = {}
+        if (
+            grant and row is not None and row["wrapper"]
+            and name == DISPATCH_TIME_OVERRIDE["provider"]
+        ):
+            extra["jail_context"] = cls._jail_context(
+                profile, "plan-file" if profile == PROFILE_AGENT_WRITE else None,
+            )
         if profile == PROFILE_GENERATE:
             argv, _ = provider.build_command_for_transport(
-                PROMPT, _model_for(name), transport, sandbox_fallback=rung
+                PROMPT, _model_for(name), transport, sandbox_fallback=rung, **extra
             )
             return argv
         if profile not in provider.agent_profiles:
             return None
         argv, _ = provider.build_agent_command_for_transport(
-            PROMPT, _model_for(name), profile, transport, sandbox_fallback=rung
+            PROMPT, _model_for(name), profile, transport, sandbox_fallback=rung, **extra
         )
         return argv
 
@@ -813,17 +885,33 @@ class TestTheOneDispatchTimeOverride:
         return any(self.FEATURE in element for element in argv)
 
     def test_the_declaration_carries_every_field_of_a_disposition(self):
-        assert set(DISPATCH_TIME_OVERRIDE) == {"provider", "profiles", "rungs"}
+        assert set(DISPATCH_TIME_OVERRIDE) == {
+            "provider", "profiles", "write_profiles", "rungs",
+        }
         assert set(DISPATCH_TIME_OVERRIDE["profiles"]) == {
             PROFILE_GENERATE, PROFILE_AGENT_READONLY,
         }, "the override may only ever cover the two read-only profiles"
+        # The write profile's ladder is its own entry, exactly this (plan
+        # codex-sandbox-unavailable step 3, 2026-09-30): the plugin's jail, and
+        # nothing else, ever.
+        assert DISPATCH_TIME_OVERRIDE["write_profiles"] == {
+            PROFILE_AGENT_WRITE: ("plugin-landlock",),
+        }
         for row in DISPATCH_TIME_OVERRIDE["rungs"]:
             assert set(row) == {
-                "rung", "rewrite", "token", "contained", "reason", "retires_when",
+                "rung", "rewrite", "token", "contained", "wrapper", "containment",
+                "reason", "retires_when",
             }, row["rung"]
             for key in ("rung", "reason", "retires_when"):
                 assert isinstance(row[key], str) and row[key].strip(), (row["rung"], key)
             assert row["rewrite"][:1] == ("--sandbox",), row["rung"]
+            # A wrapping rung is never `contained`: its grade is its own.
+            if row["wrapper"]:
+                assert row["contained"] is False and row["containment"] == "incidental"
+        # Every rung a write profile may take wraps the CLI.
+        for rungs in DISPATCH_TIME_OVERRIDE["write_profiles"].values():
+            for name in rungs:
+                assert _override_rung(name)["wrapper"], name
 
     def test_only_the_uncontained_rung_owes_a_negative_token(self):
         """The guard has to be able to see the thing it is excusing — and a
@@ -837,11 +925,16 @@ class TestTheOneDispatchTimeOverride:
                 assert negative_tokens_in_argv(list(row["rewrite"])) == [row["token"]]
 
     def test_the_declaration_matches_the_base_class_tuple(self):
-        """One tuple, declared once: the adapters read it, this file pins it."""
+        """One tuple, declared once: the adapters read it, this file pins it.
+        The read-only tuple never grows; the write profile has its own."""
         assert tuple(DISPATCH_TIME_OVERRIDE["profiles"]) == tuple(
             base_module.SANDBOX_FALLBACK_PROFILES
         )
         assert PROFILE_AGENT_WRITE not in base_module.SANDBOX_FALLBACK_PROFILES
+        assert base_module.SANDBOX_WRITE_FALLBACK_PROFILES == (PROFILE_AGENT_WRITE,)
+        assert tuple(DISPATCH_TIME_OVERRIDE["write_profiles"]) == (
+            base_module.SANDBOX_WRITE_FALLBACK_PROFILES
+        )
 
     @pytest.mark.parametrize("profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY])
     def test_the_declaration_matches_the_adapters_ladder(self, profile):
@@ -854,7 +947,13 @@ class TestTheOneDispatchTimeOverride:
             row = _override_rung(rung.name)
             assert tuple(rung.argv_rewrite) == row["rewrite"], rung.name
             assert rung.contained is row["contained"], rung.name
-        assert _PROVIDERS[name].sandbox_fallback_rungs(PROFILE_AGENT_WRITE) == ()
+            assert rung.wrapper == row["wrapper"], rung.name
+            assert rung.containment == row["containment"], rung.name
+        # The write ladder is exactly the declared write entry, not `()`.
+        write = _PROVIDERS[name].sandbox_fallback_rungs(PROFILE_AGENT_WRITE)
+        assert tuple(r.name for r in write) == (
+            DISPATCH_TIME_OVERRIDE["write_profiles"][PROFILE_AGENT_WRITE]
+        )
 
     @pytest.mark.parametrize("transport", ["argv", "stdin"])
     @pytest.mark.parametrize("profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY])
@@ -918,26 +1017,67 @@ class TestTheOneDispatchTimeOverride:
         assert not self._mentions_feature(argv)
         assert codex_module._SANDBOX_BY_PROFILE[PROFILE_GENERATE] == "workspace-write"
 
+    ONLY_WRITE_RUNG = "the only rung a write profile may take is 'plugin-landlock'"
+
     @pytest.mark.parametrize("rung", OVERRIDE_RUNGS)
-    def test_the_write_profile_raises_rather_than_rendering_it(self, rung):
+    def test_the_write_profile_raises_rather_than_rendering_it(self, rung, monkeypatch):
+        """Rewritten 2026-09-30 (plan step 3 §8.2, "Today's ValueError invariant
+        gets an explicit replacement"): parametrized over the adapter's declared
+        rungs, so a rung added later is refused for writes unless it joins the
+        write ladder on purpose. Every rung but the plugin's jail raises the same
+        `ValueError`, naming the jail as the only write rung; the jail raises
+        without a grant and renders only with one."""
+        from utils.providers import codex as codex_module
+
         name = DISPATCH_TIME_OVERRIDE["provider"]
-        with pytest.raises(
-            ValueError, match="never runs the 'agent-write' profile on a sandbox fallback"
-        ):
-            self._override_argv(name, PROFILE_AGENT_WRITE, rung)
-        # And the policy hook answers None for it whatever the config says.
+        allowed = DISPATCH_TIME_OVERRIDE["write_profiles"][PROFILE_AGENT_WRITE]
+        if rung not in allowed:
+            with pytest.raises(ValueError, match=self.ONLY_WRITE_RUNG):
+                self._override_argv(name, PROFILE_AGENT_WRITE, rung)
+        else:
+            with pytest.raises(ValueError, match="agent-write"):
+                self._override_argv(name, PROFILE_AGENT_WRITE, rung, grant=False)
+            argv = self._override_argv(name, PROFILE_AGENT_WRITE, rung)
+            assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+        # The policy hook answers the resolved word only while the step-3 opt-in
+        # is in force, and None without it whatever the config says.
+        assert _PROVIDERS[name].sandbox_fallback_policy(PROFILE_AGENT_WRITE) == "auto"
+        monkeypatch.setattr(codex_module, "WRITE_RUNG_OPT_IN", False)
         assert _PROVIDERS[name].sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
+        with pytest.raises(ValueError, match="agent-write"):
+            self._override_argv(name, PROFILE_AGENT_WRITE, rung)
+
+    @pytest.mark.parametrize("rung", [None, "", "bogus"])
+    def test_the_write_profile_raises_for_no_rung_or_an_unknown_one(self, rung):
+        name = DISPATCH_TIME_OVERRIDE["provider"]
+        provider = _PROVIDERS[name]
+        argv = provider.build_agent_command(PROMPT, _model_for(name), PROFILE_AGENT_WRITE)
+        with pytest.raises(ValueError, match=self.ONLY_WRITE_RUNG):
+            provider.apply_sandbox_fallback(list(argv), PROFILE_AGENT_WRITE, rung)
+
+    @pytest.mark.parametrize("rung", OVERRIDE_RUNGS)
+    def test_the_same_refusal_one_level_down(self, rung):
+        """`_apply_sandbox`'s own refusal, below `apply_sandbox_fallback`."""
+        name = DISPATCH_TIME_OVERRIDE["provider"]
+        provider = _PROVIDERS[name]
+        argv = provider.build_agent_command(PROMPT, _model_for(name), PROFILE_AGENT_WRITE)
+        with pytest.raises(ValueError, match="agent-write"):
+            provider._apply_sandbox(list(argv), PROFILE_AGENT_WRITE, rung=rung)
 
     @pytest.mark.parametrize("rung", OVERRIDE_RUNGS)
     @pytest.mark.parametrize("name", _registered_provider_names())
     def test_no_other_adapter_changes_its_argv_under_a_rung(self, name, rung):
-        """The kwarg is accepted everywhere and acted on in exactly one place."""
+        """The kwarg is accepted everywhere and acted on in exactly one place —
+        for the write profile too (2026-09-30)."""
         if name == DISPATCH_TIME_OVERRIDE["provider"]:
             pytest.skip("the declared adapter — covered above")
         assert self._override_argv(name, PROFILE_GENERATE, rung) == _generate_argv(name)
         readonly = self._override_argv(name, PROFILE_AGENT_READONLY, rung)
         assert readonly == _profile_argv(name, PROFILE_AGENT_READONLY)
+        write = self._override_argv(name, PROFILE_AGENT_WRITE, rung)
+        assert write == _profile_argv(name, PROFILE_AGENT_WRITE)
         assert _PROVIDERS[name].sandbox_fallback_policy(PROFILE_GENERATE) is None
+        assert _PROVIDERS[name].sandbox_fallback_policy(PROFILE_AGENT_WRITE) is None
 
     def test_the_policy_defaults_to_auto_and_reads_a_bare_boolean_as_its_word(
         self, monkeypatch, capsys
