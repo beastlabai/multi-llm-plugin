@@ -2,8 +2,8 @@
 #
 # `uv pip install --require-hashes -r` against this file is the PyPI twin of
 # `npm ci` against package-lock.json: the version is named, and so is every byte
-# behind it. `mistral-vibe` pulls 96 transitive packages, and a bare
-# `pip install mistral-vibe==2.25.5` re-resolves every one of them per build and
+# behind it. `mistral-vibe` pulls 95 transitive packages, and a bare
+# `pip install mistral-vibe==2.25.8` re-resolves every one of them per build and
 # accepts whatever wheel PyPI serves for each today.
 #
 # THE INTERPRETER IS NOT THE BASE IMAGE'S, and that is why the resolution flags
@@ -32,9 +32,9 @@ agent-client-protocol==0.11.0 \
 annotated-types==0.7.0 \
     --hash=sha256:1f02e8b43a8fbbc3f3e0d4f0f4bfc8131bcb4eebe8849b8e5c773f3a1c582a53 \
     --hash=sha256:aff07c09a53a08bc8cfccb9c85b05f1aa9a2a6f23728d790723543408344ce89
-anyio==4.14.1 \
-    --hash=sha256:4e5533c5b8ff0a24f5d7a176cbe6877129cd183893f66b537f8f227d10527d72 \
-    --hash=sha256:8d648a3544c1a700e3ff78615cd679e4c5c3f149904287e73687b2596963629e
+anyio==4.15.1 \
+    --hash=sha256:6152fdbbf9a77fdec97731721bebf7c4c44f7c29b424b0065826173efc7ed101 \
+    --hash=sha256:9f28306018cbd6d329e64a36d58256edff76dd996fe423bc957326e578b82a94
 attrs==26.1.0 \
     --hash=sha256:c647aa4a12dfbad9333ca4e71fe62ddc36f4e63b2d260a37a8b83d2f043ac309 \
     --hash=sha256:d03ceb89cb322a8fd706d4fb91940737b6642aa36998fe130a9bc96c985eff32
@@ -431,18 +431,15 @@ miniaudio==1.71 \
     --hash=sha256:f4a44b70b66628b0c307e40ae0ae857695978cae18462179b806d8edc807d416 \
     --hash=sha256:f7042af3a4db5b90e5efaea257b6dfcff9389239ea643e6b0faa80169528e2e6 \
     --hash=sha256:ff51e2887bb673e2e757752b586b3dc924d59aa5fbcae9bbc45f4a111bd3262b
-mistral-vibe==2.25.5 \
-    --hash=sha256:070a29850246e5e99158ce55ad2c71a547661410ab030bd47db01e74c2da4420 \
-    --hash=sha256:acc73923c0636540f904d6e1327c72c4861674147c5df8b0b6f5ecc21a730c84
+mistral-vibe==2.25.8 \
+    --hash=sha256:22a3eef4015ae16cdd3654be41cd5d1bdeb23a18cc5bf845d0cdf291277ed824 \
+    --hash=sha256:6c21acc2bffdfd1a94c9da6d54db51ee4e2542a60165e46d5727ff06e0a57ae1 \
+    --hash=sha256:9b2a3f9c1078e8cf2bd0a2cd860336b3ad8039894ecf423994588be4545d73ea \
+    --hash=sha256:a73727361c98440d20c376bff69edf92fd18d01c03f81e54e3d47135df2c9f20 \
+    --hash=sha256:d0d004cb834e8e7973378bb779411fe97bb4ed9d7e533c121d64c7fbd2ec3dea
 mistralai==2.6.0 \
     --hash=sha256:4b7202b0cab84ea03f8ff4a933c8cfc615b3057520d9d76467c07aa23939dab2 \
     --hash=sha256:531a86292ad498fc0fcd6dfcd480a3f4db9e92f558e14ffb22172824831e3a6e
-mistralai-vibe-local-harness==0.5.1 \
-    --hash=sha256:0123e73b4d03b1dccda467c7bc12d818a8c30db9196eb7ec4f41a59878db2b2d \
-    --hash=sha256:0b735d8bbd0b81b5e861ae8daa1b194a644afed3e882ebc4803ed0adb48529cc \
-    --hash=sha256:583b7e16e25207baa9c636a4f60ed446e1372fd937953498c0e505de17cbd753 \
-    --hash=sha256:601ddeb1b75310618116d3f5c6305ff720d4f4317b8c0470c8e2bc552bbf1c45 \
-    --hash=sha256:f97887e5cdf33b8fbe9dfa018de0eccb3a61d47358c075f832c5a0238f2f27f2
 more-itertools==11.0.2 \
     --hash=sha256:392a9e1e362cbc106a2457d37cabf9b36e5e12efd4ebff1654630e76597df804 \
     --hash=sha256:6e35b35f818b01f691643c6c611bc0902f2e92b46c18fffa77ae1e7c46e912e4
@@ -953,9 +950,9 @@ six==1.17.0 \
 smmap==5.0.3 \
     --hash=sha256:4d9debb8b99007ae47165abc08670bd74cb74b5227dda7f643eccc4e9eb5642c \
     --hash=sha256:c106e05d5a61449cf6ba9a1e650227ecfb141590d2a98412103ff35d89fc7b2f
-soupsieve==2.8.4 \
-    --hash=sha256:e121fd02e975c695e4e9e8774a5ee35d74714b59307868dcc5319ad2d9e3328e \
-    --hash=sha256:e7e6b0769c8f51ed59acab6e994b00621096cfb1c640a7509295987388fbaf65
+soupsieve==2.9.2 \
+    --hash=sha256:4a55d8cf158a9c2e587fa4922f1bbb91d68ac829e2d6f25403a85747c71daf74 \
+    --hash=sha256:8089a26fd974ca7a1f30276d3d8492ab266ab15af581642dfe8aa162e0c1c823
 sse-starlette==3.4.1 \
     --hash=sha256:6b43cf21f1d574d582a6e1b0cfbde1c94dc86a32a701a7168c99c4475c6bd1d0 \
     --hash=sha256:f780bebcf6c8997fe514e3bd8e8c648d8284976b391c8bed0bcb1f611632b555
@@ -1125,9 +1122,9 @@ tree-sitter-bash==0.25.1 \
 truststore==0.10.4 \
     --hash=sha256:9d91bd436463ad5e4ee4aba766628dd6cd7010cf3e2461756b3303710eebc301 \
     --hash=sha256:adaeaecf1cbb5f4de3b1959b42d41f6fab57b2b1666adb59e89cb0b53361d981
-typing-extensions==4.15.0 \
-    --hash=sha256:0cea48d173cc12fa28ecabc3b837ea3cf6f38c6d1136f85cbaaf598984861466 \
-    --hash=sha256:f0fa19c6845758ab08074a0cfa8b7aecb71c999ca73d62883bc25cc018c4e548
+typing-extensions==4.16.0 \
+    --hash=sha256:481caa481374e813c1b176ada14e97f1f67a4539ce9cfeb3f350d78d6370c2e8 \
+    --hash=sha256:dc983d19a509c94dba722ee6abd33940f7c05a89e243c47e907eb4db6f1a43e5
 typing-inspection==0.4.2 \
     --hash=sha256:4ed1cacbdc298c220f1bd249ed5287caa16f34d44ef4e9c3d0cbad5b521545e7 \
     --hash=sha256:ba561c48a67c5958007083d386c3295464928b01faa735ab8547c5692e87f464
