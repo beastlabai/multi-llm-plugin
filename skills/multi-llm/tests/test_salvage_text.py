@@ -227,6 +227,9 @@ CODEX_LABELS: Dict[str, str] = {
     # a JSON-escaped string inside `item.text`, so salvage could not see it.
     "agentic_reasoning_multi_message.jsonl": "answer",
     "gpt5_sol_single_message.jsonl": "answer",
+    # Plan codex-sandbox-unavailable (2026-09-30): the preflight's stub-driven
+    # `jail_writes` turn inside the plugin-landlock jail, closing on `[]`.
+    "landlock/jail_writes.out.jsonl": "answer",
 }
 
 

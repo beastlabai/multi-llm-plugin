@@ -8,27 +8,36 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
 import time
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Collection, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from . import structured_output
 from . import process_control
+from . import landlock_dispatch as _landlock
 from . import readonly_audit as _readonly_audit_mod
 from .metrics import describe_usage as _describe_usage
 from .provider_registry import parse_model_spec, get_provider, get_provider_timeout
 from .json_extractor import _ANSI_ESCAPE, looks_like_ndjson
 from .providers.base import (
+    JAIL_DENIED_MARKER,
     PROFILE_GENERATE,
     SANDBOX_RUNG_LANDLOCK,
+    SANDBOX_RUNG_PLUGIN_LANDLOCK,
     SANDBOX_RUNG_UNSANDBOXED,
+    SKIP_RUNG_ENV,
+    JailContext,
+    JailRequest,
     ReadOnlyInvocationRefused,
     StructuredOutputUnavailable,
     _matches_marker,
     availability_from_failure,
     build_child_env,
     sandbox_rung_id,
+    version_tuple,
 )
 from .providers.result_envelope import is_clean_envelope
 
@@ -73,11 +82,31 @@ SANDBOX_FALLBACK_WORD_PREFIX = "fallback-"
 #: always was, so a stray string can never read as a sandbox.
 _CONTAINED_RUNG_IDS = frozenset({SANDBOX_RUNG_LANDLOCK})
 
+#: The ``incidental``-grade rung ids a record word may name (plan
+#: codex-sandbox-unavailable §7 "Step 2 subtask" item 3, 2026-09-30): the
+#: plugin's own Landlock jail. A **separate** closed set beside
+#: :data:`_CONTAINED_RUNG_IDS`, which stays ``{landlock}`` so nothing that reads
+#: "contained" widens; without this set ``sandbox_record_word`` would drop the
+#: rung from every per-slot record, ``models_served`` and reaggregate while the
+#: log line said it ran. Recorded as ``fallback-plugin-landlock``; the renderers
+#: keep their own closed set of incidental words (they import no provider code).
+_INCIDENTAL_RUNG_IDS = frozenset({SANDBOX_RUNG_PLUGIN_LANDLOCK})
+
+#: ``details["failure_reason"]`` for a jailed slot that failed on a
+#: codex-internal EACCES the plugin's jail caused (F1 "Where it sits" item 6),
+#: or whose required allow entry vanished before the spawn. Non-retryable and
+#: never moved to another rung.
+FAILURE_JAIL_DENIED = "jail-denied"
+
+#: Where a ``[JAIL_DENIED]`` line sends the reader (F1 item 6, "Next steps").
+JAIL_DENIED_ISSUES_URL = "github.com/beastlabai/multi-llm-plugin/issues"
+
 
 def _attach_sandbox_word(details: Dict[str, Any], sandbox_fallback: Any) -> None:
     """Record the D6 override on ``details["sandbox"]`` for a child that ran.
 
-    ``bypassed`` for the uncontained rung, the rung id for a contained one, and
+    ``bypassed`` for the uncontained rung, the rung id for a contained or
+    incidental one (``plugin-landlock``, 2026-09-30), and
     nothing when the override did not fire. Called on every path where the
     child actually ran — exit 0, a non-zero exit, and a timeout kill — because
     the slot ran without the runner's sandbox whatever it then returned: a
@@ -100,7 +129,9 @@ def sandbox_record_word(value: Any) -> Optional[str]:
     word already recorded (``bypassed``, ``fallback-<rung>``), so the mapping is
     idempotent and every hop — result record, ``models_served``, reaggregate —
     can run it. Only the uncontained rung maps to ``bypassed``; a contained rung
-    maps to ``fallback-<rung>``; anything else is dropped.
+    maps to ``fallback-<rung>``, and so does an incidental one
+    (``fallback-plugin-landlock``, 2026-09-30) — each from its own closed set;
+    anything else is dropped.
     """
     if value in (SANDBOX_BYPASSED, SANDBOX_RUNG_UNSANDBOXED):
         return SANDBOX_BYPASSED
@@ -110,11 +141,19 @@ def sandbox_record_word(value: Any) -> Optional[str]:
         value[len(SANDBOX_FALLBACK_WORD_PREFIX):]
         if value.startswith(SANDBOX_FALLBACK_WORD_PREFIX) else value
     )
-    return SANDBOX_FALLBACK_WORD_PREFIX + rung if rung in _CONTAINED_RUNG_IDS else None
+    if rung in _CONTAINED_RUNG_IDS or rung in _INCIDENTAL_RUNG_IDS:
+        return SANDBOX_FALLBACK_WORD_PREFIX + rung
+    return None
+
+
+def sandbox_word_is_incidental(word: Any) -> bool:
+    """Whether a recorded word (or rung id) names an ``incidental``-grade rung."""
+    return sandbox_fallback_rung_of(word) in _INCIDENTAL_RUNG_IDS
 
 
 def sandbox_fallback_rung_of(word: Any) -> Optional[str]:
-    """The contained rung id a recorded ``fallback-<rung>`` word names, or ``None``."""
+    """The fallback rung id a recorded ``fallback-<rung>`` word names — a
+    contained rung or an incidental one — or ``None``."""
     recorded = sandbox_record_word(word)
     if recorded and recorded.startswith(SANDBOX_FALLBACK_WORD_PREFIX):
         return recorded[len(SANDBOX_FALLBACK_WORD_PREFIX):]
@@ -307,6 +346,17 @@ def provider_dispatch_context(
     (opencode's ``continue_loop_on_deny``, plan T4.2). It is forwarded only when
     the caller has one; ``None`` means "no read on this path".
     """
+    # Plan codex-sandbox-unavailable I12 (2026-09-30): an adapter may also ask
+    # to be told a dispatch is about to start (codex records its trust state
+    # so the run can remove the entries its children add). A separate,
+    # side-effect-only hook — never a context, never a refusal, never argv or
+    # env — so `hermetic_dispatch` stays opencode's alone.
+    note = getattr(provider, "note_dispatch", None)
+    if callable(note):
+        try:
+            note(profile, model, anchor=anchor)
+        except Exception:  # noqa: BLE001 - bookkeeping may never block a dispatch
+            pass
     enter = getattr(provider, "hermetic_dispatch", None)
     if not callable(enter):
         yield DispatchContext()
@@ -862,9 +912,13 @@ def _readonly_audit(
     """The adapter's read-only verdict on this attempt's **full** stdout, compact.
 
     Only for an attempt dispatched on the uncontained rung (``sandbox_fallback``
-    names ``unsandboxed``): that is the one slot the porcelain check brackets
-    and the one verdict anything reads, so a default or contained-rung run adds
-    no key — the same rule the D6 ``sandbox`` provenance key follows.
+    names ``unsandboxed``) or on the plugin's own jail (``plugin-landlock``,
+    2026-09-30): the first is the one slot the porcelain check brackets, the
+    second the one the mode check and the home check bracket, and both read
+    this verdict to decide whether a change seen in the window is downgraded to
+    a not-attributed warning (plan codex-sandbox-unavailable §6 F1, "What it
+    fixes"). A default or contained-rung run adds no key — the same rule the D6
+    ``sandbox`` provenance key follows.
 
     Plan §4.2 option B / 4.2: the audit must see the whole in-memory stream —
     the persisted log and ``stdout_excerpt`` are both cut at
@@ -875,7 +929,9 @@ def _readonly_audit(
     opinion or the hook raised — a missing verdict, which
     ``readonly_audit.combine_audits`` treats as not clean.
     """
-    if sandbox_rung_id(sandbox_fallback) != SANDBOX_RUNG_UNSANDBOXED:
+    if sandbox_rung_id(sandbox_fallback) not in (
+        SANDBOX_RUNG_UNSANDBOXED, *_INCIDENTAL_RUNG_IDS,
+    ):
         return None
     hook = getattr(provider, "audit_readonly_stream", None)
     if hook is None:
@@ -1298,6 +1354,404 @@ def _describe_tree_sweep(expired: BaseException) -> str:
         return ""
 
 
+# ---------------------------------------------------------------------------
+# A fan-out slot on the plugin's Landlock jail (plan
+# codex-sandbox-unavailable-findings-and-fixes §6 F1, 2026-09-30)
+# ---------------------------------------------------------------------------
+#
+# `invoke_with_provider` is the fan-out's spawn site, so it owns the attempt's
+# half of the grant ("How a dispatch receives its grant"): the read-only
+# `JailRequest` built from its own `cwd` (a fan-out slot never carries a write
+# scope), the attempt's scratch `TMPDIR` on its `setup_cleanup` stack (released
+# by the subprocess `finally`, after `_run_provider_cli` swept the child's
+# process groups — never by the lane's coroutine, which `asyncio.to_thread`
+# can cancel under a live child), the context completed from the composed
+# child env, the one `wrap_argv`, the home snapshots around the child, and
+# what is read back afterwards. Only paths, classes and counts travel back on
+# `details`; the context and the snapshots die with the attempt.
+
+
+def _jail_rung(provider: Any, rung_id: Optional[str]) -> Optional[Any]:
+    """The adapter's declared wrapping rung ``rung_id`` for ``generate``, or
+    ``None`` when ``rung_id`` names no wrapping rung of this adapter."""
+    if not rung_id:
+        return None
+    hook = getattr(provider, "sandbox_fallback_rungs", None)
+    if not callable(hook):
+        return None
+    try:
+        rungs = tuple(hook(PROFILE_GENERATE) or ())
+    except Exception:  # noqa: BLE001 - a declaration read never ends a slot
+        return None
+    for rung in rungs:
+        if getattr(rung, "name", None) == rung_id and getattr(rung, "wrapper", None):
+            return rung
+    return None
+
+
+#: Every live fan-out child in this process: token → (provider name, the
+#: tokens of same-provider children whose lifetime overlapped it). What the
+#: ``[CODEX_HOME_CHECK]`` line's "how many other Codex children of this run
+#: were live in the window" is read from — they share one ``$CODEX_HOME``.
+_LIVE_CHILDREN: Dict[int, Tuple[str, set]] = {}
+_LIVE_LOCK = threading.Lock()
+_LIVE_NEXT = [0]
+
+
+@contextlib.contextmanager
+def _live_child(provider_name: str):
+    """Register one child for as long as it runs; yields the (growing) set of
+    same-provider children that overlapped it."""
+    with _LIVE_LOCK:
+        _LIVE_NEXT[0] += 1
+        token = _LIVE_NEXT[0]
+        overlap: set = set()
+        for other, (name, others) in _LIVE_CHILDREN.items():
+            if name == provider_name:
+                others.add(token)
+                overlap.add(other)
+        _LIVE_CHILDREN[token] = (provider_name, overlap)
+    try:
+        yield overlap
+    finally:
+        with _LIVE_LOCK:
+            _LIVE_CHILDREN.pop(token, None)
+
+
+def _cached_cli_version(provider_name: str) -> str:
+    """The CLI version this process already read for ``provider_name`` — the
+    executor's version preflight or the sandbox probe's own read — or ``""``.
+
+    Cache-only on purpose: a ``[JAIL_DENIED]`` line must never spawn a
+    ``--version`` per slot. The fan-out's probe reads codex's version once per
+    process (its ladder declares a ``removed_at`` rung), so on the rung it is
+    normally there.
+    """
+    try:
+        from . import subagent_executor as _executor
+    except Exception:  # noqa: BLE001 - a diagnostic never ends a slot
+        return ""
+    for name in ("_VERSION_CACHE", "_PROBE_VERSION_CACHE"):
+        cache = getattr(_executor, name, None)
+        if isinstance(cache, dict):
+            value = cache.get(provider_name)
+            if value and value != "unknown":
+                return str(value)
+    return ""
+
+
+def _version_newer(installed: str, measured: str) -> bool:
+    match = re.search(r"\d+(?:\.\d+)+", installed or "")
+    if not match or not measured:
+        return False
+    return version_tuple(match.group(0)) > version_tuple(measured)
+
+
+def _render_home_text(text: str) -> str:
+    """``text`` with every ``$HOME/`` prefix shown as ``~/`` (a line pasted
+    into an issue as it is)."""
+    home = os.path.expanduser("~")
+    if not text or not home or home in ("~", os.sep):
+        return text or ""
+    return text.replace(home + os.sep, "~" + os.sep)
+
+
+def jail_denied_notice(
+    provider_name: str,
+    model_spec: str,
+    rung: Any,
+    evidence: Dict[str, Any],
+    allow_list: str,
+    installed: str,
+) -> str:
+    """The one ``[JAIL_DENIED]`` line for a slot the plugin's jail failed
+    (F1 "Where it sits" item 6, "What prints").
+
+    The runner and spec, the rung, the denied path or "path not named", the
+    excerpt, the allow-list, the installed and measured-through versions —
+    with "the likely cause" when codex is newer — and the next steps. ``$HOME``
+    renders as ``~`` throughout.
+    """
+    rung_name = getattr(rung, "name", SANDBOX_RUNG_PLUGIN_LANDLOCK)
+    measured = (getattr(rung, "measured_through", None) or ("",))[0] or "unknown"
+    path = evidence.get("path")
+    where = evidence.get("where") or "stderr"
+    # The quoted line is codex's raw stderr or error event, and this notice
+    # reaches stdout, the detached run log and the closing summary: redacted
+    # first, as `describe_failure`'s text is, then `$HOME` rendered as `~`.
+    said = _render_home_text(" ".join(_redact(str(evidence.get("line") or "")).split()))
+    if path:
+        denied = _landlock.render_home(path)
+    elif evidence.get("class") == _landlock.JAIL_CLASS_PROBABLE:
+        denied = "path not named (Codex did not name the path; a probable jail denial)"
+    else:
+        denied = "path not named"
+    versions = f"{provider_name} installed {installed or 'unknown'}, jail measured through {measured}"
+    if _version_newer(installed, measured):
+        versions += (
+            f"; {provider_name.capitalize()} is newer than the jail was measured "
+            f"with, the likely cause"
+        )
+    return (
+        f"{JAIL_DENIED_MARKER} {provider_name} ({model_spec}): the plugin's "
+        f"Landlock jail (fallback rung {rung_name!r}) denied a write "
+        f"{provider_name} itself needed, so the turn failed: {denied}; "
+        f"{where}: \"{said}\"; allow list: {allow_list or '(unavailable)'}; "
+        f"{versions}; next steps: (1) compare with `multi_llm.py doctor` (its "
+        f"{rung_name} row lists the allow-list, both versions and the switch); "
+        f"(2) report it at {JAIL_DENIED_ISSUES_URL} with this line and that row "
+        f"(the allow-list is not configurable); (3) to run the job anyway, set "
+        f"this key to a runner that is not Codex (for example "
+        f"claude-code:<model>) in .multi-llm/providers.yaml, or for one run set "
+        f"{SKIP_RUNG_ENV}={rung_name}"
+    )
+
+
+def _toml_tree(text: Optional[str]) -> Optional[Dict[str, Any]]:
+    if text is None:
+        return None
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:  # pragma: no cover - 3.10 keeps compare_home's names
+        return None
+    try:
+        return tomllib.loads(text)
+    except Exception:  # noqa: BLE001 - an unparsable file keeps the coarse names
+        return None
+
+
+def _leaf_tables(value: Any, prefix: str) -> List[str]:
+    """The dotted names an added or removed value spans: a table of tables is
+    named per sub-table (``mcp_servers.x``), a table holding keys by itself."""
+    if isinstance(value, dict) and value and all(isinstance(v, dict) for v in value.values()):
+        names: List[str] = []
+        for key in sorted(value):
+            names.extend(_leaf_tables(value[key], f"{prefix}.{key}"))
+        return names
+    return [prefix]
+
+
+def _diff_names(before: Any, after: Any, prefix: str = "") -> List[str]:
+    names: List[str] = []
+    if isinstance(before, dict) and isinstance(after, dict):
+        for key in sorted(set(before) | set(after)):
+            dotted = f"{prefix}{key}"
+            if key not in before:
+                names.extend(_leaf_tables(after[key], dotted))
+            elif key not in after:
+                names.extend(_leaf_tables(before[key], dotted))
+            elif before[key] != after[key]:
+                if isinstance(before[key], dict) and isinstance(after[key], dict):
+                    names.extend(_diff_names(before[key], after[key], dotted + "."))
+                else:
+                    names.append(dotted)
+    elif before != after:
+        names.append(prefix.rstrip(".") or "(file)")
+    return names
+
+
+def _config_key_names(before_text: Optional[str], after_text: Optional[str]) -> List[str]:
+    """The table or key names that changed in ``config.toml`` — never a value —
+    naming an added table of tables by its sub-tables (``mcp_servers.x``
+    rather than just ``mcp_servers``), so the ``[CODEX_HOME_CHECK]`` line says
+    which server a slot added. ``[]`` when either side cannot be parsed
+    (``compare_home``'s own names are kept then)."""
+    before, after = _toml_tree(before_text), _toml_tree(after_text)
+    if before is None or after is None:
+        return []
+    return _diff_names(before, after)
+
+
+@dataclass
+class _JailedAttempt:
+    """One attempt on the plugin's jail, alive only inside
+    :func:`invoke_with_provider` — never stored anywhere else."""
+
+    rung: Any
+    request: JailRequest
+    tmpdir: str
+    cwd: str
+    context: Optional[JailContext] = None
+    home_before: Any = None
+    live: set = field(default_factory=set)
+
+    def allow_list(self) -> str:
+        if self.context is None:
+            return ""
+        try:
+            return _landlock.render_allow_list(_landlock.allow_entries(self.context))
+        except Exception:  # noqa: BLE001 - a diagnostic never ends a slot
+            return ""
+
+
+def _jail_refused_result(
+    provider_name: str, model: str, rung: Any, message: str,
+    *, path: Optional[str], reason: str, failure_reason: str,
+) -> Dict[str, Any]:
+    """A slot the jail could not be granted for: nothing was spawned."""
+    evidence = {
+        "where": "spawn", "line": message[:300], "path": path,
+        "class": _landlock.JAIL_CLASS_JAIL, "reason": reason,
+    }
+    details: Dict[str, Any] = {
+        "provider": provider_name,
+        "model": model,
+        "failure_reason": failure_reason,
+        "retryable": False,
+    }
+    if failure_reason == FAILURE_JAIL_DENIED:
+        evidence["notice"] = jail_denied_notice(
+            provider_name, f"{provider_name}:{model}", rung, evidence, "",
+            _cached_cli_version(provider_name),
+        )
+        evidence["rung"] = getattr(rung, "name", None)
+        details["jail_failure"] = evidence
+        error = (
+            f"{provider_name} was not started: denied by the plugin's jail: "
+            f"{_landlock.render_home(path) or 'path not named'} ({message})"
+        )
+    else:
+        error = f"{provider_name} was not started: {message}"
+    return {
+        "success": False,
+        "error": error,
+        "error_code": ERROR_SUBPROCESS_FAILED,
+        "details": details,
+    }
+
+
+def _turn_failed(stdout: Optional[str]) -> bool:
+    """Whether the stream holds a top-level ``turn.failed`` event."""
+    for raw in (stdout or "").splitlines():
+        raw = raw.strip()
+        if not raw.startswith("{") or "turn.failed" not in raw:
+            continue
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(event, dict) and event.get("type") == "turn.failed":
+            return True
+    return False
+
+
+def _exit0_left_no_answer(hook_text: Optional[str], stdout: Optional[str]) -> bool:
+    """Whether a jailed child that exited 0 left no finished answer — the only
+    exit 0 a jail failure is read on.
+
+    The parse verdict is not that question: codex's ``parse_output`` succeeds
+    only when it finds JSON, so a finished prose ``ask`` answer, or a review
+    whose JSON failed to parse for another reason, reads as failed. The answer
+    is the adapter's own final answer text (``hook_text``, the
+    :func:`_salvage_hook_text` reading — codex's last ``agent_message``), and a
+    ``turn.failed`` event means the turn never finished, whatever narration
+    came before it.
+    """
+    answered = isinstance(hook_text, str) and bool(hook_text.strip())
+    return not answered or _turn_failed(stdout)
+
+
+def _jail_after_child(
+    details: Dict[str, Any],
+    jail: Optional[_JailedAttempt],
+    *,
+    provider_name: str,
+    model: str,
+    stdout: str,
+    stderr: str,
+    returncode: Optional[int],
+    failed: bool,
+    timed_out: bool = False,
+) -> Tuple[Optional[str], str]:
+    """What the parent reads back after a jailed child exited or was killed,
+    while the context is still alive (F1 order step 8).
+
+    Always: the home check (``details["home_check"]``, only when the home's
+    security-relevant set changed or a foreign trust table appeared) and the
+    denials inside the model's own commands (``details["jail_denials"]``, for
+    the slot's log line — never a failure). On a failed attempt: the jail
+    failure. Returns ``(error, suffix)``: ``error`` replaces the failure
+    message for a jail or probable jail denial (``failure_reason:
+    jail-denied``, non-retryable, ``details["jail_failure"]`` with the
+    ``[JAIL_DENIED]`` line under ``notice``); ``suffix`` is the "not a jail
+    denial: <reason>" note for an ordinary permission error.
+
+    A child killed at its deadline (``timed_out``) is a timeout and nothing
+    else, as on the executor lane: an EACCES it printed before the kill never
+    turns it into a never-retried jail denial.
+    """
+    if jail is None or jail.context is None:
+        return None, ""
+    context = jail.context
+    try:
+        after = _landlock.home_snapshot(context.codex_home, [jail.cwd])
+        change = _landlock.compare_home(jail.home_before, after)
+    except Exception:  # noqa: BLE001 - a check never ends a slot
+        change = None
+    if change is not None and (change.changed or change.foreign_trust):
+        record = change.to_dict()
+        if _landlock.HOME_CONFIG in change.changed:
+            names = _config_key_names(
+                getattr(jail.home_before, "config_text", None),
+                getattr(after, "config_text", None),
+            )
+            if names:
+                record["config_keys"] = names
+        record["home"] = _landlock.render_home(context.codex_home)
+        record["other_live_children"] = len(jail.live)
+        details["home_check"] = record
+    try:
+        denials = _landlock.jail_denied_edits(stdout or "", context, cwd=jail.cwd)
+        record = denials.to_dict()
+        record["total"] = denials.total
+        named: List[str] = []
+        for group in denials.failed_file_changes:
+            named.extend(group)
+        named.extend(denials.out_of_scope_paths)
+        record["paths"] = [p for i, p in enumerate(named) if p not in named[:i]][:3]
+        details["jail_denials"] = record
+    except Exception:  # noqa: BLE001 - a count never ends a slot
+        pass
+    if not failed or timed_out:
+        return None, ""
+    # The wrapper's own refusal at dispatch (exit 125/126 with its note) is
+    # read first, the same helper the executor lane uses: a jail failure,
+    # never a model error, never retried on another rung.
+    evidence = _landlock.wrapper_evidence(returncode, stderr or "")
+    if evidence is None:
+        try:
+            evidence = _landlock.is_jail_failure(stderr or "", stdout or "", context)
+        except Exception:  # noqa: BLE001 - a diagnostic never ends a slot
+            evidence = None
+    if evidence is None:
+        return None, ""
+    if evidence.klass == _landlock.JAIL_CLASS_ORDINARY:
+        return None, f"; not a jail denial: {evidence.reason}"
+    record = evidence.to_dict()
+    installed = _cached_cli_version(provider_name)
+    allow = jail.allow_list()
+    record.update({
+        "rung": getattr(jail.rung, "name", None),
+        "installed_version": installed,
+        "measured_through": (getattr(jail.rung, "measured_through", None) or ("",))[0],
+        "allow_list": allow,
+        "notice": jail_denied_notice(
+            provider_name, f"{provider_name}:{model}", jail.rung,
+            evidence.to_dict(), allow, installed,
+        ),
+    })
+    details["jail_failure"] = record
+    details["failure_reason"] = FAILURE_JAIL_DENIED
+    details["retryable"] = False
+    where = _landlock.render_home(evidence.path) if evidence.path else "path not named"
+    return (
+        f"denied by the plugin's jail: {where} (fallback rung "
+        f"{getattr(jail.rung, 'name', '?')!r}; the jail-denied line in this "
+        f"run's log names the allow-list, the versions and the next steps)",
+        "",
+    )
+
+
 def invoke_with_provider(
     prompt: str,
     model_spec: str,
@@ -1399,6 +1853,29 @@ def invoke_with_provider(
             contained one — so the provenance rides the same dict
             ``served_model`` does. The default renders every argv
             byte-for-byte as before and adds no key.
+
+            **The plugin's own jail** (``plugin-landlock``, plan
+            codex-sandbox-unavailable-findings-and-fixes §6 F1, 2026-09-30):
+            this function is the fan-out's spawn site, so it builds the
+            read-only ``JailRequest`` from ``cwd``, owns the attempt's scratch
+            ``TMPDIR`` (``slot_tmpdir`` on ``setup_cleanup``, released by the
+            subprocess ``finally`` after the child's groups were swept),
+            renders with the ``JailContext``, completes it from the composed
+            env and wraps the resolved argv (``landlock_dispatch.wrap_argv``).
+            It then reads back, on every outcome that ran a child:
+            ``details["home_check"]`` (only when ``$CODEX_HOME``'s
+            security-relevant set changed or a foreign trust table appeared:
+            ``changed``, ``config_keys``, ``foreign_trust``, ``home``,
+            ``other_live_children``), ``details["jail_denials"]`` (the denials
+            inside the model's own commands: ``JailDenials.to_dict()`` plus
+            ``total`` and the first three ``paths``) and, on a failed attempt
+            the jail caused, ``details["jail_failure"]`` (``JailEvidence``'s
+            keys plus ``rung``, ``installed_version``, ``measured_through``,
+            ``allow_list`` and the ``[JAIL_DENIED]`` line under ``notice``)
+            with ``failure_reason: "jail-denied"`` and ``retryable: False``.
+            A home it cannot grant is the same jail failure with nothing
+            spawned; a scratch directory it cannot make is
+            ``failure_reason: "jail-setup-failed"``, also non-retryable.
         want_answer_text: The ask lane's request for the model's **whole**
             answer text (plans/ask-answer-recovery-and-false-success.md D2.2).
             When True, every exit that ran the child — success, exit-0 parse
@@ -1538,6 +2015,47 @@ def invoke_with_provider(
                     },
                 }
 
+        # Plan codex-sandbox-unavailable §6 F1 (2026-09-30): a slot on a
+        # wrapping rung (the plugin's own Landlock jail) gets its grant here,
+        # at the spawn site, once per attempt — order steps 1-2 of "How a
+        # dispatch receives its grant". The read-only request comes from this
+        # function's own `cwd` (a fan-out slot never carries a write scope),
+        # and the attempt's scratch directory rides `setup_cleanup`, so a
+        # return before the spawn removes it here and a spawned child's is
+        # removed by the subprocess `finally`, after `_run_provider_cli` swept
+        # the child's process groups. A slot on the rung with no declared
+        # wrapping rung is refused rather than rendered with the bare atoms.
+        jail: Optional[_JailedAttempt] = None
+        rung_id = sandbox_rung_id(sandbox_fallback)
+        if rung_id in _INCIDENTAL_RUNG_IDS:
+            jail_rung = _jail_rung(provider, rung_id)
+            if jail_rung is None:
+                return _jail_refused_result(
+                    provider_name, model, None,
+                    f"{provider_name} declares no wrapping rung {rung_id!r} for "
+                    f"this phase; the plugin's Landlock jail cannot be applied",
+                    path=None, reason="no-rung", failure_reason="jail-setup-failed",
+                )
+            repo_root = os.path.realpath(cwd or os.getcwd())
+            request = JailRequest(repo_root=repo_root, kind=PROFILE_GENERATE)
+            try:
+                tmpdir = setup_cleanup.enter_context(_landlock.slot_tmpdir(repo_root))
+            except _landlock.JailRefused as exc:
+                return _jail_refused_result(
+                    provider_name, model, jail_rung, exc.message,
+                    path=exc.path, reason=exc.reason,
+                    failure_reason="jail-setup-failed",
+                )
+            except OSError as exc:
+                return _jail_refused_result(
+                    provider_name, model, jail_rung,
+                    f"could not make the jailed attempt's scratch directory: {exc}",
+                    path=None, reason="tmpdir", failure_reason="jail-setup-failed",
+                )
+            jail = _JailedAttempt(
+                rung=jail_rung, request=request, tmpdir=tmpdir, cwd=repo_root,
+            )
+
         # `timeout_s=effective_timeout` is L5's one call site (§9.6.b): the number is
         # already resolved here, so an adapter with an internal cutoff of its own
         # (agy's `--print-timeout`) can hold it under the deadline this same call
@@ -1555,9 +2073,15 @@ def invoke_with_provider(
             # process's", which is what the adapter falls back to; the base
             # composition ignores the keyword entirely, so seventeen adapters
             # render argv byte-for-byte.
+            # `jail_context` only when set: the eight adapters that override
+            # this builder without the keyword are called exactly as before.
             cmd, stdin_text = provider.build_command_for_transport(
                 prompt, model, transport, timeout_s=effective_timeout, schema=schema,
                 sandbox_fallback=sandbox_fallback, cwd=cwd,
+                **(
+                    {"jail_context": JailContext(jail.request, jail.tmpdir)}
+                    if jail is not None else {}
+                ),
             )
         except (StructuredOutputUnavailable, ReadOnlyInvocationRefused) as exc:
             # §4.2.1's sixth case: fails BEFORE spawn, so no partial argv reaches
@@ -1621,6 +2145,30 @@ def invoke_with_provider(
         # Lane A passes no host guards: a fan-out slot is a child of this process,
         # not of the host's shell tool, so only the adapter's own list applies.
         env = build_child_env(provider, provider_env=provider_env, anchor=anchor)
+        if jail is not None:
+            # F1 order steps 5-6: complete the context with `$CODEX_HOME` as
+            # the child will see it (read from the env just composed — `None`
+            # there means "inherits this process's"), then the one wrap. A
+            # missing or in-repo home is a jail failure naming the path, with
+            # nothing spawned and no retry on another rung.
+            child_view = env if env is not None else dict(os.environ)
+            try:
+                jail.context = _landlock.complete_context(
+                    jail.request, jail.tmpdir, child_view
+                )
+                cmd, env = _landlock.wrap_argv(cmd, jail.rung, jail.context, child_view)
+            except _landlock.JailRefused as exc:
+                return _jail_refused_result(
+                    provider_name, model, jail.rung, exc.message,
+                    path=exc.path, reason=exc.reason,
+                    failure_reason=FAILURE_JAIL_DENIED,
+                )
+            try:
+                jail.home_before = _landlock.home_snapshot(
+                    jail.context.codex_home, [jail.cwd]
+                )
+            except Exception:  # noqa: BLE001 - a check never ends a slot
+                jail.home_before = None
         # Setup survived: transfer the entered contexts out of the setup
         # stack so leaving this `with` releases nothing, and the subprocess
         # `finally` below owns them for the rest of the dispatch.
@@ -1631,34 +2179,40 @@ def invoke_with_provider(
         # on the deadline, a Ctrl-C or an abort the CLI is SIGTERMed first and
         # every process group it spawned is swept, instead of `run`'s bare
         # SIGKILL of the CLI alone (D3.3; see `_run_provider_cli`).
-        result = _run_provider_cli(
-            cmd,
-            capture_output=True,
-            text=True,
-            # Provider output is not under our control: errors="replace" is
-            # lossy for non-UTF-8 bytes but guarantees a total decode — the
-            # standard choice for LLM/tool output. surrogateescape rejected
-            # (lone surrogates raise on downstream UTF-8 re-encode);
-            # backslashreplace rejected (noisier in model-visible output).
-            encoding="utf-8",
-            errors="replace",
-            timeout=effective_timeout,
-            env=env,
-            cwd=cwd,
-            # Under the argv transport the one provider that reads stdin is
-            # aider, which reads its decline supply there (D4.2: `s` answers to
-            # the "Add file to the chat?" prompts, handed back as `stdin_text`
-            # and closed at EOF once written). For every other one, closing it
-            # prevents CLIs that poll stdin for piped input (e.g. agy) from
-            # blocking forever when the orchestrator's stdin is a non-EOF pipe.
-            # Under the stdin transport the prompt IS the child's stdin, and it
-            # is closed at EOF once written, which those CLIs treat the same way.
-            **(
-                {"input": stdin_text}
-                if stdin_text is not None
-                else {"stdin": subprocess.DEVNULL}
-            ),
-        )
+        # Registered for exactly as long as the child runs, so a jailed slot's
+        # `[CODEX_HOME_CHECK]` line can say how many other children of this
+        # provider shared its window (F1 Limits, 2026-09-30).
+        with _live_child(provider_name) as live_overlap:
+            if jail is not None:
+                jail.live = live_overlap
+            result = _run_provider_cli(
+                cmd,
+                capture_output=True,
+                text=True,
+                # Provider output is not under our control: errors="replace" is
+                # lossy for non-UTF-8 bytes but guarantees a total decode — the
+                # standard choice for LLM/tool output. surrogateescape rejected
+                # (lone surrogates raise on downstream UTF-8 re-encode);
+                # backslashreplace rejected (noisier in model-visible output).
+                encoding="utf-8",
+                errors="replace",
+                timeout=effective_timeout,
+                env=env,
+                cwd=cwd,
+                # Under the argv transport the one provider that reads stdin is
+                # aider, which reads its decline supply there (D4.2: `s` answers to
+                # the "Add file to the chat?" prompts, handed back as `stdin_text`
+                # and closed at EOF once written). For every other one, closing it
+                # prevents CLIs that poll stdin for piped input (e.g. agy) from
+                # blocking forever when the orchestrator's stdin is a non-EOF pipe.
+                # Under the stdin transport the prompt IS the child's stdin, and it
+                # is closed at EOF once written, which those CLIs treat the same way.
+                **(
+                    {"input": stdin_text}
+                    if stdin_text is not None
+                    else {"stdin": subprocess.DEVNULL}
+                ),
+            )
         duration = time.time() - start_time
 
         if result.returncode != 0:
@@ -1687,6 +2241,24 @@ def invoke_with_provider(
             )
             if unavailable is not None:
                 error_message = f"{error_message} [{unavailable.value}]"
+
+            # F1 item 6 (2026-09-30): a jailed child that died on a
+            # codex-internal EACCES the jail caused is a jail failure, never a
+            # model error; an ordinary permission error keeps today's message
+            # plus the reason it is not a jail denial. Read while the context
+            # is alive, with the home check and the in-stream denial count.
+            jail_details: Dict[str, Any] = {}
+            jail_error, jail_note = _jail_after_child(
+                jail_details, jail, provider_name=provider_name, model=model,
+                stdout=result.stdout, stderr=result.stderr,
+                returncode=result.returncode, failed=True,
+            )
+            if jail_error:
+                error_message = (
+                    f"{provider_name} exited with code {result.returncode}: {jail_error}"
+                )
+            elif jail_note:
+                error_message = f"{error_message}{jail_note}"
 
             # Plan §4.2: the read-only audit sees the FULL stream, here, before
             # the excerpt below bounds it — a failed attempt of a bypassed slot
@@ -1741,6 +2313,7 @@ def invoke_with_provider(
                 details[_READONLY_AUDIT_KEY] = audit
             # The child ran, so the D6 provenance rides a failure too.
             _attach_sandbox_word(details, sandbox_fallback)
+            details.update(jail_details)
             _attach_stdout_excerpt(details, result.stdout)
             # One hook reading for both keys (D2.2): each cuts its own copy.
             hook_text = _salvage_hook_text(provider, result.stdout)
@@ -1773,7 +2346,10 @@ def invoke_with_provider(
                     phase=schema_phase,
                     model=f"{provider_name}:{model}",
                 )
-                if verdict.failure_reason:
+                if (
+                    verdict.failure_reason
+                    and details.get("failure_reason") != FAILURE_JAIL_DENIED
+                ):
                     details["failure_reason"] = verdict.failure_reason
                     details["retryable"] = verdict.retryable
                 if verdict.warning:
@@ -1890,6 +2466,36 @@ def invoke_with_provider(
         if not parsed.get("success", False) and "error_code" not in parsed:
             parsed["error_code"] = ERROR_PARSE_ERROR
 
+        # F1 (2026-09-30): the jailed slot's read-back on an exit 0 too — the
+        # home check and the in-stream denial count always; a jail failure
+        # only when the run produced no answer (a `turn.failed` on a
+        # codex-internal EACCES can still exit 0). Such a failure is a hard
+        # one (`SUBPROCESS_FAILED`), so `invoke_with_file_output` returns it as
+        # it is instead of re-labelling it a parse failure of both channels.
+        # "No answer" is `_exit0_left_no_answer`'s reading, not the parse
+        # verdict: codex's `parse_output` succeeds only on JSON, so a finished
+        # prose answer would otherwise be rewritten as jail-denied by any
+        # EACCES-looking line on codex's stderr or in an `error` event.
+        hook_text: Any = _HOOK_UNREAD
+        if jail is not None:
+            parsed_details = parsed.setdefault("details", {})
+            jail_failed = not parsed.get("success", False)
+            if jail_failed:
+                hook_text = _salvage_hook_text(provider, result.stdout)
+                jail_failed = _exit0_left_no_answer(hook_text, result.stdout)
+            jail_error, jail_note = _jail_after_child(
+                parsed_details, jail, provider_name=provider_name, model=model,
+                stdout=result.stdout, stderr=result.stderr,
+                returncode=result.returncode,
+                failed=jail_failed,
+            )
+            if jail_error:
+                parsed["success"] = False
+                parsed["error"] = f"{provider_name}: {jail_error}"
+                parsed["error_code"] = ERROR_SUBPROCESS_FAILED
+            elif jail_note and parsed.get("error"):
+                parsed["error"] = f"{parsed['error']}{jail_note}"
+
         # WHAT THE MODEL ACTUALLY SAID, kept on the failure. A parse failure is
         # the one class where the error message describes our disappointment
         # rather than the event: "JSON parsing failed from both file and stdout"
@@ -1902,11 +2508,12 @@ def invoke_with_provider(
         # `stdout_excerpt` sites; `_attach_stdout_excerpt` now spells the rule for
         # all of them, and the two hard-failure returns above and below join it,
         # so `details.get("stdout_excerpt")` means the same thing whichever way
-        # the run was lost.
-        hook_text = _HOOK_UNREAD
+        # the run was lost. The jail read-back above may already have taken the
+        # hook's one reading; it is reused, never taken twice.
         if not parsed.get("success", False):
             _attach_stdout_excerpt(parsed.setdefault("details", {}), result.stdout)
-            hook_text = _salvage_hook_text(provider, result.stdout)
+            if hook_text is _HOOK_UNREAD:
+                hook_text = _salvage_hook_text(provider, result.stdout)
             _attach_salvage_text(
                 parsed["details"], provider, result.stdout, hook_text=hook_text
             )
@@ -1978,6 +2585,22 @@ def invoke_with_provider(
         # out not clean (an incomplete stream is "could have written").
         audit = _readonly_audit(provider, stdout, sandbox_fallback)
 
+        # F1 (2026-09-30): a jailed child killed at the deadline is read back
+        # like any other — the home check and the in-stream denials — but it
+        # stays a timeout, as on the executor lane: an EACCES on codex's own
+        # channels before the kill never makes it a never-retried jail denial.
+        jail_details: Dict[str, Any] = {}
+        jail_error, jail_note = _jail_after_child(
+            jail_details, jail, provider_name=provider_name, model=model,
+            stdout=stdout, stderr=stderr, returncode=None, failed=True,
+            timed_out=True,
+        )
+        timeout_error = f"{provider_name} timed out after {effective_timeout}s"
+        if jail_error:
+            timeout_error = f"{timeout_error}: {jail_error}"
+        elif jail_note:
+            timeout_error = f"{timeout_error}{jail_note}"
+
         # Save log on timeout if requested
         if log_file:
             _save_log(
@@ -1991,10 +2614,7 @@ def invoke_with_provider(
                 # Plus what the sweep did to the CLI and to each process group
                 # it had spawned, so a `survived` group is named where the
                 # timeout is (D3.3).
-                error=(
-                    f"{provider_name} timed out after {effective_timeout}s"
-                    f"{_describe_tree_sweep(e)}"
-                ),
+                error=f"{timeout_error}{_describe_tree_sweep(e)}",
                 duration_seconds=duration,
                 readonly_audit=audit,
             )
@@ -2033,6 +2653,7 @@ def invoke_with_provider(
             details[_READONLY_AUDIT_KEY] = audit
         # A killed child ran too, and ran under whatever rung it was given.
         _attach_sandbox_word(details, sandbox_fallback)
+        details.update(jail_details)
         _attach_stdout_excerpt(details, stdout)
         # One hook reading for both keys (D2.2): each cuts its own copy.
         hook_text = _salvage_hook_text(provider, stdout)
@@ -2052,7 +2673,7 @@ def invoke_with_provider(
 
         return {
             "success": False,
-            "error": f"{provider_name} timed out after {effective_timeout}s",
+            "error": timeout_error,
             "error_code": ERROR_TIMEOUT,
             "details": details,
         }

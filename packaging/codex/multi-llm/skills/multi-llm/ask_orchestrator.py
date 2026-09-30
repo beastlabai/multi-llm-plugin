@@ -110,9 +110,17 @@ from utils.review_orchestrator_base import (
     fanout_ignore_prefixes,
     flip_map_entries_to_done,
     maybe_detach,
+    # Plan codex-sandbox-unavailable §6 F1 (2026-09-30): a slot on the
+    # plugin's own jail runs the mode check and the home check instead of the
+    # porcelain check.
+    mode_check_applies,
+    mode_snapshot,
     porcelain_check_applies,
     porcelain_snapshot,
+    print_closing_summary,
     read_plan,
+    report_jail_outcome,
+    run_incidental_checks,
     run_models_concurrent,
     sandbox_fallback_kwargs,
     sandbox_refusal,
@@ -2131,6 +2139,11 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
                     plan_path, project_root, anchor=plan_path
                 ),
             )
+        # The plugin's own jail (F1 "What it fixes"): no porcelain check, by
+        # decision; the mode check's before-snapshot instead.
+        mode_before = None
+        if mode_check_applies(sandbox):
+            mode_before = await asyncio.to_thread(mode_snapshot, project_root)
 
         sanitized = sanitize_model_name(model_spec)
         # output_md_path MUST be absolute: provider subprocesses run with
@@ -2268,6 +2281,31 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
                     write_partial(question_dir, model_spec, answer_text)
                 return {"model": model_spec, "success": False,
                         "error": violation, "source": "failed"}
+
+        # The plugin's own jail (F1, 2026-09-30): its `[JAIL_DENIED]` line and
+        # in-stream denial count, then the mode check and the home check's
+        # verdict — the same fail-closed treatment as the porcelain violation
+        # above: the answer is set aside as evidence and never counted.
+        report_jail_outcome(model_spec, details, question_dir)
+        incidental = await run_incidental_checks(
+            sandbox, provider_name=provider_name, display_name=model_spec,
+            model_spec=model_spec, project_root=project_root, plan_path=plan_path,
+            mode_before=mode_before,
+            home_checks=[(details or {}).get("home_check")],
+            audits=[(details or {}).get("readonly_audit")],
+            tracker=tracker, summary_key=question_dir,
+        )
+        if incidental is not None:
+            write_error_log(question_dir, model_spec, incidental, result)
+            if os.path.exists(answer_path):
+                try:
+                    os.replace(answer_path, answer_path + ".violated")
+                except OSError:
+                    pass
+            if answer_text.strip():
+                write_partial(question_dir, model_spec, answer_text)
+            return {"model": model_spec, "success": False,
+                    "error": incidental, "source": "failed"}
 
         # Steps 1 and 2 count an answer only from a run that ended by itself at
         # exit 0 with a finished answer (D3.1): success, or the PARSE_ERROR a
@@ -2485,7 +2523,7 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
         if isinstance(res, dict) and res.get("success")
         and res.get("source") in ("file", "fallback")
     }
-    return close_ask_run(
+    exit_code = close_ask_run(
         question_dir=question_dir,
         question=question,
         plan_path=plan_path,
@@ -2500,6 +2538,11 @@ async def _main(argv: Optional[List[str]], held: contextlib.ExitStack) -> int:
         # D2 row 6: the caller's flags.
         retry_flags=cli_common.current_replay_flags(mode="ask"),
     )
+    # Plan codex-sandbox-unavailable F1 (2026-09-30): every
+    # `[CODEX_HOME_CHECK]` and `[JAIL_DENIED]` line of this run's slots,
+    # repeated as its last word — a home change outlives the run.
+    print_closing_summary(question_dir)
+    return exit_code
 
 
 if __name__ == "__main__":

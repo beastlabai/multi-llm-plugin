@@ -130,6 +130,129 @@ SANDBOX_RUNG_RETIRED_MARKER = "[SANDBOX_RUNG_RETIRED]"
 #: only one any ``bypassed`` word may ever be derived from.
 SANDBOX_RUNG_LANDLOCK = "landlock"
 SANDBOX_RUNG_UNSANDBOXED = "unsandboxed"
+#: The plugin's own Landlock jail (plan codex-sandbox-unavailable-findings-and-
+#: fixes §6 F1, 2026-09-30): a wrapper applies a Landlock ruleset to itself and
+#: ``exec``s the CLI under ``--sandbox danger-full-access``. It sits between
+#: the legacy ``landlock`` rung and ``unsandboxed``, and is reached only when
+#: the adapter's own sandbox probe said ``unavailable``. Its grade is
+#: :data:`SANDBOX_CONTAINMENT_INCIDENTAL`, never ``contained``: it stops stray
+#: and incidental writes, not a model set on escaping (``systemd-run --user``
+#: wrote through it, measured 2026-09-29).
+SANDBOX_RUNG_PLUGIN_LANDLOCK = "plugin-landlock"
+
+#: The containment grades a rung may carry besides ``contained``
+#: (:attr:`SandboxRung.containment`). ``incidental`` is the plugin-landlock
+#: rung's: the kernel refuses every content write outside an allow-list, but
+#: writes through pathname Unix sockets, metadata changes (``chmod``,
+#: ``utimes``) and writes to ``$CODEX_HOME`` are not stopped. ``sandbox_fallback:
+#: contained`` never reaches it (its promise is a real OS boundary), and no
+#: artifact of such a slot may call it "contained" or "sandboxed".
+SANDBOX_CONTAINMENT_INCIDENTAL = "incidental"
+
+#: The marker for a slot on an ``incidental``-grade rung. It **replaces**
+#: ``[SANDBOX_BYPASSED]`` for such a slot (that marker still counts uncontained
+#: slots only), and is never ``[SANDBOX_FALLBACK]`` (whose label means a real OS
+#: boundary). Keyed to the grade, not the rung id, so a later rung of the same
+#: grade reuses it.
+SANDBOX_INCIDENTAL_MARKER = "[SANDBOX_INCIDENTAL]"
+
+#: The after-the-fact checks of a slot on the incidental rung (F1 "What it
+#: fixes", Limits): a flipped executable bit on a tracked file (fan-out lanes
+#: only), a change to ``$CODEX_HOME``'s security-relevant files (both lanes),
+#: and a turn the jail denied at Codex's own level.
+MODE_CHECK_MARKER = "[MODE_CHECK]"
+CODEX_HOME_CHECK_MARKER = "[CODEX_HOME_CHECK]"
+JAIL_DENIED_MARKER = "[JAIL_DENIED]"
+
+#: The one environment switch that skips the plugin-landlock rung alone for a
+#: process (F1 "Where it sits" item 4/6). Its only accepted value is the rung
+#: id; any other value is rejected at start-up, never ignored.
+SKIP_RUNG_ENV = "MULTI_LLM_CODEX_SKIP_RUNG"
+
+#: The write profiles a fallback may reach (plan step 3, user decision
+#: 2026-09-30, option (b)). Separate from :data:`SANDBOX_FALLBACK_PROFILES`,
+#: which never grows: ``agent-write`` reaches exactly the rungs an adapter
+#: declares in its write ladder — for codex the plugin-landlock rung alone —
+#: and only through :func:`write_rung_allowed`.
+SANDBOX_WRITE_FALLBACK_PROFILES: Tuple[str, ...] = (PROFILE_AGENT_WRITE,)
+
+#: Plan step 6 (F5, user decision 2026-09-30: "Adopt F5"): the env var the
+#: Codex host's MCP server sets on the dispatcher it starts, per tool call, to
+#: the chat's own sandbox posture (the turn metadata's ``sandbox_mode``). Read
+#: per call and never carried over (``os.environ`` of that one dispatcher
+#: process). When — and only when — it says ``danger-full-access`` and the
+#: plugin-landlock rung could not take a write dispatch, the write may take the
+#: uncontained rung: the user already granted the chat agent unconfined write
+#: access to the machine. Below F1 on the ladder, never instead of it; never
+#: under ``contained`` or ``off``.
+HOST_SANDBOX_POSTURE_ENV = "MULTI_LLM_HOST_SANDBOX_POSTURE"
+HOST_POSTURE_FULL_ACCESS = "danger-full-access"
+
+
+@dataclass(frozen=True)
+class WritePostureConsent:
+    """The chat's full-access posture, handed to the render for a write
+    dispatch on the uncontained rung (F5). Its only valid ``posture`` is
+    ``danger-full-access``; the render raises on anything else.
+
+    ``write_scope`` is the scope of the dispatch the consent is handed to (the
+    kind map's, never the task JSON's). F5 serves the scopes the jail serves
+    and no wider (:data:`WRITE_SCOPES_ON_RUNG`), so the render and the
+    executor's backstop both refuse a consent whose scope is missing or
+    ``repo-wide`` — the refusal holds there even if a gate upstream let such a
+    dispatch through."""
+
+    posture: str
+    source: str = HOST_SANDBOX_POSTURE_ENV
+    write_scope: Optional[str] = None
+
+
+def host_write_posture_consent(
+    environ: Optional[Mapping[str, str]] = None,
+    *,
+    write_scope: Optional[str] = None,
+) -> Optional["WritePostureConsent"]:
+    """The F5 consent the environment carries for this process, or ``None``.
+
+    Only the exact value ``danger-full-access`` consents; any other posture,
+    an empty value or none leaves the step-3 rule as it is. ``write_scope``
+    is recorded on the consent for a caller that hands it to a render."""
+    env = os.environ if environ is None else environ
+    value = (env.get(HOST_SANDBOX_POSTURE_ENV) or "").strip()
+    if value == HOST_POSTURE_FULL_ACCESS:
+        return WritePostureConsent(posture=value, write_scope=write_scope)
+    return None
+
+
+def write_consent_allows(
+    rung: Optional["SandboxRung"],
+    policy: Optional[str],
+    consent: Optional["WritePostureConsent"],
+) -> bool:
+    """Whether F5's consent lets a write profile take ``rung``: the uncontained
+    rung alone, under ``auto`` alone, with a ``danger-full-access`` consent.
+    Called only after the plugin-landlock rung could not take the dispatch."""
+    if rung is None or consent is None or consent.posture != HOST_POSTURE_FULL_ACCESS:
+        return False
+    if rung.name != SANDBOX_RUNG_UNSANDBOXED or rung.contained or getattr(rung, "wrapper", None):
+        return False
+    return policy == SANDBOX_FALLBACK_AUTO
+
+
+#: The write scopes a jailed write dispatch may carry (F1 "Write profiles on the
+#: rung"). ``plan-file`` is ``apply-suggestions`` (one file rule on the plan),
+#: ``tasks`` is ``apply-task-suggestions`` (a dir rule on the default tasks
+#: directory, else a file rule on the tasks file), ``repo-wide`` is
+#: ``apply-code-fixes``/``implement`` — refused on the rung until step 3b.
+WRITE_SCOPE_PLAN_FILE = "plan-file"
+WRITE_SCOPE_TASKS = "tasks"
+WRITE_SCOPE_REPO_WIDE = "repo-wide"
+WRITE_SCOPES: Tuple[str, ...] = (
+    WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS, WRITE_SCOPE_REPO_WIDE,
+)
+#: The scopes the rung serves today. ``repo-wide`` stays refused until step 3b
+#: (protected-path enumeration and the toolchain decision of step 1b).
+WRITE_SCOPES_ON_RUNG: Tuple[str, ...] = (WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS)
 
 #: What a contained rung's probe canary prints (on stderr, exit non-zero) when
 #: the write it attempted was **not** denied — the fail-open shape: the flag
@@ -212,6 +335,21 @@ class SandboxRung:
       sees inside can only be the boundary's — never a ``mkdir`` the sandbox
       refused, a non-directory in the way, or plain filesystem permissions.
       A setup that fails is recorded ``unknown`` (the rung is not taken).
+    * ``wrapper`` — the id of a launcher the rung's dispatch and probe are
+      prefixed with (``"landlock_exec"``), or ``None`` for a rung rendered
+      entirely inside the CLI's argv. A wrapping rung's ``argv_rewrite`` holds
+      only the atoms inside the CLI argv; the prefix is added by
+      ``utils.landlock_dispatch.wrap_argv`` after ``_resolve_executable``, and
+      never by the adapter. An id rather than a path, so the declaration stays
+      host-independent for the guards and ``doctor``.
+    * ``containment`` — a grade other than ``contained``, or ``None``.
+      ``incidental`` (:data:`SANDBOX_CONTAINMENT_INCIDENTAL`) is reached under
+      ``auto`` only, gets its own marker and wording, and keeps
+      ``contained=False``.
+    * ``measured_through`` — ``(version, evidence)``: the newest CLI version the
+      rung's allow-list was measured against. Render-only (``doctor``, the
+      ``[JAIL_DENIED]`` line), like ``deprecated_at``: a newer CLI is named as
+      the likely cause of a jail denial, never refused.
     """
 
     name: str
@@ -222,6 +360,84 @@ class SandboxRung:
     removed_at: Optional[Tuple[str, str]] = None
     probe_workdir: Optional[str] = None
     removed_signature: Optional[str] = None
+    wrapper: Optional[str] = None
+    containment: Optional[str] = None
+    measured_through: Optional[Tuple[str, str]] = None
+
+
+def rung_is_incidental(rung: Optional["SandboxRung"]) -> bool:
+    """Whether ``rung`` carries the ``incidental`` grade (the plugin's jail)."""
+    return bool(
+        rung is not None
+        and getattr(rung, "containment", None) == SANDBOX_CONTAINMENT_INCIDENTAL
+    )
+
+
+@dataclass(frozen=True)
+class JailRequest:
+    """What a lane knows about a jailed dispatch before it spawns (F1 "How a
+    dispatch receives its grant").
+
+    Built once per task by the lane that owns the dispatch, from trusted inputs
+    only, with no filesystem side effect. A read-only request carries
+    ``repo_root`` and ``kind`` alone; a write request adds ``write_scope`` (from
+    the kind map, never the task JSON) and ``target`` (the phase's own write
+    target, ``realpath``-resolved). Only a dispatch on the plugin-landlock rung
+    reads it; every other dispatch ignores it and renders today's argv.
+
+    ``target_dir`` is set only for the ``tasks`` scope, and only when the tasks
+    file sits in the plan's **default** tasks directory
+    (``plans/<stem>/tasks/``, after ``realpath``): the grant is then a dir rule
+    on that directory. Anywhere else (a ``TASKS_FILE`` override into ``plans/``
+    or the output folder) it is ``None`` and the grant is a file rule on
+    ``target``, because a dir rule there would grant sibling plans or
+    ``state.json`` (``landlock_dispatch.default_tasks_dir`` decides).
+    """
+
+    repo_root: str
+    kind: str
+    write_scope: Optional[str] = None
+    target: Optional[str] = None
+    target_dir: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class JailContext:
+    """A :class:`JailRequest` completed at the spawn site, once per attempt:
+    the attempt's scratch ``tmpdir`` (made by ``slot_tmpdir()``) and the
+    ``codex_home`` the child will really see (read from its composed env).
+
+    Deliberately not named ``DispatchContext`` — ``llm_client.DispatchContext``
+    is what an adapter's ``hermetic_dispatch`` yields and must stay free of
+    per-task paths. Never stored on an adapter, in a module global or in a
+    cache: an argument to the render and the wrap, dropped with the attempt.
+    ``codex_home`` is ``None`` until the env is composed (the argv render runs
+    before it, and needs only ``tmpdir``).
+    """
+
+    request: JailRequest
+    tmpdir: str
+    codex_home: Optional[str] = None
+
+    @property
+    def repo_root(self) -> str:
+        return self.request.repo_root
+
+    @property
+    def kind(self) -> str:
+        return self.request.kind
+
+    @property
+    def write_scope(self) -> Optional[str]:
+        return self.request.write_scope
+
+    @property
+    def target(self) -> Optional[str]:
+        return self.request.target
+
+    @property
+    def target_dir(self) -> Optional[str]:
+        return self.request.target_dir
 
 
 def rung_removed_for_version(rung: "SandboxRung", version: Optional[str]) -> bool:
@@ -363,6 +579,9 @@ def sandbox_rung_retired_notice(
 #: ``RUNG_*`` constants, spelled here so this module does not import it).
 _WALK_OUTCOME_SKIPPED = "skipped"
 _WALK_OUTCOME_RETIRED = "retired"
+#: A rung the process was told to skip (``MULTI_LLM_CODEX_SKIP_RUNG``): not
+#: probed, the walk moves on — and never a retirement, so no retirement line.
+WALK_OUTCOME_SKIPPED_BY_SWITCH = "skipped-by-switch"
 
 
 def _quoted_tail(tail: str) -> str:
@@ -395,12 +614,33 @@ def sandbox_walk_clause(
     removed = {
         rung.name: rung.removed_at[0] for rung in rungs or () if rung.removed_at
     }
+    wrapping = {rung.name for rung in rungs or () if getattr(rung, "wrapper", None)}
     who = f"{provider_name} {version}" if version else "probe"
     parts: List[str] = []
     for name, outcome in walk or ():
         if outcome == "taken":
             continue
         tail = tails.get(name, "")
+        if outcome == WALK_OUTCOME_SKIPPED_BY_SWITCH:
+            parts.append(
+                f"fallback rung {name!r} not tried: skipped by "
+                f"{SKIP_RUNG_ENV}={name}"
+            )
+            continue
+        if name in wrapping and outcome in ("absent", "rejected", "unavailable"):
+            # The plugin's own jail (plan codex-sandbox-unavailable §7 step 4):
+            # absent is the wrapper's own verdict (no Landlock, an ABI below
+            # the floor, a required allow entry missing), never "this build
+            # did not recognise the rung".
+            said = {
+                "absent": f"fallback rung {name!r} absent: the plugin's Landlock jail cannot run here",
+                "rejected": f"fallback rung {name!r} rejected: a write its canary made was not denied",
+                "unavailable": f"fallback rung {name!r} unavailable: the plugin's Landlock jail failed its self-test",
+            }[outcome]
+            if tail.strip():
+                said += f" ({_quoted_tail(tail)})"
+            parts.append(said)
+            continue
         if outcome == _WALK_OUTCOME_SKIPPED:
             parts.append(
                 f"fallback rung {name!r} not tried: unavailable from "
@@ -444,13 +684,132 @@ def sandbox_rung_allowed(rung: "SandboxRung", policy: Optional[str]) -> bool:
 
     The Configuration table, in one place: ``auto`` reaches every rung,
     ``contained`` only a contained one, ``off`` (and ``None`` — an adapter with
-    no fallback, or a write profile) none.
+    no fallback, or a write profile) none. The ``incidental`` grade (the
+    plugin-landlock rung) keeps ``contained=False``, so ``contained`` never
+    reaches it: that value promises a real OS boundary, and letting it accept
+    the incidental grade would need a separate, explicit opt-in.
+
+    Read-only profiles only. A write profile goes through
+    :func:`write_rung_allowed`, never through this function.
     """
     if policy == SANDBOX_FALLBACK_AUTO:
         return True
     if policy == SANDBOX_FALLBACK_CONTAINED:
         return bool(rung.contained)
     return False
+
+
+def write_rung_allowed(rung: Optional["SandboxRung"], policy: Optional[str]) -> bool:
+    """Whether a **write** profile may take ``rung`` under ``policy`` (plan step 3,
+    user decision 2026-09-30, option (b)).
+
+    The structural rule that replaces the old blanket refusal: a write profile
+    reaches a rung only if the rung **wraps** the CLI (``wrapper`` set) and
+    carries the ``incidental`` grade — i.e. the plugin's own Landlock jail — and
+    only under ``auto``. Never the uncontained rung, never the legacy
+    ``landlock`` rung, never under ``contained`` (whose promise the incidental
+    grade does not keep) or ``off``. ``None`` (no opt-in, no fallback) is no.
+    """
+    if rung is None or not getattr(rung, "wrapper", None):
+        return False
+    if not rung_is_incidental(rung):
+        return False
+    return policy == SANDBOX_FALLBACK_AUTO
+
+
+def skip_rung_requested(environ: Optional[Mapping[str, str]] = None) -> Optional[str]:
+    """The rung ``MULTI_LLM_CODEX_SKIP_RUNG`` skips for this process, or ``None``.
+
+    The one accepted value is the plugin-landlock rung id; unset or empty is
+    ``None``. Any other value raises ``ValueError`` naming the variable and the
+    accepted value — rejected at start-up, never silently ignored (F1 "Where it
+    sits" item 6).
+    """
+    env = os.environ if environ is None else environ
+    value = (env.get(SKIP_RUNG_ENV) or "").strip()
+    if not value:
+        return None
+    if value != SANDBOX_RUNG_PLUGIN_LANDLOCK:
+        raise ValueError(
+            f"{SKIP_RUNG_ENV}={value!r} is not recognised: the only rung it can "
+            f"skip is {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} (unset it to walk the "
+            f"full ladder)"
+        )
+    return value
+
+
+#: The residual clauses of the ``[SANDBOX_INCIDENTAL]`` line, per lane (F1
+#: Limits and "What it fixes"). The fan-out lanes run the mode check and a
+#: fail-closed home check; the executor lane runs a warn-only home check and no
+#: mode check.
+_INCIDENTAL_RESIDUALS_FANOUT = (
+    "writes through Unix sockets and to file timestamps are neither stopped "
+    "nor checked, writes to $CODEX_HOME are not stopped and only its config, "
+    "instruction and plugin files are checked after this slot, and a changed "
+    "file mode is not stopped but is checked after this slot"
+)
+_INCIDENTAL_RESIDUALS_EXECUTOR = (
+    "writes through Unix sockets and to file timestamps are neither stopped "
+    "nor checked, writes to $CODEX_HOME are not stopped and only its config, "
+    "instruction and plugin files are reported after this dispatch, not "
+    "failed, and a changed file mode is neither stopped nor checked"
+)
+INCIDENTAL_LANE_FANOUT = "fanout"
+INCIDENTAL_LANE_EXECUTOR = "executor"
+
+
+def sandbox_incidental_notice_text(
+    provider_name: str,
+    rung: "SandboxRung",
+    policy: Optional[str],
+    probe_tail: str = "",
+    *,
+    walk_clause: str = "",
+    lane: str = INCIDENTAL_LANE_FANOUT,
+    write_scope: Optional[str] = None,
+    target: Optional[str] = None,
+) -> str:
+    """The one ``[SANDBOX_INCIDENTAL]`` line for a slot or dispatch on an
+    ``incidental``-grade rung (plan §7, "Step 2 subtask: messaging and markers").
+
+    One builder for both lanes — ``review_orchestrator_base.sandbox_refusal``
+    and ``subagent_executor._detect_sandbox`` pick it by grade — so the reader
+    greps one sentence across a run. Its clauses, in order: the marker and the
+    runner; the standard probe's failure line and the walk clause (the legacy
+    rung skipped by version); the rung id, the key in force and the phase; what
+    the rung stops (stray writes, not the model); what it does not stop and
+    what checks it afterwards, which differs per ``lane``. A write dispatch
+    (``write_scope`` set) names its scope and target and says the network is
+    not confined; it never says "read-only". The line never calls the rung
+    "contained" or "sandboxed".
+    """
+    text = f"{SANDBOX_INCIDENTAL_MARKER} {provider_name}: its own sandbox cannot start here"
+    said = " ".join((probe_tail or "").split())
+    if len(said) > 160:
+        said = said[:157].rstrip() + " …"
+    if said:
+        text += f" ({said})"
+    if walk_clause:
+        text += f"; {walk_clause}"
+    if write_scope:
+        phase = (
+            f"write phase, scope {write_scope}: {target or '(no target)'} is the "
+            f"one repository path it may write, and network access is not "
+            f"confined"
+        )
+    else:
+        phase = "read-only phase"
+    text += (
+        f"; running on fallback rung {rung.name!r} under "
+        f"providers.{provider_name}.sandbox_fallback="
+        f"{policy or SANDBOX_FALLBACK_AUTO} ({phase}), which stops stray "
+        f"writes, not the model: "
+    )
+    text += (
+        _INCIDENTAL_RESIDUALS_EXECUTOR if lane == INCIDENTAL_LANE_EXECUTOR
+        else _INCIDENTAL_RESIDUALS_FANOUT
+    )
+    return text
 
 # ---------------------------------------------------------------------------
 # Non-interactive git env (§2.2)
@@ -3123,8 +3482,12 @@ class LLMProvider(ABC):
         change that. An adapter that overrides this answers one of
         :data:`SANDBOX_FALLBACK_POLICIES`, read through the normal config
         layering, and **only for a profile in**
-        :data:`SANDBOX_FALLBACK_PROFILES` — ``agent-write`` must come back
-        ``None`` whatever the config says. Every gate that consults this
+        :data:`SANDBOX_FALLBACK_PROFILES` — or, for an adapter that declares a
+        write ladder (plan step 3, 2026-09-30), for ``agent-write`` while its
+        opt-in is in force, and then only a policy :func:`write_rung_allowed`
+        reads: a wrapping, ``incidental``-grade rung under ``auto``. Every other
+        adapter answers ``None`` for ``agent-write`` whatever the config says.
+        Every gate that consults this
         (``review_orchestrator_base.sandbox_refusal``,
         ``subagent_executor._detect_sandbox``) requires *all five* of: the
         probe verdict ``unavailable`` (never ``unknown`` — a probe that could
@@ -3139,19 +3502,36 @@ class LLMProvider(ABC):
         """The ordered fallback ladder for ``profile`` (landlock rung, 2026-09-22).
 
         ``()`` — the default — means no fallback exists for this profile. An
-        adapter that declares rungs does so only for a profile in
-        :data:`SANDBOX_FALLBACK_PROFILES`; ``agent-write`` must come back
-        ``()``. The executor's ``sandbox_verdict`` walks them in order after
+        adapter that declares rungs does so for a profile in
+        :data:`SANDBOX_FALLBACK_PROFILES`, and — only as a separate write ladder
+        whose every rung :func:`write_rung_allowed` could admit — for
+        ``agent-write`` (:data:`SANDBOX_WRITE_FALLBACK_PROFILES`); every other
+        adapter's ``agent-write`` comes back ``()``. The write ladder never
+        holds the uncontained or the legacy ``landlock`` rung, and a failed
+        write rung never falls through. The executor's ``sandbox_verdict`` walks them in order after
         the profile's own probe said ``unavailable``, and the gates then decide
         by :func:`sandbox_rung_allowed` whether the selected rung may be taken.
         """
         return ()
 
     def apply_sandbox_fallback(
-        self, argv: List[str], profile: str, rung: Optional[str] = None
+        self,
+        argv: List[str],
+        profile: str,
+        rung: Optional[str] = None,
+        context: Optional["JailContext"] = None,
+        consent: Optional["WritePostureConsent"] = None,
     ) -> List[str]:
         """Rewrite a rendered ``argv`` onto fallback ``rung`` of this adapter's
-        ladder, for a ``profile`` in :data:`SANDBOX_FALLBACK_PROFILES`.
+        ladder, for a ``profile`` in :data:`SANDBOX_FALLBACK_PROFILES` (or the
+        adapter's write ladder, :data:`SANDBOX_WRITE_FALLBACK_PROFILES`).
+
+        ``context`` is the attempt's :class:`JailContext`, handed only for a
+        wrapping rung (the plugin-landlock jail): its ``tmpdir`` and write
+        scope reach the CLI argv (``developer_instructions``). A wrapping rung
+        with no context must raise, never render the bare in-CLI atoms.
+        ``consent`` is F5's :class:`WritePostureConsent`, the one way a write
+        profile renders the uncontained rung (plan step 6).
 
         Called by the transport builders only when a gate has already selected
         ``rung`` (a :class:`SandboxRung` ``name``), so the default — ``argv``
@@ -3568,6 +3948,8 @@ class LLMProvider(ABC):
         timeout_s: Optional[int] = None,
         schema: Optional[StructuredSchema] = None,
         sandbox_fallback: Optional[str] = None,
+        jail_context: Optional["JailContext"] = None,
+        write_consent: Optional["WritePostureConsent"] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """``build_agent_command`` plus the text to write to the child's stdin.
 
@@ -3585,13 +3967,25 @@ class LLMProvider(ABC):
         bare ``True`` is the pre-rung spelling and means the uncontained rung
         (:func:`sandbox_rung_id`). Ignored by every adapter that keeps the
         default hook.
+
+        ``jail_context`` (plan codex-sandbox-unavailable §6 F1) is the attempt's
+        :class:`JailContext`, set by the spawn site only for a dispatch on a
+        wrapping rung (the plugin-landlock jail); it reaches
+        :meth:`apply_sandbox_fallback` as ``context=`` and is passed only when
+        set, so an adapter whose override predates the keyword is called
+        exactly as before.
         """
         argv = self.build_agent_command(
             prompt, model, profile, timeout_s=timeout_s, schema=schema
         )
         rung = sandbox_rung_id(sandbox_fallback)
         if rung:
-            argv = self.apply_sandbox_fallback(argv, profile, rung)
+            extra: Dict[str, Any] = {}
+            if jail_context is not None:
+                extra["context"] = jail_context
+            if write_consent is not None:
+                extra["consent"] = write_consent
+            argv = self.apply_sandbox_fallback(argv, profile, rung, **extra)
         if transport == "argv":
             return argv, None
         if transport == "stdin" and self.supports_prompt_transport("stdin"):
@@ -3808,6 +4202,7 @@ class LLMProvider(ABC):
         schema: Optional[StructuredSchema] = None,
         sandbox_fallback: Optional[str] = None,
         cwd: Optional[str] = None,
+        jail_context: Optional["JailContext"] = None,
     ) -> Tuple[List[str], Optional[str]]:
         """Build argv plus the text to write to the child's stdin.
 
@@ -3831,6 +4226,11 @@ class LLMProvider(ABC):
                 Keyword-only, default ``None``, and ignored by every adapter
                 that keeps the default hook, so every existing argv is
                 rendered byte-for-byte.
+            jail_context: The attempt's :class:`JailContext`, set by the
+                invoker only for a slot on a wrapping rung (the plugin-landlock
+                jail), and passed by the caller only when set, so the eight
+                adapters that override this method without the keyword are
+                called exactly as before.
             cwd: The directory the child will really be spawned in (``None``
                 means "inherit this process's"), threaded from the spawn site on
                 exactly the terms :meth:`resolve_env` already takes it — this and
@@ -3866,7 +4266,10 @@ class LLMProvider(ABC):
             )
             rung = sandbox_rung_id(sandbox_fallback)
             if rung:
-                argv = self.apply_sandbox_fallback(argv, PROFILE_GENERATE, rung)
+                argv = self.apply_sandbox_fallback(
+                    argv, PROFILE_GENERATE, rung,
+                    **({"context": jail_context} if jail_context is not None else {}),
+                )
             return argv, None
         raise ValueError(
             f"{self.name} does not support the {transport!r} prompt transport "

@@ -76,7 +76,7 @@ $multi-llm:multi-llm --review-plan plans/my-feature.md --quick
 
 A `$` mention asks the model to use the skill, and the model then calls the `multi_llm` tool with your arguments. If it ever reworks them, spell the request out: `Use the multi-llm:multi-llm skill with exactly these arguments: plans/my-feature.md`.
 
-> **Before you install:** the plugin's tool runs outside Codex's exec sandbox, so in a read-only session it refuses the modes that edit your working tree unless `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is set. Provider API keys must be exported from `~/.profile` or `~/.bash_profile`, because Codex starts the tool with a stripped environment.
+> **Before you install:** the plugin's tool runs outside Codex's exec sandbox, so in a read-only session it refuses the modes that edit your working tree unless `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` is set. Despite its name, `MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1` lifts only this tool's own refusal of write-capable modes under a read-only or unreadable session posture. It never lets the Codex processes the orchestrator starts write without a sandbox, and it does not change which sandbox they run under: a Codex editing job refused because Codex's own sandbox cannot start on this host stays refused with it set. Provider API keys must be exported from `~/.profile` or `~/.bash_profile`, because Codex starts the tool with a stripped environment.
 
 **Update.** Run `codex plugin marketplace upgrade`, then `codex plugin add multi-llm@beastlabai`, then start a new session. Uninstalling, platform support and troubleshooting are in [docs/hosts.md](docs/hosts.md#codex-plugin-route).
 

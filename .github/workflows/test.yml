@@ -47,13 +47,14 @@ jobs:
           tar -xzf /tmp/gitleaks.tar.gz -C /usr/local/bin gitleaks
           gitleaks version
       - name: Run tests
-        # `not container` and `not package` are not redundant with pyproject's
-        # addopts: an explicit -m here REPLACES that default, so without them a
-        # marked file would be collected and run on every PR — `container` on
-        # runners with no Docker daemon (and none at all on the macOS/Windows
-        # images), and `package` on runners with no staged tarball, which the
-        # package job below builds and these do not.
-        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package"
+        # `not container`, `not package` and `not codex_jail` are not redundant
+        # with pyproject's addopts: an explicit -m here REPLACES that default, so
+        # without them a marked file would be collected and run on every PR —
+        # `container` on runners with no Docker daemon (and none at all on the
+        # macOS/Windows images), `package` on runners with no staged tarball,
+        # which the package job below builds and these do not, and `codex_jail`
+        # on runners with no codex binary to put in the jail.
+        run: uv run --project skills/multi-llm -- pytest skills/multi-llm/tests -m "not live and not container and not package and not codex_jail"
 
   # The npm package. Linux-only by decision, exactly as the gitleaks guard above
   # is: nothing downstream of the uv probe has been measured on Windows or macOS

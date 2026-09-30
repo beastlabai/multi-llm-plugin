@@ -1,0 +1,1459 @@
+"""The plugin-landlock rung's dispatch half: the grant, the wrap, the scratch
+directory, and what the parent reads back after a jailed child exits.
+
+Plan ``codex-sandbox-unavailable-findings-and-fixes`` §6 F1 and §7.1 (steps 2
+and 3, 2026-09-30). When codex's own sandbox cannot start, and only then, a
+codex child may run under ``utils/landlock_exec.py``: a stdlib-only wrapper that
+applies a Landlock ruleset to itself and ``exec``s codex. This module is the
+**only** place that adds that wrapper prefix to an argv (``wrap_argv``), the
+one place the allow-list is computed (``allow_entries``), and the one place a
+jailed attempt's scratch directory is made and removed (``slot_tmpdir``).
+
+The flow at a spawn site, in both lanes (F1 "How a dispatch receives its
+grant"):
+
+1. ``with slot_tmpdir(repo_root) as tmpdir`` — one directory per attempt;
+2. render the codex argv with ``JailContext(request, tmpdir)`` (the adapter
+   splices ``-c developer_instructions=…``);
+3. ``_resolve_executable``;
+4. compose the child env, as today;
+5. ``complete_context(request, tmpdir, env)`` reads ``$CODEX_HOME`` from that
+   env and checks it (``JailRefused`` when missing — nothing is spawned);
+6. ``wrap_argv(resolved_argv, rung, context, env)`` returns the wrapped argv
+   and the env with ``TMPDIR`` set;
+7. ``home_snapshot`` → spawn → wait or kill the group → ``home_snapshot``;
+8. while the context is alive: ``is_jail_failure``, ``jail_denied_edits`` and
+   ``compare_home`` — only paths, classes and counts travel back;
+9. the ``with`` removes the directory.
+
+Nothing here is kept on an adapter, in a module global or in a cache: a
+context is an argument, dropped with the attempt. The grade is ``incidental``:
+the jail stops stray and incidental content writes, not a model set on
+escaping (pathname Unix sockets, ``$CODEX_HOME``, ``chmod``/``utimes`` and the
+network are not confined — F1 Limits).
+"""
+
+from __future__ import annotations
+
+import contextlib
+import hashlib
+import json
+import os
+import re
+import shutil
+import stat
+import sys
+import tempfile
+import threading
+from dataclasses import dataclass, field, replace
+from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+
+try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from .providers.base import (
+        JailContext,
+        JailRequest,
+        SandboxRung,
+        WRITE_SCOPE_PLAN_FILE,
+        WRITE_SCOPE_REPO_WIDE,
+        WRITE_SCOPE_TASKS,
+        WRITE_SCOPES_ON_RUNG,
+    )
+    from . import process_control
+    from . import landlock_exec
+except ImportError:  # pragma: no cover - direct-script import shim
+    from utils.providers.base import (  # type: ignore[no-redef]
+        JailContext,
+        JailRequest,
+        SandboxRung,
+        WRITE_SCOPE_PLAN_FILE,
+        WRITE_SCOPE_REPO_WIDE,
+        WRITE_SCOPE_TASKS,
+        WRITE_SCOPES_ON_RUNG,
+    )
+    from utils import process_control  # type: ignore[no-redef]
+    from utils import landlock_exec  # type: ignore[no-redef]
+
+# ---------------------------------------------------------------------------
+# The wrapper and its launch
+# ---------------------------------------------------------------------------
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+
+#: Wrapper id → absolute path, built from this module's own ``__file__`` (the
+#: omp adapter finds its overlay the same way). Never from ``PATH`` or the cwd.
+#: Tests monkeypatch this table to point at a fake wrapper.
+WRAPPER_PATHS: Dict[str, str] = {
+    "landlock_exec": os.path.join(_HERE, "landlock_exec.py"),
+}
+
+#: The interpreter flags the wrapper runs under: isolated mode (no
+#: ``PYTHONPATH``, no user site, no script dir on ``sys.path``) and no ``site``
+#: (the venv's ``.pth`` files — executed code — do not run before the ruleset).
+#: They bind the wrapper's interpreter only; codex inherits the env untouched.
+WRAPPER_INTERPRETER_FLAGS: Tuple[str, ...] = ("-I", "-S")
+
+#: The wrapper's own exit codes, re-exported so callers need not import the
+#: script module by name.
+EXIT_UNAVAILABLE = landlock_exec.EXIT_UNAVAILABLE
+EXIT_REQUIRED_ENTRY = landlock_exec.EXIT_REQUIRED_ENTRY
+NOTE_PREFIX = landlock_exec.NOTE_PREFIX
+
+#: The kinds an allow entry may declare (the wrapper's own vocabulary).
+KIND_DIR = "dir"
+KIND_FILE = "file"
+
+
+class JailRefused(Exception):
+    """A jailed dispatch or probe cannot be granted: a required allow entry is
+    missing or unusable (``$CODEX_HOME`` absent or inside the repo, a write
+    target gone), or the scope is one the rung does not serve. Nothing is
+    spawned; the message names the path and what to do."""
+
+    def __init__(self, message: str, *, path: Optional[str] = None, reason: str = "") -> None:
+        super().__init__(message)
+        self.message = message
+        self.path = path
+        self.reason = reason
+
+
+@dataclass(frozen=True)
+class AllowEntry:
+    """One ``--allow``/``--allow-optional`` argument: a ``realpath``-resolved
+    path, its declared kind and whether a missing one refuses."""
+
+    path: str
+    kind: str
+    required: bool
+    why: str = ""
+
+    def argv(self) -> List[str]:
+        flag = "--allow" if self.required else "--allow-optional"
+        return [flag, f"{self.kind}:{self.path}"]
+
+
+def wrapper_path(rung: SandboxRung) -> str:
+    """The absolute path of ``rung``'s wrapper; ``KeyError`` for an unknown id
+    (a rung naming a wrapper nobody ships is a programming error)."""
+    return WRAPPER_PATHS[str(rung.wrapper)]
+
+
+def is_wrapped(argv: Sequence[str]) -> bool:
+    """Whether ``argv`` is a wrapped dispatch or probe (``wrap_argv``'s shape)."""
+    return unwrap_argv(argv) is not None
+
+
+def unwrap_argv(argv: Sequence[str]) -> Optional[List[str]]:
+    """The CLI argv inside a wrapped ``argv`` (everything after the wrapper's
+    ``--``), or ``None`` when ``argv`` is not wrapped. Used by the suite's
+    probe guard and by the ``_spawn_in_context`` backstop."""
+    items = [str(a) for a in argv]
+    known = {os.path.basename(p) for p in WRAPPER_PATHS.values()}
+    for index, item in enumerate(items[:6]):
+        if os.path.basename(item) in known and item.endswith(".py"):
+            try:
+                sep = items.index("--", index + 1)
+            except ValueError:
+                return None
+            return items[sep + 1:]
+    return None
+
+
+# ---------------------------------------------------------------------------
+# $CODEX_HOME, the context, the allow-list
+# ---------------------------------------------------------------------------
+
+
+def resolve_codex_home(env: Mapping[str, str]) -> str:
+    """``$CODEX_HOME`` as the child will see it: ``CODEX_HOME`` from ``env``
+    (``~`` expanded), else ``$HOME/.codex`` from the same env. Not resolved
+    through symlinks and not checked — :func:`complete_context` does that."""
+    home = (env.get("HOME") or "").strip() or os.path.expanduser("~")
+    value = (env.get("CODEX_HOME") or "").strip()
+    if value:
+        if value == "~" or value.startswith("~/"):
+            return os.path.join(home, value[2:]) if value != "~" else home
+        return os.path.expanduser(value)
+    return os.path.join(home, ".codex")
+
+
+def _inside(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or beneath it (both already ``realpath``'d).
+
+    The filesystem root contains every absolute path: ``root + os.sep`` would
+    be ``//`` there, which no real path starts with, so every check built on
+    this (a ``$CODEX_HOME`` of ``/`` containing the repo, the repo-root guard,
+    the denied-path class) would pass when it has to refuse."""
+    root = root.rstrip(os.sep) or os.sep
+    if root == os.sep:
+        return path.startswith(os.sep)
+    return path == root or path.startswith(root + os.sep)
+
+
+def complete_context(request: JailRequest, tmpdir: str, env: Mapping[str, str]) -> JailContext:
+    """The attempt's :class:`JailContext`: ``request`` plus ``tmpdir`` plus the
+    checked ``$CODEX_HOME`` read from the child's composed ``env``.
+
+    Raises :class:`JailRefused` — nothing spawned — when the home does not
+    exist or is not a directory (codex itself refuses an explicit home that does
+    not exist; the plugin never creates one), or resolves inside the repo root
+    (its dir rule would grant part of the repo).
+    """
+    raw = resolve_codex_home(env)
+    home = os.path.realpath(raw)
+    if not os.path.isdir(home):
+        raise JailRefused(
+            f"codex's home {render_home(raw)} does not exist, so the plugin's "
+            f"Landlock jail cannot grant it; run codex once outside multi-llm "
+            f"(e.g. `codex login`) to create it. The plugin never creates it.",
+            path=raw, reason="codex-home-missing",
+        )
+    repo_root = os.path.realpath(request.repo_root) if request.repo_root else ""
+    if repo_root and (_inside(home, repo_root) or _inside(repo_root, home)):
+        raise JailRefused(
+            f"codex's home {render_home(home)} resolves inside the repository "
+            f"({render_home(repo_root)}) or contains it; its dir rule would grant "
+            f"part of the repository, so the plugin's Landlock jail does not take "
+            f"this job",
+            path=home, reason="codex-home-in-repo",
+        )
+    return JailContext(request=request, tmpdir=tmpdir, codex_home=home)
+
+
+def default_tasks_dir(plan_file: str, tasks_file: str) -> Optional[str]:
+    """The directory a ``tasks`` grant may be a dir rule on, or ``None``.
+
+    The tasks file's directory, ``realpath``'d, **only** when it is the plan's
+    default ``plans/<stem>/tasks/`` (``tasks_file.find_tasks_file``'s fallback
+    location). A ``TASKS_FILE`` override may put the file in ``plans/`` itself
+    or in the output folder, where a dir rule would grant sibling plans or
+    ``state.json`` and the phase dirs — there the grant is a file rule on the
+    tasks file.
+    """
+    try:
+        from .output_handler import sanitize_prefix
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.output_handler import sanitize_prefix  # type: ignore[no-redef]
+    plan_abs = os.path.abspath(plan_file)
+    default = os.path.realpath(
+        os.path.join(os.path.dirname(plan_abs), sanitize_prefix(os.path.basename(plan_abs)), "tasks")
+    )
+    actual = os.path.dirname(os.path.realpath(tasks_file))
+    return actual if actual == default else None
+
+
+#: Base entries every jailed dispatch gets besides ``$CODEX_HOME`` and its own
+#: ``TMPDIR`` (F1 allow-list table, measured 2026-09-29): ``/dev/null`` for
+#: shell redirects; ``/dev/ptmx`` and ``/dev/pts`` for ``tty: true`` exec
+#: sessions (``failed to openpty`` without them; optional).
+BASE_DEVICE_ENTRIES: Tuple[AllowEntry, ...] = (
+    AllowEntry("/dev/null", KIND_FILE, True, "shell redirects"),
+    AllowEntry("/dev/ptmx", KIND_FILE, False, "tty: true exec sessions"),
+    AllowEntry("/dev/pts", KIND_DIR, False, "tty: true exec sessions"),
+)
+
+
+def allow_entries(context: JailContext) -> List[AllowEntry]:
+    """The allow-list for ``context``, each entry ``realpath``-resolved with its
+    kind and whether it is required (F1 "Allow-list entries at dispatch").
+
+    Base: ``$CODEX_HOME`` (dir, required), the attempt's ``TMPDIR`` (dir,
+    required), ``/dev/null`` (file, required), ``/dev/ptmx`` + ``/dev/pts``
+    (optional). A write scope adds its target: ``plan-file`` one **file** rule
+    on the plan; ``tasks`` a dir rule on ``target_dir`` when the lane set it
+    (the default tasks directory), else a file rule on the tasks file.
+    ``repo-wide`` is refused until step 3b. No scope ever yields a rule on the
+    repository root.
+
+    Raises :class:`JailRefused` for a missing home (checked again here, since a
+    probe may call this without :func:`complete_context`), a missing target or
+    an unserved scope. Never creates a path.
+    """
+    if not context.codex_home:
+        raise JailRefused(
+            "the jail context carries no $CODEX_HOME (complete_context was not "
+            "called); nothing is spawned",
+            reason="codex-home-unresolved",
+        )
+    entries: List[AllowEntry] = [
+        AllowEntry(os.path.realpath(context.codex_home), KIND_DIR, True,
+                   "every codex-internal write"),
+        AllowEntry(os.path.realpath(context.tmpdir), KIND_DIR, True,
+                   "the model's scratch space (exported as TMPDIR)"),
+    ]
+    entries.extend(BASE_DEVICE_ENTRIES)
+    entries.extend(extra_base_entries(context))
+    scope = context.write_scope
+    repo_root = os.path.realpath(context.repo_root) if context.repo_root else ""
+    if scope:
+        if scope == WRITE_SCOPE_REPO_WIDE or scope not in WRITE_SCOPES_ON_RUNG:
+            raise JailRefused(
+                f"the plugin's Landlock jail does not take the {scope!r} write "
+                f"scope (served: {', '.join(WRITE_SCOPES_ON_RUNG)}; repo-wide "
+                f"edits wait for plan step 3b)",
+                reason="scope-not-served",
+            )
+        if not context.target:
+            raise JailRefused(
+                f"the {scope!r} write scope names no target; the grant is "
+                f"missing, so nothing is spawned",
+                reason="grant-missing",
+            )
+        if scope == WRITE_SCOPE_TASKS and context.target_dir:
+            path, kind = os.path.realpath(context.target_dir), KIND_DIR
+            if not os.path.isdir(path):
+                raise JailRefused(
+                    f"the tasks directory {render_home(path)} is gone; the "
+                    f"batch fails before any child starts",
+                    path=path, reason="target-missing",
+                )
+        else:
+            path, kind = os.path.realpath(context.target), KIND_FILE
+            if not os.path.isfile(path):
+                raise JailRefused(
+                    f"the write target {render_home(path)} is gone or not a "
+                    f"regular file; the batch fails before any child starts",
+                    path=path, reason="target-missing",
+                )
+        if repo_root and _inside(repo_root, path):
+            raise JailRefused(
+                "a write grant never covers the repository root",
+                path=path, reason="repo-root",
+            )
+        entries.append(AllowEntry(path, kind, True, f"the {scope} write target"))
+    return entries
+
+
+def extra_base_entries(context: JailContext) -> List[AllowEntry]:
+    """Base entries added by plan step 1c's decision (2026-09-30).
+
+    Step 1c measured (codex 0.159.0 and 0.159.1, offline against the localhost
+    stub) a plan edit whose commands also ran ``git status``, ``git diff``,
+    ``npx`` and a ``python3`` import, plus a code-mode turn. Every path it found
+    denied is either redirected under the attempt's ``TMPDIR``
+    (:func:`child_env_redirects`) or left denied and named in the developer
+    instructions (``/dev/tty`` and ``~/.bash_history`` are denied silently and
+    harmlessly). None became an allow-list row, so this is empty; it stays a
+    function so a later re-measurement adds a row here, with its "why", in one
+    place.
+    """
+    return []
+
+
+def child_env_redirects(context: JailContext) -> Dict[str, str]:
+    """Env redirects into the attempt's ``TMPDIR`` for paths plan step 1c found
+    a jailed turn writing outside the allow-list (measured 2026-09-30: with all
+    three set, every command of the tool turn exited 0 and the only EACCES left
+    was ``/dev/tty``).
+
+    They widen nothing — every target is under the scratch directory the
+    grant already covers — and they cost a cold cache per dispatch.
+    ``~/.npm`` is not an allow-list row because it persists and is shared with
+    unjailed runs.
+    """
+    base = context.tmpdir
+    return {
+        # `python3` imports from the repo write __pycache__ beside the module;
+        # under the jail that is a denied write in the repo. Redirected, the
+        # bytecode lands in the attempt's scratch dir.
+        "PYTHONPYCACHEPREFIX": os.path.join(base, "pycache"),
+        # `npx`/`npm` write their cache under ~/.npm, outside the allow-list.
+        "npm_config_cache": os.path.join(base, "npm-cache"),
+        # `git status` tries to refresh .git/index (a denied write in the
+        # repo); with optional locks off it reads without writing.
+        "GIT_OPTIONAL_LOCKS": "0",
+    }
+
+
+def wrap_argv(
+    resolved_argv: Sequence[str],
+    rung: SandboxRung,
+    context: JailContext,
+    env: Mapping[str, str],
+) -> Tuple[List[str], Dict[str, str]]:
+    """The one place an argv gets the wrapper prefix (F1 "Dispatch shape" item 3).
+
+    Returns ``[sys.executable, -I, -S, <wrapper>, --allow <kind:path>…, --,
+    *resolved_argv]`` and a copy of ``env`` with ``TMPDIR`` set to the attempt's
+    scratch directory plus the step-1c redirects. Called after
+    ``_resolve_executable`` and after the child env is composed, at both spawn
+    sites and by the rung probe. Raises :class:`JailRefused` when the grant
+    cannot be built; never renders the base entries alone for a write scope.
+    """
+    if not rung.wrapper:
+        raise ValueError(f"rung {rung.name!r} names no wrapper; nothing to wrap")
+    entries = allow_entries(context)
+    argv: List[str] = [sys.executable, *WRAPPER_INTERPRETER_FLAGS, wrapper_path(rung)]
+    for entry in entries:
+        argv.extend(entry.argv())
+    argv.append("--")
+    argv.extend(str(a) for a in resolved_argv)
+    child_env = dict(env)
+    child_env["TMPDIR"] = context.tmpdir
+    child_env.update(child_env_redirects(context))
+    return argv, child_env
+
+
+#: Placeholders a preview renders in place of per-attempt paths.
+PLACEHOLDER_CODEX_HOME = "<CODEX_HOME>"
+PLACEHOLDER_TMPDIR = "<SLOT_TMPDIR>"
+
+
+def preview_wrap_argv(
+    resolved_argv: Sequence[str],
+    rung: SandboxRung,
+    request: Optional[JailRequest] = None,
+) -> List[str]:
+    """The wrapped shape with placeholder paths, for previews and budgets
+    (``_prompt_over_budget``, ``_preview_argv``, the scheduler's
+    ``_render_argv``). Creates nothing and reads no env."""
+    argv: List[str] = [sys.executable, *WRAPPER_INTERPRETER_FLAGS, wrapper_path(rung)]
+    argv += ["--allow", f"{KIND_DIR}:{PLACEHOLDER_CODEX_HOME}"]
+    argv += ["--allow", f"{KIND_DIR}:{PLACEHOLDER_TMPDIR}"]
+    for entry in BASE_DEVICE_ENTRIES:
+        argv.extend(entry.argv())
+    if request is not None and request.write_scope and request.target:
+        if request.write_scope == WRITE_SCOPE_TASKS and request.target_dir:
+            argv += ["--allow", f"{KIND_DIR}:{request.target_dir}"]
+        else:
+            argv += ["--allow", f"{KIND_FILE}:{request.target}"]
+    argv.append("--")
+    argv.extend(str(a) for a in resolved_argv)
+    return argv
+
+
+def preview_context(request: JailRequest) -> JailContext:
+    """A context with placeholder paths, for rendering a preview argv."""
+    return JailContext(request=request, tmpdir=PLACEHOLDER_TMPDIR,
+                       codex_home=PLACEHOLDER_CODEX_HOME)
+
+
+#: The wrapper's reason words that say why it refused (exit 125/126), as
+#: opposed to the ``optional-entry-skipped:`` notes it prints on its way to the
+#: Landlock calls that can still fail after them.
+_REFUSAL_NOTE_WORDS = ("required-entry:", "unavailable:")
+
+
+def wrapper_note(stderr: str) -> str:
+    """The wrapper's own diagnostic line (``landlock_exec: …``), or ``""``.
+
+    The line naming the refusal (``required-entry:`` / ``unavailable:``) is
+    preferred over any earlier note: the wrapper prints its
+    ``optional-entry-skipped:`` notes *before* the Landlock setup calls that
+    can exit 126, so the first note is not always the reason. With no refusal
+    line, the first note.
+    """
+    first = ""
+    for line in (stderr or "").splitlines():
+        line = line.strip()
+        if not line.startswith(NOTE_PREFIX):
+            continue
+        if line[len(NOTE_PREFIX):].startswith(_REFUSAL_NOTE_WORDS):
+            return line
+        if not first:
+            first = line
+    return first
+
+
+# ---------------------------------------------------------------------------
+# The attempt's scratch directory
+# ---------------------------------------------------------------------------
+
+#: ``multi-llm-slot-<pid>-<start>-<random>`` — the parent's identity in the
+#: name, so a crashed parent's leftovers can be told apart from a live one's.
+SLOT_PREFIX = "multi-llm-slot-"
+_SLOT_NAME = re.compile(r"^multi-llm-slot-(\d+)-([^-]*)-[A-Za-z0-9_]+$")
+
+_SWEPT_BASES: set = set()
+_SWEEP_LOCK = threading.Lock()
+
+
+def _slot_base(repo_root: Optional[str]) -> str:
+    """The parent's temp dir, ``realpath``'d; refused when inside the repo."""
+    base = os.path.realpath(tempfile.gettempdir())
+    if repo_root:
+        root = os.path.realpath(repo_root)
+        if _inside(base, root):
+            raise JailRefused(
+                f"the temp directory {render_home(base)} is inside the "
+                f"repository {render_home(root)}, so a jailed attempt's scratch "
+                f"directory would grant part of the repository; set TMPDIR "
+                f"outside it",
+                path=base, reason="tmpdir-in-repo",
+            )
+    return base
+
+
+def _start_token(start: Any) -> str:
+    """The start time as a name-safe token (no ``-``, which splits the name)."""
+    text = re.sub(r"[^A-Za-z0-9_.]", "_", str(start or "unknown"))
+    return text.replace("-", "_") or "unknown"
+
+
+def sweep_slot_leftovers(base: Optional[str] = None) -> List[str]:
+    """Remove crash leftovers under ``base`` (F1 "The scratch directory's
+    lifecycle"). An entry goes only when its name matches the pattern, it is a
+    real directory (not a symlink) owned by this user, and its parent's
+    ``(pid, start)`` probes ``dead``. ``alive`` and ``unknown`` are kept; there
+    is no age threshold. Returns the removed paths."""
+    base = base or os.path.realpath(tempfile.gettempdir())
+    removed: List[str] = []
+    try:
+        names = os.listdir(base)
+    except OSError:
+        return removed
+    uid = os.getuid() if hasattr(os, "getuid") else None
+    for name in names:
+        match = _SLOT_NAME.match(name)
+        if not match:
+            continue
+        path = os.path.join(base, name)
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            continue
+        if uid is not None and info.st_uid != uid:
+            continue
+        verdict = _slot_owner_verdict(int(match.group(1)), match.group(2))
+        if verdict != process_control.DEAD:
+            continue
+        try:
+            _remove_slot_tree(path)
+            removed.append(path)
+        except OSError:
+            pass
+    return removed
+
+
+def _restore_dir_rights(path: str) -> bool:
+    """``chmod 0700`` on ``path`` when it is a real directory this user owns
+    whose mode is not already ``0700`` (``lstat`` — a symlink is never
+    followed, so a link planted in the tree cannot redirect the chmod onto a
+    file outside it). ``True`` when it changed the mode."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISDIR(info.st_mode) or stat.S_IMODE(info.st_mode) == 0o700:
+        return False
+    if hasattr(os, "getuid") and info.st_uid != os.getuid():
+        return False
+    try:
+        os.chmod(path, 0o700)
+    except OSError:
+        return False
+    return True
+
+
+def _remove_slot_tree(top: str) -> None:
+    """``shutil.rmtree(top)`` that survives a jailed model's ``chmod``.
+
+    Landlock does not mediate ``chmod``, so the model can leave a
+    subdirectory of its ``TMPDIR`` at ``000`` (``rmtree`` cannot open it) or
+    the ``TMPDIR`` itself at ``500`` (nothing in it can be unlinked). On a
+    ``PermissionError`` the handler restores ``0700`` on the failing path and
+    its parent — only directories inside ``top``, never ``top``'s own parent
+    (the shared temp dir) — and retries once per path: the unlink or rmdir
+    again, or the whole entry when ``rmtree`` never reached it (a directory
+    it could not open or list is skipped, not removed). Any other error, a
+    path whose rights were already ``0700``, or a second failure on the same
+    path propagates as before.
+    """
+    top = os.path.abspath(top)
+    retried: set = set()
+
+    def on_error(func: Any, path: str, exc: BaseException) -> None:
+        if not isinstance(exc, PermissionError) or path in retried:
+            raise exc
+        retried.add(path)
+        changed = False
+        parent = os.path.dirname(path)
+        if path != top and _inside(parent, top):
+            changed = _restore_dir_rights(parent)
+        changed = _restore_dir_rights(path) or changed
+        if not changed:
+            raise exc
+        if func in (os.unlink, os.rmdir):
+            func(path)
+        elif stat.S_ISDIR(os.lstat(path).st_mode):
+            _rmtree(path, on_error)
+        else:
+            os.unlink(path)
+
+    _rmtree(top, on_error)
+
+
+def _rmtree(path: str, on_error: Any) -> None:
+    """``shutil.rmtree`` with an ``(func, path, exc)`` handler on every
+    supported Python (``onexc`` from 3.12, ``onerror`` before it)."""
+    if sys.version_info >= (3, 12):
+        shutil.rmtree(path, onexc=on_error)
+    else:
+        shutil.rmtree(path, onerror=lambda func, p, info: on_error(func, p, info[1]))
+
+
+def _slot_owner_verdict(pid: int, token: str) -> str:
+    """``alive`` / ``dead`` / ``unknown`` for a leftover's recorded parent —
+    :func:`process_control.probe`'s rule, compared through the name's
+    start-time token: a pid that is gone, or live under another start time
+    (reused), is ``dead``; a live pid whose start time cannot be read, or a
+    name recorded without one, is ``unknown`` and kept."""
+    if not process_control.process_alive(pid):
+        return process_control.DEAD
+    if not token or token == "unknown":
+        return process_control.UNKNOWN
+    observed = process_control.process_start_time(pid)
+    if observed is None:
+        return process_control.UNKNOWN
+    return process_control.ALIVE if _start_token(observed) == token else process_control.DEAD
+
+
+@contextlib.contextmanager
+def slot_tmpdir(repo_root: Optional[str] = None) -> Iterator[str]:
+    """One scratch directory for one jailed attempt (or one rung probe).
+
+    Made with ``tempfile.mkdtemp`` (mode 0700, never adopting an existing name)
+    under the parent's ``gettempdir()``, named after the parent's pid and start
+    time, **before** any rule is applied — a Landlock rule needs an existing
+    inode. Removed with ``shutil.rmtree`` (fd-based, never follows a planted
+    symlink; rights the model ``chmod``-ed away inside it are restored first,
+    :func:`_remove_slot_tree`) when the ``with`` exits: after a clean exit, a timeout's group
+    kill, an abort or an exception. A failed removal is a warning, never a
+    failed slot. The first call per temp base in a process sweeps dead
+    parents' leftovers. A temp base inside ``repo_root`` raises
+    :class:`JailRefused` — a launch error, with nothing spawned.
+    """
+    base = _slot_base(repo_root)
+    with _SWEEP_LOCK:
+        first = base not in _SWEPT_BASES
+        _SWEPT_BASES.add(base)
+    if first:
+        sweep_slot_leftovers(base)
+    ident = process_control.identity()
+    prefix = f"{SLOT_PREFIX}{ident.get('pid', os.getpid())}-{_start_token(ident.get('process_start_time'))}-"
+    path = tempfile.mkdtemp(prefix=prefix, dir=base)
+    try:
+        yield path
+    finally:
+        try:
+            _remove_slot_tree(path)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(
+                f"multi-llm warning: could not remove the jailed attempt's "
+                f"scratch directory {render_home(path)}: {exc}",
+                file=sys.stderr,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Rendering
+# ---------------------------------------------------------------------------
+
+
+def render_home(path: Optional[str]) -> str:
+    """``path`` with ``$HOME`` shown as ``~``, so a line can be pasted into an
+    issue as it is."""
+    if not path:
+        return ""
+    home = os.path.expanduser("~")
+    text = str(path)
+    if home and home != "~" and (text == home or text.startswith(home + os.sep)):
+        return "~" + text[len(home):]
+    return text
+
+
+def render_allow_list(entries: Iterable[AllowEntry]) -> str:
+    """``dir:~/.codex, dir:/tmp/multi-llm-slot-…, file:/dev/null, …``"""
+    return ", ".join(f"{e.kind}:{render_home(e.path)}" for e in entries)
+
+
+# ---------------------------------------------------------------------------
+# After the child: jail failure, denied edits
+# ---------------------------------------------------------------------------
+
+#: How a codex-internal EACCES reads when it names its errno: Rust's
+#: ``io::Error`` display (``… (os error 13)``) and debug form (``Os { code: 13,
+#: kind: PermissionDenied, … }``), and the errno spellings a Python or shell
+#: tool prints.
+_EACCES = re.compile(
+    r"os error 13|\[errno 13\]|\beacces\b|code:\s*13,\s*kind:\s*permissiondenied",
+    re.IGNORECASE,
+)
+#: A bare ``permission denied`` names no errno: it counts only on a line that
+#: also names an absolute path (``… /x: Permission denied``). Tied to nothing,
+#: it is as likely an approval or policy refusal as a filesystem one, and it
+#: would otherwise be a path-less "probable" jail denial.
+_PERMISSION_DENIED = re.compile(r"permission denied", re.IGNORECASE)
+_ABS_PATH = re.compile(r"(?<![\w.-])(/(?:[^\s'\"`:,;()\[\]{}<>|]+))")
+
+JAIL_CLASS_JAIL = "jail"
+JAIL_CLASS_ORDINARY = "ordinary"
+JAIL_CLASS_PROBABLE = "probable"
+
+#: :func:`is_jail_failure`'s preference when several lines carry an EACCES:
+#: a jail denial anywhere decides, then an unnamed one, then an ordinary one.
+_CLASS_RANK = {JAIL_CLASS_JAIL: 2, JAIL_CLASS_PROBABLE: 1, JAIL_CLASS_ORDINARY: 0}
+
+
+@dataclass(frozen=True)
+class JailEvidence:
+    """What :func:`is_jail_failure` found: where the EACCES was (``stderr`` or
+    ``event``), the one line carrying it (≤300 chars), the absolute path when
+    the line names one, the class (``jail`` / ``ordinary`` / ``probable``) and,
+    for ``ordinary``, why it is not a jail denial."""
+
+    where: str
+    line: str
+    path: Optional[str]
+    klass: str
+    reason: str = ""
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "where": self.where, "line": self.line, "path": self.path,
+            "class": self.klass, "reason": self.reason,
+        }
+
+
+def _events(stdout: str) -> Iterator[Dict[str, Any]]:
+    for raw in (stdout or "").splitlines():
+        raw = raw.strip()
+        if not raw.startswith("{"):
+            continue
+        try:
+            event = json.loads(raw)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def _top_level_error_texts(stdout: str) -> Iterator[str]:
+    """Texts of top-level ``error``/``turn.failed`` events — codex's own
+    reports, never a command's output or the model's prose."""
+    for event in _events(stdout):
+        kind = event.get("type")
+        if kind == "error":
+            yield str(event.get("message") or "")
+        elif kind == "turn.failed":
+            err = event.get("error")
+            if isinstance(err, dict):
+                yield str(err.get("message") or "")
+            elif err:
+                yield str(err)
+
+
+def _nearest_existing(path: str) -> str:
+    probe = path
+    while probe and not os.path.lexists(probe):
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    return probe or path
+
+
+def classify_denied_path(path: Optional[str], entries: Sequence[AllowEntry]) -> Tuple[str, str]:
+    """``(class, reason)`` for a denied path the child named.
+
+    The jail handles write rights only and the parent runs outside it, so:
+    outside every allow entry and writable by the user (``os.access(W_OK)`` on
+    the path, or its nearest existing ancestor) is a **jail** denial; inside an
+    allow entry, or not writable by the user either, is an **ordinary**
+    permission error; no path is a **probable** jail denial.
+    """
+    if not path:
+        return JAIL_CLASS_PROBABLE, "Codex did not name the path"
+    real = os.path.realpath(path)
+    for entry in entries:
+        if entry.kind == KIND_DIR and _inside(real, entry.path):
+            return JAIL_CLASS_ORDINARY, f"{render_home(real)} is inside the allow entry {render_home(entry.path)}"
+        if entry.kind == KIND_FILE and real == entry.path:
+            return JAIL_CLASS_ORDINARY, f"{render_home(real)} is an allow entry"
+    if not os.access(_nearest_existing(real), os.W_OK):
+        return JAIL_CLASS_ORDINARY, f"{render_home(real)} is not writable by this user either"
+    return JAIL_CLASS_JAIL, ""
+
+
+def wrapper_evidence(returncode: Optional[int], stderr: str) -> Optional[JailEvidence]:
+    """The wrapper's own refusal at dispatch, as jail evidence
+    (``where="wrapper"``, class ``jail``), or ``None``.
+
+    Exit :data:`EXIT_REQUIRED_ENTRY` (a required entry missing, or turned into
+    a symlink, since the probe passed) or :data:`EXIT_UNAVAILABLE` (a Landlock
+    call failing after a good ABI query) together with the wrapper's
+    ``landlock_exec:`` note: never a model error, never retried on another
+    rung (F1 "Between the probe and a dispatch"). Both lanes read it — the
+    fan-out's classifier and the executor's jailed-outcome read — through
+    :func:`is_jail_failure`'s ``returncode``.
+    """
+    if returncode not in (EXIT_REQUIRED_ENTRY, EXIT_UNAVAILABLE):
+        return None
+    note = wrapper_note(stderr)
+    if not note:
+        return None
+    path: Optional[str] = None
+    body = note[len(NOTE_PREFIX):]
+    if body.startswith("required-entry: "):
+        spec = body[len("required-entry: "):]
+        spec = spec.rsplit(": ", 1)[0] if ": " in spec else spec
+        path = spec.split(":", 1)[1] if ":" in spec else spec
+    return JailEvidence(
+        where="wrapper", line=note[:300], path=path or None, klass=JAIL_CLASS_JAIL,
+    )
+
+
+def is_jail_failure(
+    stderr: str,
+    stdout: str,
+    context: Optional[JailContext],
+    *,
+    returncode: Optional[int] = None,
+) -> Optional[JailEvidence]:
+    """A codex-internal EACCES in a jailed child's output, with its evidence, or
+    ``None`` (F1 "Where it sits" item 6).
+
+    Reads codex's own channels only: stderr and the top-level ``error`` /
+    ``turn.failed`` events — never ``item.completed`` command output, which is
+    the jail stopping a stray write (counted by :func:`jail_denied_edits`),
+    and never the model's prose. The wrapper's own ``landlock_exec:`` lines
+    are skipped here; given the child's ``returncode``, the wrapper's refusal
+    at dispatch (:func:`wrapper_evidence`) is read first and wins.
+
+    A line counts when it names its errno (:data:`_EACCES`), or says a bare
+    ``permission denied`` beside an absolute path. Every such line is
+    classified and the strongest wins — ``jail`` over ``probable`` over
+    ``ordinary``, the first of equals — so an ordinary denial printed first
+    cannot hide a jail denial after it, nor the reverse. What a lane makes of
+    the evidence is its own rule, and it is the same on both: a child killed
+    at its deadline is a timeout, never a jail failure.
+    """
+    if returncode is not None:
+        refused = wrapper_evidence(returncode, stderr)
+        if refused is not None:
+            return refused
+    candidates: List[Tuple[str, str]] = []
+    for line in (stderr or "").splitlines():
+        if not line.strip().startswith(NOTE_PREFIX):
+            candidates.append(("stderr", line))
+    for text in _top_level_error_texts(stdout):
+        for line in text.splitlines():
+            candidates.append(("event", line))
+    entries: Optional[List[AllowEntry]] = None
+    best: Optional[JailEvidence] = None
+    for where, raw in candidates:
+        full = raw.strip()
+        line = full[:300]
+        match = _ABS_PATH.search(line)
+        path = match.group(1).rstrip(".") if match else None
+        if not _EACCES.search(full) and not (path and _PERMISSION_DENIED.search(full)):
+            continue
+        if entries is None:
+            entries = []
+            if context is not None:
+                try:
+                    entries = allow_entries(context)
+                except JailRefused:
+                    entries = []
+        klass, reason = classify_denied_path(path, entries)
+        if best is None or _CLASS_RANK[klass] > _CLASS_RANK[best.klass]:
+            best = JailEvidence(where=where, line=line, path=path, klass=klass, reason=reason)
+            if klass == JAIL_CLASS_JAIL:
+                break
+    return best
+
+
+@dataclass
+class JailDenials:
+    """What :func:`jail_denied_edits` read off a jailed child's stream — paths,
+    item kinds and counts only, never output text (F1 "A denied edit is never
+    recorded as applied")."""
+
+    failed_file_changes: List[List[str]] = field(default_factory=list)
+    in_scope_paths: List[str] = field(default_factory=list)
+    replacement_paths: List[str] = field(default_factory=list)
+    out_of_scope_count: int = 0
+    out_of_scope_paths: List[str] = field(default_factory=list)
+
+    @property
+    def any_in_scope(self) -> bool:
+        return bool(self.failed_file_changes or self.in_scope_paths or self.replacement_paths)
+
+    @property
+    def total(self) -> int:
+        return (
+            len(self.failed_file_changes) + len(self.in_scope_paths)
+            + len(self.replacement_paths) + self.out_of_scope_count
+        )
+
+    def denied_paths(self) -> List[str]:
+        seen: List[str] = []
+        for group in self.failed_file_changes:
+            for path in group:
+                if path not in seen:
+                    seen.append(path)
+        for path in [*self.in_scope_paths, *self.replacement_paths]:
+            if path not in seen:
+                seen.append(path)
+        return seen
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "failed_file_changes": [list(g) for g in self.failed_file_changes],
+            "in_scope_paths": list(self.in_scope_paths),
+            "replacement_paths": list(self.replacement_paths),
+            "out_of_scope_count": self.out_of_scope_count,
+            "out_of_scope_paths": list(self.out_of_scope_paths[:3]),
+        }
+
+
+_DENIAL_LINE = re.compile(r"permission denied|\[errno 13\]|os error 13|eacces", re.IGNORECASE)
+_PATH_TOKEN = re.compile(r"([^\s'\"`:,;()\[\]{}<>|]+)")
+
+
+def _denied_paths_in(output: str) -> List[str]:
+    """The paths named on ``Permission denied`` / ``[Errno 13]`` lines of one
+    command's output (``sh: 1: cannot create f.txt: Permission denied``,
+    ``PermissionError: [Errno 13] Permission denied: 'p.txt'``)."""
+    found: List[str] = []
+    for line in (output or "").splitlines():
+        if not _DENIAL_LINE.search(line):
+            continue
+        quoted = re.findall(r"'([^']+)'|\"([^\"]+)\"", line)
+        candidates = [a or b for a, b in quoted]
+        # A quoted error message is not a path (codex's Rust debug form:
+        # `Os { code: 13, kind: PermissionDenied, message: "Permission denied" }`).
+        candidates = [c for c in candidates if not _DENIAL_LINE.search(c)]
+        if not candidates:
+            head = _DENIAL_LINE.split(line)[0]
+            parts = [p.strip() for p in head.split(":") if p.strip()]
+            if parts:
+                last = parts[-1]
+                for prefix in ("cannot create ", "can't create ", "cannot open ", "cannot remove ",
+                               "cannot touch ", "cannot move ", "cannot stat "):
+                    if last.startswith(prefix):
+                        last = last[len(prefix):]
+                tokens = _PATH_TOKEN.findall(last)
+                if tokens:
+                    candidates = [tokens[-1]]
+        for candidate in candidates:
+            candidate = candidate.strip().strip("‘’")
+            if candidate and candidate not in found:
+                found.append(candidate)
+    return found
+
+
+def _resolve_against(path: str, cwd: Optional[str]) -> str:
+    if not os.path.isabs(path):
+        path = os.path.join(cwd or os.getcwd(), path)
+    return os.path.realpath(path)
+
+
+def jail_denied_edits(
+    stdout: str,
+    context: Optional[JailContext],
+    *,
+    cwd: Optional[str] = None,
+) -> JailDenials:
+    """Walk a jailed child's ``item.completed`` events for denials.
+
+    * every ``file_change`` item with ``status: "failed"``, with its
+      ``changes[].path`` list (the whole patch, not the one that was refused —
+      the bytes decide what landed);
+    * every ``command_execution`` item whose ``aggregated_output`` carries a
+      denial for a path that resolves (against ``cwd``, symlinks resolved) to
+      the write scope's target — the file, or a path under the tasks directory
+      — counted in scope;
+    * under a file-only grant (``plan-file``, the ``tasks`` file-rule
+      fallback), a denial naming a **new** path in the target's directory (the
+      temp file of ``sed -i`` or an editor's save) is a ``replacement`` denial;
+      in-place writes to the target are granted, so a denial naming the target
+      itself is one too;
+    * every other command denial is counted out of scope (the first three paths
+      kept).
+
+    With no write scope (a read-only slot) every command denial is out of scope
+    and every failed ``file_change`` is still reported, for the slot's line.
+    """
+    result = JailDenials()
+    scope = context.write_scope if context is not None else None
+    target = os.path.realpath(context.target) if context is not None and context.target else None
+    target_dir = (
+        os.path.realpath(context.target_dir)
+        if context is not None and context.target_dir else None
+    )
+    file_only = bool(scope) and target is not None and target_dir is None
+    for event in _events(stdout):
+        if event.get("type") != "item.completed":
+            continue
+        item = event.get("item")
+        if not isinstance(item, dict):
+            continue
+        kind = item.get("type")
+        if kind == "file_change" and item.get("status") == "failed":
+            paths: List[str] = []
+            for change in item.get("changes") or ():
+                if isinstance(change, dict) and change.get("path"):
+                    paths.append(_resolve_against(str(change["path"]), cwd))
+            result.failed_file_changes.append(paths)
+            continue
+        if kind != "command_execution":
+            continue
+        for raw in _denied_paths_in(str(item.get("aggregated_output") or "")):
+            resolved = _resolve_against(raw, cwd)
+            if scope and target_dir and _inside(resolved, target_dir):
+                if resolved not in result.in_scope_paths:
+                    result.in_scope_paths.append(resolved)
+            elif file_only and resolved == target:
+                if resolved not in result.replacement_paths:
+                    result.replacement_paths.append(resolved)
+            elif file_only and os.path.dirname(resolved) == os.path.dirname(target) and not os.path.exists(resolved):
+                if resolved not in result.replacement_paths:
+                    result.replacement_paths.append(resolved)
+            else:
+                result.out_of_scope_count += 1
+                if len(result.out_of_scope_paths) < 3:
+                    result.out_of_scope_paths.append(resolved)
+    return result
+
+
+# ---------------------------------------------------------------------------
+# The home check (F1 Limits, "$CODEX_HOME is writable…")
+# ---------------------------------------------------------------------------
+
+#: Files at the home's root that codex loads as configuration or instructions
+#: in a later session (hashed whole). ``.env`` is one: codex's start-up
+#: (codex-rs arg0 ``load_dotenv``) exports every variable in
+#: ``$CODEX_HOME/.env`` not prefixed ``CODEX_``, so a jailed turn writing
+#: ``OPENAI_BASE_URL`` there would redirect later unjailed sessions' API
+#: traffic, key included. Like every entry here it is compared by hash only;
+#: its bytes are never kept or logged.
+HOME_FILES: Tuple[str, ...] = ("AGENTS.md", "AGENTS.override.md", ".env")
+#: Trees codex loads as configuration, instructions or code in a later session
+#: (compared by lstat tuples, plus each symlink's destination — a link to a
+#: directory, or the tree's root itself, included), each with the names under
+#: it a normal turn rewrites (preflight step 1's write set), which the check
+#: skips.
+HOME_TREES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
+    ("rules", ()),
+    ("skills", (".system",)),
+    ("plugins", (".codex-remote-plugin-install.json", ".remote-plugin-install-staging")),
+    ("prompts", ()),
+    ("memories", ()),
+    ("hooks", ()),
+)
+#: Left out by classification (codex 0.158/0.159 home): `packages/` is codex's
+#: own self-updating app-server daemon (2 GB here, rewritten by auto-update);
+#: sqlite databases, `shell_snapshots/`, `tmp/`, `.tmp/`, `cache/`, `log/`,
+#: `sessions/`, `history.jsonl` and `installation_id` are written by a normal
+#: turn and are not loaded as instructions or code.
+HOME_CONFIG = "config.toml"
+HOME_AUTH = "auth.json"
+
+#: One trust-only ``[projects."…"]`` table, mirroring
+#: ``codex_trust._remove_table``: the header, the trust line and at most the
+#: one blank line codex's writer puts before the table — never the whitespace
+#: after it, which is the next table's separator (a greedy trailing ``\s*``
+#: swallowed it, so an entry inserted mid-file after a kept table stripped to
+#: text one blank line short of the file it was inserted into). The lookahead
+#: admits only a table that ends there: a key before the next header is still
+#: this table's in TOML, and stripping the header would hand it to the table
+#: above, hiding the move.
+_TRUST_TABLE = re.compile(
+    r'^\n?\[projects\."((?:[^"\\]|\\.)*)"\]\s*\n'
+    r'trust_level\s*=\s*"trusted"[ \t]*\r?(?:\n|\Z)'
+    r'(?=(?:[ \t]*(?:#[^\n]*)?\r?\n)*[ \t]*(?:\[|(?:#[^\n]*)?\Z))',
+    re.MULTILINE,
+)
+
+
+@dataclass
+class HomeSnapshot:
+    """A fingerprint of ``$CODEX_HOME``'s security-relevant set. Hashes and
+    lstat tuples only; ``config_text`` is kept in memory for the key-name diff
+    and never logged or persisted."""
+
+    home: str
+    files: Dict[str, str] = field(default_factory=dict)
+    #: home-relative path → ``(ino, size, mode, mtime_ns, ctime_ns)``, with
+    #: the ``readlink`` destination appended for a symlink.
+    trees: Dict[str, Tuple[Any, ...]] = field(default_factory=dict)
+    config_sha: str = ""
+    config_text: str = ""
+    foreign_trust: Tuple[str, ...] = ()
+    auth_identity: str = ""
+
+
+def _sha(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _tree_entry(path: str, *, links_only: bool = False) -> Optional[Tuple[Any, ...]]:
+    """One watched-tree entry's fingerprint: its lstat tuple, plus the
+    destination for a symlink. ``None`` when it cannot be lstat'ed, or when
+    ``links_only`` and it is not a symlink."""
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return None
+    is_link = stat.S_ISLNK(info.st_mode)
+    if links_only and not is_link:
+        return None
+    entry: Tuple[Any, ...] = (
+        info.st_ino, info.st_size, info.st_mode, info.st_mtime_ns, info.st_ctime_ns,
+    )
+    if is_link:
+        try:
+            entry += (os.readlink(path),)
+        except OSError:
+            entry += ("unreadable",)
+    return entry
+
+
+def _strip_expected_trust(text: str, run_cwds: Sequence[str]) -> Tuple[str, Tuple[str, ...]]:
+    """Remove the trust-only tables I12 expects (a ``[projects."<cwd>"]`` table
+    holding exactly ``trust_level = "trusted"`` for a cwd this run's children
+    use). Returns the remaining text and the paths of trust-only tables for
+    *other* cwds (named in the run's closing summary, never a failure)."""
+    cwds = {os.path.realpath(c) for c in run_cwds if c}
+    foreign: List[str] = []
+
+    def keep(match: "re.Match[str]") -> str:
+        path = match.group(1).replace('\\"', '"').replace("\\\\", "\\")
+        if os.path.realpath(path) in cwds or path in cwds:
+            return ""
+        foreign.append(path)
+        return ""
+
+    stripped = _TRUST_TABLE.sub(keep, text)
+    return stripped, tuple(sorted(foreign))
+
+
+def home_snapshot(codex_home: Optional[str], run_cwds: Sequence[str] = ()) -> Optional[HomeSnapshot]:
+    """Fingerprint ``codex_home``'s security-relevant set, or ``None`` when
+    there is no home to read (the check is then skipped, never failed)."""
+    if not codex_home or not os.path.isdir(codex_home):
+        return None
+    snap = HomeSnapshot(home=codex_home)
+    for name in HOME_FILES:
+        path = os.path.join(codex_home, name)
+        try:
+            with open(path, "rb") as handle:
+                snap.files[name] = _sha(handle.read())
+        except FileNotFoundError:
+            snap.files[name] = "absent"
+        except OSError:
+            snap.files[name] = "unreadable"
+    config_path = os.path.join(codex_home, HOME_CONFIG)
+    try:
+        with open(config_path, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+        stripped, foreign = _strip_expected_trust(text, run_cwds)
+        snap.config_sha = _sha(stripped.encode("utf-8"))
+        snap.config_text = stripped
+        snap.foreign_trust = foreign
+    except FileNotFoundError:
+        # codex creates the file holding only the trust table on a fresh home;
+        # a missing file therefore compares as empty, not as its own state.
+        snap.config_sha = _sha(b"")
+    except OSError:
+        snap.config_sha = "unreadable"
+    auth_path = os.path.join(codex_home, HOME_AUTH)
+    try:
+        with open(auth_path, "r", encoding="utf-8") as handle:
+            auth = json.load(handle)
+        tokens = auth.get("tokens") if isinstance(auth, dict) else None
+        identity = json.dumps([
+            auth.get("auth_mode") if isinstance(auth, dict) else None,
+            auth.get("OPENAI_API_KEY") if isinstance(auth, dict) else None,
+            tokens.get("account_id") if isinstance(tokens, dict) else None,
+        ], sort_keys=True)
+        snap.auth_identity = _sha(identity.encode("utf-8"))
+    except FileNotFoundError:
+        snap.auth_identity = "absent"
+    except (OSError, ValueError):
+        snap.auth_identity = "unreadable"
+    for tree, skipped in HOME_TREES:
+        root = os.path.join(codex_home, tree)
+        # A root that is itself a link (`skills -> elsewhere`, dangling or
+        # not) is recorded with its destination: os.walk follows it, so a
+        # retarget onto another empty tree would otherwise show nothing.
+        root_link = _tree_entry(root, links_only=True)
+        if root_link is not None:
+            snap.trees[tree] = root_link
+        if not os.path.isdir(root):
+            continue
+        for dirpath, dirnames, filenames in os.walk(root):
+            # A skipped directory name counts only at the tree's top level
+            # (`skills/.system/` is codex's own re-extraction; a `.system/`
+            # planted inside a user skill is watched).
+            dirnames[:] = sorted(
+                d for d in dirnames if not (dirpath == root and d in skipped)
+            )
+            # os.walk lists a symlink to a directory in dirnames and never
+            # descends into it, so `skills/x -> ../tmp/x` (a skill kept in an
+            # unwatched part of the home) or a retargeted skill link is
+            # recorded here with its destination. A real directory is covered
+            # by the files under it.
+            for name in dirnames:
+                path = os.path.join(dirpath, name)
+                link = _tree_entry(path, links_only=True)
+                if link is not None:
+                    snap.trees[os.path.relpath(path, codex_home)] = link
+            for name in sorted(filenames):
+                if name in skipped:
+                    continue
+                path = os.path.join(dirpath, name)
+                entry = _tree_entry(path)
+                if entry is None:
+                    continue
+                snap.trees[os.path.relpath(path, codex_home)] = entry
+    return snap
+
+
+def _toml_names(text: str) -> Dict[str, Any]:
+    try:
+        import tomllib  # Python 3.11+
+    except ImportError:  # pragma: no cover - 3.10 fallback
+        return {}
+    try:
+        return tomllib.loads(text)
+    except Exception:  # noqa: BLE001 - a malformed file is reported as changed
+        return {}
+
+
+def _changed_keys(before: Any, after: Any, prefix: str = "") -> List[str]:
+    """Dotted names of keys/tables that differ, never values."""
+    names: List[str] = []
+    if isinstance(before, dict) and isinstance(after, dict):
+        for key in sorted(set(before) | set(after)):
+            dotted = f"{prefix}{key}"
+            if key not in before or key not in after:
+                present = after.get(key) if key in after else before.get(key)
+                children = (
+                    [k for k, v in present.items() if isinstance(v, dict)]
+                    if isinstance(present, dict) else []
+                )
+                # A table added or removed whole is named down to its
+                # sub-tables (`[mcp_servers.x]` reads `mcp_servers.x`), never
+                # with a value.
+                if children:
+                    names.extend(f"{dotted}.{child}" for child in sorted(children))
+                else:
+                    names.append(dotted)
+            elif before[key] != after[key]:
+                if isinstance(before[key], dict) and isinstance(after[key], dict):
+                    names.extend(_changed_keys(before[key], after[key], dotted + "."))
+                else:
+                    names.append(dotted)
+    elif before != after:
+        names.append(prefix.rstrip(".") or "(file)")
+    return names
+
+
+@dataclass
+class HomeChange:
+    """What :func:`compare_home` found: changed files (home-relative), and for
+    ``config.toml`` the changed table or key names — never values."""
+
+    changed: List[str] = field(default_factory=list)
+    config_keys: List[str] = field(default_factory=list)
+    foreign_trust: List[str] = field(default_factory=list)
+
+    @property
+    def any(self) -> bool:
+        return bool(self.changed)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "changed": list(self.changed),
+            "config_keys": list(self.config_keys),
+            "foreign_trust": list(self.foreign_trust),
+        }
+
+    def describe(self) -> str:
+        parts: List[str] = []
+        for name in self.changed:
+            if name == HOME_CONFIG and self.config_keys:
+                parts.append(f"{name} ({', '.join(self.config_keys)})")
+            else:
+                parts.append(name)
+        return ", ".join(parts)
+
+
+def compare_home(before: Optional[HomeSnapshot], after: Optional[HomeSnapshot]) -> Optional[HomeChange]:
+    """The difference between two snapshots of one home, or ``None`` when
+    either side is missing (nothing to compare — never a failure)."""
+    if before is None or after is None:
+        return None
+    change = HomeChange()
+    for name in sorted(set(before.files) | set(after.files)):
+        if before.files.get(name) != after.files.get(name):
+            change.changed.append(name)
+    if before.config_sha != after.config_sha:
+        change.changed.append(HOME_CONFIG)
+        change.config_keys = _changed_keys(
+            _toml_names(before.config_text), _toml_names(after.config_text)
+        ) or ["(unparsed change)"]
+    if before.auth_identity != after.auth_identity:
+        change.changed.append(f"{HOME_AUTH} (account identity)")
+    for rel in sorted(set(before.trees) | set(after.trees)):
+        if before.trees.get(rel) != after.trees.get(rel):
+            change.changed.append(rel)
+    change.foreign_trust = sorted(set(after.foreign_trust) - set(before.foreign_trust))
+    return change
+
+
+# ---------------------------------------------------------------------------
+# The rung probe's setup (outside the jail)
+# ---------------------------------------------------------------------------
+
+#: The seeded file's bytes for the truncation control.
+TRUNCATION_SEED = b"multi-llm truncation canary: these bytes must survive\n"
+
+
+class ProbeSetupFailed(Exception):
+    """The parent could not prepare what the rung probe needs outside the jail
+    (the seeded file or the probe's TMPDIR): the walk records ``unknown`` and
+    stops, exactly as a failed ``_prepare_probe_workdir`` does."""
+
+
+@dataclass
+class RungProbe:
+    """A prepared rung probe: the wrapped argv, its env, and the seeded file
+    whose bytes the parent compares afterwards."""
+
+    argv: List[str]
+    env: Dict[str, str]
+    seeded: str
+    entries: List[AllowEntry]
+
+    def seed_intact(self) -> bool:
+        try:
+            with open(self.seeded, "rb") as handle:
+                return handle.read() == TRUNCATION_SEED
+        except OSError:
+            return False
+
+
+def canary_env(context: JailContext) -> Dict[str, str]:
+    """The env keys the rung's canary reads for a write profile's positive
+    control: the plan or tasks file under a file rule, the tasks dir under a
+    dir rule. Empty for a read-only probe."""
+    try:
+        from .providers.codex import CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.providers.codex import CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE  # type: ignore[no-redef]
+    if not context.write_scope or not context.target:
+        return {}
+    if context.write_scope == WRITE_SCOPE_TASKS and context.target_dir:
+        return {CANARY_ENV_WRITE_DIR: os.path.realpath(context.target_dir)}
+    return {CANARY_ENV_WRITE_FILE: os.path.realpath(context.target)}
+
+
+@contextlib.contextmanager
+def rung_probe(
+    rung: SandboxRung,
+    request: JailRequest,
+    resolved_probe_argv: Sequence[str],
+    *,
+    cwd: Optional[str],
+    env: Optional[Mapping[str, str]] = None,
+) -> Iterator[RungProbe]:
+    """Prepare a wrapped rung's probe outside the jail, then clean it up.
+
+    The walk has already made ``<cwd>/<rung.probe_workdir>`` and proven it
+    writable. This seeds the truncation file there, makes the probe's own
+    ``TMPDIR`` through :func:`slot_tmpdir`, completes the context from the
+    probe child's env (``$CODEX_HOME`` read the same way a dispatch reads it)
+    and wraps the pinned ``resolved_probe_argv``. Raises
+    :class:`ProbeSetupFailed` (walk: ``unknown``) when the seed or the
+    ``TMPDIR`` cannot be made — a temp base inside the repo (``slot_tmpdir``'s
+    ``tmpdir-in-repo`` refusal) included, since that is a preparation failure
+    and not a measurement of the rung — and :class:`JailRefused` (walk:
+    ``absent``, with the note) when a required entry is missing — the same
+    allow entries the dispatch it gates would get.
+    """
+    try:
+        from .providers.codex import CANARY_ENV_PYTHON, CANARY_ENV_SEEDED
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.providers.codex import CANARY_ENV_PYTHON, CANARY_ENV_SEEDED  # type: ignore[no-redef]
+    base_env = dict(os.environ if env is None else env)
+    workdir = os.path.join(os.path.abspath(cwd or os.getcwd()), rung.probe_workdir or "")
+    try:
+        fd, seeded = tempfile.mkstemp(prefix="plugin-landlock-seed-", dir=workdir)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(TRUNCATION_SEED)
+    except OSError as exc:
+        raise ProbeSetupFailed(f"could not seed the truncation file: {exc}") from exc
+    try:
+        try:
+            tmp_cm = slot_tmpdir(request.repo_root)
+            tmpdir = tmp_cm.__enter__()
+        except JailRefused as exc:
+            # The parent could not prepare the probe's TMPDIR (its temp base
+            # resolves inside the repo): ``unknown``, which stops the walk
+            # with no rung, exactly like a failed ``_prepare_probe_workdir``.
+            # Propagated as JailRefused it read as ``absent`` and let ``auto``
+            # fall through to the uncontained rung.
+            raise ProbeSetupFailed(f"could not make the probe's TMPDIR: {exc.message}") from exc
+        except OSError as exc:
+            raise ProbeSetupFailed(f"could not make the probe's TMPDIR: {exc}") from exc
+        try:
+            context = complete_context(request, tmpdir, base_env)
+            entries = allow_entries(context)
+            argv, child_env = wrap_argv(resolved_probe_argv, rung, context, base_env)
+            child_env[CANARY_ENV_SEEDED] = seeded
+            child_env[CANARY_ENV_PYTHON] = sys.executable
+            child_env.update(canary_env(context))
+            yield RungProbe(argv=argv, env=child_env, seeded=seeded, entries=entries)
+        finally:
+            tmp_cm.__exit__(None, None, None)
+    finally:
+        try:
+            os.unlink(seeded)
+        except OSError:
+            pass
+
+
+__all__ = [
+    "AllowEntry",
+    "BASE_DEVICE_ENTRIES",
+    "EXIT_REQUIRED_ENTRY",
+    "EXIT_UNAVAILABLE",
+    "HomeChange",
+    "HomeSnapshot",
+    "JailDenials",
+    "JailEvidence",
+    "JailRefused",
+    "NOTE_PREFIX",
+    "ProbeSetupFailed",
+    "RungProbe",
+    "TRUNCATION_SEED",
+    "WRAPPER_PATHS",
+    "allow_entries",
+    "canary_env",
+    "child_env_redirects",
+    "classify_denied_path",
+    "compare_home",
+    "complete_context",
+    "default_tasks_dir",
+    "home_snapshot",
+    "is_jail_failure",
+    "is_wrapped",
+    "jail_denied_edits",
+    "preview_context",
+    "preview_wrap_argv",
+    "render_allow_list",
+    "render_home",
+    "rung_probe",
+    "slot_tmpdir",
+    "sweep_slot_leftovers",
+    "unwrap_argv",
+    "wrap_argv",
+    "wrapper_evidence",
+    "wrapper_note",
+]

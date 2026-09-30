@@ -1159,6 +1159,9 @@ class RunHandle:
         # reason the whole file is: `status` must stay a sub-second command and
         # nothing on its path needs the tracker.
         from . import progress_tracker  # noqa: F401  (warm-up, see above)
+        # Same reason: `_restore_codex_trust` runs inside the signal handler and
+        # on the heartbeat-lost exit (plan codex-sandbox-unavailable I12).
+        from . import codex_trust  # noqa: F401  (warm-up, see above)
 
         process_control.install_worker_signal_handlers(self._on_signal)
         atexit.register(self._atexit)
@@ -1247,6 +1250,10 @@ class RunHandle:
             self._stop.set()
             self._closed = True
             if self.hard_exit_on_lost:
+                # `os._exit` skips `multi_llm.main`'s `finally`, so the codex
+                # trust entries this run's children added are removed here or
+                # never (plan codex-sandbox-unavailable I12).
+                _restore_codex_trust()
                 try:
                     sys.stderr.flush()
                     sys.stdout.flush()
@@ -1396,12 +1403,33 @@ class RunHandle:
         # but never a child they put in a session of its own (pi's detached
         # bash shells, a `timeout` inside one) — those would outlive the run.
         _sweep_live_clis()
+        # Then, with the children dead, the codex trust entries they added to
+        # the user's config (plan codex-sandbox-unavailable I12): `main`'s
+        # `finally` restores them on every other ending, and `os._exit` below
+        # skips it. Before `finish()`, so the phase lock is still held and no
+        # successor run can arm the same config first.
+        _restore_codex_trust()
         self.finish(
             EXIT_NEEDS_HUMAN,
             state=RUN_STATE_ABORTED,
             error=f"aborted_by_request ({name})",
         )
         os._exit(EXIT_NEEDS_HUMAN)
+
+
+def _restore_codex_trust() -> None:
+    """Remove the codex trust entries this run's children added (plan I12) on
+    the two worker endings that ``os._exit`` past ``multi_llm.main``'s
+    ``finally``: ``--abort`` (the signal handler) and a lost heartbeat. The
+    module was imported at :meth:`RunHandle.start`, so this is a
+    ``sys.modules`` hit, never an import under a signal. Never raises."""
+    try:
+        from . import codex_trust
+
+        codex_trust.restore_all()
+    except Exception as exc:  # noqa: BLE001 - the abort's record must still be written
+        print(f"multi-llm warning: could not restore codex's config: {exc}",
+              file=sys.stderr)
 
 
 def _sweep_live_clis() -> None:

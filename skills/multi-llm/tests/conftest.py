@@ -329,6 +329,24 @@ def _pin_opencode_debug_config(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_real_codex_trust_bookkeeping(monkeypatch):
+    """Keep the suite from arming the developer's real ``~/.codex`` for the
+    I12 trust-entry restore (plan codex-sandbox-unavailable §5, option B):
+    codex's adapter arms ``utils.codex_trust`` on every dispatch context, and
+    ``multi_llm.main``'s ``finally`` restores what it armed. Off by default;
+    ``tests/test_codex_trust.py`` turns it on against a temp home."""
+    try:
+        from utils import codex_trust
+    except Exception:
+        yield
+        return
+    monkeypatch.setattr(codex_trust, "ENABLED", False)
+    codex_trust.reset()
+    yield
+    codex_trust.reset()
+
+
+@pytest.fixture(autouse=True)
 def _pin_real_sandbox_probes(request, monkeypatch):
     """Keep the default suite from probing a developer's real provider CLI (D6).
 
@@ -390,20 +408,54 @@ def _pin_real_sandbox_probes(request, monkeypatch):
         return names or {"codex"}
 
     def _rung_probes() -> Set[Tuple[str, ...]]:
-        from utils.providers.base import SANDBOX_FALLBACK_PROFILES
+        from utils.providers.base import (
+            SANDBOX_FALLBACK_PROFILES, SANDBOX_WRITE_FALLBACK_PROFILES,
+        )
 
         probes: Set[Tuple[str, ...]] = set()
         for provider in list(getattr(registry, "_PROVIDERS", {}).values()):
             hook = getattr(provider, "sandbox_fallback_rungs", None)
             if not callable(hook):
                 continue
-            for profile in SANDBOX_FALLBACK_PROFILES:
+            for profile in (*SANDBOX_FALLBACK_PROFILES, *SANDBOX_WRITE_FALLBACK_PROFILES):
                 for rung in hook(profile) or ():
                     if rung.probe_argv:
                         probes.add(tuple(rung.probe_argv))
         return probes
 
+    def _wrapped_tail(argv):
+        # The plugin-landlock rung's probe (plan codex-sandbox-unavailable §8.1):
+        # `[python, -I, -S, <wrapper>, --allow …, --, <resolved codex argv>]`.
+        # It starts with the interpreter, so the basename check below would let
+        # it through and the default suite would run the REAL wrapper — real
+        # Landlock on a capable kernel, exit 126 on another — around whatever
+        # codex it names. Looked past the wrapper instead.
+        try:
+            from utils.landlock_dispatch import unwrap_argv
+        except Exception:
+            return None
+        return unwrap_argv(argv)
+
     def guarded(argv, **kwargs):
+        tail = _wrapped_tail(argv) if argv else None
+        if tail is not None:
+            wrapper = next(
+                (str(a) for a in argv[:6] if str(a).endswith(".py")), ""
+            )
+            if not os.path.abspath(wrapper).startswith(temp_root + os.sep):
+                # The production wrapper: answered as a kernel with no usable
+                # Landlock (the wrapper's own exit 126), so the walk records
+                # the rung `absent` and falls through exactly as before the
+                # rung existed. A test that wants the rung points
+                # `landlock_dispatch.WRAPPER_PATHS` at a fake under tmp_path,
+                # which runs for real.
+                return subprocess.CompletedProcess(
+                    list(argv), 126, "",
+                    "landlock_exec: unavailable: the default suite never runs "
+                    "the production Landlock wrapper (plugin-landlock rung "
+                    "absent)\n",
+                )
+            return real(argv, **kwargs)
         head = os.path.basename(str(argv[0])) if argv else ""
         if head in _provider_commands():
             launcher, _ = _resolve_executable(str(argv[0]))

@@ -7,6 +7,13 @@ report label, no *unsandboxed* on ``status``. It gets its own word instead —
 ``[SANDBOX_FALLBACK]`` and ``sandbox: fallback-landlock``. A slot on the
 **uncontained** rung keeps every one of those markers exactly as before.
 
+Since 2026-09-30 (plan codex-sandbox-unavailable-findings-and-fixes, step 2)
+the plugin's own Landlock jail joins them with a third word from a closed set
+of its own — ``fallback-plugin-landlock`` — kept on an exit 0, a non-zero exit
+and a timeout kill, through ``models_served``, ``progress.sandbox_fallback``
+and ``--reaggregate``; and a slot that left the jail since the last run is
+named with this run's rung-probe outcome, never the legacy retirement wording.
+
 The companion guards live beside ``tests/test_served_model_reporting.py`` (the
 carriage) and ``tests/test_sandbox_fallback_ladder.py`` (T1–T4). This file
 drives the real ``review_plan_orchestrator.main()`` and ``ask_orchestrator``
@@ -29,6 +36,7 @@ import ask_orchestrator  # noqa: E402
 import review_plan_orchestrator as rpo  # noqa: E402
 from utils import review_orchestrator_base as base  # noqa: E402
 from utils import run_status, status_file  # noqa: E402
+from utils.landlock_dispatch import unwrap_argv  # noqa: E402
 from utils.html_report_generator import (  # noqa: E402
     SANDBOX_BYPASSED_LABEL,
     served_model_label,
@@ -170,9 +178,12 @@ def _run_review_plan(tmp_path, monkeypatch, rung, *, prior_served=None):
 
     def fake_run(cmd, **kwargs):
         # Only the dispatch itself — `codex exec …`; any other probe the lane
-        # runs through the same module (a version check) is not the slot.
-        if "exec" in list(cmd)[:3]:
-            seen["argv"].append(list(cmd))
+        # runs through the same module (a version check) is not the slot. A
+        # slot on the plugin's jail is `[python, -I, -S, <wrapper>, --allow …,
+        # --, codex exec …]` (2026-09-30), so the codex argv is read past it.
+        tail = unwrap_argv(list(cmd)) or list(cmd)
+        if "exec" in tail[:3]:
+            seen["argv"].append(tail)
         return _completed(_stream(deprecation=rung == "landlock"))
 
     argv = [
@@ -433,3 +444,198 @@ class TestTheDeprecationItemIsNotAVerdict:
         parsed = CodexProvider().parse_output(_stream(deprecation=True), "")
         assert parsed["success"] is True
         assert parsed["data"] == FINDINGS
+
+
+# ---------------------------------------------------------------------------
+# The plugin's own jail keeps its word on every hop (plan
+# codex-sandbox-unavailable-findings-and-fixes §7 "Step 2 subtask" item 3 and
+# item 5's reporting regression, 2026-09-30)
+# ---------------------------------------------------------------------------
+
+JAIL = "plugin-landlock"
+JAIL_WORD = "fallback-plugin-landlock"
+
+
+@pytest.fixture
+def jail_env(tmp_path, monkeypatch):
+    """What a slot on the jail needs at its spawn site: an existing temp
+    ``CODEX_HOME``, a temp base for the attempt's scratch directory outside
+    the plan's tree, and HOME pinned so no real home is read."""
+    import tempfile
+
+    home = tmp_path / "codex-home"
+    home.mkdir()
+    slot_base = tmp_path / "slot-tmp"
+    slot_base.mkdir()
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    monkeypatch.setattr(tempfile, "tempdir", str(slot_base))
+    monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
+    return tmp_path
+
+
+class TestTheJailsRecordWord:
+    def test_the_jail_has_its_own_word_from_its_own_closed_set(self):
+        from utils import llm_client
+
+        assert sandbox_record_word(JAIL) == JAIL_WORD
+        assert sandbox_record_word(JAIL_WORD) == JAIL_WORD
+        assert sandbox_fallback_rung_of(JAIL_WORD) == JAIL
+        # Nothing that reads "contained" widens.
+        assert llm_client._CONTAINED_RUNG_IDS == frozenset({"landlock"})
+        assert llm_client._INCIDENTAL_RUNG_IDS == frozenset({JAIL})
+        assert llm_client.sandbox_word_is_incidental(JAIL_WORD)
+        assert not llm_client.sandbox_word_is_incidental("fallback-landlock")
+
+    @pytest.mark.parametrize("value", [
+        "fallback-plugin", "plugin-landlock-2", "fallback-plugin-landlock-x", "Plugin-Landlock",
+    ])
+    def test_an_undeclared_word_is_still_dropped(self, value):
+        assert sandbox_record_word(value) is None
+
+
+def _jailed_slot(tmp_path, reply):
+    """One ``run_single_model`` on the jail, the provider subprocess stubbed
+    (``reply`` is a ``subprocess.run`` side effect)."""
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n\nAdd an email field.\n", encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir(exist_ok=True)
+    with patch("shutil.which", return_value="/usr/bin/codex"), \
+         patch("utils.llm_client.subprocess.run", side_effect=reply):
+        return asyncio.run(base.run_single_model(
+            model_spec=SPEC, plan_path=str(plan),
+            prompt_template="{output_json_path}{output_location}{working_limits}",
+            prompt_context={}, phase_name="review-plan", invoke_phase="plan_review",
+            timeout=1800, out_dir=str(out_dir), prefix="plan",
+        ))
+
+
+class TestEveryOutcomeOnTheJailRecordsTheWord:
+    """Exit 0, a non-zero exit and a timeout kill each put the word on the
+    per-slot record — and ``collect_served_models`` carries it on."""
+
+    @pytest.mark.parametrize("outcome", ["exit-0", "non-zero", "timeout"])
+    def test_the_per_slot_record_and_models_served(
+        self, jail_env, monkeypatch, outcome
+    ):
+        import subprocess
+
+        _pin_probe(monkeypatch, JAIL)
+
+        def reply(cmd, **kwargs):
+            if unwrap_argv(list(cmd)) is None:
+                # Not the jailed slot (a git read the lane makes): no repo here.
+                return _completed("", returncode=128)
+            if outcome == "exit-0":
+                return _completed(_stream(deprecation=False))
+            if outcome == "non-zero":
+                return _completed("", returncode=1, stderr="codex: model error")
+            raise subprocess.TimeoutExpired(cmd, 1800, output="", stderr="")
+
+        result = _jailed_slot(jail_env, reply)
+        assert result["success"] is (outcome == "exit-0")
+        assert result["sandbox"] == JAIL_WORD
+        assert base.collect_served_models({SPEC: result}) == {SPEC: {"sandbox": JAIL_WORD}}
+
+    def test_a_jail_denied_slot_carries_its_reason_and_path(self, jail_env, monkeypatch):
+        _pin_probe(monkeypatch, JAIL)
+        outside = jail_env / "outside"
+        outside.mkdir()
+        denied = outside / "state.db"
+
+        def reply(cmd, **kwargs):
+            return _completed(
+                "", returncode=1,
+                stderr=f"Error: failed to write {denied}: Permission denied (os error 13)\n",
+            )
+
+        result = _jailed_slot(jail_env, reply)
+        assert result["success"] is False
+        assert result["failure_reason"] == "jail-denied"
+        assert result["jail_denied_path"] == "~/outside/state.db"
+        assert "denied by the plugin's jail: ~/outside/state.db" in result["error"]
+        assert base.collect_served_models({SPEC: result}) == {SPEC: {
+            "sandbox": JAIL_WORD, "failure_reason": "jail-denied",
+            "jail_denied_path": "~/outside/state.db",
+        }}
+
+
+class TestTheJailsWordSurvivesTheRunAndReaggregate:
+    def test_models_served_progress_and_reaggregate(
+        self, tmp_path, jail_env, monkeypatch
+    ):
+        import argparse
+
+        phase_dir, seen = _run_review_plan(tmp_path, monkeypatch, JAIL)
+        # The dispatch went through the wrapper and rendered the rung.
+        (argv,) = seen["argv"]
+        assert argv[argv.index("--sandbox") + 1] == "danger-full-access"
+        assert seen["details"][0]["sandbox"] == JAIL
+
+        status = status_file.read_status(str(phase_dir))
+        assert status["models_served"] == {SPEC: {"sandbox": JAIL_WORD}}
+        assert status["progress"]["sandbox_fallback"] == {SPEC: JAIL}
+        assert "sandbox_bypassed" not in status["progress"]
+
+        asyncio.run(base.reaggregate_from_existing_files(
+            prefix="auth-feature", out_dir=str(phase_dir.parent),
+            phase_dir=str(phase_dir), phase_name="review-plan",
+            plan_path=str(tmp_path / "auth-feature.md"),
+            args=argparse.Namespace(
+                skip_validation=True, validation_model="auto", timeout=None,
+                internal_validation=False, force=False,
+            ),
+            orchestrator_script="review_plan_orchestrator.py",
+        ))
+        assert base.recorded_served_models(str(phase_dir)) == {SPEC: {"sandbox": JAIL_WORD}}
+        report_data = json.loads((phase_dir / "report_data.json").read_text(encoding="utf-8"))
+        assert report_data["modelMetadata"][SPEC]["sandbox"] == JAIL_WORD
+
+
+class TestLeavingTheJailIsNotARetirement:
+    def _seed_walk(self, monkeypatch, outcome, tail):
+        from utils import subagent_executor as executor
+
+        verdict = SandboxProbeResult(
+            "unavailable", BWRAP_LINE, "unsandboxed",
+            (("landlock", "skipped"), (JAIL, outcome), ("unsandboxed", "taken")),
+            ((JAIL, tail),) if tail else (), "0.159.1",
+        )
+        monkeypatch.setitem(
+            executor._SANDBOX_PROBE_CACHE,
+            ("verdict", "claude-code", "codex", "generate", "", "0.159.1", "auto"),
+            verdict,
+        )
+
+    def test_prior_jail_then_bypassed_names_this_runs_rung_outcome(
+        self, monkeypatch, capsys
+    ):
+        tail = "landlock_exec: unavailable: this kernel has no Landlock (ABI 0; the floor is 3)"
+        self._seed_walk(monkeypatch, "absent", tail)
+        lines = base.announce_retired_rungs(
+            {SPEC: {"sandbox": JAIL_WORD}}, {SPEC: {"sandbox": "bypassed"}},
+        )
+        out = capsys.readouterr().out
+        assert len(lines) == 1
+        (line,) = lines
+        assert line.startswith(base.SANDBOX_RUNG_CHANGED_MARKER)
+        assert SPEC in line and f"'{JAIL}'" in line
+        assert "absent" in line and "the floor is 3" in line
+        # Never the legacy rung's retirement wording — not even the measured
+        # `landlock` retirement the same walk recorded.
+        assert SANDBOX_RUNG_RETIRED_MARKER not in out
+        assert "no longer usable" not in out
+        assert SANDBOX_BYPASSED_MARKER not in out
+
+    def test_a_skip_switch_is_named_as_the_switch(self, monkeypatch):
+        self._seed_walk(monkeypatch, "skipped-by-switch", "")
+        (line,) = base.announce_retired_rungs(
+            {SPEC: {"sandbox": JAIL_WORD}}, {SPEC: {"sandbox": "bypassed"}},
+        )
+        assert "MULTI_LLM_CODEX_SKIP_RUNG=plugin-landlock" in line
+        assert SANDBOX_RUNG_RETIRED_MARKER not in line
+
+    def test_still_on_the_jail_says_nothing(self):
+        prior = {SPEC: {"sandbox": JAIL_WORD}}
+        assert base.announce_retired_rungs(prior, prior) == []

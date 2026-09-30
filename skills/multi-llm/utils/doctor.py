@@ -37,6 +37,25 @@ and flags a pass on a build at or above ``removed_at``. Rendered only:
 ``[features] use_legacy_landlock = true`` in codex's own ``config.toml`` is a
 WARN (a plain file read; never ``codex features``).
 
+The plugin-landlock rung (plan codex-sandbox-unavailable-findings-and-fixes §6
+F1 "Where it sits" items 3, 4 and 6, §7 steps 2–3; 2026-09-30) gets a row of
+its own under a BROKEN codex line: its probe result from the same read-only
+walk, its grade in words ("stops stray writes, not the model" — never
+"contained" or "sandboxed"), the codex version its allow-list was measured
+through beside the installed one (a newer installed codex flagged), the
+resolved base allow-list, and in every state the one switch that skips it
+alone, ``MULTI_LLM_CODEX_SKIP_RUNG=plugin-landlock`` — while that is set the
+row says the rung is skipped and no probe runs for it. A second row says what
+``agent-write`` does: the plan-file and tasks scopes run on that rung under
+``auto`` (repo-wide edits stay refused until step 3b), with the open network
+named, and a chat in ``danger-full-access`` posture may run them unsandboxed
+only when the rung fails (F5). The verdict rule is unchanged: the row is BROKEN
+and the exit is 3 because codex's own sandbox cannot start. When the rung
+probes ok under ``auto``, the AppArmor/sysctl repair is still printed in full
+but headed as a system-level alternative (F7); otherwise its heading is
+today's. Under ``off`` no rung is probed, the rung gets no row, and the
+``agent-write`` row says refused by config.
+
 This is the one mode allowed to spawn provider CLIs outside a phase, and only
 their model-free probes. It takes no lock, writes nothing, and does not read
 or touch any phase directory.
@@ -110,10 +129,26 @@ def _repair_block() -> Dict[str, Any]:
     }
 
 
-def _render_repair() -> List[str]:
+#: The repair block's heading while it is the primary guidance: no usable
+#: plugin-landlock rung here (absent, failed, skipped or not probed).
+REPAIR_HEADING = "Repair (yours to install, with sudo — the plugin only prints it):"
+
+#: Its heading where the plugin-landlock rung probed ok under ``auto`` (plan §6
+#: F7, §7 step 2, 2026-09-30): the text is still printed in full for other
+#: users, but it is not the primary guidance on this machine — the plugin's
+#: jail already runs codex's read-only phases and its plan/tasks edits, and the
+#: refusal for repo-wide edits leads with a non-Codex runner (F6, step 4).
+REPAIR_HEADING_SYSTEM_ALTERNATIVE = (
+    "System-level alternative (needs /etc and sudo; not the primary fix here — "
+    "the plugin's Landlock jail runs codex's read-only phases and plan/tasks "
+    "edits, and apply-code-fixes/implement need this or a non-Codex runner):"
+)
+
+
+def _render_repair(alternative: bool = False) -> List[str]:
     lines = [
         "",
-        "Repair (yours to install, with sudo — the plugin only prints it):",
+        REPAIR_HEADING_SYSTEM_ALTERNATIVE if alternative else REPAIR_HEADING,
         "  write this profile to /etc/apparmor.d/bwrap:",
         "",
     ]
@@ -375,51 +410,349 @@ def _declared_rung(provider: Any, name: str) -> Optional[Any]:
     return next((rung for rung in rungs if getattr(rung, "name", None) == name), None)
 
 
+# ---------------------------------------------------------------------------
+# The plugin-landlock rung (plan codex-sandbox-unavailable-findings-and-fixes
+# §6 F1 "Where it sits" items 3, 4 and 6; §7 steps 2–3; 2026-09-30)
+# ---------------------------------------------------------------------------
+
+#: The rung's grade in the words every surface uses (F1 item 4): it stops
+#: stray and incidental writes, not a model set on escaping. Never "contained"
+#: or "sandboxed" — ``sandbox_fallback: contained`` promises a real OS boundary.
+INCIDENTAL_GRADE_WORDING = "stops stray writes, not the model"
+
+#: What an ``agent-write`` dispatch on the rung does not get that codex's own
+#: ``workspace-write`` gives it (F1 Limits, "Network is not confined"; step 3's
+#: option (b) names it on every write dispatch and here).
+WRITE_RUNG_NETWORK_WORDING = (
+    "network access is not confined on this rung, unlike codex's own workspace-write"
+)
+
+#: F5 (user decision 2026-09-30): below the rung, never instead of it.
+WRITE_RUNG_F5_WORDING = (
+    "a chat in danger-full-access posture may run writes unsandboxed only when "
+    "this rung fails"
+)
+
+#: The walk outcome doctor records for a rung the read-only walk never reached
+#: (it stopped, or took an earlier rung) — distinct from ``unprobed`` (the
+#: budget ran out) and from every outcome the walk itself records.
+RUNG_NOT_REACHED = "not-reached"
+#: The read-only profile's own sandbox started, so no walk ran at all.
+RUNG_NOT_NEEDED = "not-needed"
+
+#: The kind a doctor probe request carries: no task kind reads it, and it names
+#: whose probe the jail is for in any diagnostic.
+DOCTOR_PROBE_KIND = "doctor"
+
+
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    """Whether ``fn`` takes a keyword ``name`` (or ``**kwargs``)."""
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return name in params or any(
+        p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()
+    )
+
+
+def _run_verdict(
+    provider: Any, profile: str, *, cwd: Optional[str], timeout: float,
+    jail_request: Any = None, walk: bool = True,
+) -> Any:
+    """The executor's ``sandbox_verdict`` — the same walk a run takes — with no
+    cache key (``walk_key=None``: doctor measures every time and shares
+    nothing) and doctor's own jail request, so a wrapped rung's probe context
+    is built for this probe and removed after it (F1 "How a dispatch receives
+    its grant": "``doctor`` builds its own probe context ... and passes no
+    cache key"). ``walk=False`` runs the profile's own probe and no rung.
+    Each keyword is passed only where the walk takes it, so a stand-in walk
+    with an older signature still answers."""
+    from . import subagent_executor as executor
+
+    verdict_fn = executor.sandbox_verdict
+    kwargs: Dict[str, Any] = {"cwd": cwd, "timeout": timeout}
+    optional: Dict[str, Any] = {"walk_key": None}
+    if jail_request is not None:
+        optional["jail_request"] = jail_request
+    if not walk:
+        optional["walk"] = False
+    for name, value in optional.items():
+        if _accepts_kwarg(verdict_fn, name):
+            kwargs[name] = value
+    return verdict_fn(provider, profile, **kwargs)
+
+
+def _skip_switch() -> Tuple[Optional[str], Optional[str]]:
+    """``(skipped rung id or None, error or None)`` for ``MULTI_LLM_CODEX_SKIP_RUNG``.
+
+    Every other mode refuses to start on a bad value (``multi_llm.py``);
+    doctor reports it on the rung's row instead of dying, since it is where a
+    user looks when something is wrong."""
+    from .providers.base import skip_rung_requested
+
+    try:
+        return skip_rung_requested(), None
+    except ValueError as exc:
+        return None, str(exc)
+
+
+def _incidental_rung(provider: Any, profile: Optional[str] = None) -> Optional[Any]:
+    """The rung of the ``incidental`` grade that wraps the CLI (the plugin's
+    Landlock jail) in the adapter's ladder for ``profile`` — the read-only
+    ``generate`` ladder by default, or ``agent-write``'s (step 3's opt-in) —
+    or ``None``."""
+    from .providers.base import PROFILE_GENERATE, rung_is_incidental
+
+    hook = getattr(provider, "sandbox_fallback_rungs", None)
+    if not callable(hook):
+        return None
+    try:
+        rungs = tuple(hook(profile or PROFILE_GENERATE) or ())
+    except Exception:  # noqa: BLE001
+        return None
+    return next(
+        (r for r in rungs if rung_is_incidental(r) and getattr(r, "wrapper", None)),
+        None,
+    )
+
+
+def _probe_request(cwd: Optional[str]) -> Any:
+    """Doctor's own read-only jail request: the probe's repo root, no scope."""
+    from .providers.base import JailRequest
+
+    return JailRequest(repo_root=os.path.realpath(cwd or os.getcwd()), kind=DOCTOR_PROBE_KIND)
+
+
+def _base_allow_list(cwd: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """``(rendered base allow-list, None)`` or ``(None, why it cannot be built)``.
+
+    Computed with the same ``allow_entries`` a read-only dispatch gets, for a
+    context completed from this process's environment (``$CODEX_HOME`` read as
+    the probe child would read it). The context's scratch directory is made by
+    ``slot_tmpdir`` and removed on the way out, so nothing is left behind; the
+    rendered entry names it by its per-attempt pattern, since that exact
+    directory is gone once the row is printed.
+    """
+    from dataclasses import replace
+
+    from . import landlock_dispatch as jail
+
+    request = _probe_request(cwd)
+    try:
+        with jail.slot_tmpdir(request.repo_root) as tmpdir:
+            context = jail.complete_context(request, tmpdir, dict(os.environ))
+            entries = jail.allow_entries(context)
+            real_tmp = os.path.realpath(tmpdir)
+            pattern = os.path.join(os.path.dirname(real_tmp), f"{jail.SLOT_PREFIX}<pid>-…")
+            entries = [
+                replace(entry, path=pattern) if entry.path == real_tmp else entry
+                for entry in entries
+            ]
+    except jail.JailRefused as exc:
+        return None, exc.message
+    except OSError as exc:
+        return None, f"the probe's scratch directory could not be made: {exc}"
+    return jail.render_allow_list(entries), None
+
+
+def _incidental_row(
+    rung_decl: Any,
+    walk: Sequence[Tuple[str, str]],
+    rung_tails: Sequence[Tuple[str, str]],
+    probe_state: str,
+    skip: Optional[str],
+    skip_error: Optional[str],
+    cwd: Optional[str],
+) -> Dict[str, Any]:
+    """The plugin-landlock row's facts (F1 "Where it sits" items 3, 4 and 6).
+
+    ``outcome`` is the read-only walk's own word for the rung (``taken`` is a
+    passing probe), ``skipped-by-switch`` while the switch is set,
+    ``unprobed`` when the report's budget ran out, ``not-needed`` when the
+    read-only profile's own sandbox started, else ``not-reached``.
+    ``installed``/``newer_than_measured`` are filled in by :func:`collect`,
+    which has the version row.
+    """
+    from .providers.base import SKIP_RUNG_ENV, WALK_OUTCOME_SKIPPED_BY_SWITCH
+
+    name = rung_decl.name
+    outcomes = {step[0]: step[1] for step in walk}
+    if skip == name:
+        outcome = WALK_OUTCOME_SKIPPED_BY_SWITCH
+    elif name in outcomes:
+        outcome = outcomes[name]
+    elif probe_state == "unprobed" or any(o == "unprobed" for o in outcomes.values()):
+        outcome = "unprobed"
+    elif probe_state == "ok":
+        outcome = RUNG_NOT_NEEDED
+    else:
+        outcome = RUNG_NOT_REACHED
+    measured = getattr(rung_decl, "measured_through", None)
+    allow, allow_error = _base_allow_list(cwd)
+    skipped = outcome == WALK_OUTCOME_SKIPPED_BY_SWITCH
+    return {
+        "rung": name,
+        "outcome": outcome,
+        "tail": "" if skipped else dict(rung_tails or ()).get(name, ""),
+        "grade": INCIDENTAL_GRADE_WORDING,
+        "measured_through": measured[0] if measured else None,
+        "allow_list": allow,
+        "allow_list_error": allow_error,
+        "switch": f"{SKIP_RUNG_ENV}={name}",
+        "switch_set": skip == name,
+        "switch_error": skip_error,
+    }
+
+
+#: The ``agent_write`` row's ``status`` words.
+WRITE_RUNS_ON_RUNG = "runs-on-rung"
+WRITE_REFUSED = "refused"
+WRITE_NOT_MEASURED = "not-measured"
+WRITE_REFUSED_BY_CONFIG = "refused-by-config"
+WRITE_REFUSED_BY_POLICY = "refused-by-policy"
+WRITE_NO_RUNG = "no-rung"
+
+
+def _agent_write_row(
+    provider: Any, policy: str, incidental: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """What ``agent-write`` does on this machine (step 3, option (b); F5).
+
+    Rendered only: the verdict and the exit code stay today's — BROKEN, exit 3,
+    because codex's own sandbox cannot start (``state``/``ok`` are the
+    ``agent-write`` standard probe's, never this row's). ``status`` is
+    ``runs-on-rung`` only under ``auto`` with the write rung declared and its
+    probe passing; ``not-measured`` when doctor's walk never reached the rung
+    (each write phase probes it at its own preflight); ``refused`` when the
+    probe failed or the switch skipped it; ``refused-by-config`` under ``off``;
+    ``refused-by-policy`` under ``contained``; ``no-rung`` without step 3's
+    opt-in.
+    """
+    from .providers.base import (
+        PROFILE_AGENT_WRITE, SANDBOX_FALLBACK_AUTO, SANDBOX_FALLBACK_OFF,
+        WRITE_SCOPE_REPO_WIDE, WRITE_SCOPES_ON_RUNG,
+    )
+
+    write_rung = _incidental_rung(provider, PROFILE_AGENT_WRITE)
+    outcome = (incidental or {}).get("outcome") if write_rung is not None else None
+    row: Dict[str, Any] = {
+        "rung": write_rung.name if write_rung is not None else None,
+        "rung_outcome": outcome,
+        "scopes": list(WRITE_SCOPES_ON_RUNG) if write_rung is not None else [],
+        "refused_scopes": [WRITE_SCOPE_REPO_WIDE],
+        "status": WRITE_NO_RUNG,
+        "runs_on_rung": False,
+        "f5": False,
+        "policy": policy,
+    }
+    if write_rung is None:
+        return row
+    if policy == SANDBOX_FALLBACK_OFF:
+        row["status"] = WRITE_REFUSED_BY_CONFIG
+    elif policy != SANDBOX_FALLBACK_AUTO:
+        row["status"] = WRITE_REFUSED_BY_POLICY
+    else:
+        row["f5"] = True
+        if outcome == "taken":
+            row["status"] = WRITE_RUNS_ON_RUNG
+            row["runs_on_rung"] = True
+        elif outcome in ("unprobed", RUNG_NOT_REACHED, RUNG_NOT_NEEDED, None):
+            # Nothing was measured here: never read as a refusal or a pass.
+            row["status"] = WRITE_NOT_MEASURED
+        else:
+            row["status"] = WRITE_REFUSED
+    return row
+
+
+def _outcome_phrase(outcome: Optional[str], switch: str = "") -> str:
+    """The rung's probe result in words, for its row and the agent-write row."""
+    return {
+        "taken": "probe ok",
+        "absent": "absent: the plugin's Landlock jail cannot run here",
+        "rejected": "probe failed: a write its canary made was not denied",
+        "unavailable": "probe failed: the jail failed its self-test",
+        "unknown": "no answer: its probe gave no result",
+        "unprobed": "unprobed: the report budget was exhausted",
+        "skipped-by-switch": f"skipped: {switch or 'the switch'} is set, so no probe ran",
+        RUNG_NOT_NEEDED: "not needed: the read-only profile's own sandbox starts",
+        RUNG_NOT_REACHED: "not probed: the read-only walk stopped before it",
+    }.get(outcome or "", f"{outcome or 'not probed'}")
+
+
 def _probe_fallback(
     provider: Any, row: Dict[str, Any], deadline: float, cwd: Optional[str],
 ) -> None:
     """The second probe: the read-only profile the fallback applies to (T6).
 
-    ``agent-write`` reaches no rung, so the row's own probe can never report
-    one; this probe of ``generate`` walks the adapter's ladder and the row
-    renders the rung *it* selected. It gets only what is left of the sandbox
-    job's ``deadline`` — the walk inside it shares that same remainder — so a
-    slow ``agent-write`` probe truncates this one rather than lengthening the
+    The ``agent-write`` probe walks no rung (``walk=False``), so this probe
+    of ``generate`` is the one walk doctor runs, and the row renders the rung
+    *it* selected. It gets only what is left of the sandbox job's
+    ``deadline`` — the walk inside it shares that same remainder — so a slow
+    ``agent-write`` probe truncates this one rather than lengthening the
     report, and a probe nobody had time to run is ``unprobed``, never
     ``unavailable``. Rendered only: it changes neither ``state``, ``ok`` nor
     the exit code.
+
+    The plugin-landlock rung (2026-09-30) is walked here with doctor's own jail
+    request and no cache key. While ``MULTI_LLM_CODEX_SKIP_RUNG=plugin-landlock``
+    is set the walk records it ``skipped-by-switch`` without spawning its probe
+    (the executor's own rule, the same a run takes). Its row
+    (``plugin_landlock``) and the ``agent_write`` row are built from this walk.
     """
     from .providers.base import PROFILE_GENERATE
     from .subagent_executor import (
         RUNG_ABSENT, RUNG_REJECTED, RUNG_RETIRED, RUNG_SKIPPED, RUNG_UNAVAILABLE,
-        sandbox_verdict,
     )
 
+    rung_decl = _incidental_rung(provider)
+    skip, skip_error = _skip_switch()
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         row["fallback_probe"] = "unprobed"
+        if rung_decl is not None:
+            row["plugin_landlock"] = _incidental_row(
+                rung_decl, (), (), "unprobed", skip, skip_error, cwd,
+            )
         return
-    verdict = sandbox_verdict(provider, PROFILE_GENERATE, cwd=cwd, timeout=remaining)
-    state = verdict.state
+    try:
+        verdict = _run_verdict(
+            provider, PROFILE_GENERATE, cwd=cwd, timeout=remaining,
+            jail_request=_probe_request(cwd),
+        )
+        state = verdict.state
+        walk = [tuple(step) for step in verdict.walk]
+        rung_tails = tuple(getattr(verdict, "rung_tails", ()) or ())
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must not crash the report
+        verdict, state, walk, rung_tails = None, "unknown", [], ()
+        row["fallback_error"] = f"{type(exc).__name__}: {exc}"
     if state == "unknown" and time.monotonic() >= deadline:
         state = "unprobed"
     row["fallback_probe"] = state
-    row["fallback_walk"] = [list(step) for step in verdict.walk]
+    row["fallback_walk"] = [list(step) for step in walk]
     _, rung = _sandbox_fallback_for(provider, cwd, verdict)
     if rung is not None:
         row["fallback_rung"] = rung.name
         row["fallback_contained"] = bool(rung.contained)
+        if getattr(rung, "containment", None):
+            row["fallback_containment"] = rung.containment
         if rung.deprecated_at:
             row["fallback_deprecated_at"] = list(rung.deprecated_at)
         if rung.removed_at:
             row["fallback_removed_at"] = list(rung.removed_at)
+    if rung_decl is not None:
+        row["plugin_landlock"] = _incidental_row(
+            rung_decl, walk, rung_tails, state, skip, skip_error, cwd,
+        )
     # A contained rung that expires upstream, measured here and found unusable:
     # the doctor-side half of Open question 2. Named with its `deprecated_at`
     # and `removed_at`, because "the boundary you had is gone" is the one day
     # the expiry matters. `retired` (the probe printed the rung's removal
     # panic) is what earns the "measured unavailable" clause; every other
     # outcome is shown as itself.
-    for name, outcome in verdict.walk:
+    for name, outcome in walk:
         if outcome not in (
             RUNG_REJECTED, RUNG_UNAVAILABLE, RUNG_ABSENT, RUNG_RETIRED, RUNG_SKIPPED,
         ):
@@ -444,17 +777,24 @@ def _probe_sandbox(provider: Any, timeout: float, cwd: Optional[str]) -> Dict[st
     ``sandbox_fallback`` key (``""`` where none is declared), and — when the
     runner's ``agent-write`` probe says ``unavailable`` under a key that may
     take a rung — the second, read-only probe's findings (``fallback_probe``,
-    ``fallback_walk``, ``fallback_rung``, …; see :func:`_probe_fallback`). They
-    change neither the verdict nor the exit code — ``agent-write`` stays
-    refused under a broken sandbox whatever the key says, and the repair is
-    still the fix — they are rendered beside ``BROKEN`` so the operator sees
-    what read-only phases will run under on this machine.
+    ``fallback_walk``, ``fallback_rung``, …; see :func:`_probe_fallback`),
+    the plugin-landlock rung's row (``plugin_landlock``) and what
+    ``agent-write`` does (``agent_write``). They change neither the verdict nor
+    the exit code: the row is BROKEN, and doctor exits 3, because codex's own
+    sandbox cannot start — whatever a rung serves — and the repair is still
+    printed; they are rendered beside ``BROKEN`` so the operator sees what each
+    phase will run under on this machine.
+
+    The ``agent-write`` probe here is the standard one only (``walk=False``):
+    doctor has no plan or tasks target for the write ladder's positive
+    control, so the plugin-landlock rung is probed once, by the read-only walk
+    — the same wrapper, base allow-list and canary — and never by a
+    scope-less write probe. Under ``off`` no rung probe spawns at all.
 
     ``timeout`` is the whole job's budget: every probe here gets only what is
     left of it, recomputed before each.
     """
     from .providers.base import PROFILE_AGENT_WRITE, SANDBOX_FALLBACK_OFF
-    from .subagent_executor import sandbox_verdict
 
     deadline = time.monotonic() + max(timeout, 0.0)
     mechanism = (getattr(provider, "sandbox_mechanism", "") or "").strip()
@@ -471,7 +811,9 @@ def _probe_sandbox(provider: Any, timeout: float, cwd: Optional[str]) -> Dict[st
         return row
     state, detail = "not-required", ""
     if not bypassed:
-        probe = sandbox_verdict(provider, PROFILE_AGENT_WRITE, cwd=cwd, timeout=timeout)
+        probe = _run_verdict(
+            provider, PROFILE_AGENT_WRITE, cwd=cwd, timeout=timeout, walk=False,
+        )
         state, detail = probe.state, probe.tail
         if state != "not-required":
             row["probe"] = "runner"
@@ -485,13 +827,38 @@ def _probe_sandbox(provider: Any, timeout: float, cwd: Optional[str]) -> Dict[st
     # A bypassed sandbox is reported, never failed: the adapter no longer puts
     # it in the dispatch path (muse, `--disable-sandbox`).
     row["ok"] = state != "unavailable" or bool(bypassed)
-    # `off` takes no rung whatever the walk finds, so its row needs no probe.
-    if (
-        state == "unavailable" and row["probe"] == "runner"
-        and policy and policy != SANDBOX_FALLBACK_OFF
-    ):
-        _probe_fallback(provider, row, deadline, cwd)
+    if state == "unavailable" and row["probe"] == "runner" and policy:
+        # `off` takes no rung whatever the walk finds, so its row needs no
+        # probe — and, plan §8.2 "off never reaches the rung", gets none.
+        if policy != SANDBOX_FALLBACK_OFF:
+            _probe_fallback(provider, row, deadline, cwd)
+        row["agent_write"] = _agent_write_row(provider, policy, row.get("plugin_landlock"))
     return row
+
+
+def _version_token(text: Optional[str]) -> str:
+    match = re.search(r"\d+(?:\.\d+)*", text or "")
+    return match.group(0) if match else ""
+
+
+def _flag_measured_through(sandbox: Dict[str, Any], version: Optional[str]) -> None:
+    """Put the installed codex version beside the rung's measured-through one
+    and flag an installed codex newer than the jail was measured with (F1
+    "Where it sits" item 3: the evidence rides the row the way
+    ``LANDLOCK_RUNG.removed_at``'s does, :func:`_flag_removed_mismatch`).
+    Render-only: a newer codex is named as the likely cause of a jail denial,
+    never refused."""
+    from .providers.base import version_tuple
+
+    rung = sandbox.get("plugin_landlock")
+    if not isinstance(rung, dict):
+        return
+    installed = _version_token(version) if version and version != "unknown" else ""
+    rung["installed"] = installed or None
+    measured = rung.get("measured_through") or ""
+    rung["newer_than_measured"] = bool(
+        installed and measured and version_tuple(installed) > version_tuple(measured)
+    )
 
 
 def _flag_removed_mismatch(sandbox: Dict[str, Any], version: Optional[str]) -> None:
@@ -515,14 +882,37 @@ def _flag_removed_mismatch(sandbox: Dict[str, Any], version: Optional[str]) -> N
         sandbox["fallback_removed_mismatch"] = True
 
 
+def _incidental_probed_ok(sandbox: Dict[str, Any]) -> bool:
+    """Whether the plugin-landlock rung's probe passed on this row."""
+    rung = sandbox.get("plugin_landlock")
+    return isinstance(rung, dict) and rung.get("outcome") == "taken"
+
+
+def _incidental_clause(sandbox: Dict[str, Any]) -> str:
+    """``; rung plugin-landlock …`` for a rung the walk reached and did not
+    take (absent, failed, skipped by the switch), or ``""``. A rung that gave
+    no answer or ran out of budget has its own ending, so says nothing here."""
+    rung = sandbox.get("plugin_landlock")
+    if not isinstance(rung, dict):
+        return ""
+    outcome = rung.get("outcome")
+    if outcome == "skipped-by-switch":
+        return f"; rung {rung['rung']} skipped by {rung.get('switch')}"
+    if outcome in ("absent", "rejected", "unavailable"):
+        return f"; rung {rung['rung']} is not usable here ({outcome})"
+    return ""
+
+
 def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
     """The ``(fallback: …)`` clause of a BROKEN row, or ``""``.
 
     Names the key in force **and** what the read-only probe found, so the
-    three key values and the three endings stay apart on screen: a rung the
-    probe selected (``→ landlock …``); the uncontained rung (today's
-    unsandboxed sentence); and a rung nobody measured because the report's
-    budget ran out (``rung unprobed``), which must never read as either.
+    key values and the endings stay apart on screen: a contained rung the
+    probe selected (``→ landlock …``); the plugin's Landlock jail
+    (``→ plugin-landlock``, in its stray-writes-only words, 2026-09-30); the
+    uncontained rung (today's unsandboxed sentence); and a rung nobody
+    measured because the report's budget ran out (``rung unprobed``), which
+    must never read as either.
     """
     from .providers.base import SANDBOX_FALLBACK_CONTAINED, SANDBOX_FALLBACK_OFF
 
@@ -538,6 +928,8 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
     walk = [tuple(step) for step in sandbox.get("fallback_walk") or ()]
     rung = sandbox.get("fallback_rung")
     lost = sandbox.get("fallback_lost")
+    incidental_ok = _incidental_probed_ok(sandbox)
+    incidental_name = (sandbox.get("plugin_landlock") or {}).get("rung")
     lost_clause = ""
     if lost and lost.get("rung") != rung:
         removed = list(lost.get("removed_at") or ())
@@ -553,18 +945,32 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
             lost_clause = f"; rung {lost['rung']} is not usable here ({lost['outcome']})"
             if dep_version:
                 lost_clause += f" — measured at {provider_name} {dep_version}: {sentence}"
-        # The read-phase choice that exists without touching the machine.
-        lost_clause += (
+    incidental_clause = _incidental_clause(sandbox)
+    read_phase_clause = ""
+    if lost and lost.get("rung") != rung:
+        # The read-phase choice that exists without touching the machine: on
+        # a host where the plugin's jail probed ok, `auto` runs them there
+        # (2026-09-30), never under danger-full-access.
+        if incidental_ok:
+            auto_runs = (
+                f"`auto` runs them on {incidental_name} (the [SANDBOX_INCIDENTAL] line)"
+            )
+        else:
+            auto_runs = (
+                "`auto` runs them under --sandbox danger-full-access (the "
+                "[SANDBOX_BYPASSED] line)"
+            )
+        read_phase_clause = (
             f"; read phases: `sandbox_fallback: {SANDBOX_FALLBACK_CONTAINED}` "
-            f"refuses them like writes, `auto` runs them under --sandbox "
-            f"danger-full-access (the [SANDBOX_BYPASSED] line)"
+            f"refuses them like writes, {auto_runs}"
         )
+    tail = lost_clause + incidental_clause + read_phase_clause
     if probe_state == "unprobed" or any(outcome == "unprobed" for _, outcome in walk):
         return f" (fallback: {policy} — rung unprobed: the report budget was exhausted)"
     if rung and sandbox.get("fallback_contained"):
         note = (
             f" (fallback: {policy} → {rung} — {provider_name} runs read-only "
-            f"phases under a real sandbox; agent-write still refused"
+            f"phases under a real sandbox; writes: see the agent-write row"
         )
         deprecated = sandbox.get("fallback_deprecated_at")
         if deprecated:
@@ -580,10 +986,18 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
                 f" — re-measure removed_at"
             )
         return note + ")"
+    if rung and rung == incidental_name:
+        # The plugin's Landlock jail (2026-09-30): its grade in words, never
+        # "under a real sandbox" — it stops stray writes, not the model.
+        return (
+            f" (fallback: {policy} → {rung} — {provider_name} runs read-only "
+            f"phases on the plugin's Landlock jail, which {INCIDENTAL_GRADE_WORDING}"
+            f"{tail})"
+        )
     if rung:
         return (
             f" (fallback: {policy} — {provider_name} runs unsandboxed "
-            f"for read-only phases{lost_clause})"
+            f"for read-only phases{tail})"
         )
     if probe_state == "ok":
         return (
@@ -599,18 +1013,124 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
         return (
             f" (fallback: {policy} — no rung taken: a rung probe gave no "
             f"answer, so {provider_name} is refused for read-only phases too"
-            f"{lost_clause})"
+            f"{tail})"
         )
     if policy == SANDBOX_FALLBACK_CONTAINED:
+        if incidental_ok:
+            # The walk is policy-blind: the jail probed ok, and `contained`
+            # does not take it, by design (F1 item 4).
+            tail += (
+                f"; {incidental_name} probed ok, but it {INCIDENTAL_GRADE_WORDING}, "
+                f"which `sandbox_fallback: {SANDBOX_FALLBACK_CONTAINED}` does not "
+                f"accept (`auto` takes it)"
+            )
         return (
             f" (fallback: {policy} — bypass disabled: no contained rung is "
             f"usable here, so {provider_name} is refused for read-only phases "
-            f"too{lost_clause})"
+            f"too{tail})"
         )
     return (
         f" (fallback: {policy} — no rung usable here: {provider_name} is "
-        f"refused for read-only phases too{lost_clause})"
+        f"refused for read-only phases too{tail})"
     )
+
+
+def _incidental_row_text(provider_name: str, rung: Dict[str, Any]) -> str:
+    """The plugin-landlock row under a BROKEN line (F1 "Where it sits" items 3,
+    4 and 6; "When the jail denies a turn", next step 1): the probe result, the
+    grade, both codex versions, the resolved base allow-list and — in every
+    state — the switch that skips this rung alone."""
+    outcome = rung.get("outcome")
+    text = f"{rung['rung']}: {_outcome_phrase(outcome, rung.get('switch', ''))}"
+    tail = " ".join(str(rung.get("tail") or "").split())
+    allow_error = " ".join(str(rung.get("allow_list_error") or "").split())
+    # A refused grant (`$CODEX_HOME` missing, or inside the repository) is
+    # both the probe's tail and the allow-list's reason: said once, below.
+    duplicate = bool(allow_error and tail and allow_error.startswith(tail.rstrip(" …")))
+    # A bad switch value stops the walk with the value's own message as the
+    # tail; the switch clause below says it once.
+    switch_error = " ".join(str(rung.get("switch_error") or "").split())
+    duplicate = duplicate or bool(
+        switch_error and tail and switch_error.startswith(tail.rstrip(" …"))
+    )
+    if tail and outcome in ("absent", "rejected", "unavailable", "unknown") and not duplicate:
+        if len(tail) > 160:
+            tail = tail[:157].rstrip() + " …"
+        text += f' ("{tail}")'
+    text += f" — {rung.get('grade') or INCIDENTAL_GRADE_WORDING}"
+    measured = rung.get("measured_through") or "?"
+    installed = rung.get("installed") or "unknown"
+    text += f"; measured through {provider_name} {measured}, installed {provider_name} {installed}"
+    if rung.get("newer_than_measured"):
+        text += (
+            f" ({provider_name} is newer than the jail was measured with, the "
+            f"likely cause of a jail denial)"
+        )
+    if rung.get("allow_list"):
+        text += f"; base allow-list: {rung['allow_list']}"
+    elif rung.get("allow_list_error"):
+        text += f"; base allow-list unresolved: {rung['allow_list_error']}"
+    switch = rung.get("switch") or ""
+    if rung.get("switch_error"):
+        text += (
+            f"; {rung['switch_error']} — every other mode refuses to start until "
+            f"it is unset or set to {switch.split('=', 1)[-1]}"
+        )
+    elif rung.get("switch_set"):
+        text += f"; {switch} is set: this rung is skipped for this process (unset it to walk it)"
+    else:
+        text += f"; {switch} skips this rung alone"
+    return text
+
+
+def _agent_write_text(
+    provider_name: str, write: Dict[str, Any], incidental: Optional[Dict[str, Any]] = None,
+) -> str:
+    """The ``agent-write`` row (step 3, option (b); F5). It names the write rung
+    and its probe result, the scopes it serves, that repo-wide edits stay
+    refused (step 3b), the rung's grade and its open network, F5's clause, and
+    restates the verdict rule: BROKEN and exit 3 because codex's own sandbox
+    cannot start, whatever the write rung serves."""
+    from .providers.base import SANDBOX_FALLBACK_AUTO
+
+    verdict = (
+        f"the row stays BROKEN (exit 3 without --warn-only): {provider_name}'s own "
+        f"sandbox cannot start"
+    )
+    repo_wide = "repo-wide edits (apply-code-fixes, implement) stay refused (step 3b)"
+    status = write.get("status")
+    rung = write.get("rung")
+    if status == WRITE_NO_RUNG or not rung:
+        return f"agent-write: refused — no fallback rung serves {provider_name}'s editing jobs; {verdict}"
+    if status == WRITE_REFUSED_BY_CONFIG:
+        return f"agent-write: refused by config (sandbox_fallback: {write.get('policy')}); {verdict}"
+    scopes = " and ".join(write.get("scopes") or ())
+    served = f"{rung} serves the {scopes} scopes (apply-suggestions, apply-task-suggestions)"
+    if status == WRITE_REFUSED_BY_POLICY:
+        return "; ".join([
+            f"agent-write: refused — `sandbox_fallback: {write.get('policy')}` never "
+            f"reaches {rung}, which {INCIDENTAL_GRADE_WORDING}; "
+            f"`{SANDBOX_FALLBACK_AUTO}` admits it for the {scopes} scopes",
+            repo_wide, verdict,
+        ])
+    phrase = _outcome_phrase(write.get("rung_outcome"), (incidental or {}).get("switch", ""))
+    if status == WRITE_RUNS_ON_RUNG:
+        head = f"agent-write: runs on {rung} (probe ok) — {served}"
+    elif status == WRITE_NOT_MEASURED:
+        head = (
+            f"agent-write: {rung} not measured here ({phrase}) — {served}; each "
+            f"write phase probes it at its own preflight and is refused if it fails"
+        )
+    else:
+        head = f"agent-write: refused — {served}, and its probe here says {phrase}"
+    return "; ".join([
+        head,
+        f"it {INCIDENTAL_GRADE_WORDING}",
+        WRITE_RUNG_NETWORK_WORDING,
+        repo_wide,
+        WRITE_RUNG_F5_WORDING,
+        verdict,
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -813,6 +1333,9 @@ def collect(
 
     failures: List[str] = []
     sandbox_broken = False
+    # F7 / §7 step 2 (2026-09-30): the repair's heading, not its text, moves
+    # when the plugin's jail probed ok under `auto` on a BROKEN row.
+    repair_alternative = False
     for row in rows:
         if not row["present"]:
             continue
@@ -825,10 +1348,13 @@ def collect(
                 failures.append(f"{row['provider']}: auth — not logged in ({row['auth']['detail']})")
         sandbox = row["sandbox"]
         _flag_removed_mismatch(sandbox, row["version"].get("version"))
+        _flag_measured_through(sandbox, row["version"].get("version"))
         if sandbox["state"] == "unavailable":
             sandbox_broken = True
             if not sandbox["ok"]:
                 failures.append(f"{row['provider']}: sandbox — {SANDBOX_FIX_SENTENCE}")
+            if _jail_serves_here(sandbox):
+                repair_alternative = True
 
     return {
         "host": host,
@@ -841,7 +1367,26 @@ def collect(
         "warnings": warnings,
         "sandbox_broken": sandbox_broken,
         "repair": _repair_block() if sandbox_broken else None,
+        "repair_heading": (
+            (REPAIR_HEADING_SYSTEM_ALTERNATIVE if repair_alternative else REPAIR_HEADING)
+            if sandbox_broken else None
+        ),
+        "repair_is_system_alternative": bool(sandbox_broken and repair_alternative),
     }
+
+
+def _jail_serves_here(sandbox: Dict[str, Any]) -> bool:
+    """Whether the plugin's Landlock jail runs codex on this row: its probe
+    passed under ``auto`` (the only policy that reaches it). A rung that is
+    absent, failed, skipped by the switch or never probed leaves the repair
+    as the primary guidance."""
+    from .providers.base import SANDBOX_FALLBACK_AUTO
+
+    return (
+        sandbox.get("fallback") == SANDBOX_FALLBACK_AUTO
+        and not sandbox.get("bypassed_by")
+        and _incidental_probed_ok(sandbox)
+    )
 
 
 def _probe_cwd(anchor: Optional[str]) -> Optional[str]:
@@ -879,16 +1424,26 @@ def render_text(report: Dict[str, Any], *, warn_only: bool) -> List[str]:
             a += f" ({auth['detail']})"
         sandbox = row["sandbox"]
         s = sandbox["state"]
+        sub_rows: List[str] = []
         if s == "unavailable":
             s = ("broken, bypassed by " + sandbox["bypassed_by"]) if sandbox["bypassed_by"] else "BROKEN"
             if sandbox["detail"]:
                 s += f": {sandbox['detail']}"
             # D6 override (2026-09-17), landlock rung (2026-09-22): the row
-            # stays BROKEN and the repair is still printed — the write profile
-            # is refused regardless — but the operator is told what the key in
-            # force does on this machine, from the read-only probe's own walk.
+            # stays BROKEN and the repair is still printed — codex's own
+            # sandbox cannot start, whatever a rung serves (plugin-landlock,
+            # 2026-09-30) — but the operator is told what the key in force
+            # does on this machine, from the read-only probe's own walk.
             if not sandbox["bypassed_by"]:
                 s += _fallback_note(row["provider"], sandbox)
+                # 2026-09-30: the plugin-landlock rung and agent-write each get
+                # a row of their own beneath the line (F1 items 3, 4, 6; step 3).
+                if isinstance(sandbox.get("plugin_landlock"), dict):
+                    sub_rows.append(_incidental_row_text(row["provider"], sandbox["plugin_landlock"]))
+                if isinstance(sandbox.get("agent_write"), dict):
+                    sub_rows.append(_agent_write_text(
+                        row["provider"], sandbox["agent_write"], sandbox.get("plugin_landlock"),
+                    ))
         elif s == "ok":
             s = f"ok ({sandbox['probe']})"
         elif s == "none":
@@ -899,6 +1454,7 @@ def render_text(report: Dict[str, Any], *, warn_only: bool) -> List[str]:
         if row.get("trust"):
             line += f"  trust: {row['trust']}"
         lines.append(line)
+        lines.extend(f"    {sub}" for sub in sub_rows)
     for warning in report.get("warnings") or ():
         lines.append(f"WARN: {warning}")
     if report["failures"]:
@@ -906,7 +1462,7 @@ def render_text(report: Dict[str, Any], *, warn_only: bool) -> List[str]:
         for failure in report["failures"]:
             lines.append(f"{head}: {failure}")
     if report["sandbox_broken"]:
-        lines += _render_repair()
+        lines += _render_repair(bool(report.get("repair_is_system_alternative")))
     if not report["failures"]:
         lines.append("OK: every present provider passed its checks.")
     return lines

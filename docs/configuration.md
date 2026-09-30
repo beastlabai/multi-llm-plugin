@@ -136,33 +136,146 @@ narrow it). codex is the only reviewer that insists on its own OS sandbox —
 24.04 bwrap cannot start (`multi_llm.py doctor` prints the AppArmor repair).
 Once the sandbox probe has failed, codex's **read-only** work (the review/ask
 fan-out and the executor's validation/consolidation/salvage kinds) walks a
-two-rung ladder. Rung 1, `landlock`, runs `--sandbox read-only` with a
+three-rung ladder. Rung 1, `landlock`, runs `--sandbox read-only` with a
 per-dispatch `-c features.use_legacy_landlock=true` — codex's second Linux
 backend, which needs no user namespace — and is taken only when its probe's
 canary write is denied by the kernel; the slot stays sandboxed and says
 so (`[SANDBOX_FALLBACK]` on stdout, `sandboxed by fallback rung: landlock` on
-the report's model labels, `sandbox-fallback landlock <spec>` in `status`). Rung 2 runs `--sandbox danger-full-access` in the real
+the report's model labels, `sandbox-fallback landlock <spec>` in `status`).
+Rung 2, `plugin-landlock` (since 2026-09-30), is the plugin's own Landlock jail
+around codex, described [below](#the-plugins-landlock-jail): it stops stray
+writes, not the model, so its grade is `incidental`, never contained, and its
+slots say so (`[SANDBOX_INCIDENTAL]` on stdout, `stray writes stopped by
+plugin-landlock; not a boundary against the model` on the report's model labels,
+`stray-writes-only plugin-landlock <spec>` in `status`). Rung 3 runs
+`--sandbox danger-full-access` in the real
 repo root, i.e. with the same rights as your shell — the footing cursor-agent,
 pi, claude-code and muse have always had in those phases — and every artifact
 of such a slot says so (`[SANDBOX_BYPASSED]` on stdout,
 `ran unsandboxed: sandbox_fallback=auto` on the report's model labels, a
 `git status` check that fails the slot by path if the tree changed). `auto`
-takes rung 1, then rung 2; `contained` takes rung 1 only and otherwise refuses;
-`off` restores the refusal: codex is left out on such a machine until the
-repair is installed. A run that falls to rung 2 where the previous run of the
-phase took rung 1 says so once, on its own `[SANDBOX_RUNG_RETIRED]` line —
-never a second `[SANDBOX_BYPASSED]`, which stays one line per slot. doctor's BROKEN row names the value in force and the rung
-it selected. The write phases are refused under a broken sandbox whatever the
-key says — no rung serves them, so the AppArmor repair is still their fix.
+takes rung 1, then rung 2, then rung 3; `contained` takes rung 1 only and
+otherwise refuses — rung 2 is not the real OS boundary that value promises, so
+`contained` never takes it; `off` restores the refusal: codex is left out on
+such a machine until the repair is installed. A run that falls to rung 3 where
+the previous run of the phase took rung 1 says so once, on its own
+`[SANDBOX_RUNG_RETIRED]` line (one that left rung 2, on a
+`[SANDBOX_RUNG_CHANGED]` line) — never a second `[SANDBOX_BYPASSED]`, which
+stays one line per slot. doctor's BROKEN row names the value in force and the
+rung it selected.
+
+The write phases follow a narrower rule. Where codex's own `workspace-write`
+sandbox starts, they use it, whatever the key says. Where it cannot start, two
+of them run on rung 2 alone, and only under `auto`: `apply-suggestions` (scope
+`plan-file`: the jail lets codex write the plan file and nothing else in the
+repository, in place) and `apply-task-suggestions` (scope `tasks`: the default
+`plans/<stem>/tasks/` directory, else the tasks file). Each batch on the rung
+prints the stray-writes-only line first, which also says network access is not
+confined there (codex's own `workspace-write` confines it). `contained` and
+`off` refuse them, and a write never falls to rung 1 or to rung 3 — with one
+exception: when the codex chat that started the run is itself in
+`danger-full-access`, a plan-file or tasks write the jail could not take runs
+on rung 3 under `auto`, because you already gave that chat unconfined write
+access. `apply-code-fixes` and `implement` stay off the jail and off rung 3
+alike, so on such a machine they refuse codex whatever the chat's posture. The refusal leads with the way out that needs no change to the
+machine — set `driver.subagent_runner` to a runner that is not Codex (for
+example `claude-code:<model>`) in `.multi-llm/providers.yaml` — then says why
+codex cannot run here and why the jail did not take the job, and ends "Nothing
+was dispatched." The AppArmor repair `doctor` prints is the system-level
+alternative: it needs `/etc` and sudo, and gives back codex's own
+`workspace-write` for every write phase.
 
 **Never enable landlock globally.** `codex features enable
 use_legacy_landlock` makes every `workspace-write` dispatch panic (exit 101),
 write phases included; the flag is only safe as the per-dispatch `-c` rung 1
 adds, and `doctor` warns if your codex config sets it. Rung 1 is read-only only
-and rides a feature codex has marked deprecated (measured at 0.155.1); when it
-is removed, `auto` falls back to rung 2 and `contained` to refusal.
+and rides a feature codex marked deprecated (measured at 0.155.1) and removed
+(measured unavailable from 0.156.1): on a current codex the walk skips it by
+version, `auto` goes on to rung 2 and `contained` refuses.
 
 Because the default is already the widest value, a cloned repository's
 `.multi-llm/providers.yaml` can only narrow the fallback — there is nothing for
 an untrusted override to widen here. See the key's comment in `providers.yaml`
 for what each rung gives up.
+
+**codex's trust entries.** codex adds `[projects."<repo>"] trust_level =
+"trusted"` to your `$CODEX_HOME/config.toml` whenever it runs with write access
+(`workspace-write` or `danger-full-access`, jailed or not) in a repository you
+never trusted — the codex children a multi-llm run starts included — which
+would make your later codex sessions honour that repository's project config.
+Since 2026-09-30 a run records the file's state before its first codex child
+starts and, when it ends — normally, on an error, on Ctrl-C or on SIGTERM —
+removes only the tables it added that still hold exactly that line, leaving
+every other byte and the file's mode as they were. A table changed during the run is left, with a warning. A SIGKILLed run,
+or two overlapping runs in one repository, can still leave an entry behind.
+
+### The plugin's Landlock jail
+
+Rung 2 (since 2026-09-30) confines codex from outside: a small wrapper,
+`utils/landlock_exec.py`, applies a Landlock ruleset to its own process and then
+`exec`s codex under `--sandbox danger-full-access`. Inside it, codex may write
+only to `$CODEX_HOME`, a fresh 0700 `TMPDIR` made for each attempt under your
+temp directory (and removed afterwards), `/dev/null` and, where they exist,
+`/dev/ptmx` and `/dev/pts`. `GIT_OPTIONAL_LOCKS=0`, `PYTHONPYCACHEPREFIX` and
+`npm_config_cache` send git's, Python's and npm's incidental writes into that
+`TMPDIR`. A write phase adds its one target (the plan file, or the tasks
+directory or file). The allow-list is not configurable.
+
+- **When it is used.** Only after codex's own sandbox probe says `unavailable`;
+  a sandbox that starts is used unchanged. The kernel must offer Landlock ABI 3
+  (Linux 6.2) or newer. Without it (an older kernel, or the Docker image) the
+  wrapper exits 126, the rung is recorded absent, and `auto` moves on to rung 3.
+  Its own probe runs `codex sandbox -c sandbox_mode="danger-full-access" -- sh
+  -c <canary>` inside the jail and passes only when a write outside the
+  allow-list and a truncation of an existing file are both denied and a write
+  inside it lands.
+- **What it does not stop.** Writes through Unix sockets (`systemd-run --user`,
+  D-Bus, Docker), mode and timestamp changes on existing files, writes to
+  `$CODEX_HOME`, and the network. It stops stray writes, not a model set on
+  escaping, which is why no artifact calls it contained or sandboxed.
+- **What checks the rest.** A review slot on the rung skips the `git status`
+  check and runs two narrower ones. `[MODE_CHECK]` fails the slot when a tracked
+  file's executable bit flipped, and `[CODEX_HOME_CHECK]` fails it when
+  `$CODEX_HOME`'s config, instruction or plugin files changed, unless the slot's
+  own audited command stream clears it. In the executor lane (validation, task
+  generation, the write phases) the home check only warns.
+- **A denied edit is never recorded as applied.** Codex can finish its turn
+  normally with every write denied, so the scheduler reads the turn's stream:
+  a batch whose edit was denied fails, and one that moved some bytes is a
+  partial application (exit 3) that keeps its pre-batch snapshot and leaves
+  the phase open. The plan-file grant allows in-place edits only: `sed -i`, a
+  save through a temporary file and a rename, and `mv` onto the plan are
+  denied.
+
+#### When the jail denies a turn
+
+A codex upgrade that writes a new path, or a tool the probe never started, can
+make codex itself fail inside the jail with a permission error. That slot or
+dispatch fails with one `[JAIL_DENIED]` line, in the run log and again in the
+run's closing summary. It names the denied path (or says codex did not name
+one), the allow-list, and the installed and measured-through codex versions,
+flagging a newer installed codex as the likely cause. It is not a model error:
+it is never retried and never moved to another rung. The line prints the next
+steps:
+
+1. **Compare.** `multi_llm.py doctor` shows a `plugin-landlock` row under a
+   BROKEN codex line: the probe result, the resolved base allow-list, both
+   codex versions and the switch in step 3.
+2. **Report.** Open an issue at
+   [github.com/beastlabai/multi-llm-plugin/issues](https://github.com/beastlabai/multi-llm-plugin/issues)
+   with the `[JAIL_DENIED]` line and that row. A missing entry is fixed in the
+   plugin, never by your config.
+3. **Run the job anyway.** First, point the failing job at a runner that is not
+   Codex (for example `claude-code:<model>` in `.multi-llm/providers.yaml`;
+   `driver.subagent_runner` for editing jobs). That widens nothing. Otherwise,
+   for one run, set `MULTI_LLM_CODEX_SKIP_RUNG=plugin-landlock`. It skips this
+   rung alone, and nothing about it outlives the process:
+   - a read-only phase under `auto` walks on to rung 3 (`[SANDBOX_BYPASSED]`
+     and the `git status` check; the line names the variable);
+   - `contained` and `off` refuse as before, and so does a write phase
+     (`The plugin's Landlock jail does not take this job: skipped by
+     MULTI_LLM_CODEX_SKIP_RUNG`), unless the full-access chat exception above
+     applies;
+   - any other value stops every mode at start-up with exit 3, naming the one
+     accepted value. `doctor` reports it on its row instead, and shows the rung
+     as skipped while the variable is set.

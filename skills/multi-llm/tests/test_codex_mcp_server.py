@@ -150,7 +150,8 @@ argv = sys.argv[1:]
 record = {{"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(),
           "env": {{k: os.environ.get(k) for k in (
               "MULTI_LLM_UV", "MULTI_LLM_SKILL_DIR", "STUB_PROFILE_MARK",
-              "PYTHONDONTWRITEBYTECODE", "MULTI_LLM_HOST_SESSION_MODEL")}}}}
+              "PYTHONDONTWRITEBYTECODE", "MULTI_LLM_HOST_SESSION_MODEL",
+              "MULTI_LLM_HOST_SANDBOX_POSTURE")}}}}
 dargv = argv[argv.index("--") + 3:] if "--" in argv else []
 if dargv[:2] == ["util", "instructions"]:
     with open(log + ".instructions", "a", encoding="utf-8") as handle:
@@ -1351,6 +1352,53 @@ class TestChildEnvironment:
         assert client.close() == 0
         assert [c["env"][self.SESSION_ENV] for c in harness.calls()] == [
             "gpt-5.5", "gpt-5.5", None, None]
+
+
+class TestTheChatPostureReachesTheDispatcher:
+    """Plan codex-sandbox-unavailable step 6 (F5, 2026-09-30): the turn's own
+    sandbox posture is exported per call as ``MULTI_LLM_HOST_SANDBOX_POSTURE``,
+    beside the session model, so the dispatcher may treat a
+    ``danger-full-access`` chat as consent for an uncontained write — below
+    the plugin's Landlock jail, never instead of it. Only codex's own posture
+    words are exported, and the variable never outlives its call."""
+
+    POSTURE_ENV = CONST["HOST_SANDBOX_POSTURE_ENV"]
+
+    def test_the_name_matches_the_dispatcher_s(self):
+        from utils.providers.base import HOST_SANDBOX_POSTURE_ENV
+
+        assert self.POSTURE_ENV == HOST_SANDBOX_POSTURE_ENV
+
+    @pytest.mark.parametrize("mode", ["read-only", "workspace-write", "danger-full-access"])
+    def test_the_turn_s_posture_reaches_the_launch_and_every_poll(self, harness, mode):
+        _, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0)], meta=turn_meta(sandbox_mode=mode))
+        assert calls and {c["env"][self.POSTURE_ENV] for c in calls} == {mode}
+
+    @pytest.mark.parametrize("value", [
+        _ABSENT, None, "", "DANGER-FULL-ACCESS", "external-sandbox", ["danger-full-access"], 1,
+    ], ids=["absent", "null", "empty", "case", "unknown-word", "list", "number"])
+    def test_an_unknown_posture_exports_nothing(self, harness, value):
+        _, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0)], meta=turn_meta(sandbox_mode=value))
+        assert calls and {c["env"][self.POSTURE_ENV] for c in calls} == {None}
+
+    def test_a_forwarded_value_is_never_consent(self, harness):
+        """Only the chat's own posture is consent: a value codex forwarded
+        from its environment is removed when the turn names none."""
+        _, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0)], meta=turn_meta(sandbox_mode=_ABSENT),
+            extra_env={self.POSTURE_ENV: "danger-full-access"})
+        assert calls and {c["env"][self.POSTURE_ENV] for c in calls} == {None}
+
+    def test_the_posture_is_read_per_call_and_never_carried_over(self, harness):
+        client = harness.client([launch_step(), poll_step(0)] * 2)
+        client.envelope(client.start_call(
+            REVIEW, meta=turn_meta(sandbox_mode="danger-full-access")))
+        client.envelope(client.start_call(REVIEW, meta=turn_meta(sandbox_mode=_ABSENT)))
+        assert client.close() == 0
+        assert [c["env"][self.POSTURE_ENV] for c in harness.calls()] == [
+            "danger-full-access", "danger-full-access", None, None]
 
 
 class TestRefusals:

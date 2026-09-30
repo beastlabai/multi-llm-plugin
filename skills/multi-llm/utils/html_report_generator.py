@@ -13,7 +13,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 try:
     from .stream_bootstrap import bootstrap_streams
@@ -497,6 +497,11 @@ def _attribution_notes(model: str, entry: Any) -> List[str]:
         notes.append(SANDBOX_BYPASSED_LABEL)
     elif isinstance(sandbox, str) and sandbox.startswith(SANDBOX_FALLBACK_WORD_PREFIX):
         notes.append(sandbox_fallback_label(sandbox))
+    # A slot the plugin's jail failed (2026-09-30) keeps its rung on the record
+    # (F1 item 6); its reason rides the same parenthesis.
+    denied = jail_denied_label(entry)
+    if denied:
+        notes.append(denied)
     return notes
 
 
@@ -625,6 +630,7 @@ def failed_models_line(
     salvage_requested: Optional[Sequence[str]] = None,
     *,
     bold: bool = True,
+    served_models: Optional[Dict[str, Any]] = None,
 ) -> str:
     """The one-line account of the models that produced no result, or ``""``.
 
@@ -650,13 +656,29 @@ def failed_models_line(
             attempt ask for a salvage of this still-failed model"
             (``review_orchestrator_base.salvage_requested_models``).
         bold: ``True`` for the markdown header line, ``False`` for the notice.
+        served_models: ``models_served`` (2026-09-30). A slot whose entry
+            there carries ``failure_reason: jail-denied`` leads with ``denied
+            by the plugin's jail: <path>`` — the record outlives the log that
+            printed the ``[JAIL_DENIED]`` line (plan §6 F1 item 6) — and keeps
+            its recorded reason after it (a later ``[CODEX_HOME_CHECK]`` or
+            ``[MODE_CHECK]`` violation, code-review's ``(spent $X)``), unless
+            that reason already carries the label.
     """
     if not failed_models:
         return ""
     salvaged = {str(spec) for spec in (salvage_requested or ())}
     entries = []
     for spec, reason in failed_models.items():
-        entry = f"{spec}: {_one_line(reason)}"
+        # A record (2026-09-30: a jailed slot's `failure_reason: jail-denied`
+        # plus its path) renders through the one reason renderer; a string is
+        # itself, as before. The served record's jail label is prepended, never
+        # substituted: the recorded reason can carry what happened after the
+        # denial (a check violation, the spend clause).
+        text = failure_reason_text(reason)
+        denied = jail_denied_label((served_models or {}).get(spec))
+        if denied and denied not in text:
+            text = f"{denied}; {text}" if text.strip() else denied
+        entry = f"{spec}: {_one_line(text)}"
         if str(spec) in salvaged:
             entry += f"; {SALVAGE_REQUESTED_CLAUSE}"
         entries.append(entry)
@@ -674,6 +696,7 @@ def build_report_notices(
     failed_models: Optional[Dict[str, Any]] = None,
     requested_models: Optional[int] = None,
     salvage_requested: Optional[Sequence[str]] = None,
+    served_models: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, str]]:
     """``reportData.notices``: the failure warning first, then *notices*.
 
@@ -687,7 +710,8 @@ def build_report_notices(
     """
     result: List[Dict[str, str]] = []
     failure = failed_models_line(
-        failed_models, requested_models, salvage_requested, bold=False
+        failed_models, requested_models, salvage_requested, bold=False,
+        served_models=served_models,
     )
     if failure:
         result.append({"type": "warning", "message": failure})
@@ -715,17 +739,84 @@ SANDBOX_BYPASSED_LABEL = "ran unsandboxed: sandbox_fallback=auto"
 SANDBOX_FALLBACK_WORD_PREFIX = "fallback-"
 
 
-def sandbox_fallback_label(word: str) -> str:
-    """The report note for a slot on a contained fallback rung.
+#: The recorded words of a slot on an **incidental**-grade rung, and the label
+#: each renders as (plan codex-sandbox-unavailable-findings-and-fixes §7, "Step 2
+#: subtask: messaging and markers", item 3; 2026-09-30). A closed set spelled
+#: here, because this renderer reads recorded data and imports no provider
+#: code: the plugin's Landlock jail stops stray writes and nothing more, so its
+#: slot is never "sandboxed by fallback rung" — the label a real OS boundary
+#: earns. A word outside this set keeps the contained wording, as before. The
+#: label names no phase, so a read-only slot and a write dispatch share it.
+INCIDENTAL_FALLBACK_LABELS: Dict[str, str] = {
+    "fallback-plugin-landlock": (
+        "stray writes stopped by plugin-landlock; not a boundary against the model"
+    ),
+}
 
-    Says the slot was sandboxed — by a fallback boundary, named — because its
-    findings came from a model whose writes the kernel denied, which is the
-    opposite of what :data:`SANDBOX_BYPASSED_LABEL` tells a reader.
+
+def sandbox_fallback_label(word: str) -> str:
+    """The report note for a slot on a fallback rung.
+
+    A **contained** rung (``fallback-landlock``) says the slot was sandboxed —
+    by a fallback boundary, named — because its findings came from a model
+    whose writes the kernel denied, which is the opposite of what
+    :data:`SANDBOX_BYPASSED_LABEL` tells a reader. An **incidental** rung
+    (:data:`INCIDENTAL_FALLBACK_LABELS`, 2026-09-30) says what it stops and
+    that it is not a boundary against the model, never "sandboxed".
     """
+    incidental = INCIDENTAL_FALLBACK_LABELS.get(word)
+    if incidental is not None:
+        return incidental
     rung = word[len(SANDBOX_FALLBACK_WORD_PREFIX):] if word.startswith(
         SANDBOX_FALLBACK_WORD_PREFIX
     ) else word
     return f"sandboxed by fallback rung: {rung}"
+
+
+#: The per-slot failure reason a jailed slot records when codex itself died on
+#: an EACCES the plugin's jail caused (plan §6 F1 "Where it sits" item 6, "When
+#: the jail denies a turn"), and the key carrying the denied path. Spelled here
+#: for the same reason as :data:`INCIDENTAL_FALLBACK_LABELS`: the fan-out's
+#: ``llm_client`` sets ``failure_reason: "jail-denied"`` on the slot's record,
+#: and the report reads the record, never the provider code.
+JAIL_DENIED_REASON = "jail-denied"
+JAIL_DENIED_PATH_KEY = "jail_denied_path"
+#: What the jail-denied label says when codex named no path (the probable-jail
+#: class of ``landlock_dispatch.is_jail_failure``).
+JAIL_DENIED_NO_PATH = "path not named"
+
+
+def jail_denied_label(record: Any) -> Optional[str]:
+    """``denied by the plugin's jail: <path>`` for a slot record whose
+    ``failure_reason`` is ``jail-denied``, else ``None``.
+
+    Generic over the record's shape: a ``failed_models`` value, a
+    ``models_served`` entry or a ``progress.models`` row all carry the same two
+    keys, so the report and ``status`` show the same words after the log that
+    printed the ``[JAIL_DENIED]`` line is gone.
+    """
+    if not isinstance(record, Mapping):
+        return None
+    if record.get("failure_reason") != JAIL_DENIED_REASON:
+        return None
+    path = record.get(JAIL_DENIED_PATH_KEY)
+    return f"denied by the plugin's jail: {path or JAIL_DENIED_NO_PATH}"
+
+
+def failure_reason_text(reason: Any) -> str:
+    """A ``failed_models`` value as the one reason a report line carries.
+
+    A string is itself (every lane today). A record (2026-09-30) is its
+    jail-denied label when it carries one, else its ``error``/``reason`` text —
+    so a lane that starts recording a dict never renders as a Python repr.
+    """
+    if isinstance(reason, Mapping):
+        label = jail_denied_label(reason)
+        if label:
+            return label
+        text = reason.get("error") or reason.get("reason")
+        return str(text) if text else "failed with no error recorded"
+    return str(reason)
 
 
 def extract_section_contexts(
@@ -1891,7 +1982,8 @@ def generate_html_report(
         "fullSectionContexts": full_section_contexts,
         "sectionOrder": section_order,
         "notices": build_report_notices(
-            source_notices, failed_models, requested_models, salvage_requested
+            source_notices, failed_models, requested_models, salvage_requested,
+            served_models=served_models,
         ),
         "summary": {
             "totalGroups": len(effective_groups),
