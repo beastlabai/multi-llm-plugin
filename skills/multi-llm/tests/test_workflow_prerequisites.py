@@ -791,3 +791,587 @@ class TestStatusMode:
         assert output["phases"]["implement"]["status"] == "in_progress"
         assert output["phases"]["implement"]["tasks_done"] == 1
         assert output["phases"]["implement"]["tasks_total"] == 2
+
+
+# --- T1 (plans/next-phase-command.md): a review that left nothing to apply ---
+
+import check_workflow_prerequisites as prereq  # noqa: E402
+from utils.output_handler import output_dir_path  # noqa: E402
+
+#: Every phase before code-review, i.e. "every earlier phase on record" for the
+#: apply-code-fixes rows (the two optional phases never block suggested_next).
+_BEFORE_CODE_REVIEW = (
+    "review-plan", "apply-suggestions", "generate-tasks", "implement",
+)
+
+_ONE_FINDING = {"format_version": 2, "groups": [
+    {"group_id": "g1", "theme": "t",
+     "suggestions": [{"title": "fix it", "importance": "HIGH"}]},
+]}
+
+
+def _workflow_plan(tmp_path: Path, name: str = "t1-plan") -> Path:
+    plan = tmp_path / f"{name}.md"
+    plan.write_text("# T1 plan\n", encoding="utf-8")
+    return plan
+
+
+def _record(plan: Path, completed=(), skipped=(), tasks=None) -> None:
+    state = StateManager(plan)
+    for phase in completed:
+        state.mark_phase_completed(phase)
+    for phase in skipped:
+        state.mark_phase_skipped(phase, f"test skip of {phase}")
+    for task_id, status in (tasks or {}).items():
+        state.update_task_status(task_id, status)
+    state.save()
+
+
+def _put(plan: Path, phase_dir: str, name: str, content) -> Path:
+    target = output_dir_path(plan) / phase_dir
+    target.mkdir(parents=True, exist_ok=True)
+    path = target / name
+    text = content if isinstance(content, str) else json.dumps(content)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _status(plan: Path) -> dict:
+    return prereq.get_workflow_status(
+        StateManager(plan), plan, output_dir_path(plan)
+    )
+
+
+def _fixture_clean_v2(plan):
+    _put(plan, "code-review", "grouped.json",
+         {"format_version": 2, "groups": [{"group_id": "g1", "suggestions": []}]})
+
+
+def _fixture_clean_v1(plan):
+    _put(plan, "code-review", "grouped.json", [{"group_id": "g1", "suggestions": []}])
+
+
+def _fixture_missing(plan):
+    output_dir_path(plan).mkdir(parents=True, exist_ok=True)
+
+
+def _fixture_unreadable(plan):
+    _put(plan, "code-review", "grouped.json", "{not json")
+
+
+def _fixture_invalid_finding(plan):
+    _put(plan, "code-review", "grouped.json", _ONE_FINDING)
+    _put(plan, "code-review", "validation.json", {"format_version": 2, "groups": [
+        {"group_index": 0, "status": "invalid"},
+    ]})
+
+
+#: (id, grouped.json fixture, code-review recorded as, apply-code-fixes expected)
+CODE_REVIEW_FIXTURES = [
+    ("clean-v2", _fixture_clean_v2, "completed", ("skipped", "skipped (no findings)")),
+    ("clean-v1", _fixture_clean_v1, "completed", ("skipped", "skipped (no findings)")),
+    ("missing", _fixture_missing, "completed", ("skipped", "skipped (no findings)")),
+    ("unreadable", _fixture_unreadable, "completed", ("skipped", "skipped (no findings)")),
+    ("finding-judged-invalid", _fixture_invalid_finding, "completed", ("pending", None)),
+    ("review-skipped-finding-on-disk",
+     lambda plan: _put(plan, "code-review", "grouped.json", _ONE_FINDING),
+     "skipped", ("skipped", "skipped (prerequisite skipped)")),
+]
+
+
+def _code_review_plan(tmp_path, fixture, review_status) -> Path:
+    plan = _workflow_plan(tmp_path)
+    fixture(plan)
+    if review_status == "completed":
+        _record(plan, completed=_BEFORE_CODE_REVIEW + ("code-review",))
+    else:
+        _record(plan, completed=_BEFORE_CODE_REVIEW, skipped=("code-review",))
+    return plan
+
+
+class TestApplyCodeFixesKnowsWhenReviewLeftNothing:
+    @pytest.mark.parametrize(
+        "fixture,review_status,expected",
+        [row[1:] for row in CODE_REVIEW_FIXTURES],
+        ids=[row[0] for row in CODE_REVIEW_FIXTURES],
+    )
+    def test_apply_code_fixes_entry(self, tmp_path, fixture, review_status, expected):
+        plan = _code_review_plan(tmp_path, fixture, review_status)
+        entry = _status(plan)["phases"]["apply-code-fixes"]
+        status, reason = expected
+        assert entry["status"] == status
+        assert entry.get("reason") == reason
+
+    @pytest.mark.parametrize(
+        "fixture",
+        [_fixture_clean_v2, _fixture_missing, _fixture_unreadable],
+        ids=["no-non-empty-group", "missing", "unreadable"],
+    )
+    def test_a_clean_review_leaves_nothing_suggested(self, tmp_path, capsys, fixture):
+        from utils import run_status
+
+        plan = _code_review_plan(tmp_path, fixture, "completed")
+        payload = _status(plan)
+        assert payload["phases"]["apply-code-fixes"]["status"] == "skipped"
+        assert payload["suggested_next"] is None
+
+        run_status.main(["--plan-file", str(plan)])
+        out = capsys.readouterr().out
+        assert "workflow (state.json)" in out
+        assert "suggested next:" not in out
+
+    def test_one_non_empty_group_keeps_apply_code_fixes_pending_even_if_invalid(
+        self, tmp_path
+    ):
+        plan = _code_review_plan(tmp_path, _fixture_invalid_finding, "completed")
+        payload = _status(plan)
+        assert payload["phases"]["apply-code-fixes"]["status"] == "pending"
+        assert payload["suggested_next"] == "apply-code-fixes"
+
+    def test_a_pending_review_reads_no_file_and_is_itself_suggested(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "code-review", "grouped.json", _ONE_FINDING)
+        _record(plan, completed=_BEFORE_CODE_REVIEW)
+        payload = _status(plan)
+        assert payload["phases"]["apply-code-fixes"] == {"status": "pending"}
+        assert payload["suggested_next"] == "code-review"
+
+    def test_a_pending_review_with_a_clean_file_on_disk_marks_nothing(self, tmp_path):
+        """A `grouped.json` from a partial run is never read while the review
+        itself is not on record."""
+        plan = _workflow_plan(tmp_path)
+        _fixture_clean_v2(plan)
+        _record(plan, completed=_BEFORE_CODE_REVIEW)
+        payload = _status(plan)
+        assert payload["phases"]["apply-code-fixes"] == {"status": "pending"}
+        assert payload["suggested_next"] == "code-review"
+
+    def test_a_skip_full_recorded_keeps_fulls_reason(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _fixture_clean_v2(plan)
+        _record(plan, completed=_BEFORE_CODE_REVIEW + ("code-review",))
+        state = StateManager(plan)
+        state.mark_phase_skipped(
+            "apply-code-fixes", "Skipped: code review produced zero actionable findings"
+        )
+        state.save()
+        entry = _status(plan)["phases"]["apply-code-fixes"]
+        assert entry["status"] == "skipped"
+        assert entry["reason"] == "Skipped: code review produced zero actionable findings"
+
+
+class TestFullAndStatusAgreeOnApplyCodeFixes:
+    """`full`'s `step_apply_code_fixes` and `get_workflow_status` ask the same
+    predicate in the same order, so they give the same answer for every
+    completed-review and skipped-review fixture."""
+
+    @pytest.mark.parametrize(
+        "fixture,review_status,expected",
+        [row[1:] for row in CODE_REVIEW_FIXTURES],
+        ids=[row[0] for row in CODE_REVIEW_FIXTURES],
+    )
+    def test_same_answer(self, tmp_path, capsys, fixture, review_status, expected):
+        import full_workflow_orchestrator as fwo
+
+        plan = _code_review_plan(tmp_path, fixture, review_status)
+        status_says_skip = _status(plan)["phases"]["apply-code-fixes"]["status"] == "skipped"
+
+        args = fwo.parse_args(["--plan-file", str(plan), "--yes"])
+        workflow = fwo.FullWorkflow(args)
+        ran = []
+
+        def run_mode(mode_word, extra):
+            ran.append(mode_word)
+            state = StateManager(plan)
+            state.mark_phase_completed("apply-code-fixes")
+            state.save()
+            return 0
+
+        workflow.run_mode = run_mode  # type: ignore[assignment]
+        outcome, _detail, _code = workflow.step_apply_code_fixes()
+        capsys.readouterr()
+
+        full_says_skip = outcome == fwo.SKIPPED and not ran
+        assert full_says_skip == status_says_skip
+        assert full_says_skip == (expected[0] == "skipped")
+        if full_says_skip:
+            assert StateManager(plan).is_phase_skipped("apply-code-fixes")
+        else:
+            assert ran == ["apply-code-fixes"]
+
+
+class TestApplyTaskSuggestionsPrerequisiteReadsEffectiveReviewStatus:
+    """A review-tasks that was skipped and later completed is completed:
+    ``mark_phase_completed`` leaves the old skip record, so both lists name it."""
+
+    def _plan(self, tmp_path):
+        plan = tmp_path / "plan.md"
+        plan.write_text("# Plan\n", encoding="utf-8")
+        d = output_dir_path(plan) / "review-tasks"
+        d.mkdir(parents=True)
+        (d / "grouped.json").write_text(json.dumps([
+            {"group_id": "g1", "suggestions": [{"title": "x", "importance": "HIGH"}]},
+        ]), encoding="utf-8")
+        return plan
+
+    def test_plain_skip_is_still_met_by_skip(self, tmp_path):
+        plan = self._plan(tmp_path)
+        state = StateManager(plan)
+        state.mark_phase_skipped("review-tasks", reason="r")
+        result = prereq.check_apply_task_suggestions_prerequisite(state, output_dir_path(plan))
+        assert result == {"met": True, "reason": "skipped (prerequisite skipped)"}
+
+    def test_skipped_then_completed_is_not_met_by_skip(self, tmp_path):
+        plan = self._plan(tmp_path)
+        state = StateManager(plan)
+        state.mark_phase_skipped("review-tasks", reason="r")
+        state.mark_phase_completed("review-tasks")
+        assert state.is_phase_skipped("review-tasks")  # the stale record survives
+        result = prereq.check_apply_task_suggestions_prerequisite(state, output_dir_path(plan))
+        assert result["reason"] != "skipped (prerequisite skipped)"
+        assert result["met"] is False
+        assert result["actionable_count"] == 1
+
+
+class TestApplySuggestionsKnowsWhenReviewLeftNothing:
+    def test_every_group_invalid_skips_apply_suggestions(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {"format_version": 2, "groups": [
+            {"group_index": 0, "status": "invalid"},
+            {"group_index": 1, "status": "invalid"},
+        ]})
+        _record(plan, completed=("review-plan",))
+        payload = _status(plan)
+        entry = payload["phases"]["apply-suggestions"]
+        assert entry["status"] == "skipped"
+        assert entry["reason"] == "skipped (no valid findings)"
+        assert payload["suggested_next"] == "generate-tasks"
+
+    def test_every_group_invalid_v1_shape_too(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {
+            "g1": {"status": "invalid", "importance": "HIGH"},
+        })
+        _record(plan, completed=("review-plan",))
+        payload = _status(plan)
+        assert payload["phases"]["apply-suggestions"]["status"] == "skipped"
+        assert payload["suggested_next"] == "generate-tasks"
+
+    def test_needs_human_decision_groups_keep_apply_suggestions_pending(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {"format_version": 2, "groups": [
+            {"group_index": 0, "status": "needs-human-decision"},
+            {"group_index": 1, "status": "invalid"},
+        ]})
+        _record(plan, completed=("review-plan",))
+        payload = _status(plan)
+        assert payload["phases"]["apply-suggestions"] == {"status": "pending"}
+        assert payload["suggested_next"] == "apply-suggestions"
+
+    def test_open_count_is_carried_only_by_the_no_valid_return(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        plan_dir = output_dir_path(plan)
+        state = StateManager(plan)
+        # No validation.json: met, no field.
+        assert "open_count" not in prereq.check_apply_suggestions_prerequisite(
+            state, plan_dir
+        )
+        _put(plan, "review-plan", "validation.json", {"format_version": 2, "groups": [
+            {"group_index": 0, "status": "needs-human-decision"},
+            {"group_index": 1, "status": "invalid"},
+            {"group_index": 2, "status": "validation_failed"},
+        ]})
+        check = prereq.check_apply_suggestions_prerequisite(state, plan_dir)
+        assert check["met"] is True
+        assert check["reason"] == "No valid suggestions to apply"
+        assert check["open_count"] == 2
+        _put(plan, "review-plan", "validation.json", "{not json")
+        assert "open_count" not in prereq.check_apply_suggestions_prerequisite(
+            state, plan_dir
+        )
+
+    def test_no_validation_json_leaves_apply_suggestions_pending(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan",))
+        payload = _status(plan)
+        assert payload["phases"]["apply-suggestions"] == {"status": "pending"}
+        assert payload["suggested_next"] == "apply-suggestions"
+
+
+def _review_tasks_actionable(plan):
+    _put(plan, "review-tasks", "grouped.json", {"format_version": 2, "groups": [
+        {"group_id": "g1", "theme": "t",
+         "suggestions": [{"title": "s", "importance": "LOW"}]},
+    ]})
+    _put(plan, "review-tasks", "validation.json", {"format_version": 2, "groups": [
+        {"group_index": 0, "status": "valid"},
+    ]})
+
+
+#: (phase, its own batch id, fixture that leaves the phase pending, the
+#: completed phases that fixture records)
+APPLY_PHASE_BATCH_ROWS = [
+    ("apply-suggestions", "apply-batch-0",
+     lambda plan: _put(plan, "review-plan", "validation.json", {
+         "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]}),
+     ("review-plan",)),
+    ("apply-task-suggestions", "apply-task-batch-0",
+     _review_tasks_actionable,
+     ("review-plan", "apply-suggestions", "generate-tasks", "review-tasks")),
+    ("apply-code-fixes", "apply-fix-batch-0",
+     lambda plan: _put(plan, "code-review", "grouped.json", _ONE_FINDING),
+     _BEFORE_CODE_REVIEW + ("code-review",)),
+]
+
+
+class TestApplyPhaseInProgress:
+    def test_a_partly_implemented_plan_keeps_suggesting_implement(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(
+            plan,
+            completed=("review-plan", "apply-suggestions", "generate-tasks"),
+            tasks={"T001": "completed", "T002": "pending"},
+        )
+        payload = _status(plan)
+        assert payload["phases"]["implement"]["status"] == "in_progress"
+        assert payload["suggested_next"] == "implement"
+
+    @pytest.mark.parametrize(
+        "phase,batch_id,fixture,completed",
+        APPLY_PHASE_BATCH_ROWS,
+        ids=[row[0] for row in APPLY_PHASE_BATCH_ROWS],
+    )
+    def test_own_completed_batch_marks_in_progress(
+        self, tmp_path, phase, batch_id, fixture, completed
+    ):
+        pending_plan = _workflow_plan(tmp_path, "pending")
+        fixture(pending_plan)
+        _record(pending_plan, completed=completed)
+        pending = _status(pending_plan)
+        assert pending["phases"][phase]["status"] == "pending"
+
+        plan = _workflow_plan(tmp_path, "partial")
+        fixture(plan)
+        _record(plan, completed=completed, tasks={batch_id: "completed"})
+        partial = _status(plan)
+        assert partial["phases"][phase]["status"] == "in_progress"
+        assert partial["suggested_next"] == pending["suggested_next"]
+        others = {p for p, _b, _f, _c in APPLY_PHASE_BATCH_ROWS} - {phase}
+        for other in others:
+            assert partial["phases"][other]["status"] != "in_progress"
+
+    @pytest.mark.parametrize(
+        "phase,batch_id,fixture,completed",
+        APPLY_PHASE_BATCH_ROWS,
+        ids=[row[0] for row in APPLY_PHASE_BATCH_ROWS],
+    )
+    def test_a_batch_not_completed_is_no_progress(
+        self, tmp_path, phase, batch_id, fixture, completed
+    ):
+        plan = _workflow_plan(tmp_path)
+        fixture(plan)
+        _record(plan, completed=completed, tasks={batch_id: "failed"})
+        assert _status(plan)["phases"][phase]["status"] == "pending"
+
+    def test_another_phases_batch_never_counts(self, tmp_path):
+        """`apply-batch-0` belongs to apply-suggestions: completed there, it
+        leaves that phase completed and apply-task-suggestions pending."""
+        plan = _workflow_plan(tmp_path)
+        _record(
+            plan,
+            completed=("review-plan", "apply-suggestions", "generate-tasks"),
+            tasks={"apply-batch-0": "completed"},
+        )
+        phases = _status(plan)["phases"]
+        assert phases["apply-suggestions"]["status"] == "completed"
+        assert phases["apply-task-suggestions"]["status"] == "pending"
+        assert phases["apply-code-fixes"]["status"] == "pending"
+        assert not [p for p, info in phases.items() if info["status"] == "in_progress"]
+
+    def test_ids_are_matched_whole(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(
+            plan,
+            completed=("review-plan",),
+            tasks={"apply-batch-0-extra": "completed", "xapply-batch-1": "completed"},
+        )
+        assert _status(plan)["phases"]["apply-suggestions"]["status"] == "pending"
+
+
+def _date_cycle(plan, phase, review, reviewed_at, *, started_at=None, metric_at=None):
+    """Rewrite the times `state.json` holds for one apply phase and its review.
+
+    `reviewed_at` stamps the review's completion; `started_at` is the phase's
+    `metrics_progress.{phase}.started_at`, `metric_at` one `metrics.{phase}`
+    entry's `timestamp`. None leaves that record out.
+    """
+    state = StateManager(plan)
+    state.state["phases_completed"][review] = reviewed_at
+    if started_at is not None:
+        state.state.setdefault("metrics_progress", {})[phase] = {
+            "started_at": started_at}
+    if metric_at is not None:
+        state.state.setdefault("metrics", {})[phase] = [{"timestamp": metric_at}]
+    state.save()
+
+
+_OLD, _NEW = "2026-01-01T10:00:00", "2026-01-02T10:00:00"
+
+
+class TestStaleApplyBatchesAfterReviewRerun:
+    """Batch ids in the flat `task_status` map outlive a `--force` review re-run.
+
+    (A review re-stamped by `--reaggregate` also reads as newer than its older
+    batches; that cost is documented in the helper, not pinned here.)
+    """
+
+    @pytest.mark.parametrize(
+        "phase,batch_id,fixture,completed",
+        APPLY_PHASE_BATCH_ROWS,
+        ids=[row[0] for row in APPLY_PHASE_BATCH_ROWS],
+    )
+    @pytest.mark.parametrize("source", ["started_at", "metric_at"])
+    def test_batches_older_than_the_review_do_not_mark_in_progress(
+        self, tmp_path, phase, batch_id, fixture, completed, source
+    ):
+        plan = _workflow_plan(tmp_path)
+        fixture(plan)
+        _record(plan, completed=completed, tasks={batch_id: "completed"})
+        review = prereq.PHASE_PREREQUISITES[phase][0]
+        _date_cycle(plan, phase, review, _NEW, **{source: _OLD})
+        assert _status(plan)["phases"][phase]["status"] == "pending"
+
+    @pytest.mark.parametrize(
+        "phase,batch_id,fixture,completed",
+        APPLY_PHASE_BATCH_ROWS,
+        ids=[row[0] for row in APPLY_PHASE_BATCH_ROWS],
+    )
+    @pytest.mark.parametrize("source", ["started_at", "metric_at"])
+    def test_batches_newer_than_the_review_still_mark_in_progress(
+        self, tmp_path, phase, batch_id, fixture, completed, source
+    ):
+        plan = _workflow_plan(tmp_path)
+        fixture(plan)
+        _record(plan, completed=completed, tasks={batch_id: "completed"})
+        review = prereq.PHASE_PREREQUISITES[phase][0]
+        _date_cycle(plan, phase, review, _OLD, **{source: _NEW})
+        assert _status(plan)["phases"][phase]["status"] == "in_progress"
+
+    def test_the_newest_of_several_stamps_decides(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {
+            "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]})
+        _record(plan, completed=("review-plan",),
+                tasks={"apply-batch-0": "completed"})
+        # started_at predates the review, a later batch's metric entry does not
+        _date_cycle(plan, "apply-suggestions", "review-plan", _NEW,
+                    started_at=_OLD, metric_at="2026-01-03T10:00:00")
+        assert _status(plan)["phases"]["apply-suggestions"]["status"] == "in_progress"
+
+    def test_no_dated_run_keeps_the_mark(self, tmp_path):
+        """Absence of a date is not staleness."""
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {
+            "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]})
+        _record(plan, completed=("review-plan",),
+                tasks={"apply-batch-0": "completed"})
+        _date_cycle(plan, "apply-suggestions", "review-plan", _NEW)
+        assert _status(plan)["phases"]["apply-suggestions"]["status"] == "in_progress"
+
+    @pytest.mark.parametrize("bad", ["not-a-date", "", 12345, None])
+    def test_unparseable_run_times_keep_the_mark(self, tmp_path, bad):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {
+            "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]})
+        _record(plan, completed=("review-plan",),
+                tasks={"apply-batch-0": "completed"})
+        _date_cycle(plan, "apply-suggestions", "review-plan", _NEW)
+        state = StateManager(plan)
+        state.state["metrics_progress"] = {"apply-suggestions": {"started_at": bad}}
+        state.state["metrics"] = {"apply-suggestions": [{"timestamp": bad}, "junk"]}
+        state.save()
+        assert _status(plan)["phases"]["apply-suggestions"]["status"] == "in_progress"
+
+    def test_unparseable_review_time_keeps_the_mark(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {
+            "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]})
+        _record(plan, completed=("review-plan",),
+                tasks={"apply-batch-0": "completed"})
+        _date_cycle(plan, "apply-suggestions", "review-plan", "garbage",
+                    started_at=_OLD)
+        assert _status(plan)["phases"]["apply-suggestions"]["status"] == "in_progress"
+
+    def test_timezone_aware_stamps_compare(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {
+            "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]})
+        _record(plan, completed=("review-plan",),
+                tasks={"apply-batch-0": "completed"})
+        _date_cycle(plan, "apply-suggestions", "review-plan",
+                    "2026-01-02T10:00:00+00:00",
+                    started_at="2026-01-01T10:00:00+00:00")
+        assert _status(plan)["phases"]["apply-suggestions"]["status"] == "pending"
+
+    def test_a_review_that_is_not_completed_keeps_the_mark(self, tmp_path):
+        """Staleness is judged only against a completed review."""
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "code-review", "grouped.json", _ONE_FINDING)
+        _record(plan, completed=_BEFORE_CODE_REVIEW,
+                tasks={"apply-fix-batch-0": "completed"})
+        state = StateManager(plan)
+        state.state["metrics_progress"] = {"apply-code-fixes": {"started_at": _OLD}}
+        state.save()
+        assert _status(plan)["phases"]["apply-code-fixes"]["status"] == "in_progress"
+
+
+class TestUnappliedGroupsNoticeOnItsPhase:
+    def test_notice_is_recorded_on_apply_task_suggestions_and_list_unchanged(
+        self, tmp_path
+    ):
+        plan = _workflow_plan(tmp_path)
+        _review_tasks_actionable(plan)
+        _record(plan, completed=("review-tasks",))
+        payload = _status(plan)
+        assert payload["notices"] == [
+            "review-tasks produced 1 unapplied task suggestion groups. "
+            "Run --apply-task-suggestions to apply them, or proceed to "
+            "--implement to skip."
+        ]
+        assert payload["phases"]["apply-task-suggestions"]["notice"] == payload["notices"][0]
+
+    def test_no_notice_no_entry_key(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-tasks",))
+        payload = _status(plan)
+        assert "notices" not in payload
+        assert "notice" not in payload["phases"]["apply-task-suggestions"]
+
+
+class TestUpstreamSkipNoticePrecedence:
+    """Completed wins over skipped, as everywhere else in the module."""
+
+    def _skip(self, plan: Path, phase: str) -> None:
+        state = StateManager(plan)
+        state.mark_phase_skipped(phase, f"{prereq.SKIP_PREREQUISITES_REASON} ({phase})")
+        state.save()
+
+    def test_plain_skip_keeps_notice_byte_for_byte(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        self._skip(plan, "apply-suggestions")
+        reason = f"{prereq.SKIP_PREREQUISITES_REASON} (apply-suggestions)"
+        assert prereq.upstream_skip_notices(StateManager(plan)) == [
+            f"[PREREQUISITE_SKIPPED_UPSTREAM apply-suggestions: {reason}]"
+        ]
+
+    def test_skipped_then_completed_has_no_notice(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        self._skip(plan, "apply-suggestions")
+        state = StateManager(plan)
+        state.mark_phase_completed("apply-suggestions")
+        state.save()
+        state = StateManager(plan)
+        # Both records remain on file; completed must win.
+        assert state.is_phase_skipped("apply-suggestions")
+        assert state.is_phase_completed("apply-suggestions")
+        assert prereq.upstream_skip_notices(state) == []

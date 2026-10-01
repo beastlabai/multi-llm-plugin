@@ -1,8 +1,8 @@
 {
-  "schema_version": 4,
+  "schema_version": 5,
   "host": "codex",
   "tool_name": "multi_llm",
-  "tool_description": "Run a multi-LLM workflow over a plan file. This tool is the only supported way to run multi-llm on this host: never invoke multi_llm.py, uv run or any dispatcher command through bash, because the flags this host requires are appended here and a shell invocation reaches none of them.\n\nModes:\n  review-plan | review \u2014 Review a plan with every configured model, then group + validate.\n  apply-suggestions \u2014 Prepare the validated plan-review suggestions for application.\n  generate-tasks | tasks \u2014 Decompose the plan into an implementable task list.\n  review-tasks \u2014 Review the generated task list with every configured model.\n  apply-task-suggestions \u2014 Prepare the validated task-review suggestions for application.\n  implement \u2014 Batch the tasks for implementation and track progress.\n  review-code | code-review \u2014 Review the working diff against the plan with every model.\n  apply-code-fixes \u2014 Prepare the validated code-review fixes for application.\n  full \u2014 Run the whole plan-to-code workflow as one resumable sequence.\n  ask \u2014 Ask every configured model one free-text question about a plan.\n  status | abort | cancel | stop \u2014 Report workflow phases (state.json) and detached runs ({phase}/.status.json).\n  init \u2014 Scaffold a per-project .multi-llm/providers.yaml override.\n\nThe default mode is review-plan.\n\nExit codes: 0 done \u00b7 1 error \u00b7 2 nothing to do \u00b7 3 needs a human: stop, report, do not do the phase's work.\n\nThis tool runs outside the session's exec sandbox. apply-suggestions, apply-task-suggestions, implement, apply-code-fixes, full edit the working tree through agent CLIs; under a read-only posture, or one this tool cannot read, they are refused unless the user has set MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1.\n\nExamples:\n  {\"mode\":\"review-plan\",\"plan\":\"plans/x.md\",\"question\":\"\",\"extra_flags\":[]}\n  {\"mode\":\"init\",\"plan\":\"\",\"question\":\"\",\"extra_flags\":[]}\n  {\"mode\":\"ask\",\"plan\":\"plans/x.md\",\"question\":\"Why is the ceiling 120 s?\",\"extra_flags\":[]}\n  {\"mode\":\"review\",\"plan\":\"plans/x.md\",\"question\":\"\",\"extra_flags\":[\"--quick\"]}",
+  "tool_description": "Run a multi-LLM workflow over a plan file. This tool is the only supported way to run multi-llm on this host: never invoke multi_llm.py, uv run or any dispatcher command through bash, because the flags this host requires are appended here and a shell invocation reaches none of them.\n\nModes:\n  review-plan | review \u2014 Review a plan with every configured model, then group + validate.\n  apply-suggestions \u2014 Prepare the validated plan-review suggestions for application.\n  generate-tasks | tasks \u2014 Decompose the plan into an implementable task list.\n  review-tasks \u2014 Review the generated task list with every configured model.\n  apply-task-suggestions \u2014 Prepare the validated task-review suggestions for application.\n  implement \u2014 Batch the tasks for implementation and track progress.\n  review-code | code-review \u2014 Review the working diff against the plan with every model.\n  apply-code-fixes \u2014 Prepare the validated code-review fixes for application.\n  full \u2014 Run the whole plan-to-code workflow as one resumable sequence.\n  ask \u2014 Ask every configured model one free-text question about a plan.\n  status | abort | cancel | stop \u2014 Report workflow phases (state.json) and detached runs ({phase}/.status.json).\n  init \u2014 Scaffold a per-project .multi-llm/providers.yaml override.\n\nThe default mode is review-plan.\n\nExit codes: 0 done \u00b7 1 error \u00b7 2 nothing to do \u00b7 3 needs a human: stop, report, do not do the phase's work.\n`user_next_step` in a result is a command for the user to type, never a call to make: copy its `command`, and each `optional_before` command, into your report, each in its own fenced block, and stop. Only `next` is a call.\n\nThis tool runs outside the session's exec sandbox. apply-suggestions, apply-task-suggestions, implement, apply-code-fixes, full edit the working tree through agent CLIs; under a read-only posture, or one this tool cannot read, they are refused unless the user has set MULTI_LLM_CODEX_UNSANDBOXED_WRITES=1.\n\nExamples:\n  {\"mode\":\"review-plan\",\"plan\":\"plans/x.md\",\"question\":\"\",\"extra_flags\":[]}\n  {\"mode\":\"init\",\"plan\":\"\",\"question\":\"\",\"extra_flags\":[]}\n  {\"mode\":\"ask\",\"plan\":\"plans/x.md\",\"question\":\"Why is the ceiling 120 s?\",\"extra_flags\":[]}\n  {\"mode\":\"review\",\"plan\":\"plans/x.md\",\"question\":\"\",\"extra_flags\":[\"--quick\"]}",
   "argument_descriptions": {
     "mode": "One of: review-plan, review, apply-suggestions, generate-tasks, tasks, review-tasks, apply-task-suggestions, implement, review-code, code-review, apply-code-fixes, full, ask, status, abort, cancel, stop, init. An alias travels unexpanded \u2014 do not expand it and do not add the flag it already contributes. Never empty. The default when the user named no mode is review-plan.",
     "plan": "The plan path, as exactly one argv element \u2014 never split, never shell-quoted, never escaped. Strip at most one layer of matching quotes from what the user typed and send the value. A path containing spaces needs no escaping. Empty (\"\") when and only when the mode declares no plan positional. Modes taking a plan: review-plan, apply-suggestions, generate-tasks, review-tasks, apply-task-suggestions, implement, review-code, apply-code-fixes, full, ask, status. Relative paths resolve against the workspace.",
@@ -35,6 +35,7 @@
       ],
       "supports_detach": true,
       "summary": "Review a plan with every configured model, then group + validate.",
+      "optional_why": null,
       "phase": "review-plan",
       "writes_worktree": false
     },
@@ -46,6 +47,7 @@
       ],
       "supports_detach": true,
       "summary": "Prepare the validated plan-review suggestions for application.",
+      "optional_why": null,
       "phase": "apply-suggestions",
       "writes_worktree": true
     },
@@ -59,6 +61,7 @@
       ],
       "supports_detach": true,
       "summary": "Decompose the plan into an implementable task list.",
+      "optional_why": null,
       "phase": "generate-tasks",
       "writes_worktree": false
     },
@@ -70,6 +73,7 @@
       ],
       "supports_detach": true,
       "summary": "Review the generated task list with every configured model.",
+      "optional_why": "optional: have the models review the tasks before implementing",
       "phase": "review-tasks",
       "writes_worktree": false
     },
@@ -81,6 +85,7 @@
       ],
       "supports_detach": true,
       "summary": "Prepare the validated task-review suggestions for application.",
+      "optional_why": "optional: apply the task-review suggestions before implementing",
       "phase": "apply-task-suggestions",
       "writes_worktree": true
     },
@@ -92,6 +97,7 @@
       ],
       "supports_detach": true,
       "summary": "Batch the tasks for implementation and track progress.",
+      "optional_why": null,
       "phase": "implement",
       "writes_worktree": true
     },
@@ -105,6 +111,7 @@
       ],
       "supports_detach": true,
       "summary": "Review the working diff against the plan with every model.",
+      "optional_why": null,
       "phase": "code-review",
       "writes_worktree": false
     },
@@ -116,6 +123,7 @@
       ],
       "supports_detach": true,
       "summary": "Prepare the validated code-review fixes for application.",
+      "optional_why": null,
       "phase": "apply-code-fixes",
       "writes_worktree": true
     },
@@ -127,6 +135,7 @@
       ],
       "supports_detach": true,
       "summary": "Run the whole plan-to-code workflow as one resumable sequence.",
+      "optional_why": null,
       "phase": "full",
       "writes_worktree": true
     },
@@ -139,6 +148,7 @@
       ],
       "supports_detach": true,
       "summary": "Ask every configured model one free-text question about a plan.",
+      "optional_why": null,
       "phase": "ask",
       "writes_worktree": false
     },
@@ -154,6 +164,7 @@
       ],
       "supports_detach": false,
       "summary": "Report workflow phases (state.json) and detached runs ({phase}/.status.json).",
+      "optional_why": null,
       "phase": null,
       "writes_worktree": false
     },
@@ -163,6 +174,7 @@
       "positionals": [],
       "supports_detach": false,
       "summary": "Scaffold a per-project .multi-llm/providers.yaml override.",
+      "optional_why": null,
       "phase": null,
       "writes_worktree": false
     }
@@ -273,6 +285,10 @@
     "host_option": "--host",
     "run_id_option": "--run-id",
     "session_model_env": "MULTI_LLM_HOST_SESSION_MODEL",
+    "route_env": {
+      "name": "MULTI_LLM_ROUTE",
+      "value": "package"
+    },
     "mechanical_continuations": [
       "--reaggregate",
       "--consolidate"

@@ -57,6 +57,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sys
 import threading
@@ -717,7 +718,24 @@ class Handler(BaseHTTPRequestHandler):
         except (UnicodeDecodeError, ValueError):
             return raw, {}
 
+    def _record_pending(self) -> None:
+        """Write this request's log line, once, BEFORE any response byte leaves.
+
+        A client holding its answer may read the log right away, so the line
+        has to be on disk by then. It used to be written in `_dispatch`'s
+        ``finally``, after the response: a `Content-Length` answer lets the
+        client return as soon as the body arrives, and a reader that looked at
+        once found no line, or half of one (measured: 8 in 2000 sequential JSON
+        requests idle, 20 in 500 under CPU load). Both send paths call this
+        first; `_dispatch` calls it again for a request that raised before
+        sending, which is the only case left for the ``finally``.
+        """
+        entry, self._pending_entry = getattr(self, "_pending_entry", None), None
+        if entry is not None:
+            _record(entry)
+
     def _send_json(self, obj: dict, status: int = 200) -> None:
+        self._record_pending()
         payload = json.dumps(obj).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
@@ -742,6 +760,7 @@ class Handler(BaseHTTPRequestHandler):
         `JSON.parse`s every frame and dies with `Unexpected token 'D'`, so the
         sentinel is emitted only on the surfaces whose clients expect it.
         """
+        self._record_pending()
         self.send_response(200)
         self.send_header("Content-Type", "text/event-stream")
         self.send_header("Cache-Control", "no-cache")
@@ -811,11 +830,14 @@ class Handler(BaseHTTPRequestHandler):
             # Names only, and only the ones that matched — see `_facts`.
             entry["facts"] = [name for name, rx in _facts if rx.search(prompt)]
 
+        # Every field is final before the first send, which records the line
+        # (`_record_pending`); the ``finally`` covers a request that raised first.
+        self._pending_entry = entry
         try:
             self._route(method, path, query, body, model, prompt, turn,
                         streamed, entry)
         finally:
-            _record(entry)
+            self._record_pending()
 
     def _resolve_or_422(self, prompt, turn, entry) -> tuple[bool, str]:
         """Resolve for any surface, or answer 422 and flag the log line.
@@ -1180,6 +1202,11 @@ def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, required=True)
     parser.add_argument("--log", required=True)
+    parser.add_argument("--port-file", default=None,
+                        help="after the socket is bound and listening, write the "
+                             "ACTUAL port here (atomically: .tmp + os.replace). "
+                             "With `--port 0` the OS picks the port, so a caller "
+                             "needs no pick-then-close race.")
     parser.add_argument("--scenario", default=None)
     parser.add_argument("--facts", default=None,
                         help="JSON {name: regex}; each request's log entry gains "
@@ -1204,7 +1231,17 @@ def main(argv=None) -> int:
     refuse_probe_port(args.port, "stub")
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     server.daemon_threads = True
-    print(f"stub listening on 127.0.0.1:{args.port}", flush=True)
+    port = server.server_address[1]
+    if port != args.port:  # `--port 0`: re-check the port the OS chose
+        refuse_probe_port(port, "stub")
+    if args.port_file:
+        # Bound AND listening (the constructor does both), so a reader that sees
+        # the file can connect at once. Atomic so it never sees a partial number.
+        port_file = Path(args.port_file)
+        tmp = port_file.with_name(port_file.name + ".tmp")
+        tmp.write_text(str(port), encoding="utf-8")
+        os.replace(tmp, port_file)
+    print(f"stub listening on 127.0.0.1:{port}", flush=True)
     try:
         server.serve_forever()
     except KeyboardInterrupt:

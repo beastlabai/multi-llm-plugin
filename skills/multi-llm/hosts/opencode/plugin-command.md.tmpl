@@ -13,6 +13,10 @@ Do not reach the dispatcher any other way.
 Read the result's `exit` and `next` the way the dispatcher's own contract reads
 them. {NEEDS_HUMAN_RULE}
 
+`user_next_step` is the phase after this one, for the user to type: never run it
+yourself; end your report with its `command`, and each `optional_before` command, every one in its own fenced block, verbatim. It is
+never a tool call, unlike `next`, which is one.
+
 On exit 0, report `validation_counts`, and if `needs_human_decision` or
 `validation_failed` is non-zero point at `report.md` for those groups; they are
 decided later, when the suggestions are applied.

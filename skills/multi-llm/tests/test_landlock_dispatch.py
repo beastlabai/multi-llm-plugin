@@ -34,6 +34,7 @@ file (2026-09-30); they fail until ``landlock_dispatch.py`` is fixed and are
 left failing on purpose.
 """
 
+import hashlib
 import json
 import os
 import re
@@ -1212,22 +1213,51 @@ def _append(path, text):
 
 
 def _rewrite_same_size_keep_mtime(path):
-    """Rewrite ``path`` in place at the same size, then reset its mtime
-    (``utime`` cannot reset ctime, which is what the check reads)."""
+    """Rewrite ``path`` in place at the same size, then reset its mtime, so
+    inode, size, mode and mtime all match the before-snapshot and only the
+    content hash can tell (the check never reads ctime)."""
     before = os.lstat(path)
     data = Path(path).read_bytes()
     evil = data.replace(b"a", b"b")
     assert len(evil) == len(data) and evil != data
-    for _ in range(200):  # wait out a coarse ctime tick if we are inside one
-        with open(path, "r+b") as handle:
-            handle.write(evil)
-        os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-        after = os.lstat(path)
-        if after.st_ctime_ns != before.st_ctime_ns:
-            break
+    with open(path, "r+b") as handle:
+        handle.write(evil)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    after = os.lstat(path)
+    assert (after.st_ino, after.st_size, after.st_mode, after.st_mtime_ns) == (
+        before.st_ino, before.st_size, before.st_mode, before.st_mtime_ns)
+
+
+def _until_ctime_moves(path, act):
+    """Run ``act`` (which must leave ``path``'s bytes alone) until ``path``'s
+    ctime has moved — retried past a coarse timestamp tick — and assert that
+    it did, so a test built on it really exercises a ctime-only change."""
+    before = os.lstat(path)
+    for _ in range(200):
+        act()
+        if os.lstat(path).st_ctime_ns != before.st_ctime_ns:
+            return
         time.sleep(0.005)
-    assert (after.st_ino, after.st_size, after.st_mtime_ns) == (
-        before.st_ino, before.st_size, before.st_mtime_ns)
+    raise AssertionError(f"ctime of {path} never moved")
+
+
+#: Where a plugin's uv ``.venv`` keeps a package file under the home.
+VENV_REL = os.path.join(PLUGIN_REL, ".venv", "lib", "python3.11", "site-packages", "yaml")
+
+
+def _venv_file_linked_from_a_cache(root, home):
+    """The shape of a plugin's uv ``.venv`` (measured 2026-09-30: every pyyaml
+    file a 15-name hardlink): the watched file is one name of an inode whose
+    other name lives in the uv cache, outside the home. Returns
+    ``(cache_name, watched_name)``."""
+    cache = root / "uv-cache" / "archive-v0" / "TI6" / "yaml"
+    cache.mkdir(parents=True)
+    cached = cache / "__init__.py"
+    cached.write_text("__version__ = '6.0.3'\nfrom .loader import *\n")
+    venv = home / VENV_REL
+    venv.mkdir(parents=True)
+    os.link(cached, venv / "__init__.py")
+    return cached, venv / "__init__.py"
 
 
 def _set_account(home, account_id):
@@ -1271,6 +1301,13 @@ CHANGES = {
     "plugin file same size, mtime reset": (
         lambda h: _rewrite_same_size_keep_mtime(h / PLUGIN_REL / "index.js"),
         os.path.join(PLUGIN_REL, "index.js"), None),
+    "plugin file made executable": (
+        lambda h: os.chmod(h / PLUGIN_REL / "index.js", 0o755),
+        os.path.join(PLUGIN_REL, "index.js"), None),
+    "plugin file replaced by a FIFO": (
+        lambda h: (os.unlink(h / PLUGIN_REL / "index.js"),
+                   os.mkfifo(h / PLUGIN_REL / "index.js")),
+        os.path.join(PLUGIN_REL, "index.js"), None),
     "auth.json account id": (
         lambda h: _set_account(h, "acct-OTHER-2222"),
         "auth.json (account identity)", None),
@@ -1297,6 +1334,93 @@ class TestTheHomeCheck:
         blob = json.dumps(change.to_dict()) + change.describe()
         for secret in ("evil-cmd", "tok-SECRET", "curl evil", "never", "acct-", "evil |"):
             assert secret not in blob, secret
+
+    WATCHED_FILES = ["AGENTS.md", "AGENTS.override.md", ".env", "config.toml", "auth.json"]
+    WATCHED_NAMES = {"auth.json": "auth.json (account identity)"}
+
+    def _snapshot_promptly(self, home, cwds):
+        """``home_snapshot`` in a thread: a hang fails the test (the daemon
+        thread is left blocked on a FIFO, so open its write end to release it)."""
+        import threading
+        out = {}
+        thread = threading.Thread(
+            target=lambda: out.setdefault("snap", ld.home_snapshot(str(home), cwds)),
+            daemon=True)
+        thread.start()
+        thread.join(10)
+        return out.get("snap") if not thread.is_alive() else "HUNG"
+
+    def _home_with_every_watched_file(self, root):
+        home = _make_home(root)
+        (home / "AGENTS.override.md").write_text("override\n")
+        (home / ".env").write_text("KEY=value\n")
+        return home
+
+    @pytest.mark.parametrize("name", WATCHED_FILES)
+    def test_a_watched_file_replaced_by_a_fifo_is_named_not_a_hang(self, lay, name):
+        home = self._home_with_every_watched_file(lay.root)
+        before = ld.home_snapshot(str(home), [])
+        os.unlink(home / name)
+        os.mkfifo(home / name)
+        after = self._snapshot_promptly(home, [])
+        assert after != "HUNG", "home_snapshot blocked on a FIFO"
+        change = ld.compare_home(before, after)
+        assert change.changed == [self.WATCHED_NAMES.get(name, name)]
+
+    @pytest.mark.parametrize("name", WATCHED_FILES)
+    def test_a_watched_file_replaced_by_a_symlink_is_named(self, lay, name):
+        home = self._home_with_every_watched_file(lay.root)
+        before = ld.home_snapshot(str(home), [])
+        target = lay.root / "elsewhere"
+        target.write_bytes((home / name).read_bytes())  # identical bytes: only the link differs
+        os.unlink(home / name)
+        os.symlink(target, home / name)
+        change = ld.compare_home(before, ld.home_snapshot(str(home), []))
+        assert change.changed == [self.WATCHED_NAMES.get(name, name)]
+
+    def _link_watched(self, lay, name):
+        home = self._home_with_every_watched_file(lay.root)
+        target = lay.root / "elsewhere"
+        target.write_bytes((home / name).read_bytes())
+        os.unlink(home / name)
+        os.symlink(target, home / name)
+        return home, target
+
+    @pytest.mark.parametrize("name", WATCHED_FILES)
+    def test_an_edit_of_a_symlinked_watched_files_target_is_named(self, lay, name):
+        home, target = self._link_watched(lay, name)
+        before = ld.home_snapshot(str(home), [])
+        assert not ld.compare_home(before, ld.home_snapshot(str(home), [])).any
+        target.write_bytes(target.read_bytes() + b"\n# edited\n")
+        change = ld.compare_home(before, ld.home_snapshot(str(home), []))
+        assert change is not None and change.any
+        assert change.changed == [self.WATCHED_NAMES.get(name, name)]
+
+    @pytest.mark.parametrize("name", WATCHED_FILES)
+    def test_a_symlink_target_replaced_by_a_fifo_is_named_not_a_hang(self, lay, name):
+        home, target = self._link_watched(lay, name)
+        before = ld.home_snapshot(str(home), [])
+        os.unlink(target)
+        os.mkfifo(target)
+        after = self._snapshot_promptly(home, [])
+        assert after != "HUNG", "home_snapshot blocked on a FIFO behind a link"
+        change = ld.compare_home(before, after)
+        assert change.changed == [self.WATCHED_NAMES.get(name, name)]
+
+    @pytest.mark.parametrize("name", WATCHED_FILES)
+    def test_a_dangling_watched_symlink_is_handled_and_named(self, lay, name):
+        home, target = self._link_watched(lay, name)
+        before = ld.home_snapshot(str(home), [])
+        os.unlink(target)
+        after = ld.home_snapshot(str(home), [])
+        change = ld.compare_home(before, after)
+        assert change.changed == [self.WATCHED_NAMES.get(name, name)]
+        assert not ld.compare_home(after, ld.home_snapshot(str(home), [])).any
+
+    def test_untouched_watched_files_are_unchanged(self, lay):
+        home = self._home_with_every_watched_file(lay.root)
+        before = ld.home_snapshot(str(home), [])
+        assert not ld.compare_home(before, ld.home_snapshot(str(home), [])).any
 
     def test_a_table_added_beside_an_existing_one_is_named_by_its_dotted_key(self, lay):
         if not HAVE_TOMLLIB:
@@ -1476,6 +1600,112 @@ class TestTheHomeCheck:
         change = ld.compare_home(before, ld.home_snapshot(str(home), cwds))
         assert change.changed == [], change.to_dict()
         assert change.foreign_trust == []
+
+    @pytest.mark.parametrize("event", [
+        "another venv links from the cache",
+        "the cache entry is pruned",
+        "a hardlink is made and removed",
+    ])
+    def test_hardlink_traffic_elsewhere_on_a_watched_inode_is_not_a_change(self, lay, event):
+        """BUG (2026-09-30, plans/next-phase-command/review-plan): a codex
+        slot on the plugin-landlock rung failed closed with
+        ``[CODEX_HOME_CHECK]`` naming 23 files under
+        ``plugins/cache/…/skills/multi-llm/.venv/`` — exactly the 23 whose
+        inodes are 15-name hardlinks into the uv cache, none of the 19
+        single-link files beside them. Bytes, mtime and inode were unchanged;
+        only ctime had moved, because ``link(2)``/``unlink(2)`` on any name
+        of an inode move its ctime, and every ``uv run``/``uv sync`` anywhere
+        on the machine links from (or prunes) that cache. The check compared
+        lstat tuples carrying ``st_ctime_ns``. Fix: drop ctime from a tree
+        entry and compare the content hash, which still catches the write
+        ctime stood in for (see the ``mtime reset`` rows of CHANGES)."""
+        home = _make_home(lay.root)
+        cached, watched = _venv_file_linked_from_a_cache(lay.root, home)
+        other_venv = lay.root / "other-project" / ".venv" / "yaml"
+        other_venv.mkdir(parents=True)
+        cwds = [str(lay.repo)]
+        before = ld.home_snapshot(str(home), cwds)
+        rel = os.path.join(VENV_REL, "__init__.py")
+        assert rel in before.trees
+
+        def act():
+            if event == "another venv links from the cache":
+                target = other_venv / f"__init__{time.monotonic_ns()}.py"
+                os.link(cached, target)
+            elif event == "the cache entry is pruned":
+                if cached.exists():
+                    os.unlink(cached)
+                else:  # a previous round already pruned it: relink and prune
+                    os.link(watched, cached)
+                    os.unlink(cached)
+            else:
+                spare = lay.root / "spare-link.py"
+                os.link(watched, spare)
+                os.unlink(spare)
+
+        _until_ctime_moves(watched, act)
+        change = ld.compare_home(before, ld.home_snapshot(str(home), cwds))
+        assert change.changed == [], change.to_dict()
+
+    def test_a_ctime_only_change_by_a_no_op_chmod_or_utime_is_not_a_change(self, lay):
+        """The other ways to move only ctime — a chmod to the same mode and a
+        utime to the same times — leave the bytes, mode and mtime alone."""
+        home = _make_home(lay.root)
+        watched = home / PLUGIN_REL / "index.js"
+        before = ld.home_snapshot(str(home), [])
+        info = os.lstat(watched)
+
+        def act():
+            os.chmod(watched, stat.S_IMODE(info.st_mode))
+            os.utime(watched, ns=(info.st_atime_ns, info.st_mtime_ns))
+
+        _until_ctime_moves(watched, act)
+        change = ld.compare_home(before, ld.home_snapshot(str(home), []))
+        assert change.changed == [], change.to_dict()
+
+    @pytest.mark.parametrize("through", ["the cache name", "the watched name"])
+    def test_a_content_change_to_a_hardlinked_watched_file_is_named(self, lay, through):
+        """The security half the fix must keep: rewriting a hardlinked venv
+        file — through its own name or through the cache's, at the same size
+        with the mtime reset, so inode, size, mode and mtime all still match —
+        changes the code a later codex session runs, and is named."""
+        home = _make_home(lay.root)
+        cached, watched = _venv_file_linked_from_a_cache(lay.root, home)
+        before = ld.home_snapshot(str(home), [])
+        _rewrite_same_size_keep_mtime(cached if through == "the cache name" else watched)
+        change = ld.compare_home(before, ld.home_snapshot(str(home), []))
+        assert change.changed == [os.path.join(VENV_REL, "__init__.py")]
+
+    def test_a_file_swapped_for_an_identical_copy_is_still_named(self, lay):
+        """A rename-over keeps the bytes but not the inode: still a write to
+        the home during the slot, and still named (only ctime was dropped)."""
+        home = _make_home(lay.root)
+        watched = home / PLUGIN_REL / "index.js"
+        before = ld.home_snapshot(str(home), [])
+        info = os.lstat(watched)
+        copy = watched.with_name("index.js.tmp")
+        copy.write_bytes(watched.read_bytes())
+        os.chmod(copy, stat.S_IMODE(info.st_mode))
+        os.utime(copy, ns=(info.st_atime_ns, info.st_mtime_ns))
+        os.replace(copy, watched)
+        change = ld.compare_home(before, ld.home_snapshot(str(home), []))
+        assert change.changed == [os.path.join(PLUGIN_REL, "index.js")]
+
+    def test_a_tree_entry_carries_no_ctime_and_hashes_regular_files(self, lay):
+        home = _make_home(lay.root)
+        watched = home / PLUGIN_REL / "index.js"
+        (home / "skills" / "linked").symlink_to(os.path.join("..", "tmp"))
+        snap = ld.home_snapshot(str(home), [])
+        info = os.lstat(watched)
+        assert snap.trees[os.path.join(PLUGIN_REL, "index.js")] == (
+            info.st_ino, info.st_size, info.st_mode, info.st_mtime_ns,
+            hashlib.sha256(watched.read_bytes()).hexdigest(),
+        )
+        link_info = os.lstat(home / "skills" / "linked")
+        assert snap.trees[os.path.join("skills", "linked")] == (
+            link_info.st_ino, link_info.st_size, link_info.st_mode,
+            link_info.st_mtime_ns, os.path.join("..", "tmp"),
+        )
 
     def test_a_nested_dot_system_dir_in_a_user_skill_is_watched(self, lay):
         """BUG (2026-09-30, low): the check skips ``.system`` at *every* depth

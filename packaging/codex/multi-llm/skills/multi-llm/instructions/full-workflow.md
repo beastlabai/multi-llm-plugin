@@ -320,9 +320,11 @@ Follow the full apply-code-fixes instruction file to process batches, generate t
 
 ### 7. Report Combined Results
 
-After all phases complete, provide a comprehensive summary. The two reporting
-rules in `references/summary-format.md` apply here too — every path comes from the
-run's own output, and `MULTI_LLM_RESULT.next` is copied verbatim:
+After all phases complete, provide a comprehensive summary. The reporting rules
+in `references/summary-format.md` apply here too — every path comes from the
+run's own output, `MULTI_LLM_RESULT.next` is copied verbatim, and the report ends
+with the next step its `### Next Steps` rule gives, copied from
+`user_next_step` and never composed:
 
 ```markdown
 ## Full Workflow Complete
@@ -384,7 +386,12 @@ run's own output, and `MULTI_LLM_RESULT.next` is copied verbatim:
    Include the output (if non-empty) after "### All Output Files".
 
 ### Next Steps
-- [Any recommended follow-up actions]
+- [Exactly what the `### Next Steps` rule in `references/summary-format.md`
+  says: `user_next_step.command` in a fenced block, with any optional commands
+  after it under "Optional, before that:", each optional command in its own
+  fenced block; "Workflow complete." when
+  `complete` is true; nothing when there is no `user_next_step`, or one line
+  quoting a failed lookup]
 ```
 
 ---

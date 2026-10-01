@@ -1033,10 +1033,21 @@ def jail_denied_edits(
 #: its bytes are never kept or logged.
 HOME_FILES: Tuple[str, ...] = ("AGENTS.md", "AGENTS.override.md", ".env")
 #: Trees codex loads as configuration, instructions or code in a later session
-#: (compared by lstat tuples, plus each symlink's destination — a link to a
+#: (compared by :func:`_tree_entry`: inode, size, mode and mtime, plus each
+#: regular file's content hash and each symlink's destination — a link to a
 #: directory, or the tree's root itself, included), each with the names under
 #: it a normal turn rewrites (preflight step 1's write set), which the check
 #: skips.
+#:
+#: ``ctime`` is deliberately **not** compared. ``link(2)``/``unlink(2)`` on
+#: *any* name of an inode move that inode's ctime, and a plugin's uv ``.venv``
+#: under ``plugins/cache/`` holds its packages as hardlinks into the uv cache
+#: (15 names per inode, measured 2026-09-30), so every ``uv run``/``uv sync``
+#: elsewhere on the machine that links from or prunes the cache moved the
+#: ctime of watched files that no one wrote: a review-plan codex slot failed
+#: closed on 23 pyyaml files whose bytes and mtime were untouched. The content
+#: hash is what catches the write ctime used to stand in for — a same-size
+#: rewrite with its mtime reset by ``utime``.
 HOME_TREES: Tuple[Tuple[str, Tuple[str, ...]], ...] = (
     ("rules", ()),
     ("skills", (".system",)),
@@ -1073,13 +1084,14 @@ _TRUST_TABLE = re.compile(
 @dataclass
 class HomeSnapshot:
     """A fingerprint of ``$CODEX_HOME``'s security-relevant set. Hashes and
-    lstat tuples only; ``config_text`` is kept in memory for the key-name diff
+    lstat fields only; ``config_text`` is kept in memory for the key-name diff
     and never logged or persisted."""
 
     home: str
     files: Dict[str, str] = field(default_factory=dict)
-    #: home-relative path → ``(ino, size, mode, mtime_ns, ctime_ns)``, with
-    #: the ``readlink`` destination appended for a symlink.
+    #: home-relative path → ``(ino, size, mode, mtime_ns)``, with the content's
+    #: sha256 appended for a regular file and the ``readlink`` destination for
+    #: a symlink (never ctime — see :data:`HOME_TREES`).
     trees: Dict[str, Tuple[Any, ...]] = field(default_factory=dict)
     config_sha: str = ""
     config_text: str = ""
@@ -1091,10 +1103,131 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
+#: Read size for hashing a watched file (memory stays bounded whatever its size).
+_HASH_CHUNK = 1 << 20
+
+
+def _content_sha(path: str, info: os.stat_result) -> str:
+    """sha256 of the regular file ``info`` lstat'ed at ``path``.
+
+    Opened ``O_NOFOLLOW | O_NONBLOCK``, so a path swapped for a symlink or a
+    FIFO after the lstat neither follows the link nor blocks the snapshot;
+    the descriptor must be the very inode lstat'ed (``"replaced"`` otherwise,
+    which compares unequal to any hash, so a swap mid-snapshot is a change).
+    ``"unreadable"`` when it cannot be opened or read."""
+    flags = os.O_RDONLY
+    for name in ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC"):
+        flags |= getattr(os, name, 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return "unreadable"
+    try:
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode)
+                or (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino)):
+            return "replaced"
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(fd, _HASH_CHUNK)
+            if not chunk:
+                break
+            digest.update(chunk)
+        return digest.hexdigest()
+    except OSError:
+        return "unreadable"
+    finally:
+        os.close(fd)
+
+
+#: Largest watched home file read whole (AGENTS.md, config.toml, auth.json);
+#: one larger reads as ``"unreadable"``, which is a change from any real state.
+_WATCHED_READ_LIMIT = 8 << 20
+
+
+def _read_watched(path: str) -> Tuple[str, bytes]:
+    """Safely read one watched ``$CODEX_HOME`` file: ``(status, data)``.
+
+    ``status`` is ``"ok"`` (``data`` holds the bytes), ``"absent"`` (nothing
+    there), or a marker that never equals another state: ``"symlink:<dest>"``
+    for a link (``<dest>|sha256:<hex>`` of the target read through it, or
+    ``<dest>|absent``/``replaced``/``unreadable``), ``"replaced"`` for anything else that is not
+    the regular file lstat'ed (a FIFO, a device, a swapped inode), and
+    ``"unreadable"`` for an open/read failure or an over-limit file.
+
+    Opened ``O_NOFOLLOW | O_NONBLOCK`` and checked with fstat, so a jailed
+    turn replacing the file with a FIFO or a link can neither block the
+    snapshot nor redirect it."""
+    try:
+        info = os.lstat(path)
+    except FileNotFoundError:
+        return "absent", b""
+    except OSError:
+        return "unreadable", b""
+    if stat.S_ISLNK(info.st_mode):
+        try:
+            dest = os.readlink(path)
+        except OSError:
+            return "unreadable", b""
+        # Record the destination AND the target's content (read through the
+        # link, same safeguards), so a retarget and an edit of the target are
+        # both changes. Only a hash goes in the marker, never the bytes.
+        tstatus, tdata = _open_and_read(path, follow=True)
+        tail = ("sha256:" + _sha(tdata)) if tstatus == "ok" else tstatus
+        return f"symlink:{dest}|{tail}", b""
+    if not stat.S_ISREG(info.st_mode):
+        return "replaced", b""
+    return _open_and_read(path, info=info)
+
+
+def _open_and_read(path: str, info: Optional[os.stat_result] = None,
+                   follow: bool = False) -> Tuple[str, bytes]:
+    """Bounded non-blocking read of ``path``. With ``follow`` the path is
+    opened through a symlink and any regular file is accepted; otherwise
+    ``O_NOFOLLOW`` and the descriptor must be the ``info`` inode."""
+    flags = os.O_RDONLY
+    for name in (("O_NONBLOCK", "O_CLOEXEC") if follow
+                 else ("O_NOFOLLOW", "O_NONBLOCK", "O_CLOEXEC")):
+        flags |= getattr(os, name, 0)
+    try:
+        fd = os.open(path, flags)
+    except FileNotFoundError:
+        return "absent", b""
+    except OSError:
+        return "unreadable", b""
+    try:
+        opened = os.fstat(fd)
+        if (not stat.S_ISREG(opened.st_mode)
+                or (info is not None
+                    and (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino))):
+            return "replaced", b""
+        chunks: List[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, _HASH_CHUNK)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > _WATCHED_READ_LIMIT:
+                return "unreadable", b""
+            chunks.append(chunk)
+        return "ok", b"".join(chunks)
+    except OSError:
+        return "unreadable", b""
+    finally:
+        os.close(fd)
+
+
 def _tree_entry(path: str, *, links_only: bool = False) -> Optional[Tuple[Any, ...]]:
-    """One watched-tree entry's fingerprint: its lstat tuple, plus the
-    destination for a symlink. ``None`` when it cannot be lstat'ed, or when
-    ``links_only`` and it is not a symlink."""
+    """One watched-tree entry's fingerprint: ``(ino, size, mode, mtime_ns)``,
+    plus the content's sha256 for a regular file or the destination for a
+    symlink. ``None`` when it cannot be lstat'ed, or when ``links_only`` and
+    it is not a symlink.
+
+    No ctime: a hardlink made or removed anywhere else on the machine moves
+    it without touching this file (:data:`HOME_TREES`). A content write that
+    resets its mtime still changes the hash, and a rename-over still changes
+    the inode."""
     try:
         info = os.lstat(path)
     except OSError:
@@ -1102,14 +1235,14 @@ def _tree_entry(path: str, *, links_only: bool = False) -> Optional[Tuple[Any, .
     is_link = stat.S_ISLNK(info.st_mode)
     if links_only and not is_link:
         return None
-    entry: Tuple[Any, ...] = (
-        info.st_ino, info.st_size, info.st_mode, info.st_mtime_ns, info.st_ctime_ns,
-    )
+    entry: Tuple[Any, ...] = (info.st_ino, info.st_size, info.st_mode, info.st_mtime_ns)
     if is_link:
         try:
             entry += (os.readlink(path),)
         except OSError:
             entry += ("unreadable",)
+    elif stat.S_ISREG(info.st_mode):
+        entry += (_content_sha(path, info),)
     return entry
 
 
@@ -1139,43 +1272,36 @@ def home_snapshot(codex_home: Optional[str], run_cwds: Sequence[str] = ()) -> Op
         return None
     snap = HomeSnapshot(home=codex_home)
     for name in HOME_FILES:
-        path = os.path.join(codex_home, name)
-        try:
-            with open(path, "rb") as handle:
-                snap.files[name] = _sha(handle.read())
-        except FileNotFoundError:
-            snap.files[name] = "absent"
-        except OSError:
-            snap.files[name] = "unreadable"
-    config_path = os.path.join(codex_home, HOME_CONFIG)
-    try:
-        with open(config_path, "r", encoding="utf-8", errors="replace") as handle:
-            text = handle.read()
+        status, data = _read_watched(os.path.join(codex_home, name))
+        snap.files[name] = _sha(data) if status == "ok" else status
+    status, data = _read_watched(os.path.join(codex_home, HOME_CONFIG))
+    if status == "ok":
+        text = data.decode("utf-8", errors="replace")
         stripped, foreign = _strip_expected_trust(text, run_cwds)
         snap.config_sha = _sha(stripped.encode("utf-8"))
         snap.config_text = stripped
         snap.foreign_trust = foreign
-    except FileNotFoundError:
+    elif status == "absent":
         # codex creates the file holding only the trust table on a fresh home;
         # a missing file therefore compares as empty, not as its own state.
         snap.config_sha = _sha(b"")
-    except OSError:
-        snap.config_sha = "unreadable"
-    auth_path = os.path.join(codex_home, HOME_AUTH)
-    try:
-        with open(auth_path, "r", encoding="utf-8") as handle:
-            auth = json.load(handle)
-        tokens = auth.get("tokens") if isinstance(auth, dict) else None
-        identity = json.dumps([
-            auth.get("auth_mode") if isinstance(auth, dict) else None,
-            auth.get("OPENAI_API_KEY") if isinstance(auth, dict) else None,
-            tokens.get("account_id") if isinstance(tokens, dict) else None,
-        ], sort_keys=True)
-        snap.auth_identity = _sha(identity.encode("utf-8"))
-    except FileNotFoundError:
-        snap.auth_identity = "absent"
-    except (OSError, ValueError):
-        snap.auth_identity = "unreadable"
+    else:
+        snap.config_sha = status
+    status, data = _read_watched(os.path.join(codex_home, HOME_AUTH))
+    if status == "ok":
+        try:
+            auth = json.loads(data.decode("utf-8"))
+            tokens = auth.get("tokens") if isinstance(auth, dict) else None
+            identity = json.dumps([
+                auth.get("auth_mode") if isinstance(auth, dict) else None,
+                auth.get("OPENAI_API_KEY") if isinstance(auth, dict) else None,
+                tokens.get("account_id") if isinstance(tokens, dict) else None,
+            ], sort_keys=True)
+            snap.auth_identity = _sha(identity.encode("utf-8"))
+        except ValueError:
+            snap.auth_identity = "unreadable"
+    else:
+        snap.auth_identity = status
     for tree, skipped in HOME_TREES:
         root = os.path.join(codex_home, tree)
         # A root that is itself a link (`skills -> elsewhere`, dangling or

@@ -84,6 +84,13 @@ class Mode:
             ``full`` *because* it runs the apply phases and ``implement`` — and
             a second composite added later is classified by this column, not by
             a list in a host layer.
+        optional_why: The generic reason an *optional* phase is offered before
+            the next required one, shown beside its command in a finished
+            phase's next-step block (``user_next_step.optional_before[].why``,
+            plans/next-phase-command.md §2.1 "Each ``why`` has one owner").
+            Set on exactly the rows whose phase is in
+            ``check_workflow_prerequisites.OPTIONAL_PHASES`` and ``None`` on
+            every other row; ``utils/next_phase.py`` holds no prose of its own.
     """
 
     name: str
@@ -100,6 +107,7 @@ class Mode:
     requires_uv: bool = True
     unavailable: Optional[str] = None
     runs_workflow: bool = False
+    optional_why: Optional[str] = None
 
 
 # Reason strings for the modes that are dispatchable but not yet implemented.
@@ -166,6 +174,7 @@ MODES: Tuple[Mode, ...] = (
         instruction_file="review-tasks.md",
         is_workflow_phase=True,
         supports_detach=True,
+        optional_why="optional: have the models review the tasks before implementing",
     ),
     Mode(
         name="apply-task-suggestions",
@@ -176,6 +185,7 @@ MODES: Tuple[Mode, ...] = (
         instruction_file="apply-task-suggestions.md",
         is_workflow_phase=True,
         supports_detach=True,
+        optional_why="optional: apply the task-review suggestions before implementing",
     ),
     Mode(
         name="implement",
@@ -394,6 +404,33 @@ TOOL_OUTCOMES_LINE = (
     "Exit codes: 0 done · 1 error · 2 nothing to do · 3 needs a human: stop, "
     "report, do not do the phase's work."
 )
+
+#: The outcomes line's second sibling (plans/next-phase-command.md §2.4): what
+#: ``user_next_step`` in a result is, said in the tool description a model reads
+#: before any result. Lifting that key to a tool result's top level puts it next
+#: to ``next``, which the same model is taught to treat as a call — so the
+#: description says, once, that this one is the user's to type and never a call.
+#: Rendered after :data:`TOOL_OUTCOMES_LINE` on both package hosts; neither
+#: server authors the string.
+TOOL_USER_NEXT_STEP_LINE = (
+    "`user_next_step` in a result is a command for the user to type, never a "
+    "call to make: copy its `command`, and each `optional_before` command, into your "
+    "report, each in its own fenced block, and stop. Only `next` is a call."
+)
+
+#: The route signal's one owner (plans/next-phase-command.md §2.1, "Knowing the
+#: route"). The package routes' tool servers set ``ROUTE_ENV`` in every child
+#: env they spawn (polls included) to their surface's
+#: ``dispatcher.route_env.value``, which the surface generator picks from
+#: ``TOOL_ROUTES`` — so neither server spells the name or the value. It picks
+#: only the spelling a printed next-phase command uses, never which phases run
+#: (D6b). ``utils.next_phase.resolve_route`` is the one reader, and it honours
+#: a value only when it is a member of ``TOOL_ROUTES`` **and** the resolved host
+#: carries a ``next_command`` cell for it. It is owned by the tool servers, not
+#: a user setting. ``package`` is the route key ``hosts/capabilities.yaml``
+#: already gives each host's distribution route, whatever the host calls it.
+ROUTE_ENV = "MULTI_LLM_ROUTE"
+TOOL_ROUTES: Tuple[str, ...] = ("package",)
 
 #: The one sentence every needs-human surface shares, and the one the incident
 #: turned on: an agent whose tool has just told it the run is blocked has no

@@ -76,8 +76,12 @@ READERS = {
     "hosts/uv-missing.txt": "bracket",
     # The Claude Code plugin's SessionStart hook (D6 step 5) resolves uv the
     # same way before running `doctor --warn-only`; it lives at the repo root
-    # beside `.claude-plugin/`, so it is the one reader outside the skill tree.
+    # beside `.claude-plugin/`, outside the skill tree.
     "hooks/doctor.sh": "ls",
+    # The plugin's Stop hook (plans/next-phase-command.md T11) resolves uv the
+    # same way, after the grep that lets a session with no phase result skip
+    # it; it sits beside doctor.sh, the second reader outside the skill tree.
+    "hooks/report-check.sh": "ls",
     # The codex plugin's generated surface (plans/codex-native-plugin.md, D3e),
     # committed because the Git route serves the checked-in tree: the list the
     # server's uv preflight reads, emitted from `unattended.UV_CANDIDATES`.
@@ -87,6 +91,7 @@ READERS = {
 #: Where each reader lives, relative to the repo root.
 _ROOTS = {name: SKILL_ROOT for name in READERS}
 _ROOTS["hooks/doctor.sh"] = REPO_ROOT
+_ROOTS["hooks/report-check.sh"] = REPO_ROOT
 _ROOTS["packaging/codex/multi-llm/dist/cli-surface.json"] = REPO_ROOT
 
 #: The codex plugin's committed copy of the skill tree. A hit under it is the

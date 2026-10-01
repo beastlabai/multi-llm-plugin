@@ -67,6 +67,7 @@ import subprocess
 import sys
 import textwrap
 from pathlib import Path
+from typing import NamedTuple
 
 import pytest
 
@@ -83,6 +84,7 @@ CODEX_PLUGIN_SKILL = (
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from utils import cli_common  # noqa: E402
+from utils import host_capabilities  # noqa: E402
 from utils import unattended  # noqa: E402
 
 
@@ -232,8 +234,8 @@ PLACEHOLDER_MANIFEST = {
     # roster that reaches the user three minutes after launch is not a roster —
     # so `ask.md` moves this time too, where the poll row above left it alone.
     #
-    # review-code.md 28 -> 30: the "If implementation ran outside `/multi-llm
-    # implement`" note carries the one `util finalize-tracking --only-touched`
+    # review-code.md 28 -> 30: the "If implementation ran outside the
+    # `implement` phase" note carries the one `util finalize-tracking --only-touched`
     # command an external implementer runs before the review (review-scope
     # plan D2.6).
     "instructions/review-code.md": (0, 30),
@@ -1316,6 +1318,184 @@ LINT_EXEMPT_PREFIXES = ("hosts/",)
 LINT_ALLOWLIST: dict = {}
 
 
+def _invocation_prefixes():
+    """Every host's invocation spelling: the text before ``{args}`` in each
+    ``next_command`` template, one per route, deduplicated, in host order.
+
+    Read through the capability accessor and never typed in here
+    (plans/next-phase-command.md T6), so a new host or a new route is covered
+    with no edit to this file.
+    """
+    prefixes = []
+    for host_id in sorted(host_capabilities.host_ids()):
+        for route in host_capabilities.next_command_routes(host_id):
+            prefix = host_capabilities.next_command_prefix(host_id, route)
+            if prefix not in prefixes:
+                prefixes.append(prefix)
+    return tuple(prefixes)
+
+
+#: Forbidden like ``FORBIDDEN_TOKENS``: a plain substring test on every line of
+#: the corpus, fenced blocks, example transcripts, recovery prompts and
+#: comparison sections included — nothing is exempt by position. A next-phase
+#: command is built in Python and reaches the report as
+#: ``user_next_step.command``; a spelled invocation in the shared core is
+#: either a next-step hint that command replaces, or one host's spelling that
+#: the file-shim routes hand verbatim to hosts where it does not work.
+INVOCATION_PREFIXES = _invocation_prefixes()
+
+#: What a prefix hit is replaced with — named in the failure, like a verb.
+INVOCATION_REPLACEMENT = (
+    "end the report with `user_next_step.command`, copied as "
+    "references/summary-format.md's `### Next Steps` rule says; elsewhere name "
+    "the phase and its flags, never a host's invocation"
+)
+
+#: The three kinds of *documentary* line: input the user already typed, which
+#: the model never shows as something to run. There is no fourth kind, and an
+#: actionable line is rewritten, never allowlisted.
+INVOCATION_LINE_KINDS = ("usage", "user-input", "args-example")
+
+#: ``args-example``'s two shapes: a list item under this file's "Parsing
+#: examples" paragraph, or a line carrying this phrase.
+ARGS_EXAMPLE_FILE = "instructions/ask.md"
+ARGS_EXAMPLE_PARAGRAPH = "Parsing examples"
+ARGS_EXAMPLE_MARKER = "If models provided in args (e.g., "
+
+
+class AllowedInvocationLine(NamedTuple):
+    """One sanctioned line: its exact stripped text, its kind, and why."""
+
+    line: str
+    kind: str
+    why: str
+
+
+_USAGE = "the mode's usage synopsis: the input a user types, never relayed as a step"
+_USER = "example transcript: the invocation the user already typed"
+_ARGS = "shows how the arguments the user passed are parsed"
+
+#: Exceptions to ``INVOCATION_PREFIXES``, by **exact stripped line** under its
+#: file — never per file or per token, which for these tokens would be a blanket
+#: ignore (the Claude Code spelling is in ten of the eleven instruction files).
+#: Each entry declares a kind, and ``test_every_invocation_exception_has_its_
+#: kind_s_shape`` checks the line against it, so an actionable line cannot be
+#: kept by calling it documentary. Each is asserted to still occur
+#: (``test_no_stale_invocation_line_entries``). A new next-step line has new
+#: text, so it fails wherever it is added and however it is worded.
+INVOCATION_LINE_ALLOWLIST = {
+    "instructions/apply-code-fixes.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --apply-code-fixes <plan_path> [options]",
+            "usage", _USAGE),
+        AllowedInvocationLine(
+            "User: /multi-llm:multi-llm --apply-code-fixes plans/my-feature.md",
+            "user-input", _USER),
+    ),
+    "instructions/apply-suggestions.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --apply-suggestions <plan_path> [options]",
+            "usage", _USAGE),
+        AllowedInvocationLine(
+            "User: /multi-llm:multi-llm --apply-suggestions plans/my-feature.md",
+            "user-input", _USER),
+    ),
+    "instructions/apply-task-suggestions.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --apply-task-suggestions <plan_path> [options]",
+            "usage", _USAGE),
+        AllowedInvocationLine(
+            "User: /multi-llm:multi-llm --apply-task-suggestions "
+            "plans/my-feature.md",
+            "user-input", _USER),
+    ),
+    "instructions/ask.md": (
+        AllowedInvocationLine(
+            '/multi-llm:multi-llm --ask <plan_path> "<free text question>" '
+            "[--models provider:model ...] [--quick] [--interactive] [--force] "
+            "[--rerun-all] [--accept-partial <model> ...]",
+            "usage", _USAGE),
+        AllowedInvocationLine(
+            '- `/multi-llm:multi-llm --ask plans/x.md "Is the rollback strategy '
+            'sufficient?"`',
+            "args-example", _ARGS + ": a quoted question"),
+        AllowedInvocationLine(
+            '- `/multi-llm:multi-llm --ask plans/x.md "should we keep --quick '
+            'mode?" --quick`',
+            "args-example", _ARGS + ": a flag inside the quotes is question text"),
+        AllowedInvocationLine(
+            '- `/multi-llm:multi-llm --quick --ask plans/x.md "Summarize this '
+            'plan"`',
+            "args-example", _ARGS + ": flags may precede the plan path"),
+        AllowedInvocationLine(
+            "- `/multi-llm:multi-llm --ask plans/x.md Is the rollback "
+            "sufficient?`",
+            "args-example", _ARGS + ": an unquoted question is an error"),
+        AllowedInvocationLine(
+            '- `/multi-llm:multi-llm --ask plans/x.md ""`',
+            "args-example", _ARGS + ": an empty question is an error"),
+    ),
+    "instructions/full-workflow.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --full <plan_path> [model1 model2 ...] "
+            "[--quick] [--yes]",
+            "usage", _USAGE),
+    ),
+    "instructions/generate-tasks.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --generate-tasks <plan_path>",
+            "usage", _USAGE),
+    ),
+    "instructions/init-config.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --init [--dir PATH] [--force] [--gitignore] "
+            "[--template-only]",
+            "usage", _USAGE),
+    ),
+    "instructions/review-code.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --review-code <plan_path> [--models model1 "
+            "model2] [--base-ref REF] [--quick]",
+            "usage", _USAGE),
+        AllowedInvocationLine(
+            "User: /multi-llm:multi-llm --review-code plans/my-feature.md",
+            "user-input", _USER),
+        AllowedInvocationLine(
+            "User: /multi-llm:multi-llm --review-code --apply-fixes "
+            "plans/my-feature.md",
+            "user-input", _USER + " (the combined review-and-fix form)"),
+    ),
+    "instructions/review-plan.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --review-plan <plan_path> [--models "
+            "provider:model ...] [--quick] [--interactive]",
+            "usage", _USAGE),
+        AllowedInvocationLine(
+            "- If models provided in args (e.g., `/multi-llm:multi-llm "
+            "plans/foo.md --models provider:model-a provider:model-b`): use "
+            "those directly",
+            "args-example", _ARGS + ": models named in the user's arguments"),
+        AllowedInvocationLine(
+            "User: /multi-llm:multi-llm plans/my-feature.md",
+            "user-input", _USER + " (no mode flag: the default mode)"),
+    ),
+    "instructions/review-tasks.md": (
+        AllowedInvocationLine(
+            "/multi-llm:multi-llm --review-tasks <plan_path> [model1 model2 ...] "
+            "[--quick] [--interactive]",
+            "usage", _USAGE),
+        AllowedInvocationLine(
+            "- If models provided in args (e.g., `/multi-llm:multi-llm "
+            "--review-tasks plans/foo.md gpt-5.2 gemini-3-pro`): use those "
+            "directly",
+            "args-example", _ARGS + ": models named in the user's arguments"),
+        AllowedInvocationLine(
+            "User: /multi-llm:multi-llm --review-tasks plans/my-feature.md",
+            "user-input", _USER),
+    ),
+}
+
+
 def _ambiguous_patterns(token):
     return (
         rf"`{token}`",
@@ -1335,23 +1515,102 @@ def _lint_corpus_files():
     ]
 
 
+def _line_violations(line, allowed_tokens=(), allowed_lines=frozenset()):
+    """``(token, replacement)`` for every lint hit on one line.
+
+    The one matcher: the corpus sweep and the synthetic-violation test both go
+    through it, so the test cannot pass on a matcher the sweep does not use.
+    """
+    hits = []
+    for token, verb in FORBIDDEN_TOKENS.items():
+        if token in line and token not in allowed_tokens:
+            hits.append((token, verb))
+    for token, verb in AMBIGUOUS_TOOL_TOKENS.items():
+        if token in allowed_tokens:
+            continue
+        if any(re.search(p, line) for p in _ambiguous_patterns(token)):
+            hits.append((token, verb))
+    if line.strip() not in allowed_lines:
+        for prefix in INVOCATION_PREFIXES:
+            if prefix in line:
+                hits.append((prefix, INVOCATION_REPLACEMENT))
+    return hits
+
+
 def _lint_violations():
     hits = []
     for path in _lint_corpus_files():
         rel = _rel(path)
         allowed = LINT_ALLOWLIST.get(rel, {})
+        allowed_lines = frozenset(
+            entry.line for entry in INVOCATION_LINE_ALLOWLIST.get(rel, ())
+        )
         for line_no, line in enumerate(
             path.read_text(encoding="utf-8").splitlines(), start=1
         ):
-            for token, verb in FORBIDDEN_TOKENS.items():
-                if token in line and token not in allowed:
-                    hits.append((rel, line_no, token, verb, line.strip()[:110]))
-            for token, verb in AMBIGUOUS_TOOL_TOKENS.items():
-                if token in allowed:
-                    continue
-                if any(re.search(p, line) for p in _ambiguous_patterns(token)):
-                    hits.append((rel, line_no, token, verb, line.strip()[:110]))
+            for token, verb in _line_violations(line, allowed, allowed_lines):
+                hits.append((rel, line_no, token, verb, line.strip()[:110]))
     return hits
+
+
+def _usage_block_span(lines):
+    """``(first, end)`` line indexes of the first fenced block under the file's
+    ``## Usage`` heading (``end`` exclusive, fences excluded), or ``None`` when
+    the heading is absent or the next heading comes before any fence."""
+    try:
+        heading = next(
+            index for index, line in enumerate(lines) if line.strip() == "## Usage"
+        )
+    except StopIteration:
+        return None
+    for index in range(heading + 1, len(lines)):
+        stripped = lines[index].strip()
+        if re.match(r"#{1,2} ", stripped):
+            return None
+        if stripped.startswith("```"):
+            for close in range(index + 1, len(lines)):
+                if lines[close].strip().startswith("```"):
+                    return (index + 1, close)
+            return None
+    return None
+
+
+def _parsing_example_items(lines):
+    """Indexes of the list items directly under the "Parsing examples"
+    paragraph: the contiguous list after it, ending at its first blank line."""
+    try:
+        paragraph = next(
+            index for index, line in enumerate(lines)
+            if line.startswith(ARGS_EXAMPLE_PARAGRAPH)
+        )
+    except StopIteration:
+        return set()
+    index = paragraph + 1
+    while index < len(lines) and not lines[index].strip():
+        index += 1
+    items = set()
+    while index < len(lines) and lines[index].strip():
+        if lines[index].startswith("- "):
+            items.add(index)
+        elif not lines[index][:1].isspace():
+            break
+        index += 1
+    return items
+
+
+def _invocation_shape_ok(kind, rel, lines, index):
+    """Whether ``lines[index]`` of *rel* has the shape its declared *kind* claims."""
+    stripped = lines[index].strip()
+    if kind == "usage":
+        span = _usage_block_span(lines)
+        return span is not None and span[0] <= index < span[1]
+    if kind == "user-input":
+        return stripped.startswith("User: ")
+    if kind == "args-example":
+        if ARGS_EXAMPLE_MARKER in stripped:
+            return True
+        return rel == ARGS_EXAMPLE_FILE and index in _parsing_example_items(lines)
+    return False
 
 
 class TestHostNeutralityLint:
@@ -1364,7 +1623,8 @@ class TestHostNeutralityLint:
         hits = _lint_violations()
         assert not hits, (
             "the shared instruction core must name capability verbs, never a "
-            "host's tool. Replace each with the verb named below:\n"
+            "host's tool, and never spell a host's invocation. Replace each "
+            "with what is named below:\n"
             + "\n".join(
                 f"  {rel}:{line_no}: `{token}` -> {verb}\n      {text}"
                 for rel, line_no, token, verb, text in hits
@@ -1389,6 +1649,128 @@ class TestHostNeutralityLint:
                     re.search(p, line) for p in _ambiguous_patterns(token)
                 )
             assert fired, f"the lint would not catch: {line!r}"
+        # One synthetic next-step line per host spelling, built from the
+        # prefix the data holds — the lint is asserted against every route,
+        # not against the one spelling this file happens to show.
+        assert INVOCATION_PREFIXES, "no next_command prefix read from the data"
+        for prefix in INVOCATION_PREFIXES:
+            line = f"Next: `{prefix}--implement plans/x.md`"
+            hits = _line_violations(line)
+            assert (prefix, INVOCATION_REPLACEMENT) in hits, (
+                f"the lint would not catch: {line!r}"
+            )
+            # And a recovery line outside any usage block, which is actionable
+            # however it is worded, so no allowlist entry for another line of
+            # the same file can cover it.
+            recovery = f"1. `{prefix}--generate-tasks $PLAN_PATH`"
+            assert (prefix, INVOCATION_REPLACEMENT) in _line_violations(
+                recovery, allowed_lines=frozenset({f"{prefix}--generate-tasks"})
+            ), f"the lint would not catch: {recovery!r}"
+        assert "`user_next_step.command`" in INVOCATION_REPLACEMENT, (
+            "a prefix failure must name its replacement"
+        )
+
+    def test_the_prefixes_are_read_from_every_route(self):
+        """Each host/route's prefix is in the forbidden set, and each is a
+        non-empty spelling — an empty prefix would match every line."""
+        for host_id in host_capabilities.host_ids():
+            routes = host_capabilities.next_command_routes(host_id)
+            assert routes, f"host {host_id!r} carries no next_command route"
+            for route in routes:
+                prefix = host_capabilities.next_command_prefix(host_id, route)
+                assert prefix.strip(), (host_id, route)
+                assert prefix in INVOCATION_PREFIXES, (host_id, route, prefix)
+        assert len(set(INVOCATION_PREFIXES)) == len(INVOCATION_PREFIXES)
+
+    def test_every_invocation_exception_has_its_kind_s_shape(self):
+        """An entry's line must be what its kind says, wherever it occurs.
+
+        Checked on every occurrence of the text in its file, so a copy of a
+        usage line pasted outside the ``## Usage`` block is not covered by the
+        entry that sanctions the original.
+        """
+        wrong = []
+        for rel, entries in INVOCATION_LINE_ALLOWLIST.items():
+            lines = (SKILL_ROOT / rel).read_text(encoding="utf-8").splitlines()
+            for entry in entries:
+                assert entry.kind in INVOCATION_LINE_KINDS, (
+                    f"{rel}: kind {entry.kind!r} is not one of "
+                    f"{INVOCATION_LINE_KINDS}; there is no fourth kind"
+                )
+                assert entry.why.strip() and "\n" not in entry.why, (
+                    f"{rel}: every entry carries a one-line rationale"
+                )
+                for index, line in enumerate(lines):
+                    if line.strip() != entry.line:
+                        continue
+                    if not _invocation_shape_ok(entry.kind, rel, lines, index):
+                        wrong.append(f"{rel}:{index + 1} ({entry.kind}): {entry.line}")
+        assert not wrong, (
+            "allowlisted invocation lines that do not have their declared "
+            "kind's shape. Only documentary lines are sanctioned; rewrite an "
+            "actionable one (plans/next-phase-command.md §2.3):\n  "
+            + "\n  ".join(wrong)
+        )
+
+    def test_the_shape_check_rejects_a_recovery_line_under_every_kind(self):
+        """The synthetic recovery line is actionable, so no kind may pass it —
+        while each kind's genuine shape, in the same file, still passes."""
+        prefix = INVOCATION_PREFIXES[0]
+        document = [
+            "# Some Mode Instructions",
+            "",
+            "## Usage",
+            "",
+            "```bash",
+            f"{prefix}--generate-tasks <plan_path>",
+            "```",
+            "",
+            f"{ARGS_EXAMPLE_PARAGRAPH} (each `<question>` is one argv element):",
+            "",
+            f'- `{prefix}--ask plans/x.md "Is it sufficient?"`',
+            "  → plan=`plans/x.md`",
+            "",
+            "## Prerequisites",
+            "",
+            "  - **\"Run generate-tasks first\"**: Stop and instruct the user to run:",
+            f"    1. `{prefix}--generate-tasks $PLAN_PATH`",
+        ]
+        recovery = len(document) - 1
+        for rel in (ARGS_EXAMPLE_FILE, "instructions/review-tasks.md"):
+            for kind in INVOCATION_LINE_KINDS:
+                assert not _invocation_shape_ok(kind, rel, document, recovery), (
+                    f"kind {kind!r} in {rel} accepts an actionable recovery "
+                    f"line: {document[recovery].strip()!r}"
+                )
+            assert _invocation_shape_ok("usage", rel, document, 5)
+        assert _invocation_shape_ok("args-example", ARGS_EXAMPLE_FILE, document, 10)
+        assert not _invocation_shape_ok(
+            "args-example", "instructions/review-tasks.md", document, 10
+        ), "a Parsing examples item counts only in ask.md"
+        assert _invocation_shape_ok(
+            "user-input", "instructions/review-tasks.md",
+            [f"User: {prefix}--review-tasks plans/my-feature.md"], 0,
+        )
+
+    def test_no_stale_invocation_line_entries(self):
+        """Each exception still occurs, and still holds a prefix to excuse."""
+        stale = []
+        for rel, entries in INVOCATION_LINE_ALLOWLIST.items():
+            path = SKILL_ROOT / rel
+            lines = (
+                {line.strip() for line in path.read_text(encoding="utf-8").splitlines()}
+                if path.exists() else set()
+            )
+            for entry in entries:
+                if entry.line not in lines:
+                    stale.append(f"{rel}: {entry.line}")
+                elif not any(prefix in entry.line for prefix in INVOCATION_PREFIXES):
+                    stale.append(f"{rel}: {entry.line} (holds no invocation prefix)")
+        assert not stale, (
+            "invocation-line exceptions that no longer match a line of their "
+            "file, or excuse nothing (delete them, or the allowlist decays into "
+            f"a blanket ignore): {stale}"
+        )
 
     def test_ordinary_english_passes(self):
         """The narrow rule: prose about reading and writing is not a violation."""

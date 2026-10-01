@@ -147,6 +147,21 @@ if kind == "home":
     with open(os.path.join(home, "config.toml"), "a", encoding="utf-8") as handle:
         handle.write(arg.replace("\\n", "\n"))
     os.execvp(cmd[0], cmd)
+if kind == "link":
+    # uv traffic on a shared inode: a name made and removed (ctime only).
+    time.sleep(0.02)
+    os.link(arg, arg + ".spare")
+    os.unlink(arg + ".spare")
+    os.execvp(cmd[0], cmd)
+if kind == "linkwrite":
+    # The same inode rewritten at the same size, mtime put back.
+    info = os.stat(arg)
+    with open(arg, "r+b") as handle:
+        data = handle.read()
+        handle.seek(0)
+        handle.write(data.replace(b"6.0.3", b"6.6.6"))
+    os.utime(arg, ns=(info.st_atime_ns, info.st_mtime_ns))
+    os.execvp(cmd[0], cmd)
 if kind == "cmdeny":
     done = subprocess.run(cmd, capture_output=True, text=True)
     item = {{"type": "item.completed", "item": {{
@@ -1053,6 +1068,45 @@ class TestTheDispatchOnTheRung:
         assert "evil-value" not in lines[0]
         assert "Warn-only" in lines[0]
         assert "mcp_servers.x" in (jail_home / "config.toml").read_text(encoding="utf-8")
+
+    def _seed_linked_venv(self, tmp_path, jail_home):
+        """A plugin's uv ``.venv`` file under the home, hardlinked from a uv
+        cache outside it (the shape that tripped the check, 2026-09-30)."""
+        cache = tmp_path / "uv-cache" / "yaml"
+        cache.mkdir(parents=True)
+        cached = cache / "__init__.py"
+        cached.write_text("__version__ = '6.0.3'\n", encoding="utf-8")
+        venv = jail_home / "plugins" / "cache" / "m" / "multi-llm" / "0.1.0" / ".venv" / "yaml"
+        venv.mkdir(parents=True)
+        os.link(cached, venv / "__init__.py")
+        return cached, venv / "__init__.py"
+
+    @pytest.mark.parametrize("dispatch, warned", [("link", False), ("linkwrite", True)])
+    def test_the_home_check_reads_content_not_ctime(
+        self, repo, wrapper, runner_env, jail_home, tmp_path, capsys, dispatch, warned
+    ):
+        """The executor lane shares the snapshot: a hardlink made and removed
+        on a watched venv inode (ctime only) warns nothing; a rewrite of the
+        same inode through the cache's name, size and mtime unchanged, warns."""
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        cached, watched = self._seed_linked_venv(tmp_path, jail_home)
+        ctime_before = os.lstat(watched).st_ctime_ns
+        wrapper.set(dispatch=f"{dispatch}:{cached}")
+        _decide("codex:gpt-5.5", PROFILE_AGENT_READONLY, "plugin-landlock")
+        phase = repo / "phase"
+        phase.mkdir()
+        outcome = executor.dispatch_task(
+            _validation_batch(phase), phase_dir=str(phase), runner="codex:gpt-5.5",
+            cwd=str(repo), retries=0,
+        )
+        assert outcome.ok, outcome.reason
+        assert os.lstat(watched).st_ctime_ns != ctime_before
+        lines = [ln for ln in capsys.readouterr().out.splitlines() if "[CODEX_HOME_CHECK]" in ln]
+        if warned:
+            assert len(lines) == 1 and "__init__.py" in lines[0], lines
+        else:
+            assert lines == []
 
     def test_the_closing_summary_repeats_the_lines(self, repo, wrapper, runner_env, jail_home, capsys):
         runner_env.use("codex:gpt-5.5")

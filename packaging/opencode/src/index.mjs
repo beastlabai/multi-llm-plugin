@@ -100,8 +100,11 @@ const SKILL_DIR_TOKEN = "{SKILL_DIR}"
  * Bumped in lockstep with `packaging/common/surface.py`'s
  * SURFACE_SCHEMA_VERSION. 4: `tool_name`, `tool_description` and
  * `argument_descriptions` are read from the surface rather than composed here.
+ * 5: `dispatcher.route_env` (the route signal's name and value, set on every
+ * child this file spawns, so a finished phase's next command is spelled for
+ * this route) and each mode row's `optional_why`.
  */
-const SUPPORTED_SURFACE_VERSION = 4
+const SUPPORTED_SURFACE_VERSION = 5
 
 // ---------------------------------------------------------------------------
 // The generated surface
@@ -126,11 +129,27 @@ function loadSurface() {
       )
       return null
     }
+    // Schema v5's route signal, set on every child. A surface without a usable
+    // one is refused whole, like a version mismatch, never half-used: spawning
+    // without it would print a finished phase's next command in the file-shim
+    // spelling on this route.
+    const routeEnv = surface.dispatcher?.route_env
+    if (!isNonEmptyString(routeEnv?.name) || !isNonEmptyString(routeEnv?.value)) {
+      warn(
+        `cli-surface.json declares no usable dispatcher.route_env (a non-empty ` +
+          `name and value). The package is inconsistent; reinstall it.`,
+      )
+      return null
+    }
     return surface
   } catch (error) {
     warn(`cannot read the generated CLI surface: ${describe(error)}`)
     return null
   }
+}
+
+function isNonEmptyString(value) {
+  return typeof value === "string" && value.length > 0
 }
 
 function warn(message) {
@@ -1951,14 +1970,16 @@ function terminalResult(child, context) {
     // never reaches here; on a foreground child it is a legitimate terminal
     // answer, and reporting it as an error would tell a model a completed phase
     // had failed.
+    const result = redactCommand(child.result, rawNext, surface)
     return {
       ...base,
       state: child.result.state ?? "nothing-to-do",
       ok: true,
-      result: redactCommand(child.result, rawNext, surface),
+      result,
       artifacts: child.result.artifacts ?? [],
       next: nextAsToolCall(rawNext, surface),
       output: humanOutput(child, rawNext, surface),
+      ...liftedUserNextStep(result),
     }
   }
 
@@ -1988,15 +2009,33 @@ function terminalResult(child, context) {
   // while carefully re-spelling it as a tool call in a third, and the model's
   // natural move is to run the one it can paste.
   const raw = child.result.next
+  const result = redactCommand(child.result, raw, surface)
   return {
     ...base,
     state: child.result.state ?? "done",
     ok: true,
-    result: redactCommand(child.result, raw, surface),
+    result,
     artifacts: child.result.artifacts ?? [],
     next: nextAsToolCall(raw, surface),
     output: humanOutput(child, raw, surface),
+    ...liftedUserNextStep(result),
   }
+}
+
+/**
+ * `{ user_next_step }` off the *redacted* payload, or `{}` when it has none.
+ *
+ * Exit 0 and exit 2 only: a finished phase or a terminal poll, and a phase
+ * already complete. The copy is the payload's own, byte for byte, the completed
+ * form (`command: null`, `complete: true`) included, under the same key name,
+ * so a model reading the top-level keys cannot miss it. A payload without the
+ * key lifts nothing: an absent key keeps meaning "no answer", never "workflow
+ * complete". It is the user's to type, never a call: `isMechanical` reads
+ * `next` alone, so the continuation loop never follows it.
+ */
+function liftedUserNextStep(payload) {
+  const step = payload?.user_next_step
+  return step === undefined || step === null ? {} : { user_next_step: step }
 }
 
 /**
@@ -2655,6 +2694,12 @@ async function execute(args, ctx, surface, client) {
     // Propagate the binary the preflight approved, so the detached worker
     // re-resolves to it instead of re-probing a PATH it may not share.
     env[surface.uv.env] = uv
+    // The route signal, on the environment the launcher, every poll, the abort
+    // dispatch and the instructions fetch all run with: the dispatcher spells a
+    // finished phase's `user_next_step` command for this route. Both strings
+    // are the surface's (`loadSurface` refused a surface without them); this
+    // file spells neither.
+    env[surface.dispatcher.route_env.name] = surface.dispatcher.route_env.value
 
     // The session's own model, on the environment the launcher AND every poll
     // run with — the detached worker inherits it through `utils/detach.py`'s
@@ -2760,6 +2805,7 @@ const __testing = {
   nextAsToolCall,
   normalizePlan,
   parseDispatcherCommand,
+  redactCommand,
   relayCounts,
   relayMemory,
   relayProgress,

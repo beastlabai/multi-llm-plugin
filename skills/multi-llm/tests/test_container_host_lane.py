@@ -56,6 +56,7 @@ import yaml
 from .container.docker_probe import requires_docker
 from .container import harness
 from .container import host_spend
+from .container import next_command_check
 
 pytestmark = [pytest.mark.container, requires_docker()]
 
@@ -352,6 +353,28 @@ CREDENTIALED_ROWS = [
                  marks=pytest.mark.live_native_phase),
     pytest.param(("claude-code", "claude-code-phase-apply-task-suggestions"),
                  marks=pytest.mark.live_native_phase),
+    # ------------------------------------------------------------------- #
+    # T10 OF plans/next-phase-command.md — THE NEXT-COMMAND LIVE CHECK, one
+    # row per host and route the lane can run, and deselected by default.
+    #
+    # Each row runs `generate-tasks` on a fixture plan whose path holds a
+    # space, then hands the command its dispatcher printed to a FRESH session
+    # of the same host and route (`entrypoint.run_typed_followup`). Graded by
+    # `TestTheNextCommandLiveCheck`; the generic classes above grade the phase
+    # itself like any other row. A tier of its own (`live_next_command`,
+    # `make e2e-container-host-next-command`) so the ordinary target's cost
+    # does not move, and so the check can be re-run alone after a template
+    # or instruction edit.
+    pytest.param(("codex", "codex-next-command"),
+                 marks=pytest.mark.live_next_command),
+    pytest.param(("codex", "codex-package-next-command"),
+                 marks=pytest.mark.live_next_command),
+    pytest.param(("opencode", "opencode-next-command"),
+                 marks=pytest.mark.live_next_command),
+    pytest.param(("opencode", "opencode-package-next-command"),
+                 marks=pytest.mark.live_next_command),
+    pytest.param(("claude-code", "claude-code-next-command"),
+                 marks=pytest.mark.live_next_command),
 ]
 
 
@@ -389,9 +412,18 @@ NATIVE_PHASE_ROWS = [
            for m in getattr(param, "marks", ()))
 ]
 
+#: The T10 next-command rows (`live_next_command`), read off the marks the same
+#: way and for the same reason.
+NEXT_COMMAND_ROWS = [
+    _row_pair(param)[1] for param in CREDENTIALED_ROWS
+    if any(getattr(m, "name", "") == "live_next_command"
+           for m in getattr(param, "marks", ()))
+]
+
 #: The rows the ordinary `make e2e-container-host` target keeps.
 PROVIDER_TIER_ROWS = [row for row in CREDENTIALED_IDS
-                      if row not in NATIVE_PHASE_ROWS]
+                      if row not in NATIVE_PHASE_ROWS
+                      and row not in NEXT_COMMAND_ROWS]
 
 
 def _invoked_tier(config) -> str:
@@ -418,6 +450,12 @@ def _invoked_tier(config) -> str:
     cached in a module global, so there is no window in which it is unset.
     """
     expression = config.getoption("markexpr", default="") or ""
+    # `make e2e-container-host-next-command` types
+    # `-m "container and live and live_next_command"`; the ordinary target's
+    # expression names the same mark only to exclude it.
+    if ("live_next_command" in expression
+            and "not live_next_command" not in expression):
+        return "next-command"
     if "not live_native_phase" in expression:
         return "provider"
     if "live_native_phase" in expression:
@@ -431,6 +469,8 @@ def _declared_for_tier(config) -> list[str]:
         return list(PROVIDER_TIER_ROWS)
     if tier == "native-phase":
         return list(NATIVE_PHASE_ROWS)
+    if tier == "next-command":
+        return list(NEXT_COMMAND_ROWS)
     return list(CREDENTIALED_IDS)
 
 
@@ -653,6 +693,26 @@ def _refuse_empty_lane(config, utc: str) -> None:
         "make e2e-container-host-discovery", returncode=1)
 
 
+#: The credential mode the credentialed rows run under. `openrouter` (the
+#: default) is the dedicated, spend-capped key; `fallback` is C6a's documented
+#: subscription / vendor-auth mode (`creds.yaml`'s `:ro` mounts, copied into
+#: the tmpfs $HOME by the entrypoint), which forwards NO OpenRouter variable into
+#: the container (`harness.build_run_argv`). Typed per run, never a default:
+#: `MLLM_E2E_HOST_CREDS=fallback` with an `MLLM_HOST_MODEL` the vendor account
+#: serves (the matrix pins are OpenRouter slugs). The fixture still reads the
+#: OpenRouter key's own usage around each row, so a fallback row that somehow
+#: spent on the key shows up as a non-zero delta rather than as nothing.
+HOST_CREDS_ENV = "MLLM_E2E_HOST_CREDS"
+
+
+def _host_lane_creds() -> str:
+    value = (os.environ.get(HOST_CREDS_ENV) or "openrouter").strip()
+    if value not in ("openrouter", "fallback"):
+        pytest.fail(f"{HOST_CREDS_ENV}={value!r}: the credentialed rows run under "
+                    f"`openrouter` (the default) or `fallback`, nothing else")
+    return value
+
+
 @pytest.fixture(scope="module", params=CREDENTIALED_ROWS,
                 ids=CREDENTIALED_IDS)
 def graded(request, posture, utc):
@@ -785,8 +845,9 @@ def graded(request, posture, utc):
     if not specs:
         specs = [runner_spec] if runner_spec else []
 
+    creds = _host_lane_creds()
     row = harness.Row(
-        row_id=row_id, lane="host", host=host, creds="openrouter",
+        row_id=row_id, lane="host", host=host, creds=creds,
         # The fan-out, unioned with the runner (and the host on the negative
         # rows). A row that fans out to five providers while its helper list
         # still said `codex` ran four CLIs with no seeded home.
@@ -835,7 +896,7 @@ def graded(request, posture, utc):
     # row. The spend below still brackets BOTH attempts — `before` was read
     # before the first container and `after` after the last — so a retried row
     # is charged what it really cost.
-    _Census.record_ran(row_id, host, "openrouter", attempts=result.attempt)
+    _Census.record_ran(row_id, host, creds, attempts=result.attempt)
     _Census.write(request.config, utc)
 
     # FAIL CLOSED on the closing readback too — but without throwing away the
@@ -1564,6 +1625,12 @@ class TestTheSpendWasMeasured:
     #: exemption.
     def test_the_row_recorded_an_actual(self, graded):
         result, _row, _entry = graded
+        if result.row.creds == "fallback":
+            pytest.skip(
+                f"{result.row.row_id}: --creds fallback runs on the vendor's own "
+                f"subscription, whose spend this rig cannot read (the credential "
+                f"census says so); the OpenRouter key is not in the container, and "
+                f"the fixture's own readback of it brackets the row regardless")
         usage = result.usage
         assert usage, f"{result.row.host}: no usage readback recorded for the row"
         assert usage.get("delta_usd") is not None, (
@@ -1866,6 +1933,144 @@ class TestTheNegativeAuthRowsRefuse:
         }, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
+def _next_command_observed(graded):
+    """`(result, matrix_row, observed)` for a T10 row; every other row skips.
+
+    `observed` is `next_command_check.observe` over the row's bundle — the same
+    pure function the record is written from — and it is also filed beside the
+    bundle as `next-command-observed.json`, so a red row's evidence is one file a
+    human can open rather than a re-derivation.
+    """
+    result, matrix_row, _entry = graded
+    if not matrix_row.get("next_command_check"):
+        pytest.skip(f"{matrix_row.get('id')}: not a T10 row (it declares no "
+                    f"`next_command_check`)")
+    templates = dict((harness.load_capabilities().get(result.row.host) or {})
+                     .get("next_command") or {})
+    observed = next_command_check.observe(
+        result.out_dir, result.row.host, result.row.row_id, matrix_row,
+        templates, route=result.row.route)
+    (result.out_dir / "next-command-observed.json").write_text(
+        json.dumps(observed, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8")
+    return result, matrix_row, observed
+
+
+class TestTheNextCommandLiveCheck:
+    """T10 of plans/next-phase-command.md, asserted rather than read by eye.
+
+    One phase per host and route, against the real host model with the fan-out
+    stubbed. Each test is one of the plan's checks, and each one fails naming
+    the evidence it read:
+
+    * **criterion 4** — the host's final assistant message carries the command
+      its dispatcher printed, as a fenced line, byte for byte, with one more
+      fenced line per `optional_before` entry;
+    * **claude-code's two extras** — the lookup (a `util next-command` call, or
+      a phase result carrying the block, after the phase's last step), and
+      whether T11's Stop hook blocked, so "copied" and "copied after the
+      check" are counted apart;
+    * **criterion 5** — on the two tool routes, no `multi_llm` call after the
+      phase's terminal result and none whose mode is the next phase;
+    * **the typed template** — the printed command, handed verbatim to a fresh
+      session of the same host and route, dispatched the named mode with a plan
+      argument that names the fixture and holds no quote character. This is
+      the only test whose pass can promote a `next_command` cell.
+
+    A red here is a legitimate T10 outcome — a model that does not copy the
+    command, or runs it — and is recorded, never excused: the cell stays
+    `documented`.
+    """
+
+    pytestmark = pytest.mark.live
+
+    def test_the_final_message_carries_the_printed_command(self, graded):
+        result, matrix_row, observed = _next_command_observed(graded)
+        copy = observed["copy"]
+        printed = observed.get("printed")
+        assert copy.get("observable"), (
+            f"{matrix_row.get('id')}: no dispatcher receipt of the session "
+            f"carried a user_next_step, so there was no printed command for the "
+            f"report to copy — the phase did not finish (see the receipts and "
+            f"run-states.json). Criterion 4 is NOT OBSERVED on this run.")
+        message = next_command_check.final_message(
+            result.row.host, (result.out_dir / "host-stdout.txt").read_text(
+                encoding="utf-8", errors="replace")) or ""
+        if copy.get("complete"):
+            assert copy.get("passes"), (
+                f"{matrix_row.get('id')}: the workflow is complete, and the "
+                f"final message must say {next_command_check.WORKFLOW_COMPLETE_TEXT!r} "
+                f"with no fenced command (stray: {copy.get('stray_commands')}).\n"
+                f"--- final message (tail) ---\n{message[-1500:]}")
+            return
+        assert copy.get("passes"), (
+            f"{matrix_row.get('id')}: the host's final message does not carry "
+            f"the printed command as a fenced line, byte for byte.\n"
+            f"  printed command   : {printed.get('command')!r}\n"
+            f"  command copied    : {copy.get('command_copied')} "
+            f"(present anywhere: {copy.get('command_anywhere')})\n"
+            f"  optional commands : {copy.get('optional_commands')}\n"
+            f"  optional copied   : {copy.get('optional_copied')}\n"
+            f"  near misses       : {copy.get('near_misses')}\n"
+            f"--- final message (tail) ---\n{message[-2000:]}")
+
+    def test_claude_code_looked_the_command_up(self, graded):
+        result, matrix_row, observed = _next_command_observed(graded)
+        if result.row.host != "claude-code":
+            pytest.skip(f"{matrix_row.get('id')}: the lookup extra is "
+                        f"claude-code's — the tool and file routes on the other "
+                        f"hosts carry the key in the phase's own result")
+        lookup = observed.get("lookup") or {}
+        assert observed.get("stop_hook") in (
+            "blocked", "ran", "silent", "not-installed"), (
+            f"{matrix_row.get('id')}: the record does not say whether T11's Stop "
+            f"hook blocked: {observed.get('stop_hook')!r}")
+        assert lookup.get("lookup") in ("util-next-command", "phase-result"), (
+            f"{matrix_row.get('id')}: after the phase's last dispatcher step "
+            f"there is neither a `util next-command` call nor a phase result "
+            f"carrying the block ({lookup}). A copy the report could not make "
+            f"is a skipped CALL, not a bad copy — counted apart on purpose.")
+
+    def test_the_host_model_did_not_run_the_printed_command(self, graded):
+        result, matrix_row, observed = _next_command_observed(graded)
+        if result.row.route != "package":
+            pytest.skip(f"{matrix_row.get('id')}: criterion 5 is asserted on the "
+                        f"two tool routes (the Codex plugin and the OpenCode "
+                        f"package); this row's observation is recorded only")
+        no_call = observed.get("no_call") or {}
+        assert no_call.get("observable"), (
+            f"{matrix_row.get('id')}: {no_call.get('reason') or no_call}. "
+            f"Criterion 5 is NOT OBSERVED on this run.")
+        assert no_call.get("holds"), (
+            f"{matrix_row.get('id')}: the host model ran the dispatcher after "
+            f"the phase's terminal result, or ran the printed next phase.\n"
+            f"  next phase              : {no_call.get('phase')!r}\n"
+            f"  terminal call index     : {no_call.get('terminal_call_index')}\n"
+            f"  calls after terminal    : {no_call.get('calls_after_terminal')}\n"
+            f"  calls naming next phase : {no_call.get('calls_naming_next_phase')}\n"
+            f"  receipts naming it      : {no_call.get('receipts_naming_next_phase')}\n"
+            f"  every dispatching call  : {no_call.get('calls')}")
+
+    def test_the_typed_command_dispatched_the_named_mode(self, graded):
+        result, matrix_row, observed = _next_command_observed(graded)
+        typed = observed.get("typed") or {}
+        assert typed.get("exercised"), (
+            f"{matrix_row.get('id')}: the typed-template session never ran: "
+            f"{typed.get('reason')}. This route is NOT EXERCISED on this run, "
+            f"and its next_command cell stays `documented`.")
+        assert typed.get("dispatched"), (
+            f"{matrix_row.get('id')}: the fresh session was handed "
+            f"{typed.get('typed')!r} ({typed.get('surface')}) and never "
+            f"dispatched {typed.get('phase')!r}; it ran "
+            f"{typed.get('modes_dispatched')} and stopped on "
+            f"{typed.get('stop_reason')!r}.")
+        assert typed.get("quote_free") and typed.get("names_fixture"), (
+            f"{matrix_row.get('id')}: {typed.get('phase')!r} dispatched, but "
+            f"the plan argument the dispatcher recorded is not the fixture "
+            f"unquoted: {typed.get('plan_args')} (fixture "
+            f"{(matrix_row.get('fixture_plan') or {}).get('path')!r}).")
+
+
 def _dispatcher_receipts(result) -> list[dict]:
     """Every receipt except the entrypoint's own staging invocation.
 
@@ -2001,6 +2206,12 @@ def _fan_out_is_native(matrix_row: dict, entry: dict) -> bool:
     stub" has nothing to grade there. The ask and review-plan rows on the same
     host still fan out to provider CLIs by name, and are graded normally.
     """
+    # A row that DECLARES `fan_out: native` says the same thing in its own words:
+    # T10's claude-code row runs its one task-generation subagent as a native
+    # Task, so no wrapped call ever reaches the stub. Every earlier row that
+    # declares it is also an `applied` write row, so none of them moves.
+    if harness.host_fan_out(entry, matrix_row) == harness.FAN_OUT_NATIVE:
+        return True
     return (((matrix_row.get("expect") or {}).get("write_outcome") == "applied")
             and (entry.get("continuation") or {}).get("who") == "host")
 

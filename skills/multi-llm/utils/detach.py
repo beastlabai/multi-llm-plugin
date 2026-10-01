@@ -118,6 +118,18 @@ WORKER_ENV = "MULTI_LLM_DETACHED_WORKER"
 #: transport. Absent or malformed decodes to ``[]``.
 REPLAY_FLAGS_ENV = "MULTI_LLM_REPLAY_FLAGS"
 
+#: The launcher's ``--plan-file`` value exactly as the dispatcher received it
+#: (``cli_common.invocation()``'s argv), shipped to the worker for the same
+#: reason as :data:`REPLAY_FLAGS_ENV`: the worker's own argv can only carry the
+#: absolute path :func:`build_worker_argv` rewrote it to, and the next-phase
+#: command a finished run prints names the plan the way the user typed it
+#: (plans/next-phase-command.md §2.1, "Where each emitter gets its inputs").
+#: :func:`begin_worker_run` pops it (no provider subprocess inherits it) and
+#: :class:`RunHandle` writes it once into the run record as ``plan_arg``, beside
+#: ``plan_file``. Absent — a launch with no ``--plan-file``, or a worker started
+#: by hand — records no ``plan_arg``, and readers fall back to ``plan_file``.
+PLAN_ARG_ENV = "MULTI_LLM_PLAN_ARG"
+
 #: Env overrides, all read at call time so a test can set them per-case.
 HEARTBEAT_INTERVAL_ENV = "MULTI_LLM_HEARTBEAT_INTERVAL_S"
 HANDSHAKE_TIMEOUT_ENV = "MULTI_LLM_HANDSHAKE_TIMEOUT_S"
@@ -378,6 +390,7 @@ def child_env(
     *,
     base: Optional[Path] = None,
     replay_flags: Optional[Sequence[str]] = None,
+    plan_arg: Optional[str] = None,
 ) -> Dict[str, str]:
     """The invoker's environment, pinned for a process that outlives its shell."""
     base = Path(base) if base is not None else skill_dir()
@@ -387,6 +400,12 @@ def child_env(
     env["MULTI_LLM_SKILL_DIR"] = str(base)
     env[WORKER_ENV] = "1"
     env[REPLAY_FLAGS_ENV] = json.dumps([str(t) for t in (replay_flags or [])])
+    # This launch's own value or none: never one inherited from whatever
+    # environment the invoker itself was started in.
+    if plan_arg:
+        env[PLAN_ARG_ENV] = str(plan_arg)
+    else:
+        env.pop(PLAN_ARG_ENV, None)
     # Propagate the *binary*, not only the flags: the worker outlives the shell
     # that launched it and may not share its PATH, so re-probing could resolve a
     # different uv — or none — than the preflight approved. ``UV_ENV`` is common
@@ -1077,11 +1096,14 @@ class RunHandle:
         host: Optional[str] = None,
         detached: bool = True,
         replay_flags: Optional[Sequence[str]] = None,
+        plan_arg: Optional[str] = None,
     ):
         self.phase_dir = str(phase_dir)
         self.run_id = run_id
         self.mode = mode
         self.plan_file = str(plan_file)
+        # The launcher's typed plan (PLAN_ARG_ENV), never this process's argv.
+        self.plan_arg: Optional[str] = str(plan_arg) if plan_arg else None
         self.host = host
         self.detached = detached
         # The launcher's list, never recomputed from this process's argv.
@@ -1121,6 +1143,9 @@ class RunHandle:
             "host": self.host,
             "mode": self.mode,
             "plan_file": self.plan_file,
+            # Not process state: written once here, beside the absolute path,
+            # never by update_run. Absent when the launcher shipped none.
+            **({"plan_arg": self.plan_arg} if self.plan_arg else {}),
             "cwd": self.cwd,
             "log_path": self.log_path,
             "started_at": status_file.now_iso(),
@@ -1897,7 +1922,10 @@ def launch(
     # The launcher's list, from the argv *before* build_worker_argv appends a
     # thing: the only process that can still tell a typed --yes from an implied
     # one is this one (D2 step 2, the *Later* bullet).
-    env = child_env(replay_flags=replay_flags(mode, argv))
+    env = child_env(
+        replay_flags=replay_flags(mode, argv),
+        plan_arg=_invoker_plan_arg(argv),
+    )
     log = log_path(phase_dir)
     try:
         worker_pid = process_control.spawn_detached(
@@ -1985,6 +2013,24 @@ def launch(
     # entry, so an invocation with nothing to say grows no key.
     record_progress_lines([_launch_roster(model_specs, plan_file, args)])
     return EXIT_OK
+
+
+def _invoker_plan_arg(argv: Sequence[str]) -> Optional[str]:
+    """The ``--plan-file`` value the dispatcher received, before anything resolved it.
+
+    Read from the invoker's recorded invocation (``_normalize_positionals``
+    copied the plan positional there verbatim), falling back to *argv* — the
+    same list :func:`maybe_detach` hands in from that record — for a caller that
+    reached :func:`launch` without one. ``launch`` makes its own ``plan_file``
+    absolute before this matters, so this is the only place the typed spelling
+    survives (:data:`PLAN_ARG_ENV`).
+    """
+    from .cli_common import flag_value, invocation
+
+    record = invocation()
+    source = record.get("argv") if record else None
+    value = flag_value(list(source or argv), "--plan-file")
+    return value or None
 
 
 def _launch_roster(
@@ -2139,6 +2185,9 @@ def begin_worker_run(
     # this worker spawns nor any argv-echo of them (a short `ask` question
     # would otherwise ride along in every child's environment).
     replay = decode_replay_flags(os.environ.pop(REPLAY_FLAGS_ENV, None))
+    # Same rule: the launcher's typed plan goes into the record, not into the
+    # environment of every provider child this worker spawns.
+    plan_arg = os.environ.pop(PLAN_ARG_ENV, None) or None
     if detached:
         # On both platforms the launcher already handed the log in as this
         # process's stdout/stderr, so this is normally a no-op on the
@@ -2162,6 +2211,7 @@ def begin_worker_run(
         host=getattr(args, "host", None),
         detached=detached,
         replay_flags=replay,
+        plan_arg=plan_arg,
     )
     handle.start()
     return handle

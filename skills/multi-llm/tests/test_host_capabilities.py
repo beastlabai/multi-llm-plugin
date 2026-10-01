@@ -40,6 +40,7 @@ SKILL_ROOT = Path(__file__).parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
 sys.path.insert(0, str(SKILL_ROOT / "hosts"))
 
+import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from utils import host_capabilities as caps  # noqa: E402
 from utils import unattended as un  # noqa: E402
@@ -54,6 +55,25 @@ RENDERED = SKILL_ROOT / render_capabilities.OUTPUT
 DOCUMENT = yaml.safe_load(CAPS_PATH.read_text(encoding="utf-8"))
 HOSTS = DOCUMENT["hosts"]
 HOST_IDS = sorted(HOSTS)
+
+
+def _flat_provenance(provenance):
+    """``{name: value}`` with every map-valued row flattened into dotted names.
+
+    ``next_command``'s provenance is a map, one value per route, so a promoted
+    route is ``{"package": "verified"}`` — a dict, never equal to
+    ``"verified"``. Without flattening, the ledger tests would let that
+    promotion through with no recorded run. Written here rather than imported
+    from the renderer, so a bug in one cannot hide the other's.
+    """
+    flat = {}
+    for field, value in provenance.items():
+        if isinstance(value, dict):
+            for key, inner in value.items():
+                flat[f"{field}.{key}"] = inner
+        else:
+            flat[field] = value
+    return flat
 
 
 def _capture(store):
@@ -203,6 +223,162 @@ class TestSchema:
         prov = schema["definitions"]["host"]["properties"]["provenance"]["properties"]
         for key in self.OPTIONAL_KEYS:
             assert key in prov, f"optional key '{key}' has no provenance slot"
+
+
+#: Every ``(host, route)`` the shipped ``next_command`` cells carry.
+NEXT_COMMAND_ROUTES = [
+    (host_id, route)
+    for host_id in HOST_IDS
+    for route in HOSTS[host_id]["next_command"]
+]
+
+
+class TestNextCommand:
+    """The host-level ``next_command`` cell (plans/next-phase-command.md §2.1, T2).
+
+    Required, keyed by the route vocabulary (``default``, ``package``,
+    ``skill``), read at run time by ``utils/next_phase.py`` to spell the
+    command a finished phase ends its report with.
+    """
+
+    @staticmethod
+    def _validator():
+        jsonschema = pytest.importorskip("jsonschema")
+        schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+        return jsonschema, schema
+
+    @staticmethod
+    def _copy():
+        return json.loads(json.dumps(DOCUMENT))
+
+    @staticmethod
+    def _package_host():
+        hosts = [host_id for host_id in HOST_IDS if "package" in HOSTS[host_id]]
+        assert hosts, "no host declares a package block"
+        return hosts[0]
+
+    def test_a_package_block_without_a_package_template_is_rejected(self):
+        jsonschema, schema = self._validator()
+        host_id = self._package_host()
+        broken = self._copy()
+        del broken["hosts"][host_id]["next_command"]["package"]
+        del broken["hosts"][host_id]["provenance"]["next_command"]["package"]
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, schema)
+
+    def test_a_package_template_without_a_package_block_is_rejected(self):
+        jsonschema, schema = self._validator()
+        # A host that never had a block gains a template.
+        broken = self._copy()
+        host = broken["hosts"]["claude-code"]
+        assert "package" not in host
+        host["next_command"]["package"] = host["next_command"]["default"]
+        host["provenance"]["next_command"]["package"] = "documented"
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, schema)
+        # A host that had one loses the block and keeps the template.
+        host_id = self._package_host()
+        broken = self._copy()
+        del broken["hosts"][host_id]["package"]
+        del broken["hosts"][host_id]["provenance"]["package"]
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, schema)
+
+    @pytest.mark.parametrize("host_id, route", NEXT_COMMAND_ROUTES)
+    def test_a_route_without_its_provenance_row_is_rejected(self, host_id, route):
+        jsonschema, schema = self._validator()
+        broken = self._copy()
+        del broken["hosts"][host_id]["provenance"]["next_command"][route]
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, schema)
+
+    @pytest.mark.parametrize("template", [
+        "/multi-llm:multi-llm",                  # no {args}
+        "{args}",                                # no prefix
+        "/multi-llm {args} --yes",               # {args} not last
+        "/multi-llm {plan} {args}",              # a second brace
+        "/multi-llm {ARGS}",                     # not the token
+    ])
+    def test_a_template_ends_in_args_and_holds_no_other_brace(self, template):
+        jsonschema, schema = self._validator()
+        broken = self._copy()
+        broken["hosts"]["claude-code"]["next_command"]["default"] = template
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, schema)
+
+    def test_an_unknown_route_key_is_rejected(self):
+        """The keys are the route vocabulary; ``plugin`` is a product name."""
+        jsonschema, schema = self._validator()
+        broken = self._copy()
+        broken["hosts"]["codex"]["next_command"]["plugin"] = "$x {args}"
+        with pytest.raises(jsonschema.ValidationError):
+            jsonschema.validate(broken, schema)
+
+    @pytest.mark.parametrize("host_id", HOST_IDS)
+    def test_provenance_has_exactly_the_cells_routes(self, host_id):
+        host = HOSTS[host_id]
+        assert set(host["provenance"]["next_command"]) == set(host["next_command"])
+
+    @pytest.mark.parametrize("host_id, route", NEXT_COMMAND_ROUTES)
+    def test_each_prefix_is_in_the_prose_that_documents_its_route(
+        self, host_id, route
+    ):
+        """``default``/``skill`` against ``invocation``, ``package`` against
+        ``package.invocation``, so the display cell and the documented
+        spelling cannot drift apart."""
+        host = HOSTS[host_id]
+        prose = (
+            host["package"]["invocation"] if route == "package"
+            else host["invocation"]
+        )
+        prefix = caps.next_command_prefix(host_id, route)
+        assert prefix.strip(), (host_id, route)
+        assert prefix in prose, (
+            f"{host_id}.next_command.{route}'s prefix {prefix!r} is not in the "
+            f"prose that documents that route: {prose!r}"
+        )
+
+    @pytest.mark.parametrize("host_id", HOST_IDS)
+    def test_none_reads_default(self, host_id):
+        assert caps.next_command_template(host_id, None) == (
+            HOSTS[host_id]["next_command"]["default"]
+        )
+
+    @pytest.mark.parametrize("host_id, route", NEXT_COMMAND_ROUTES)
+    def test_each_present_key_returns_its_template(self, host_id, route):
+        assert caps.next_command_template(host_id, route) == (
+            HOSTS[host_id]["next_command"][route]
+        )
+
+    @pytest.mark.parametrize("host_id, route", [
+        ("claude-code", "package"),
+        ("codex", "skill"),
+        ("opencode", "plugin"),
+        ("codex", ""),
+    ])
+    def test_an_absent_route_raises_naming_the_host_and_the_route(
+        self, host_id, route
+    ):
+        """The accessor never falls back: a wrong spelling is a caller bug."""
+        with pytest.raises(ValueError) as raised:
+            caps.next_command_template(host_id, route)
+        assert host_id in str(raised.value)
+        assert f"'{route}'" in str(raised.value)
+
+    @pytest.mark.parametrize("host_id", HOST_IDS)
+    def test_the_route_list_is_the_cells_keys(self, host_id):
+        assert caps.next_command_routes(host_id) == tuple(
+            HOSTS[host_id]["next_command"]
+        )
+
+    def test_every_tool_route_is_a_key_on_some_host(self):
+        """``modes.TOOL_ROUTES`` and the yaml keys are one vocabulary."""
+        assert mode_table.TOOL_ROUTES
+        for route in mode_table.TOOL_ROUTES:
+            assert any(route in HOSTS[h]["next_command"] for h in HOST_IDS), (
+                f"modes.TOOL_ROUTES names {route!r}, which no host's "
+                "next_command carries"
+            )
 
 
 class TestLoadRefusesAMalformedDocument:
@@ -452,47 +628,123 @@ class TestConservativeResolution:
     #: codex 0.156.1, 2026-09-25, `codex-package-sandbox-posture`: every
     #: `tools/call` its mcp-tap recorded carried the session's `--model` as the turn
     #: metadata's `model`, which promotes `session_runner_provider` alone.
+    #:
+    #: codex 0.159.2 and opencode 1.18.33, 2026-10-01, T10 of
+    #: plans/next-phase-command.md (`TestTheNextCommandLiveCheck`, rows
+    #: `<host>[-package]-next-command`): on each host and route a session ran
+    #: `generate-tasks` on `plans/next phase.md`, and the command its dispatcher
+    #: printed was handed verbatim to a FRESH session of the same route; that
+    #: session's receipt recorded `implement` with the fixture as the plan
+    #: argument and no quote character in it. Twice per route, on two models
+    #: (`~deepseek/deepseek-v4-flash-latest`, `deepseek/deepseek-v4.1-flash`):
+    #: codex default runs/20261001T113914Z + 115800Z, codex package 113244Z +
+    #: 115346Z, opencode default 113344Z + 115548Z, opencode package 112645Z +
+    #: 115138Z. It promotes the four `next_command.<route>` cells and nothing
+    #: else — a typed template, not the composer, not the model's copy of it.
+    #:
+    #: claude-code 2.1.285, 2026-10-01, T10 of plans/next-phase-command.md (row
+    #: `claude-code-next-command`, `live_next_command` tier): the lane stages this
+    #: host as a plain skill under `$HOME/.claude/skills/multi-llm`, so the route
+    #: exercised is `skill`. A session ran `generate-tasks` on `plans/next phase.md`
+    #: and the printed command was typed as the whole prompt of a FRESH `claude -p`
+    #: session, which dispatched `implement` with the fixture unquoted. Twice:
+    #: runs/20261001T114907Z on `openai/gpt-6-luna` through OpenRouter, and
+    #: runs/20261001T121548Z on `sonnet` through the Claude subscription (`--creds
+    #: fallback`). It promotes `next_command.skill` and nothing else: the plugin
+    #: route (`next_command.default`), the Stop hook (not installed under plain-skill
+    #: staging) and TUI typing were not exercised.
     RECORDED_SMOKES = {
+        "claude-code": {"next_command.skill"},
         "codex": {
             "invocation", "session_runner_provider",
+            "next_command.default", "next_command.package",
         },
         "opencode": {
             "shim", "installable", "install_paths", "reload", "arguments",
             "headless_invocation", "detach", "multi_turn", "invocation",
+            "next_command.default", "next_command.package",
         },
     }
 
-    def test_no_value_is_verified_without_a_recorded_run(self):
-        for host_id, host in HOSTS.items():
+    #: Cells the reference host carried as `verified` before this ledger existed
+    #: (D5b, 227af2d), by its own use as the host the skill was written on, with no
+    #: recorded run id behind them. Exactly these two are exempt from the
+    #: unexercised-verb check below; `next_command` is deliberately not here.
+    PRE_LEDGER_VERIFIED = {("claude-code", "subagents"), ("claude-code", "ask")}
+
+    @classmethod
+    def _unbacked(cls, hosts):
+        """``{host: [dotted field, …]}`` claiming ``verified`` with no ledger row.
+
+        Map-valued rows are flattened first (``next_command.package``), so a
+        promoted route is held to the ledger like any other field.
+        """
+        unbacked = {}
+        for host_id, host in hosts.items():
+            if host_id == "claude-code":
+                continue
             verified = {
-                field for field, value in host["provenance"].items()
+                field for field, value in _flat_provenance(host["provenance"]).items()
                 if value == "verified"
             }
-            if host_id == "claude-code":
-                assert verified, "the reference host has observed *something*"
-                continue
-            allowed = self.RECORDED_SMOKES.get(host_id, set())
-            assert verified <= allowed, (
-                f"{host_id} claims verified provenance for "
-                f"{sorted(verified - allowed)} with no recorded smoke behind it"
-            )
+            extra = sorted(verified - cls.RECORDED_SMOKES.get(host_id, set()))
+            if extra:
+                unbacked[host_id] = extra
+        return unbacked
+
+    def test_no_value_is_verified_without_a_recorded_run(self):
+        reference = _flat_provenance(HOSTS["claude-code"]["provenance"])
+        assert "verified" in reference.values(), (
+            "the reference host has observed *something*"
+        )
+        unbacked = self._unbacked(HOSTS)
+        assert not unbacked, (
+            f"verified provenance with no recorded smoke behind it: {unbacked}"
+        )
+
+    def test_a_nested_verified_route_is_held_to_the_ledger(self, monkeypatch):
+        """A promoted ``next_command`` route is a dict row; it is caught anyway.
+
+        Since T10 promoted every non-reference route, the unbacked case is made
+        by taking the ledger row away rather than by promoting a cell.
+        """
+        ledger = {host: set(fields) for host, fields in self.RECORDED_SMOKES.items()}
+        ledger["codex"].discard("next_command.package")
+        monkeypatch.setattr(type(self), "RECORDED_SMOKES", ledger)
+        hosts = json.loads(json.dumps(HOSTS))
+        hosts["codex"]["provenance"]["next_command"]["package"] = "verified"
+        assert self._unbacked(hosts) == {"codex": ["next_command.package"]}
 
     def test_the_smoke_ledger_has_no_stale_rows(self):
         """A ledger entry that nothing claims is a promotion silently reverted."""
         for host_id, fields in self.RECORDED_SMOKES.items():
             assert host_id in HOSTS, f"ledger names unknown host '{host_id}'"
-            prov = HOSTS[host_id]["provenance"]
+            prov = _flat_provenance(HOSTS[host_id]["provenance"])
             for field in fields:
                 assert prov.get(field) == "verified", (
                     f"{host_id}.{field} is recorded as smoke-verified but the "
                     f"entry says '{prov.get(field)}'"
                 )
 
+    def test_a_ledger_row_names_a_route_by_its_dotted_path(self):
+        """The stale-row check reads a nested route the way the ledger names it."""
+        flat = _flat_provenance({
+            "invocation": "verified",
+            "next_command": {"default": "documented", "package": "verified"},
+        })
+        assert flat == {
+            "invocation": "verified",
+            "next_command.default": "documented",
+            "next_command.package": "verified",
+        }
+
     def test_an_unexercised_verb_is_never_verified(self):
         """The two verbs the recorded smokes could not reach stay conservative."""
         for host_id in self.RECORDED_SMOKES:
             prov = HOSTS[host_id]["provenance"]
             for verb in ("subagents", "ask"):
+                if (host_id, verb) in self.PRE_LEDGER_VERIFIED:
+                    continue
                 assert prov[verb] != "verified", (
                     f"{host_id}.{verb} was promoted to verified, but no recorded "
                     "smoke dispatched a subagent or rendered a question. "
@@ -1240,6 +1492,16 @@ class TestGeneratedReference:
         )
         assert render_capabilities.main(["--check"]) == 1
         assert "stale" in capsys.readouterr().err
+
+    def test_a_promoted_route_is_listed_by_its_dotted_name(self):
+        """``_verified_cell`` flattens a map row, so a promotion is not dropped."""
+        host = json.loads(json.dumps(HOSTS["codex"]))
+        host["provenance"]["next_command"] = {"default": "documented",
+                                              "package": "verified"}
+        cell = render_capabilities._verified_cell(host)
+        assert "`next_command.package`" in cell
+        assert "`next_command.default`" not in cell
+        assert "`next_command`" not in cell
 
     def test_the_render_is_deterministic(self):
         assert render_capabilities.render() == render_capabilities.render()

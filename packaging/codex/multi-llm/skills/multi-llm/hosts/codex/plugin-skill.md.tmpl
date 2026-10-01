@@ -13,7 +13,7 @@ runs outside the exec sandbox, and on the modes that apply changes it writes to 
 
 Read the result's `exit` and `next` the way the dispatcher's own contract reads them; on `state: partial`, name the failed models and their reasons from `progress.models`; on exit 0, report `validation_counts`, and if `needs_human_decision` or `validation_failed` is non-zero point at `report.md` for those groups; they are decided later, when the suggestions are applied.
 On this host `next` arrives as arguments for this same tool, not as a command: "running" it means calling the tool again with exactly those arguments, never a shell.
-{NEEDS_HUMAN_RULE}
+{NEEDS_HUMAN_RULE} `user_next_step` is the phase after this one, for the user to type: never run it yourself; end your report with its `command`, and each `optional_before` command, every one in its own fenced block, verbatim. It is never a tool call, unlike `next`, which is one.
 
 If that tool is not listed, the plugin's server did not start: `codex mcp get multi_llm`
 names the command it tried, and `python3 >= 3.9` must be on `PATH`.

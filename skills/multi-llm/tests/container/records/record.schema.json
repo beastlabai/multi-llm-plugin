@@ -79,6 +79,46 @@
               "input_tokens": {"type": "integer"},
               "output_tokens": {"type": "integer"}
             }
+          },
+          "next_command": {
+            "type": "object",
+            "additionalProperties": false,
+            "description": "T10 of plans/next-phase-command.md, on a `next_command_check` row only: what the host did with the command its dispatcher printed. Derived from the bundle by `next_command_check.observe` (the function the row's tests assert on) and summarized by `record_block`. `printed_*` are the dispatcher's own `user_next_step`, read from the session's receipts. `copied` is criterion 4 — the final assistant message carries `printed_command` and every `printed_optional` as fenced lines, byte for byte — and is null when nothing was printed; `copied_unfenced` says the command appeared only outside a fence. `lookup` and `stop_hook` are claude-code's two extras. `no_call` is criterion 5 on the tool routes, null when no tool result handed the model a `user_next_step`. `typed` is the typed-template check: a fresh session handed the printed command verbatim.",
+            "properties": {
+              "model": {
+                "type": ["string", "null"],
+                "description": "The slug the host session really ran, from the bundle's credential census: an operator's `MLLM_HOST_MODEL` override when there was one. The row's `model` column keeps the checked-in pin."
+              },
+              "route_observed": {
+                "type": ["string", "null"],
+                "description": "The `next_command` route key whose template prefix the printed command starts with."
+              },
+              "printed_phase": {"type": ["string", "null"]},
+              "printed_command": {"type": ["string", "null"]},
+              "printed_optional": {"type": "array", "items": {"type": "string"}},
+              "printed_complete": {"type": ["boolean", "null"]},
+              "copied": {"type": ["boolean", "null"]},
+              "copied_unfenced": {"type": ["boolean", "null"]},
+              "lookup": {"enum": ["util-next-command", "phase-result", "none"]},
+              "stop_hook": {"enum": ["blocked", "ran", "silent", "not-installed"]},
+              "no_call": {"type": ["boolean", "null"]},
+              "calls_after_terminal": {"type": "integer", "minimum": 0},
+              "typed": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["exercised", "passes"],
+                "properties": {
+                  "exercised": {"type": "boolean"},
+                  "surface": {"type": ["string", "null"]},
+                  "dispatched": {"type": ["boolean", "null"]},
+                  "plan_args": {"type": "array", "items": {"type": ["string", "null"]}},
+                  "quote_free": {"type": ["boolean", "null"]},
+                  "names_fixture": {"type": ["boolean", "null"]},
+                  "passes": {"type": "boolean"},
+                  "stop_reason": {"type": ["string", "null"]}
+                }
+              }
+            }
           }
         }
       }

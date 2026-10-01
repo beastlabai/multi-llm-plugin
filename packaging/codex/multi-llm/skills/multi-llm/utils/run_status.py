@@ -2382,6 +2382,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     workflow_trailer: List[str] = []
     terminal_notice: Optional[str] = None
+    terminal_workflow: Optional[Dict[str, Any]] = None
     if args.view == VIEW_RUN and terminal_run:
         try:
             terminal_workflow = _workflow_payload(plan_path)
@@ -2427,6 +2428,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lines.append("")
             lines += workflow_trailer
         print("\n".join(lines))
+
+    # plans/next-phase-command.md §2.2(1): a TERMINAL poll pinned to exactly one
+    # run that exits 0 — a worker that ended 0 or 2 — carries the next phase as
+    # `user_next_step`, beside F7's notice but without F7's view guard: the key
+    # is machine-readable, and `--view all`'s result line carries no parsed
+    # workflow step either (`--view workflow` returned above). The block follows
+    # the text on stdout, or goes to stderr under `--json`, whose payload stays
+    # exactly what it was. Never on exit 2 (still moving, or nothing recorded)
+    # or 3 (failed/aborted). Advisory: a failed read or builder costs one
+    # stderr line and nothing else.
+    if (
+        exit_code == EXIT_OK
+        and terminal_run
+        and len(views) == 1
+        and (args.phase or args.question or args.run_id)
+    ):
+        _emit_user_next_step(
+            plan_path, args, views[0], workflow=terminal_workflow,
+        )
 
     # Plan §2.4: a `mode: truncated` validation source sets the notice on any
     # terminal poll (every view, not only `--view run`); it qualifies the
@@ -2554,6 +2574,50 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 STATE_DIED if all(_died(v) for v in live_views) else STATE_RUNNING
             )
     return exit_code
+
+
+def _emit_user_next_step(
+    plan_path: Path,
+    args: argparse.Namespace,
+    view: Dict[str, Any],
+    *,
+    workflow: Optional[Dict[str, Any]] = None,
+) -> None:
+    """The terminal poll's ``user_next_step`` and block (next-phase-command §2.2(1)).
+
+    Inputs per §2.1 "Where each emitter gets its inputs": ``finished_mode`` is
+    the pinned run's own mode (its record's ``mode``, else its phase dir — the
+    pair ``record_mode_phase`` reports); ``plan_arg`` is the record's
+    ``plan_arg`` — the plan as the launcher typed it — else its absolute
+    ``plan_file``, never this poll's own argv, which ``main`` made absolute;
+    the host is this poll's (``--host``, ``$MULTI_LLM_HOST``, the default). The
+    workflow is read now, after any ``--wait``; *workflow* is such a read when
+    the caller already took one. A failed read or builder raise prints one
+    stderr line and sets nothing.
+    """
+    from . import host_capabilities, next_phase
+    from .cli_common import _modes
+
+    run = view.get("run") or {}
+    finished_mode = str(run.get("mode") or view.get("phase") or "") or None
+    mode = _modes().resolve(finished_mode) if finished_mode else None
+    if mode is None or not (mode.is_workflow_phase or mode.runs_workflow):
+        return  # an ask, or no mode on record: no phase finished, no answer
+    plan_arg = str(run.get("plan_arg") or run.get("plan_file") or plan_path)
+    try:
+        if workflow is None:
+            workflow = _workflow_payload(plan_path)
+    except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
+        print(next_phase.lookup_failure_line(exc), file=sys.stderr)
+        return
+    next_phase.emit_answer(
+        plan_arg,
+        host_capabilities.resolve_host_id(explicit=getattr(args, "host", None)),
+        finished_mode,
+        plan_path=plan_path,
+        workflow=workflow,
+        stream=sys.stderr if args.json else sys.stdout,
+    )
 
 
 def _wait_clamp_ceiling(host_id: Optional[str]) -> Optional[Tuple[str, int]]:

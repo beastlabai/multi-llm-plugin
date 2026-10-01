@@ -40,7 +40,9 @@ class TestTheHookFile:
     def test_it_is_valid_json_naming_session_start(self):
         data = json.loads(HOOKS_JSON.read_text(encoding="utf-8"))
         assert list(data) == ["hooks"]
-        assert list(data["hooks"]) == ["SessionStart"]
+        # `Stop` is the report check (plans/next-phase-command.md T11), pinned
+        # in tests/test_report_check.py.
+        assert list(data["hooks"]) == ["SessionStart", "Stop"]
 
     def test_the_one_hook_is_a_command_running_the_doctor_script(self):
         entries = _hook_entries()

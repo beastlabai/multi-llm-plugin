@@ -19,7 +19,7 @@ RULES EVERY LINE HERE KEEPS (plan D3):
      ``uv`` is absent so it can *report* that absence (rule 7); a dependency, or a
      second module, is one more thing whose absence empties the tool list.
   2. **No word of its own.** Every mode word, alias, flag, exit code, state word
-     and message template is read from ``dist/cli-surface.json`` (schema v4). The
+     and message template is read from ``dist/cli-surface.json`` (schema v5). The
      only words held here are the JSON-RPC/MCP vocabulary, the envelope's key
      names, the anchor_source spellings (``roots``, ``turn-metadata``,
      ``env:<NAME>``), codex's turn-metadata keys and posture words, the
@@ -69,7 +69,7 @@ PLUGIN_MANIFEST_PATH = PLUGIN_ROOT / ".codex-plugin" / "plugin.json"
 #: Bumped in lockstep with ``packaging/common/surface.py``'s
 #: ``SURFACE_SCHEMA_VERSION``; ``test_surface_schema_version_matches`` compares
 #: the two constants, never a literal.
-SUPPORTED_SURFACE_VERSION = 4
+SUPPORTED_SURFACE_VERSION = 5
 
 #: The longest a cancellation may sit unobserved (D3c). It is met by the
 #: worker's cancel-event watch in ``run_child`` (a 20 ms wait on the event, then
@@ -187,6 +187,13 @@ DEGRADED_DESCRIPTION = (
 #: could not be read; it is the dispatcher's exit-3 word, held for this case only.
 DEGRADED_STATE = "needs-human"
 
+#: The result-line key a finished phase's next command rides in
+#: (plans/next-phase-command.md §2.4): an envelope key name, lifted to the top
+#: level of an exit-0 or exit-2 result beside ``next``. It is the user's to type,
+#: never a call — ``is_mechanical`` reads ``next`` alone, so the continuation
+#: loop never follows it, and the tool description (surface data) says so.
+USER_NEXT_STEP_KEY = "user_next_step"
+
 #: Where a redacted ``next`` went, and where any other removed command went.
 NEXT_MARKER = "<see the `next` field of this result for the tool call>"
 RUNNABLE_MARKER = (
@@ -268,7 +275,9 @@ _REQUIRED_SURFACE_PATHS = (
     ("dispatcher", "states"), ("dispatcher", "poll"), ("dispatcher", "abort"),
     ("dispatcher", "instructions"), ("dispatcher", "host_option"),
     ("dispatcher", "run_id_option"), ("dispatcher", "banner"),
-    ("dispatcher", "session_model_env"), ("needs_human_message",),
+    ("dispatcher", "session_model_env"), ("dispatcher", "route_env"),
+    ("dispatcher", "route_env", "name"), ("dispatcher", "route_env", "value"),
+    ("needs_human_message",),
     ("needs_human_option",), ("write_posture_refusal",),
     ("anchor_unresolved",), ("shell_missing",), ("runbook",), ("host",),
 )
@@ -306,6 +315,14 @@ def load_surface():
         described, dict
     ) or not all(isinstance(described.get(name), str) for name in PROPERTIES):
         return None, "{}: the tool definition's text is malformed".format(
+            SURFACE_PATH)
+    # Schema v5's route signal, set on every child. A surface without a usable
+    # one is refused whole, never half-used: spawning without it would print a
+    # finished phase's next command in another route's spelling.
+    route_env = data["dispatcher"]["route_env"]
+    if not all(isinstance(route_env.get(key), str) and route_env.get(key)
+               for key in ("name", "value")):
+        return None, "{}: dispatcher.route_env is not a non-empty name and value".format(
             SURFACE_PATH)
     return data, None
 
@@ -766,6 +783,23 @@ def pinned_run_id(tokens, surface):
         return following if following is not None and not following.startswith(
             "-") else None
     return None
+
+
+def lift_user_next_step(outcome: dict) -> None:
+    """Copy the redacted payload's ``user_next_step`` to the result's top level.
+
+    Exit 0 and exit 2 only (plans/next-phase-command.md §2.4): a finished phase
+    or a terminal poll, and a phase already complete. The copy is taken from
+    ``result`` after ``redact``, byte for byte, the completed form
+    (``command: null``, ``complete: true``) included, under the same key name.
+    A payload without the key lifts nothing, so an absent top-level key keeps
+    meaning "no answer", never "workflow complete". A still-running poll's
+    exit 2 carries no key (the dispatcher never sets one there), so nothing is
+    lifted mid-run.
+    """
+    payload = outcome.get("result")
+    if isinstance(payload, dict) and payload.get(USER_NEXT_STEP_KEY) is not None:
+        outcome[USER_NEXT_STEP_KEY] = payload[USER_NEXT_STEP_KEY]
 
 
 def is_mechanical(next_args, surface) -> bool:
@@ -1386,10 +1420,15 @@ class Server:
         if missing is not None:
             return self.refusal(call, "needs_human", payload_missing_text(missing))
         self.uv = uv
-        # D9 layer 2: the resolved uv (the detached worker reuses it) and the
-        # skill dir. The child inherits os.environ whole; no env= is passed.
+        # D9 layer 2: the resolved uv (the detached worker reuses it), the
+        # skill dir, and the route signal (both strings from the surface, so
+        # a finished phase's next command is spelled for this route). The
+        # child inherits os.environ whole; no env= is passed, so every child
+        # this call spawns — launch, polls, abort, runbook — carries all three.
         os.environ[surface["uv"]["env"]] = uv
         os.environ[SKILL_DIR_ENV] = str(SKILL_DIR)
+        route_env = surface["dispatcher"]["route_env"]
+        os.environ[route_env["name"]] = route_env["value"]
         if NO_BYTECODE_ENV not in os.environ:
             os.environ[NO_BYTECODE_ENV] = "1"
         model = self.export_session_model(call)
@@ -1923,6 +1962,7 @@ class Server:
                 "next": next_as_tool_call(raw, surface),
                 "output": self.human_output(child, raw),
                 "stderr": redact(child.stderr, raw, surface) or None})
+            lift_user_next_step(base)
             return base
         if child.code != codes["ok"] or child.result is None:
             marker = surface["dispatcher"]["result_marker"]
@@ -1952,6 +1992,7 @@ class Server:
             "next": next_as_tool_call(raw, surface),
             "output": self.human_output(child, raw),
             "stderr": redact(child.stderr, raw, surface) or None})
+        lift_user_next_step(base)
         return base
 
     def error_result(self, call: Call, child: ChildRun, message: str,

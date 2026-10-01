@@ -19,7 +19,7 @@ What they pin:
 * the output round-trips: the request carrying ``function_call_output`` for the
   script's ``call_id`` gets the terminal message, whatever the turn counter says;
 * the frames served, the declaration seen and the output returned are recorded
-  in the log;
+  in the log, and each request's line is written before its response starts;
 * every other scenario, and a scenario-less stub, never emits a tool call even
   to a request that advertises the tool — the text path is unchanged;
 * the chat-completions leg (plans/opencode-validator-false-rate-limit-and-
@@ -31,9 +31,9 @@ What they pin:
 
 from __future__ import annotations
 
+import io
 import json
 import os
-import socket
 import subprocess
 import sys
 import time
@@ -71,39 +71,54 @@ BUILTIN_TOOL = {"type": "function", "name": "exec_command",
                 "parameters": {"type": "object", "properties": {}}}
 
 
-def _free_port() -> int:
-    with socket.socket() as probe:
-        probe.bind(("127.0.0.1", 0))
-        return probe.getsockname()[1]
+def _launch_stub(tmp: Path, name: str, scenario: Path | None):
+    """Start the stub on an OS-picked port; return ``(proc, port, log)``.
+
+    ``--port 0 --port-file``: the stub binds first and then publishes the port it
+    actually got, so there is no pick-close-rebind window for another process to
+    steal. A file, not the child's stdout, because ``select`` on a pipe does not
+    work on Windows.
+    """
+    log = tmp / f"stub-{name}.jsonl"
+    port_file = tmp / f"port-{name}"
+    argv = [sys.executable, str(STUB_SERVER), "--port", "0",
+            "--port-file", str(port_file), "--log", str(log)]
+    if scenario is not None:
+        argv += ["--scenario", str(scenario)]
+    env = os.environ.copy()
+    # The stub reaches for `tests.scenario_matcher`; the skill dir is the
+    # parent of this tests package (the parity module's arrangement).
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(TESTS_DIR.parent), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
+    proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, text=True, env=env)
+    deadline = time.time() + 20
+    while True:
+        if port_file.exists():
+            text = port_file.read_text(encoding="utf-8").strip()
+            if text:
+                return proc, int(text), log
+        if proc.poll() is not None:
+            raise AssertionError(
+                f"stub exited {proc.returncode} before writing {port_file}: "
+                f"{proc.stderr.read()}")
+        if time.time() > deadline:
+            proc.kill()
+            proc.wait()
+            raise AssertionError(
+                f"stub never wrote {port_file} within 20s; stderr: "
+                f"{proc.stderr.read()}")
+        time.sleep(0.05)
 
 
 class _Stub:
+    _count = 0
+
     def __init__(self, tmp: Path, scenario: Path | None):
-        self.port = _free_port()
-        self.log = tmp / f"stub-{self.port}.jsonl"
-        argv = [sys.executable, str(STUB_SERVER), "--port", str(self.port),
-                "--log", str(self.log)]
-        if scenario is not None:
-            argv += ["--scenario", str(scenario)]
-        env = os.environ.copy()
-        # The stub reaches for `tests.scenario_matcher`; the skill dir is the
-        # parent of this tests package (the parity module's arrangement).
-        env["PYTHONPATH"] = os.pathsep.join(
-            [str(TESTS_DIR.parent), env.get("PYTHONPATH", "")]).rstrip(os.pathsep)
-        self.proc = subprocess.Popen(argv, stdout=subprocess.PIPE,
-                                     stderr=subprocess.PIPE, text=True, env=env)
+        type(self)._count += 1
+        self.proc, self.port, self.log = _launch_stub(
+            tmp, str(type(self)._count), scenario)
         self.base = f"http://127.0.0.1:{self.port}"
-        deadline = time.time() + 20
-        while time.time() < deadline:
-            if self.proc.poll() is not None:
-                raise AssertionError(
-                    f"stub exited {self.proc.returncode}: {self.proc.stderr.read()}")
-            try:
-                with urllib.request.urlopen(self.base + "/__health", timeout=1):
-                    return
-            except OSError:
-                time.sleep(0.1)
-        raise AssertionError("stub never answered /__health")
 
     def post(self, path: str, body: dict, stream: bool) -> tuple[int, str]:
         body = dict(body, stream=stream)
@@ -143,6 +158,21 @@ def stub(tmp_path):
     yield factory
     for server in started:
         server.close()
+
+
+def _last_entry(server: "_Stub", surface: str, count: int = 1) -> dict:
+    """The newest log line for ``surface``, read once, with no waiting.
+
+    The stub records a request's line before the first response byte
+    (`Handler._record_pending`), so a client holding its answer finds the line
+    on disk. `TestTheLogLineLandsBeforeTheAnswer` pins that order; this helper
+    used to poll for up to 5 s instead, and a test that read the log directly
+    failed whenever the line was not yet written.
+    """
+    lines = [e for e in server.entries() if e["surface"] == surface]
+    assert len(lines) >= count, (
+        f"expected {count} {surface} log line(s), found {len(lines)}")
+    return lines[-1]
 
 
 def _sse_events(text: str) -> list[tuple[str | None, dict]]:
@@ -254,7 +284,7 @@ class TestTheCallIsServed:
         final = events[-1][1]["response"]["output"]
         assert [item["type"] for item in final] == ["message"]
         assert final[0]["content"][0]["text"] == SCRIPT["terminal"]
-        entry = [e for e in server.entries() if e["surface"] == "responses"][-1]
+        entry = _last_entry(server, "responses")
         assert entry["scripted"]["phase"] == "terminal"
         assert "MULTI_LLM_RESULT" in entry["scripted"]["output"]
         assert entry["scripted"]["output_truncated"] is False
@@ -274,7 +304,7 @@ class TestTheFramesAreRecorded:
     def test_the_log_carries_frames_declaration_and_arguments(self, stub):
         server = stub(SCRIPTED)
         server.post("/v1/responses", _request(tools=[NAMESPACE_TOOL]), True)
-        entry = [e for e in server.entries() if e["surface"] == "responses"][-1]
+        entry = _last_entry(server, "responses")
         scripted = entry["scripted"]
         assert scripted["phase"] == "call"
         assert scripted["declaration"] == NAMESPACE_TOOL, (
@@ -286,6 +316,100 @@ class TestTheFramesAreRecorded:
         assert entry["unmatched"] is False
 
 
+class _OrderProbe:
+    """The socket of one in-process request. It reads the stub's log the moment
+    the first response byte is sent, which a client that returns on
+    `Content-Length` is entitled to do."""
+
+    def __init__(self, request: bytes, log: Path):
+        self._request, self._log = request, log
+        self.log_at_first_byte: list[dict] | None = None
+        self.sent = b""
+
+    def makefile(self, *_args, **_kwargs):
+        return io.BytesIO(self._request)
+
+    def sendall(self, data) -> None:
+        if self.log_at_first_byte is None:
+            self.log_at_first_byte = [
+                json.loads(line) for line in
+                self._log.read_text(encoding="utf-8").splitlines()]
+        self.sent += bytes(data)
+
+
+@pytest.fixture
+def in_process(tmp_path, monkeypatch):
+    """`stub_server.Handler` driven in-process against one fresh, empty log."""
+    from .container import stub_server
+
+    log = tmp_path / "in-process.jsonl"
+    log.touch()
+    for name, value in (("_log_path", log), ("_seq", 0), ("_turns", {}),
+                        ("_tool_script", None), ("_resolver", None),
+                        ("_facts", [])):
+        monkeypatch.setattr(stub_server, name, value)
+
+    def serve(path: str, body: dict) -> _OrderProbe:
+        payload = json.dumps(body).encode()
+        request = (f"POST {path} HTTP/1.1\r\nHost: stub\r\n"
+                   f"Content-Type: application/json\r\n"
+                   f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n"
+                   ).encode() + payload
+        probe = _OrderProbe(request, log)
+        stub_server.Handler(probe, ("127.0.0.1", 0), None)
+        return probe
+
+    return stub_server, log, serve
+
+
+class TestTheLogLineLandsBeforeTheAnswer:
+    """A request's log line is on disk before the first byte of its response.
+
+    The stub used to write the line in `_dispatch`'s ``finally``, after the
+    response. A JSON answer carries `Content-Length`, so the client returned as
+    soon as the body arrived, and a reader that looked at once found no line or
+    half of one (`test_a_request_that_does_not_advertise_the_tool_gets_text`
+    failed with `IndexError` about once in 250 requests idle and once in 25
+    under CPU load). The real server loses that race only sometimes. A handler
+    run in-process on a socket that reads the log at its first `sendall` loses
+    it every time the order is wrong.
+    """
+
+    @pytest.mark.parametrize(("path", "stream", "status", "surface"), [
+        ("/v1/responses", False, 200, "responses"),
+        ("/v1/responses", True, 200, "responses"),
+        ("/v1/chat/completions", False, 422, "chat"),
+    ], ids=["json", "sse", "unmatched-422"])
+    def test_the_line_is_written_before_the_first_byte(
+            self, in_process, monkeypatch, path, stream, status, surface):
+        stub_server, _log, serve = in_process
+        if status == 422:
+            def refuse(_prompt, _turn):
+                raise stub_server.Unmatched("no rule owns this prompt")
+            monkeypatch.setattr(stub_server, "resolve", refuse)
+        body = (_request(tools=[BUILTIN_TOOL]) if surface == "responses" else
+                {"model": "stub-model",
+                 "messages": [{"role": "user", "content": "hi"}]})
+        probe = serve(path, dict(body, stream=stream))
+        assert probe.sent.startswith(f"HTTP/1.1 {status} ".encode())
+        assert [e["surface"] for e in probe.log_at_first_byte] == [surface], (
+            "the response started before its log line was written")
+        assert probe.log_at_first_byte[0]["unmatched"] is (status == 422)
+
+    def test_a_request_that_raises_before_answering_is_still_logged(
+            self, in_process, monkeypatch):
+        stub_server, log, serve = in_process
+
+        def boom(*_args, **_kwargs):
+            raise RuntimeError("route failed before sending")
+        monkeypatch.setattr(stub_server.Handler, "_route", boom)
+        with pytest.raises(RuntimeError, match="before sending"):
+            serve("/v1/responses", _request())
+        lines = [json.loads(line) for line in
+                 log.read_text(encoding="utf-8").splitlines()]
+        assert [e["path"] for e in lines] == ["/v1/responses"]
+
+
 class TestTheTextPathIsUnchanged:
     def test_a_request_that_does_not_advertise_the_tool_gets_text(self, stub):
         server = stub(SCRIPTED)
@@ -294,7 +418,7 @@ class TestTheTextPathIsUnchanged:
         output = json.loads(text)["output"]
         assert [item["type"] for item in output] == ["message"]
         assert output[0]["content"][0]["text"] == "OK"
-        entry = [e for e in server.entries() if e["surface"] == "responses"][-1]
+        entry = _last_entry(server, "responses")
         assert entry["scripted"]["phase"] == "not-advertised"
 
     def test_the_chat_surface_never_sees_a_call(self, stub):
@@ -384,21 +508,6 @@ def _chat_follow_up(call_id: str, content) -> list[dict]:
                                           CHAT_SCRIPT["arguments"])}}]},
         {"role": "tool", "tool_call_id": call_id, "content": content},
     ]
-
-
-def _last_entry(server: "_Stub", surface: str, count: int = 1) -> dict:
-    """The newest log line for ``surface``, waiting for it to land.
-
-    The stub writes its log line after the response (`_dispatch`'s
-    ``finally``), so a JSON answer can reach the client before the line does.
-    """
-    deadline = time.time() + 5
-    while True:
-        lines = [e for e in server.entries() if e["surface"] == surface]
-        if len(lines) >= count or time.time() > deadline:
-            assert lines, f"no {surface} log line"
-            return lines[-1]
-        time.sleep(0.05)
 
 
 def _chat_stream_result(text: str) -> tuple[str, list[dict], str | None]:
@@ -670,3 +779,27 @@ class TestTheDenyScenario:
         assert entry["scripted"]["phase"] == "output-to-text"
         assert entry["fixture"].endswith("nested_exec/probe_not_measured.txt")
         assert answer and not entry["unmatched"]
+
+
+class TestPortFile:
+    def test_two_concurrent_stubs_get_distinct_ports(self, tmp_path):
+        procs = []
+        try:
+            # Both launched before either is waited on: they bind at once.
+            first = _launch_stub(tmp_path, "a", None)
+            procs.append(first[0])
+            second = _launch_stub(tmp_path, "b", None)
+            procs.append(second[0])
+            assert first[1] != second[1]
+            for _proc, port, _log in (first, second):
+                with urllib.request.urlopen(
+                        f"http://127.0.0.1:{port}/__health", timeout=5) as answer:
+                    assert answer.status == 200
+            assert not list(tmp_path.glob("port-*.tmp"))
+        finally:
+            for proc in procs:
+                proc.terminate()
+                proc.wait(timeout=10)
+                for stream in (proc.stdout, proc.stderr):
+                    if stream:
+                        stream.close()

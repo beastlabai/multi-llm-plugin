@@ -76,7 +76,7 @@ uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.p
 Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complete,
 `3` needs a human) and the last stdout line is always `MULTI_LLM_RESULT: {…}`: read
 `state`, `artifacts` and `next` from it rather than mining the transcript (on `state: partial`, name the failed models and their reasons from `progress.models`).
-{NEEDS_HUMAN_RULE}
+{NEEDS_HUMAN_RULE} `user_next_step` is the phase after this one, for the user to type: never run it yourself; end your report with its `command`, and each `optional_before` command, every one in its own fenced block, verbatim.
 
 A fan-out mode outlives one shell call, so add `--detach`, then poll the command the launcher printed —
 it carries `--host`, `--run-id` on an `ask` run, and `--wait` with no `--timeout` — one call per turn:

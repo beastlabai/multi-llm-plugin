@@ -37,8 +37,10 @@ prose markers on stdout (``implement_orchestrator.py``) print theirs there.
 
 import argparse
 import json
+import re
 import sys
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -71,6 +73,114 @@ PHASE_PREREQUISITES = {
 }
 
 OPTIONAL_PHASES = {"review-tasks", "apply-task-suggestions"}
+
+#: Each apply phase's own write-batch ids in ``state.json``'s ``task_status``
+#: map (``utils/write_phase_bridge.py``: ``apply-batch-N``,
+#: ``apply-task-batch-N``, ``apply-fix-batch-N``). That map is one flat
+#: namespace shared by every write kind, so an id is matched whole — the way
+#: ``StateManager.implementation_task_statuses`` matches implement's ``T###`` —
+#: and an ``apply-batch-N`` never counts for apply-task-suggestions.
+APPLY_BATCH_ID_PATTERNS: Dict[str, "re.Pattern"] = {
+    "apply-suggestions": re.compile(r"^apply-batch-[0-9]+$"),
+    "apply-task-suggestions": re.compile(r"^apply-task-batch-[0-9]+$"),
+    "apply-code-fixes": re.compile(r"^apply-fix-batch-[0-9]+$"),
+}
+
+#: ``get_workflow_status``'s two recorded-and-done words: every walk over its
+#: ``phases`` map (``suggested_next`` here, ``utils/next_phase.py`` there)
+#: treats any other status — ``pending`` *and* ``in_progress`` — as open.
+DONE_STATUSES = ("completed", "skipped")
+
+
+def _grouped_has_suggestions(path: Path) -> bool:
+    """Whether a ``grouped.json`` carries anything to apply (v1 list or v2 envelope).
+
+    The one predicate both ``full`` (``step_apply_code_fixes``) and
+    :func:`get_workflow_status` ask of ``code-review/grouped.json``, so the two
+    cannot disagree about whether a review left anything to fix. True when any
+    group has a non-empty ``suggestions`` list, whatever its validation verdict;
+    false for a missing or unreadable file. It reads no ``validation.json``,
+    ``issues.json`` or user selection, so a review whose groups were all judged
+    invalid or all deselected still counts as having findings.
+    """
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return False
+    if isinstance(data, dict) and "groups" in data:
+        groups = data["groups"]
+    elif isinstance(data, list):
+        groups = data
+    else:
+        return False
+    if not isinstance(groups, list):
+        return False
+    return any(
+        isinstance(group, dict) and group.get("suggestions") for group in groups
+    )
+
+
+def _parse_timestamp(value) -> Optional[datetime]:
+    """An ISO timestamp from ``state.json`` as a naive local datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
+
+def _latest_phase_activity(state: StateManager, phase: str) -> Optional[datetime]:
+    """The newest time ``state.json`` records for one of ``phase``'s own runs.
+
+    ``task_status`` carries no time, so a write batch is dated through the two
+    records the scheduler writes beside it: ``metrics_progress.{phase}.started_at``
+    (stamped before a run's first dispatch, popped only when the phase is marked
+    completed) and each ``metrics.{phase}`` entry's ``timestamp`` (saved with
+    the batch's status). None when neither holds a readable time.
+    """
+    stamps = []
+    progress = state.state.get("metrics_progress")
+    if isinstance(progress, dict) and isinstance(progress.get(phase), dict):
+        stamps.append(_parse_timestamp(progress[phase].get("started_at")))
+    metrics = state.state.get("metrics")
+    entries = metrics.get(phase) if isinstance(metrics, dict) else None
+    if isinstance(entries, list):
+        stamps.extend(
+            _parse_timestamp(entry.get("timestamp"))
+            for entry in entries if isinstance(entry, dict)
+        )
+    stamps = [stamp for stamp in stamps if stamp is not None]
+    return max(stamps) if stamps else None
+
+
+def _apply_batches_predate_review(
+    state: StateManager, phases: Dict[str, dict], phase: str
+) -> bool:
+    """Whether an apply phase's recorded batches belong to an earlier review.
+
+    Nothing clears ``task_status`` when a review is re-run (``review-code
+    --force``, ``review-plan --force``), so batch ids left by a partly applied
+    cycle outlive the review that produced them. They are that cycle's when the
+    phase's latest recorded run (:func:`_latest_phase_activity`) is older than
+    its review's latest completion — each apply phase's one prerequisite is the
+    review it applies. False whenever either time is missing, which keeps the
+    mark for a state with no dated run (absence of a date is not staleness).
+    A review completion re-stamped without new findings (``--reaggregate``)
+    reads the same way; the cost is a bare command instead of ``--resume``,
+    and the scheduler still skips a batch whose result and inputs match.
+    """
+    review = PHASE_PREREQUISITES[phase][0]
+    if phases[review]["status"] != "completed":
+        return False
+    reviewed_at = _parse_timestamp(phases[review].get("timestamp"))
+    last_run = _latest_phase_activity(state, phase)
+    if reviewed_at is None or last_run is None:
+        return False
+    return last_run < reviewed_at
 
 
 def check_phase_prerequisite(state: StateManager, required_phase: str) -> dict:
@@ -134,7 +244,23 @@ def check_apply_suggestions_prerequisite(state: StateManager, plan_dir: Path) ->
                 importance_breakdown[importance] += 1
 
     if valid_count == 0:
-        return {"met": True, "reason": "No valid suggestions to apply"}
+        # `open_count` is what `get_workflow_status` keys the
+        # `skipped (no valid findings)` mark on (plans/next-phase-command.md
+        # §2.1): the groups whose verdict is anything but `invalid`. This return
+        # is too wide to mean "nothing to apply" on its own — a review whose
+        # only groups are `needs-human-decision` lands here too, and
+        # apply-suggestions presents those, so skipping it would hide decisions
+        # the user still owes. Only this return carries the field; the other
+        # met returns (no or unreadable `validation.json`) mark nothing.
+        open_count = sum(
+            1 for entry in validation_entries
+            if isinstance(entry, dict) and entry.get("status") != "invalid"
+        )
+        return {
+            "met": True,
+            "reason": "No valid suggestions to apply",
+            "open_count": open_count,
+        }
 
     # Prerequisite NOT met - has unapplied suggestions
     return {
@@ -160,8 +286,10 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
     grouped_path = review_tasks_dir / "grouped.json"
     validation_path = review_tasks_dir / "validation.json"
 
-    # If review-tasks was skipped, apply-task-suggestions is skipped too
-    if state.is_phase_skipped("review-tasks"):
+    # If review-tasks was skipped, apply-task-suggestions is skipped too. A
+    # review that was skipped and LATER completed is completed (completed wins,
+    # as in get_workflow_status): mark_phase_completed leaves the old skip record.
+    if state.is_phase_skipped("review-tasks") and not state.is_phase_completed("review-tasks"):
         return {"met": True, "reason": "skipped (prerequisite skipped)"}
 
     # If review-tasks hasn't run yet (no grouped.json), nothing to do
@@ -463,10 +591,14 @@ def upstream_skip_notices(state: StateManager) -> List[str]:
     ``--skip-prerequisites``, consent was already given explicitly, and re-asking
     would make the recorded skip meaningless. So the recorded skip surfaces as a
     single line quoting the reason, and the run proceeds.
+
+    Completed wins over skipped: ``mark_phase_completed`` does not clear an
+    earlier skip record, so a phase that was skipped and later completed has
+    both on file and gets no notice.
     """
     notices: List[str] = []
     for phase in SKIPPABLE_PREREQUISITES:
-        if not state.is_phase_skipped(phase):
+        if not state.is_phase_skipped(phase) or state.is_phase_completed(phase):
             continue
         reason = state.get_phase_skip_reason(phase) or ""
         if SKIP_PREREQUISITES_REASON not in reason:
@@ -661,11 +793,23 @@ def ensure_prerequisites(
 
 
 def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) -> dict:
-    """Get current workflow state for all phases."""
+    """Get current workflow state for all phases.
+
+    The first loop reads what ``state.json`` recorded. The post-loop branches
+    then mark what the recorded state implies but nothing wrote: an apply phase
+    whose review left nothing to apply is ``skipped`` (``apply-suggestions``,
+    ``apply-task-suggestions``, ``apply-code-fixes``), and a write phase with
+    some of its own batches or tasks recorded ``completed`` is ``in_progress``
+    (for an apply phase, unless its last dated run predates its review's latest
+    completion).
+    ``suggested_next`` is picked once, after every one of those changes, so it
+    can never name a phase this payload shows as skipped
+    (plans/next-phase-command.md §2.1). A skip ``full`` recorded itself is read
+    by the first loop and keeps ``full``'s own reason.
+    """
     ALL_PHASES = list(PREREQUISITE_PHASES)
 
     phases = {}
-    suggested_next = None
 
     for phase in ALL_PHASES:
         if state.is_phase_completed(phase):
@@ -682,8 +826,18 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
             phases[phase] = {"status": "pending"}
             if phase in OPTIONAL_PHASES:
                 phases[phase]["optional"] = True
-            if suggested_next is None and phase not in OPTIONAL_PHASES:
-                suggested_next = phase
+
+    # apply-suggestions: a completed review-plan whose every group was judged
+    # `invalid` left nothing to apply. Keyed on `open_count`, never on the
+    # reason text, and only that one return carries it: no `validation.json`,
+    # an unreadable one, or a review whose only groups are
+    # `needs-human-decision` (which apply-suggestions presents) marks nothing.
+    if (phases["apply-suggestions"]["status"] == "pending"
+            and phases["review-plan"]["status"] == "completed"):
+        plan_check = check_apply_suggestions_prerequisite(state, plan_dir)
+        if plan_check.get("open_count") == 0:
+            phases["apply-suggestions"]["status"] = "skipped"
+            phases["apply-suggestions"]["reason"] = "skipped (no valid findings)"
 
     # For apply-task-suggestions phase, determine skip reason from review-tasks state.
     # Cache the prerequisite check result to avoid redundant I/O (used again in notices below).
@@ -698,6 +852,20 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
             if cached_task_check.get("reason") == "skipped (no findings)":
                 phases["apply-task-suggestions"]["status"] = "skipped"
                 phases["apply-task-suggestions"]["reason"] = "skipped (no findings)"
+
+    # apply-code-fixes: the same two checks, in the same order — the review's
+    # own status before any file. A skipped code-review reads nothing (a
+    # `grouped.json` left over from an earlier review cannot count), a
+    # completed one asks the predicate `full`'s `step_apply_code_fixes` asks,
+    # and one that is neither (not run, failed, stopped mid-run) marks nothing.
+    if phases["apply-code-fixes"]["status"] == "pending":
+        if phases["code-review"]["status"] == "skipped":
+            phases["apply-code-fixes"]["status"] = "skipped"
+            phases["apply-code-fixes"]["reason"] = "skipped (prerequisite skipped)"
+        elif phases["code-review"]["status"] == "completed":
+            if not _grouped_has_suggestions(plan_dir / "code-review" / "grouped.json"):
+                phases["apply-code-fixes"]["status"] = "skipped"
+                phases["apply-code-fixes"]["reason"] = "skipped (no findings)"
 
     # For implement phase, add task progress. `implementation_task_statuses`
     # (not `get_all_task_statuses`) filters `task_status` to the T### ids the
@@ -727,10 +895,47 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
             # F9.5: `actionable_count` is a count of valid GROUPS (see the
             # matching comment on `check_apply_task_suggestions_prerequisite`),
             # so this notice must not call it "suggestions" either.
-            notices.append(
+            notice = (
                 f"review-tasks produced {actionable_count} unapplied task suggestion groups. "
                 f"Run --apply-task-suggestions to apply them, or proceed to --implement to skip."
             )
+            notices.append(notice)
+            # Also on the entry of the phase it concerns, so a reader that
+            # needs "which phase is this notice about" (the next-phase
+            # builder's `optional_before[].why`) reads a key instead of
+            # parsing prose. `notices` itself is unchanged, so `status`
+            # output stays the same.
+            phases["apply-task-suggestions"]["notice"] = notice
+
+    # An apply phase with some of its own write batches recorded `completed`
+    # has progress on record: it is `in_progress`, not `pending`, so a command
+    # for it carries `--resume` (a bare re-invocation starts the phase over).
+    # It records itself completed only once every batch verified
+    # (`write_batch_scheduler._finalize`), and a phase this payload already
+    # shows as completed or skipped is left alone. Batches whose phase last
+    # ran before its review last completed are an earlier cycle's and mark
+    # nothing: `--resume` there would replay that cycle's recorded decisions
+    # against the new review's findings.
+    task_statuses = state.get_all_task_statuses()
+    for phase, pattern in APPLY_BATCH_ID_PATTERNS.items():
+        if phases[phase]["status"] in DONE_STATUSES:
+            continue
+        if any(
+            pattern.match(task_id) and status == "completed"
+            for task_id, status in task_statuses.items()
+        ) and not _apply_batches_predate_review(state, phases, phase):
+            phases[phase]["status"] = "in_progress"
+
+    # Picked once, after every post-loop change above: the first non-optional
+    # phase that is neither completed nor skipped. `in_progress` counts as
+    # open, so a partly implemented plan keeps `suggested_next: implement`.
+    suggested_next = None
+    for phase in ALL_PHASES:
+        if phase in OPTIONAL_PHASES:
+            continue
+        if phases[phase]["status"] not in DONE_STATUSES:
+            suggested_next = phase
+            break
 
     result = {
         "plan": str(plan_path),

@@ -41,8 +41,14 @@ from .container import entrypoint
 #: on purpose — this is the assertion, so reading it from the file it is meant to
 #: guard would make the module agree with any edit at all.
 ROW_ID = "claude-code-apply-native"
-ROW_PIN = "anthropic/claude-haiku-4.5"
-HOST_PIN = "~deepseek/deepseek-v4-flash-latest"
+#: Moved 2026-10-01 by the operator's cheap-models-only decision (see the MODEL
+#: POLICY block in host_matrix.yaml): the four write-native row overrides left
+#: `anthropic/claude-haiku-4.5` ($1/$5 per M through OpenRouter) for luna, and
+#: the claude-code host pin left DeepSeek (DSML markup leak) for luna too.
+ROW_PIN = "openai/gpt-6-luna"
+HOST_PIN = "openai/gpt-6-luna"
+#: The non-claude-code hosts' pin.
+OTHER_HOST_PIN = "deepseek/deepseek-v4.1-flash"
 
 #: The claude-code per-phase rows (`live_native_phase`), added 2026-09-22 by
 #: `plans/chain-lane-write-runner-matrix.md` §3.4. Each is deliberately on the
@@ -151,7 +157,8 @@ class TestTheShippedMatrixDeclaresExactlyOneRowPin:
         """The override is per row and must not have crept up to a host block."""
         assert {host: (entry.get("model") or {}).get("slug")
                 for host, entry in _matrix().items()} == {
-            "claude-code": HOST_PIN, "codex": HOST_PIN, "opencode": HOST_PIN}
+            "claude-code": HOST_PIN, "codex": OTHER_HOST_PIN,
+            "opencode": OTHER_HOST_PIN}
 
 
 class TestTheArgvTheRowReallyLaunches:
@@ -170,7 +177,7 @@ class TestTheArgvTheRowReallyLaunches:
         entry = _matrix()["claude-code"]
         return entrypoint.build_host_argv(entry, _row("claude-code", row_id))
 
-    def test_the_apply_native_row_launches_on_haiku(self):
+    def test_the_apply_native_row_launches_on_its_row_pin(self):
         argv = self._argv(ROW_ID)
         assert ["--model", ROW_PIN] == argv[argv.index("--model"):
                                             argv.index("--model") + 2]

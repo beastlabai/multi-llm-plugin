@@ -5059,6 +5059,268 @@ def run_host(host: str, entry: dict, row: dict, home: Path, overlay: dict,
     return record
 
 
+# --------------------------------------------------------------------------- #
+# T10 of plans/next-phase-command.md: the fixture plan and the typed follow-up
+# --------------------------------------------------------------------------- #
+
+def install_fixture_plan(fixture: dict) -> Path:
+    """Copy the row's fixture plan into place and return its path.
+
+    A `next_command_check` row runs its phase on a plan whose path holds a
+    SPACE, so the command the dispatcher prints carries the double-quoted form
+    (§2.1) and the typed check can see whether the quoting survived the route.
+    The plan is a byte copy of the seeded one (`source`), so the stub scenario
+    that answers it is the one every other row already uses. Copied before the
+    whole-row census is taken, so it is part of the workspace the row starts
+    from rather than a write the row made.
+    """
+    source = WORKSPACE / str(fixture.get("source") or "")
+    target = WORKSPACE / str(fixture.get("path") or "")
+    if not str(fixture.get("path") or "").strip() or target == WORKSPACE:
+        raise SystemExit("entrypoint: `fixture_plan.path` is empty")
+    if not source.is_file():
+        raise SystemExit(f"entrypoint: `fixture_plan.source` {source} is not a "
+                         f"file in the seeded workspace")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(source, target)
+    log(f"fixture plan: {source.relative_to(WORKSPACE)} -> "
+        f"{target.relative_to(WORKSPACE)!s}")
+    return target
+
+
+def _printed_next_step(receipt_dir: Path) -> dict | None:
+    """The last `user_next_step` a receipt in *receipt_dir* carried, or ``None``.
+
+    The receipts are the dispatcher's own result lines (`wrapper.run_uv` parses
+    them with the product's parser), so this is the command the dispatcher
+    PRINTED in that session — what a user would copy — and never one the rig
+    composes from a template.
+    """
+    found = None
+    receipts = []
+    for path in sorted(receipt_dir.glob("*.receipt.json")) if receipt_dir.is_dir() else []:
+        try:
+            receipts.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            continue
+    for receipt in sorted(receipts, key=lambda r: int(r.get("seq") or 0)):
+        payload = receipt.get("result") if isinstance(receipt, dict) else None
+        if isinstance(payload, dict) and isinstance(payload.get("user_next_step"), dict):
+            found = payload["user_next_step"]
+    return found
+
+
+def _receipt_mode(receipt: dict) -> str | None:
+    argv = [str(t) for t in (receipt.get("argv") or [])]
+    for index, token in enumerate(argv):
+        if token.endswith("multi_llm.py") and index + 1 < len(argv):
+            return argv[index + 1]
+    return None
+
+
+def _typed_prompt(host: str, entry: dict, command: str) -> tuple[str, str]:
+    """`(the string handed to the host, the surface it went through)`.
+
+    The printed command is passed VERBATIM — no template around it — to the
+    host's own headless surface, which is the measured way each host is
+    launched (`invoke_argv`, `invoke_provenance: verified`):
+
+    * codex and claude-code take a prompt, so the command IS the prompt — the
+      exact line a user pastes into the composer.
+    * opencode's headless form is `opencode run --command multi-llm -- <args>`
+      (capabilities.yaml's verified `headless_invocation`): a bare
+      `opencode run -- "/multi-llm …"` sends the line as literal text and never
+      expands the command (measured on the documented-invocation row). So the
+      command's own `/multi-llm ` prefix is what `--command multi-llm` names,
+      and the rest is the argument string, byte for byte. A printed command
+      without that prefix cannot be typed on this surface, and says so.
+    """
+    if host == "opencode":
+        prefix = "/multi-llm "
+        if not command.startswith(prefix):
+            raise ValueError(
+                f"the printed command {command!r} does not start with "
+                f"{prefix!r}, the command name `--command multi-llm` types")
+        return command[len(prefix):], "headless: opencode run --command multi-llm -- <args>"
+    return command, "headless: the command as the whole prompt"
+
+
+def run_typed_followup(host: str, entry: dict, row: dict, home: Path,
+                       overlay: dict, key: str, creds: str = "openrouter",
+                       secrets=()) -> dict:
+    """T10's typed-template check: a FRESH session handed the printed command.
+
+    After the row's own session has run its phase, the command that phase's
+    dispatcher printed (`user_next_step.command`) is handed to a brand-new host
+    process on the same route, in the same workspace — so the phase the command
+    names really is the one that comes next. Its dispatcher calls land in their
+    own receipt directory, `receipts/<row>-typed/`, so nothing graded about the
+    first session can be satisfied (or spoiled) by the second.
+
+    **It stops at the evidence, not at the end of the phase.** The question is
+    whether the typed command reaches the dispatcher as the named mode with the
+    plan argument intact — answered by the first receipt for that mode. The
+    session is stopped a short grace after that receipt lands, so a write phase
+    named by the command (`implement`, here) is dispatched and never driven to
+    the end on the paid host model. A detached worker it launched keeps running
+    on the stub, which costs nothing.
+
+    Output goes to a file under /tmp (the container's own tmpfs) while the host
+    runs, so polling the receipt directory can never fill a pipe and stall the
+    host; it is scrubbed of the row's secrets before it reaches the bundle.
+    """
+    check = dict(row.get("next_command_check") or {})
+    row_id = str(row.get("id"))
+    receipts = OUT / "receipts" / f"{row_id}-typed"
+    record: dict = {"host": host, "row": row_id, "exercised": False}
+    step = _printed_next_step(OUT / "receipts" / row_id)
+    if not step or not step.get("command") or not step.get("phase"):
+        record["reason"] = ("the row's session printed no user_next_step with a "
+                            "command, so there was nothing to type")
+        (OUT / "typed-run.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        log(f"typed follow-up: not run — {record['reason']}")
+        return record
+    command = str(step["command"])
+    phase = str(step["phase"])
+    try:
+        typed, surface = _typed_prompt(host, entry, command)
+    except ValueError as exc:
+        record["reason"] = str(exc)
+        (OUT / "typed-run.json").write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        log(f"typed follow-up: not run — {exc}")
+        return record
+
+    # The host's own launch cell, with the typed string as its whole prompt:
+    # `prompt_template: "{args}"` renders it verbatim on the prompt hosts, and
+    # opencode's host-level `null` template takes `args` verbatim already.
+    wall = int(check.get("typed_wall_clock_s") or 300)
+    typed_row = dict(row, args=typed, wall_clock_s=wall,
+                     prompt_template=(None if host == "opencode" else "{args}"))
+    argv = build_host_argv(entry, typed_row)
+    binary = argv[0]
+    argv[0] = str(REAL_DIR / binary)
+
+    receipts.mkdir(parents=True, exist_ok=True)
+    env = dict(os.environ)
+    env["HOME"] = str(home)
+    env.update(overlay)
+    for var, value in (entry.get("env_extra") or {}).items():
+        env[str(var)] = str(value)
+    env["MLLM_RECEIPT_DIR"] = str(receipts)
+    # The codex plugin's MCP server reaches the dispatcher through a login
+    # shell that reads $HOME/.profile, never this environment
+    # (`export_harness_names_into_profile`); a later export wins there.
+    profile = home / ".profile"
+    if profile.is_file():
+        body = profile.read_text(encoding="utf-8")
+        profile.write_text(body + ("" if body.endswith("\n") else "\n")
+                           + f"export MLLM_RECEIPT_DIR={shlex.quote(str(receipts))}\n",
+                           encoding="utf-8")
+    if host == "claude-code" and creds == "openrouter":
+        assert_claude_key_is_empty(env)
+
+    def _scrub(text: str) -> str:
+        text = text or ""
+        for secret in ([key] if key else []) + list(secrets):
+            text = text.replace(secret, f"<redacted:{creds}-credential>")
+        return text
+
+    grace = float(check.get("typed_grace_s") or 3.0)
+    raw_out = Path("/tmp") / f"mllm-typed-{row_id}.out"
+    raw_err = Path("/tmp") / f"mllm-typed-{row_id}.err"
+    log(f"typed follow-up: {surface}; typing {typed!r} (printed command "
+        f"{command!r}, named phase {phase!r}); wall-clock bound {wall}s")
+    started = time.time()
+    stop_reason = "host exited"
+    dispatched_at = None
+    timed_out = False
+    with raw_out.open("w", encoding="utf-8") as out_handle, \
+            raw_err.open("w", encoding="utf-8") as err_handle:
+        proc = subprocess.Popen(argv, env=env, cwd=str(WORKSPACE), text=True,
+                                stdout=out_handle, stderr=err_handle,
+                                stdin=subprocess.DEVNULL,
+                                start_new_session=True)
+        while proc.poll() is None:
+            elapsed = time.time() - started
+            if dispatched_at is None:
+                for path in sorted(receipts.glob("*.receipt.json")):
+                    try:
+                        receipt = json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, ValueError):
+                        continue
+                    if _receipt_mode(receipt) == phase:
+                        dispatched_at = elapsed
+                        log(f"typed follow-up: {phase} dispatched after "
+                            f"{elapsed:.1f}s ({path.name}); stopping in {grace}s")
+                        break
+            if dispatched_at is not None and elapsed >= dispatched_at + grace:
+                stop_reason = "the named mode dispatched; session stopped"
+                break
+            if elapsed >= wall:
+                stop_reason = "wall-clock"
+                timed_out = True
+                break
+            time.sleep(1.0)
+        if proc.poll() is None:
+            try:
+                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+                proc.wait(timeout=20)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                proc.wait()
+    (OUT / "host-typed-stdout.txt").write_text(
+        _scrub(raw_out.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+    (OUT / "host-typed-stderr.txt").write_text(
+        _scrub(raw_err.read_text(encoding="utf-8", errors="replace")), encoding="utf-8")
+    for path in (raw_out, raw_err):
+        path.unlink(missing_ok=True)
+    record.update({
+        "exercised": True,
+        "phase": phase,
+        "printed_command": command,
+        "typed": typed,
+        "surface": surface,
+        "argv": [binary, *argv[1:]],
+        "exit": proc.returncode,
+        "timed_out": timed_out,
+        "stop_reason": stop_reason,
+        "dispatched_after_s": None if dispatched_at is None else round(dispatched_at, 2),
+        "wall_clock_s": round(time.time() - started, 2),
+        "bound_s": wall,
+        "receipts": str(receipts.relative_to(OUT)),
+    })
+    (OUT / "typed-run.json").write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    log(f"typed follow-up: {stop_reason} after {record['wall_clock_s']}s")
+    return record
+
+
+def plan_output_dir(plan: Path) -> Path:
+    """Where the product writes *plan*'s output: its own `output_dir_path`.
+
+    `<plans>/<stem>` only while the stem is already a safe prefix: the product
+    sanitizes it (`output_handler.sanitize_prefix` — every character outside
+    `[A-Za-z0-9_-]` becomes `_`), so T10's fixture `plans/next phase.md` writes
+    under `plans/next_phase/`. Read from the product rather than retyped, the
+    way `wrapper._write_receipt` reads the result line; the bare stem is only
+    the fallback for a skill tree that cannot be imported, and it is exactly
+    what every pre-T10 row's `auth-feature` resolves to either way.
+    """
+    try:
+        if str(SKILL_DIR) not in sys.path:
+            sys.path.insert(0, str(SKILL_DIR))
+        from utils.output_handler import output_dir_path  # type: ignore
+
+        return Path(output_dir_path(plan))
+    except Exception:  # noqa: BLE001 - the export must never fail on this
+        return plan.parent / plan.stem
+
+
 def poll_terminal_run(plan: Path, timeout: float = 180.0) -> dict:
     """Wait for a detached worker's `.status.json` to reach a terminal run state.
 
@@ -5074,7 +5336,7 @@ def poll_terminal_run(plan: Path, timeout: float = 180.0) -> dict:
     made this loop wait out its whole timeout for a `state` that is structurally
     `None`, and then hand the grader phantom rows to fail a passing row on.
     """
-    root = plan.parent / plan.stem
+    root = plan_output_dir(plan)
     deadline = time.time() + timeout
     seen: dict = {}
     while time.time() < deadline:
@@ -5199,7 +5461,7 @@ def split_command_env(tokens: list[str]) -> tuple[dict[str, str], list[str]]:
 
 def export_artifacts(plan: Path) -> None:
     """Copy the plan's output dir to /work/out (the LAST step, in a finally)."""
-    source = plan.parent / plan.stem
+    source = plan_output_dir(plan)
     target = OUT / "artifacts"
     target.mkdir(parents=True, exist_ok=True)
     if source.is_dir():
@@ -5594,6 +5856,13 @@ def main(argv=None) -> int:
             subprocess.check_call(
                 [sys.executable, str(seeder), "--root", str(WORKSPACE),
                  *spec_argv, "--runner", runner])
+            # T10: a row that runs its phase on a fixture plan — a path with a
+            # space — moves `plan` with it, so the terminal poll and the
+            # artifact export read that plan's output directory.
+            fixture = (_matrix_row(args.host, args.row).get("fixture_plan")
+                       if args.lane == "host" and args.host else None)
+            if fixture:
+                plan = install_fixture_plan(dict(fixture))
             # The WHOLE-ROW pair. Taken here, before `run_pre_commands`, so it
             # brackets everything the container did; `write_host_census` takes
             # the narrower pair that brackets the host process alone.
@@ -5797,6 +6066,14 @@ def main(argv=None) -> int:
                         write_host_census("after")
                     if ((row.get("expect") or {}).get("run")) == "done":
                         poll_terminal_run(plan)
+                    # T10's typed-template check: a FRESH session of the same
+                    # host and route, handed the command this session's
+                    # dispatcher printed. Inside the row's spend bracket, so
+                    # `usage.json` below charges both sessions to the row.
+                    if (row.get("next_command_check") or {}).get("typed_followup"):
+                        run_typed_followup(args.host, entry, row, Path.home(),
+                                           overlay, key, creds=args.creds,
+                                           secrets=secrets)
                     if args.creds != "openrouter":
                         log(f"host row complete (host exit {record['exit']}, "
                             f"credential mode {args.creds})")

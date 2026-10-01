@@ -2413,7 +2413,33 @@ def row_record(row: Row, result: RowResult, outcome: str | None = None,
     cost = cost_block(row, result)
     if cost:
         entry["cost"] = cost
+    observed = next_command_block(row, result)
+    if observed is not None:
+        entry["next_command"] = observed
     return entry
+
+
+def next_command_block(row: Row, result: RowResult) -> dict | None:
+    """T10's observation for a `next_command_check` row, or `None` for any other.
+
+    Derived from the bundle by `next_command_check.observe` — the same pure
+    function the row's tests assert on — so the record says what the row saw
+    whether or not a test got as far as grading it.
+    """
+    if row.lane != "host" or not row.host:
+        return None
+    matrix_row = next((dict(r) for r in
+                       (load_host_matrix().get(row.host) or {}).get("rows") or []
+                       if r.get("id") == row.row_id), None)
+    if not matrix_row or not matrix_row.get("next_command_check"):
+        return None
+    from . import next_command_check
+
+    templates = dict((load_capabilities().get(row.host) or {}).get("next_command") or {})
+    observed = next_command_check.observe(
+        result.out_dir, row.host, row.row_id, matrix_row, templates,
+        route=row.route)
+    return next_command_check.record_block(observed)
 
 
 def census_block(row: Row, result: RowResult, outcome: str) -> dict:

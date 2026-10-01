@@ -431,6 +431,44 @@ class TestConditionalApplyPhases:
         capsys.readouterr()
         assert "apply-code-fixes" in _modes_called(calls)
 
+    @pytest.mark.parametrize("review, apply, step, dirname, payload", [
+        pytest.param(
+            "review-tasks", "apply-task-suggestions", "step_apply_task_suggestions",
+            "review-tasks",
+            [{"group_id": "g1", "suggestions": [{"title": "x", "importance": "HIGH"}]}],
+        ),
+        ("code-review", "apply-code-fixes", "step_apply_code_fixes",
+         "code-review",
+         {"groups": [{"group_id": "g1",
+                      "suggestions": [{"title": "y", "importance": "HIGH"}]}]}),
+    ])
+    def test_a_review_skipped_then_completed_does_not_skip_its_apply_phase(
+        self, tmp_path, review, apply, step, dirname, payload
+    ):
+        """A completion wins over an earlier skip record, as in `status`.
+
+        ``mark_phase_completed`` leaves the stale skip in place; `full` must
+        read the effective status (``_recorded``), not the raw skip flag, or it
+        skips the apply phase while `status` shows it pending.
+        """
+        plan = _plan(tmp_path)
+        phase_dir = _phase_dir(plan, dirname)
+        phase_dir.mkdir(parents=True)
+        (phase_dir / "grouped.json").write_text(json.dumps(payload), encoding="utf-8")
+        state = StateManager(plan)
+        state.mark_phase_skipped(review, reason="earlier skip")
+        state.mark_phase_completed(review)
+        state.save()
+        workflow = fwo.FullWorkflow(
+            fwo.parse_args(["--plan-file", str(plan), "--yes"])
+        )
+        ran = []
+        workflow.run_mode = lambda mode, extra: ran.append(mode) or 0  # type: ignore[assignment]
+        workflow._verify = lambda *a, **k: ("ok", "stub", None)  # type: ignore[assignment]
+        getattr(workflow, step)()
+        assert ran == [apply]
+        assert not StateManager(plan).is_phase_skipped(apply)
+
     def test_the_workflow_never_opts_into_the_standalone_high_gate(
         self, tmp_path, stub_phases, capsys
     ):

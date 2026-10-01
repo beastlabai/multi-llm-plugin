@@ -407,6 +407,25 @@ worker_receipt_is_null_provenance: verified
 #              passes on a claim.
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# MODEL POLICY FOR THE HOST LANE (operator decision 2026-10-01, scoped to running
+# multi-llm tests). Spend on CHEAP models only:
+#   * claude-code billed through OpenRouter -> `openai/gpt-6-luna`. NOT DeepSeek:
+#     its tool-call markup (DSML) leaks through Claude Code's Anthropic skin as
+#     literal text (recorded at claude-code-review-plan and apply-native below).
+#   * claude-code on the Claude subscription (`--creds fallback` /
+#     MLLM_E2E_HOST_CREDS=fallback) -> Haiku or Sonnet.
+#   * every other OpenRouter host (codex, opencode, ...) ->
+#     `deepseek/deepseek-v4.1-flash` ($0.03 in / $0.50 out / $0.01 cache-read per
+#     M, prices as of 2026-10-01), not `~deepseek/deepseek-v4-flash-latest` (the
+#     0731 build, $0.0108 / $1.28 per M, which also hangs under opencode
+#     `--variant`).
+#   * NEVER `anthropic/claude-haiku-4.5` through OpenRouter ($1 / $5 per M).
+# A per-run override goes through MLLM_HOST_MODEL (outranks row and host pins).
+# Slugs named in attempt logs, `detail:` and `usd:` rows below are HISTORY; only
+# `model:` blocks are live. Pins switched 2026-10-01 carry `provenance: unmeasured`
+# until a row of that kind runs on them; the comment above each says what has.
+# ---------------------------------------------------------------------------
 hosts:
 
   # ===========================================================================
@@ -643,11 +662,14 @@ hosts:
     # (added 2026-08-21, after four failures that were the model rather than the
     # shim — the derivation is beside that row). `entrypoint.pinned_model`
     # resolves MLLM_HOST_MODEL > the row block > this one.
+    # SWITCHED 2026-10-01 (see the MODEL POLICY block above `hosts:`) from the
+    # 2026-08-14 pin `~deepseek/deepseek-v4-flash-latest`, `verified`; that block's `why:` below is
+    # the history of the old pin. Evidence on the new slug: only measured on the claude-code-next-command row (runs/20261001T114907Z, passed, skill route); the ask / review-plan / write rows have never run on luna.
     model:
-      slug: "~deepseek/deepseek-v4-flash-latest"
-      arg: ["--model", "~deepseek/deepseek-v4-flash-latest"]
-      provenance: verified
-      resolved_on: "2026-08-14"
+      slug: "openai/gpt-6-luna"
+      arg: ["--model", "openai/gpt-6-luna"]
+      provenance: unmeasured
+      resolved_on: "2026-10-01"
       why: >
         OPERATOR CHOICE (2026-08-14): deepseek v4 flash latest on every host, for
         cost. Resolved against the live catalog: $0.08/M in, $0.16/M out, 1M
@@ -1812,13 +1834,18 @@ hosts:
         # `tests/test_security.py` — i.e. inside `paths` with nothing stray, so
         # R2's widening is confirmed on a second, independent run.
         model:
-          slug: "anthropic/claude-haiku-4.5"
+          slug: "openai/gpt-6-luna"
           # `arg` mirrors the host block's cell and is documentation on the same
           # terms: the argv is rendered by substituting `<model>` in the host's
           # `invoke_argv`, never read from here.
-          arg: ["--model", "anthropic/claude-haiku-4.5"]
-          provenance: verified     # runs/20260821T082250Z — the row passed on it; 3 of 4 again on 2026-09-22 (see `measured:` below)
-          resolved_on: "2026-08-21"
+          arg: ["--model", "openai/gpt-6-luna"]
+          provenance: unmeasured   # luna has run no write-native row; the Haiku evidence in this block is history
+          resolved_on: "2026-10-01"
+          superseded: >
+            2026-10-01, operator decision (cheap models only; never Haiku through OpenRouter,
+            $1/$5 per M): this row was pinned `anthropic/claude-haiku-4.5`, `provenance: verified`,
+            `resolved_on: "2026-08-21"`. The comments around this block and the `why` below describe
+            THAT pin and stay as history.
           scope: row
           why: >
             Four measured-red attempts on the host pin (bundle ids, turn counts,
@@ -2457,8 +2484,8 @@ hosts:
           # four measured-red attempts on it produced two empty-string results
           # and one verbatim DSML tool-call leak, none of which reached a
           # finalization.
-          slug: "anthropic/claude-haiku-4.5"
-          arg: ["--model", "anthropic/claude-haiku-4.5"]
+          slug: "openai/gpt-6-luna"
+          arg: ["--model", "openai/gpt-6-luna"]
           # MEASURED ON THIS ROW 2026-09-22 (`runs/20260922T191142Z`) AND IT
           # LOST: the pin drove a turn that reached the dispatcher and then
           # applied nothing. NOT A VERDICT ON THE SLUG — its two siblings in the
@@ -2466,8 +2493,13 @@ hosts:
           # native loops to the end, so what this measured is a per-turn
           # behaviour and not a property of the model. `measured.attempts` below
           # carries what the turn actually did; T4 owns the re-measurement.
-          provenance: measured-red
-          resolved_on: "2026-09-22"
+          provenance: unmeasured   # luna has run no write-native row; the Haiku evidence in this block is history
+          resolved_on: "2026-10-01"
+          superseded: >
+            2026-10-01, operator decision (cheap models only; never Haiku through OpenRouter,
+            $1/$5 per M): this row was pinned `anthropic/claude-haiku-4.5`, `provenance: measured-red`,
+            `resolved_on: "2026-09-22"`. The comments around this block and the `why` below describe
+            THAT pin and stay as history.
           scope: row
           why: >
             Inherited from `claude-code-apply-native`, whose four failures and
@@ -2726,15 +2758,20 @@ hosts:
         model:
           # Copied from `claude-code-apply-native`'s row pin, for the reason
           # written out on `claude-code-phase-apply-suggestions` above.
-          slug: "anthropic/claude-haiku-4.5"
-          arg: ["--model", "anthropic/claude-haiku-4.5"]
+          slug: "openai/gpt-6-luna"
+          arg: ["--model", "openai/gpt-6-luna"]
           # VERIFIED ON THIS ROW 2026-09-22 (`runs/20260922T191142Z`): the pin
           # drove this phase's native loop end to end on its first execution —
           # 9 dispatcher receipts, 3 Task batches spawned and all 3 completed,
           # both declared trees moved. The prediction in `why` below is ANSWERED
           # AND WRONG: this row did NOT need a pin of its own.
-          provenance: verified
-          resolved_on: "2026-09-22"
+          provenance: unmeasured   # luna has run no write-native row; the Haiku evidence in this block is history
+          resolved_on: "2026-10-01"
+          superseded: >
+            2026-10-01, operator decision (cheap models only; never Haiku through OpenRouter,
+            $1/$5 per M): this row was pinned `anthropic/claude-haiku-4.5`, `provenance: verified`,
+            `resolved_on: "2026-09-22"`. The comments around this block and the `why` below describe
+            THAT pin and stay as history.
           scope: row
           why: >
             Inherited from `claude-code-apply-native` — the only slug measured to
@@ -2964,15 +3001,20 @@ hosts:
         # three-row tier finished in 659.52 s against `cap_s` 7200.
         wall_clock_s: 1350
         model:
-          slug: "anthropic/claude-haiku-4.5"
-          arg: ["--model", "anthropic/claude-haiku-4.5"]
+          slug: "openai/gpt-6-luna"
+          arg: ["--model", "openai/gpt-6-luna"]
           # VERIFIED ON THIS ROW 2026-09-22 (`runs/20260922T191142Z`), and on
           # the one thing the `why` below says the pin is for: the host REACHED
           # THE FINALIZATION. Receipt 18 is `apply-task-suggestions --plan-file
           # plans/auth-feature.md --mark-completed`, exit 0, and `state.json`
           # records `phases_completed["apply-task-suggestions"]`.
-          provenance: verified
-          resolved_on: "2026-09-22"
+          provenance: unmeasured   # luna has run no write-native row; the Haiku evidence in this block is history
+          resolved_on: "2026-10-01"
+          superseded: >
+            2026-10-01, operator decision (cheap models only; never Haiku through OpenRouter,
+            $1/$5 per M): this row was pinned `anthropic/claude-haiku-4.5`, `provenance: verified`,
+            `resolved_on: "2026-09-22"`. The comments around this block and the `why` below describe
+            THAT pin and stay as history.
           scope: row
           why: >
             Inherited from `claude-code-apply-native`, and this is the row where
@@ -3178,6 +3220,47 @@ hosts:
           `TestTheWriteRowsAreGradedOnBytes` grades this row on its ABSENCE — a
           report appearing means the agent typed the flag its shim forbids.
 
+        # T10 of plans/next-phase-command.md — the live check, one phase per
+        # host and route. AUTHORED 2026-10-01. One paid container run answers
+        # three questions, graded by `TestTheNextCommandLiveCheck` over
+        # `next_command_check.observe` (pure, unit-tested offline):
+        #   (a) criterion 4 — the host's FINAL message carries the command its
+        #       dispatcher printed (`user_next_step.command`) as a fenced line,
+        #       byte for byte, plus each `optional_before` command;
+        #   (b) criterion 5 (the package routes) — no `multi_llm` call after the
+        #       phase's terminal result, none whose mode is the next phase;
+        #   (c) the typed template — `entrypoint.run_typed_followup` hands the
+        #       printed command, verbatim, to a FRESH session of the same host
+        #       and route; its receipts (`receipts/<row>-typed/`) must show the
+        #       named mode dispatched with a plan argument naming the fixture and
+        #       holding no quote character. The session is stopped once that
+        #       receipt lands, so the write phase it names is dispatched, never
+        #       driven on the paid model.
+        # The phase is `generate-tasks` on a fixture plan whose path holds a
+        # SPACE (`fixture_plan`, a byte copy of the seeded plan), so the printed
+        # command carries the double-quoted form and `optional_before` is
+        # non-empty (review-tasks). Deselected from `make e2e-container-host` by
+        # its `live_next_command` mark; `make e2e-container-host-next-command`
+        # selects these rows alone.
+      - id: claude-code-next-command
+        # `--yes` typed explicitly (`must_type_explicitly`). The host runs the
+        # one task-generation subagent ITSELF (native Task), so nothing crosses
+        # /opt/mllm/bin and the row declares `fan_out: native`. This host is
+        # staged as a PLAIN SKILL (`stage_host`: a symlink under
+        # `$HOME/.claude/skills/multi-llm`), so the route it exercises is
+        # `next_command.skill`, not the plugin's `default`, and the T11 Stop hook
+        # (a plugin hook) is not installed here — the observation records both.
+        args: '--generate-tasks "plans/next phase.md" --yes'
+        command: "generate-tasks 'plans/next phase.md' --yes"
+        expect: {run: none, exit: 0, phases: [generate-tasks], receipts_min: 2}
+        fan_out: native
+        wall_clock_s: 900
+        cost_budget_usd: 0.15   # DERIVED: claude-code-review-plan's measured $0.034-0.051 on the same pin, three native batches against this row's one, plus a short typed session; the $0.25 floor binds
+        fixture_plan: {source: plans/auth-feature.md, path: "plans/next phase.md"}
+        next_command_check: {phase: generate-tasks, typed_followup: true, typed_wall_clock_s: 300}
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        provenance: verified   # runs/20261001T114907Z (openai/gpt-6-luna, OpenRouter) and runs/20261001T121548Z (sonnet, --creds fallback on the Claude subscription, $0 on the key), 2026-10-01 — every T10 check green both times; both models by MLLM_HOST_MODEL on the operator's instruction, so this row has never run on the host pin. Route observed `skill`, lookup `phase-result`, Stop hook not installed
+
   # ===========================================================================
   codex:
     stage:
@@ -3348,11 +3431,14 @@ hosts:
       (2) the catalog refresh itself fails, on stderr, twice per run:
       "ERROR codex_models_manager::manager: failed to refresh available models:
       timeout waiting for child process to exit". Also non-fatal.
+    # SWITCHED 2026-10-01 (see the MODEL POLICY block above `hosts:`) from the
+    # 2026-08-14 pin `~deepseek/deepseek-v4-flash-latest`, `verified`; that block's `why:` below is
+    # the history of the old pin. Evidence on the new slug: measured on codex rows 2026-10-01: package passed (runs/20261001T115346Z, T131426Z); default file shim passed once (T115800Z), failed the typed check once on a model-caused extra no-plan call (T131203Z); the ask / review-plan / write rows have never run on it.
     model:
-      slug: "~deepseek/deepseek-v4-flash-latest"
-      arg: ["--model", "~deepseek/deepseek-v4-flash-latest"]
-      provenance: verified
-      resolved_on: "2026-08-14"
+      slug: "deepseek/deepseek-v4.1-flash"
+      arg: ["--model", "deepseek/deepseek-v4.1-flash"]
+      provenance: unmeasured
+      resolved_on: "2026-10-01"
       why: >
         OPERATOR CHOICE (2026-08-14): deepseek v4 flash latest on every host, for
         cost. Resolved against the live catalog: $0.08/M in, $0.16/M out, 1M
@@ -3978,6 +4064,42 @@ hosts:
           them. Its scripted-call control is `codex-package-scripted-call`, which
           grades the MECHANISM and never a model choosing the tool.
 
+        # T10 (plans/next-phase-command.md): what this row answers, and how,
+        # is written once, above `claude-code-next-command`.
+      - id: codex-next-command
+        args: '--generate-tasks "plans/next phase.md"'
+        # FOREGROUND, not detached: the shim adds `--detach` to a FAN-OUT mode
+        # only (step 5), and `generate-tasks` is not one. Measured on both file
+        # routes, 2026-10-01 (runs/20261001T113344Z, runs/20261001T113914Z): the
+        # model ran the phase in one shell call, as the shim says, and the
+        # first authoring of this row's `run: done` was the rig's error.
+        command: "generate-tasks 'plans/next phase.md' --yes --exec-subagents"
+        expect: {run: none, exit: 0, phases: [generate-tasks], receipts_min: 2}
+        wall_clock_s: 900
+        cost_budget_usd: 0.05   # DERIVED: codex-review-plan's measured $0.009-0.026 on the same pin, plus a short typed session; the $0.25 floor binds
+        fixture_plan: {source: plans/auth-feature.md, path: "plans/next phase.md"}
+        next_command_check: {phase: generate-tasks, typed_followup: true, typed_wall_clock_s: 300}
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        provenance: verified   # runs/20261001T115800Z (deepseek/deepseek-v4.1-flash, MLLM_HOST_MODEL), 2026-10-01 — all green. The first run, runs/20261001T113914Z on the pin, was green on every T10 check and red only on this row's own first `run: done`, a rig error corrected above
+
+        # T10 (plans/next-phase-command.md): what this row answers, and how,
+        # is written once, above `claude-code-next-command`.
+      - id: codex-package-next-command
+        route: package
+        args: '--generate-tasks "plans/next phase.md"'
+        # The row-16 sentence `codex-package-ask` measured; the `$` mention the
+        # `next_command.package` template spells is what the TYPED session tests.
+        prompt_template: |
+          Use the `multi-llm:multi-llm` skill with exactly these arguments: {args}
+        command: "generate-tasks 'plans/next phase.md' --yes --detach"
+        expect: {run: done, exit: 0, phases: [generate-tasks], receipts_min: 2}
+        wall_clock_s: 900
+        cost_budget_usd: 0.05   # DERIVED: codex-package-ask's measured $0.000623-0.002400, plus a typed session; the $0.25 floor binds
+        fixture_plan: {source: plans/auth-feature.md, path: "plans/next phase.md"}
+        next_command_check: {phase: generate-tasks, typed_followup: true, typed_wall_clock_s: 300}
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        provenance: verified   # runs/20261001T113244Z (pin) and runs/20261001T115346Z (deepseek/deepseek-v4.1-flash, MLLM_HOST_MODEL), 2026-10-01 — all green both times
+
     # -------------------------------------------------------------------------
     # THE CODEX PACKAGE ROUTE's ZERO-QUOTA ROWS (plans/codex-native-plugin.md
     # Phase 1 items 1, 1a, 5–14 — AUTHORED 2026-09-23, NONE HAS RUN).
@@ -4281,11 +4403,14 @@ hosts:
       not name still resolves — plus `permission: {bash: allow, edit: allow}`.
       The seed's own opencode.json (the provider lane's {{base_url}} stub block)
       is OVERWRITTEN rather than copied, or it shadows the host wiring.
+    # SWITCHED 2026-10-01 (see the MODEL POLICY block above `hosts:`) from the
+    # 2026-08-14 pin `~deepseek/deepseek-v4-flash-latest`, `verified`; that block's `why:` below is
+    # the history of the old pin. Evidence on the new slug: measured on opencode rows 2026-10-01: file shim passed (runs/20261001T130949Z, T115548Z); package passed (T115138Z, T131625Z); the ask / review-plan / write rows have never run on it.
     model:
-      slug: "~deepseek/deepseek-v4-flash-latest"
-      arg: ["--model", "~deepseek/deepseek-v4-flash-latest"]
-      provenance: verified
-      resolved_on: "2026-08-14"
+      slug: "deepseek/deepseek-v4.1-flash"
+      arg: ["--model", "deepseek/deepseek-v4.1-flash"]
+      provenance: unmeasured
+      resolved_on: "2026-10-01"
       why: >
         OPERATOR CHOICE (2026-08-14): deepseek v4 flash latest on every host, for
         cost. Resolved against the live catalog: $0.08/M in, $0.16/M out, 1M
@@ -5074,3 +5199,35 @@ hosts:
           overwriting the shim's entry) and `_write_opencode_config` write
           `plugin[]`. Crediting a plugin run to the shim, or the reverse, would
           let either route rot behind the other's evidence.
+
+        # T10 (plans/next-phase-command.md): what this row answers, and how,
+        # is written once, above `claude-code-next-command`.
+      - id: opencode-next-command
+        args: '--generate-tasks "plans/next phase.md"'
+        # FOREGROUND, not detached: the shim adds `--detach` to a FAN-OUT mode
+        # only (step 5), and `generate-tasks` is not one. Measured on both file
+        # routes, 2026-10-01 (runs/20261001T113344Z, runs/20261001T113914Z): the
+        # model ran the phase in one shell call, as the shim says, and the
+        # first authoring of this row's `run: done` was the rig's error.
+        command: "generate-tasks 'plans/next phase.md' --yes --exec-subagents"
+        expect: {run: none, exit: 0, phases: [generate-tasks], receipts_min: 2}
+        wall_clock_s: 900
+        cost_budget_usd: 0.05   # DERIVED: opencode-review-plan's measured $0.007-0.021 on the same pin, plus a short typed session; the $0.25 floor binds
+        fixture_plan: {source: plans/auth-feature.md, path: "plans/next phase.md"}
+        next_command_check: {phase: generate-tasks, typed_followup: true, typed_wall_clock_s: 300}
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        provenance: measured-red   # runs/20261001T113344Z (pin) and runs/20261001T115548Z (deepseek/deepseek-v4.1-flash), 2026-10-01 — criterion 4 red both times, the same shape: the primary command fenced, the optional review-tasks command written inline. Typed check green both times. Owner: the next-step instruction text (only references/summary-format.md says the optional command takes its own fence) — a T10 finding, not corrected here
+
+        # T10 (plans/next-phase-command.md): what this row answers, and how,
+        # is written once, above `claude-code-next-command`.
+      - id: opencode-package-next-command
+        route: package
+        args: '--generate-tasks "plans/next phase.md"'
+        command: "generate-tasks 'plans/next phase.md' --yes --detach"
+        expect: {run: done, exit: 0, phases: [generate-tasks], receipts_min: 2}
+        wall_clock_s: 900
+        cost_budget_usd: 0.05   # DERIVED: opencode-package-review-plan's measured $0.0013-0.0017, plus a typed session; the $0.25 floor binds
+        fixture_plan: {source: plans/auth-feature.md, path: "plans/next phase.md"}
+        next_command_check: {phase: generate-tasks, typed_followup: true, typed_wall_clock_s: 300}
+        scenario: /opt/mllm/skill/tests/fixtures/e2e/scenarios/container_full_chain.yaml
+        provenance: verified   # runs/20261001T115138Z (deepseek/deepseek-v4.1-flash, MLLM_HOST_MODEL), 2026-10-01 — all green. The first run, runs/20261001T112645Z on the pin, was green on every T10 check and red only on the rig's poll/export of a sanitized output dir (`plans/next_phase/`), fixed in `entrypoint.plan_output_dir`

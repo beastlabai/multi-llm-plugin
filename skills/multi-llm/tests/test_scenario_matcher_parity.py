@@ -556,7 +556,6 @@ def stub_factory(tmp_path_factory):
     in-process call to :func:`scenario_matcher.resolve` would compare this module
     against itself.
     """
-    import socket
     import urllib.error
     import urllib.request
 
@@ -564,15 +563,10 @@ def stub_factory(tmp_path_factory):
     started: dict[Path, tuple[str, Path]] = {}
     procs: list[subprocess.Popen] = []
 
-    def _free_port() -> int:
-        with socket.socket() as probe:
-            probe.bind(("127.0.0.1", 0))
-            return probe.getsockname()[1]
-
     def factory(scenario: Path) -> tuple[str, Path]:
         if scenario in started:
             return started[scenario]
-        port = _free_port()
+        port_file = root / f"{scenario.stem}.port"
         log = root / f"{scenario.stem}.jsonl"
         env = os.environ.copy()
         # The stub reaches for `tests.scenario_matcher`; inside the image that is
@@ -582,13 +576,28 @@ def stub_factory(tmp_path_factory):
             [str(TESTS_DIR.parent), env.get("PYTHONPATH", "")]
         ).rstrip(os.pathsep)
         proc = subprocess.Popen(
-            [sys.executable, str(STUB_SERVER), "--port", str(port),
-             "--log", str(log), "--scenario", str(scenario)],
+            [sys.executable, str(STUB_SERVER), "--port", "0",
+             "--port-file", str(port_file), "--log", str(log), "--scenario", str(scenario)],
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
         )
         procs.append(proc)
-        base = f"http://127.0.0.1:{port}"
+        # The stub binds port 0 and publishes the real port to a file once it is
+        # listening: no pick-close-rebind race, and a file polls on Windows too.
         deadline = time.time() + 20
+        while not (port_file.exists() and port_file.read_text().strip()):
+            if proc.poll() is not None:  # pragma: no cover - startup failure
+                raise AssertionError(
+                    f"stub exited {proc.returncode} before writing {port_file}:\n"
+                    f"{proc.stderr.read() if proc.stderr else ''}"
+                )
+            if time.time() > deadline:  # pragma: no cover - startup failure
+                proc.kill()
+                raise AssertionError(
+                    f"stub never wrote {port_file} within 20s:\n"
+                    f"{proc.stderr.read() if proc.stderr else ''}"
+                )
+            time.sleep(0.05)
+        base = f"http://127.0.0.1:{int(port_file.read_text().strip())}"
         while time.time() < deadline:
             if proc.poll() is not None:  # pragma: no cover - startup failure
                 raise AssertionError(

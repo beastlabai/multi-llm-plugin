@@ -284,7 +284,10 @@ Report in the shape `references/summary-format.md` defines, carrying:
 - Path of the rendered tasks file (`{plan}/tasks/tasks.md`) and the plan's fresh
   `<!-- TASKS_FILE: … -->` marker
 - Number of tasks generated and their dependencies
-- Next step hint: "Run `/multi-llm:multi-llm --review-tasks $PLAN_PATH` to review tasks with multiple LLMs before implementation (optional)"
+- The next step exactly as that file's `### Next Steps` rule gives it: the
+  `user_next_step` command, copied, never composed. The optional task review
+  (`review-tasks`), when it is still pending, is listed after that command
+  under "Optional, before that:", its command in its own fenced block.
 
 ---
 
