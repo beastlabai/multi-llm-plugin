@@ -43,7 +43,9 @@ Grammar (one line, no shell preprocessing)::
   ``MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[…],"next":…}``
   — emitted even on a crash, so the contract holds for a host that cannot parse
   prose or is tailing a detached log. ``next`` is ``null`` whenever no follow-up
-  is owed, which is the normal case.
+  is owed, which is the normal case. Optional keys join these only when set;
+  one of them, ``user_next_step``, is the workflow's next phase as a command for
+  the *user* to type — never a follow-up for the caller, which is ``next``.
 """
 
 from __future__ import annotations
@@ -72,6 +74,7 @@ from utils.cli_common import (
     dispatcher_command,
     flag_present,
     flag_value,
+    invocation,
     record_invocation,
     render_instruction_text,
     skill_dir,
@@ -125,6 +128,12 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "restore-batch": ("utils.restore_batch", "main",
                       "Restore a failed write batch from its pre-batch snapshot."),
     "runs": ("utils.run_registry", "main", "List (or --sweep) this project's detached runs."),
+    "report-check": ("utils.report_check", "main",
+                     "Check a turn's final message copies the printed next "
+                     "command (Claude Code Stop hook)."),
+    "next-command": ("utils.next_phase", "main",
+                     "Print a plan's next workflow command (read-only; "
+                     "--after <mode>, --host <id>)."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }
 
@@ -214,6 +223,9 @@ def render_help() -> str:
         "",
         "Every invocation ends with one machine-readable line:",
         '  MULTI_LLM_RESULT: {"mode","phase","state","exit","artifacts":[...],"next":...}',
+        "Optional keys join these only when set. One is `user_next_step`: the",
+        "workflow's next phase as a command for the user to type, never a",
+        "follow-up for the caller (that is `next`).",
         "",
         "Utility scripts live under a separate namespace: `multi_llm.py util --help`.",
     ]
@@ -239,6 +251,11 @@ def render_util_help() -> str:
         "`util instructions <mode>` prints instructions/<mode>.md with every",
         "skill-dir placeholder replaced by the running skill dir, so the text a host",
         "agent reads contains no unexpanded token.",
+        "",
+        "`util next-command <plan> [--after <mode>] [--host <id>]` prints the",
+        "workflow's next phase as the next-command block (or the workflow-complete",
+        "line) and sets MULTI_LLM_RESULT.user_next_step: a command for the user to",
+        "type, never a follow-up for the caller. It reads state.json as recorded.",
     ]
     return "\n".join(lines)
 
@@ -934,6 +951,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             traceback.print_exc()
             crash = _crash_summary()
             exit_code = EXIT_ERROR
+        try:
+            _emit_user_next_step(ctx, exit_code)
+        except Exception as exc:  # noqa: BLE001 - advisory, never the exit code
+            from utils.next_phase import lookup_failure_line
+
+            print(lookup_failure_line(exc), file=sys.stderr)
         ctx.emit(exit_code)
         return exit_code
     finally:
@@ -952,6 +975,76 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _close_detached_run(exit_code, crash, ctx.state)
         deactivate_result()
         clear_invocation()
+
+
+def _write_phases() -> "frozenset":
+    """The phases whose batch loop is the invoker's without ``--exec-subagents``.
+
+    From the executor's own table (``subagent_tasks.PHASE_BY_WRITE_KIND``, the
+    mode/``state.json`` spelling), never a hand-kept list.
+    """
+    from utils.subagent_tasks import PHASE_BY_WRITE_KIND
+
+    return frozenset(PHASE_BY_WRITE_KIND.values())
+
+
+def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
+    """Set ``user_next_step`` and print its block (plans/next-phase-command.md §2.2(1)).
+
+    Only for the recorded invocation of a workflow-phase mode that exits 0 or 2,
+    or ``full`` on 0, with no ``next`` owed — and never for a write phase that
+    handed its batch loop to the invoker (no ``--exec-subagents``) or for the
+    invoker of a ``--detach`` launch, whose run's terminal poll answers instead.
+    That last exclusion is the ``next`` test itself: ``detach.launch`` records
+    the run's poll command as ``next`` on both of its success paths (a fresh
+    launch and an ``--if-not-running`` re-attach) and fails every other way
+    with exit 1 or 3. A ``--detach`` invocation that ended before the boundary
+    — the completed-phase guard's exit 2, which the tool routes hit on every
+    re-run because they always append ``--detach`` — launched nothing, so no
+    poll will ever answer for it, and it goes through the builder like any
+    foreground exit. The builder's gate decides the rest. ``plan_arg`` is the
+    ``--plan-file`` value as received; a detached worker, whose argv holds it
+    absolute, takes the run record's ``plan_arg`` (else its ``plan_file``). The
+    block goes to stderr when the invocation asked for JSON output.
+    """
+    record = invocation()
+    if not record or ctx.next:
+        return
+    mode = mode_table.resolve(str(record.get("mode") or ""))
+    if mode is None:
+        return
+    if mode.runs_workflow:
+        if exit_code != EXIT_OK:
+            return
+    elif not (mode.is_workflow_phase and exit_code in (EXIT_OK, EXIT_NOTHING_TO_DO)):
+        return
+    argv = list(record.get("argv") or [])
+    worker = flag_present(argv, "--internal-worker")
+    # No `--detach` test here: a launched or re-attached run already returned
+    # above on its recorded `next`, and keying on the flag instead silenced a
+    # completed phase's exit 2 that launched no run and so has no poll to
+    # carry the answer.
+    if mode.phase in _write_phases() and not flag_present(argv, "--exec-subagents"):
+        return
+    plan_arg = flag_value(argv, "--plan-file")
+    plan_path = os.path.abspath(plan_arg) if plan_arg else None
+    detach = sys.modules.get("utils.detach") if worker else None
+    handle = detach.active_run() if detach is not None else None
+    if handle is not None:
+        plan_path = handle.plan_file
+        plan_arg = handle.plan_arg or handle.plan_file
+    if not plan_arg:
+        return
+    from utils import next_phase
+
+    as_json = flag_value(argv, "--output-format") == "json"
+    next_phase.emit_answer(
+        plan_arg,
+        resolve_host(argv),
+        mode.name,
+        plan_path=plan_path,
+        stream=sys.stderr if as_json else sys.stdout,
+    )
 
 
 def _raise_on_sigterm(signum, frame):  # pragma: no cover - exercised in a subprocess

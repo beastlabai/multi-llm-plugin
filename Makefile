@@ -104,7 +104,7 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
 # The image tags are values, never rule targets: `mllm-e2e:local` contains a colon,
 # which make would read as a target/prerequisite separator.
 .PHONY: help e2e-preflight e2e-image e2e-image-latest e2e-container e2e-container-host \
-        e2e-container-host-phases \
+        e2e-container-host-phases e2e-container-host-next-command \
         e2e-container-host-discovery e2e-container-host-invocation \
         e2e-version-delta e2e-container-latest \
         e2e-container-latest-host e2e-live-provider e2e-lock-update e2e-verify-record \
@@ -120,6 +120,7 @@ help:
 	@echo "  make e2e-container                 pinned build; provider lane (no secrets, --network none)"
 	@echo "  make e2e-container-host            pinned build; host lane (needs OPENROUTER_API_KEY)"
 	@echo "  make e2e-container-host-phases     host lane, claude-code per-phase tier; EXPENSIVE (~\$$3-5/pass)"
+	@echo "  make e2e-container-host-next-command host lane, T10 next-command rows (needs OPENROUTER_API_KEY)"
 	@echo "  make e2e-container-host-discovery  host lane, --creds none tier: stage + list, no key, no network"
 	@echo "  make e2e-container-host-invocation host lane, --creds none tier: type the documented /multi-llm string"
 	@echo "  make e2e-container-latest         CLIs @latest; provider lane only; credential-free by construction"
@@ -210,7 +211,7 @@ e2e-container-host: e2e-image
 	@test -n "$${OPENROUTER_API_KEY:-}" || { \
 	  echo "make: the host lane needs OPENROUTER_API_KEY (a DEDICATED key carrying a key-level spend limit)."; \
 	  echo "      For the credential-free tier run: make e2e-container-host-discovery"; exit 1; }
-	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" $(PYTEST) -m "container and live and not live_native_phase"
+	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" $(PYTEST) -m "container and live and not live_native_phase and not live_next_command"
 
 # The claude-code PER-PHASE tier: one workflow phase per row, seeded by the
 # row's `pre_commands` leg so the host turn does exactly one phase natively.
@@ -244,6 +245,21 @@ e2e-container-host-phases: e2e-image
 	MLLM_E2E_BUDGET_USD="$${MLLM_E2E_BUDGET_USD:-6.00}" \
 	MLLM_E2E_MATRIX_TIMEOUT_S="$${MLLM_E2E_MATRIX_TIMEOUT_S:-3600}" \
 	  $(PYTEST) -m "container and live and live_native_phase"
+
+# T10 of plans/next-phase-command.md: the next-command live check. One
+# `generate-tasks` row per host and route the lane can run (codex and opencode,
+# file and package; claude-code as the plain skill it is staged as), each with
+# a short typed follow-up session that hands the printed command to a FRESH
+# session. Cheap (measured 2026-10-01: $0.001-0.03 a row on deepseek v4 flash,
+# ~$0.13 for claude-code on gpt-6-luna) but paid, so it is its own tier:
+# `make e2e-container-host` excludes `live_next_command`. One row at a time is
+# this expression plus `-k '[<row id>]'` (brackets included) on the pytest line.
+e2e-container-host-next-command: e2e-image
+	@test -n "$${OPENROUTER_API_KEY:-}" || { \
+	  echo "make: the next-command tier needs OPENROUTER_API_KEY (a DEDICATED key carrying a key-level spend limit)."; exit 1; }
+	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" \
+	MLLM_E2E_BUDGET_USD="$${MLLM_E2E_BUDGET_USD:-1.00}" \
+	  $(PYTEST) -m "container and live and live_next_command"
 
 # The third, FREE tier of the host lane (C6): stage the shim, cross the reload
 # boundary, assert the command is listed and invocable — then stop. No workflow

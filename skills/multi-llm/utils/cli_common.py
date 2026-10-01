@@ -46,6 +46,7 @@ exists. Print them; never persist them.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import shlex
@@ -582,6 +583,7 @@ class ResultContext:
         self.notice: Optional[str] = None
         self.progress: Optional[Dict[str, Any]] = None
         self.progress_lines: Optional[List[str]] = None
+        self.user_next_step: Optional[Dict[str, Any]] = None
         self._emitted = False
 
     # -- recording ------------------------------------------------------
@@ -741,6 +743,29 @@ class ResultContext:
         kept = [str(line) for line in lines if line] if lines else []
         self.progress_lines = kept or None
 
+    def set_user_next_step(self, obj: Optional[Dict[str, Any]]) -> None:
+        """Record the workflow's next phase, as the command the *user* types.
+
+        ``{"phase", "command", "optional_before": [{"phase", "command",
+        "why"}], "complete": false}`` (``optional_before`` omitted when empty),
+        or exactly ``{"phase": null, "command": null, "complete": true}`` when
+        the workflow is complete (plans/next-phase-command.md §2.1).
+
+        Deliberately **not** ``next``: ``next`` is a follow-up for the *caller*,
+        and a tool route (the opencode plugin, the codex MCP server)
+        auto-follows it without asking. This is the next *phase*, a command
+        for the user to type in a fresh context; followed by a tool route it
+        would start an unrequested phase. So the two never share a key, and
+        :meth:`payload` never carries this one beside a non-null ``next``.
+
+        Stored as a copy, so a caller that keeps mutating its dict cannot move
+        the line after the fact. A completed answer (``command`` null) is an
+        answer and is kept; only ``None`` clears the key. ``None`` — the
+        builder had no answer — leaves the line byte-for-byte what it was, and
+        "absent" always means "no answer", never "workflow complete".
+        """
+        self.user_next_step = copy.deepcopy(obj) if obj is not None else None
+
     # -- emitting -------------------------------------------------------
     def payload(self, exit_code: int) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -773,6 +798,18 @@ class ResultContext:
             payload["progress"] = dict(self.progress)
         if self.progress_lines:
             payload["progress_lines"] = list(self.progress_lines)
+        # `is not None`, never truthiness: the completed answer
+        # (`command: null`) is an answer and must ride the line. The second
+        # guard is defensive — the emitters' gate already keeps the key off
+        # these runs — so the key can never sit beside a follow-up the caller
+        # owes (`next`), or on a failed or needs-human run, whose `next` /
+        # `options` own what happens instead.
+        if (
+            self.user_next_step is not None
+            and not self.next
+            and exit_code not in (EXIT_ERROR, EXIT_NEEDS_HUMAN)
+        ):
+            payload["user_next_step"] = copy.deepcopy(self.user_next_step)
         return payload
 
     def emit(self, exit_code: int, stream=None) -> None:
@@ -911,6 +948,16 @@ def record_progress_lines(lines: Optional[Sequence[str]]) -> None:
     """Record the rendered progress line(s), if a dispatcher run is active."""
     if _ACTIVE is not None:
         _ACTIVE.set_progress_lines(lines)
+
+
+def record_user_next_step(obj: Optional[Dict[str, Any]]) -> None:
+    """Record ``user_next_step``, if a dispatcher run is active; else a no-op.
+
+    The command for the *user* to type, never a ``next`` — see
+    :meth:`ResultContext.set_user_next_step`.
+    """
+    if _ACTIVE is not None:
+        _ACTIVE.set_user_next_step(obj)
 
 
 # ---------------------------------------------------------------------------

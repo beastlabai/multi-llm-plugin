@@ -41,7 +41,7 @@ import argparse
 import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 SKILL_ROOT = Path(os.path.abspath(__file__)).parent.parent
 sys.path.insert(0, str(SKILL_ROOT))
@@ -121,9 +121,27 @@ def _timeout_cell(host: Dict[str, Any]) -> str:
     return f"{ceiling} s (raise via {', '.join(channels)})"
 
 
+def _provenance_rows(provenance: Dict[str, Any]) -> List[Tuple[str, Any]]:
+    """Each provenance row as ``(name, value)``, a map-valued row flattened.
+
+    A row whose value is a map (``next_command``: one provenance value per
+    route) yields one dotted name per key (``next_command.package``). Without
+    this a promoted route would be a dict, never equal to ``"verified"``, and
+    the generated page would silently drop it.
+    """
+    rows: List[Tuple[str, Any]] = []
+    for field, value in provenance.items():
+        if isinstance(value, dict):
+            rows.extend((f"{field}.{key}", inner) for key, inner in value.items())
+        else:
+            rows.append((field, value))
+    return rows
+
+
 def _verified_cell(host: Dict[str, Any]) -> str:
     verified = sorted(
-        field for field, value in host["provenance"].items() if value == "verified"
+        field for field, value in _provenance_rows(host["provenance"])
+        if value == "verified"
     )
     return ", ".join(f"`{f}`" for f in verified) if verified else "*none yet*"
 

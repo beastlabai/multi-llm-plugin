@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-09-30T19:07:03Z",
+    "captured_at": "2026-10-01T10:27:01Z",
     "cli": "kimi",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -61,7 +61,7 @@
     "image": "mllm-e2e:local",
     "reviewer": "kimi",
     "row_id": "chain-kimi",
-    "run_bundle": "20260930T184423Z"
+    "run_bundle": "20261001T100434Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -82,6 +82,7 @@
     "[VALIDATION_BATCHES_PENDING]",
     "[PROGRESS]",
     "[AUTO_RESOLVED]",
+    "[WORKFLOW_COMPLETE]",
     "[PROGRESS]",
     "[PROGRESS]",
     "[PROGRESS]",
@@ -4703,6 +4704,11 @@
       "next": null,
       "phase": "full",
       "state": "done",
+      "user_next_step": {
+        "command": null,
+        "complete": true,
+        "phase": null
+      },
       "validation_counts": {
         "invalid": 0,
         "needs_human_decision": 0,

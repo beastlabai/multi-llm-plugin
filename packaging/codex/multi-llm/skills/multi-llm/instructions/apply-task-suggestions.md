@@ -774,22 +774,14 @@ uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.p
 ## Workflow Comparison
 
 ### Full Workflow Mode
-```bash
-# Task review and apply happen as sequential phases in the full workflow
-/multi-llm:multi-llm --full plans/my-feature.md
-# Phase 3b reviews tasks, Phase 3c applies task suggestions automatically
-```
+1. Run `full`: task review and apply happen as sequential phases of the
+   workflow — Phase 3b reviews the tasks, Phase 3c applies the task suggestions
+   automatically.
 
 ### Separate Mode
-```bash
-# Step 1: Task review only
-/multi-llm:multi-llm --review-tasks plans/my-feature.md
-
-# Step 2: User manually reviews the task suggestions in the generated report
-
-# Step 3: Apply task suggestions later
-/multi-llm:multi-llm --apply-task-suggestions plans/my-feature.md
-```
+1. Run `review-tasks` (task review only).
+2. The user reads the task suggestions in the generated report.
+3. Run `apply-task-suggestions` later.
 
 The separate mode gives users time to:
 - Review task suggestions before deciding to apply them

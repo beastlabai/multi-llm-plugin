@@ -70,18 +70,14 @@ uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKI
 
 This prints the core with every skill-dir placeholder already substituted — but most
 cores exceed this host's Bash-result cap, and what comes back is then a
-`<persisted-output>` stub: a file path plus the output's first 2 KB. **That stub is
-not the core.** It keeps what the mode is and how it is invoked, which reads like a
-finished overview, and drops the end, where the steps that do the work are. So check
-before anything else: that command's opening lines name the line the core ends with,
-and if you cannot find that line in the result, `Read` the path the stub names, in
-full, before your next tool call and treat that file as the core. Never run a mode
-command from a core you have not seen the end of — the usage line in the surviving
-2 KB runs cleanly, reports success, and applies nothing.
-
-Reading `${CLAUDE_SKILL_DIR}/instructions/<mode>.md` off disk is the documented
-fallback: that file uses a brace-delimited template placeholder no shell expands, so
-you would have to substitute the path above yourself.
+`<persisted-output>` stub: a file path plus the output's first 2 KB. **That stub is not
+the core**: it keeps what the mode is and how it is invoked, which reads like a finished
+overview, and drops the end, where the steps that do the work are. So first find, in the
+result, the line its opening lines say the core ends with; if it is missing, `Read` the
+path the stub names, in full, before your next tool call, and treat that file as the core.
+Never run a mode command from a core you have not seen the end of — the usage line in the
+surviving 2 KB runs cleanly, reports success, and applies nothing. The documented fallback,
+`${CLAUDE_SKILL_DIR}/instructions/<mode>.md`, leaves its path placeholder for you to fill.
 
 ## 5. Capability verbs — how this host answers each one
 
@@ -100,13 +96,17 @@ Every mode is this single command, with `--host claude-code` baked in:
 uv run --frozen --no-dev --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/multi_llm.py" <mode> "<plan-path>" --host claude-code [flags…]
 ```
 
-Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complete, `3` needs
-a human) and the last stdout line is always `MULTI_LLM_RESULT: {…}`: read `state`, `artifacts`
-and `next` from it rather than mining the transcript. Run `next` verbatim when it is not
-`null` on `0` and `2`. On `3` stop: report to the user what was being run, the last error
-line it printed, and the options its output names (`next` included); do not run a different
-mode. Do not perform the work this run was going to review, plan, or implement: doing it
-yourself is never a substitute for a failed run. Run an option only after the user has picked it.
+Exit codes are uniform (`0` done, `1` error, `2` nothing to do / already complete, `3` needs a human) and the
+last stdout line is always `MULTI_LLM_RESULT: {…}`: read `state`, `artifacts` and `next` from it rather than
+mining the transcript. Run `next` verbatim when it is not `null` on `0` and `2`. On `3` stop: report to the
+user what was being run, the last error line it printed, and the options its output names (`next` included);
+do not run a different mode. Do not perform the work this run was going to review, plan, or implement: doing
+it yourself is never a substitute for a failed run. Run an option only after the user has picked it.
+`user_next_step` is the phase after this one, for the user to type: never run it yourself; end your report
+with its `command`, and each `optional_before` command, every one in its own fenced block, verbatim. When the run exited `0` or `2`, the last result has none, and
+its `next` is `null`, get it as the report's first step, after every command the core names: the command above
+with `util next-command "<plan-path>" --after <mode>` replacing `<mode> "<plan-path>"`, no `[flags…]`. After
+`1` or `3` look nothing up: a failed run has no next command.
 
 ## 7. Examples
 

@@ -83,10 +83,9 @@ Parse the JSON output (stdout is always pure JSON; the human-readable
   exist.
 - Without `--yes`, **ask the user**, telling them that `generate-tasks` must run first.
 - Options:
-  - **"Run generate-tasks first"**: Stop and instruct the user to run:
-    1. `/multi-llm:multi-llm --generate-tasks $PLAN_PATH`
-    2. `/clear`
-    3. `/multi-llm:multi-llm --review-tasks $PLAN_PATH`
+  - **"Run generate-tasks first"**: Stop and tell the user that the
+    `generate-tasks` phase must finish first, and that its report ends with the
+    `review-tasks` command, listed there as the optional step before `implement`.
 
     **Do NOT** proceed further. Stop execution after displaying this message.
   - **"Cancel"**: Stop and inform the user that review-tasks was cancelled.
@@ -451,9 +450,11 @@ If the review produces more than 25 finding groups, note to the user: *Consider 
 
 #### Applying Findings
 
-Findings from task review can be applied automatically or manually:
-
-> **Next step:** `/multi-llm:multi-llm --apply-task-suggestions $PLAN_PATH`
+Findings from task review can be applied automatically or manually. The report
+does not spell a command for either: it ends with the next step the
+`### Next Steps` rule in `references/summary-format.md` gives, which lists the
+`apply-task-suggestions` phase under "Optional, before that:", its command in its own
+fenced block, while validated findings are left to apply.
 
 The `--apply-task-suggestions` phase reads the validated findings and user selections, then uses subagents to update `tasks.md` automatically (additions, modifications, deletions, and clarifications).
 
@@ -467,11 +468,9 @@ The `--apply-task-suggestions` phase reads the validated findings and user selec
 
 For findings with **HIGH importance** and type `plan_coverage` (missing plan sections not covered by any task), provide actionable next steps:
 
-1. **Re-run `--generate-tasks`**: If multiple plan sections are uncovered, regenerate tasks:
-   ```
-   /multi-llm:multi-llm --generate-tasks $PLAN_PATH --force
-   ```
-   Review the new task list to confirm coverage.
+1. **Re-run `--generate-tasks`**: If multiple plan sections are uncovered, tell
+   the user to regenerate the tasks: re-run the `generate-tasks` phase with
+   `--force`. Review the new task list to confirm coverage.
 
 2. **Manual patching**: For 1-2 missing items, manually add tasks to `tasks.md` following the existing `### Task T0XX:` format with dependencies, files, complexity, description, and acceptance criteria.
 
@@ -496,5 +495,7 @@ Agent:
 7. Subagents write validation_batch_0.json, validation_batch_1.json
 8. Runs reaggregation
 9. Reports: 8 findings, 5 valid, 2 invalid, 1 needs-human-decision
-   "Next step: /multi-llm:multi-llm --apply-task-suggestions plans/my-feature.md"
+10. Ends the report with user_next_step, copied: the implement command in a
+    fenced block, then, under "Optional, before that:", the
+    apply-task-suggestions command with its reason
 ```

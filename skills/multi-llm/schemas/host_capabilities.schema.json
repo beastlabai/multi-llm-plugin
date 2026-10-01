@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "host_capabilities.schema.json",
   "title": "Host capability data (D5b)",
-  "description": "The verb->mechanism map the host-neutral instruction core defers to. Every field is required except a small, closed set of optional keys (`shim_max_lines`, `headless_invocation`, `package`), and they share one admission rule: an optional key may govern a lint or a generated document, and may never affect a dispatch decision. A defaulted *capability* is exactly the silent guess this schema exists to remove, which is why the rule is about the class of key rather than about a count. There is no 'omit it and inherit'. Consumed by multi_llm.py, install-host, hosts/render_capabilities.py and the tests; never by an agent.",
+  "description": "The verb->mechanism map the host-neutral instruction core defers to. Every field is required except a small, closed set of optional keys (`shim_max_lines`, `headless_invocation`, `package`), and they share one admission rule: an optional key may govern a lint or a generated document, and may never affect a dispatch decision. A defaulted *capability* is exactly the silent guess this schema exists to remove, which is why the rule is about the class of key rather than about a count. There is no 'omit it and inherit'. `next_command` is required although it decides no dispatch: Python reads it at run time to build output (the next-phase command a finished phase prints), and a host with no template would silently print no command, so it fails the optional-key admission rule and is required like `invocation`. Consumed by multi_llm.py, install-host, hosts/render_capabilities.py, utils/next_phase.py and the tests; never by an agent.",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -58,6 +58,11 @@
       "minLength": 1,
       "pattern": "^(?:(?:\\$HOME|\\$\\{HOME\\}|%USERPROFILE%|\\$XDG_CONFIG_HOME|\\$\\{XDG_CONFIG_HOME\\}|~)(?:/(?!\\.\\.(?:/|$))[^/\\\\]+)*|(?!\\.\\.(?:/|$))[^/\\\\]+(?:/(?!\\.\\.(?:/|$))[^/\\\\]+)*)$"
     },
+    "next_command_template": {
+      "description": "One route's spelling of a next-phase command: the text a user types into this host's chat composer to start a phase, with `{args}` standing for the mode flag and the plan path. It ends with `{args}` and carries no other brace, so the text before `{args}` is always defined and is the route's invocation prefix (the host-neutrality lint forbids that prefix in the instruction core).",
+      "type": "string",
+      "pattern": "^[^{}]+\\{args\\}$"
+    },
     "host": {
       "type": "object",
       "additionalProperties": false,
@@ -68,6 +73,7 @@
         "reload",
         "arguments",
         "invocation",
+        "next_command",
         "multi_turn",
         "subagents",
         "ask",
@@ -127,7 +133,7 @@
           "minLength": 1
         },
         "package": {
-          "description": "How this skill is distributed to this host as a *package*, when a package route exists at all. It is optional because most hosts have none, and it is deliberately NOT a second host id: `reload`, `subagents`, `ask`, `detach`, `max_concurrent_subagents` and `timeout_ceiling_s` are properties of the harness, not of how the skill got installed, so an `opencode-plugin` host would duplicate all of them and split the matrix. It governs generated documentation and `install-host --check`'s route-detection note; no consumer branches on it for a dispatch decision, which is what makes it admissible as an optional key at all.",
+          "description": "How this skill is distributed to this host as a *package*, when a package route exists at all. It is optional because most hosts have none, and it is deliberately NOT a second host id: `reload`, `subagents`, `ask`, `detach`, `max_concurrent_subagents` and `timeout_ceiling_s` are properties of the harness, not of how the skill got installed, so an `opencode-plugin` host would duplicate all of them and split the matrix. It governs generated documentation and `install-host --check`'s route-detection note; no consumer branches on it for a dispatch decision, which is what makes it admissible as an optional key at all. The route's own command spelling is not in this block but in the host's `next_command.package`, because a runtime consumer (`utils/next_phase.py`) reads it.",
           "type": "object",
           "additionalProperties": false,
           "required": [
@@ -353,6 +359,25 @@
           "minLength": 1,
           "pattern": "\\.$"
         },
+        "next_command": {
+          "description": "The next-phase command template per install route, keyed by the route vocabulary: `default` (the route the host's `invocation` cell documents: the plugin on claude-code, the file shim on codex and opencode), `package` (the host's distribution route, whatever the host calls it; required exactly when the host has a `package:` block and forbidden otherwise) and `skill` (a plain-skill install under `install_paths`; claude-code only today). `utils/next_phase.py` reads it at run time to build user-facing output: the command a finished phase ends its report with. It never decides a dispatch. It is host-level rather than a field of the `package:` block because a runtime consumer reads it, and that block is admissible only because nothing does. Each value is shown to the user as display text whatever its provenance.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "default"
+          ],
+          "properties": {
+            "default": {
+              "$ref": "#/definitions/next_command_template"
+            },
+            "package": {
+              "$ref": "#/definitions/next_command_template"
+            },
+            "skill": {
+              "$ref": "#/definitions/next_command_template"
+            }
+          }
+        },
         "multi_turn": {
           "description": "Whether this host leaves the driving agent able to act on a dispatcher command's output: after that command returns, does the agent get another turn in which to read it and do something. True covers either mechanism that produces one \u2014 further tool calls inside the same invocation, or a conversation the next invocation resumes \u2014 because every consumer asks the same single question ('is an agent still there to act on this?') and either mechanism answers it yes. False means the invocation ends with the command it ran, so this run's output is read by a human and by nobody else. It decides whom a failed batch's recovery instruction is addressed to (subagent_executor.continue_past_marker: 're-invoke to retry the failures' is unfollowable where no turn follows) and the D3b host-driven vs. self-contained default.",
           "type": "boolean"
@@ -568,7 +593,7 @@
           }
         },
         "provenance": {
-          "description": "One key per field above (shim_max_lines excepted, being optional). Missing keys fail the completeness test.",
+          "description": "One key per field above (shim_max_lines excepted, being optional). Missing keys fail the completeness test. Every row is one provenance value except `next_command`, which is a map with exactly the keys of the host's own `next_command`, one value per route, so one route can be promoted while another stays `documented`.",
           "type": "object",
           "additionalProperties": false,
           "required": [
@@ -578,6 +603,7 @@
             "reload",
             "arguments",
             "invocation",
+            "next_command",
             "multi_turn",
             "subagents",
             "ask",
@@ -620,6 +646,25 @@
             },
             "invocation": {
               "$ref": "#/definitions/provenance_value"
+            },
+            "next_command": {
+              "description": "One provenance value per `next_command` route, with the same keys as the host's `next_command`. A route becomes `verified` only when a recorded run typed its printed command into that host and route and it dispatched; the ledger names it by its dotted path (`next_command.package`).",
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "default"
+              ],
+              "properties": {
+                "default": {
+                  "$ref": "#/definitions/provenance_value"
+                },
+                "package": {
+                  "$ref": "#/definitions/provenance_value"
+                },
+                "skill": {
+                  "$ref": "#/definitions/provenance_value"
+                }
+              }
             },
             "multi_turn": {
               "$ref": "#/definitions/provenance_value"
@@ -680,6 +725,90 @@
                 "required": [
                   "package"
                 ]
+              }
+            }
+          }
+        },
+        {
+          "$comment": "The package route's spelling moves with the package block: a host with a `package:` block must spell that route's next-phase command, and a host without one must not carry a `package` template that no install route can reach.",
+          "if": {
+            "required": [
+              "package"
+            ]
+          },
+          "then": {
+            "properties": {
+              "next_command": {
+                "required": [
+                  "package"
+                ]
+              }
+            }
+          },
+          "else": {
+            "properties": {
+              "next_command": {
+                "not": {
+                  "required": [
+                    "package"
+                  ]
+                }
+              }
+            }
+          }
+        },
+        {
+          "$comment": "A next_command route and its provenance row move as a pair, as `package` does above.",
+          "if": {
+            "properties": {
+              "next_command": {
+                "required": [
+                  "package"
+                ]
+              }
+            },
+            "required": [
+              "next_command"
+            ]
+          },
+          "then": {
+            "properties": {
+              "provenance": {
+                "properties": {
+                  "next_command": {
+                    "required": [
+                      "package"
+                    ]
+                  }
+                }
+              }
+            }
+          }
+        },
+        {
+          "$comment": "The same pairing for the `skill` route.",
+          "if": {
+            "properties": {
+              "next_command": {
+                "required": [
+                  "skill"
+                ]
+              }
+            },
+            "required": [
+              "next_command"
+            ]
+          },
+          "then": {
+            "properties": {
+              "provenance": {
+                "properties": {
+                  "next_command": {
+                    "required": [
+                      "skill"
+                    ]
+                  }
+                }
               }
             }
           }

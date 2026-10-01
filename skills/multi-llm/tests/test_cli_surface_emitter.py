@@ -16,6 +16,12 @@ What is graded here and nowhere else:
   OpenCode's alone, the write-capable note codex's alone.
 * **``writes_worktree`` is derived**, from the executor's write-kind table and
   the mode table's ``runs_workflow`` column, never from a hand list.
+* **Schema v5's route signal is generated, never guessed**:
+  ``dispatcher.route_env`` is ``modes.ROUTE_ENV`` plus the one
+  ``modes.TOOL_ROUTES`` member the host's ``next_command`` cell carries, and the
+  generator raises rather than pick when there is none or more than one. Each
+  mode row carries its ``Mode.optional_why``, and the tool description says,
+  right under the outcomes line, that ``user_next_step`` is never a call.
 """
 
 from __future__ import annotations
@@ -36,7 +42,7 @@ sys.path.insert(0, str(REPO_ROOT / "packaging"))
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402
 from common import surface  # noqa: E402
-from utils import subagent_tasks, unattended  # noqa: E402
+from utils import host_capabilities, subagent_tasks, unattended  # noqa: E402
 
 #: Every host a package route ships this surface for.
 HOSTS = ("opencode", "codex")
@@ -109,10 +115,10 @@ def test_both_hosts_ship_one_schema_version():
     sys.path.insert(0, str(REPO_ROOT / "packaging" / "opencode"))
     import build as opencode_build  # noqa: E402
 
-    assert surface.SURFACE_SCHEMA_VERSION == 4
+    assert surface.SURFACE_SCHEMA_VERSION == 5
     assert opencode_build.SURFACE_SCHEMA_VERSION == surface.SURFACE_SCHEMA_VERSION
     for host in HOSTS:
-        assert surface.cli_surface(host)["schema_version"] == 4
+        assert surface.cli_surface(host)["schema_version"] == 5
     # The plugin's lockstep constant, compared rather than trusted.
     mjs = (REPO_ROOT / "packaging" / "opencode" / "src" / "index.mjs").read_text(
         encoding="utf-8"
@@ -245,3 +251,98 @@ def test_worked_examples_are_selected_by_shape(host):
     }
     assert by_mode["ask"]["question"] == mode_table.EXAMPLE_QUESTION
     assert set(mode_table.ALIASES) & set(by_mode), "no alias example"
+
+
+# ---------------------------------------------------------------------------
+# Schema v5: the route signal, optional_why, the user_next_step line
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_route_env_is_the_owners_name_and_the_hosts_package_route(host):
+    """``{"name": modes.ROUTE_ENV, "value": "package"}`` on both package hosts."""
+    assert surface.cli_surface(host)["dispatcher"]["route_env"] == {
+        "name": mode_table.ROUTE_ENV, "value": "package",
+    }
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_each_servers_route_literal_is_a_tool_route_with_a_cell(host):
+    """The generated value is a ``TOOL_ROUTES`` member this host carries a
+    ``next_command`` template for — so a typo in the surface fails CI instead of
+    printing a plausible wrong command at run time."""
+    value = surface.cli_surface(host)["dispatcher"]["route_env"]["value"]
+    assert value in mode_table.TOOL_ROUTES
+    assert value in host_capabilities.next_command_routes(host)
+    # And the accessor answers it, which is what resolve_route will ask.
+    assert host_capabilities.next_command_template(host, value)
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_the_surface_ignores_an_exported_route(host, monkeypatch):
+    """The route is read from the source tree, never the builder's env."""
+    monkeypatch.delenv(mode_table.ROUTE_ENV, raising=False)
+    unset = surface.cli_surface_json(host)
+    for value in ("skill", "", "plugin", "package"):
+        monkeypatch.setenv(mode_table.ROUTE_ENV, value)
+        assert surface.cli_surface_json(host) == unset, value
+
+
+def _fixture_entry(monkeypatch, next_command):
+    """Point ``host_capabilities.entry`` at a host whose cell is *next_command*."""
+    real = host_capabilities.entry
+
+    def entry(host_id, base=None):
+        if host_id == "fixture-host":
+            return {"next_command": next_command}
+        return real(host_id, base)
+
+    monkeypatch.setattr(host_capabilities, "entry", entry)
+
+
+def test_the_generator_raises_when_no_tool_route_has_a_cell(monkeypatch):
+    _fixture_entry(monkeypatch, {"default": "/x {args}", "skill": "/y {args}"})
+    with pytest.raises(ValueError) as raised:
+        surface._route_env("fixture-host")
+    assert "fixture-host" in str(raised.value)
+    assert "found 0" in str(raised.value)
+    # The real hosts are unaffected by the fixture.
+    assert surface._route_env("codex")["value"] == "package"
+
+
+def test_the_generator_raises_on_more_than_one_candidate(monkeypatch):
+    """Two members with a cell is a guess the build refuses to make."""
+    monkeypatch.setattr(mode_table, "TOOL_ROUTES", ("package", "skill"))
+    _fixture_entry(monkeypatch, {
+        "default": "/x {args}", "package": "/p {args}", "skill": "/s {args}",
+    })
+    with pytest.raises(ValueError) as raised:
+        surface._route_env("fixture-host")
+    assert "found 2" in str(raised.value)
+
+
+def test_a_host_without_a_package_route_cannot_be_built_for():
+    """claude-code carries ``default`` and ``skill``: no surface to write."""
+    with pytest.raises(ValueError):
+        surface.cli_surface("claude-code")
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_each_rows_optional_why_is_its_modes(host):
+    by_name = {mode.name: mode for mode in mode_table.MODES}
+    rows = surface.cli_surface(host)["modes"]
+    assert rows
+    for row in rows:
+        assert "optional_why" in row, row["name"]
+        assert row["optional_why"] == by_name[row["name"]].optional_why, row["name"]
+    # At least one exposed row carries one, or the copy is untested.
+    assert any(row["optional_why"] for row in rows)
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_the_user_next_step_line_follows_the_outcomes_line(host):
+    """§2.4: said once, in the description, before the model reads any result."""
+    description = surface.cli_surface(host)["tool_description"]
+    lines = description.split("\n")
+    assert lines.count(mode_table.TOOL_USER_NEXT_STEP_LINE) == 1
+    at = lines.index(mode_table.TOOL_OUTCOMES_LINE)
+    assert lines[at + 1] == mode_table.TOOL_USER_NEXT_STEP_LINE

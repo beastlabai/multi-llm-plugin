@@ -68,7 +68,9 @@ EXECUTOR_PROFILES: Tuple[str, ...] = ("agent-readonly", "agent-write")
 #: the executor. It is the schema's own ``definitions.host.required`` list, minus
 #: nothing: ``schemas/host_capabilities.schema.json`` requires every field except
 #: ``shim_max_lines``, ``headless_invocation`` and ``package``, each of which
-#: governs a lint or a generated document rather than a dispatch. Restated here as a plain tuple
+#: governs a lint or a generated document rather than a dispatch. (``next_command``
+#: decides no dispatch either, but ``utils/next_phase.py`` reads it at run time to
+#: build output, so it is required like ``invocation``.) Restated here as a plain tuple
 #: because :func:`load` must not need ``jsonschema`` — a dev-only extra — nor a
 #: second file present to give a clean error; ``tests/test_host_capabilities.py``
 #: asserts the two lists still agree, so the drift is caught at test time and the
@@ -83,6 +85,7 @@ REQUIRED_HOST_KEYS: Tuple[str, ...] = (
     "installable",
     "invocation",
     "max_concurrent_subagents",
+    "next_command",
     "multi_turn",
     "native_tool",
     "nested_exec",
@@ -222,6 +225,52 @@ def entry(host_id: str, base: Optional[str] = None) -> Dict[str, Any]:
             "into a shim by `install-host`, not guessed at run time."
         )
     return hosts[host_id]
+
+
+#: The ``next_command`` key a ``None`` route reads: the route the host's
+#: ``invocation`` cell documents (plans/next-phase-command.md §2.1, "One route
+#: vocabulary").
+DEFAULT_ROUTE_KEY = "default"
+
+
+def next_command_routes(host_id: str, base: Optional[str] = None) -> Tuple[str, ...]:
+    """The route keys *host_id*'s ``next_command`` cell carries, in file order."""
+    return tuple(entry(host_id, base).get("next_command") or {})
+
+
+def next_command_template(
+    host_id: str, route: Optional[str], base: Optional[str] = None
+) -> str:
+    """The next-phase command template for *host_id* on *route*.
+
+    ``None`` reads ``default``; a route key the host carries returns its
+    template. **It never falls back**: any other route raises ``ValueError``
+    naming the host and the route. Falling back is done once, in
+    ``utils.next_phase.resolve_route``, which already turns an unset or invalid
+    ``MULTI_LLM_ROUTE`` into ``None``; a route that reaches this accessor with no
+    key on the host is a caller bug, and a silent default would print a
+    plausible wrong spelling. The provenance never gates use: the template is
+    display text with no conservative alternative, so a ``documented`` cell is
+    returned like a ``verified`` one.
+    """
+    cell = entry(host_id, base).get("next_command") or {}
+    key = DEFAULT_ROUTE_KEY if route is None else route
+    template = cell.get(key)
+    if not isinstance(template, str) or not template:
+        raise ValueError(
+            f"host '{host_id}' has no next_command template for route "
+            f"'{key}' (it carries: {', '.join(cell) or 'none'})"
+        )
+    return template
+
+
+def next_command_prefix(
+    host_id: str, route: Optional[str], base: Optional[str] = None
+) -> str:
+    """The text before ``{args}`` in :func:`next_command_template` — the route's
+    invocation prefix (the schema pins every template to end in ``{args}``)."""
+    template = next_command_template(host_id, route, base)
+    return template[: template.index("{args}")]
 
 
 def resolve_host_id(

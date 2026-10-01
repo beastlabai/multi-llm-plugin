@@ -745,6 +745,38 @@ changes:
     rationale: >
       Positional shift only: `[HIGH_PRIORITY_ISSUES]` moves down two indices
       behind `[DIFF_FAILED]` and `[DIFF_PARTIAL]` (review-scope plan D2.2).
+  # 2026-10-01, plans/next-phase-command.md T5 (§2.2(1), §2.1's outcome
+  # table): a workflow-phase run that exits 0 with its phase on record ends
+  # with `MULTI_LLM_RESULT.user_next_step` and the `[NEXT_COMMAND]` block above
+  # the result line. Of the guard's five dispatches only the two reviews
+  # qualify: both run `--skip-validation` and record themselves completed. The
+  # three write phases run without `--exec-subagents`, so §2.2(1) excludes
+  # them and their result lines and markers are unchanged. The command is the
+  # claude-code plugin spelling (the checkout's skill root is not an
+  # `install_paths` entry) with the plan path as the dispatch received it,
+  # normalized to `<run-root>` like every other path in the bundle. The marker
+  # is appended after each phase's last marker, so nothing earlier shifts.
+  - pointer: /result_lines/review-plan/user_next_step
+    rationale: >
+      plans/next-phase-command.md T5: review-plan is completed and
+      apply-suggestions pending (no validation.json under --skip-validation,
+      so it is not skipped), so the key is `{"phase": "apply-suggestions",
+      "command": "/multi-llm:multi-llm --apply-suggestions <plan>",
+      "complete": false}`, with no optional phase in between.
+  - pointer: /markers/review-plan/3
+    rationale: >
+      plans/next-phase-command.md T5: the `[NEXT_COMMAND]` line of the same
+      answer, printed on stdout after the phase's last marker.
+  - pointer: /result_lines/review-code/user_next_step
+    rationale: >
+      plans/next-phase-command.md T5: code-review is completed and its
+      grouped.json carries findings, so apply-code-fixes stays pending and the
+      key is `{"phase": "apply-code-fixes", "command": "/multi-llm:multi-llm
+      --apply-code-fixes <plan>", "complete": false}`.
+  - pointer: /markers/review-code/6
+    rationale: >
+      plans/next-phase-command.md T5: the `[NEXT_COMMAND]` line of the same
+      answer, printed on stdout after the phase's last marker.
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):

@@ -162,7 +162,7 @@ to bare `python`.
 
    **IMPORTANT**: Do NOT manually search for state files. The orchestrator handles state loading automatically via `get_or_create_state(plan_path)`.
 
-   **If implementation ran outside `/multi-llm implement`.** Nothing recorded the
+   **If implementation ran outside the `implement` phase.** Nothing recorded the
    files it changed, so the review falls back to every change since the base
    ref (`[SCOPE_FALLBACK]`), which can be far wider than the implementation.
    Record the exact scope first, with the files the implementation changed:

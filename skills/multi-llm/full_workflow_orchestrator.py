@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent))
 
 import modes as mode_table
 from check_workflow_prerequisites import (
+    _grouped_has_suggestions,
     check_apply_task_suggestions_prerequisite,
     ensure_prerequisites,
     record_prerequisite_skip,
@@ -588,7 +589,9 @@ class FullWorkflow:
         distinguishes them, so the decision is not re-derived here.
         """
         state = self.state
-        if state.is_phase_skipped("review-tasks"):
+        # The effective status (`_recorded`: a completion wins over a stale skip
+        # record), the precedence `get_workflow_status` uses too.
+        if self._recorded("review-tasks") == "skipped":
             return self._record_skip(
                 "apply-task-suggestions", "Skipped: review-tasks was not executed"
             )
@@ -621,6 +624,23 @@ class FullWorkflow:
         return self._verify("code-review", code)
 
     def step_apply_code_fixes(self) -> Tuple[str, str, Optional[int]]:
+        """Run apply-code-fixes only when code-review left something to fix.
+
+        The review's own status is checked before any file, as
+        :meth:`step_apply_task_suggestions` does for review-tasks: a skipped
+        code-review is a recorded skip whatever ``grouped.json`` an earlier
+        review left on disk. That status is the effective one (:meth:`_recorded`,
+        the precedence ``get_workflow_status`` uses too): a code-review that
+        completed after an earlier skip is completed — ``mark_phase_completed``
+        leaves the stale skip record in place — so its findings still reach
+        apply-code-fixes. Then the one predicate ``status``'s workflow view
+        asks too (``check_workflow_prerequisites._grouped_has_suggestions``), so
+        the two cannot disagree.
+        """
+        if self._recorded("code-review") == "skipped":
+            return self._record_skip(
+                "apply-code-fixes", "Skipped: code-review was not executed"
+            )
         if not _grouped_has_suggestions(self.plan_dir / "code-review" / "grouped.json"):
             return self._record_skip(
                 "apply-code-fixes",
@@ -886,23 +906,6 @@ def _validation_entries(path: Path) -> List[Dict[str, Any]]:
     else:
         return []
     return [entry for entry in entries if isinstance(entry, dict)]
-
-
-def _grouped_has_suggestions(path: Path) -> bool:
-    """Whether a ``grouped.json`` carries anything to apply (v1 list or v2 envelope)."""
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
-        return False
-    if isinstance(data, dict) and "groups" in data:
-        groups = data["groups"]
-    elif isinstance(data, list):
-        groups = data
-    else:
-        return False
-    return any(
-        isinstance(group, dict) and group.get("suggestions") for group in groups
-    )
 
 
 # ---------------------------------------------------------------------------

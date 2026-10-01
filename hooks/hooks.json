@@ -11,6 +11,17 @@
           }
         ]
       }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}/hooks/report-check.sh\"",
+            "timeout": 30
+          }
+        ]
+      }
     ]
   }
 }

@@ -81,6 +81,10 @@ FINDINGS = [{
     "type": "addition",
 }]
 
+#: A plugin's uv ``.venv`` package dir under ``$CODEX_HOME`` (a watched tree).
+VENV_REL = os.path.join("plugins", "cache", "market", "multi-llm", "0.1.0",
+                        ".venv", "lib", "python3.11", "site-packages", "yaml")
+
 #: A command the stream audit rejects (a heredoc), and one it accepts.
 HEREDOC_COMMAND = "/bin/bash -lc \"python3 - <<'PY'\nprint(1)\nPY\""
 CLEAN_COMMAND = "/bin/bash -lc 'rg -n validation plans'"
@@ -180,6 +184,24 @@ elif mode == "trust":
 elif mode == "foreign":
     with open(os.path.join(home, "config.toml"), "a", encoding="utf-8") as handle:
         handle.write('\n[projects."/elsewhere/other-repo"]\ntrust_level = "trusted"\n')
+elif mode == "link":
+    # What any `uv run` elsewhere does to the uv cache: link and unlink a
+    # name of an inode the home's plugin venv shares (moves only its ctime).
+    # The sleep only clears a coarse timestamp tick after the before-snapshot.
+    src = os.environ["FAKE_LINK_SRC"]
+    time.sleep(0.02)
+    os.link(src, src + ".spare")
+    os.unlink(src + ".spare")
+elif mode == "link-write":
+    # A real change to the same inode, through the cache's name, at the same
+    # size and with the mtime put back.
+    src = os.environ["FAKE_LINK_SRC"]
+    info = os.stat(src)
+    with open(src, "r+b") as handle:
+        data = handle.read()
+        handle.seek(0)
+        handle.write(data.replace(b"6.0.3", b"6.6.6"))
+    os.utime(src, ns=(info.st_atime_ns, info.st_mtime_ns))
 elif mode == "eacces":
     sys.stderr.write(
         "Error: failed to write %s: Permission denied (os error 13)\n"
@@ -487,6 +509,55 @@ class TestTheHomeCheck:
         assert len(lines) == 1
         assert "/elsewhere/other-repo" in lines[0] and "not a failure" in lines[0]
         assert _result_file(phase_dir).exists()
+
+    def _seed_linked_venv(self, scratch):
+        """A plugin's uv ``.venv`` under the home whose package file is a
+        hardlink into a uv cache outside it (the 2026-09-30 shape)."""
+        cache = scratch["tmp"] / "uv-cache" / "yaml"
+        cache.mkdir(parents=True)
+        cached = cache / "__init__.py"
+        cached.write_text("__version__ = '6.0.3'\n", encoding="utf-8")
+        venv = scratch["home"] / VENV_REL
+        venv.mkdir(parents=True)
+        os.link(cached, venv / "__init__.py")
+        return cached, venv / "__init__.py"
+
+    def test_hardlink_traffic_on_a_venv_inode_does_not_fail_the_slot(
+        self, fake_codex, monkeypatch, capsys
+    ):
+        """BUG (2026-09-30, plans/next-phase-command/review-plan): the
+        ``codex:gpt-6-astra:xhigh`` slot failed closed after 5m24s naming 23
+        pyyaml files of the plugin's own ``.venv`` whose bytes and mtime were
+        untouched — their inodes are hardlinks into the uv cache, and a
+        ``uv run`` elsewhere moved only their ctime."""
+        _pin_verdict(monkeypatch, RUNG)
+        cached, watched = self._seed_linked_venv(fake_codex)
+        ctime_before = os.lstat(watched).st_ctime_ns
+        monkeypatch.setenv("FAKE_CODEX_MODE", "link")
+        monkeypatch.setenv("FAKE_LINK_SRC", str(cached))
+        phase_dir, status = _run_review_plan(fake_codex)
+        out = capsys.readouterr().out
+
+        assert os.lstat(watched).st_ctime_ns != ctime_before  # the window really moved it
+        assert CODEX_HOME_CHECK_MARKER not in out
+        assert json.loads(_result_file(phase_dir).read_text()) == FINDINGS
+        assert status["models_failed"] == {}
+
+    def test_a_content_change_through_the_cache_name_still_fails_closed(
+        self, fake_codex, monkeypatch, capsys
+    ):
+        _pin_verdict(monkeypatch, RUNG)
+        cached, _watched = self._seed_linked_venv(fake_codex)
+        monkeypatch.setenv("FAKE_CODEX_MODE", "link-write")
+        monkeypatch.setenv("FAKE_LINK_SRC", str(cached))
+        phase_dir, status = _run_review_plan(fake_codex, expect_exit=3)
+        out = capsys.readouterr().out
+
+        (line,) = _slot_lines(out, CODEX_HOME_CHECK_MARKER)
+        assert os.path.join(VENV_REL, "__init__.py") in line
+        assert "fails closed" in line
+        assert not _result_file(phase_dir).exists()
+        assert CODEX_HOME_CHECK_MARKER in status["models_failed"][SPEC]
 
 
 # ---------------------------------------------------------------------------

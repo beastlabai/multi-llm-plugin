@@ -24,17 +24,67 @@ After any mode completes, report:
 - Start the next phase in a fresh context (recommended, for best performance) —
   use whatever context-reset command your host provides, and omit this line if it
   has none
-- [Recommended actions, if any]
+- [The next step, copied from `user_next_step` as the next-step rule below says:
+  its `command` alone in a fenced block, then any optional commands under
+  "Optional, before that:" — or "Workflow complete." — or nothing]
 ```
 
-Every mode ends with this report. Three rules, and a fourth for `ask`:
+Every mode ends with this report. Four rules, and a fifth for `ask`:
 
 - **Paths come from the run, never from memory.** Take them from the orchestrator's
   own output — the `[OUTPUT_FILE]` lines, the paths a phase printed, and
   `MULTI_LLM_RESULT`'s `artifacts` array. Do not reconstruct a path from a pattern.
-- **Report the one follow-up the run owes, verbatim.** `MULTI_LLM_RESULT.next` is
-  the command to run next when it is not `null`; copy it exactly, and report nothing
-  as a next step that the run did not name.
+- **Report the one follow-up the run owes, verbatim — and tell `next` from
+  `user_next_step`.** They are two different things. `MULTI_LLM_RESULT.next`,
+  when it is not `null`, *continues this phase*: the phase has not finished (a
+  `--reaggregate` or a `status` poll is still owed), so copy it exactly, and
+  report nothing as a next step that the run did not name. `user_next_step`
+  *starts the next phase*: it is the user's to type, never yours to run, and it
+  ends the report as the next rule says.
+- **End the report with the next phase's command — copied, never composed.**
+  Python builds it as `user_next_step`; your part is to fetch it and copy it.
+  - *Where it comes from.* While the last result's `next` is not `null`, the
+    phase is unfinished: report that follow-up under the rule above and look
+    nothing up. A phase whose run exited `1` or `3` failed and has no next
+    step either: report the failure, and look nothing up. Otherwise take
+    `user_next_step` from the last result (its `MULTI_LLM_RESULT` line, or the
+    tool result that relays it) when that result carries the key. When it does
+    not, the host decides:
+    - *On Codex and OpenCode* (file shim and tool alike), the key arrives in
+      the phase's own result, so a result without it means there is no next
+      step — the phase stopped short (at a `[…_PENDING]` marker, say), or the
+      run is not one that names a next phase. Look nothing up, and write
+      nothing under `### Next Steps`. `--after` does not check that the phase
+      finished, so a lookup here could name the successor of a phase that
+      never did.
+    - *On Claude Code* only, the phase's last call is often a `util` step that
+      cannot know the phase, so the report's first step is one read-only
+      lookup, run after every command the core told you to run — the phase's
+      own completion write included, because run earlier it answers from a
+      phase not yet recorded: the dispatcher's
+      `util next-command "<plan-path>" --after <the mode you ran>`, behind the
+      same `uv run … multi_llm.py` prefix as every command in the core. Its
+      `MULTI_LLM_RESULT` line carries `user_next_step`, and the
+      `[NEXT_COMMAND]` lines above it hold the same strings.
+
+    `ask` and `init` are not workflow phases: on every host they run no
+    lookup and end with no command.
+  - *What to write under `### Next Steps`.* `user_next_step.command` alone in a
+    fenced block, copied character for character. Any `optional_before`
+    entries follow it, never precede it: the line "Optional, before that:",
+    then each entry in the order the key lists them — its `why` as plain text
+    outside the fence, then its `command` alone in its own fenced block. When
+    `complete` is `true` (its `command` is then `null`), write
+    "Workflow complete." instead. When there is no `user_next_step` at all,
+    write neither a command nor "Workflow complete.": an absent key is not a
+    completion.
+  - *A failed lookup prints no command.* When `util next-command` exits
+    non-zero, write no fenced command and no "Workflow complete.": write one
+    line under `### Next Steps` saying the next-step lookup failed, quoting the
+    stderr line it printed.
+  - Never build, shorten, recall or rephrase a command yourself — not from a
+    phase name, a mode flag, a usage line or an earlier report. A paraphrased
+    command is the failure this rule exists to remove.
 - **Name every model that produced nothing, with its reason.** A review
   phase's `report.md` lists them on its `**Models failed:** N of M requested — …`
   line, directly under `**Models:**`, on the fan-out and after `--reaggregate`

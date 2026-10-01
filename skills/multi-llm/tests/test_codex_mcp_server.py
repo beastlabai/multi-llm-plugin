@@ -47,6 +47,8 @@ DISPATCHER = SURFACE["dispatcher"]
 STATES = DISPATCHER["states"]
 CODES = DISPATCHER["exit_codes"]
 MARKER = DISPATCHER["result_marker"]
+#: Schema v5's route signal, read from the surface like every other word here.
+ROUTE_ENV = DISPATCHER["route_env"]
 
 #: A2b's allowlist, as the fixture .mcp.json carries it.
 ENV_VARS = [
@@ -151,7 +153,7 @@ record = {{"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(),
           "env": {{k: os.environ.get(k) for k in (
               "MULTI_LLM_UV", "MULTI_LLM_SKILL_DIR", "STUB_PROFILE_MARK",
               "PYTHONDONTWRITEBYTECODE", "MULTI_LLM_HOST_SESSION_MODEL",
-              "MULTI_LLM_HOST_SANDBOX_POSTURE")}}}}
+              "MULTI_LLM_HOST_SANDBOX_POSTURE", {route_env_name!r})}}}}
 dargv = argv[argv.index("--") + 3:] if "--" in argv else []
 if dargv[:2] == ["util", "instructions"]:
     with open(log + ".instructions", "a", encoding="utf-8") as handle:
@@ -457,7 +459,8 @@ class Harness:
         self.cwd = tmp_path / "elsewhere"  # the server's own, unrelated cwd
         self.cwd.mkdir()
         self.stub = tmp_path / "uv-stub"
-        self.stub.write_text(UV_STUB.format(python=sys.executable), encoding="utf-8")
+        self.stub.write_text(UV_STUB.format(
+            python=sys.executable, route_env_name=ROUTE_ENV["name"]), encoding="utf-8")
         self.stub.chmod(0o755)
         self.log = tmp_path / "argv.log"
         self.script = tmp_path / "script.json"
@@ -681,6 +684,8 @@ class TestNoWordOfItsOwn:
             SURFACE["uv"]["run_args_env"], SURFACE["uv"]["missing_message_file"],
             SURFACE["write_posture_refusal"]["lever_env"],
             DISPATCHER["session_model_env"],
+            # Schema v5: neither the route variable's name nor its value.
+            ROUTE_ENV["name"], ROUTE_ENV["value"],
             *SURFACE["uv"]["candidates"], *SURFACE["nested_exec_reasons"],
         ]
         # Routing words, by equality once surface-key reads are set aside.
@@ -964,13 +969,48 @@ class TestWireContract:
 # Bad reads of the surface and the cap (D3e, rule 7)
 # ===========================================================================
 
+def _previous_version_surface() -> dict:
+    """The current surface as the previous schema version shipped it.
+
+    One version back, and without the keys that version bump added
+    (``dispatcher.route_env`` and each mode row's ``optional_why``).
+    """
+    dispatcher = dict(DISPATCHER)
+    dispatcher.pop("route_env")
+    rows = [{k: v for k, v in row.items() if k != "optional_why"}
+            for row in SURFACE["modes"]]
+    return dict(SURFACE, schema_version=CONST["SUPPORTED_SURFACE_VERSION"] - 1,
+                dispatcher=dispatcher, modes=rows)
+
+
 class TestSurfaceBadReads:
     @pytest.mark.parametrize("spelling", ["wrong-version", "unparseable", "absent",
-                                          "descriptions-array", "descriptions-string"])
+                                          "descriptions-array", "descriptions-string",
+                                          "previous-version", "no-route-env",
+                                          "empty-route-name", "no-route-value",
+                                          "route-env-string"])
     def test_a_bad_surface_degrades_but_stays_listed(self, harness, tmp_path, spelling):
         if spelling == "wrong-version":
             bad = dict(SURFACE, schema_version=CONST["SUPPORTED_SURFACE_VERSION"] + 1)
             text = json.dumps(bad)
+        elif spelling == "previous-version":
+            # A v4 surface: the previous version, without schema v5's keys. A
+            # v5 server refuses it rather than spawn with no route signal.
+            text = json.dumps(_previous_version_surface())
+        elif spelling in ("no-route-env", "empty-route-name", "no-route-value",
+                          "route-env-string"):
+            # The current version with an unusable route signal: refused whole,
+            # never half-used (a spawn without it prints the file-shim spelling).
+            dispatcher = dict(DISPATCHER)
+            if spelling == "no-route-env":
+                del dispatcher["route_env"]
+            elif spelling == "empty-route-name":
+                dispatcher["route_env"] = dict(ROUTE_ENV, name="")
+            elif spelling == "no-route-value":
+                dispatcher["route_env"] = {"name": ROUTE_ENV["name"]}
+            else:
+                dispatcher["route_env"] = ROUTE_ENV["name"]
+            text = json.dumps(dict(SURFACE, dispatcher=dispatcher))
         elif spelling.startswith("descriptions-"):
             # A container of the wrong type passes the key-presence checks; it
             # must still degrade rather than crash Server construction.
@@ -995,6 +1035,9 @@ class TestSurfaceBadReads:
         if spelling == "wrong-version":
             assert str(CONST["SUPPORTED_SURFACE_VERSION"] + 1) in envelope["message"]
             assert str(CONST["SUPPORTED_SURFACE_VERSION"]) in envelope["message"]
+        if spelling in ("no-route-env", "empty-route-name", "no-route-value",
+                        "route-env-string"):
+            assert "route_env" in envelope["message"]
         assert client.close() == 0
         assert "cli-surface.json" in client.stderr
         warnings = [n for n in client.notifications
@@ -1899,6 +1942,151 @@ class TestRedaction:
         broken = {"exit": 0, "stdout": [MARKER + " {not json"]}
         envelope, result, _, _ = harness.run(REVIEW, [launch_step(), broken])
         assert result["isError"] and MARKER in envelope["output"]
+
+
+# ===========================================================================
+# The route signal and the lifted next step (plans/next-phase-command.md T2, T8)
+# ===========================================================================
+
+sys.path.insert(0, str(SKILL_ROOT))
+from utils import host_capabilities as _caps  # noqa: E402
+
+#: Every next-phase spelling the capability data carries, read through the
+#: accessor (never retyped): six ``(host, route)`` cells.
+NEXT_COMMAND_CELLS = [
+    (host_id, route)
+    for host_id in _caps.host_ids()
+    for route in _caps.next_command_routes(host_id)
+]
+PHASE_ARGS = "--generate-tasks /w/plans/p.md"
+
+
+def next_step(command=None, *, complete=False, optional=()):
+    """A ``user_next_step`` value shaped like the dispatcher's (§2.1)."""
+    if complete:
+        return {"phase": None, "command": None, "complete": True}
+    step = {"phase": "generate-tasks", "command": command, "complete": False}
+    if optional:
+        step["optional_before"] = [dict(entry) for entry in optional]
+    return step
+
+
+class TestRouteSignal:
+    def test_the_route_reaches_the_launch_every_poll_and_the_runbook(self, harness):
+        """Every child carries ``route_env.name=route_env.value``, from the surface."""
+        envelope, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(CODES["nothing_to_do"]),
+                     poll_step(CODES["needs_human"], error="blocked")])
+        assert len(calls) == 3
+        assert [c["env"][ROUTE_ENV["name"]] for c in calls] == [ROUTE_ENV["value"]] * 3
+        runbook = harness.instruction_calls()
+        assert runbook, "the unfinished outcome fetched no runbook"
+        assert {c["env"][ROUTE_ENV["name"]] for c in runbook} == {ROUTE_ENV["value"]}
+        assert envelope["state"] == STATES["needs_human"]
+
+    def test_a_foreground_mode_carries_it_too(self, harness):
+        _, _, calls, _ = harness.run(
+            {"mode": "init", "plan": "", "question": "", "extra_flags": []},
+            [{"exit": 0, "stdout": [result_line(mode="init")]}])
+        assert [c["env"][ROUTE_ENV["name"]] for c in calls] == [ROUTE_ENV["value"]]
+
+    def test_the_server_spells_neither_the_name_nor_the_value(self):
+        tree = ast.parse(SERVER_SRC.read_text(encoding="utf-8"))
+        literals = _string_constants(tree)
+        for word in (ROUTE_ENV["name"], ROUTE_ENV["value"]):
+            assert not any(word in lit for lit in literals), (
+                "{!r} is spelled in the server; it must be read from the "
+                "surface's dispatcher.route_env".format(word))
+
+    def test_the_route_is_required_at_load(self):
+        """``("dispatcher", "route_env")`` is a required path (T2)."""
+        assert ("dispatcher", "route_env") in CONST["_REQUIRED_SURFACE_PATHS"]
+
+
+class TestUserNextStep:
+    """§2.4: lifted to the top level on exit 0 and exit 2, never followed."""
+
+    def test_exit_0_lifts_it_beside_the_payload_copy(self, harness):
+        why = "optional: have the models review the tasks before implementing"
+        step = next_step("/multi-llm --implement /w/plans/p.md", optional=[{
+            "phase": "review-tasks", "command": "/multi-llm --review-tasks /w/plans/p.md",
+            "why": why}])
+        envelope, result, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0, user_next_step=step)])
+        assert not result["isError"]
+        assert envelope["user_next_step"] == step
+        assert envelope["result"]["user_next_step"] == step
+        assert envelope.get("next") is None  # the envelope drops a null key
+        assert "next_phase" not in json.dumps(envelope)
+        assert len(calls) == 2  # launch + terminal poll: nothing followed
+
+    def test_the_completed_form_is_lifted_too(self, harness):
+        envelope, _, _, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0, user_next_step=next_step(complete=True))])
+        assert envelope["user_next_step"] == {
+            "phase": None, "command": None, "complete": True}
+
+    def test_exit_2_of_a_phase_already_complete_lifts_it(self, harness):
+        """The phase's own guard exits 2 before any detach: no banner, a result."""
+        step = next_step("/multi-llm --generate-tasks /w/plans/p.md")
+        already = {"exit": CODES["nothing_to_do"], "stdout": [result_line(
+            mode="review-plan", state=STATES["nothing_to_do"],
+            exit=CODES["nothing_to_do"], user_next_step=step)]}
+        envelope, result, calls, _ = harness.run(REVIEW, [already])
+        assert not result["isError"] and envelope["ok"] is True
+        assert envelope["exit"] == CODES["nothing_to_do"]
+        assert envelope["user_next_step"] == step
+        assert "next_phase" not in json.dumps(envelope)
+        assert len(calls) == 1
+
+    def test_a_still_running_poll_carries_none(self, harness):
+        """A poll's exit 2 means "still moving": no key arrives, none is lifted."""
+        status = {"mode": DISPATCHER["poll"][0], "plan": "/w/p.md", "question": "",
+                  "extra_flags": []}
+        running = {"exit": CODES["nothing_to_do"], "stdout": [result_line(
+            state=STATES["running"], exit=CODES["nothing_to_do"])]}
+        envelope, _, _, _ = harness.run(status, [running])
+        assert envelope["exit"] == CODES["nothing_to_do"]
+        assert "user_next_step" not in envelope
+        assert "user_next_step" not in envelope["result"]
+
+    def test_an_absent_key_lifts_nothing(self, harness):
+        envelope, _, _, _ = harness.run(REVIEW, [launch_step(), poll_step(0)])
+        assert "user_next_step" not in envelope
+
+    def test_exit_3_and_1_lift_nothing(self, harness):
+        step = next_step("/multi-llm --implement /w/plans/p.md")
+        for code in (CODES["needs_human"], CODES["error"]):
+            envelope, _, _, _ = harness.run(
+                REVIEW, [launch_step(), poll_step(code, user_next_step=step)])
+            assert "user_next_step" not in envelope, code
+
+    def test_the_continuation_loop_never_follows_it(self, harness):
+        """Zero follows for a result carrying only ``user_next_step`` — even one
+        whose command carries a mechanical-continuation flag."""
+        marker = DISPATCHER["mechanical_continuations"][0]
+        step = next_step("/multi-llm --review-plan /w/plans/p.md " + marker)
+        envelope, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0, user_next_step=step),
+                     launch_step(run_id="RID-FOLLOWED")])
+        assert len(calls) == 2
+        assert "continuations" not in envelope
+        assert envelope["user_next_step"] == step
+
+    @pytest.mark.parametrize("host_id, route", NEXT_COMMAND_CELLS)
+    def test_redaction_leaves_every_spelling_intact(self, harness, host_id, route):
+        """The command is the host's own spelling, never a ``uv run`` line, so
+        ``redact`` passes it through byte for byte: in the lifted copy, the
+        payload copy and the human output."""
+        command = _caps.next_command_template(host_id, route).replace(
+            "{args}", PHASE_ARGS)
+        done = poll_step(0, user_next_step=next_step(command))
+        done["stdout"].insert(0, "[NEXT_COMMAND] " + command)
+        envelope, _, _, _ = harness.run(REVIEW, [launch_step(), done])
+        assert envelope["user_next_step"]["command"] == command
+        assert envelope["result"]["user_next_step"]["command"] == command
+        assert "[NEXT_COMMAND] " + command in envelope["output"].split("\n")
+        assert RUNNABLE_MARKER not in json.dumps(envelope)
 
 
 # ===========================================================================

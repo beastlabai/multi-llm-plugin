@@ -744,21 +744,13 @@ This is useful for:
 ## Workflow Comparison
 
 ### Combined Mode (existing)
-```bash
-/multi-llm:multi-llm --review-code plans/my-feature.md --apply-fixes
-# Reviews code AND applies fixes in one session
-```
+1. Run `review-code` with `--apply-fixes`: it reviews the code **and** applies
+   the fixes in one session.
 
 ### Separate Mode (new)
-```bash
-# Step 1: Code review only
-/multi-llm:multi-llm --review-code plans/my-feature.md
-
-# Step 2: User manually reviews the issues in the generated report
-
-# Step 3: Apply fixes later
-/multi-llm:multi-llm --apply-code-fixes plans/my-feature.md
-```
+1. Run `review-code` (code review only).
+2. The user reads the issues in the generated report.
+3. Run `apply-code-fixes` later.
 
 The separate mode gives users time to:
 - Review issues before deciding to fix them

@@ -41,8 +41,8 @@ if str(SKILL_DIR) not in sys.path:
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402  (side-effect free at import: main() does the work)
 from utils import (  # noqa: E402
-    cli_common, detach, provider_registry, subagent_executor,
-    subagent_tasks, unattended,
+    cli_common, detach, host_capabilities, provider_registry,
+    subagent_executor, subagent_tasks, unattended,
 )
 
 #: The token a generated artifact carries in place of an absolute skill dir.
@@ -81,7 +81,17 @@ RUN_ID_OPTION = "--run-id"
 #: ``anchor_unresolved``, ``shell_missing`` and ``runbook`` (the
 #: ``util instructions`` sentinel and banner opening). A host layer composes
 #: none of it.
-SURFACE_SCHEMA_VERSION = 4
+#:
+#: 5: ``dispatcher`` gained ``route_env`` — ``{"name", "value"}``, the route
+#: signal a server sets on every child it spawns (polls included), so the
+#: dispatcher prints the next-phase command in this route's spelling
+#: (plans/next-phase-command.md §2.1, "Knowing the route"). The name is
+#: ``modes.ROUTE_ENV`` and the value the one ``modes.TOOL_ROUTES`` member the
+#: host's ``next_command`` cell carries; a server spells neither. And every
+#: mode row gained ``optional_why`` beside ``summary``: ``Mode.optional_why``,
+#: the generic reason an optional phase is offered before the next required
+#: one (``None`` on every row whose phase is not optional).
+SURFACE_SCHEMA_VERSION = 5
 
 
 def _aliases_for(name: str) -> List[str]:
@@ -108,6 +118,11 @@ def _exposed_modes() -> List[Dict[str, Any]]:
             "positionals": list(mode.positionals),
             "supports_detach": mode.supports_detach,
             "summary": mode.summary,
+            # The generic `why` an optional phase carries beside its command in
+            # a finished phase's next step (schema v5), `None` on every row
+            # whose phase is not optional. Vocabulary only: a server relays the
+            # `why` that arrives in a result, never one read from here.
+            "optional_why": mode.optional_why,
             # The phase word the exit-3 message names. From the *launch*, never
             # from the payload: a poll's result line is `status`'s own and
             # declares no phase, so the payload cannot say which phase died.
@@ -272,8 +287,11 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
     The lede (``modes.TOOL_DESCRIPTION_LEDE``), one line per exposed mode with
     its aliases and summary, the default-mode line, the outcomes line — after
     the mode block, so a model meets the exit codes in the same glance as the
-    modes — then any host-keyed note, then the worked examples. Examples travel
-    inside the description because a JSON-Schema fallback has nowhere to put an
+    modes — and directly under it the ``user_next_step`` line
+    (``modes.TOOL_USER_NEXT_STEP_LINE``: a lifted next-phase command is the
+    user's to type, never a call; plans/next-phase-command.md §2.4), then any
+    host-keyed note, then the worked examples. Examples travel inside the
+    description because a JSON-Schema fallback has nowhere to put an
     ``examples`` key a host would render.
     """
     lines = [mode_table.TOOL_DESCRIPTION_LEDE, "", "Modes:"]
@@ -284,6 +302,7 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
     lines.append(f"The default mode is {mode_table.DEFAULT_MODE}.")
     lines.append("")
     lines.append(mode_table.TOOL_OUTCOMES_LINE)
+    lines.append(mode_table.TOOL_USER_NEXT_STEP_LINE)
     note = _DESCRIPTION_NOTE.get(host_id)
     if note:
         writers = ", ".join(row["name"] for row in rows if row["writes_worktree"])
@@ -421,6 +440,31 @@ def _uninstall_command(host_id: str) -> str:
     )
 
 
+def _route_env(host_id: str) -> Dict[str, str]:
+    """``dispatcher.route_env`` for *host_id*: ``{"name", "value"}`` (schema v5).
+
+    The name is ``modes.ROUTE_ENV``. The value is the one member of
+    ``modes.TOOL_ROUTES`` that is a key of the host's ``next_command`` cell,
+    read through ``host_capabilities.entry`` — the source tree's
+    ``hosts/capabilities.yaml``, no environment — so the surface stays a
+    function of the source tree (plans/next-phase-command.md T2). None, or more
+    than one, is a table drift: the build fails naming both tables rather than
+    writing a guess, because a wrong value would print a plausible wrong
+    command on this route.
+    """
+    cell = host_capabilities.entry(host_id).get("next_command") or {}
+    members = [route for route in mode_table.TOOL_ROUTES if route in cell]
+    if len(members) != 1:
+        raise ValueError(
+            f"host '{host_id}': expected exactly one modes.TOOL_ROUTES member "
+            f"({', '.join(mode_table.TOOL_ROUTES)}) among its next_command keys "
+            f"in hosts/capabilities.yaml ({', '.join(cell) or 'none'}), found "
+            f"{len(members)}. Fix one table or the other; the surface's "
+            "route_env is never guessed."
+        )
+    return {"name": mode_table.ROUTE_ENV, "value": members[0]}
+
+
 def cli_surface(host_id: str) -> Dict[str, Any]:
     """Everything a host's plugin needs to know about the CLI, generated.
 
@@ -440,7 +484,11 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
     three resolved capability-verb sentences — is gone. The plugin never read
     them from here: it asks ``util instructions <mode> --host <id>`` at run
     time, which is the single owner of that text, and a second copy in a file
-    nothing consumes is a copy that can only go stale.
+    nothing consumes is a copy that can only go stale. One field reads data
+    rather than a module: ``dispatcher.route_env``'s value comes from the
+    source tree's ``hosts/capabilities.yaml`` (the host's ``next_command``
+    keys) through ``host_capabilities.entry`` — still the source tree, still
+    no environment.
     """
     rows = _exposed_modes()
     reserved = _reserved_flags()
@@ -586,6 +634,14 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
             # host's credential-free floor while the picker two inches above the
             # prompt says something else.
             "session_model_env": provider_registry.HOST_SESSION_MODEL_ENV,
+            # The route signal (schema v5): a server sets `env[name] = value`
+            # on every child it spawns, the polls included, so the dispatcher
+            # spells a finished phase's `user_next_step` command the way this
+            # route types it. The same precedent as `session_model_env` — a
+            # Python-owned name the server reads from here — plus the value,
+            # which is picked from `modes.TOOL_ROUTES` by the host's
+            # `next_command` cell. It picks a spelling, never what runs.
+            "route_env": _route_env(host_id),
             # A `next` carrying one of these is a *mechanical* continuation —
             # the same phase finishing itself off — so `execute` follows it
             # internally under its own cap rather than handing it back for a

@@ -74,7 +74,32 @@ hosts:
     # `verified`: no row has ever typed it into a Claude Code session — the
     # container lane drives this host headless with a prompt, exactly as the two
     # installable hosts' `documented` cells were before 2026-08-24.
-    invocation: "as `/multi-llm:multi-llm <mode-flag> <plan-path> [options]`."
+    #
+    # The trailing clause names the second install route: a copy under one of
+    # `install_paths` is a plain skill, invoked without the plugin namespace. It
+    # is appended, so the leading ``as `/`` `hosts/render_capabilities.py` keys
+    # on is unchanged, and it is the prose `next_command.skill` is held to.
+    invocation: "as `/multi-llm:multi-llm <mode-flag> <plan-path> [options]`, or as `/multi-llm <mode-flag> <plan-path> [options]` when the skill is installed as a plain skill under one of `install_paths`."
+    # The next-phase command a finished phase ends its report with, per install
+    # route (plans/next-phase-command.md §2.1). Read by `utils/next_phase.py` at
+    # run time, so it is required. `default` is the plugin (the route
+    # `invocation` documents first); `skill` is a copy under `install_paths`,
+    # which `resolve_route` recognises from the dispatcher's own skill root.
+    # `skill` is `verified` (2026-10-01, T10 of plans/next-phase-command.md,
+    # claude-code 2.1.285): the container lane stages this host as a plain skill
+    # under `$HOME/.claude/skills/multi-llm`, and `claude-code-next-command` ran
+    # twice on that route: runs/20261001T114907Z on `openai/gpt-6-luna` through
+    # OpenRouter, and runs/20261001T121548Z on `sonnet` through the Claude
+    # subscription (`--creds fallback`). Each printed `/multi-llm --implement
+    # "/work/sample-project/plans/next phase.md"`, and that command typed as the
+    # whole prompt of a fresh `claude -p` session dispatched `implement` with the
+    # fixture unquoted. NOT covered: `default` (the plugin route) has never been
+    # typed by a recorded run (the lane cannot stage it) and stays `documented`;
+    # the plugin's Stop hook (plain-skill staging loads no plugin hooks); and
+    # typing into the TUI (both runs were headless `claude -p`).
+    next_command:
+      default: "/multi-llm:multi-llm {args}"
+      skill: "/multi-llm {args}"
     multi_turn: true
     subagents: native
     ask: structured
@@ -142,6 +167,7 @@ hosts:
       reload: documented
       arguments: verified
       invocation: documented
+      next_command: {default: documented, skill: verified}
       multi_turn: verified
       subagents: verified
       ask: verified
@@ -200,6 +226,14 @@ hosts:
       exactly these arguments: <the same arguments the Claude Code skill takes>`.
       Codex installs this shim as a **skill**, which is model-invoked rather than
       typed: its composer answers `/multi-llm` with `Unrecognized command`.
+    # Per route (plans/next-phase-command.md §2.1). `default` is the file shim
+    # `invocation` documents; `package` is the Codex plugin, the spelling
+    # `package.invocation` documents. Both `verified` since T10 (2026-10-01) —
+    # by a recorded run that typed the PRINTED command, never by derivation
+    # from `invocation` (see the provenance row below for the runs).
+    next_command:
+      default: "Use the multi-llm skill with exactly these arguments: {args}"
+      package: "$multi-llm:multi-llm {args}"
     multi_turn: true                 # documented, not observed: `codex exec`
                                      # runs a tool loop and `codex exec resume`
                                      # continues the session — either would give
@@ -336,6 +370,31 @@ hosts:
       reload: documented
       arguments: documented
       invocation: verified
+      # PROMOTED BY T10 (plans/next-phase-command.md), codex-cli 0.159.2,
+      # container rows `codex-next-command` / `codex-package-next-command`. Each
+      # route ran `generate-tasks` on a fixture plan whose path holds a space
+      # (`plans/next phase.md`), then handed the command its dispatcher printed
+      # (`user_next_step.command`), verbatim and as the whole prompt, to a FRESH
+      # headless `codex exec` session on the same route
+      # (`entrypoint.run_typed_followup`). In both sessions on both routes the
+      # dispatcher's own receipt then recorded `implement` with the plan
+      # argument naming the fixture and holding no quote character:
+      #   default: `Use the multi-llm skill with exactly these arguments:
+      #     --implement "plans/next phase.md"` — runs/20261001T113914Z
+      #     (~deepseek/deepseek-v4-flash-latest) and runs/20261001T115800Z
+      #     (deepseek/deepseek-v4.1-flash), argv `plans/next phase.md`;
+      #   package: `$multi-llm:multi-llm --implement "/work/sample-project/plans/
+      #     next phase.md"` — the `$` mention, typed into `codex exec` — runs/
+      #     20261001T113244Z (~deepseek/deepseek-v4-flash-latest) and runs/
+      #     20261001T115346Z (deepseek/deepseek-v4.1-flash), a `multi_llm` tool
+      #     call whose argv held the absolute fixture path unquoted. The plugin
+      #     was installed from the image's local marketplace mirror, which is
+      #     why `package` (the published Git route) below stays `documented`.
+      # What it does NOT cover, and the cell claims no more: the interactive
+      # composer (no row has typed either spelling into the TUI against a real
+      # model — the `$` popup's own resolution is unmeasured), other platforms,
+      # and the four other workflow modes' commands (one template, one row).
+      next_command: {default: verified, package: verified}
       multi_turn: documented
       subagents: documented
       ask: documented
@@ -393,6 +452,13 @@ hosts:
     # is rendered separately, because `--command` is what resolves the shim
     # there, not this spelling.
     invocation: "as `/multi-llm <the same arguments the Claude Code skill takes>`."
+    # Per route (plans/next-phase-command.md §2.1): the file shim and the npm
+    # package both answer to `/multi-llm` (the package's `config` hook injects
+    # the same command). Both `verified` since T10 (2026-10-01); the runs are
+    # named on the provenance row below.
+    next_command:
+      default: "/multi-llm {args}"
+      package: "/multi-llm {args}"
     # A second, recommended install route — NOT a second host. `reload`,
     # `subagents`, `ask`, `detach`, `max_concurrent_subagents` and
     # `timeout_ceiling_s` are properties of this harness, not of how the skill
@@ -594,6 +660,30 @@ hosts:
       # `opencode-publish` succeeds, one registry-spec row promotes this line.
       package: documented
       invocation: verified
+      # PROMOTED BY T10 (plans/next-phase-command.md), opencode 1.18.33,
+      # container rows `opencode-next-command` / `opencode-package-next-command`.
+      # Each route ran `generate-tasks` on `plans/next phase.md`, then handed the
+      # PRINTED command to a FRESH `opencode run` on the same route through the
+      # host's verified headless spelling, `--command multi-llm -- <args>` — the
+      # command's own `/multi-llm ` prefix is what `--command multi-llm` names,
+      # and the argument string is the printed one, byte for byte (`opencode run
+      # -- "/multi-llm …"` never expands, measured on the documented-invocation
+      # row, which separately verified the TUI's `/multi-llm` resolution). The
+      # dispatcher's own receipt then recorded `implement` with the fixture as
+      # its plan argument and no quote character in it:
+      #   default: `--implement "plans/next phase.md"` — runs/20261001T113344Z
+      #     (~deepseek/deepseek-v4-flash-latest) and runs/20261001T115548Z
+      #     (deepseek/deepseek-v4.1-flash), a shell dispatch;
+      #   package: `--implement "/work/sample-project/plans/next phase.md"` —
+      #     runs/20261001T112645Z (~deepseek/deepseek-v4-flash-latest) and
+      #     runs/20261001T115138Z (deepseek/deepseek-v4.1-flash), a `multi_llm`
+      #     tool call. The plugin was the image's local-directory install, which
+      #     is why `package` (a registry install) above stays `documented`.
+      # Not covered: a real model typing into the TUI, other platforms, and the
+      # other modes' commands. (Both default-route runs' FINAL MESSAGES left the
+      # optional review-tasks command unfenced — criterion 4, a separate
+      # question this cell does not grade.)
+      next_command: {default: verified, package: verified}
       multi_turn: verified
       subagents: documented
       ask: documented

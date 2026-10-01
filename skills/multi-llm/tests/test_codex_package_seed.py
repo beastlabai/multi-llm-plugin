@@ -304,12 +304,24 @@ class TestTheMatrix:
         assert row["args"] in prompt
 
     def test_every_other_codex_row_keeps_the_host_template(self):
+        # A package-route row is the exception by construction: the plugin
+        # advertises the skill namespaced (`multi-llm:multi-llm`, R8′), so each
+        # one (`codex-package-ask`, and T10's `codex-package-next-command`)
+        # carries the row-16 sentence — graded just below — and no file-route
+        # row may borrow it.
         for row in CODEX["rows"]:
-            if row["id"] == "codex-package-ask" or not row.get("args"):
+            if row.get("route") == "package" or not row.get("args"):
                 continue
             assert "prompt_template" not in row, row["id"]
             assert entrypoint.render_prompt(CODEX, row).startswith(
                 "Use the multi-llm skill with exactly these arguments")
+
+    def test_every_package_row_names_the_namespaced_skill(self):
+        rows = [r for r in CODEX["rows"] if r.get("route") == "package"]
+        assert rows
+        for row in rows:
+            assert entrypoint.render_prompt(CODEX, row).startswith(
+                "Use the `multi-llm:multi-llm` skill"), row["id"]
 
 
 class TestTheHarnessForwardsTheProbe:

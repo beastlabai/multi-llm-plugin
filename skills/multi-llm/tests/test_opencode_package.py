@@ -1480,9 +1480,10 @@ class TestConfigHook:
     ):
         """A surface with the right ``schema_version`` and the wrong shape warns.
 
-        ``loadSurface`` checks the *version* and nothing else, so a truncated or
-        hand-edited payload that still declares the current version sails past
-        it and only
+        ``loadSurface`` checks the *version* and the route signal (schema v5's
+        ``dispatcher.route_env``) and nothing else, so a truncated or
+        hand-edited payload that still declares the current version and a
+        route sails past it and only
         blows up later, inside ``toolDescription``/``toolArgs``, where
         ``surface.tool_name`` and ``surface.argument_descriptions`` are read. Unlike ``config``, the ``tool`` hook is a **map built eagerly
         at plugin init**, so that TypeError would escape the factory itself and
@@ -1493,12 +1494,16 @@ class TestConfigHook:
         broken = tmp_path / "wrong-shape"
         (broken / "dist").mkdir(parents=True)
         shutil.copy2(SRC_MJS, broken / "dist" / "index.mjs")
-        # The right version, and then nothing else the builders need: no
-        # `modes`, no `reserved_flags`, no `dispatcher`.
+        # The right version and a usable route signal (so `loadSurface`
+        # passes it), and then nothing else the builders need: no `modes`, no
+        # `reserved_flags`, no `tool_name`.
         (broken / "dist" / "cli-surface.json").write_text(
             json.dumps({
                 "schema_version": pkg_build.SURFACE_SCHEMA_VERSION,
                 "description_lede": "x",
+                "dispatcher": {
+                    "route_env": pkg_build.cli_surface()["dispatcher"]["route_env"],
+                },
             }),
             encoding="utf-8",
         )
@@ -1690,6 +1695,13 @@ argv = sys.argv[1:]
 
 with open(log, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(argv) + "\n")
+# One line per child when a row asks for it, in spawn order: the variables
+# the plugin hands the dispatcher (the route signal, the session model, uv).
+if os.environ.get("STUB_ENV_LOG"):
+    with open(os.environ["STUB_ENV_LOG"], "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({
+            key: value for key, value in os.environ.items()
+            if key.startswith("MULTI_LLM_")}) + "\n")
 
 # Count how many calls have happened, and pick this call's scripted outcome.
 with open(log, "r", encoding="utf-8") as handle:
@@ -6594,3 +6606,260 @@ class TestTheSessionModelIsObservedAndHandedToPython:
         assert "session_model" not in outcome
         child_env = json.loads(env_log.read_text(encoding="utf-8"))
         assert provider_registry.HOST_SESSION_MODEL_ENV not in child_env
+
+
+# ===========================================================================
+# The route signal and the lifted next step (plans/next-phase-command.md T2, T8)
+# ===========================================================================
+
+#: Schema v5's route signal, from the generated surface (never retyped).
+ROUTE_ENV = pkg_build.cli_surface()["dispatcher"]["route_env"]
+
+#: Every next-phase spelling the capability data carries, read through the
+#: accessor: six ``(host, route)`` cells.
+NEXT_COMMAND_CELLS = [
+    (host_id, route)
+    for host_id in caps.host_ids()
+    for route in caps.next_command_routes(host_id)
+]
+
+NEXT_STEP_ARGS = {"mode": "review-plan", "plan": "p.md", "question": "",
+                  "extra_flags": []}
+NEXT_STEP_VALUES = {"word": "review-plan", "plan": "/w/p.md", "question": "",
+                    "extraFlags": []}
+NEXT_STEP_LAUNCH = {
+    "exit": 0,
+    "stdout": [
+        "run_id: RID-N",
+        "log: /tmp/next.log",
+        'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+        '"artifacts":[],"next":null}',
+    ],
+}
+
+
+def _next_step(command=None, *, complete=False):
+    """A ``user_next_step`` value shaped like the dispatcher's (§2.1)."""
+    if complete:
+        return {"phase": None, "command": None, "complete": True}
+    return {
+        "phase": "implement",
+        "command": command,
+        "optional_before": [{
+            "phase": "review-tasks",
+            "command": "/multi-llm --review-tasks /w/p.md",
+            "why": next(
+                m for m in mode_table.MODES if m.name == "review-tasks"
+            ).optional_why,
+        }],
+        "complete": False,
+    }
+
+
+def _child(code, state, **payload):
+    """A synthetic finished child for ``terminalResult``."""
+    body = {"mode": "status", "state": state, "exit": code, "artifacts": [],
+            "next": None, **payload}
+    return {
+        "code": code,
+        "result": body,
+        "stdout": f"{cli_common.RESULT_MARKER} {json.dumps(body)}\n",
+    }
+
+
+class TestTheRouteSignalReachesEveryChild:
+    def test_the_surface_carries_the_owners_name_and_this_hosts_route(self):
+        assert ROUTE_ENV == {"name": mode_table.ROUTE_ENV, "value": "package"}
+        assert ROUTE_ENV["value"] in mode_table.TOOL_ROUTES
+        assert ROUTE_ENV["value"] in caps.next_command_routes("opencode")
+
+    def test_neither_the_name_nor_the_value_is_a_js_literal(self):
+        """The plugin reads both strings from the surface (T2)."""
+        body = _code_only(SRC_MJS.read_text(encoding="utf-8"))
+        assert ROUTE_ENV["name"] not in body
+        for quote in ('"', "'", "`"):
+            assert f"{quote}{ROUTE_ENV['value']}{quote}" not in body
+
+    def test_the_launch_and_every_poll_carry_it(
+        self, built_package, uv_stub, tmp_path
+    ):
+        env_log = tmp_path / "child-env.log"
+        result, calls = uv_stub.run(
+            built_package, NEXT_STEP_ARGS,
+            [NEXT_STEP_LAUNCH, _poll(2), _poll(0, state="done")],
+            extra_env={"STUB_ENV_LOG": str(env_log)},
+        )
+        envs = [json.loads(line) for line in
+                env_log.read_text(encoding="utf-8").splitlines() if line]
+        assert len(calls) == 3 and len(envs) == 3, (calls, envs)
+        assert [env.get(ROUTE_ENV["name"]) for env in envs] == (
+            [ROUTE_ENV["value"]] * 3
+        )
+        assert result["ok"] is True
+
+    @pytest.mark.parametrize("spelling", [
+        "previous-version", "no-route-env", "empty-route-name", "no-route-value",
+    ])
+    def test_a_stale_surface_is_refused_and_spawns_nothing(
+        self, tmp_path, uv_stub, spelling
+    ):
+        """A v4 surface, or a v5 one without a usable ``dispatcher.route_env``,
+        is refused like a version mismatch: no tool registered, a warning naming
+        the repair, and ``execute`` (reached directly) spawns no child. Never a
+        spawn without the route signal, which would print the file-shim
+        spelling on this route."""
+        current = pkg_build.cli_surface()
+        dispatcher = dict(current["dispatcher"])
+        if spelling == "previous-version":
+            dispatcher.pop("route_env")
+            stale = dict(
+                current, schema_version=pkg_build.SURFACE_SCHEMA_VERSION - 1,
+                dispatcher=dispatcher,
+                modes=[{k: v for k, v in row.items() if k != "optional_why"}
+                       for row in current["modes"]],
+            )
+        else:
+            if spelling == "no-route-env":
+                dispatcher.pop("route_env")
+            elif spelling == "empty-route-name":
+                dispatcher["route_env"] = dict(ROUTE_ENV, name="")
+            else:
+                dispatcher["route_env"] = {"name": ROUTE_ENV["name"]}
+            stale = dict(current, dispatcher=dispatcher)
+        package = tmp_path / "stale"
+        (package / "dist").mkdir(parents=True)
+        shutil.copy2(SRC_MJS, package / "dist" / "index.mjs")
+        (package / "dist" / "cli-surface.json").write_text(
+            json.dumps(stale), encoding="utf-8")
+        log = tmp_path / "spawns.log"
+        log.write_text("", encoding="utf-8")
+        script = tmp_path / "script.json"
+        script.write_text(json.dumps([_poll(0, state="done")]), encoding="utf-8")
+        result = run_node(
+            f"""
+            const {{ MultiLlmPlugin }} = await import({json.dumps(str(package / "dist" / "index.mjs"))})
+            const p = await MultiLlmPlugin()
+            const surface = MultiLlmPlugin.__testing.loadSurface()
+            const answer = await MultiLlmPlugin.execute(
+              {json.dumps(NEXT_STEP_ARGS)}, {{ directory: {json.dumps(str(tmp_path))} }},
+              surface,
+            )
+            console.log("@@" + JSON.stringify({{
+              tools: Object.keys(p.tool ?? {{}}), surface, answer,
+            }}) + "@@")
+            """,
+            env={"MULTI_LLM_UV": str(uv_stub.path), "STUB_LOG": str(log),
+                 "STUB_SCRIPT_FILE": str(script)},
+        )
+        assert result.returncode == 0, result.stderr
+        payload_json = json.loads(re.search(r"@@(.*)@@", result.stdout, re.S).group(1))
+        assert payload_json["tools"] == [], "the tool registered on a stale surface"
+        assert payload_json["surface"] is None
+        assert payload_json["answer"]["ok"] is False
+        assert log.read_text(encoding="utf-8") == "", "a child was spawned"
+        assert "[multi-llm]" in result.stderr and "reinstall" in result.stderr
+        if spelling != "previous-version":
+            assert "route_env" in result.stderr
+
+
+class TestTheNextStepIsLiftedAndNeverFollowed:
+    """§2.4 on this route: ``terminalResult`` lifts, ``isMechanical`` ignores."""
+
+    def test_exit_0_lifts_it_beside_the_payload_copy(self, built_package):
+        step = _next_step("/multi-llm --implement /w/p.md")
+        out = _terminal(built_package, _child(0, "done", user_next_step=step),
+                        NEXT_STEP_VALUES)
+        assert out["ok"] is True
+        assert out["user_next_step"] == step
+        assert out["result"]["user_next_step"] == step
+        assert "next_phase" not in json.dumps(out)
+
+    def test_the_completed_form_is_lifted_too(self, built_package):
+        step = _next_step(complete=True)
+        out = _terminal(built_package, _child(0, "done", user_next_step=step),
+                        NEXT_STEP_VALUES)
+        assert out["user_next_step"] == {
+            "phase": None, "command": None, "complete": True}
+
+    def test_exit_2_of_a_phase_already_complete_lifts_it(self, built_package):
+        step = _next_step("/multi-llm --generate-tasks /w/p.md")
+        out = _terminal(
+            built_package,
+            _child(2, cli_common._STATE_BY_EXIT[cli_common.EXIT_NOTHING_TO_DO],
+                   mode="review-plan", user_next_step=step),
+            NEXT_STEP_VALUES,
+        )
+        assert out["ok"] is True and out["exit"] == 2
+        assert out["user_next_step"] == step
+        assert "next_phase" not in json.dumps(out)
+
+    def test_a_still_running_poll_carries_none(self, built_package):
+        out = _terminal(built_package, _child(2, cli_common.STATE_RUNNING),
+                        NEXT_STEP_VALUES)
+        assert "user_next_step" not in out
+        assert "user_next_step" not in out["result"]
+
+    def test_an_absent_key_lifts_nothing(self, built_package):
+        out = _terminal(built_package, _child(0, "done"), NEXT_STEP_VALUES)
+        assert "user_next_step" not in out
+
+    @pytest.mark.parametrize("code", [1, 3])
+    def test_exit_1_and_3_lift_nothing(self, built_package, code):
+        step = _next_step("/multi-llm --implement /w/p.md")
+        out = _terminal(built_package, _child(code, "error", user_next_step=step),
+                        NEXT_STEP_VALUES)
+        assert "user_next_step" not in out
+
+    def test_redaction_leaves_every_spelling_intact(self, built_package):
+        """All six ``next_command`` spellings survive ``redactCommand`` and the
+        lift byte for byte: they are the host's own invocation, never a
+        ``uv run`` line."""
+        commands = [
+            caps.next_command_template(host_id, route).replace(
+                "{args}", "--generate-tasks /w/plans/p.md")
+            for host_id, route in NEXT_COMMAND_CELLS
+        ]
+        assert len(commands) == 6
+        children = []
+        for command in commands:
+            child = _child(0, "done", user_next_step=_next_step(command))
+            child["stdout"] = f"[NEXT_COMMAND] {command}\n" + child["stdout"]
+            children.append({
+                "code": 0, "argv": ["uv", "run"], "stderr": "", "resultRaw": None,
+                "truncated": False, "banner": {}, "aborted": False,
+                "timedOut": False, "spawnError": None, **child,
+            })
+        out = node_json(
+            f"""
+            const commands = {json.dumps(commands)}
+            const children = {json.dumps(children)}
+            emit({{
+              redacted: commands.map((c) => T.redactCommand(c, null, surface)),
+              lifted: children.map((child) => T.terminalResult(
+                child, {{ anchor: "/anchor", surface,
+                          values: {json.dumps(NEXT_STEP_VALUES)} }},
+              )),
+            }})
+            """,
+            built_package,
+        )
+        assert out["redacted"] == commands
+        for command, result in zip(commands, out["lifted"]):
+            assert result["user_next_step"]["command"] == command
+            assert result["result"]["user_next_step"]["command"] == command
+            assert f"[NEXT_COMMAND] {command}" in result["output"].split("\n")
+
+    def test_the_continuation_loop_never_follows_it(self, built_package, uv_stub):
+        """Zero follows for a result carrying only ``user_next_step`` — even one
+        whose command carries a mechanical-continuation flag."""
+        marker = pkg_build.cli_surface()["dispatcher"]["mechanical_continuations"][0]
+        step = _next_step("/multi-llm --review-plan /w/p.md " + marker)
+        result, calls = uv_stub.run(
+            built_package, NEXT_STEP_ARGS,
+            [NEXT_STEP_LAUNCH, _poll(0, state="done", user_next_step=step),
+             NEXT_STEP_LAUNCH],
+        )
+        assert len(calls) == 2, calls
+        assert "continuations" not in result
+        assert result["user_next_step"] == step
+        assert result.get("next") is None
