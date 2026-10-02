@@ -1,0 +1,62 @@
+[
+ [
+  {
+   "id": "ctc_1",
+   "type": "custom_tool_call",
+   "status": "completed",
+   "call_id": "call_1",
+   "name": "apply_patch",
+   "input": "*** Begin Patch\n*** Update File: src/pkg/calc.py\n@@\n def sub(a, b):\n-    return a + b\n+    return a - b\n*** End Patch\n"
+  }
+ ],
+ [
+  {
+   "id": "fc_2",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_2",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"uv run --frozen pytest -q 2>&1 | tail -15\", \"yield_time_ms\": 120000}"
+  }
+ ],
+ [
+  {
+   "id": "fc_3",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_3",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"uv run --frozen pytest -q -n 2 2>&1 | tail -15\", \"yield_time_ms\": 120000}"
+  }
+ ],
+ [
+  {
+   "id": "fc_4",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_4",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"cd web && npm test --no-update-notifier 2>&1 | tail -15\", \"yield_time_ms\": 120000}"
+  }
+ ],
+ [
+  {
+   "id": "fc_5",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_5",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"python3 -c \\\"open('/tmp/mllm-1b-direct', 'w').write('x'); print('wrote /tmp')\\\" 2>&1; python3 -c \\\"open('/dev/shm/mllm-1b', 'w').write('x'); print('wrote /dev/shm')\\\" 2>&1; python3 -c \\\"import tempfile; f = tempfile.NamedTemporaryFile(); print('tempfile', f.name)\\\" 2>&1\"}"
+  }
+ ],
+ [
+  {
+   "id": "fc_6",
+   "type": "function_call",
+   "status": "completed",
+   "call_id": "call_6",
+   "name": "exec_command",
+   "arguments": "{\"cmd\": \"mkdir newtop 2>&1; echo x > newtop.txt 2>&1; echo y > src/pkg/new_module.py 2>&1; echo appended >> AGENTS.md 2>&1; git commit -qam 'should fail' 2>&1; git config user.name x 2>&1; echo z > .codex/x 2>&1; echo z > .multi-llm/tmp/x 2>&1; echo z > plans/p/state.json 2>&1; git status --porcelain --untracked-files=all 2>&1; ls -a 2>&1\"}"
+  }
+ ]
+]

@@ -90,11 +90,13 @@ sys.path.insert(0, str(SKILL_ROOT))
 from utils import landlock_dispatch as ld  # noqa: E402
 from utils import process_control  # noqa: E402
 from utils.llm_client import _resolve_executable  # noqa: E402
+from utils.provider_registry import DEFAULT_WRITE_PATHS  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
     SANDBOX_RUNG_PLUGIN_LANDLOCK,
     WRITE_SCOPE_PLAN_FILE,
+    WRITE_SCOPE_REPO_WIDE,
     JailContext,
     JailRequest,
 )
@@ -193,18 +195,83 @@ def _git(tree: Path, *args: str) -> str:
     ).stdout
 
 
-def make_tree(tmp_path: Path, *, with_helper: bool = False) -> Path:
+#: Step 1b's scratch projects (plan "Editing turns that run tests and
+#: builds", measured 2026-10-02): a small Python project with a pytest suite
+#: and a small npm project, plus the protected set a repo-wide grant keeps
+#: read-only. ``implement_tools.json`` edits ``src/pkg/calc.py`` and runs the
+#: toolchain against them.
+TOOLCHAIN_PYPROJECT = """[project]
+name = "scratch"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = []
+
+[dependency-groups]
+dev = ["pytest>=7.0", "pytest-xdist>=3.0"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+"""
+CALC_BEFORE = "def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return a + b\n"
+#: What `implement_tools.json`'s apply_patch makes of it.
+CALC_AFTER = "def add(a, b):\n    return a + b\n\n\ndef sub(a, b):\n    return a - b\n"
+TOOLCHAIN_FILES = {
+    "src/pkg/__init__.py": "",
+    "src/pkg/calc.py": CALC_BEFORE,
+    "tests/test_calc.py": (
+        "from pkg.calc import add, sub\n\n\n"
+        "def test_add():\n    assert add(1, 2) == 3\n\n\n"
+        "def test_sub():\n    assert sub(5, 2) == 3\n"
+    ),
+    "web/package.json": (
+        '{"name": "scratch-web", "version": "1.0.0", "private": true, '
+        '"scripts": {"test": "node test.js"}}\n'
+    ),
+    "web/test.js": (
+        "const assert = require('assert');\nassert.strictEqual(1 + 1, 2);\n"
+        "console.log('web ok');\n"
+    ),
+    "plans/p/state.json": "{}\n",
+    ".multi-llm/providers.yaml": "# project config\n",
+    ".multi-llm/runs/.keep": "",
+    ".codex/config.toml": "# project codex config\n",
+    ".gitignore": ".venv/\n__pycache__/\n.pytest_cache/\nnode_modules/\n",
+}
+
+
+def make_tree(tmp_path: Path, *, with_helper: bool = False, with_toolchain: bool = False) -> Path:
     """The rig's scratch repo: ``AGENTS.md``, ``plans/p.md`` (and ``helper.py``
-    for the import step), committed."""
+    for the import step), committed. ``with_toolchain`` adds step 1b's two
+    projects and the protected set, and syncs the Python project's ``.venv``
+    OUTSIDE the jail with the user's warm cache — as a real repo's would be —
+    so the jailed turn only has to keep it in sync (skipped when ``uv`` or
+    ``npm`` is missing, or the sync needs a network this host lacks)."""
     tree = tmp_path / "tree"
     (tree / "plans").mkdir(parents=True)
     (tree / "AGENTS.md").write_text(AGENTS_TEXT)
     (tree / PLAN_REL).write_text(PLAN_BEFORE)
     if with_helper:
         (tree / "helper.py").write_text("VALUE = 42\n")
+    if with_toolchain:
+        (tree / "pyproject.toml").write_text(TOOLCHAIN_PYPROJECT)
+        for rel, text in TOOLCHAIN_FILES.items():
+            path = tree / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text)
     _git(tree, "init", "-q")
     _git(tree, "add", ".")
     _git(tree, "commit", "-qm", "init")
+    if with_toolchain:
+        for tool in ("uv", "npm", "node"):
+            if not shutil.which(tool):
+                pytest.skip(f"{tool} is not on PATH: step 1b's toolchain turn needs it")
+        synced = subprocess.run(
+            ["uv", "sync", "--project", str(tree)], capture_output=True, text=True,
+            timeout=300, stdin=subprocess.DEVNULL,
+        )
+        if synced.returncode != 0:
+            pytest.skip(f"uv sync could not prepare the scratch venv: {synced.stderr[-400:]}")
     return Path(os.path.realpath(tree))
 
 
@@ -394,6 +461,7 @@ def run_turn(
     script: Path,
     *,
     plan_file: bool = False,
+    repo_wide: bool = False,
     jailed: bool = True,
     strace: bool = False,
     home: Optional[Path] = None,
@@ -403,16 +471,27 @@ def run_turn(
     (landlock_dispatch's module docstring, steps 1-9).
 
     ``plan_file`` gives the request the ``plan-file`` scope on ``plans/p.md``
-    and renders the executor's ``agent-write`` leg; otherwise the fan-out's
-    read-only ``generate`` leg. ``jailed=False`` runs the same codex argv and
-    the same child env (``TMPDIR`` + redirects) without the wrapper prefix — the
-    strace leg's "outside the jail". ``strace`` wraps whatever is spawned.
+    and renders the executor's ``agent-write`` leg; ``repo_wide`` (step 3b)
+    the ``repo-wide`` scope of an ``implement`` dispatch, with ``plans/p/``
+    as the run's output folder and the shipped deny list, declaring
+    ``src/pkg/calc.py``; otherwise the fan-out's read-only ``generate`` leg.
+    ``jailed=False`` runs the same codex argv and the same child env
+    (``TMPDIR`` + redirects) without the wrapper prefix — the strace leg's
+    "outside the jail". ``strace`` wraps whatever is spawned.
     """
     work = tmp_path / label
     work.mkdir()
     home = home or make_home(work)
     assert os.path.realpath(home) != REAL_CODEX_HOME
-    if plan_file:
+    if repo_wide:
+        request = JailRequest(
+            repo_root=str(tree), kind="implement", write_scope=WRITE_SCOPE_REPO_WIDE,
+            output_dir=str(tree / "plans" / "p"),
+            deny_patterns=tuple(DEFAULT_WRITE_PATHS["deny"]),
+            declared=(str(tree / "src" / "pkg" / "calc.py"),),
+        )
+        prompt = "Implement T001: fix sub() in src/pkg/calc.py and run the tests."
+    elif plan_file:
         request = JailRequest(
             repo_root=str(tree), kind="apply_suggestions",
             write_scope=WRITE_SCOPE_PLAN_FILE, target=str(tree / PLAN_REL),
@@ -428,7 +507,7 @@ def run_turn(
             # Step 2: render with the attempt's context (no home yet, as the
             # fan-out does: `JailContext(jail.request, jail.tmpdir)`).
             render_context = JailContext(request, tmpdir)
-            if plan_file:
+            if plan_file or repo_wide:
                 cmd, stdin_text = provider.build_agent_command_for_transport(
                     prompt, MODEL, PROFILE_AGENT_WRITE, "argv",
                     sandbox_fallback=SANDBOX_RUNG_PLUGIN_LANDLOCK,
@@ -1039,6 +1118,87 @@ def test_step_1c_tool_turn_runs_clean_under_the_redirects(tmp_path, jail_ready):
             f"{jail_ready}: EACCES beyond /dev/tty in the jailed tool turn:\n"
             + "\n".join(f"  {p}  [{c} by {g}]" for p, c, g in eacces)
         )
+
+
+def test_step_1b_implement_turn_runs_its_toolchain_under_the_repo_wide_grant(tmp_path, jail_ready):
+    """§8.3 "Step 3b is done when", tier 3 (the promoted step-1b turn, measured
+    2026-10-02 on codex 0.160.0): an ``implement`` batch on the rung edits a
+    file in a subdirectory with ``apply_patch``, then its commands run ``uv run
+    --frozen pytest``, the same with ``-n 2`` and ``npm test`` — all three
+    exit 0 with no denial under the redirects (``UV_CACHE_DIR`` and the pytest
+    ``cache_dir`` under ``TMPDIR`` beside step 1c's) — while a direct ``/tmp``
+    and ``/dev/shm`` write, and every attempt on the protected set (a new
+    top-level entry, ``git commit``, ``git config``, ``.codex``, ``.multi-llm``,
+    the output folder) are denied and leave ``.git/``, ``.multi-llm/`` and the
+    output folder byte-identical; a new file inside ``src/`` and an in-place
+    append to ``AGENTS.md`` land."""
+    tree = make_tree(tmp_path, with_toolchain=True)
+    protected = {}
+    for base in (tree / ".git", tree / ".codex", tree / ".multi-llm", tree / "plans" / "p"):
+        for path in base.rglob("*"):
+            if path.is_file() and path.name != "index":
+                protected[path] = path.read_bytes()
+    head = _git(tree, "rev-parse", "HEAD")
+    top_before = sorted(os.listdir(tree))
+    trace = bool(shutil.which("strace"))
+    result = run_turn(
+        tmp_path, tree, scripted(tmp_path, "implement_tools"), repo_wide=True, strace=trace,
+        label="implement_tools",
+    )
+    assert result.rc == 0 and result.completed and not result.failed, f"{jail_ready}\n{result.describe()}"
+    assert set(result.env_redirects) == {
+        "GIT_OPTIONAL_LOCKS", "PYTHONPYCACHEPREFIX", "npm_config_cache",
+        "UV_CACHE_DIR", "PYTEST_ADDOPTS",
+    }
+    # The declared edit landed in place.
+    assert [c.get("status") for c in result.file_changes] == ["completed"], result.describe()
+    assert (tree / "src" / "pkg" / "calc.py").read_text() == CALC_AFTER
+    commands = {(c.get("command") or ""): c for c in result.commands}
+    assert len(commands) == 5, result.describe()
+
+    def output_of(fragment: str) -> str:
+        matches = [c for name, c in commands.items() if fragment in name]
+        assert len(matches) == 1, (fragment, list(commands))
+        return matches[0].get("aggregated_output") or ""
+
+    # The toolchain: pytest, pytest-xdist and npm complete with no denial.
+    for fragment, expected in (("pytest -q 2", "2 passed"), ("-n 2", "2 passed"), ("npm test", "web ok")):
+        output = output_of(fragment)
+        assert expected in output, f"{jail_ready}: {fragment}:\n{output[-800:]}"
+        assert "permission denied" not in output.lower() and "errno 13" not in output.lower(), (
+            f"{jail_ready}: {fragment} hit a denial:\n{output[-800:]}"
+        )
+    # The direct /tmp and /dev/shm writes are the jail's; tempfile honours TMPDIR.
+    direct = output_of("mllm-1b-direct")
+    assert direct.count("PermissionError") == 2 and "wrote" not in direct, direct
+    assert f"tempfile {result.context.tmpdir}/" in direct
+    # The protected set held; the subdirectory file and the in-place append landed.
+    attempts = output_of("git commit")
+    for denied in ("newtop", "newtop.txt", ".git/index.lock", ".git/config",
+                   ".codex/x", ".multi-llm/tmp/x", "plans/p/state.json"):
+        assert denied in attempts and "Permission denied" in attempts, (denied, attempts)
+    assert (tree / "src" / "pkg" / "new_module.py").read_text() == "y\n"
+    assert (tree / "AGENTS.md").read_text() == AGENTS_TEXT + "appended\n"
+    assert {p: p.read_bytes() for p in protected} == protected
+    assert _git(tree, "rev-parse", "HEAD") == head
+    assert sorted(os.listdir(tree)) == top_before
+    assert not (tree / "newtop").exists() and not (tree / "newtop.txt").exists()
+    # The stream reads back as the jail working: no in-scope denial, no
+    # codex-internal EACCES, the stray ones counted out of scope.
+    assert result.denials.in_scope_paths == [] and result.denials.failed_file_changes == []
+    assert result.denials.out_of_scope_count >= 7, result.denials.to_dict()
+    assert result.evidence is None, f"{jail_ready}: codex-internal EACCES {result.evidence}"
+    # The redirects were used.
+    assert any(p.startswith("uv-cache/") for p in result.tmp_files), result.tmp_files[:40]
+    assert any(p.startswith("pytest-cache/") for p in result.tmp_files), result.tmp_files[:40]
+    assert not (tree / ".pytest_cache").exists()
+    if result.trace is not None:
+        stray = sorted({e.path for e in result.trace.eacces})
+        allowed = (str(tree / ".git"), str(tree / ".codex"), str(tree / ".multi-llm"),
+                   str(tree / "plans" / "p"), "/tmp/mllm-1b-direct", "/dev/shm/mllm-1b",
+                   "/dev/tty", str(tree / "newtop"))
+        unexpected = [p for p in stray if not p.startswith(allowed)]
+        assert not unexpected, f"{jail_ready}: EACCES outside step 1b's expected set:\n{unexpected}"
 
 
 # ===========================================================================
