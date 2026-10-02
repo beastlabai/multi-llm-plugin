@@ -150,7 +150,9 @@ to bare `python`.
      - Present available models from `providers.yaml` (multi-select)
      - Then run orchestrator with `--models <selected>`
    - **Partial results** (D6 row 3): under `--yes`, a model that produced nothing
-     is re-run once via `--force` and never with `--rerun-all`; a second failure
+     is re-run once via `--force` with the original run's full `--models`
+     selection (only the missing model actually runs; the run's report covers
+     only the models passed) and never with `--rerun-all`; a second failure
      is reported as `[PARTIAL_RESULTS: <model>,…]` with
      `MULTI_LLM_RESULT.state: "partial"` and exit **0**. Zero results is exit
      **3** naming the retry command.
@@ -380,7 +382,7 @@ to bare `python`.
       configured it; state that number there instead. Announcing an interval you are
       not waiting is worse than announcing none.
 
-   **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results. A kept result must have reviewed the current scope: when the change moved since it was written, the model re-runs (`[SCOPE_CHANGED]`) and its old file is kept as `{model}.json.stale-<scope id>`.
+   **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results. Pass the **same `--models` selection as the original run** (`models_requested` in `{plan}/code-review/.status.json`), never only the missing ones: the orchestrator skips the models that already have a result, and the run's report covers only the models passed. A kept result must have reviewed the current scope: when the change moved since it was written, the model re-runs (`[SCOPE_CHANGED]`) and its old file is kept as `{model}.json.stale-<scope id>`.
 
    The orchestrator will output (to the log):
    - `Git base reference: {commit}` - showing which base ref is being used
@@ -447,7 +449,11 @@ to bare `python`.
 
    A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
    `inputs` hashes no longer match the plan and grouped.json, is refused with
-   exit 3: re-run the phase with `--force` to re-materialize it.
+   exit 3: re-run the phase with `--force` to re-materialize it. A
+   `--reaggregate` of a review completed before the latest implement is
+   refused the same way (exit 3, naming the `--force` re-run): its results
+   judge an earlier state of the code, and reaggregating would only re-stamp
+   them.
 
    #### Single Batch: `[VALIDATION_PENDING]`
 

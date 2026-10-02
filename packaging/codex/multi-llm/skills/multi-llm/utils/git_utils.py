@@ -299,15 +299,32 @@ def ignored_paths(paths: Iterable[str], *, cwd: Optional[str] = None) -> Set[str
     (transcripts, build output, caches) come back. Best-effort: outside a
     repository, or when git fails, nothing is ignored, because dropping a path
     on a guess is worse than keeping it. ``-z`` both ways so no path is C-quoted.
+
+    A path outside the repository is never asked about: ``check-ignore`` exits
+    128 ("fatal: … is outside repository") for the whole batch on one such
+    path, which used to answer "nothing is ignored" for every path beside it
+    (adversarial review, 2026-10-02; ``finalize_tracking --touched`` can carry
+    one). Such a path is not ignored — it is not the repository's at all.
     """
     candidates = [path for path in paths if path]
     if not candidates:
         return set()
     where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
+    stdout, _, rc = _run_git("rev-parse", "--show-toplevel", check=False, cwd=cwd)
+    if rc != 0:
+        return set()
+    toplevel = os.path.realpath(stdout.strip())
+    base = os.path.realpath(cwd) if cwd is not None else os.path.realpath(os.getcwd())
+    inside = [
+        path for path in candidates
+        if _under_toplevel(os.path.join(base, path), toplevel)
+    ]
+    if not inside:
+        return set()
     try:
         result = subprocess.run(
             ["git", "check-ignore", "-z", "--stdin"],
-            input="\0".join(candidates) + "\0",
+            input="\0".join(inside) + "\0",
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             **where,
         )
@@ -316,6 +333,17 @@ def ignored_paths(paths: Iterable[str], *, cwd: Optional[str] = None) -> Set[str
     if result.returncode not in (0, 1):  # 128: not a repository, bad path
         return set()
     return {path for path in result.stdout.split("\0") if path}
+
+
+def _under_toplevel(path: str, toplevel: str) -> bool:
+    """Whether ``path`` (absolute or cwd-joined) lies at or under ``toplevel``.
+
+    Lexical after ``normpath`` on the path and ``realpath`` on the root: the
+    path need not exist (a deleted file is still a candidate) and a symlink
+    inside the repo pointing out is ``check-ignore``'s own question to answer.
+    """
+    resolved = os.path.normpath(path)
+    return resolved == toplevel or resolved.startswith(toplevel.rstrip(os.sep) + os.sep)
 
 
 def get_staged_files() -> List[str]:
@@ -434,9 +462,16 @@ def _private_index_copy(cwd: Optional[str]) -> str:
     if not source:
         stdout, _, _ = _run_git("rev-parse", "--git-path", "index", cwd=cwd)
         source = stdout.strip()
-        if not os.path.isabs(source):
-            source = os.path.join(cwd or os.getcwd(), source)
+    # Either value can be relative, and both are relative to where git runs
+    # (`cwd`), not to this process's own directory: a git hook exports
+    # `GIT_INDEX_FILE=.git/index`, and resolving that against the process cwd
+    # pointed the copy at a directory that did not exist, so `git add -N`
+    # failed on its lock file and no untracked file reached the reviewers
+    # (adversarial review, 2026-10-02).
+    if not os.path.isabs(source):
+        source = os.path.join(cwd or os.getcwd(), source)
     source = os.path.abspath(source)
+    _sweep_dead_index_copies(os.path.dirname(source))
     name = f"multi-llm-index.{os.getpid()}.{time.monotonic_ns()}"
     target = os.path.join(os.path.dirname(source), name)
     try:
@@ -452,6 +487,44 @@ def _private_index_copy(cwd: Optional[str]) -> str:
         else:
             os.unlink(target)
     return target
+
+
+#: The private index copies, as :func:`_private_index_copy` names them:
+#: ``multi-llm-index.<pid>.<monotonic ns>`` plus git's own ``.lock`` sibling.
+_INDEX_COPY_NAME = re.compile(r"^multi-llm-index\.(\d+)\.\d+(\.lock)?$")
+
+
+def _sweep_dead_index_copies(git_dir: str) -> None:
+    """Remove the index copies a killed run left behind in *git_dir*.
+
+    The ``finally`` in :func:`intent_to_add_untracked` cannot run under
+    SIGKILL, so a hard-killed review leaves ``multi-llm-index.<pid>.<ns>`` (and
+    its ``.lock``) in the git directory forever: harmless to git, which never
+    reads them, but they accumulate (adversarial review, 2026-10-02). A copy
+    is swept only when the pid in its name is not alive; this process's own
+    copies (a nested block) and another live run's are left alone. Best
+    effort: a directory that cannot be listed, or a file that cannot be
+    removed, changes nothing about the run.
+    """
+    try:
+        from .process_control import process_alive
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.process_control import process_alive
+    try:
+        names = os.listdir(git_dir)
+    except OSError:
+        return
+    for name in names:
+        match = _INDEX_COPY_NAME.match(name)
+        if not match:
+            continue
+        pid = int(match.group(1))
+        if pid == os.getpid() or process_alive(pid):
+            continue
+        try:
+            os.unlink(os.path.join(git_dir, name))
+        except OSError:
+            pass
 
 
 def _restore_index_var(had: bool, previous: Optional[str]) -> None:

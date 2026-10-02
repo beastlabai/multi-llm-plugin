@@ -93,6 +93,7 @@ from utils.review_orchestrator_base import (
     retire_salvage_artifacts,
     retire_stale_validation,
     retire_stale_validation_round,
+    retire_validation_for_regroup,
     retire_unselected_results,
     salvage_failure_fields,
     salvage_failure_kind,
@@ -4183,6 +4184,26 @@ async def main(argv: Optional[List[str]] = None) -> int:
             print(f"ERROR: Output directory does not exist: {out_dir}")
             sys.exit(1)
 
+        # The stale guard the fan-out path applies below, applied here too. A
+        # review completed before the latest implement judged an earlier state
+        # of the code (2026-10-02: the empty repository); the fan-out takes
+        # `--force` on it, but this path ran no model and ended in
+        # `mark_phase_completed`, which re-stamped the stale review newer than
+        # implement, so apply-code-fixes then applied the empty-repo findings
+        # (adversarial review, 2026-10-02). Refused, not re-run: a reaggregate
+        # is a promise to run no model. Before the detach boundary, so the
+        # refusal lands on the caller's terminal with no child and no log.
+        if get_or_create_state(plan_path).phase_completion_is_stale("code-review"):
+            print("ERROR: code-review was completed before the latest implement, "
+                  "so its results judge an earlier state of the code; "
+                  "--reaggregate would only re-stamp them.")
+            print("  Re-run the review instead: "
+                  + cli_common.retry_command(
+                      "review-code", plan_path, "--force",
+                      flags=cli_common.current_replay_flags(mode="review-code"),
+                  ))
+            sys.exit(EXIT_NEEDS_HUMAN)
+
         # The detach boundary, crossed here as well as on the fan-out path
         # below: a `--reaggregate --detach` launch must print its run banner
         # and hand the re-dispatch to a worker, or the host that composed
@@ -4952,10 +4973,13 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
                 # D7: the previous run's verdicts belong to the grouping this write
                 # replaces; retired in the same step so no later reaggregate finds them.
-                # Round-wide, not `validation.json` alone: the batch replies are that
+                # Round-wide when the grouping changed: the batch replies are that
                 # grouping's verdicts too, and a survivor is skipped as "already
-                # complete" by the executor (2026-10-02, #25).
-                retire_stale_validation_round(str(grouped_path.parent), reason="grouped.json rewritten by a re-run")
+                # complete" by the executor (2026-10-02, #25). `validation.json`
+                # alone when the hashes are the same grouping (a resume that
+                # skipped every model), so completed batches are not re-run
+                # (adversarial review, 2026-10-02).
+                retire_validation_for_regroup(str(grouped_path.parent), grouped_list, reason="grouped.json rewritten by a re-run")
                 with open(grouped_path, 'w', encoding='utf-8') as f:
                     json.dump(save_groups_payload(grouped_list), f, indent=2)
                 print(f"Grouped issues saved to: {grouped_path}")

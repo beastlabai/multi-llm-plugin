@@ -172,10 +172,17 @@ def _apply_batches_predate_review(
     A review completion re-stamped without new findings (``--reaggregate``)
     reads the same way; the cost is a bare command instead of ``--resume``,
     and the scheduler still skips a batch whose result and inputs match.
+
+    A review that is not ``completed`` has no cycle for the batches to belong
+    to, so they are an earlier one's: True. (Adversarial review, 2026-10-02:
+    this returned False for a code-review read as pending because it predated
+    implement's latest completion, so the batches of the cycle it had produced
+    marked apply-code-fixes ``in_progress`` and ``next-command`` offered the
+    ``--resume`` that replays that cycle's recorded decisions.)
     """
     review = PHASE_PREREQUISITES[phase][0]
     if phases[review]["status"] != "completed":
-        return False
+        return True
     reviewed_at = _parse_timestamp(phases[review].get("timestamp"))
     last_run = _latest_phase_activity(state, phase)
     if reviewed_at is None or last_run is None:
@@ -850,7 +857,9 @@ def _recorded_sandbox_fallback(plan_dir: Path) -> Optional[Tuple[str, str]]:
     return None
 
 
-def repo_wide_sandbox_warning(plan_path: Path, plan_dir: Path) -> Optional[str]:
+def repo_wide_sandbox_warning(
+    plan_path: Path, plan_dir: Path, *, host_id: Optional[str] = None
+) -> Optional[str]:
     """The early warning that implement / apply-code-fixes will be refused.
 
     On a machine where codex's own sandbox cannot start, ``implement`` and
@@ -864,6 +873,18 @@ def repo_wide_sandbox_warning(plan_path: Path, plan_dir: Path) -> Optional[str]:
     warning). Config resolution only; nothing is probed. None when either fact
     is missing or the config cannot be read, because a warning that may be
     wrong is worse than none.
+
+    *host_id* is the host the runner is resolved for, and it must be the one
+    the dispatch resolves: the ladder's ``session`` rung (the codex / opencode
+    session's own model, where the refusal lands) exists only for a host whose
+    entry names a ``session_runner_provider``. The reader's ``--host`` is
+    that host, and the servers declare it nowhere else — no server, shim or
+    surface exports ``$MULTI_LLM_HOST`` — so the fallback is the argv scan the
+    executor uses (``resolve_host_id(sys.argv[1:])``), never the bare
+    environment read. (Adversarial review, 2026-10-02: resolved against the
+    claude-code entry, ``codex:<session model>`` fell to ``claude-code:sonnet``
+    and the warning never fired on either tool route while the dispatch
+    refused.)
     """
     evidence = _recorded_sandbox_fallback(plan_dir)
     if evidence is None:
@@ -872,9 +893,10 @@ def repo_wide_sandbox_warning(plan_path: Path, plan_dir: Path) -> Optional[str]:
         from utils import host_capabilities
         from utils.provider_registry import resolve_subagent_runner
 
+        if host_id is None:
+            host_id = host_capabilities.resolve_host_id(sys.argv[1:])
         spec, _layer = resolve_subagent_runner(
-            "full", anchor=str(plan_path),
-            host_id=host_capabilities.resolve_host_id(),
+            "full", anchor=str(plan_path), host_id=host_id,
         )
     except Exception:  # noqa: BLE001 - advisory: status never fails on it
         return None
@@ -890,7 +912,10 @@ def repo_wide_sandbox_warning(plan_path: Path, plan_dir: Path) -> Optional[str]:
     )
 
 
-def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) -> dict:
+def get_workflow_status(
+    state: StateManager, plan_path: Path, plan_dir: Path,
+    *, host_id: Optional[str] = None,
+) -> dict:
     """Get current workflow state for all phases.
 
     The first loop reads what ``state.json`` recorded. The post-loop branches
@@ -904,6 +929,10 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
     can never name a phase this payload shows as skipped
     (plans/next-phase-command.md §2.1). A skip ``full`` recorded itself is read
     by the first loop and keeps ``full``'s own reason.
+
+    *host_id* is the reader's host (its ``--host``), handed to
+    :func:`repo_wide_sandbox_warning`; None scans ``sys.argv`` as the executor
+    does.
     """
     ALL_PHASES = list(PREREQUISITE_PHASES)
 
@@ -919,6 +948,18 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
                 "status": "skipped",
                 "reason": skip_info.get("reason", ""),
                 "timestamp": skip_info.get("skipped_at", "")
+            }
+        elif state.phase_completion_is_stale(phase):
+            # Recorded completed, but before implement's latest completion
+            # (`StateManager.phase_completion_is_stale`): pending, and said
+            # so. `status`'s run view used to read the done run under it as
+            # "not yet marked completed" and offer its `--reaggregate`, which
+            # re-stamps the stale review (adversarial review, 2026-10-02).
+            phases[phase] = {
+                "status": "pending",
+                "stale": True,
+                "completed_at": state.state.get("phases_completed", {}).get(phase, ""),
+                "implemented_at": state.state.get("phases_completed", {}).get("implement", ""),
             }
         else:
             phases[phase] = {"status": "pending"}
@@ -977,7 +1018,15 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
             tasks_total = len(task_status)
             phases["implement"]["tasks_done"] = tasks_done
             phases["implement"]["tasks_total"] = tasks_total
-            if tasks_done > 0 and tasks_done < tasks_total:
+            # Any completed task is progress a bare `--implement` would redo:
+            # it re-dispatches every task (`format_batches_for_output` filters
+            # only under `--resume`). `done == total` with the phase unmarked
+            # is a run whose finalize failed (`driver.verify_command` non-zero,
+            # or killed before `mark_phase_completed`); `--resume` dispatches
+            # nothing and re-runs the check it owes. Until the adversarial
+            # review (2026-10-02) that state read `pending` and the earlier-
+            # phase rule routed a later phase's answer to the bare command.
+            if tasks_done > 0:
                 phases["implement"]["status"] = "in_progress"
 
     notices = []
@@ -1043,7 +1092,7 @@ def get_workflow_status(state: StateManager, plan_path: Path, plan_dir: Path) ->
         if phases[phase]["status"] not in DONE_STATUSES
     ]
     if open_write_phases:
-        warning = repo_wide_sandbox_warning(plan_path, plan_dir)
+        warning = repo_wide_sandbox_warning(plan_path, plan_dir, host_id=host_id)
         if warning:
             for phase in open_write_phases:
                 phases[phase]["warning"] = warning
@@ -1110,7 +1159,11 @@ def main(argv=None) -> int:
 
         plan_dir = get_output_dir(plan_path)
         state = StateManager(plan_path)
-        result = get_workflow_status(state, plan_path, plan_dir)
+        from utils import host_capabilities
+        result = get_workflow_status(
+            state, plan_path, plan_dir,
+            host_id=host_capabilities.resolve_host_id(explicit=args.host),
+        )
         print(json.dumps(result, indent=2))
         sys.exit(0)
 
