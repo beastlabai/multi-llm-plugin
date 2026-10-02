@@ -404,16 +404,6 @@ class RepoWidePlan:
             for entry in self.entries
         ]
 
-    def write_dir(self) -> Optional[str]:
-        """The directory the rung probe's positive control writes into: the
-        first enumerated directory entry, in sorted order (deterministic for a
-        tree, never a batch's declared path), or ``None`` when the tree has no
-        directory entry outside the protected set."""
-        for entry in self.entries:
-            if entry.kind == KIND_DIR:
-                return entry.path
-        return None
-
     def negative_dirs(self) -> List[str]:
         """The protected directories that exist, for the probe's negative
         controls (``.git/`` and the output folder among them)."""
@@ -1922,10 +1912,21 @@ class RungProbe:
 
 def canary_env(context: JailContext) -> Dict[str, str]:
     """The env keys the rung's canary reads for a write profile's controls:
-    the plan or tasks file under a file rule, the tasks dir under a dir rule;
-    for ``repo-wide`` (step 3b) the enumeration's first directory entry as the
-    positive control and the protected directories that exist (``.git/``, the
-    output folder, …) as extra negative targets. Empty for a read-only probe."""
+    the plan or tasks file under a file rule, the tasks dir under a dir rule
+    — each the dispatch's own declared target; for ``repo-wide`` (step 3b)
+    the protected directories that exist (``.git/``, the output folder, …) as
+    extra negative targets, and **no positive target in the tree**. The
+    canary's ``$TMPDIR`` write is the repo-wide grant's one positive control:
+    every enumerated entry is the same kind of rule, rendered by the same
+    :func:`allow_entries` and taken by the same wrapper, a required entry it
+    cannot grant is the wrapper's own refusal before anything runs, and a
+    write the jail wrongly denies at dispatch is a ``[JAIL_DENIED]`` failure
+    naming the path. A control on the enumeration's first sorted directory
+    (``.github``, ``.husky``, a root-owned volume dir — a path nobody proved
+    writable) failed on plain permissions where the jail was fine, refused
+    every implement on a working jail through the shared decision, and
+    created a file in the user's source tree on every ``status`` poll
+    (adversarial review, 2026-10-02). Empty for a read-only probe."""
     try:
         from .providers.codex import (
             CANARY_ENV_DENY_DIRS, CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE,
@@ -1937,9 +1938,6 @@ def canary_env(context: JailContext) -> Dict[str, str]:
     if context.write_scope == WRITE_SCOPE_REPO_WIDE:
         plan = repo_wide_plan(context.request)
         env: Dict[str, str] = {}
-        write_dir = plan.write_dir()
-        if write_dir:
-            env[CANARY_ENV_WRITE_DIR] = write_dir
         negatives = plan.negative_dirs()
         for path in negatives:
             if "\n" in path:

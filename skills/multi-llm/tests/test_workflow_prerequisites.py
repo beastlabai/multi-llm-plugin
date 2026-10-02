@@ -1670,6 +1670,21 @@ class TestEarlySandboxWarning:
         else:
             assert "its probe gave no answer" in payload["phases"]["implement"]["warning"]
 
+    def test_the_advisory_probe_hands_the_canary_no_target_in_the_source_tree(self, jailhost):
+        """`status` and `init` are advisory readers: their probe must create
+        nothing in the user's source tree outside `.multi-llm/`. The
+        repo-wide canary used to take the enumeration's first directory as a
+        positive control — `.github/.multi-llm-canary-NNN` on every `status`
+        poll (adversarial review, 2026-10-02, strace of one `status`)."""
+        (jailhost.repo / ".github").mkdir()
+        jailhost.configure(runner="codex:gpt-5.5")
+        payload = jailhost.status(host_id="claude-code")
+        assert "warning" not in payload["phases"]["implement"]
+        [probe] = jailhost.wrapper.records(probe=True)
+        assert probe["env"]["MULTI_LLM_CANARY_WRITE_DIR"] is None
+        assert probe["env"]["MULTI_LLM_CANARY_WRITE_FILE"] is None
+        assert os.path.realpath(jailhost.repo / ".git") in probe["env"]["MULTI_LLM_CANARY_DENY_DIRS"]
+
     def test_a_usable_jail_stays_silent(self, jailhost):
         jailhost.configure(runner="codex:gpt-5.5")
         payload = jailhost.status(host_id="claude-code")

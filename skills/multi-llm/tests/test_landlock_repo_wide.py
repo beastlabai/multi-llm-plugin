@@ -216,7 +216,7 @@ class TestTheEnumeration:
 
     def test_the_probe_controls_come_from_the_enumeration(self, wide):
         plan = ld.repo_wide_plan(_request(wide))
-        assert plan.write_dir() == str(wide.repo / "src")
+        assert not hasattr(plan, "write_dir")  # no positive target in the tree (2026-10-02)
         assert [_rel(wide, p) for p in plan.negative_dirs()] == [
             ".git", ".codex", ".multi-llm", "plans/plan",
         ]
@@ -444,32 +444,23 @@ class TestThePreviewAndTheInstructions:
 
 
 class TestTheCanary:
-    def test_canary_env_names_the_first_directory_and_every_protected_dir(self, wide):
+    def test_canary_env_names_every_protected_dir_and_no_target_in_the_tree(self, wide):
         env = ld.canary_env(_ctx(wide))
-        assert env[codex_mod.CANARY_ENV_WRITE_DIR] == str(wide.repo / "src")
         assert env[codex_mod.CANARY_ENV_DENY_DIRS].split("\n") == [
             str(wide.repo / ".git"), str(wide.repo / ".codex"),
             str(wide.repo / ".multi-llm"), str(wide.out),
         ]
-        assert codex_mod.CANARY_ENV_WRITE_FILE not in env
-
-    def test_a_tree_with_no_directory_entry_has_no_positive_dir_control(self, wide):
-        for name in ("src", "tests", "node_modules", ".ssh", "srclink"):
-            path = wide.repo / name
-            if path.is_symlink():
-                path.unlink()
-            else:
-                shutil.rmtree(path)
-        env = ld.canary_env(_ctx(wide))
+        # The repo-wide grant's positive control is the canary's own $TMPDIR
+        # write; nothing in the source tree is ever a target (2026-10-02).
         assert codex_mod.CANARY_ENV_WRITE_DIR not in env
-        assert codex_mod.CANARY_ENV_DENY_DIRS in env
+        assert codex_mod.CANARY_ENV_WRITE_FILE not in env
 
     def test_the_rung_probe_hands_the_controls_to_the_canary(self, wide):
         env = {"PATH": os.environ.get("PATH", ""), "HOME": str(wide.root),
                "CODEX_HOME": str(wide.home)}
         resolved = ["/opt/codex/bin/codex", *codex_mod.PLUGIN_LANDLOCK_PROBE_ARGV[1:]]
         with ld.rung_probe(RUNG, _request(wide), resolved, cwd=str(wide.repo), env=env) as probe:
-            assert probe.env[codex_mod.CANARY_ENV_WRITE_DIR] == str(wide.repo / "src")
+            assert codex_mod.CANARY_ENV_WRITE_DIR not in probe.env
             assert str(wide.repo / ".git") in probe.env[codex_mod.CANARY_ENV_DENY_DIRS]
             assert str(wide.out) in probe.env[codex_mod.CANARY_ENV_DENY_DIRS]
             allowed = [a for a in probe.argv if a.startswith(("dir:", "file:"))]
@@ -575,6 +566,22 @@ class TestTheCanaryUnderPlainPermissions:
         assert proc.returncode == codex_mod.LANDLOCK_CANARY_SETUP_EXIT, (proc.stdout, proc.stderr)
         assert codex_mod.LANDLOCK_CANARY_TARGET_FAILED in proc.stderr
         assert SANDBOX_CANARY_DENIED not in proc.stdout
+
+    def test_an_unwritable_first_directory_does_not_fail_the_probe(self, tmp_path, sh):
+        """The probe's positive control never writes into the source tree:
+        the first enumerated directory (sorted order puts `.github`, `.husky`
+        and a root-owned volume dir first) is nobody's proven-writable
+        target, and a control there failed on plain permissions where the
+        jail was fine (adversarial review, 2026-10-02, repro case B)."""
+        plain = _plain_repo(tmp_path, ".github", "src")
+        with self._probe(plain, sh) as probe, _perms_jail(
+            probe, plain.repo / ".git", plain.repo / ".github",
+        ):
+            assert codex_mod.CANARY_ENV_WRITE_DIR not in probe.env
+            proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert SANDBOX_CANARY_DENIED in proc.stdout
+        assert os.listdir(plain.repo / ".github") == []
 
     def test_a_target_holding_a_newline_cannot_be_handed_over(self, tmp_path, sh):
         """The one byte the hand-over cannot carry: the probe is a setup
@@ -850,6 +857,26 @@ class TestTheRealJailRepoWide:
         assert _tree_hashes(wide.repo / ".git") == git_before
         assert _tree_hashes(wide.out) == out_before
         assert sorted(os.listdir(wide.repo / "src")) == ["app.py", "pkg"]
+
+    def test_the_real_canary_passes_with_an_unwritable_first_directory(self, wide, sh):
+        """Repro case B (2026-10-02): the first sorted directory 0555 is a
+        plain-permissions fact the jail has no part in, so the probe passes
+        and nothing was ever created outside `.multi-llm/` and `$TMPDIR`."""
+        first = wide.repo / ".husky"
+        first.mkdir()
+        (first / "pre-commit").write_text("#!/bin/sh\n")
+        first.chmod(0o555)
+        env = dict(os.environ, CODEX_HOME=str(wide.home))
+        resolved = [sh, "-c", codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT]
+        try:
+            with ld.rung_probe(RUNG, _request(wide), resolved, cwd=str(wide.repo), env=env) as probe:
+                assert codex_mod.CANARY_ENV_WRITE_DIR not in probe.env
+                proc = _run(probe.argv, probe.env, wide.repo)
+        finally:
+            first.chmod(0o755)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert SANDBOX_CANARY_DENIED in proc.stdout
+        assert sorted(os.listdir(first)) == ["pre-commit"]
 
     def test_a_write_into_git_alone_fails_the_canary(self, wide, sh):
         """A jail that left `.git/` writable (no deny target) must not pass:

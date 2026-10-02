@@ -412,11 +412,14 @@ _TRUNCATE_SNIPPET = (
 #: repo-wide grant's `.git/` and output folder); truncation — the seeded file
 #: (`$MULTI_LLM_CANARY_SEEDED`, in the same negative target) must not be
 #: truncatable, and the parent compares its bytes afterwards too; positive — a
-#: file created and removed in `$TMPDIR`, and for a write profile its own target
-#: (`: >> <file>` opens the plan or tasks file for writing without changing it;
-#: a tasks dir, or a repo-wide grant's first enumerated directory, gets a file
-#: created and removed). Only when every control holds does it print
-#: SANDBOX_CANARY_DENIED (split, so an echoing CLI cannot forge it) and exit 0.
+#: file created and removed in `$TMPDIR`, and for the `plan-file` and `tasks`
+#: scopes the dispatch's own declared target (`: >> <file>` opens the plan or
+#: tasks file for writing without changing it; a tasks dir gets a file created
+#: and removed). A repo-wide grant hands over no positive target: its `$TMPDIR`
+#: write is the control, and nothing is created in the user's source tree
+#: (`landlock_dispatch.canary_env` has the reasoning, 2026-10-02). Only when
+#: every control holds does it print SANDBOX_CANARY_DENIED (split, so an
+#: echoing CLI cannot forge it) and exit 0.
 PLUGIN_LANDLOCK_CANARY_SCRIPT = (
     f'd={LANDLOCK_CANARY_WORKDIR}; f="$d/sandbox-canary-$$"; '
     f'if [ ! -d "$d" ] || [ -z "${CANARY_ENV_SEEDED}" ] '
