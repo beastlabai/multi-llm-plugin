@@ -151,6 +151,33 @@ class TestTheMap:
         document = {"claude_decide_item_ids": ["stale"], "judge_decide_item_ids": ["new"]}
         assert upgrade_legacy(document) == {"judge_decide_item_ids": ["new"]}
 
+    @pytest.mark.parametrize("legacy_first", [True, False])
+    @pytest.mark.parametrize("old_key, new_key, old_value, empty", [
+        ("claude_decide_item_ids", JUDGE_DECIDE_ITEM_IDS, ["a", "b"], []),
+        ("claude_decide_item_ids", JUDGE_DECIDE_ITEM_IDS, ["a"], None),
+        ("claude_decide", JUDGE_DECIDE, True, False),
+        ("claudeDecided", JUDGE_DECIDED, 3, 0),
+    ])
+    def test_an_empty_new_twin_does_not_erase_a_populated_legacy_key(
+        self, old_key, new_key, old_value, empty, legacy_first
+    ):
+        """A writer that filled in the new key's default over an old document
+        must not cost it the value the old key carried (review 2026-10-02)."""
+        pairs = [(old_key, old_value), (new_key, empty)]
+        document = dict(pairs if legacy_first else reversed(pairs))
+        assert upgrade_legacy(document) == {new_key: old_value}
+
+    def test_an_empty_legacy_twin_never_replaces_the_new_key(self):
+        for new_value in ([], ["new"]):
+            document = {"judge_decide_item_ids": new_value, "claude_decide_item_ids": []}
+            assert upgrade_legacy(document) == {"judge_decide_item_ids": new_value}
+
+    def test_a_kept_legacy_value_is_upgraded_too(self):
+        document = {"human_review_config": {
+            "claude_decide_item_ids": ["claude_skipped"], "judge_decide_item_ids": []}}
+        assert upgrade_legacy(document) == {
+            "human_review_config": {"judge_decide_item_ids": ["judge_skipped"]}}
+
     def test_the_label_helpers_read_both_spellings(self):
         for source in ("claude_auto_decide", JUDGE_AUTO_DECIDE):
             assert judge_source_label(source) == "judge agent"

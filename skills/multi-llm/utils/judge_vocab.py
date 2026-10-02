@@ -96,11 +96,14 @@ def canonical_value(value: Any) -> Any:
 def upgrade_legacy(document: Any) -> Any:
     """*document* with every legacy judge key and value renamed, in place.
 
-    Walks dicts and lists recursively. A legacy key is renamed unless the new
-    key is already present (then the new one wins and the legacy one is
-    dropped, so a half-upgraded document never carries both). String values
-    are mapped through :func:`canonical_value`. Returns *document* so a loader
-    can write ``data = upgrade_legacy(json.load(f))``.
+    Walks dicts and lists recursively. A legacy key is renamed; when the new
+    key is already present only one survives, so a half-upgraded document
+    never carries both. The new one wins, unless it is empty or falsy (``[]``,
+    ``None``, ``False``, ``0``) while the legacy one is not: that is a default
+    some writer filled in over an old document, and keeping it would erase
+    what the old key recorded. String values are mapped through
+    :func:`canonical_value`. Returns *document* so a loader can write
+    ``data = upgrade_legacy(json.load(f))``.
     """
     if isinstance(document, dict):
         for key in list(document):
@@ -108,7 +111,7 @@ def upgrade_legacy(document: Any) -> Any:
             new_key = LEGACY_KEYS.get(key, key) if isinstance(key, str) else key
             if new_key != key:
                 del document[key]
-                if new_key in document:
+                if new_key in document and (document[new_key] or not value):
                     continue
             if isinstance(value, (dict, list)):
                 upgrade_legacy(value)
