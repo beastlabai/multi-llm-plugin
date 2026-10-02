@@ -1,1 +1,0 @@
-[93m[1m! [0mpermission requested: external_directory (/rig/outside/*); auto-rejecting
