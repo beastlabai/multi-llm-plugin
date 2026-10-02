@@ -1133,7 +1133,7 @@ def main(argv=None) -> int:
             sys.exit(1)
 
         plan_dir = get_output_dir(plan_path)
-        state = StateManager(plan_path)
+        state = StateManager(plan_path, read_only=True)
         from utils import host_capabilities
         result = get_workflow_status(
             state, plan_path, plan_dir,

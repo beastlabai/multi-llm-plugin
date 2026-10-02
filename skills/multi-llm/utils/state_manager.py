@@ -400,15 +400,28 @@ class StateManager:
 
     SCHEMA_VERSION = "2.0"
 
-    def __init__(self, plan_path: Path, state_dir: Optional[Path] = None):
+    def __init__(
+        self,
+        plan_path: Path,
+        state_dir: Optional[Path] = None,
+        *,
+        read_only: bool = False,
+    ):
         """
         Initialize state manager.
 
         Args:
             plan_path: Path to the plan being implemented
             state_dir: Deprecated, ignored. State now stored in plan directory.
+            read_only: Load for reading only, and never touch the file: no
+                old-location move, no judge-name write-back (the upgrade
+                still applies in memory), and ``save()`` raises. For the
+                commands that only report (``status``, ``util next-command``,
+                ``--status``), which a host polls while another process may
+                be writing ``state.json``.
         """
         self.plan_path = Path(plan_path).resolve()
+        self.read_only = read_only
 
         # State file lives in the plan's output directory
         from .output_handler import get_output_dir
@@ -416,7 +429,8 @@ class StateManager:
         self.state_file = self.plan_dir / "state.json"
 
         self.state: Dict[str, Any] = {}
-        self._migrate_from_old_location()  # Check for old state file
+        if not read_only:
+            self._migrate_from_old_location()  # Check for old state file
         self._load_or_create()
 
     def _migrate_from_old_location(self) -> None:
@@ -479,12 +493,7 @@ class StateManager:
         """Load existing state or create new one."""
         if self.state_file.exists():
             try:
-                with open(self.state_file, "r", encoding="utf-8") as f:
-                    # A run started before the judge rename recorded its
-                    # decisions as `claude_auto_decide*`; read them as the
-                    # host-neutral names, so `--resume` crosses the upgrade and
-                    # the next save() writes only the new spelling.
-                    self.state = upgrade_legacy(json.load(f))
+                self.state = self._read_upgraded()
 
                 # Check for plan changes. Deliberately set-only: the flag is
                 # cleared by whoever CONSUMES it, never by a bare load.
@@ -507,6 +516,50 @@ class StateManager:
                 self.state = self._create_initial_state()
         else:
             self.state = self._create_initial_state()
+
+    def _read_upgraded(self) -> Any:
+        """``state.json`` with every legacy judge spelling upgraded.
+
+        A run started before the judge rename recorded its decisions as
+        ``claude_auto_decide*``; they are read as the host-neutral names, so
+        ``--resume`` crosses the upgrade. An upgrade that changed something is
+        also written back at once, because a load is not always followed by a
+        save — a native-leg ``--resume`` of an apply phase saves nothing until
+        the host's ``--mark-completed`` — and the host reads this file raw,
+        filtering ``human_decisions_{phase}`` on the new names, for its
+        "Decided by the judge agent" section (review 2026-10-02). Not under
+        ``read_only``, and never when nothing changed.
+
+        Raises what ``open``/``json.loads`` raise; a failed write-back does not.
+        """
+        with open(self.state_file, "r", encoding="utf-8") as f:
+            text = f.read()
+        loaded = upgrade_legacy(json.loads(text))
+        if (not self.read_only and isinstance(loaded, dict)
+                and loaded != json.loads(text)):
+            self._write_back_upgrade(loaded, text)
+        return loaded
+
+    def _write_back_upgrade(self, document: Dict[str, Any], read_text: str) -> None:
+        """Persist the judge-name upgrade of *read_text*, and only that.
+
+        The document is written as loaded — no ``updated_at`` stamp, no
+        plan-change flag — so the write renames keys and values and changes
+        nothing else. Skipped when the file no longer holds *read_text*:
+        another process saved in between, and its file is the newer one.
+        """
+        try:
+            with open(self.state_file, "r", encoding="utf-8") as f:
+                if f.read() != read_text:
+                    return
+            self._write_atomic(document)
+        except OSError as exc:
+            # The in-memory upgrade still holds, and every Python reader maps
+            # the old names; the host's raw read is the only one that misses.
+            logger.warning(
+                "Could not write the judge-name upgrade back to %s: %s",
+                self.state_file, exc,
+            )
 
     def _validate_state(self, state: Dict[str, Any]) -> tuple[bool, List[str]]:
         """
@@ -535,7 +588,12 @@ class StateManager:
 
         Raises:
             IOError: If the save operation fails
+            RuntimeError: On a ``read_only`` manager
         """
+        if self.read_only:
+            raise RuntimeError(
+                f"read-only StateManager for {self.plan_path} cannot save"
+            )
         self.state["updated_at"] = datetime.now().isoformat()
 
         # Validate state before saving
@@ -545,6 +603,14 @@ class StateManager:
             import warnings
             warnings.warn(f"State validation warnings: {errors}")
 
+        self._write_atomic(self.state)
+
+    def _write_atomic(self, document: Dict[str, Any]) -> None:
+        """Write *document* to ``state.json`` via a temp file and ``os.replace``.
+
+        Raises:
+            IOError: If the write fails
+        """
         # Write to temp file first, then atomically rename
         temp_fd = None
         temp_path = None
@@ -560,7 +626,7 @@ class StateManager:
 
             # Write state to temp file
             with os.fdopen(temp_fd, 'w', encoding='utf-8') as f:
-                json.dump(self.state, f, indent=2)
+                json.dump(document, f, indent=2)
             temp_fd = None  # fdopen closes the file descriptor
 
             # Atomically rename temp file to target location
@@ -604,8 +670,7 @@ class StateManager:
         if not self.state_file.exists():
             return
         try:
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                loaded = upgrade_legacy(json.load(f))
+            loaded = self._read_upgraded()
         except (json.JSONDecodeError, OSError):
             # A corrupt or unreadable file is not worth losing the dict we hold:
             # the next `save()` rewrites it wholesale anyway.
