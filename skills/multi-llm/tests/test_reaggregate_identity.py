@@ -35,6 +35,7 @@ import argparse
 import asyncio
 import contextlib
 import json
+import os
 import shutil
 import sys
 import time
@@ -744,6 +745,11 @@ def _fanout_args(plan, models, skip_validation=True):
         reaggregate=False,
         report_style="pr",
     )
+
+
+def _forced(args):
+    args.force = True
+    return args
 
 
 def _fanout_state():
@@ -2134,6 +2140,76 @@ class TestARegroupRetiresTheVerdictsItOrphans:
         assert len(stale) == 1
         assert (phase_dir / stale[0]).read_bytes() == stale_bytes
         assert f"[VALIDATION_RETIRED] {stale[0]} (grouped.json rewritten by a re-run)" in out
+
+    def test_the_code_review_fanout_retires_the_previous_rounds_batch_files(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """#25: `--force` regroups; a `validation_batch_<n>.json` from the previous
+        round must leave with `validation.json`, or the executor skips it as
+        already complete and the merge discards it as a foreign group_hash."""
+        phase_dir = cro.get_phase_dir(tmp_path / "auth-feature.md", "code-review")
+        (phase_dir / "validation_batch_0.json").write_text('{"groups": []}', encoding="utf-8")
+        (phase_dir / "validation_tasks.json").write_text("{}", encoding="utf-8")
+        # `--force`, as in the measured run: without it the partial-completion
+        # guard refuses a dir that already carries a batch file.
+        real_args = _fanout_args
+        monkeypatch.setattr(
+            sys.modules[__name__], "_fanout_args",
+            lambda *a, **k: _forced(real_args(*a, **k)),
+        )
+
+        _run_cro_fanout(tmp_path, _two_model_findings())
+        out = capsys.readouterr().out
+
+        assert not (phase_dir / "validation_batch_0.json").exists()
+        assert any(
+            n.startswith("validation_batch_0.") and n.endswith(".stale.json")
+            for n in os.listdir(phase_dir)
+        )
+        assert "[VALIDATION_RETIRED] validation_batch_0." in out
+
+
+class TestAModelDroppedFromTheSelectionIsRetired:
+    """#30: stale detection is keyed by slot, so a respelled model
+    (`codex:gpt-6-luna` -> `codex:gpt-6-luna:high`) left its old result and log
+    beside the new slot's, for the next `--reaggregate` to read back."""
+
+    def _seed(self, phase_dir):
+        (phase_dir / "codex_gpt-6-luna.json").write_text('[{"title": "old"}]', encoding="utf-8")
+        (phase_dir / "log_codex_gpt-6-luna.txt").write_text("old log", encoding="utf-8")
+        (phase_dir / "codex_gpt-6-luna_high.json").write_text("[]", encoding="utf-8")
+        (phase_dir / "grouped.json").write_text('{"groups": []}', encoding="utf-8")
+        (phase_dir / "weird.json").write_text('{"not": "a result"}', encoding="utf-8")
+
+    def test_helper_retires_only_unselected_list_results_and_their_logs(self, tmp_path, capsys):
+        self._seed(tmp_path)
+        retired = rob.retire_unselected_results(
+            str(tmp_path), ["codex:gpt-6-luna:high"]
+        )
+        assert [os.path.basename(r) for r in retired] == [
+            "codex_gpt-6-luna.json.stale-unselected"]
+        assert (tmp_path / "codex_gpt-6-luna.json.stale-unselected").exists()
+        assert (tmp_path / "log_codex_gpt-6-luna.txt.stale-unselected").exists()
+        assert not (tmp_path / "codex_gpt-6-luna.json").exists()
+        # selected slot, bookkeeping and an unidentifiable file all stay.
+        for kept in ("codex_gpt-6-luna_high.json", "grouped.json", "weird.json"):
+            assert (tmp_path / kept).exists()
+        assert "[SELECTION_CHANGED] codex_gpt-6-luna" in capsys.readouterr().out
+        assert rob.retire_unselected_results(str(tmp_path), ["codex:gpt-6-luna:high"]) == []
+
+    def test_the_code_review_fanout_retires_them(self, tmp_path, monkeypatch):
+        phase_dir = cro.get_phase_dir(tmp_path / "auth-feature.md", "code-review")
+        (phase_dir / "codex_gpt-6-luna.json").write_text("[]", encoding="utf-8")
+        (phase_dir / "log_codex_gpt-6-luna.txt").write_text("x", encoding="utf-8")
+        real_args = _fanout_args
+        monkeypatch.setattr(
+            sys.modules[__name__], "_fanout_args",
+            lambda *a, **k: _forced(real_args(*a, **k)),
+        )
+        _run_cro_fanout(tmp_path, _two_model_findings())
+        assert not (phase_dir / "codex_gpt-6-luna.json").exists()
+        assert (phase_dir / "codex_gpt-6-luna.json.stale-unselected").exists()
+        assert (phase_dir / "log_codex_gpt-6-luna.txt.stale-unselected").exists()
 
 
 def _as_legacy_file(phase_dir, status):
