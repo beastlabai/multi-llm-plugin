@@ -126,3 +126,21 @@ def test_the_marker_is_registered():
     assert "live_provider:" in text, (
         "pyproject.toml must register the live_provider marker, or -m selection "
         "silently matches nothing")
+
+
+def test_the_host_lane_target_does_not_demand_the_key(makefile_text):
+    """codex and claude-code run on the subscription; only opencode needs the key.
+
+    Operator decision 2026-10-02. The census (`_refuse_empty_lane`) is what stops
+    a run with no credential at all from passing, so the Makefile need not.
+    """
+    body = makefile_text.split("\ne2e-container-host: e2e-image\n", 1)[1].split(
+        "\n\n", 1)[0]
+    assert "exit 1" not in body
+    assert "subscription" in body
+
+
+def test_help_says_the_host_lane_takes_the_subscription(makefile_text):
+    line = next(l for l in makefile_text.splitlines()
+                if "make e2e-container-host " in l and "@echo" in l)
+    assert "subscription" in line and "OPENROUTER_API_KEY" in line

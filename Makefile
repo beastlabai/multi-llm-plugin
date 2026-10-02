@@ -118,7 +118,7 @@ help:
 	@echo "Containerized E2E harness (see $(CONTAINER_DIR)/README.md)"
 	@echo
 	@echo "  make e2e-container                 pinned build; provider lane (no secrets, --network none)"
-	@echo "  make e2e-container-host            pinned build; host lane (needs OPENROUTER_API_KEY)"
+	@echo "  make e2e-container-host            pinned build; host lane (codex/claude-code on the subscription; OPENROUTER_API_KEY for opencode)"
 	@echo "  make e2e-container-host-phases     host lane, claude-code per-phase tier; EXPENSIVE (~\$$3-5/pass)"
 	@echo "  make e2e-container-host-next-command host lane, T10 next-command rows (needs OPENROUTER_API_KEY)"
 	@echo "  make e2e-container-host-discovery  host lane, --creds none tier: stage + list, no key, no network"
@@ -207,10 +207,17 @@ e2e-container: e2e-image
 # row against this lane's $0.0080-$0.0094 for an executor host's equivalent —
 # an order of magnitude — so folding them in here would make the cheap tier
 # ~$3-5 more expensive every pass. They get their own target below.
+#
+# The OpenRouter key is NOT demanded here since 2026-10-02: codex and claude-code
+# rows run on the developer's own subscription when its credential file is
+# present (`harness.default_host_creds`), so a subscription-only run needs no key
+# and its opencode rows skip into the census as `not-run`-style named skips. The
+# lane itself refuses a run where NO row could execute (`_refuse_empty_lane`
+# exits non-zero), so dropping the gate cannot turn "nothing ran" green.
+# `MLLM_E2E_HOST_CREDS=openrouter` forces every row back onto the key.
 e2e-container-host: e2e-image
-	@test -n "$${OPENROUTER_API_KEY:-}" || { \
-	  echo "make: the host lane needs OPENROUTER_API_KEY (a DEDICATED key carrying a key-level spend limit)."; \
-	  echo "      For the credential-free tier run: make e2e-container-host-discovery"; exit 1; }
+	@test -n "$${OPENROUTER_API_KEY:-}" || \
+	  echo "make: OPENROUTER_API_KEY unset: codex and claude-code run on the subscription when its credential file exists; opencode rows skip (named, in the census)."
 	OPENROUTER_API_KEY="$$OPENROUTER_API_KEY" $(PYTEST) -m "container and live and not live_native_phase and not live_next_command"
 
 # The claude-code PER-PHASE tier: one workflow phase per row, seeded by the

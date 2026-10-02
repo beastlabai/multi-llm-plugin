@@ -143,7 +143,12 @@ LIVE_MODEL_OVERRIDES: dict[str, dict[str, str]] = {
                "job is not to discover which aliases OpenRouter expands.",
     },
     "opencode": {
-        "slug": "openrouter/deepseek/deepseek-v4-flash-0731",
+        # MOVED 2026-10-02 from `openrouter/deepseek/deepseek-v4-flash-0731` by
+        # the model policy (host_matrix.yaml MODEL POLICY): the baked models.dev
+        # catalogue (`/opt/mllm/rig/home_seed/opencode/.cache/opencode/models.json`,
+        # read in mllm-e2e:local that day) lists `deepseek/deepseek-v4.1-flash`
+        # under `openrouter`. The `why` below is the history of the old pin.
+        "slug": "openrouter/deepseek/deepseek-v4.1-flash",
         "why": "`models[0]` is `opencode/big-pickle` — opencode's OWN zen "
                "backend, which authenticates against opencode.ai and not with "
                "this lane's key. This slug is not invented for the lane: it is "
@@ -204,8 +209,8 @@ LIVE_SUBSCRIPTIONS: dict[str, dict] = {
         "why": "codex resolves its ChatGPT login from $CODEX_HOME/auth.json and "
                "talks to chatgpt.com's codex backend; the pin is "
                "host_matrix.yaml's codex `subscription.model` (gpt-6-luna, high). "
-               "NOTE: this row is still gated by NEEDS_INNER_USERNS on a daemon "
-               "whose seccomp denies CLONE_NEWUSER, credential or not.",
+               "The inner-userns gate was retired 2026-10-02: the stdout smoke "
+               "makes no tool call (see NEEDS_INNER_USERNS).",
     },
     "claude-code": {
         "credential_file": ".claude/.credentials.json",
@@ -341,7 +346,23 @@ SEED_DROP: dict[str, dict[str, str]] = {
 #: The probe is a real `docker run` under this lane's own identity, capability and
 #: privilege flags, so the day a daemon or posture permits CLONE_NEWUSER the row
 #: starts running by itself rather than waiting for somebody to notice.
-NEEDS_INNER_USERNS: dict[str, str] = {
+#:
+#: **EMPTY SINCE 2026-10-02: codex's row no longer needs it.** The smoke makes no
+#: tool call, so codex never builds its sandbox. Re-measured with the gate lifted,
+#: on the developer's Codex subscription (gpt-6-luna:high, codex 0.159.2,
+#: mllm-e2e:local, the same posture, inner userns still denied by the daemon's
+#: seccomp): `codex exec --sandbox workspace-write --json ... "Reply with ...
+#: [\"ok\"]"` answered `{"data": ["ok"], "success": true}` in about two seconds,
+#: exit 0, a1/a3-a7 green, a2 unread (see NO_MODEL_ECHO_ON_SUBSCRIPTION). What
+#: changed since 2026-08-20: `CodexProvider.supports_file_output` is False (D6,
+#: 2026-09-11), so the prompt asks for stdout and no `cat >` ever runs, and the
+#: old row's failure was the FILE WRITE, not the sandbox's existence. The
+#: mechanism stays for the next CLI that must tool-call; the old measurement is
+#: kept below as history, still true of any codex run that does call a tool.
+NEEDS_INNER_USERNS: dict[str, str] = {}
+
+#: The 2026-08-20 codex entry, kept verbatim as history (see above).
+INNER_USERNS_HISTORY: dict[str, str] = {
     "codex": (
         "MEASURED TWICE on 2026-08-20, at $0.0258 and $0.0217, both timed out at "
         "the 180 s inner bound. `CodexProvider._BASE_ARGV` passes "
@@ -839,6 +860,13 @@ LIVE_ENV_OVERRIDES: dict[str, dict[str, str]] = {
         # DISABLE_ERROR_REPORTING and DISABLE_BUG_COMMAND, all of which
         # CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC gates together.
         "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
+        # The claude.ai MCP connectors proxy. On the SUBSCRIPTION variant Claude
+        # Code is logged in to claude.ai and auto-loads the account's connectors,
+        # which resolves `mcp-proxy.anthropic.com` (measured 2026-10-02, the
+        # first subscription run; the resolver refused it). The binary names the
+        # switch in its own message ("disableClaudeAiConnectors setting or
+        # ENABLE_CLAUDEAI_MCP_SERVERS env var", 2.1.x bundle, 11 occurrences).
+        "ENABLE_CLAUDEAI_MCP_SERVERS": "false",
     },
     "grok": {
         # grok's own documented custom-endpoint mode (its bundled
@@ -1016,6 +1044,20 @@ NO_MODEL_ECHO: dict[str, str] = {
     ),
 }
 
+#: The per-row exception to :data:`NO_MODEL_ECHO`: a CLI whose stream names the
+#: served model on the OpenRouter route and not on its subscription route. Read
+#: only for a row that runs on `subscription`.
+NO_MODEL_ECHO_ON_SUBSCRIPTION: dict[str, str] = {
+    "codex": (
+        "on the ChatGPT subscription codex's --json stream is thread.started, "
+        "turn.started, item.completed and turn.completed (token usage) with no "
+        "model field anywhere (measured 2026-10-02, mllm-e2e:local, "
+        "gpt-6-luna:high); the OpenRouter route's responses name the served "
+        "model, so only the subscription variant is unread. The endpoint is "
+        "still asserted by a1 and the pin by the rendered argv."
+    ),
+}
+
 OPT_OUTS: dict[str, tuple[str, ...]] = {
     "copilot": ("COPILOT_OFFLINE", "COPILOT_AUTO_UPDATE"),
     "kimi": ("KIMI_CODE_NO_AUTO_UPDATE", "KIMI_DISABLE_TELEMETRY"),
@@ -1142,7 +1184,8 @@ OPT_OUTS: dict[str, tuple[str, ...]] = {
     # together — all four names are in the binary. It is set by
     # LIVE_ENV_OVERRIDES, exactly as the host lane sets it, and asserted here so a
     # future edit to that table cannot quietly drop it.
-    "claude-code": ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DO_NOT_TRACK"),
+    "claude-code": ("CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC", "DO_NOT_TRACK",
+                    "ENABLE_CLAUDEAI_MCP_SERVERS"),
 
     # FOUR, AND THE FIRST IS THE IMAGE'S. GROK_AUTO_UPDATE=0 is in the
     # Dockerfile's step-8 ENV block and reaches this lane directly. The other
@@ -1780,10 +1823,13 @@ class TestTheSmokeReachedTheRealEndpoint:
                     outcome=outcome if ok else f"failed — {outcome}")
             assert ok, outcome
             return
-        if cli in NO_MODEL_ECHO:
+        silent = NO_MODEL_ECHO.get(cli) or (
+            NO_MODEL_ECHO_ON_SUBSCRIPTION.get(cli)
+            if smoke["row"].get("subscription") else None)
+        if silent:
             _record(kind="assertion", cli=cli, assertion="a2_model",
-                    outcome=f"unread — {NO_MODEL_ECHO[cli]}")
-            pytest.skip(f"a2 unread — {NO_MODEL_ECHO[cli]}")
+                    outcome=f"unread — {silent}")
+            pytest.skip(f"a2 unread — {silent}")
         # THE HALF THE RESPONSE ACTUALLY NAMES, for the rows measured to drop
         # the spec's first segment (see MODEL_ECHO_DROPS_FIRST_SEGMENT) —
         # whether the adapter split the spec before the argv boundary or the
