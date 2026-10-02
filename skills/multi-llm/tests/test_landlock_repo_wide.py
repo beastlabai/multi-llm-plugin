@@ -438,6 +438,55 @@ class TestJailDeniedEditsRepoWide:
         assert denials.failed_file_changes == [[str(wide.repo / ".git/config")]]
         assert denials.any_in_scope
 
+    #: A test suite's own output: a failing test's report (pytest indents the
+    #: exception with ``E   ``), the short summary, a test id, and a print of
+    #: the exception's text. None of them is a tool reporting a denied write.
+    ORDINARY_OUTPUT = (
+        "tests/test_perm.py::test_locked FAILED\n"
+        "tests/test_perm.py::test_raises[Permission denied] PASSED\n"
+        "    with open('src/app.py', 'w') as h:\n"
+        "E   PermissionError: [Errno 13] Permission denied: 'src/app.py'\n"
+        "E       PermissionError: [Errno 13] Permission denied: 'README.md.tmp'\n"
+        "[Errno 13] Permission denied: 'src/app.py'\n"
+        "FAILED tests/test_perm.py::test_locked - PermissionError: [Errno 13] "
+        "Permission denied: 'src/app.py'\n"
+        "expected EACCES on src/app.py, got it: permission denied\n"
+    )
+
+    def test_a_test_suites_own_permission_denied_text_names_no_path(self, wide):
+        """Fix round 4 (2026-10-02): a ``Permission denied`` line in ordinary
+        test output used to resolve to a declared path (in scope, so a
+        nothing-moved batch read FAILED) or to a new root name beside a
+        declared root file (a ``replacement`` denial, same verdict). Only the
+        shapes the measured denials take — a tool naming itself at column 0
+        — count."""
+        ctx = _ctx(wide, declared=(wide.repo / "src/app.py", wide.repo / "README.md"))
+        denials = ld.jail_denied_edits(_cmd(self.ORDINARY_OUTPUT), ctx, cwd=str(wide.repo))
+        assert denials.total == 0, denials.to_dict()
+        assert ld._denied_paths_in(self.ORDINARY_OUTPUT) == []
+
+    @pytest.mark.parametrize("line, expected", [
+        # The fixture's shapes (codex 0.158.0, jail_writes.out.jsonl).
+        ("/bin/bash: line 1: src/app.py: Permission denied", ["src/app.py"]),
+        ("PermissionError: [Errno 13] Permission denied: 'src/app.py'", ["src/app.py"]),
+        # dash, coreutils, git, sed, tee and node, as measured on the rig and
+        # in Appendix A of the plan.
+        ("sh: 1: cannot create src/app.py: Permission denied", ["src/app.py"]),
+        ("touch: cannot touch 'src/app.py': Permission denied", ["src/app.py"]),
+        ("rm: cannot remove 'README.md': Permission denied", ["README.md"]),
+        ("mv: cannot move 'README.md' to 'README2.md': Permission denied",
+         ["README.md", "README2.md"]),
+        ("mkdir: cannot create directory \u2018newtop\u2019: Permission denied", ["newtop"]),
+        ("cp: cannot create regular file 'src/app.py': Permission denied", ["src/app.py"]),
+        ("fatal: Unable to create '.git/index.lock': Permission denied", [".git/index.lock"]),
+        ("sed: couldn't open temporary file ./sedAbC12: Permission denied", ["./sedAbC12"]),
+        ("tee: src/app.py: Permission denied", ["src/app.py"]),
+        ("Error: EACCES: permission denied, open '/x/src/app.py'", ["/x/src/app.py"]),
+        ("[Error: EACCES: permission denied, open '/x/src/app.py'] {", ["/x/src/app.py"]),
+    ])
+    def test_every_measured_denial_shape_still_names_its_path(self, line, expected):
+        assert ld._denied_paths_in(line + "\n") == expected
+
 
 # ===========================================================================
 # Tier 2: the production wrapper under a repo-wide grant (F1 "Denied-write

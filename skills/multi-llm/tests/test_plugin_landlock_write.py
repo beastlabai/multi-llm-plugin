@@ -1180,3 +1180,49 @@ class TestEveryDeclaredSetIsCheckedBeforeBatchOne:
                                 finalize=False).run()
         assert result.exit_code == 0, result.messages
         assert [d["task_id"] for d in fake.dispatches] == ["T001", "T002", "T003"]
+
+
+class TestATestSuitesOwnPermissionDeniedTextIsNotADenial:
+    """Fix round 4 (2026-10-02): a repo-wide batch whose verification ran a
+    test that *reports* a ``PermissionError`` (pytest's ``E   PermissionError:
+    [Errno 13] Permission denied: '<declared path>'``) was recorded
+    ``FAILED (jail-denied edit)`` with nothing moved, where the right verdict
+    is the runner's own ``no-op``. A real shell denial on the same path still
+    fails the batch."""
+
+    PYTEST_REPORT = (
+        "tests/test_perm.py::test_locked FAILED\n"
+        "E   PermissionError: [Errno 13] Permission denied: 'src/t0.py'\n"
+        "FAILED tests/test_perm.py::test_locked - PermissionError: [Errno 13] "
+        "Permission denied: 'src/t0.py'\n"
+    )
+    SHELL_DENIAL = "/bin/bash: line 1: src/t0.py: Permission denied\n"
+
+    def _task(self, repo: Repo):
+        (repo.root / "src").mkdir(exist_ok=True)
+        (repo.root / "src" / "t0.py").write_text("x = 0\n", encoding="utf-8")
+        return repo.task(0, kind="implement", task_id="T001",
+                         declared=[repo.root / "src" / "t0.py"],
+                         expected_ids=["T001"], prior_changes_id="T001")
+
+    def test_a_pytest_failure_report_leaves_the_no_op_verdict(self, repo, monkeypatch):
+        FakeExecutor(repo, monkeypatch).script(
+            untouched(claim("no-op"), command_denied(self.PYTEST_REPORT)),
+        )
+        result = repo.scheduler([self._task(repo)], kind="implement",
+                                write_target=None, finalize=False).run()
+        outcome = result.outcomes[0]
+        assert outcome.ok and outcome.write_outcome == "no-op", outcome.reason
+        assert result.exit_code == 0
+
+    def test_a_shell_denial_on_the_declared_path_still_fails_the_batch(
+        self, repo, monkeypatch,
+    ):
+        FakeExecutor(repo, monkeypatch).script(
+            untouched(claim("applied"), command_denied(self.SHELL_DENIAL)),
+        )
+        result = repo.scheduler([self._task(repo)], kind="implement",
+                                write_target=None, finalize=False).run()
+        outcome = result.outcomes[0]
+        assert not outcome.ok and "jail-denied edit" in (outcome.reason or "")
+        assert result.exit_code == 3
