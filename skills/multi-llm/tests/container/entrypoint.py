@@ -24,6 +24,8 @@ step did not run is a **failed row**, not a row with an empty golden diff.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import fcntl
 import json
 import os
@@ -1714,7 +1716,8 @@ def credential_preflight(host: str, entry: dict, key: str,
     return census
 
 
-def pinned_model(entry: dict, row: dict | None = None) -> str:
+def pinned_model(entry: dict, row: dict | None = None,
+                 creds: str = "openrouter") -> str:
     """The row's model: the checked-in pin, or a deliberately recorded override.
 
     Three sources, most specific first, and each of them is a PIN — none of them
@@ -1736,12 +1739,45 @@ def pinned_model(entry: dict, row: dict | None = None) -> str:
     Whichever slug ran is recorded in the row's credential census, together with
     WHICH of the three it came from, so a run is never ambiguous about what it
     drove.
+
+    On a ``fallback`` row (the developer's own subscription) a fourth source sits
+    between the override and the row pin: the host's ``subscription.model``. The
+    row and host pins are OpenRouter slugs, which a vendor's own catalog may not
+    serve, so they apply there only when the host declares no subscription pin.
     """
     override = os.environ.get("MLLM_HOST_MODEL", "").strip()
     if override:
         return override
+    if creds == "fallback":
+        subscription, _ = subscription_model(entry)
+        if subscription:
+            return subscription
     row_pin = ((row or {}).get("model") or {}).get("slug") or ""
     return row_pin.strip() or ((entry.get("model") or {}).get("slug") or "").strip()
+
+
+#: What a `subscription.model.effort` may say: codex's own reasoning levels are
+#: bare lowercase words, and the value is written into a TOML string, so nothing
+#: else is let through.
+_EFFORT_TOKEN = re.compile(r"^[a-z]+$")
+
+
+def subscription_model(entry: dict) -> tuple[str, str]:
+    """``(slug, effort)`` from the host's ``subscription.model`` block, or ``("", "")``.
+
+    Operator decision 2026-10-02 (host_matrix.yaml's MODEL POLICY block): codex
+    and claude-code run on the developer's own subscription when it is present,
+    each on the model pinned here. Pure: no environment read — the
+    ``MLLM_HOST_MODEL`` override is ``pinned_model``'s, and the effort is applied
+    only when the slug that runs IS this pin.
+    """
+    pin = (entry.get("subscription") or {}).get("model") or {}
+    slug = str(pin.get("slug") or "").strip()
+    effort = str(pin.get("effort") or "").strip()
+    if effort and not _EFFORT_TOKEN.match(effort):
+        raise SystemExit(f"entrypoint: subscription.model.effort {effort!r} is not a "
+                         f"bare reasoning level (lowercase letters only)")
+    return slug, effort
 
 
 def wire_credentials(host: str, home: Path, key: str, slug: str,
@@ -1887,6 +1923,20 @@ def _codex_first_run_config() -> str:
         f'[projects."{WORKSPACE}"]\n'
         'trust_level = "trusted"\n'
     )
+
+
+def _codex_fallback_config(effort: str = "") -> str:
+    """The fallback (subscription) path's codex config.toml.
+
+    `_codex_first_run_config` plus, when the host's `subscription.model` pins
+    one, `model_reasoning_effort` — written FIRST, because a TOML key after the
+    `[projects."…"]` table header would belong to that table rather than to the
+    root and codex would ignore it.
+    """
+    if effort and not _EFFORT_TOKEN.match(effort):
+        raise SystemExit(f"entrypoint: refusing reasoning effort {effort!r}")
+    head = f'model_reasoning_effort = "{effort}"\n' if effort else ""
+    return head + _codex_first_run_config()
 
 
 def _opencode_package_spec() -> str | None:
@@ -4280,7 +4330,8 @@ def run_codex_package_probe(probe: str, home: Path, overlay: dict,
 
 
 def wire_fallback_credentials(host: str, home: Path, slug: str,
-                              route: str = "file") -> tuple[dict, list[Path]]:
+                              route: str = "file",
+                              effort: str = "") -> tuple[dict, list[Path]]:
     """C6a's documented fallback: the host's OWN subscription / vendor auth.
 
     The default path injects one `OPENROUTER_API_KEY` and mounts nothing. This is
@@ -4321,7 +4372,7 @@ def wire_fallback_credentials(host: str, home: Path, slug: str,
         # No `model_provider` and no `[model_providers.*]`: codex reads the copied
         # ~/.codex/auth.json and talks to its own vendor.
         (codex_home / "config.toml").write_text(
-            _codex_first_run_config(), encoding="utf-8")
+            _codex_fallback_config(effort), encoding="utf-8")
         overlay["CODEX_HOME"] = str(codex_home)
         # No `.profile` export on this path: there is no OpenRouter key to
         # carry, and the vendor auth codex reads is the copied auth.json.
@@ -4387,6 +4438,38 @@ def copy_in_fallback_credentials(host: str, home: Path) -> list[Path]:
     return copied
 
 
+def jwt_claim_values(token: str) -> set[str]:
+    """The identifying string claims inside a JWT's payload, or an empty set.
+
+    Only what a by-value scrub needs: claims of 20+ characters (account and user
+    ids) and anything carrying an ``@`` (emails). Not a verifier — the signature
+    is never checked, and anything that does not decode is simply not a JWT.
+    """
+    parts = token.split(".")
+    if len(parts) != 3 or not parts[1]:
+        return set()
+    padded = parts[1] + "=" * (-len(parts[1]) % 4)
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(padded.encode("ascii")))
+    except (ValueError, binascii.Error, UnicodeError):
+        return set()
+    found: set[str] = set()
+
+    def walk(node) -> None:
+        if isinstance(node, str):
+            if len(node) >= 20 or ("@" in node and len(node) >= 5):
+                found.add(node)
+        elif isinstance(node, dict):
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for value in node:
+                walk(value)
+
+    walk(claims)
+    return found
+
+
 def fallback_secret_values(paths) -> list[str]:
     """Every long string inside the copied credential files, for write-time scrubbing.
 
@@ -4402,6 +4485,14 @@ def fallback_secret_values(paths) -> list[str]:
         if isinstance(node, str):
             if len(node) >= 20:
                 secrets.add(node)
+            # SHORT IDENTIFIERS TOO, not only long tokens. An email is under 20
+            # characters often enough, and a codex `id_token` carries the
+            # account's email and ids base64-encoded in its payload, where a
+            # CLI that prints "logged in as …" would emit them in clear and no
+            # by-value match on the token itself could catch them.
+            elif "@" in node and len(node) >= 5:
+                secrets.add(node)
+            secrets.update(jwt_claim_values(node))
         elif isinstance(node, dict):
             for value in node.values():
                 walk(value)
@@ -4466,9 +4557,13 @@ def assert_claude_key_is_empty(env: dict) -> None:
             "would not be running on the OpenRouter key it claims to.")
 
 
-def build_host_argv(entry: dict, row: dict) -> list[str]:
-    """Render the row's `invoke_argv` from the matrix. No argv is improvised."""
-    slug = pinned_model(entry, row)
+def build_host_argv(entry: dict, row: dict, creds: str = "openrouter") -> list[str]:
+    """Render the row's `invoke_argv` from the matrix. No argv is improvised.
+
+    `creds` picks the model the same way the credential wiring does: a
+    `fallback` row drives the host's subscription pin, never an OpenRouter slug.
+    """
+    slug = pinned_model(entry, row, creds)
     bound = entry.get("turn_bound") or {}
     prompt = render_prompt(entry, row)
     out: list[str] = []
@@ -4959,7 +5054,7 @@ def run_host(host: str, entry: dict, row: dict, home: Path, overlay: dict,
     `capture_host_session`, in a `finally` so the unfinished row is the one it
     serves.
     """
-    argv = build_host_argv(entry, row)
+    argv = build_host_argv(entry, row, creds)
     binary = argv[0]
     argv[0] = str(REAL_DIR / binary)
     if not Path(argv[0]).exists():
@@ -5198,7 +5293,7 @@ def run_typed_followup(host: str, entry: dict, row: dict, home: Path,
     wall = int(check.get("typed_wall_clock_s") or 300)
     typed_row = dict(row, args=typed, wall_clock_s=wall,
                      prompt_template=(None if host == "opencode" else "{args}"))
-    argv = build_host_argv(entry, typed_row)
+    argv = build_host_argv(entry, typed_row, creds)
     binary = argv[0]
     argv[0] = str(REAL_DIR / binary)
 
@@ -5903,15 +5998,28 @@ def main(argv=None) -> int:
                     # the SAME row the OpenRouter path does — the difference is
                     # where the credential comes from, which is why it joins the
                     # common stage-and-launch flow below rather than having one.
-                    slug = pinned_model(entry, row)
+                    # THE SUBSCRIPTION PIN FIRST (operator decision 2026-10-02):
+                    # MLLM_HOST_MODEL, else the host's `subscription.model`, else
+                    # the OpenRouter pin with the warning below. The pinned
+                    # effort rides along only when the slug that runs IS the pin.
+                    slug = pinned_model(entry, row, "fallback")
+                    pinned_slug, pinned_effort = subscription_model(entry)
+                    effort = pinned_effort if slug == pinned_slug else ""
                     overlay, copied = wire_fallback_credentials(
-                        args.host, Path.home(), slug, route=args.route)
+                        args.host, Path.home(), slug, route=args.route,
+                        effort=effort)
                     secrets = fallback_secret_values(copied)
                     census = {
                         "host": args.host,
                         "row": args.row,
                         "credential_mode": "fallback",
                         "model": slug,
+                        "model_source": (
+                            "MLLM_HOST_MODEL"
+                            if os.environ.get("MLLM_HOST_MODEL", "").strip()
+                            else "host_matrix.yaml subscription.model"
+                            if pinned_slug else
+                            "host_matrix.yaml OpenRouter pin (no subscription pin)"),
                         # PATHS, never values — the same rule creds.yaml itself is
                         # written under.
                         "copied": sorted(str(p) for p in copied),
@@ -5923,7 +6031,10 @@ def main(argv=None) -> int:
                                          "this path",
                         },
                     }
-                    if not os.environ.get("MLLM_HOST_MODEL", "").strip():
+                    if effort:
+                        census["effort"] = effort
+                    if (not os.environ.get("MLLM_HOST_MODEL", "").strip()
+                            and not pinned_slug):
                         # host_matrix.yaml's pins are OpenRouter slugs, verified
                         # against that catalog. On vendor auth the host resolves
                         # ids against its OWN catalog, so an unset override is a
@@ -6009,7 +6120,7 @@ def main(argv=None) -> int:
                         # staged shim and the exact argv, at zero cost.
                         (OUT / "host-run.json").write_text(json.dumps({
                             "host": args.host, "row": args.row,
-                            "argv": build_host_argv(entry, row),
+                            "argv": build_host_argv(entry, row, args.creds),
                             "credential_mode": args.creds,
                             "dry_run": True, "exit": None,
                         }, indent=2, sort_keys=True), encoding="utf-8")
@@ -6026,7 +6137,7 @@ def main(argv=None) -> int:
                     #    today. Rendering after the leg would turn a fast, honest
                     #    abort into a slow one that prepared a workspace for a
                     #    host process that was never going to launch.
-                    build_host_argv(entry, row)
+                    build_host_argv(entry, row, args.creds)
                     # 2. Then the pre-command leg, while the seeded credential is
                     #    still in place: the prerequisite read phase (`review-plan`
                     #    on four rows, `review-code` on the native write row) fans

@@ -107,7 +107,14 @@ LANE_CLIS = ("copilot", "kimi", "qwen-code", "vibe", "cursor-agent",
 #: runs.
 LIVE_MODEL_OVERRIDES: dict[str, dict[str, str]] = {
     "claude-code": {
-        "slug": "anthropic/claude-haiku-4.5",
+        # MOVED 2026-10-02 from `anthropic/claude-haiku-4.5` by the operator's
+        # model policy (host_matrix.yaml's MODEL POLICY block): never Haiku
+        # through OpenRouter ($1/$5 per M); claude-code billed through
+        # OpenRouter runs `openai/gpt-6-luna`, as the host lane already does.
+        # The Anthropic-model argument below is the history of the old pin, and
+        # this row now runs on the OpenRouter key only when the developer's
+        # Claude subscription is absent (LIVE_SUBSCRIPTIONS).
+        "slug": "openai/gpt-6-luna",
         "why": "`models[0]` is `sonnet`, a FIRST-PARTY ANTHROPIC ALIAS that only "
                "api.anthropic.com resolves; OpenRouter's Anthropic skin takes "
                "catalogue ids and 400s an alias. `anthropic/claude-haiku-4.5` is "
@@ -120,7 +127,12 @@ LIVE_MODEL_OVERRIDES: dict[str, dict[str, str]] = {
                "adapter.",
     },
     "codex": {
-        "slug": "deepseek/deepseek-v4-flash-0731",
+        # MOVED 2026-10-02 from `deepseek/deepseek-v4-flash-0731` by the model
+        # policy (every non-claude-code OpenRouter host runs
+        # `deepseek/deepseek-v4.1-flash`). Used only when the developer's Codex
+        # subscription is absent (LIVE_SUBSCRIPTIONS); the `why` below is the
+        # history of the old pin.
+        "slug": "deepseek/deepseek-v4.1-flash",
         "why": "`models[0]` is `gpt-5.5`, a first-party OpenAI id; through "
                "OpenRouter the same model is `openai/gpt-5.5`, so the bare form "
                "is a 400. Pinned to the cheap deepseek flash the HOST lane "
@@ -156,6 +168,74 @@ LIVE_MODEL_OVERRIDES: dict[str, dict[str, str]] = {
                "renders is not what this lane is for.",
     },
 }
+
+#: THE DEVELOPER'S OWN SUBSCRIPTION, per CLI (operator decision 2026-10-02:
+#: "Codex and Claude Code should use my subscriptions if available, otherwise
+#: OpenRouter; only opencode uses OpenRouter"). Applied by `_live_rows` when
+#: `harness.subscription_available(cli)` — the host lane's own rule, reading the
+#: same `creds.yaml` allowlist and the same `host_matrix.yaml` `subscription.model`
+#: pin — unless `MLLM_LIVE_CREDS=openrouter` forces the key.
+#:
+#: The credential travels exactly like cursor-agent's file credential: read
+#: host-side by `_credential_material`, handed to the docker CLIENT's environment
+#: (never argv, never a mount), staged by the runner into the container's
+#: disposable HOME at `credential_file`, mode 0600, and redacted by value —
+#: nested tokens and JWT claims included (`live_provider.credential_strings`).
+#: No OpenRouter variable is forwarded to a subscription row.
+#:
+#: `allow` names the vendor hosts the resolver must answer besides the endpoint:
+#: the OAuth refresh a copied token may need. `env_drop` removes the OpenRouter
+#: routing LIVE_ENV_OVERRIDES adds, which on this path would point the CLI away
+#: from the very credential it should use. `seed_drop` removes seed files that
+#: name the OpenRouter/stub provider.
+LIVE_SUBSCRIPTIONS: dict[str, dict] = {
+    "codex": {
+        "credential_file": ".codex/auth.json",
+        "live_base_url": "https://chatgpt.com/backend-api/codex",
+        "live_vendor": "openai-codex-subscription",
+        "allow": ("auth.openai.com",),
+        "env_drop": (),
+        "seed_drop": {
+            ".codex/config.toml": (
+                "the seeded config selects the `stub` model_provider rendered "
+                "against OpenRouter; on the subscription codex must use its "
+                "built-in provider with the staged auth.json"),
+        },
+        "why": "codex resolves its ChatGPT login from $CODEX_HOME/auth.json and "
+               "talks to chatgpt.com's codex backend; the pin is "
+               "host_matrix.yaml's codex `subscription.model` (gpt-6-luna, high). "
+               "NOTE: this row is still gated by NEEDS_INNER_USERNS on a daemon "
+               "whose seccomp denies CLONE_NEWUSER, credential or not.",
+    },
+    "claude-code": {
+        "credential_file": ".claude/.credentials.json",
+        "live_base_url": "https://api.anthropic.com",
+        "live_vendor": "anthropic-claude-subscription",
+        "allow": ("console.anthropic.com", "platform.claude.com"),
+        "env_drop": ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY"),
+        "seed_drop": {},
+        "why": "Claude Code reads its OAuth login from ~/.claude/.credentials.json "
+               "when no ANTHROPIC_* routing or key is set — the host lane's "
+               "fallback wiring makes the same omission on purpose; the pin is "
+               "host_matrix.yaml's claude-code `subscription.model` (sonnet).",
+    },
+}
+
+
+def _subscription_variant(cli: str) -> dict | None:
+    """This CLI's LIVE_SUBSCRIPTIONS entry, completed, or None for the key path."""
+    forced = (os.environ.get(harness.LIVE_CREDS_ENV) or "").strip()
+    if forced and forced not in ("openrouter", "subscription"):
+        raise ValueError(f"{harness.LIVE_CREDS_ENV}={forced!r}: expected "
+                         f"`openrouter` or `subscription`")
+    spec = LIVE_SUBSCRIPTIONS.get(cli)
+    if spec is None or forced == "openrouter":
+        return None
+    if not harness.subscription_available(cli):
+        return None
+    sources = harness.subscription_sources(cli)
+    return dict(spec, credential_source=str(sources[0]),
+                model=harness.subscription_model_spec(cli))
 
 #: An ADDITIONAL variable name this row's credential is exported under, inside the
 #: container, with the measurement — the lane-side half of `--credential-alias`.
@@ -1161,6 +1241,23 @@ def _live_rows() -> list[dict]:
         override = LIVE_ENV_OVERRIDES.get(str(row["cli"]))
         if override:
             row["env_extra"] = {**(row.get("env_extra") or {}), **override}
+        # …and, last, the developer's own subscription when it is present: a
+        # different credential, endpoint, model and allowlist for the same
+        # adapter (LIVE_SUBSCRIPTIONS).
+        subscription = _subscription_variant(str(row["cli"]))
+        if subscription:
+            row["subscription"] = True
+            row["model_arg"] = subscription["model"]
+            row["credential_file"] = subscription["credential_file"]
+            row["credential_source"] = subscription["credential_source"]
+            row.pop("credential_env", None)
+            row["live_base_url"] = subscription["live_base_url"]
+            row["live_vendor"] = subscription["live_vendor"]
+            row["live_allow"] = list(subscription["allow"])
+            row["subscription_seed_drop"] = sorted(subscription["seed_drop"])
+            row["env_extra"] = {
+                key: value for key, value in (row.get("env_extra") or {}).items()
+                if key not in subscription["env_drop"]}
         rows.append(row)
     return rows
 
@@ -1215,7 +1312,7 @@ def _row_is_credentialed(row: dict) -> tuple[bool, str]:
             return False, (
                 f"{row['cli']}'s credential is the file {source}, which is "
                 f"missing or unreadable on this host — log the CLI in first "
-                f"(`cursor-agent login`), or give the row a "
+                f"(e.g. `{row['cli']} login`), or give the row a "
                 f"`credential_env` instead")
         return True, ""
 
@@ -1374,15 +1471,22 @@ def _run_argv(row: dict, out_dir: Path, posture: dict, image: str) -> list[str]:
     # ...and the per-FILE version of the same statement, for a tree that is part
     # live configuration and part stub artifact. SEED_DROP carries the per-file
     # measurement; the runner records what it removed in the evidence.
-    for rel in sorted(SEED_DROP.get(str(row["cli"]), {})):
+    for rel in sorted(set(SEED_DROP.get(str(row["cli"]), {}))
+                      | set(row.get("subscription_seed_drop") or ())):
         argv += ["--seed-drop", rel]
     # The credential, under the name this CLI's own auth path reads. Only the
     # NAME crosses here — the value is read inside the container from the row's
     # `credential_env`, so nothing in this argv (which is written verbatim to
     # `run-command.txt`) can carry it.
-    for alias in LIVE_CREDENTIAL_ALIASES.get(str(row["cli"]), ()):
-        argv += ["--credential-alias", alias]
-    if row["cli"] in ENDPOINT_IN_ENV:
+    # NOT on a subscription row: an alias re-exports the OpenRouter key under the
+    # vendor's own variable name, and a subscription row carries no key — the
+    # runner would fail closed on an alias with nothing to alias.
+    if not row.get("subscription"):
+        for alias in LIVE_CREDENTIAL_ALIASES.get(str(row["cli"]), ()):
+            argv += ["--credential-alias", alias]
+    # A subscription CLI routes itself to its vendor's built-in endpoint, so no
+    # seeded file names it.
+    if row["cli"] in ENDPOINT_IN_ENV or row.get("subscription"):
         argv += ["--endpoint-in-env"]
     return argv
 
@@ -1476,13 +1580,19 @@ def _record_metering_note(row: dict, evidence: dict) -> None:
     discards. `usage_support` states how far that goes (`partial` for cursor:
     tokens yes, cost never).
     """
-    if not row.get("live_lane") or row.get("live_vendor") in (None, "openrouter"):
+    if row.get("live_vendor") in (None, "openrouter"):
+        return
+    if not (row.get("live_lane") or row.get("subscription")):
         return
     _record(kind="credit-window",
             vendor=str(row.get("live_vendor")),
             cli=row["cli"],
-            metering="unmetered — this vendor publishes no usage endpoint; the "
-                     "bound is the row's own one-shot plus row_timeout_s",
+            metering=("unmetered — the developer's own subscription quota, which "
+                      "this rig cannot read; the bound is the row's own one-shot "
+                      "plus row_timeout_s"
+                      if row.get("subscription") else
+                      "unmetered — this vendor publishes no usage endpoint; the "
+                      "bound is the row's own one-shot plus row_timeout_s"),
             usage=evidence.get("usage"),
             usage_support=evidence.get("usage_support"))
 
@@ -1646,6 +1756,11 @@ class TestTheSmokeReachedTheRealEndpoint:
         """
         cli = smoke["cli"]
         pinned = str(smoke["row"].get("model_arg", ""))
+        # A subscription pin may carry `:effort` (codex `gpt-6-luna:high`); the
+        # adapter turns that into a config flag and the response names the model
+        # alone.
+        if smoke["row"].get("subscription"):
+            pinned = pinned.partition(":")[0]
         blob = json.dumps(smoke["evidence"].get("parsed", {})) + \
             smoke["evidence"].get("stdout", "")
         # …plus stderr, for the one row measured to put its model banner there
