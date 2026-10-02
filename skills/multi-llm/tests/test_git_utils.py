@@ -33,6 +33,7 @@ from utils.git_utils import (
     get_modified_files,
     get_staged_diff,
     get_staged_files,
+    ignored_paths,
     intent_to_add_untracked,
     is_clean_working_tree,
     list_untracked_files,
@@ -1864,6 +1865,36 @@ def temp_git_repo(tmp_path, monkeypatch):
     _run(["git", "commit", "--quiet", "-m", "init"], repo)
     monkeypatch.chdir(repo)
     return repo
+
+
+class TestIgnoredPaths:
+    """`ignored_paths` (2026-10-02, #22) asks `git check-ignore` which of the
+    paths it is handed git ignores. W7 (adversarial review, 2026-10-02): one
+    path outside the repository made the whole call exit 128, and the function
+    answered "nothing is ignored" for every path beside it — the one answer
+    that re-admits a transcript to `tracked_files`."""
+
+    def test_an_outside_path_does_not_disable_the_answer_for_the_rest(
+        self, temp_git_repo
+    ):
+        (temp_git_repo / ".gitignore").write_text("logs/\n", encoding="utf-8")
+        (temp_git_repo / "logs").mkdir()
+        (temp_git_repo / "logs" / "run.jsonl").write_text("{}\n", encoding="utf-8")
+        outside = str(temp_git_repo.parent / "elsewhere.txt")
+
+        answer = ignored_paths(["logs/run.jsonl", outside, "seed.txt"],
+                               cwd=str(temp_git_repo))
+
+        assert answer == {"logs/run.jsonl"}
+
+    def test_an_outside_path_alone_is_simply_not_ignored(self, temp_git_repo):
+        outside = str(temp_git_repo.parent / "elsewhere.txt")
+        assert ignored_paths([outside], cwd=str(temp_git_repo)) == set()
+
+    def test_outside_a_repository_nothing_is_ignored(self, tmp_path):
+        bare = tmp_path / "not-a-repo"
+        bare.mkdir()
+        assert ignored_paths(["x"], cwd=str(bare)) == set()
 
 
 class TestIntentToAddUntracked:

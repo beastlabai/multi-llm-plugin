@@ -644,6 +644,101 @@ class TestVerificationOnlyImplementTask:
         result = env.scheduler([task]).run()
         assert "declares no files to snapshot" in result.outcomes[0].reason
 
+    # -- adversarial review, 2026-10-02 ---------------------------------
+
+    def test_with_the_sweep_off_the_task_is_refused_before_dispatch(
+        self, env, monkeypatch
+    ):
+        """W1: over `SWEEP_MAX_FILES` the census is None and the sweep is a
+        no-op; the verdict then read "no file changed" and VERIFIED an edit
+        of index.html at exit 0. Nothing but the sweep can judge this task,
+        so with no census it is refused and the runner never starts."""
+        index = env.root / "index.html"
+        index.write_text("<p>orig</p>\n", encoding="utf-8")
+        import utils.write_batch_scheduler as wbs
+        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", 0)
+        env.edits([_patch_edit(index, "<p>rewritten</p>\n")],
+                  result={"status": "applied", "ids": ["T009"],
+                          "files_touched": ["index.html"], "summary": "did it"})
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_REJECTED
+        assert "Nothing was dispatched" in outcome.reason
+        assert "Files to modify" in outcome.reason
+        assert index.read_text() == "<p>orig</p>\n"
+        assert result.exit_code == 3
+
+    def test_a_tree_that_outgrows_the_sweep_during_the_run_is_not_verified(
+        self, env, monkeypatch
+    ):
+        """W1, the other side: the pre-run census was usable and the run
+        itself pushed the tree past the cap (an `npm install`), so the
+        post-run census is None. "Could not look" is a failed batch, never
+        VERIFIED."""
+        import utils.write_batch_scheduler as wbs
+        scheduler = env.scheduler([self._task(env)], kind="implement",
+                                  finalize=False)
+        monkeypatch.setattr(wbs, "SWEEP_MAX_FILES", len(scheduler._census()))
+        env.edits([{"path": str(env.root / "node_modules" / "x.js"),
+                    "mode": "create", "content": "x\n"}],
+                  result={"status": "applied", "ids": ["T009"],
+                          "files_touched": [], "summary": "installed"})
+        result = scheduler.run()
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_BATCH_FAILED
+        assert "not VERIFIED" in outcome.reason
+        assert result.exit_code == 3
+
+    def test_a_resume_that_touches_nothing_keeps_the_stray_write_partial(
+        self, env
+    ):
+        """W3: run 1's runner edits index.html → PARTIAL, left on disk by
+        design. Run 2 under --resume reuses the snapshot (the adopted
+        index.html entry included) and touches nothing; the verdict read
+        only the sweep, so the same stray bytes came back as VERIFIED with
+        `files_touched == ['index.html']` on the same row."""
+        index = env.root / "index.html"
+        index.write_text("<p>orig</p>\n", encoding="utf-8")
+        env.edits([_patch_edit(index, "<p>stray</p>\n")],
+                  result={"status": "applied", "ids": ["T009"],
+                          "files_touched": ["index.html"], "summary": "fixed"})
+        first = env.scheduler([self._task(env)], kind="implement",
+                              finalize=False).run()
+        assert first.outcomes[0].status == executor.STATUS_PARTIAL
+
+        env.edits([], result={"status": "applied", "ids": ["T009"],
+                              "files_touched": [], "summary": "node --check ok"})
+        second = env.scheduler([self._task(env)], kind="implement",
+                               finalize=False, resume=True).run()
+        outcome = second.outcomes[0]
+        assert "<p>stray</p>" in index.read_text()
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert "index.html" in outcome.files_touched
+        assert "earlier dispatch of this task" in outcome.reason
+        assert second.exit_code == 3
+
+    def test_a_same_bytes_rewrite_is_not_a_write(self, env):
+        """W4: the census stamps (size, mtime_ns), so a formatter no-op, a
+        `touch` or a checkout of an unchanged file read as moved and stopped
+        the loop at exit 3. The declared set was always judged by sha256
+        (`TaskSnapshot.changed`); the sweep now applies the same rule."""
+        index = env.root / "index.html"
+        index.write_text("<p>orig</p>\n", encoding="utf-8")
+        env.edits([{"path": str(index), "mode": "create",
+                    "content": "<p>orig</p>\n"}],
+                  result={"status": "applied", "ids": ["T009"],
+                          "files_touched": [], "summary": "ok"})
+        result = env.scheduler([self._task(env)], kind="implement",
+                               finalize=False).run()
+        outcome = result.outcomes[0]
+        assert index.read_text() == "<p>orig</p>\n"
+        assert outcome.status == executor.STATUS_OK, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_NO_OP
+        assert result.exit_code == 0
+
 
 class TestVerificationEvidenceOnEveryRow:
     """F9: `expected_ids`/`returned_ids`/`sha256_before`/`sha256_after` land on
@@ -1092,6 +1187,57 @@ class TestScheduler:
         assert "| T001 (earlier run) | applied |" in text
         assert "| T002 | applied |" in text
         assert "recorded by earlier run(s)" in text
+
+    def test_a_resume_after_a_review_rerun_carries_no_rows_of_the_old_cycle(
+        self, env
+    ):
+        """W8 (adversarial review, 2026-10-02): apply batch ids are per review
+        cycle and the phase dir outlives the review, so a `--resume` typed
+        after a `--force` review re-run showed the previous review's rows as
+        "(earlier run)" rows. A report written before the review's latest
+        completion belongs to the old cycle — the rule
+        `check_workflow_prerequisites._apply_batches_predate_review` applies
+        to the batch ids."""
+        from datetime import datetime, timedelta
+        state = FakeState(env.tmp_path / "state.json")
+        env.edits([_patch_edit(env.plan, "one\n")],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "first"})
+        env.scheduler([env.apply_task(0)], state=state, finalize=False).run()
+        report = env.phase_dir / "write_batch_report.json"
+        assert json.loads(report.read_text())["written_at"]
+
+        # The review is re-run and completes AFTER that report was written.
+        state.state.setdefault("phases_completed", {})["review-plan"] = (
+            datetime.now() + timedelta(seconds=1)
+        ).isoformat()
+        state.save()
+        env.edits([_patch_edit(env.plan, "two\n")],
+                  result={"status": "applied", "ids": ["s1"],
+                          "files_touched": ["plans/p.md"], "summary": "second"})
+        env.scheduler([env.apply_task(1)], state=state, finalize=False,
+                      resume=True).run()
+        rows = json.loads(report.read_text())["tasks"]
+        assert [r["task_id"] for r in rows] == ["apply-batch-1"]
+        assert not any(r.get("from_earlier_run") for r in rows)
+
+    def test_the_review_per_write_kind_agrees_with_the_prerequisite_table(self):
+        """`REVIEW_PHASE_BY_WRITE_KIND` spells the first prerequisite of each
+        apply phase so the scheduler need not import the prerequisite script;
+        this is what keeps the two from drifting."""
+        import check_workflow_prerequisites as prereq
+        from utils.subagent_tasks import PHASE_BY_WRITE_KIND
+        from utils.write_batch_scheduler import REVIEW_PHASE_BY_WRITE_KIND
+        # Exactly the kinds whose phase has per-cycle batch ids, each mapped
+        # to the review the prerequisite rule dates those ids against.
+        assert set(REVIEW_PHASE_BY_WRITE_KIND) == {
+            kind for kind, phase in PHASE_BY_WRITE_KIND.items()
+            if phase in prereq.APPLY_BATCH_ID_PATTERNS
+        }
+        for kind, review in REVIEW_PHASE_BY_WRITE_KIND.items():
+            phase = PHASE_BY_WRITE_KIND[kind]
+            assert prereq.PHASE_PREREQUISITES[phase][0] == review
+        assert "implement" not in REVIEW_PHASE_BY_WRITE_KIND
 
     def test_finalize_re_stamps_plan_hash_so_the_next_session_sees_no_change(
         self, env
@@ -3372,6 +3518,99 @@ class TestTheSweepLeavesGitignoredPathsOut:
         assert code == 0
         tracked = json.loads(state_file.read_text())["tracked_files"]
         assert [t["path"] for t in tracked] == ["index.html"]
+
+    # -- adversarial review, 2026-10-02 ---------------------------------
+
+    def _verification_task(self, env):
+        return env.apply_task(
+            0, kind="implement", task_id="T009", expected_ids=["T009"],
+            output_name="implement_batch_T009.json",
+            declared_files=[], snapshot_files=[],
+        )
+
+    def test_a_runner_written_gitignore_hides_nothing(self, env):
+        """W2: `check-ignore` ran after the run on rules the runner can write.
+        A new `.gitignore` holding `*` made every file the runner created,
+        and the rule file itself, vanish from the sweep → VERIFIED."""
+        env.edits([
+            {"path": str(env.root / ".gitignore"), "mode": "create",
+             "content": "*\n"},
+            {"path": str(env.root / "evil.html"), "mode": "create",
+             "content": "<script>\n"},
+        ], result={"status": "applied", "ids": ["T009"],
+                   "files_touched": [], "summary": "ok"})
+        result = env.scheduler([self._verification_task(env)],
+                               kind="implement", finalize=False).run()
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert "evil.html" in outcome.files_touched
+        assert ".gitignore" in outcome.files_touched
+        assert result.exit_code == 3
+
+    def test_a_runner_written_git_info_exclude_hides_nothing(self, env):
+        """W2 without touching `.gitignore`: `.git/` is pruned from the
+        census, so a rewritten `.git/info/exclude` was never "moved" and
+        its `*` hid the new file."""
+        import subprocess
+        (env.root / ".gitignore").write_text("node_modules/\n", encoding="utf-8")
+        subprocess.run(["git", "-c", "user.email=x@y", "-c", "user.name=x",
+                        "add", "-A"], cwd=env.root, check=True)
+        subprocess.run(["git", "-c", "user.email=x@y", "-c", "user.name=x",
+                        "commit", "-qm", "init"], cwd=env.root, check=True)
+        env.edits([
+            {"path": str(env.root / ".git" / "info" / "exclude"),
+             "mode": "create", "content": "*\n"},
+            {"path": str(env.root / "evil.html"), "mode": "create",
+             "content": "<script>\n"},
+        ], result={"status": "applied", "ids": ["T009"],
+                   "files_touched": [], "summary": "ok"})
+        result = env.scheduler([self._verification_task(env)],
+                               kind="implement", finalize=False).run()
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert "evil.html" in outcome.files_touched
+        assert result.exit_code == 3
+
+    def test_an_ignore_rule_in_force_at_dispatch_still_drops_the_transcript(
+        self, env
+    ):
+        """The drop itself survives W2: rules that did not move during the
+        run keep working, so #22's transcript still leaves the sweep."""
+        (env.root / ".gitignore").write_text("logs/\n", encoding="utf-8")
+        (env.root / "logs").mkdir()
+        env.edits([
+            {"path": str(env.root / "logs" / "01-host.jsonl"),
+             "mode": "create", "content": "{}\n"},
+        ], result={"status": "applied", "ids": ["T009"],
+                   "files_touched": [], "summary": "ok"})
+        result = env.scheduler([self._verification_task(env)],
+                               kind="implement", finalize=False).run()
+        assert result.outcomes[0].status == executor.STATUS_OK
+        assert result.exit_code == 0
+
+    def test_an_ignored_path_outside_a_narrow_allow_list_still_leaves_the_sweep(
+        self, env
+    ):
+        """W6: the drop kept an ignored path only when `policy.violation` was
+        None, and `violation` also fails "no allow pattern matches" — so
+        under `allow: ["src/**"]` the ignored `logs/run.jsonl` stayed in the
+        sweep and became the very policy violation #22 reported. Only the
+        deny side decides; a denied path stays observable."""
+        env.use(write_paths={"allow": ["src/**", "plans/**"],
+                             "deny": ["**/.env"]})
+        (env.root / ".gitignore").write_text("logs/\n.env\n", encoding="utf-8")
+        (env.root / "logs").mkdir()
+        task = env.apply_task(0, task_id="T-A")
+        scheduler = env.scheduler([task])
+        assert scheduler.policy.allow == ["src/**", "plans/**"]
+        snapshot = scheduler._snapshot(task)
+        scheduler._begin_sweep("T-A", ["plans/p.md"])
+        (env.root / "logs" / "run.jsonl").write_text("{}\n", encoding="utf-8")
+        (env.root / ".env").write_text("TOKEN=x\n", encoding="utf-8")
+
+        undeclared = scheduler._undeclared_writes("T-A", snapshot)
+
+        assert undeclared.paths == [".env"]
 
 
 class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
