@@ -360,6 +360,7 @@ __all__ = [
     "preflight_runner",
     "sandbox_rung",
     "write_rung_notice",
+    "repo_wide_write_refusal",
     "jail_summary_lines",
     "WRITE_SCOPE_BY_KIND",
     "RUNG_SKIPPED_BY_SWITCH",
@@ -3481,6 +3482,49 @@ def write_rung_notice(spec: str, jail_request: Optional[JailRequest]) -> Optiona
         lane=INCIDENTAL_LANE_EXECUTOR, write_scope=scope,
         target=_render_target(jail_request),
     )
+
+
+def repo_wide_write_refusal(
+    spec: str,
+    *,
+    anchor: Optional[str],
+    output_dir: Optional[str] = None,
+    key: str = "driver.subagent_runner",
+) -> Optional[str]:
+    """Why a ``repo-wide`` write dispatch of ``spec`` (``implement``,
+    ``apply-code-fixes``) would be refused on this host right now, or ``None``
+    when it would run (racing-run issue #1's early warning, 2026-10-02).
+
+    The same decision the dispatch takes — :func:`_detect_sandbox` with the
+    ``agent-write`` profile and a repo-wide :class:`JailRequest` — so the
+    answer is never a guess from recorded evidence: it runs the adapter's
+    model-free probes once per process (the standard sandbox, then the rung
+    walk) through the shared probe cache, and a runner with no sandbox probe
+    (every adapter but codex) answers ``None`` with nothing spawned. The
+    refusal text is the dispatch's own, led by F6 and ending in "Nothing was
+    dispatched." Advisory: any failure other than the refusal reads as
+    ``None``, because a warning that may be wrong is worse than none.
+    """
+    try:
+        from .write_safety import resolve_repo_root
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.write_safety import resolve_repo_root  # type: ignore[no-redef]
+    provider_name = str(spec).partition(":")[0]
+    try:
+        repo_root = resolve_repo_root(anchor)
+        request = JailRequest(
+            repo_root=repo_root, kind="implement", write_scope=WRITE_SCOPE_REPO_WIDE,
+            output_dir=os.path.realpath(output_dir) if output_dir else None,
+        )
+        _detect_sandbox(
+            provider_name, key=key, spec=str(spec), profile=PROFILE_AGENT_WRITE,
+            anchor=anchor, jail_request=request,
+        )
+    except RunnerRejected as exc:
+        return exc.message
+    except Exception:  # noqa: BLE001 - advisory, never a failed status or init
+        return None
+    return None
 
 
 def _uncontained_rung(provider: Any) -> Optional[SandboxRung]:
