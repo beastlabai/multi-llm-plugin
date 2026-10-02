@@ -195,6 +195,14 @@ class TestTheMap:
 # Writers use only the new names
 # ---------------------------------------------------------------------------
 
+#: The one legacy spelling a host-read document may carry: the apply
+#: instructions' raw ``state.json`` read accepts both decision-source markers.
+_LEGACY_READ_CLAUSE = (
+    " (a run recorded before the judge rename may carry them as"
+    " `claude_auto_decide` / `claude_auto_decide_salvage`: the same two markers,"
+    " read the same way)"
+)
+
 #: Runtime string constants that would write a legacy spelling. Comments and
 #: docstrings are not constants an output can carry, so they are not scanned.
 _LEGACY_LITERAL = re.compile(
@@ -241,17 +249,36 @@ class TestWritersUseOnlyTheNewNames:
         assert "hd.judgeDecided" in pr and "claudeDecided" not in pr
 
     def test_the_documents_a_host_reads_name_only_the_new_keys(self):
-        """The instructions are the interface the host agent reads the keys by."""
-        paths = [*sorted((SKILL_ROOT / "instructions").glob("apply-*.md")),
-                 SKILL_ROOT / "references" / "human-decision-batch.md",
-                 *sorted((SKILL_ROOT / "legacy" / "instructions").glob("apply-*.md")),
-                 SKILL_ROOT / "legacy" / "references" / "human-decision-batch.md"]
-        for path in paths:
+        """The instructions are the interface the host agent reads the keys by.
+
+        The one exception is a *read*: each apply file's raw read of
+        ``state.json`` for its "Decided by the judge agent" section also
+        accepts the two old markers, through one fixed clause, so a run
+        recorded before the rename is never dropped from that section even if
+        no write-back reached the file (review 2026-10-02). Nothing tells a
+        host to write an old name.
+        """
+        apply_files = [*sorted((SKILL_ROOT / "instructions").glob("apply-*.md")),
+                       *sorted((SKILL_ROOT / "legacy" / "instructions").glob("apply-*.md"))]
+        references = [SKILL_ROOT / "references" / "human-decision-batch.md",
+                      SKILL_ROOT / "legacy" / "references" / "human-decision-batch.md"]
+        assert len(apply_files) == 6
+        read = "`batch_context.decision_source` is `judge_auto_decide` or `judge_auto_decide_salvage`"
+        for path in apply_files:
             text = path.read_text(encoding="utf-8")
-            assert not LEGACY_TOKEN.search(text), path
-        reference = paths[3].read_text(encoding="utf-8")
+            assert text.count(read + _LEGACY_READ_CLAUSE) == 1, path
+            assert not LEGACY_TOKEN.search(text.replace(_LEGACY_READ_CLAUSE, "")), path
+        for path in references:
+            assert not LEGACY_TOKEN.search(path.read_text(encoding="utf-8")), path
+        reference = references[0].read_text(encoding="utf-8")
         for name in (JUDGE_AUTO_DECIDE, JUDGE_AUTO_DECIDE_SALVAGE, JUDGE_DECIDE_ITEM_IDS):
             assert name in reference
+
+    def test_the_legacy_read_clause_names_exactly_the_two_old_markers(self):
+        named = set(re.findall(r"`([a-z_]+)`", _LEGACY_READ_CLAUSE))
+        assert named == {"claude_auto_decide", "claude_auto_decide_salvage"}
+        assert {LEGACY_VALUES[n] for n in named} == {
+            JUDGE_AUTO_DECIDE, JUDGE_AUTO_DECIDE_SALVAGE}
 
     def test_recorded_verdicts_carry_the_new_markers_and_batch_prefix(self, tmp_path):
         plan = tmp_path / "plan.md"
