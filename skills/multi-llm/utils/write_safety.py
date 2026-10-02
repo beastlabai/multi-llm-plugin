@@ -436,6 +436,11 @@ class TaskSnapshot:
     directory: str
     root: str
     entries: List[SnapshotEntry] = field(default_factory=list)
+    #: The items the batch was materialized for (its ``expected_ids``), so a
+    #: resume can tell this batch's snapshot from one an earlier run took
+    #: under the same positional id for other items. ``None`` for a manifest
+    #: written before the key existed.
+    expected_ids: Optional[List[str]] = None
 
     # -- creation -------------------------------------------------------
 
@@ -447,6 +452,7 @@ class TaskSnapshot:
         task_id: str,
         files: Sequence[str],
         root: str,
+        expected_ids: Optional[Sequence[str]] = None,
     ) -> "TaskSnapshot":
         """Snapshot ``files`` before dispatch. Every path is contained first.
 
@@ -484,7 +490,9 @@ class TaskSnapshot:
                 payload=payload,
             ))
         snapshot = cls(task_id=task_id, directory=str(directory), root=str(root),
-                       entries=entries)
+                       entries=entries,
+                       expected_ids=(None if expected_ids is None
+                                     else [str(i) for i in expected_ids]))
         snapshot.save()
         return snapshot
 
@@ -558,13 +566,16 @@ class TaskSnapshot:
     def save(self) -> str:
         path = Path(self.directory) / MANIFEST_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_write(str(path), json.dumps({
+        manifest: Dict[str, Any] = {
             "snapshot_version": 1,
             "task_id": self.task_id,
             "root": self.root,
             "taken_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
             "files": [entry.to_dict() for entry in self.entries],
-        }, indent=2))
+        }
+        if self.expected_ids is not None:
+            manifest["expected_ids"] = list(self.expected_ids)
+        _atomic_write(str(path), json.dumps(manifest, indent=2))
         return str(path)
 
     @classmethod
@@ -578,12 +589,42 @@ class TaskSnapshot:
             data = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
+        recorded_ids = data.get("expected_ids")
         return cls(
             task_id=str(data.get("task_id", task_id)),
             directory=str(directory),
             root=str(data.get("root", "")),
             entries=[SnapshotEntry.from_dict(row) for row in data.get("files", [])],
+            expected_ids=(
+                [str(i) for i in recorded_ids]
+                if isinstance(recorded_ids, list) else None
+            ),
         )
+
+    def set_aside(self) -> Optional[str]:
+        """Move this snapshot out of its task id's slot; return where it went.
+
+        For a snapshot that belongs to another batch than the one about to
+        take the slot (an apply id reused for other items on a resume): its
+        rollback point must survive, so it is renamed beside the slot, never
+        deleted. ``util restore-batch --task-id <new name>`` restores it
+        (unverified: the audit's records are keyed by the old id).
+        """
+        source = Path(self.directory)
+        if not source.is_dir():
+            return None
+        digest = hashlib.sha256(
+            "\n".join(sorted(self.expected_ids or [])).encode("utf-8")
+        ).hexdigest()[:8]
+        base = f"{source.name}.items-{digest}"
+        target = source.with_name(base)
+        counter = 2
+        while target.exists():
+            target = source.with_name(f"{base}-{counter}")
+            counter += 1
+        os.replace(str(source), str(target))
+        self.directory = str(target)
+        return str(target)
 
     # -- the verdict ----------------------------------------------------
 
