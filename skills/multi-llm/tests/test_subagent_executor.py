@@ -6117,7 +6117,34 @@ class TestNormalizeResult:
         assert all(t["files_to_create"] == [] for t in data["tasks"])
         out = capsys.readouterr().out
         assert "[exec-subagents] task_generation: the reply omitted " \
-               "'files_to_create' on 2 task(s); supplied []" in out
+               "'files_to_create' on 2 task(s); supplied the empty value" in out
+
+    def test_an_omitted_subagent_type_is_counted_so_the_file_is_rewritten(
+        self, tmp_path
+    ):
+        """W5 (adversarial review, 2026-10-02): `subagent_type` became
+        required-but-nullable (#9) and `normalize_result` supplied the null
+        SILENTLY, outside the notes — so the native leg's "write the completed
+        document back before validating" never fired for it and a
+        pre-upgrade `task_generation_result.json` stayed schema-invalid on
+        disk: `task_is_complete` False for a file the phase had consumed."""
+        document = _generated_document(drop=("subagent_type",))
+        assert executor.validate_result("task_generation", document)
+        target = tmp_path / "task_generation_result.json"
+        target.write_text(json.dumps(document), encoding="utf-8")
+        task = {"task_id": "task_generation", "kind": "task_generation",
+                "output_name": "task_generation_result.json"}
+        assert executor.task_is_complete(task, str(tmp_path)) is False
+
+        notes = executor.normalize_result("task_generation", document)
+
+        assert notes == ["'subagent_type' on 2 task(s)"]
+        assert all(t["subagent_type"] is None for t in document["tasks"])
+        assert executor.validate_result("task_generation", document) == []
+        # What the notes trigger on the native leg: the completed document
+        # goes back to disk, and the file on disk is the one that validates.
+        target.write_text(json.dumps(document), encoding="utf-8")
+        assert executor.task_is_complete(task, str(tmp_path)) is True
 
 
 class TestSessionModelCatalogExemptionByModel:

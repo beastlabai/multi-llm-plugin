@@ -29,6 +29,35 @@ def _no_ignore_rules(monkeypatch):
                         lambda paths, cwd=None: set())
 
 
+class TestOnlyTouchedWithEveryPathIgnored:
+    """W7 (adversarial review, 2026-10-02): `_drop_ignored` runs before the
+    `--only-touched` check, so a call whose every `--touched` path is
+    gitignored used to fail with "needs at least one --touched <path>" —
+    against a command line that passed three. Still a refusal (an empty
+    explicit list would send review-code to its git-diff fallback), but it
+    says what happened."""
+
+    def test_the_refusal_names_the_ignored_paths(self, valid_state, monkeypatch,
+                                                 capsys):
+        import finalize_tracking
+        monkeypatch.setattr(finalize_tracking, "ignored_paths",
+                            lambda paths, cwd=None: set(paths))
+        code = main([
+            "--state-file", str(valid_state), "--only-touched",
+            "--touched", "logs/a.jsonl", "--touched", "logs/b.jsonl",
+        ])
+        assert code == 1
+        err = capsys.readouterr().err
+        assert "every one is gitignored" in err
+        assert "logs/a.jsonl" in err and "logs/b.jsonl" in err
+        assert "needs at least one --touched" not in err
+
+    def test_with_no_path_at_all_the_old_message_stands(self, valid_state, capsys):
+        code = main(["--state-file", str(valid_state), "--only-touched"])
+        assert code == 1
+        assert "needs at least one --touched" in capsys.readouterr().err
+
+
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for test files."""
