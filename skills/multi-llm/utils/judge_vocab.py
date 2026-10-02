@@ -17,7 +17,9 @@ are therefore mapped here and nowhere else: :data:`LEGACY_VALUES` and
 :data:`LEGACY_KEYS` are the whole table, :func:`canonical_value` is the per-value
 reader and :func:`upgrade_legacy` rewrites a loaded document once at its load
 boundary. A writer that re-saves an upgraded document (``StateManager.save``)
-therefore writes only the new names.
+therefore writes only the new names, and ``StateManager`` writes an upgrade
+back at load even when nothing saves after it, because the host reads
+``state.json`` raw.
 
 Old batch ids (``claude_decide_<hash>``) are deliberately *not* rewritten: a
 ``batch_id`` is an opaque identifier nothing parses, and only new ids get the

@@ -485,7 +485,8 @@ def _workflow_payload(
         sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent.parent))
         import check_workflow_prerequisites as prereq  # type: ignore
 
-    state = StateManager(plan_path)
+    # A poll: read-only, so it never rewrites the file a run is writing.
+    state = StateManager(plan_path, read_only=True)
     return prereq.get_workflow_status(
         state, plan_path, output_dir_path(plan_path), host_id=host_id,
     )

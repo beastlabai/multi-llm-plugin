@@ -38,7 +38,7 @@ def _plan_edited_after_generate_tasks(
     try:
         from .state_manager import StateManager
 
-        state = StateManager(plan_path_abs)
+        state = StateManager(plan_path_abs, read_only=True)
         completed_at = state.get("phases_completed", {}).get("generate-tasks")
         if completed_at:
             completed_ts = datetime.fromisoformat(completed_at).timestamp()

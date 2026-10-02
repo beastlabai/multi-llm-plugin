@@ -20,6 +20,7 @@ Two halves, both asserted here:
 
 import ast
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -364,7 +365,10 @@ class TestAnEarlierRunLoadsTheSame:
             orch.print_write_outcome_summary()
             out = capsys.readouterr().out
             summary = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
-            orch.state.save()
+            # No save() by hand: on the native leg nothing saves after the
+            # load (completion is the host's --mark-completed, later), and the
+            # host reads this file raw for its "Decided by the judge agent"
+            # section. The resume itself must have left the new names on disk.
             on_disk = state_file.read_text(encoding="utf-8")
 
             seen[spelling] = (
@@ -373,7 +377,7 @@ class TestAnEarlierRunLoadsTheSame:
                 _normalized(out, root),
                 _normalized(summary, root),
             )
-            # The next save writes only the new names; old batch ids stay as ids.
+            # Only the new names on disk; old batch ids stay as ids.
             assert not LEGACY_TOKEN.search(on_disk), spelling
             assert "judge_auto_decide_salvage" in on_disk
             assert "claude_decide_efabfefb" in on_disk
@@ -503,3 +507,116 @@ class TestAnEarlierRunLoadsTheSame:
                 (phase_dir / "report_data.json").read_text(encoding="utf-8"))
         assert sidecars["legacy"] == sidecars["current"]
         assert sidecars["legacy"]["humanDecisionsSummary"][JUDGE_DECIDED] == 2
+
+
+# ---------------------------------------------------------------------------
+# The upgrade reaches the disk, and only on a load that may write
+# ---------------------------------------------------------------------------
+
+def _identity(path: Path):
+    """What a rewrite of *path* would change: its bytes, inode and mtime."""
+    stat = path.stat()
+    return path.read_bytes(), stat.st_ino, stat.st_mtime_ns
+
+
+def _pin_file(path: Path):
+    """Back-date *path* (so a same-second rewrite still shows) and return its identity."""
+    os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    return _identity(path)
+
+
+class TestTheUpgradeIsWrittenBack:
+    """A load that upgraded a legacy spelling writes it back, once.
+
+    The host reads ``state.json`` raw (the apply instructions' "Decided by the
+    judge agent" section), and a native-leg ``--resume`` saves nothing after
+    its load, so an upgrade held only in memory never reached that reader
+    (review 2026-10-02).
+    """
+
+    def test_the_native_leg_resume_leaves_only_the_new_names_on_disk(self, tmp_path):
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
+        orch = MockApplyOrchestrator(
+            _make_args(plan_file=str(plan_path), resume=True, yes=True))
+        assert orch.run() == 0
+        on_disk = state_file.read_text(encoding="utf-8")
+        assert not LEGACY_TOKEN.search(on_disk)
+        # The host's own filter, over the raw file, finds all three judgements.
+        records = json.loads(on_disk)[f"human_decisions_{orch.phase_name}"]
+        judged = [gid for gid, r in records.items()
+                  if r["batch_context"]["decision_source"]
+                  in (JUDGE_AUTO_DECIDE, JUDGE_AUTO_DECIDE_SALVAGE)]
+        assert sorted(judged) == [
+            "3b810046f0a56e8c", "5c5c5c5c5c5c5c5c", "9a9a9a9a9a9a9a9a"]
+
+    def test_the_write_is_the_upgraded_document_and_nothing_else(self, tmp_path):
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
+        before = json.loads(state_file.read_text(encoding="utf-8"))
+        state = StateManager(plan_path)
+        on_disk = json.loads(state_file.read_text(encoding="utf-8"))
+        assert on_disk == upgrade_legacy(before)  # updated_at untouched too
+        assert state.state == on_disk
+
+    def test_a_current_file_is_never_rewritten(self, tmp_path):
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "current")
+        pinned = _pin_file(state_file)
+        StateManager(plan_path).reload()
+        assert _identity(state_file) == pinned
+
+    def test_a_read_only_load_upgrades_in_memory_and_writes_nothing(self, tmp_path):
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
+        pinned = _pin_file(state_file)
+        state = StateManager(plan_path, read_only=True)
+        records = state.get_all_human_decisions(MockApplyOrchestrator.phase_name)
+        assert not LEGACY_TOKEN.search(json.dumps(records))
+        state.reload()
+        with pytest.raises(RuntimeError, match="read-only"):
+            state.save()
+        assert _identity(state_file) == pinned
+
+    def test_reload_writes_an_upgrade_back(self, tmp_path):
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "current")
+        state = StateManager(plan_path)
+        # A file-level writer from before the rename puts the old names back.
+        raw = json.loads(state_file.read_text(encoding="utf-8"))
+        raw[f"human_decisions_{MockApplyOrchestrator.phase_name}"] = _fixture(
+            "human_decisions.json", "legacy")
+        state_file.write_text(json.dumps(raw, indent=2), encoding="utf-8")
+        state.reload()
+        assert not LEGACY_TOKEN.search(state_file.read_text(encoding="utf-8"))
+        assert not LEGACY_TOKEN.search(json.dumps(state.state))
+
+    def test_a_save_that_lands_after_the_read_is_not_overwritten(
+        self, tmp_path, monkeypatch
+    ):
+        from utils import state_manager
+
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
+        newer = json.loads(_fixture_text("human_decisions.json", "current"))
+        real_upgrade = state_manager.upgrade_legacy
+
+        def upgrade_while_another_process_saves(document):
+            state_file.write_text(json.dumps({"concurrent": newer}), encoding="utf-8")
+            return real_upgrade(document)
+
+        monkeypatch.setattr(state_manager, "upgrade_legacy",
+                            upgrade_while_another_process_saves)
+        StateManager(plan_path)
+        assert json.loads(state_file.read_text(encoding="utf-8")) == {"concurrent": newer}
+
+    def test_the_read_only_commands_never_write(self, tmp_path, capsys):
+        """`status`, `util next-command`, `--status` and the tasks staleness probe."""
+        import check_workflow_prerequisites as prereq
+        from utils import next_phase, run_status
+        from utils.tasks_file import _plan_edited_after_generate_tasks
+
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
+        pinned = _pin_file(state_file)
+        assert run_status.main(["--plan-file", str(plan_path), "--view", "workflow"]) == 0
+        assert next_phase.main([str(plan_path)]) == 0
+        with pytest.raises(SystemExit) as exit_:
+            prereq.main(["--plan-file", str(plan_path), "--status"])
+        assert exit_.value.code == 0
+        _plan_edited_after_generate_tasks(str(plan_path), 0.0, 0.0)
+        capsys.readouterr()
+        assert _identity(state_file) == pinned
