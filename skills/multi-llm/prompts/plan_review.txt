@@ -6,9 +6,11 @@ You are reviewing an implementation plan for completeness, correctness, and clar
 Read this file to understand the proposed implementation. The plan should contain:
 1. Problem statement and objectives
 2. Technical approach and architecture decisions
-3. Implementation tasks with dependencies
-4. File changes and their purposes
-5. Testing strategy and acceptance criteria
+3. File changes and their purposes
+4. Testing strategy and acceptance criteria
+
+## Out of Scope: Task Decomposition
+Breaking the plan into implementation tasks, with their ids, dependencies and order, is a separate later phase (task generation) that works from the plan as written. A plan is a design document, not a task list. Do NOT report that the plan lacks a task breakdown, task list, implementation order, dependency graph or milestones, and do not suggest adding one. Do still report a missing or unclear design decision that would block someone writing those tasks, and an existing order or dependency in the plan that is wrong.
 
 ## Your Task
 1. Read the plan file at the path above
@@ -26,8 +28,8 @@ Read this file to understand the proposed implementation. The plan should contai
 
 ### Completeness
 - **Missing requirements**: Are all features fully specified?
-- **Incomplete tasks**: Do tasks have enough detail to implement?
-- **Missing dependencies**: Are task dependencies properly identified?
+- **Incomplete steps**: Where the plan describes work, does it have enough detail to implement?
+- **Missing dependencies**: Are dependencies the plan states, or that the design implies between its parts, identified?
 - **Missing edge cases**: Are error conditions and edge cases addressed?
 - **Missing tests**: Is testing strategy adequate?
 
@@ -40,7 +42,7 @@ Read this file to understand the proposed implementation. The plan should contai
 
 ### Clarity
 - **Ambiguous requirements**: Are any requirements unclear or open to interpretation?
-- **Vague tasks**: Do tasks clearly specify what needs to be done?
+- **Vague steps**: Does each described piece of work clearly specify what needs to be done?
 - **Missing context**: Is there sufficient background for implementers?
 - **Conflicting statements**: Are there contradictions in the plan?
 

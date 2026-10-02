@@ -189,7 +189,8 @@ PLACEHOLDER_MANIFEST = {
     # one more instance of the invariant two-token prefix.
     "instructions/apply-code-fixes.md": (0, 30),
     "instructions/apply-suggestions.md": (0, 28),
-    "instructions/apply-task-suggestions.md": (0, 26),
+    # 26 -> 28: the post-loop `util check-tasks` graph check (issue 10).
+    "instructions/apply-task-suggestions.md": (0, 28),
     # 4 -> 6: the hand-rolled question-file dance (write the file, re-resolve the
     # git root inline, launch) collapsed into the dispatcher's two positionals,
     # and the mode gained its `--detach` + `status` poll pair. 6 -> 8: the roster
@@ -238,9 +239,11 @@ PLACEHOLDER_MANIFEST = {
     # `implement` phase" note carries the one `util finalize-tracking --only-touched`
     # command an external implementer runs before the review (review-scope
     # plan D2.6).
-    "instructions/review-code.md": (0, 30),
-    "instructions/review-plan.md": (0, 30),
-    "instructions/review-tasks.md": (0, 20),
+    # +2 each on review-code/-plan/-tasks: the `util check-reply` command run after
+    # each validation batch is written (issue 11).
+    "instructions/review-code.md": (0, 32),
+    "instructions/review-plan.md": (0, 32),
+    "instructions/review-tasks.md": (0, 22),
     # The shared shim partials (D5). Authored once, interpolated into a rendered
     # shim by `install-host`, and still counted against that shim's rendered line
     # budget because an agent reads them. `poll-loop.md` carries the one `status`

@@ -1005,3 +1005,29 @@ class TestConstants:
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
+
+
+class TestFixBatchPromptsChangeCodeOnly:
+    """Issue 31: the batch that "approved" a finding edited the plan and tasks.md."""
+
+    def test_single_fix_prompt_forbids_editing_the_plan(self):
+        from utils.code_fix_batcher import CODE_ONLY_RULE, format_fix_batch_prompt
+
+        fixes = [{"file": "index.html", "title": "t", "description": "d",
+                  "line_range": [1, 2]}]
+        batch = CodeFixBatch(file_key="index.html", fixes=fixes, batch_type="single")
+        prompt = format_fix_batch_prompt(batch, "plans/p.md", "HEAD~1")
+        assert CODE_ONLY_RULE in prompt
+        assert "approved deviation" in prompt
+
+    def test_multi_fix_prompt_forbids_editing_the_plan(self):
+        from utils.code_fix_batcher import CODE_ONLY_RULE, format_fix_batch_prompt
+
+        fixes = [
+            {"file": "index.html", "title": "a", "description": "d", "line_range": [1, 2]},
+            {"file": "index.html", "title": "b", "description": "d", "line_range": [3, 4]},
+        ]
+        batch = CodeFixBatch(file_key="index.html", fixes=fixes, batch_type="file")
+        prompt = format_fix_batch_prompt(batch, "plans/p.md", "HEAD~1")
+        assert CODE_ONLY_RULE in prompt
+        assert "needs a plan decision" in prompt

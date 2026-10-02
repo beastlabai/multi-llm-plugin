@@ -897,3 +897,58 @@ class TestTheJudgeIsNamed:
         assert record["batch_context"]["judge"] == self.RUNNER
         assert record["reason"].startswith(f"Agent decide [{self.RUNNER}]: ")
         assert self.RUNNER in capsys.readouterr().err
+
+
+class TestHostNeutralJudgeProvenance:
+    """Issue 18: persisted keys keep their spelling; what a user reads does not."""
+
+    def test_the_persisted_markers_are_still_recognised(self):
+        from utils.human_decisions import is_judge_source
+
+        assert is_judge_source("claude_auto_decide")
+        assert is_judge_source("claude_auto_decide_salvage")
+        assert not is_judge_source("user")
+        assert not is_judge_source(None)
+
+    def test_labels_are_host_neutral(self):
+        from utils.human_decisions import judge_source_label, judge_status_label
+
+        assert judge_source_label("claude_auto_decide") == "judge agent"
+        assert judge_source_label("claude_auto_decide_salvage") == "judge agent (salvaged)"
+        assert judge_source_label("user") == "user"
+        assert judge_status_label("claude_skipped") == "skipped by judge"
+        assert judge_status_label("invalid") == "invalid"
+        for text in (judge_source_label("claude_auto_decide"),
+                     judge_status_label("claude_skipped")):
+            assert "claude" not in text.lower()
+
+    def test_a_salvage_is_salvaged_though_stored_as_approved(self):
+        from utils.human_decisions import judge_outcome
+
+        salvage = {"decision": "approved",
+                   "batch_context": {"decision_source": "claude_auto_decide_salvage"}}
+        plain = {"decision": "approved",
+                 "batch_context": {"decision_source": "claude_auto_decide"}}
+        assert judge_outcome(salvage) == "salvaged"
+        assert judge_outcome(plain) == "approved"
+        assert judge_outcome({"decision": "skipped", "batch_context": {}}) == "skipped"
+
+    def test_a_native_judge_names_the_model_its_verdict_file_declares(self, tmp_path):
+        path = _write_verdicts(tmp_path, 0, [_verdict(GROUP_A, DECISION_APPROVE, "ok")])
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+        document["judge"] = "claude-sonnet-5-5"
+        Path(path).write_text(json.dumps(document), encoding="utf-8")
+        assert validate_human_decision_verdicts(document) == []
+        ingest = ingest_verdicts(phase_dir=str(tmp_path), expected_group_ids=[GROUP_A])
+        labels = judge_labels(str(tmp_path), ingest.sources,
+                              fallback="claude-code host agent")
+        assert labels == {GROUP_A: "claude-sonnet-5-5 (claude-code host agent)"}
+
+    def test_an_unrecorded_or_executor_label_is_never_given_a_model(self, tmp_path):
+        path = _write_verdicts(tmp_path, 0, [_verdict(GROUP_A, DECISION_APPROVE, "ok")])
+        document = json.loads(Path(path).read_text(encoding="utf-8"))
+        document["judge"] = "claude-sonnet-5-5"
+        Path(path).write_text(json.dumps(document), encoding="utf-8")
+        ingest = ingest_verdicts(phase_dir=str(tmp_path), expected_group_ids=[GROUP_A])
+        assert judge_labels(str(tmp_path), ingest.sources, fallback="unrecorded") == {
+            GROUP_A: "unrecorded"}

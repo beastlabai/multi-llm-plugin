@@ -8,6 +8,7 @@
   "required": ["schema_version", "verdicts"],
   "properties": {
     "schema_version": {"const": "1.0"},
+    "judge": {"type": "string", "description": "Optional: the model the judging agent says it is. Names a native (host-agent) judge in the report; an executor-run judge is named by its runner instead."},
     "verdicts": {
       "type": "array",
       "items": {"$ref": "#/$defs/verdict"}

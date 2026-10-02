@@ -930,7 +930,8 @@ class TestDisplayDecisions:
 
         assert "x INVALID (1 task suggestions)" in out
         assert "! SKIPPED BY THE JUDGE AGENT (1 task suggestions)" in out
-        assert "claude_auto_decide" in out
+        assert "(judge agent)" in out
+        assert "claude_auto_decide" not in out
         assert "not decidable from the text" in out
         # The judged item must not be counted as a validation skip.
         invalid_block = out.split("INVALID")[1].split("SKIPPED BY THE JUDGE AGENT")[0]
