@@ -667,19 +667,6 @@ class _Census:
         return path
 
 
-def _rows_still_runnable(config) -> bool:
-    """True when some declared row of this tier has a credential to run under.
-
-    Per row, as `graded` decides it: a subscription (`fallback`) row needs no key,
-    an `openrouter` row needs `OPENROUTER_API_KEY`. Decided 2026-10-02 with the
-    keyless subscription run: `make e2e-container-host` no longer demands the key.
-    """
-    declared = set(_declared_for_tier(config))
-    have_key = bool(os.environ.get("OPENROUTER_API_KEY"))
-    return any(harness.default_host_creds(host) == "fallback" or have_key
-               for host, row in CREDENTIALED_PAIRS if row in declared)
-
-
 def _refuse_empty_lane(config, utc: str) -> None:
     """`not-run` is its own outcome, and it exits non-zero (C6).
 
@@ -691,15 +678,24 @@ def _refuse_empty_lane(config, utc: str) -> None:
     census — and it exists for the contributor deliberately confirming the rig is
     wired up without a key. It is never the default, because the default has to
     make "nobody here has a key" visible.
+
+    **Asked once, after the last selected row** (`_host_lane_verdict`, this
+    module's teardown), and answered from the census's final `ran` list. It
+    used to be asked at every key skip, which could not know whether a later
+    row would run: a keyless subscription run skips opencode, the first host in
+    the schedule, before any codex row (f4d2382), and the prediction added for
+    that, "does some row of the TIER have a credential", was True under
+    `-k '[opencode-ask]'`, where the tier's codex rows were never collected,
+    and under a forced `MLLM_E2E_HOST_CREDS=fallback` with no credential file.
+    Both exited 0 having run nothing (adversarial review, 2026-10-02). A count
+    taken at the end needs no prediction.
     """
+    if not (_Census.ran or _Census.skipped):
+        # No credentialed row was selected (the free tier, a probe-only run):
+        # there is no host lane to judge, and no census to write.
+        return
     path = _Census.write(config, utc)
     if _Census.ran:
-        return
-    # A keyless run on the subscription skips the opencode rows (the first rows
-    # in the schedule) BEFORE any codex or claude-code row has run, so "nothing
-    # ran yet" is not "nothing will run": refuse only once no declared row is
-    # left that its own credential mode could execute.
-    if _rows_still_runnable(config):
         return
     if config.getoption("allow_empty_host_lane", default=False):
         return
@@ -711,6 +707,31 @@ def _refuse_empty_lane(config, utc: str) -> None:
         "  Pass --allow-empty-host-lane to accept a credential-free invocation "
         "of this lane (the census is printed either way), or run the free tier: "
         "make e2e-container-host-discovery", returncode=1)
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _host_lane_verdict(request, utc):
+    """Take the empty-lane verdict once every selected row has run or skipped.
+
+    Module scope, so its teardown follows this module's last test, and that is
+    the first point at which `_Census.ran` is final: `pytest.exit` raised there
+    still ends the session with its return code, as it did from the skip site.
+    """
+    yield
+    _refuse_empty_lane(request.config, utc)
+
+
+def _skip_unkeyed_row(config, utc: str, row_id: str, host: str) -> None:
+    """Skip one `openrouter` row that has no key: named, and in the census.
+
+    It never refuses the lane itself: whether the lane ran nothing is answered
+    by `_host_lane_verdict` after the last row, because a row that skips cannot
+    know what the rows after it will do.
+    """
+    _Census.record_skipped(row_id, host, "OPENROUTER_API_KEY unset")
+    _Census.write(config, utc)
+    pytest.skip("the credentialed host lane needs OPENROUTER_API_KEY (a "
+                "DEDICATED key carrying a key-level spend limit)")
 
 
 #: The credential mode the credentialed rows run under, PER HOST since the
@@ -752,13 +773,11 @@ def graded(request, posture, utc):
     creds = _host_lane_creds(host)
     have_key = bool(os.environ.get("OPENROUTER_API_KEY"))
     if creds == "openrouter" and not have_key:
-        # A named skip, a census entry, and — unless the operator asked for an
-        # empty lane — a non-zero `not-run`, because a lane that executed nothing
-        # must never read as a lane that passed everything.
-        _Census.record_skipped(row_id, host, "OPENROUTER_API_KEY unset")
-        _refuse_empty_lane(request.config, utc)
-        pytest.skip("the credentialed host lane needs OPENROUTER_API_KEY (a "
-                    "DEDICATED key carrying a key-level spend limit)")
+        # A named skip and a census entry. If no selected row runs at all, the
+        # lane's `not-run` follows after the last one (`_host_lane_verdict`),
+        # because a lane that executed nothing must never read as a lane that
+        # passed everything.
+        _skip_unkeyed_row(request.config, utc, row_id, host)
     _Spend.check()
 
     entry = dict(dict(HOSTS)[host])

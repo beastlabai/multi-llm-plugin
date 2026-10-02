@@ -284,16 +284,21 @@ class TestAKeylessSubscriptionRunIsNotRefusedAsEmpty:
     """`make e2e-container-host` no longer demands the key (2026-10-02).
 
     opencode is the first scheduled host and has no subscription, so it skips
-    BEFORE any codex row has run; the old `_refuse_empty_lane` read that as an
-    empty lane and killed the run. Offline: the real module, a fake config.
+    BEFORE any codex row has run; the old `_refuse_empty_lane`, called at that
+    skip, read it as an empty lane and killed the run. Its replacement, a
+    prediction over the declared tier, then let a run that executed nothing
+    exit 0 (adversarial review, 2026-10-02). The verdict is now taken once,
+    after the last row, from what ran. Offline: the real module, a fake config.
     """
 
     class _Config:
-        def __init__(self, expression):
+        def __init__(self, expression, keyword=""):
             self.expression = expression
+            self.keyword = keyword
 
         def getoption(self, name, default=None):
-            return {"markexpr": self.expression}.get(name, default)
+            return {"markexpr": self.expression, "keyword": self.keyword,
+                    "allow_empty_host_lane": False}.get(name, default)
 
     @pytest.fixture
     def lane(self, monkeypatch, tmp_path):
@@ -306,20 +311,83 @@ class TestAKeylessSubscriptionRunIsNotRefusedAsEmpty:
         return lane
 
     PROVIDER = "container and live and not live_native_phase and not live_next_command"
+    UTC = "20261002T000000Z"
 
-    def test_a_subscription_row_is_left_to_run(self, lane, monkeypatch):
+    def test_a_skip_never_refuses_the_lane(self, lane, monkeypatch, tmp_path):
+        """The f4d2382 regression: opencode skips first, a codex row runs after."""
         monkeypatch.setattr(harness, "subscription_available",
                             lambda host: host in ("codex", "claude-code"))
         config = self._Config(self.PROVIDER)
-        lane._refuse_empty_lane(config, "20261002T000000Z")        # must not exit
+        with pytest.raises(pytest.skip.Exception):
+            lane._skip_unkeyed_row(config, self.UTC, "opencode-ask", "opencode")
+        census = json.loads(
+            (tmp_path / self.UTC / "host-lane-census.json").read_text(encoding="utf-8"))
+        assert [row["row"] for row in census["skipped"]] == ["opencode-ask"]
+        lane._Census.record_ran("codex-ask", "codex", "fallback")
+        lane._refuse_empty_lane(config, self.UTC)                 # must not exit
+
+    def test_a_per_row_selector_that_ran_nothing_is_not_run(self, lane, monkeypatch):
+        """`-k '[opencode-ask]'` keyless with codex's subscription present.
+
+        The tier's codex rows were never collected, so the opencode skip was the
+        whole lane. The tier-wide prediction said a codex row could still run and
+        the lane exited 0; before f4d2382 the same run exited 1.
+        """
+        monkeypatch.setattr(harness, "subscription_available",
+                            lambda host: host in ("codex", "claude-code"))
+        config = self._Config("container and live", keyword="[opencode-ask]")
+        with pytest.raises(pytest.skip.Exception):
+            lane._skip_unkeyed_row(config, self.UTC, "opencode-ask", "opencode")
+        with pytest.raises(pytest.exit.Exception) as exited:
+            lane._refuse_empty_lane(config, self.UTC)
+        assert exited.value.returncode == 1
+        assert "NOT-RUN" in str(exited.value)
+
+    def test_a_forced_fallback_is_no_credential(self, lane, monkeypatch):
+        """`MLLM_E2E_HOST_CREDS=fallback` with no credential file is not a row that
+        ran: the verdict reads the census, never the credential mode."""
+        monkeypatch.setattr(harness, "subscription_available", lambda host: False)
+        monkeypatch.setenv(harness.HOST_CREDS_ENV, "fallback")
+        lane._Census.record_skipped("codex-ask", "codex", "refused for the test")
+        with pytest.raises(pytest.exit.Exception):
+            lane._refuse_empty_lane(self._Config(self.PROVIDER), self.UTC)
 
     def test_no_subscription_and_no_key_is_still_not_run(self, lane, monkeypatch):
         monkeypatch.setattr(harness, "subscription_available", lambda host: False)
         config = self._Config(self.PROVIDER)
-        config.getoption = lambda name, default=None: (
-            self.PROVIDER if name == "markexpr" else False)
+        for host, row in (("opencode", "opencode-ask"), ("codex", "codex-ask")):
+            with pytest.raises(pytest.skip.Exception):
+                lane._skip_unkeyed_row(config, self.UTC, row, host)
         with pytest.raises(pytest.exit.Exception):
-            lane._refuse_empty_lane(config, "20261002T000000Z")
+            lane._refuse_empty_lane(config, self.UTC)
+
+    def test_the_operator_can_still_accept_an_empty_lane(self, lane):
+        config = self._Config(self.PROVIDER)
+        config.getoption = lambda name, default=None: (
+            True if name == "allow_empty_host_lane" else
+            self._Config(self.PROVIDER).getoption(name, default))
+        lane._Census.record_skipped("opencode-ask", "opencode", "OPENROUTER_API_KEY unset")
+        lane._refuse_empty_lane(config, self.UTC)                 # must not exit
+
+    def test_a_run_with_no_credentialed_row_selected_is_not_judged(self, lane, tmp_path):
+        """The free tier (`make e2e-container-host-discovery`) selects none."""
+        lane._refuse_empty_lane(self._Config("container and not live"), self.UTC)
+        assert not (tmp_path / self.UTC).exists()
+
+    def test_the_verdict_runs_at_the_modules_teardown(self, lane, monkeypatch):
+        """Wired as a module-scoped autouse fixture whose teardown refuses."""
+        fixture = lane._host_lane_verdict
+        marker = fixture._fixture_function_marker
+        assert (marker.scope, marker.autouse) == ("module", True)
+
+        class _Request:
+            config = self._Config(self.PROVIDER)
+
+        verdict = fixture._get_wrapped_function()(_Request(), self.UTC)
+        next(verdict)
+        lane._Census.record_skipped("opencode-ask", "opencode", "OPENROUTER_API_KEY unset")
+        with pytest.raises(pytest.exit.Exception):
+            next(verdict, None)
 
     def test_the_makefile_gate_no_longer_exits(self):
         makefile = (Path(__file__).resolve().parents[3] / "Makefile").read_text(
