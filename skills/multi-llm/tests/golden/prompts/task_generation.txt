@@ -68,6 +68,7 @@ Acceptance criteria are **task-scoped, specific and verifiable**: each one descr
 - Use paths relative to the project root
 - Clearly distinguish files to modify from files to create
 - Only reference files that actually need changes
+- A task that only checks something (a syntax gate, a smoke run) and must not change any file lists none. A task that may fix what it checks lists those files under `files_to_modify`: implement stops a task that changes a file it never declared
 
 **Plan Preamble**
 

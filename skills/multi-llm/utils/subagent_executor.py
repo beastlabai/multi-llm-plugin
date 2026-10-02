@@ -4843,6 +4843,11 @@ def normalize_result(kind: str, data: Any) -> List[str]:
             if key not in task:
                 task[key] = []
                 supplied[key] = supplied.get(key, 0) + 1
+        # Required-but-nullable in the schema (OpenAI's strict subset needs every
+        # property required) and absent from the prompt's reply shape, so most
+        # replies omit it. Supplied silently: it is optional Claude-only
+        # metadata, and "no value" is what null says.
+        task.setdefault("subagent_type", None)
     return [f"{key!r} on {count} task(s)" for key, count in supplied.items()]
 
 

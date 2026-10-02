@@ -589,6 +589,62 @@ class TestFourWriteOutcomes:
         assert result.outcomes[0].status == executor.STATUS_SCHEMA_INVALID
 
 
+class TestVerificationOnlyImplementTask:
+    """#2/#33 (2026-10-01 three-host run): generate-tasks emitted T009 "Inline
+    module syntax gate" with `Files to modify: none`, and the write loop's D3h
+    refusal stopped implement at batch 12 for good (`--resume` hit it again).
+    T013 on the Codex host ran because it declared `index.html`; T009 declared
+    nothing. An `implement` task with no files is a verification-only task."""
+
+    def _task(self, env, **over):
+        return env.apply_task(
+            0, kind="implement", task_id="T009", expected_ids=["T009"],
+            output_name="implement_batch_T009.json",
+            declared_files=[], snapshot_files=[], **over,
+        )
+
+    def test_a_check_that_changes_nothing_is_verified_not_refused(self, env):
+        env.edits([], result={"status": "applied", "ids": ["T009"],
+                              "files_touched": [], "summary": "node --check ok"})
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_OK, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_NO_OP
+        assert outcome.reason.startswith("VERIFIED")
+        assert result.exit_code == 0
+
+    def test_a_file_it_changes_is_a_partial_application_naming_the_remedy(self, env):
+        env.edits([_patch_edit(env.root / "index.html", "<p>fixed</p>\n")],
+                  result={"status": "applied", "ids": ["T009"],
+                          "files_touched": ["index.html"], "summary": "fixed"})
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert "index.html" in outcome.reason
+        assert "Files to modify" in outcome.reason
+        assert "index.html" in outcome.files_touched
+        assert result.exit_code == 3
+
+    def test_a_failing_check_is_still_a_failed_batch(self, env):
+        env.edits([], result={"status": "failed", "ids": [],
+                              "files_touched": [], "summary": "syntax error"})
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        assert result.outcomes[0].write_outcome == executor.WRITE_CLEAN_FAILURE
+        assert result.exit_code == 3
+
+    def test_the_apply_kinds_are_still_refused_with_nothing_to_snapshot(self, env):
+        task = env.apply_task(0, declared_files=[], snapshot_files=[])
+        result = env.scheduler([task]).run()
+        assert "declares no files to snapshot" in result.outcomes[0].reason
+
+
 class TestVerificationEvidenceOnEveryRow:
     """F9: `expected_ids`/`returned_ids`/`sha256_before`/`sha256_after` land on
     the outcome itself, so both reports built from it — `write_batch_report.json`
@@ -1002,6 +1058,41 @@ class TestScheduler:
         assert state.is_phase_completed("apply-suggestions")
         assert "## Implementation Summary" in env.plan.read_text()
 
+    def test_a_resumed_run_keeps_the_first_runs_rows_in_both_reports(self, env):
+        """#28 (2026-10-02): `--resume` re-materializes only the unfinished
+        tasks, and its summary.md and write_batch_report.json replaced the first
+        run's, so T001-T008 vanished from the phase's own account."""
+        state = FakeState(env.tmp_path / "state.json")
+        summary = env.out_dir / "implement" / "summary.md"
+        env.edits([_patch_edit(env.plan, "one\n")],
+                  result={"status": "applied", "ids": ["T001"],
+                          "files_touched": ["plans/p.md"], "summary": "first"})
+        first = env.apply_task(0, kind="implement", task_id="T001",
+                               expected_ids=["T001"],
+                               output_name="implement_batch_T001.json")
+        env.scheduler([first], state=state, kind="implement",
+                      summary_file=str(summary)).run()
+
+        env.edits([_patch_edit(env.plan, "two\n")],
+                  result={"status": "applied", "ids": ["T002"],
+                          "files_touched": ["plans/p.md"], "summary": "second"})
+        second = env.apply_task(1, kind="implement", task_id="T002",
+                                expected_ids=["T002"], depends_on=["T001"],
+                                output_name="implement_batch_T002.json")
+        result = env.scheduler([second], state=state, kind="implement",
+                               resume=True, summary_file=str(summary)).run()
+
+        report = json.loads(
+            (env.phase_dir / "write_batch_report.json").read_text()
+        )
+        assert [r["task_id"] for r in report["tasks"]] == ["T001", "T002"]
+        assert report["tasks"][0]["from_earlier_run"] is True
+        assert "from_earlier_run" not in report["tasks"][1]
+        text = Path(result.summary_file).read_text()
+        assert "| T001 (earlier run) | applied |" in text
+        assert "| T002 | applied |" in text
+        assert "recorded by earlier run(s)" in text
+
     def test_finalize_re_stamps_plan_hash_so_the_next_session_sees_no_change(
         self, env
     ):
@@ -1325,6 +1416,13 @@ class TestHumanTaskStrategies:
         assert "depends on skipped task T001" in plan.skipped["T003"]
         assert plan.overrides == {}
 
+    def test_the_deferred_reason_names_the_strategy_not_a_user_choice(self):
+        """#21: `--yes` resolves the strategy on its own; nobody "chose"."""
+        plan = resolve_human_task_plan(self._graph(),
+                                       strategy=STRATEGY_SKIP_DEPENDENTS)
+        assert "user chose" not in plan.skipped["T001"]
+        assert "human-task strategy: skip-dependents" in plan.skipped["T001"]
+
     def test_skip_continue_records_a_dependency_override_per_unblocked_task(self):
         plan = resolve_human_task_plan(self._graph(),
                                        strategy=STRATEGY_SKIP_CONTINUE)
@@ -1440,6 +1538,32 @@ class TestSecuritySet:
         events = [r["event"] for r in
                   write_safety.AuditLog(str(env.phase_dir)).records()]
         assert "restored" in events
+        # #27: a restored path is in the "Restored" list and never claimed to
+        # be left as the runner wrote it; the sweep does not name the author.
+        assert "Restored from the pre-batch snapshot: .env." in outcome.reason
+        assert "Not restored" not in outcome.reason
+        assert "exactly as the runner left" not in outcome.reason
+        assert "not the runner's" in outcome.reason
+
+    def test_a_denied_path_with_no_rollback_point_is_not_called_restored(self, env):
+        """#27 (2026-10-02): the message said "restored from the pre-batch
+        snapshot (.multi-llm/providers.yaml: skipped: not in this task's
+        snapshot)" and, in the same breath, "remain on disk exactly as the
+        runner left them". The change was the coordinator's own mid-run edit."""
+        secret = env.root / ".env"
+        secret.write_text("TOKEN=original\n", encoding="utf-8")
+        env.edits([{"path": ".env", "mode": "patch", "content": "LEAKED=1\n"}],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": [".env"], "summary": "edited .env"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        outcome = result.outcomes[0]
+
+        assert outcome.status == executor.STATUS_POLICY_VIOLATION
+        assert "Restored from the pre-batch snapshot" not in outcome.reason
+        assert "Not restored, because no rollback point exists (.env)" in outcome.reason
+        assert "may be another process's or your own edit" in outcome.reason
+        assert "exactly as the runner left" not in outcome.reason
+        assert "LEAKED=1" in secret.read_text()
 
     def test_a_denied_declared_path_is_refused_before_the_runner_starts(self, env):
         """Pre-dispatch enforcement: no child, so nothing to restore."""
@@ -2705,6 +2829,10 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         # The census is `git status` on the *test process's* cwd; the `--touched`
         # set is what this assertion is about, so pin the other half to empty.
         monkeypatch.setattr(finalize_tracking, "get_all_modified_files", set)
+        # Likewise the ignore lookup: the process cwd's own .gitignore covers
+        # `plans/`, which is not what this assertion is about.
+        monkeypatch.setattr(finalize_tracking, "ignored_paths",
+                            lambda paths, cwd=None: set())
         env.edits([_patch_edit(env.plan)],
                   result={"status": "applied", "ids": ["s0"],
                           "files_touched": ["plans/p.md"], "summary": "S"})
@@ -3192,6 +3320,60 @@ class TestTheInFlightMirrorNamesADispatchInProgress:
         assert mirror["in_flight"] == []
 
 
+class TestTheSweepLeavesGitignoredPathsOut:
+    """#22 (2026-10-02, Codex run): the host's own transcript `logs/*.jsonl` is
+    gitignored, moved during a dispatch, and was reported "changed outside this
+    task's declared set", handed to finalize-tracking as touched and became
+    review-code's scope. An ignored path is not a change to the repository,
+    except one `driver.write_paths` denies: `.env` is exactly what `.gitignore`
+    hides and what the post-run policy check exists to see."""
+
+    def test_an_ignored_transcript_is_not_an_undeclared_write(self, env):
+        (env.root / ".gitignore").write_text("logs/\n.env\n", encoding="utf-8")
+        (env.root / "logs").mkdir()
+        task = env.apply_task(0, task_id="T-A")
+        scheduler = env.scheduler([task])
+        snapshot = scheduler._snapshot(task)
+        scheduler._begin_sweep("T-A", ["plans/p.md"])
+        (env.root / "logs" / "01-host.jsonl").write_text("{}\n", encoding="utf-8")
+        (env.root / "notes.txt").write_text("real stray\n", encoding="utf-8")
+
+        undeclared = scheduler._undeclared_writes("T-A", snapshot)
+
+        assert undeclared.paths == ["notes.txt"]
+
+    def test_a_denied_path_stays_observable_even_when_ignored(self, env):
+        (env.root / ".gitignore").write_text(".env\n", encoding="utf-8")
+        task = env.apply_task(0, task_id="T-A")
+        scheduler = env.scheduler([task])
+        snapshot = scheduler._snapshot(task)
+        scheduler._begin_sweep("T-A", ["plans/p.md"])
+        (env.root / ".env").write_text("TOKEN=x\n", encoding="utf-8")
+
+        assert ".env" in scheduler._undeclared_writes("T-A", snapshot).paths
+
+    def test_finalize_tracking_drops_ignored_touched_paths(self, env, capsys):
+        import finalize_tracking
+        (env.root / ".gitignore").write_text("logs/\n", encoding="utf-8")
+        (env.root / "logs").mkdir()
+        (env.root / "logs" / "a.jsonl").write_text("{}\n", encoding="utf-8")
+        (env.root / "index.html").write_text("<p>\n", encoding="utf-8")
+        state_file = env.root / "state.json"
+        state_file.write_text("{}", encoding="utf-8")
+        cwd = os.getcwd()
+        os.chdir(env.root)
+        try:
+            code = finalize_tracking.main([
+                "--state-file", str(state_file), "--only-touched",
+                "--touched", "logs/a.jsonl", "--touched", "index.html",
+            ])
+        finally:
+            os.chdir(cwd)
+        assert code == 0
+        tracked = json.loads(state_file.read_text())["tracked_files"]
+        assert [t["path"] for t in tracked] == ["index.html"]
+
+
 class TestTheContainmentSweepIgnoresOnlyInFlightDeclarations:
     """F13: `_begin_sweep` used to union every dispatch's declared set into a
     PHASE-LIFETIME `_declared_seen`, so once ANY task declared a path, a
@@ -3286,6 +3468,10 @@ class TestTheContractCarriesTheProcessSafetyRule:
             assert "## Process safety (required)" in text, kind
             assert "`killall`" in text and "background servers" in text, kind
             assert text.index("## Process safety") < text.index("## Result"), kind
+            # #16: scratch guidance sits at the same shared seam.
+            assert "## Scratch files (advisory)" in text, kind
+            assert "mktemp -d" in text, kind
+            assert text.index("## Scratch files") < text.index("## Result"), kind
 
 
 class TestThePhaseRunsTheRepositorysOwnCheck:

@@ -933,7 +933,7 @@ class TestNativeTransportPreconditions:
 
         Read it as the honest state of §4.2: the *mechanism* ships complete, and
         three of the six schema-carrying phases can use it on claude while
-        **none** can on codex, because every shipped schema predates OpenAI's
+        only generate-tasks can on codex (strict-clean since 2026-10-02), because every other shipped schema predates OpenAI's
         strict subset. The other three are array-rooted documents, which no
         tool-input transport can express; changing that is a contract change for
         every consumer of those files, not something M7 may do at a call site.
@@ -956,7 +956,9 @@ class TestNativeTransportPreconditions:
             "review-plan": (False, False),
             "review-tasks": (False, False),
             "code-review": (False, False),
-            "generate-tasks": (True, False),
+            # 2026-10-02: `subagent_type` became required-but-nullable, which
+            # made generated_tasks.schema.json the first strict-clean document.
+            "generate-tasks": (True, True),
             "consolidation": (True, False),
             "task-decomposition": (True, False),
         }

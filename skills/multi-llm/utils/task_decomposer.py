@@ -108,8 +108,12 @@ class Task:
             files_to_create=data.get("files_to_create", []),
             estimated_complexity=data.get("estimated_complexity", "medium"),
             executor_role=executor_role,
-            subagent_type=data.get(
-                "subagent_type", subagent_type_for_role(executor_role)
+            # A generated task carries an explicit null (the schema's
+            # required-but-nullable spelling of "none"), which `.get`'s default
+            # does not cover.
+            subagent_type=(
+                data.get("subagent_type")
+                or subagent_type_for_role(executor_role)
             ),
             acceptance_criteria=acceptance_criteria,
             batch_group=data.get("batch_group"),
@@ -708,6 +712,22 @@ def validate_generated_tasks(tasks: List[Dict[str, Any]]) -> List[str]:
             )
             continue
         ids.append(task_id)
+    if problems:
+        return problems
+
+    # `subagent_type` is optional Claude-only metadata (null = none), but when a
+    # reply does name one it must agree with `executor_role`. The schema used to
+    # say so with an allOf/if/then; OpenAI's strict structured-output subset
+    # does not list those keywords, so the rule moved here.
+    for task in tasks:
+        legacy = task.get("subagent_type")
+        role = task.get("executor_role")
+        if legacy is not None and role in ("agent", "human"):
+            if legacy != subagent_type_for_role(role):
+                problems.append(
+                    f"{task.get('id')}: subagent_type {legacy!r} disagrees with "
+                    f"executor_role {role!r}"
+                )
     if problems:
         return problems
 

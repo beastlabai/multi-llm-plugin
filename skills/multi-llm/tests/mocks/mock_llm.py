@@ -377,6 +377,7 @@ def echo_subagent_answer(kind: str, prompt: str) -> Optional[str]:
                     ],
                     "estimated_complexity": "low",
                     "executor_role": "agent",
+                    "subagent_type": None,
                 },
                 {
                     "id": "T002",
@@ -391,6 +392,7 @@ def echo_subagent_answer(kind: str, prompt: str) -> Optional[str]:
                     ],
                     "estimated_complexity": "medium",
                     "executor_role": "agent",
+                    "subagent_type": None,
                 },
             ],
         })

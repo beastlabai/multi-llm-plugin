@@ -17,6 +17,18 @@ from finalize_tracking import get_all_modified_files, main
 
 # --- Fixtures ---
 
+@pytest.fixture(autouse=True)
+def _no_ignore_rules(monkeypatch):
+    """`finalize_tracking` drops gitignored `--touched` paths by asking git in
+    the test process's cwd, whose own `.gitignore` covers `plans/`. These tests
+    are about the census arithmetic, so the ignore lookup answers "none"; the
+    ignore rule itself is covered where a throwaway repo carries one
+    (`TestTheSweepLeavesGitignoredPathsOut`)."""
+    import finalize_tracking
+    monkeypatch.setattr(finalize_tracking, "ignored_paths",
+                        lambda paths, cwd=None: set())
+
+
 @pytest.fixture
 def temp_dir():
     """Create a temporary directory for test files."""

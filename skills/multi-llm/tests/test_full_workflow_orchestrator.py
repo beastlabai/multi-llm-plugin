@@ -107,6 +107,7 @@ def _valid_document() -> dict:
                 "acceptance_criteria": ["src/foundation.py exports the interface"],
                 "estimated_complexity": "low",
                 "executor_role": "agent",
+                "subagent_type": None,
             },
             {
                 "id": "T002",
@@ -118,6 +119,7 @@ def _valid_document() -> dict:
                 "acceptance_criteria": ["src/main.py calls the interface"],
                 "estimated_complexity": "medium",
                 "executor_role": "agent",
+                "subagent_type": None,
             },
         ],
     }

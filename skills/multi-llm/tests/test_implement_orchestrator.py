@@ -1297,6 +1297,35 @@ class TestTaskProcessing:
         assert gitignore_path.exists()
         assert gitignore_path.read_text(encoding="utf-8").strip() == "*"
 
+    def test_an_executor_run_that_dispatched_nothing_leaves_no_tmp_dir(
+        self, sample_plan_with_tasks, mock_state_manager, temp_dir, capsys
+    ):
+        """#23 (2026-10-02): `.multi-llm/tmp/` and `implementation_tasks_*.json`
+        were created for an `--exec-subagents` run refused at preflight. The
+        executor reads `write_tasks.json`; only the native handoff needs the
+        file. The same run's batch line also counts what dispatches (#21)."""
+        from implement_orchestrator import main
+
+        output_path = temp_dir / ".multi-llm" / "tmp" / "implementation_tasks_x.json"
+        with patch('implement_orchestrator.parse_args') as mock_args, \
+             patch('implement_orchestrator.get_or_create_state', return_value=mock_state_manager), \
+             patch('implement_orchestrator.record_pre_existing_changes'), \
+             patch('implement_orchestrator.get_output_paths', return_value=temp_dir / "tasks.md"), \
+             patch('implement_orchestrator.get_relative_output_path', return_value="tasks.md"), \
+             patch('implement_orchestrator.run_implement_write_phase', return_value=3):
+            mock_args.return_value = MagicMock(
+                plan_file=str(sample_plan_with_tasks),
+                output=str(output_path),
+                resume=False, task=None, dry_run=False,
+                exec_subagents=True, dry_run_subagents=False,
+                detach=False, internal_worker=False,
+            )
+            assert main() == 3
+
+        assert not output_path.parent.exists()
+        out = capsys.readouterr().out
+        assert "execution batches: 3 task(s) to dispatch" in out
+
     def test_task_not_found_exits(self, sample_plan_with_tasks, mock_state_manager, temp_dir):
         """Test that requesting non-existent task exits with error."""
         from implement_orchestrator import main
