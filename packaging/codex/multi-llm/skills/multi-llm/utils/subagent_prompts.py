@@ -90,6 +90,10 @@ _VALIDATION_REPLY_CONTRACT = '''## Reply
 
 Print ONE JSON object and nothing else — no prose, no markdown fences, no
 explanation. Do not write any file; whoever invoked you persists your reply.
+Your reply is parsed as-is, and a reply that does not parse is thrown away:
+the first character is `{` and the last is the `}` that closes it. Keep every
+`reason` to one short line with no raw double quotes or line breaks inside it,
+and re-read the object once for balanced brackets before you finish.
 
 {
   "groups": [
@@ -108,6 +112,20 @@ Rules:
 4. Be conservative: when you cannot decide from the context given, answer
    "needs-human-decision" rather than guessing.
 '''
+
+
+#: Appended to every plan validation (context label "Plan content"). The plan
+#: reviewers are told task decomposition is out of scope (prompts/plan_review.txt);
+#: this is the same rule for a finding that got through anyway. Without it the
+#: 2026-10-01 racing-game run validated "the plan has no task breakdown" as valid
+#: on all three hosts (HIGH on one), apply-suggestions wrote a task list into the
+#: plan, and generate-tasks then wrote a second, diverging one.
+PLAN_VALIDATION_SCOPE_GUIDANCE = '''Scope: a plan is a design document. Breaking it into implementation tasks, with
+ids, dependencies and an order, is a later phase (task generation). A finding
+whose only complaint is that the plan has no task breakdown, task list,
+implementation order, dependency graph or milestones is "invalid": not
+applicable to a plan review. A finding that names a concrete design gap which
+would block writing those tasks is judged on that gap.'''
 
 
 #: Extra guidance for code-review validation, phrased in **capability-neutral**
@@ -364,6 +382,10 @@ def build_validation_prompt(
         else ""
     )
     count = len(suggestion_records)
+    # The default label is the plan review's; code review passes extra
+    # instructions of its own and review-tasks labels its two contexts.
+    if context_label == "Plan content" and not extra_instructions.strip():
+        extra_instructions = PLAN_VALIDATION_SCOPE_GUIDANCE
     guidance = f"\n{extra_instructions.strip()}\n" if extra_instructions.strip() else ""
     by_path = [
         dict(source) for source in (context_sources or [])
@@ -663,6 +685,12 @@ def build_human_decision_judge_prompt(items: Sequence[Dict[str, Any]]) -> str:
         "that file before deciding — this task runs read-only and the "
         "profile permits it — rather than judging a code change from title "
         "and description alone.\n"
+        "\nAn item that names a `file` is a code fix, and whatever you approve or "
+        "salvage is applied as an edit to that code. Never salvage it into an edit "
+        "of the plan or a task list (for example \"record this as an approved "
+        "deviation in the plan\"): if the only way left to satisfy it is to change "
+        "the plan, skip it and say in the reason that the plan, not the code, "
+        "would have to move.\n"
         if any("file" in entry for entry in embedded)
         else ""
     )
@@ -680,9 +708,14 @@ could not settle. For each one, choose Approve, Salvage or Skip.
 
 Print ONE JSON object and nothing else — no prose, no markdown fences, no
 explanation. Do not write any file; whoever invoked you persists your reply.
+Your reply is parsed as-is, and a reply that does not parse is thrown away:
+the first character is `{{` and the last is the `}}` that closes it. Keep every
+`reason` to one short line with no raw double quotes or line breaks inside it,
+and re-read the object once for balanced brackets before you finish.
 
 {{
   "schema_version": "1.0",
+  "judge": "<the model you are>",
   "verdicts": [
     {{
       "group_id": "<copy the item's group_id verbatim>",
@@ -765,6 +798,7 @@ Acceptance criteria are **task-scoped, specific and verifiable**: each one descr
 - Use paths relative to the project root
 - Clearly distinguish files to modify from files to create
 - Only reference files that actually need changes
+- A task that only checks something (a syntax gate, a smoke run) and must not change any file lists none. A task that may fix what it checks lists those files under `files_to_modify`: implement stops a task that changes a file it never declared
 
 **Plan Preamble**
 

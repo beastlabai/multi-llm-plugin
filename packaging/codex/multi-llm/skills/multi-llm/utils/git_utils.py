@@ -291,6 +291,33 @@ def list_untracked_files(directory: str) -> List[str]:
         return []
     return [path for path in stdout.split("\0") if path]
 
+def ignored_paths(paths: Iterable[str], *, cwd: Optional[str] = None) -> Set[str]:
+    """The subset of ``paths`` git ignores, as the strings given.
+
+    ``git check-ignore`` without ``--no-index``, so a *tracked* file that a
+    pattern happens to match is not reported: only untracked-and-ignored paths
+    (transcripts, build output, caches) come back. Best-effort: outside a
+    repository, or when git fails, nothing is ignored, because dropping a path
+    on a guess is worse than keeping it. ``-z`` both ways so no path is C-quoted.
+    """
+    candidates = [path for path in paths if path]
+    if not candidates:
+        return set()
+    where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-z", "--stdin"],
+            input="\0".join(candidates) + "\0",
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            **where,
+        )
+    except OSError:
+        return set()
+    if result.returncode not in (0, 1):  # 128: not a repository, bad path
+        return set()
+    return {path for path in result.stdout.split("\0") if path}
+
+
 def get_staged_files() -> List[str]:
     """Get list of currently staged files."""
     stdout, _, _ = _run_git("diff", "--cached", "--name-only")
@@ -314,7 +341,7 @@ def unstage_files(files: List[str]) -> None:
 def intent_to_add_untracked(
     file_paths: List[str], *, cwd: Optional[str] = None
 ) -> Iterator[List[str]]:
-    """Temporarily mark untracked files as intent-to-add so `git diff` picks them up.
+    """Make untracked files visible to `git diff` without touching the real index.
 
     `git diff` (all variants -- `git diff`, `git diff HEAD`, `git diff A..B`) silently
     ignores fully-untracked files. For code review flows that rely on git diff to
@@ -322,9 +349,17 @@ def intent_to_add_untracked(
     with `git add -N` creates an empty index entry so diffs treat them as full-file
     additions without staging any content.
 
-    On exit, any files this context manager added are reset back to untracked via
-    `git reset HEAD -- <file>`. Files that were already in the index (staged, or
-    already intent-to-add by the user) are never touched.
+    The mark is made in a **private copy of the index**, exported as
+    ``GIT_INDEX_FILE`` for the duration of the block. Every git call in this
+    process, and every reviewer subprocess that inherits the environment, reads
+    the copy and sees the files as additions; the user's own ``.git/index`` is
+    never written, so there is nothing to undo, an interrupted run cannot leave
+    ``intent-to-add`` entries behind, and a ``git status`` the user runs in
+    another terminal meanwhile shows a clean tree (2026-10-02: the old
+    ``git add -N`` / ``git reset HEAD`` pair mutated the real index for the whole
+    review, flagged as a side effect of ``review-code``). On exit the variable is
+    restored (or removed) and the copy deleted. Files that were already in the
+    index (staged, or already intent-to-add by the user) are never touched.
 
     Args:
         file_paths: Candidate files to consider. Files not currently untracked are
@@ -340,6 +375,9 @@ def intent_to_add_untracked(
         The list of files this context manager actually marked (may be empty).
     """
     touched: List[str] = []
+    private_index: Optional[str] = None
+    had_index_var = "GIT_INDEX_FILE" in os.environ
+    previous_index_var = os.environ.get("GIT_INDEX_FILE")
     if file_paths:
         try:
             stdout, _, rc = _run_git(
@@ -357,32 +395,86 @@ def intent_to_add_untracked(
 
         if touched:
             try:
+                private_index = _private_index_copy(cwd)
+                os.environ["GIT_INDEX_FILE"] = private_index
                 _run_git("add", "-N", "--", *touched, cwd=cwd)
                 print(
                     f"Marked {len(touched)} untracked file(s) as intent-to-add "
-                    f"so review can see their contents"
+                    f"in a private index copy so review can see their contents"
                 )
-            except GitError as exc:
+            except (GitError, OSError) as exc:
+                _restore_index_var(had_index_var, previous_index_var)
+                _discard_private_index(private_index)
+                private_index = None
                 print(
-                    f"Warning: git add -N failed ({exc}); untracked files may be "
-                    f"invisible to reviewers",
+                    f"Warning: could not mark untracked files intent-to-add "
+                    f"({exc}); untracked files may be invisible to reviewers",
                     file=sys.stderr,
                 )
                 touched = []
     try:
         yield touched
     finally:
-        if touched:
-            try:
-                _run_git("reset", "HEAD", "--", *touched, cwd=cwd)
-            except GitError as exc:
-                where = f"-C {shlex.quote(cwd)} " if cwd else ""
-                print(
-                    f"Warning: failed to reset intent-to-add entries for "
-                    f"{len(touched)} file(s): {exc}. Run `git {where}reset HEAD -- "
-                    f"{' '.join(touched)}` to clean up manually.",
-                    file=sys.stderr,
-                )
+        if private_index is not None:
+            _restore_index_var(had_index_var, previous_index_var)
+            _discard_private_index(private_index)
+
+
+def _private_index_copy(cwd: Optional[str]) -> str:
+    """Copy the index git would use into a file of its own; return its path.
+
+    Source: ``$GIT_INDEX_FILE`` if the caller already redirected git, else the
+    worktree's own index (``git rev-parse --git-path index``, which is right for
+    linked worktrees). The copy sits beside it inside the git directory, so a
+    reviewer sandbox that can read the repository can read it; a git directory
+    that refuses the write falls back to the system temp dir. A repository with
+    no index yet (nothing ever staged) copies nothing: git creates the file.
+    """
+    source = os.environ.get("GIT_INDEX_FILE")
+    if not source:
+        stdout, _, _ = _run_git("rev-parse", "--git-path", "index", cwd=cwd)
+        source = stdout.strip()
+        if not os.path.isabs(source):
+            source = os.path.join(cwd or os.getcwd(), source)
+    source = os.path.abspath(source)
+    name = f"multi-llm-index.{os.getpid()}.{time.monotonic_ns()}"
+    target = os.path.join(os.path.dirname(source), name)
+    try:
+        if os.path.exists(source):
+            shutil.copyfile(source, target)
+    except OSError:
+        import tempfile
+
+        descriptor, target = tempfile.mkstemp(prefix="multi-llm-index.")
+        os.close(descriptor)
+        if os.path.exists(source):
+            shutil.copyfile(source, target)
+        else:
+            os.unlink(target)
+    return target
+
+
+def _restore_index_var(had: bool, previous: Optional[str]) -> None:
+    if had and previous is not None:
+        os.environ["GIT_INDEX_FILE"] = previous
+    else:
+        os.environ.pop("GIT_INDEX_FILE", None)
+
+
+def _discard_private_index(path: Optional[str]) -> None:
+    if not path:
+        return
+    for leftover in (path, f"{path}.lock"):
+        try:
+            os.unlink(leftover)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(
+                f"Warning: could not remove the private index copy {leftover}: {exc}",
+                file=sys.stderr,
+            )
+
 
 def get_staged_diff() -> str:
     """Get diff of all staged changes."""

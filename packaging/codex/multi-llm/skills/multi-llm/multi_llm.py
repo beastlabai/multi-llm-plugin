@@ -134,6 +134,11 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "next-command": ("utils.next_phase", "main",
                      "Print a plan's next workflow command (read-only; "
                      "--after <mode>, --host <id>)."),
+    "check-tasks": ("utils.tasks_graph_check", "main",
+                    "Report inconsistencies in a tasks.md's task graph (advisory)."),
+    "check-reply": ("utils.check_reply", "main",
+                    "Check the replies persisted for a task file's batches "
+                    "parse and cover their groups."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }
 

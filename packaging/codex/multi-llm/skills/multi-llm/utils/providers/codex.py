@@ -150,6 +150,22 @@ _SANDBOX_BY_PROFILE = {
 #: render it.
 SANDBOX_FALLBACK_VALUE = "danger-full-access"
 
+#: Every codex slot starts without the user's installed plugins (2026-10-02,
+#: codex 0.160.0, offline against a stub, throwaway CODEX_HOME holding a copy of
+#: the multi-llm plugin install). A nested `codex exec` loads `$CODEX_HOME/plugins`
+#: like the interactive session does, so each review slot booted multi-llm's own
+#: `multi_llm` MCP server (a probe wrapper in the copied `.mcp.json` logged the
+#: start) whose venv Python wrote `__pycache__/*.pyc` under the watched
+#: `plugins/` tree: a `[CODEX_HOME_CHECK]` warning on every slot, on every host.
+#: `-c features.plugins=false` stops it (0 starts, against 1 without it);
+#: `-c plugins."<name>@<marketplace>".enabled=false` did not (still 1 start) and
+#: would name the user's plugins anyway, and `--ignore-user-config` also drops
+#: their model provider. A provider slot reads and reviews text; it needs none of
+#: the user's plugins, skills or apps. Their user-defined `[mcp_servers.*]` are not
+#: plugins and are untouched. A codex too old to know the key ignores an unknown
+#: `features.*` key (see the legacy-landlock probe note below).
+PLUGINS_OFF_PAIR = ("-c", "features.plugins=false")
+
 #: The one `-c` key the landlock rung adds (2026-09-22). codex-cli 0.155.1 still
 #: ships a second Linux sandbox backend, `[features] use_legacy_landlock`, which
 #: needs no user namespace — so on a machine where bubblewrap cannot start it
@@ -645,6 +661,10 @@ def _sandbox_for(profile: str) -> str:
 #: `build_command_for_transport`'s stdin leg (which drops `cmd[-1]`) would then
 #: drop the wrong element. Keeping them inside this head makes that structural.
 #:
+#: The plugins-off pair sits before them for the same reason: a `-c` pair is never
+#: the last element before the prompt either, and `--skip-git-repo-check` stays the
+#: splice site the landlock rung's `-c` pair is measured against.
+#:
 #: The sandbox value is `_sandbox_for(PROFILE_GENERATE)` rather than a literal:
 #: this head is what `build_command` — the `generate` path — renders, so this is
 #: that profile's call site into `_SANDBOX_BY_PROFILE` (M5). `--sandbox` keeps
@@ -652,6 +672,7 @@ def _sandbox_for(profile: str) -> str:
 #: relies on.
 _BASE_ARGV = (
     "codex", "exec", "--sandbox", _sandbox_for(PROFILE_GENERATE), "--json",
+    *PLUGINS_OFF_PAIR,
     "--ephemeral", "--skip-git-repo-check",
 )
 
@@ -1032,8 +1053,14 @@ class CodexProvider(LLMProvider):
     # which is the honest posture for an unmeasured future build. 0.156.1 since
     # the §6.2 recapture (2026-09-24): `tests/fixtures/codex/0.156.1/`, driven
     # offline against a localhost Responses stub, parsed by this adapter in
-    # `tests/test_codex_stream_audit.py::TestTheCapturedFixtures`.
-    verified_version = "0.156.1"
+    # `tests/test_codex_stream_audit.py::TestTheCapturedFixtures`. 0.160.0 since
+    # 2026-10-02: the same capture rig (`0.156.1/capture/`, offline, throwaway
+    # CODEX_HOME) re-run on the installed 0.160.0 gave the same event kinds and
+    # key shapes for the five scripted cases (`tests/fixtures/codex/0.160.0/`
+    # keeps three), so the version-lag WARN every run printed was this pin
+    # lagging the install. The `web_search_*` / `code_mode_*` fixtures are live
+    # captures no stub can redo; they stay at 0.156.1.
+    verified_version = "0.160.0"
 
     # M14/§5.4.1(a) — the exemption, as data. Each of these was re-verified
     # FUNCTIONALLY (not merely found in help text) at the declared floor above

@@ -1434,8 +1434,11 @@ class Server:
         model = self.export_session_model(call)
         self.export_host_posture(call)
         values = {"word": args["mode"], "plan": self.normalize_plan(args["plan"], call),
+                  "plan_arg": self.plan_spelling(args["plan"]),
                   "question": args["question"], "extra": list(args["extra_flags"])}
         outcome = self.run_workflow(call, row, values)
+        if not call.cancel.is_set():
+            self.attach_resume(call, values, outcome)
         if not call.cancel.is_set() and self.unfinished(row, outcome):
             self.attach_runbook(call, row, outcome)
         if model is not None:
@@ -1494,11 +1497,24 @@ class Server:
         fallback = self.layer1.get("MLLM_TEST_FALLBACK_SHELL") or FALLBACK_SHELL
         return fallback if _is_file(fallback) and os.access(fallback, os.X_OK) else None
 
+    def plan_spelling(self, plan: str) -> str:
+        """The plan as the user spelled it: ``~`` expanded, **nothing resolved**.
+
+        ``normalize_plan``'s absolute path is what this server names the file
+        by, and it used to be the string the dispatcher received, recorded as
+        ``plan_arg`` and printed in every next command (2026-10-02, issue #15: a
+        user who typed ``plans/racing-game.md`` was told to type ``$multi-llm:
+        multi-llm --implement <absolute path>/plans/racing-game.md``). The child runs in
+        the anchor, so a relative spelling names the same file there, and the
+        launch passes this one; the polls and the abort keep the absolute path.
+        """
+        return expand_home(plan, self.layer1) if plan else ""
+
     def normalize_plan(self, plan: str, call: Call) -> str:
         """A relative plan resolved against the anchor, ``~`` expanded."""
         if not plan:
             return ""
-        expanded = expand_home(plan, self.layer1)
+        expanded = self.plan_spelling(plan)
         if os.path.isabs(expanded):
             return expanded
         return os.path.normpath(os.path.join(call.anchor, expanded))
@@ -1511,7 +1527,9 @@ class Server:
         argv = [values.get("word") or row["name"]]  # aliases travel unexpanded
         for kind in row["positionals"]:
             if kind == kinds["plan"] and values.get("plan"):
-                argv.append(values["plan"])
+                # The user's own spelling when the caller kept one, else the
+                # resolved path (see `plan_spelling`).
+                argv.append(values.get("plan_arg") or values["plan"])
             elif kind == kinds["question"] and values.get("question"):
                 argv.append(values["question"])
         argv.extend(surface["baked_flags"])
@@ -1746,8 +1764,13 @@ class Server:
                             "run it in a shell.".format(problem)}
                 break
             followed += 1
+            planned = self.normalize_plan(args["plan"], call)
             kind, following = cycle(checked, {
-                "word": args["mode"], "plan": self.normalize_plan(args["plan"], call),
+                "word": args["mode"], "plan": planned,
+                # The dispatcher's `next` names the plan absolutely; when that is
+                # the plan this call was typed with, the continuation keeps the
+                # user's spelling so its own next-phase command does too.
+                "plan_arg": values.get("plan_arg") if planned == values.get("plan") else "",
                 "question": args["question"], "extra": list(args["extra_flags"])})
             if kind == "spawn-error":
                 break
@@ -2028,6 +2051,40 @@ class Server:
         if state == states["error"] and outcome.get("run_id") and outcome.get("exit") is not None:
             return True
         return outcome.get("ok") is True and outcome.get("next") is not None
+
+    def attach_resume(self, call: Call, values, outcome) -> None:
+        """``util next-command <plan> --blocked <mode>`` after an exit 3.
+
+        A blocked run owes the user a command they can type: the same phase,
+        resumed, in this route's own spelling. The dispatcher's output names the
+        retry as a raw ``uv run`` argv (redacted here) and the options as tool
+        calls, and neither is something a person types. The string is built in
+        Python from the host's ``next_command`` template, so this file spells
+        none of it, and it is the user's to type: nothing here (or in
+        ``is_mechanical``) runs it. A surface without the ``resume`` entry, a
+        spawn failure, a non-zero exit or an empty answer all leave the result
+        as it was: an advisory lookup never changes what it decorates.
+        """
+        dispatcher = self.surface["dispatcher"]
+        resume = dispatcher.get("resume")
+        plan = values.get("plan_arg") or values.get("plan")
+        if (not resume or not plan or not values.get("word")
+                or outcome.get("state") != dispatcher["states"]["needs_human"]
+                or outcome.get("exit") != dispatcher["exit_codes"]["needs_human"]):
+            return
+        argv = list(resume["argv"]) + [
+            plan, resume["option"], values["word"],
+            dispatcher["host_option"], self.surface["host"]]
+        spare = max(1.0, call.hard_deadline - time.monotonic() - 0.5)
+        child = self.run_child(call, argv, spare)
+        if child.spawn_error or child.code != dispatcher["exit_codes"]["ok"]:
+            return
+        step = (child.result or {}).get(resume["result_key"])
+        command = step.get("command") if isinstance(step, dict) else None
+        if isinstance(command, str) and command.strip():
+            outcome["resume_command"] = command
+            outcome["message"] = "{} {}".format(
+                outcome.get("message") or "", self.surface["needs_human_message"]["resume"])
 
     def attach_runbook(self, call: Call, row, outcome) -> None:
         """``util instructions <mode> --host <id>``: integrity-checked, banner dropped."""

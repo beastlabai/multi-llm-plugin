@@ -226,6 +226,34 @@ def generate_tasks_markdown(tasks: List[Dict[str, Any]], plan_name: str) -> str:
     return '\n'.join(lines)
 
 
+#: A task list the plan already carries: a heading whose text is "Tasks" or
+#: "<anything> tasks" (``### Tasks``, ``## Implementation tasks``, ``### Implementation
+#: tasks with dependencies``). The pointer section this script itself writes is
+#: told apart by the TASKS_FILE marker inside it.
+_IN_PLAN_TASK_HEADING = re.compile(
+    r"^#{2,4}[ \t]+(?:[\w-]+[ \t]+)?tasks\b[^\n]*$", re.IGNORECASE | re.MULTILINE
+)
+
+
+def find_in_plan_task_sections(plan_content: str) -> List[str]:
+    """Headings of task lists the plan holds besides the generated pointer.
+
+    The 2026-10-01 runs ended with two diverging task lists in one plan
+    (`### Tasks`, `## Implementation tasks`, ... from apply-suggestions, then this
+    script's pointer). Merging them is not this script's job, so it only names
+    them: the caller prints a notice and the user decides which list stands.
+    """
+    found: List[str] = []
+    for match in _IN_PLAN_TASK_HEADING.finditer(plan_content):
+        rest = plan_content[match.end():]
+        nxt = re.search(r"^#{1,4}[ \t]", rest, re.MULTILINE)
+        body = rest[: nxt.start()] if nxt else rest
+        if "TASKS_FILE" in body or "TASKS_FILE" in match.group(0):
+            continue
+        found.append(match.group(0).strip())
+    return found
+
+
 def validate_tasks_json(data: Any) -> tuple[bool, str]:
     """
     Validate the tasks JSON structure.
@@ -345,6 +373,15 @@ def main(argv=None) -> int:
     # Update plan file
     plan_path.write_text(updated_plan, encoding="utf-8")
     print(f"Updated plan file: {plan_path}")
+    existing = find_in_plan_task_sections(plan_content)
+    if existing:
+        print(
+            "NOTICE: the plan already holds its own task list under "
+            + ", ".join(f"'{heading}'" for heading in existing)
+            + f". {tasks_relative_path} is the list implement follows; the plan's "
+            "list is not updated to match it and may disagree. Delete it, or keep "
+            "it as background only."
+        )
 
     # Mark generate-tasks phase as completed in state
     state = get_or_create_state(plan_path)

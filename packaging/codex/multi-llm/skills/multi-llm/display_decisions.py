@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
+from utils.human_decisions import judge_source_label
 from utils.output_handler import sanitize_prefix, get_phase_dir
 
 
@@ -182,7 +183,7 @@ def display(data: dict, phase: str) -> None:
             source = item.get("decision_source", "")
             line = f"  {counter}. [{imp}] {title}"
             if source:
-                line += f"  ({source})"
+                line += f"  ({judge_source_label(source)})"
             if reason:
                 line += f"  -- {reason}"
             print(line)

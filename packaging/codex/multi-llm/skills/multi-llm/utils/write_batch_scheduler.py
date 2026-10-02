@@ -48,6 +48,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from . import git_utils as _git_utils
     from . import landlock_dispatch as _landlock
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
@@ -125,6 +126,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         resolve_repo_root,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
+    from utils import git_utils as _git_utils
     from utils import landlock_dispatch as _landlock
     from utils import prior_changes as _prior_changes
     from utils import process_control as _process_control
@@ -425,9 +427,17 @@ class HumanTaskPlan:
         return task_id in self.skipped
 
 
-_DEFERRED_REASON = (
-    "deferred — user chose to complete manually after implementation"
-)
+def _deferred_reason(strategy: Optional[str]) -> str:
+    """Why a manual task did not run, naming the strategy and not a person.
+
+    This used to say "user chose to complete manually", which is false when
+    ``--yes`` resolved the strategy to ``skip-dependents`` on its own
+    (2026-10-01, OpenCode run): nobody was asked.
+    """
+    return (
+        f"deferred — manual task, left for you to complete after "
+        f"implementation (human-task strategy: {strategy})"
+    )
 
 
 def verification_line(result: Any) -> str:
@@ -532,7 +542,7 @@ def resolve_human_task_plan(
                 plan.pending.append(task_id)
     else:
         for task_id in sorted(human_ids):
-            plan.skipped[task_id] = _DEFERRED_REASON
+            plan.skipped[task_id] = _deferred_reason(strategy)
             seeds.append(task_id)
 
     if strategy == STRATEGY_SKIP_CONTINUE:
@@ -606,6 +616,13 @@ class SchedulerResult:
     #: row rather than in it. Absent for a batch on codex's own sandbox or on
     #: another runner, so those reports are byte-identical to before.
     sandbox_records: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    #: #28 (2026-10-02): a ``--resume`` re-materializes only the unfinished tasks,
+    #: so its reports described the resumed stretch alone and the first run's
+    #: T001-T008 rows were overwritten and gone. These are the previous
+    #: ``write_batch_report.json``'s task rows, read before this run replaces it
+    #: (and already merged if that run was itself a resume), so the phase's
+    #: report and summary cover the whole phase.
+    earlier_rows: List[Dict[str, Any]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -614,6 +631,30 @@ class SchedulerResult:
     @property
     def failed(self) -> List[TaskOutcome]:
         return [o for o in self.outcomes if not o.ok]
+
+    def report_rows(self) -> List[Dict[str, Any]]:
+        """Every task row of the phase: earlier runs' first, this run's after.
+
+        This run's row replaces an earlier one for the same task, except a
+        resume *skip*: that row only says "already done", and the earlier run's
+        row is the one that holds what was done, so it stays (flagged
+        ``from_earlier_run``).
+        """
+        current = {
+            o.task_id: {**o.to_dict(), **self.sandbox_records.get(o.task_id, {})}
+            for o in self.outcomes
+        }
+        rows: List[Dict[str, Any]] = []
+        kept: set = set()
+        for earlier in self.earlier_rows:
+            task_id = str(earlier.get("task_id", ""))
+            row = current.get(task_id)
+            if row is not None and not row.get("skipped"):
+                continue
+            rows.append({**earlier, "from_earlier_run": True})
+            kept.add(task_id)
+        rows.extend(row for task_id, row in current.items() if task_id not in kept)
+        return rows
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -632,10 +673,7 @@ class SchedulerResult:
                 k: list(v) for k, v in self.human_plan.overrides.items()
             },
             "pending_human_tasks": list(self.human_plan.pending),
-            "tasks": [
-                {**o.to_dict(), **self.sandbox_records.get(o.task_id, {})}
-                for o in self.outcomes
-            ],
+            "tasks": self.report_rows(),
         }
 
 
@@ -1233,6 +1271,14 @@ class WriteBatchScheduler:
             "(measured 2026-09-16). Do not start background servers or "
             "browsers, and leave no process running when you finish; verify "
             "with static checks only.\n\n"
+            "## Scratch files (advisory)\n\n"
+            "Keep scratch work (an extracted script to syntax-check, a probe) "
+            "out of the repository and out of fixed, shared names such as a "
+            "bare `check.mjs` in the system temp directory: create a fresh "
+            "directory with `mktemp -d`, work only there and delete it before "
+            "you finish. The write gate only sees the repository, so a file "
+            "left elsewhere is invisible to it (measured 2026-10-01, OpenCode "
+            "runner).\n\n"
             "## Result (required — this is how the batch is verified)\n\n"
             "Do the work above, then end your reply with ONE JSON object (a "
             "fenced ```json block is fine) of exactly this shape:\n\n"
@@ -1390,6 +1436,8 @@ class WriteBatchScheduler:
     def _run(self) -> SchedulerResult:
         result = SchedulerResult(kind=self.kind, phase=self.phase)
         ordered = self.batches()
+        if self.resume and not self.dry_run:
+            result.earlier_rows = self._earlier_report_rows()
 
         # 0. Advisory only, never a mutation: name any result file left behind
         # by an earlier naming scheme before the batches that matter start.
@@ -2128,6 +2176,7 @@ class WriteBatchScheduler:
             relative for relative in before
             if relative not in after and relative not in ignored
         )
+        moved -= self._ignored_and_harmless(moved)
         observed = UndeclaredWrites(paths=sorted(moved))
         adopted = 0
         for relative in observed.paths:
@@ -2153,6 +2202,26 @@ class WriteBatchScheduler:
             snapshot.save()
         return observed
 
+    def _ignored_and_harmless(self, moved: "set[str]") -> "set[str]":
+        """The moved paths git ignores and the write policy does not deny.
+
+        A gitignored path is not part of the repository's change set: the host's
+        own transcript (``logs/*.jsonl``), build output and caches moved during a
+        dispatch were read as "changed outside this task's declared set", were
+        handed to ``finalize-tracking`` as touched implementation files and from
+        there became ``review-code``'s scope (2026-10-02, Codex run). They leave
+        the sweep, with one exception: a path ``driver.write_paths`` **denies**
+        stays observable even when ignored, because the deny list's usual
+        subjects (``.env``, ``**/*.pem``) are exactly what ``.gitignore`` hides,
+        and dropping them would make the post-run policy check vacuous again.
+        """
+        if not moved:
+            return set()
+        ignored = _git_utils.ignored_paths(sorted(moved), cwd=self.repo_root)
+        return {
+            path for path in ignored if self.policy.violation(path) is None
+        }
+
     def _moved_since_dispatch(
         self, task_id: str, snapshot: TaskSnapshot
     ) -> List[str]:
@@ -2173,14 +2242,15 @@ class WriteBatchScheduler:
             ignored = set(self._sweep_ignored.get(task_id, ()))
             after = self._census() if before is not None else None
         if before is not None and after is not None:
-            moved.update(
+            swept = {
                 relative for relative, stamp in after.items()
                 if relative not in ignored and before.get(relative) != stamp
-            )
-            moved.update(
+            }
+            swept.update(
                 relative for relative in before
                 if relative not in after and relative not in ignored
             )
+            moved.update(swept - self._ignored_and_harmless(swept))
         return sorted(moved)
 
     def _observed_with_undeclared(
@@ -2567,22 +2637,41 @@ class WriteBatchScheduler:
             )
             outcome.status = STATUS_POLICY_VIOLATION
             outcome.write_outcome = WRITE_POLICY_VIOLATION
+            restored = sorted(
+                path for path, state in report.items()
+                if not state.startswith("skipped:")
+            )
+            many = len(exc.paths) != 1
+            # The message used to say two things at once: "restored from the
+            # pre-batch snapshot (x: skipped: not in this task's snapshot)" and
+            # "remain on disk exactly as the runner left them". It also named the
+            # runner as the author, which the sweep cannot know: it sees a path
+            # that moved during the task's window (2026-10-02: a coordinator's
+            # own mid-run edit of `.multi-llm/providers.yaml` failed T009). Each
+            # path is now in exactly one of the two lists below.
             outcome.reason = (
-                f"{exc.message} The offending file(s) were restored from the "
-                f"pre-batch snapshot ({', '.join(f'{k}: {v}' for k, v in report.items())}) "
-                f"and the loop stops here."
+                f"{exc.message} "
+                f"{'These paths' if many else 'This path'} changed during this "
+                f"task's window; the executor sees that they moved, not who "
+                f"moved them, so the change may be another process's or your "
+                f"own edit and not the runner's."
+                + (
+                    f" Restored from the pre-batch snapshot: "
+                    f"{', '.join(restored)}."
+                    if restored else ""
+                )
                 + (
                     # A path the sweep could not retain bytes for (a policy-denied
                     # one above all: its bytes are deliberately never copied into
-                    # an executor artifact). Saying "restored" and leaving the
-                    # contradiction in the parenthetical is how a violation gets
-                    # read as handled.
-                    f" No rollback point existed for {len(stranded)} of them "
+                    # an executor artifact) is NOT restored, and says so.
+                    f" Not restored, because no rollback point exists "
                     f"({', '.join(stranded[:5])}"
-                    f"{', …' if len(stranded) > 5 else ''}); those files remain on "
-                    f"disk exactly as the runner left them — inspect them by hand."
+                    f"{', …' if len(stranded) > 5 else ''}): left on disk as "
+                    f"{'they are' if len(stranded) != 1 else 'it is'} now, so "
+                    f"inspect {'them' if len(stranded) != 1 else 'it'} by hand."
                     if stranded else ""
                 )
+                + " The loop stops here."
             )
             self.audit.restored(task_id=outcome.task_id, report=report, force=False)
             self._audit_completion(outcome, runner, profile, attempt, exit_code,
@@ -2602,6 +2691,13 @@ class WriteBatchScheduler:
         denials = _as_jail_denials(jail_denials)
         if denials is not None and self._jail_verdict(
             outcome, snapshot, denials, changed, undeclared, claimed,
+        ):
+            self._audit_completion(outcome, runner, profile, attempt, exit_code,
+                                   observed, duration)
+            return
+
+        if self._verification_only(snapshot) and self._verification_verdict(
+            outcome, snapshot, undeclared, claimed, summary, crashed_exit=exit_code,
         ):
             self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                    observed, duration)
@@ -2761,6 +2857,65 @@ class WriteBatchScheduler:
         outcome.status = STATUS_OK
         self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                observed, duration)
+
+    def _verification_only(self, snapshot: TaskSnapshot) -> bool:
+        """Whether this dispatch declared no files at all (``implement`` only)."""
+        return self.kind == "implement" and not snapshot.declared_entries()
+
+    def _verification_verdict(
+        self,
+        outcome: TaskOutcome,
+        snapshot: TaskSnapshot,
+        undeclared: UndeclaredWrites,
+        claimed: str,
+        summary: str,
+        *,
+        crashed_exit: Optional[int],
+    ) -> bool:
+        """The verdict for a task that declared no files. ``True`` when decided.
+
+        D3h's guarantee is that the executor, not the runner's claim, says what
+        changed. A task with no declared files makes that guarantee *stricter*,
+        not void: it promised to change nothing, so every path the sweep saw move
+        is a write it never declared.
+
+        * a path moved: a partial application. The loop stops, the sweep already
+          adopted each path into this task's snapshot (so ``util restore-batch``
+          can revert it) and nothing is reverted automatically, which is what
+          every other unattested write gets. The reason says how to proceed when
+          the task is *meant* to fix what it checks: declare those files under
+          ``Files to modify`` in the tasks file and ``--resume``.
+        * nothing moved and the runner did not fail: ``no-op``/``ok``. The
+          check ran and left the repo as it was, which is a verification
+          passing, and the loop continues.
+        * nothing moved and the runner failed or crashed: falls through to the
+          ordinary clean-failure branch (``False``).
+        """
+        moved = list(undeclared.paths)
+        if moved:
+            shown = ", ".join(moved[:5]) + (", …" if len(moved) > 5 else "")
+            outcome.status = STATUS_PARTIAL
+            outcome.write_outcome = WRITE_PARTIAL
+            outcome.reason = (
+                f"PARTIAL APPLICATION: {outcome.task_id} declares no files (a "
+                f"verification-only task) but {len(moved)} file(s) changed "
+                f"during its run ({shown}). The loop stops here and the "
+                f"pre-batch snapshot is kept at {snapshot.directory}. If this "
+                f"task is meant to fix what it checks, list those files under "
+                f"`Files to modify` in the tasks file and re-run with --resume; "
+                f"otherwise restore them with `util restore-batch`."
+            )
+            return True
+        if crashed_exit not in (0, None) or claimed == "failed":
+            return False
+        outcome.write_outcome = WRITE_NO_OP
+        outcome.status = STATUS_OK
+        outcome.reason = (
+            f"VERIFIED: {outcome.task_id} declares no files and the sweep found "
+            f"no file changed during its run. Recorded; the loop continues."
+            + (f" Runner summary: {summary}" if summary else "")
+        )
+        return True
 
     def _relative(self, path: str) -> str:
         """``path`` repo-relative when it lies under the root, else as given."""
@@ -3256,7 +3411,23 @@ class WriteBatchScheduler:
         """
         task_id = str(task.get("task_id", ""))
         files = snapshot_file_set(task)
-        if not files:
+        if not files and self.kind == "implement":
+            # A verification-only task: generate-tasks emits an agent task with
+            # no files to create or modify when the work is a check ("Inline
+            # module syntax gate", 2026-10-01, which this refusal used to dead-end
+            # on at batch 12, with `--resume` hitting it again). The refusal's
+            # reason does not apply to it: the byte comparison has nothing to
+            # compare because the task is promised to change nothing, and the
+            # undeclared-write sweep is then the whole verdict — see
+            # `_verification_only` and `_verification_verdict`. Only `implement`
+            # materializes such a task; the three apply kinds always declare
+            # their one artifact, so an empty set there is still a bug.
+            self.log(
+                f"[write-subagents] {task_id}: declares no files, so it runs as "
+                f"a verification-only task: any file it changes is a partial "
+                f"application, not an edit."
+            )
+        elif not files:
             raise WriteSafetyError(
                 f"Refusing to dispatch write task {task_id}: it declares no files "
                 f"to snapshot, so the post-run byte comparison would have nothing "
@@ -4113,6 +4284,24 @@ class WriteBatchScheduler:
             if result is not None:
                 result.messages.append(message)
 
+    def _earlier_report_rows(self) -> List[Dict[str, Any]]:
+        """The task rows the previous run left in ``write_batch_report.json``.
+
+        Read before this run writes its own. Anything unreadable is simply no
+        earlier rows: the report is evidence, never an input the loop obeys.
+        """
+        path = os.path.join(self.phase_dir, WRITE_BATCH_REPORT_FILENAME)
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                data = json.load(handle)
+        except (OSError, ValueError):
+            return []
+        rows = data.get("tasks") if isinstance(data, dict) else None
+        return [
+            row for row in (rows or [])
+            if isinstance(row, dict) and row.get("task_id")
+        ]
+
     def _write_summary(self, result: SchedulerResult) -> str:
         """The implementation summary, with the three conditional sections (D3n)."""
         plan_name = Path(self.plan_file).name if self.plan_file else "(plan)"
@@ -4130,6 +4319,8 @@ class WriteBatchScheduler:
         # the code-editing kinds — a plan-text phase has no check to report.
         if self.kind in CODE_WRITE_KINDS:
             lines.append(f"**Verification**: {verification_line(result)}")
+        rows = result.report_rows()
+        earlier = [row for row in rows if row.get("from_earlier_run")]
         lines += [
             "",
             "## Summary",
@@ -4137,14 +4328,20 @@ class WriteBatchScheduler:
             f"{len(result.outcomes)} batch task(s) dispatched across "
             f"{len(result.batches_dispatched)} batch(es) in ascending batch_index "
             f"order, each verified by a pre-batch snapshot comparison before the "
-            f"next was dispatched.",
+            f"next was dispatched."
+            + (
+                f" The table below also carries {len(earlier)} task(s) "
+                f"recorded by earlier run(s) of this phase (marked), which this "
+                f"`--resume` did not dispatch again."
+                if earlier else ""
+            ),
             "",
             "## Task Results",
             "",
             "| Task | Outcome | Files touched | Notes |",
             "|------|---------|---------------|-------|",
         ]
-        for outcome in result.outcomes:
+        for row in rows:
             # `reason` first: it is `_classify`'s own diagnostic (why a
             # partial/clean-failure/no-op-with-bytes-moved outcome landed
             # where it did) and, unlike `summary`, is only ever set when there
@@ -4153,14 +4350,17 @@ class WriteBatchScheduler:
             # row. Before this a self-contradicting `no-op` claim printed its
             # own rosy summary ("T006 already implemented: …") with no sign
             # the bytes disagreed (N2, 2026-09-16).
+            task_cell = f"{row['task_id']}" + (
+                " (earlier run)" if row.get("from_earlier_run") else ""
+            )
             lines.append(
-                f"| {outcome.task_id} | {outcome.write_outcome or outcome.status} | "
-                f"{', '.join(outcome.files_touched) or '—'} | "
-                f"{(outcome.reason or outcome.summary or '').replace('|', '/')[:160]} |"
+                f"| {task_cell} | {row.get('write_outcome') or row.get('status')} | "
+                f"{', '.join(row.get('files_touched') or []) or '—'} | "
+                f"{(row.get('reason') or row.get('summary') or '').replace('|', '/')[:160]} |"
             )
         touched: List[str] = []
-        for outcome in result.outcomes:
-            for path in outcome.files_touched:
+        for row in rows:
+            for path in row.get("files_touched") or []:
                 if path not in touched:
                     touched.append(path)
         lines += ["", "## Files Modified", ""]

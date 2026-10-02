@@ -39,6 +39,7 @@ from utils import (
     list_untracked_files,
     subtract_baseline,
 )
+from utils.git_utils import ignored_paths
 from utils.state_manager import compute_plan_hash
 
 # A tracked-file dump is a reference list, not a reading; state.json holds all
@@ -216,6 +217,7 @@ def main(argv=None) -> int:
         )
         return 1
 
+    args.touched = _drop_ignored(args.touched)
     explicit_scope = sorted({f.strip() for f in args.touched if f and f.strip()})
     if args.only_touched and not explicit_scope:
         # Refused before the state file is even read: an empty explicit list
@@ -282,6 +284,24 @@ def main(argv=None) -> int:
             return code
         _restamp_plan_hash(state_path, Path(args.plan_file))
     return 0
+
+
+def _drop_ignored(paths) -> List[str]:
+    """``paths`` without the ones git ignores (a transcript, a build cache).
+
+    An ignored path is not a change to the repository, and ``tracked_files``
+    becomes ``review-code``'s scope: the host's own ``logs/*.jsonl`` reached it
+    through ``--touched`` (2026-10-02, Codex run). Said once, naming what went.
+    """
+    named = [p.strip() for p in paths if p and p.strip()]
+    ignored = ignored_paths(named)
+    if ignored:
+        print(
+            f"Left out {len(ignored)} gitignored path(s): "
+            f"{', '.join(sorted(ignored)[:5])}"
+            f"{', …' if len(ignored) > 5 else ''}"
+        )
+    return [p for p in paths if p.strip() not in ignored]
 
 
 def _tracked_entries(paths) -> List[Dict[str, str]]:

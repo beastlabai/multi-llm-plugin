@@ -410,6 +410,21 @@ def _implementation_record_block(output_dir: Optional[str], batch_files: Sequenc
     )
 
 
+#: Appended to every fix-batch prompt's instructions. A code-fix phase changes
+#: code. The 2026-10-02 Codex run's judge salvaged "bring plan and code back into
+#: agreement" into "record the look-ahead as an approved deviation in the plan and
+#: T009", and the batch then edited ``plans/racing-game.md`` and ``tasks.md`` where
+#: the reviewers had asked for a code fix. Blessing a deviation in the plan is a
+#: human call, so the default is to leave the plan alone and say so.
+CODE_ONLY_RULE = (
+    "Change code only. Do NOT edit the plan file or any task list/tasks file "
+    "(not to record an \"approved deviation\", not to make the plan match the "
+    "code). If a fix can only be satisfied by changing the plan, or the plan "
+    "should be what moves, make no edit for that fix and report it as "
+    "\"not applied: needs a plan decision\"."
+)
+
+
 def format_fix_batch_prompt(
     batch: CodeFixBatch,
     plan_path: str,
@@ -477,6 +492,7 @@ def format_fix_batch_prompt(
 3. Make the necessary fix
 4. Verify your fix doesn't break anything (run typecheck if applicable)
 5. Do NOT make any other changes beyond this specific fix
+6. {CODE_ONLY_RULE}
 
 Return: Brief summary of what you changed."""
 
@@ -528,6 +544,7 @@ Return: Brief summary of what you changed."""
    - Ensure it integrates smoothly with surrounding code
 5. Do NOT make any changes beyond these specific fixes
 6. Run typecheck if applicable to verify no regressions
+7. {CODE_ONLY_RULE}
 
 ## Return Format
 

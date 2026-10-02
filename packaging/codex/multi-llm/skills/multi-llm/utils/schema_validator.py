@@ -32,8 +32,10 @@ def load_schema(schema_name: str) -> Dict[str, Any]:
         return json.load(f)
 
 
-def validate_type(value: Any, expected_type: str) -> bool:
-    """Validate a value against a JSON schema type."""
+def validate_type(value: Any, expected_type: Union[str, List[str]]) -> bool:
+    """Validate a value against a JSON schema type, or a list of them (any matches)."""
+    if isinstance(expected_type, list):
+        return any(validate_type(value, name) for name in expected_type)
     type_map = {
         "string": str,
         "integer": int,
@@ -49,6 +51,11 @@ def validate_type(value: Any, expected_type: str) -> bool:
 
     expected = type_map[expected_type]
     return isinstance(value, expected)
+
+
+def _has_type(schema: Dict[str, Any], name: str) -> bool:
+    declared = schema.get("type")
+    return declared == name or (isinstance(declared, list) and name in declared)
 
 
 def validate_against_schema(
@@ -77,7 +84,7 @@ def validate_against_schema(
             return errors  # Can't continue if type mismatch
 
     # Required fields for objects
-    if schema.get("type") == "object" and isinstance(data, dict):
+    if _has_type(schema, "object") and isinstance(data, dict):
         for required_field in schema.get("required", []):
             if required_field not in data:
                 errors.append(f"{path}: missing required field '{required_field}'")
@@ -90,7 +97,7 @@ def validate_against_schema(
                 errors.extend(validate_against_schema(data[prop_name], prop_schema, prop_path))
 
     # Array items validation
-    if schema.get("type") == "array" and isinstance(data, list):
+    if _has_type(schema, "array") and isinstance(data, list):
         items_schema = schema.get("items", {})
         for i, item in enumerate(data):
             item_path = f"{path}[{i}]"

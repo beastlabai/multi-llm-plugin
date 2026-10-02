@@ -414,7 +414,7 @@ After all batches are processed, create `{prefix}_applied_task_suggestions.md`:
 
 judge: {judge}
 
-Suggestions whose decision was offloaded to the judge agent — via `--agent-decide`, the batch "Let the agent decide" option, or a per-item "Let the agent decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `claude_auto_decide` or `claude_auto_decide_salvage`. Omit this section if there are none. `{judge}` is the runner spec that actually judged (e.g. `codex:<chat model>`, the session model, under `--exec-subagents` on Codex — or an explicit `driver.subagent_runner` override, or the `codex:gpt-6-astra` host floor when that is what resolved), or the host agent on a host with native subagents.
+Suggestions whose decision was offloaded to the judge agent — via `--agent-decide`, the batch "Let the agent decide" option, or a per-item "Let the agent decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `claude_auto_decide` or `claude_auto_decide_salvage`. Omit this section if there are none. `{judge}` is the runner spec that actually judged (e.g. `codex:<chat model>`, the session model, under `--exec-subagents` on Codex — or an explicit `driver.subagent_runner` override, or the `codex:gpt-6-astra` host floor when that is what resolved), or, on a host with native subagents, the label recorded in the decision's `judge` field — the model the judging subagent reported, e.g. `claude-sonnet-5-5 (claude-code host agent)`. Print it as recorded; never write "claude" for a judge that was not Claude. A salvaged item is "Salvaged" everywhere, never "Approved", even though state.json stores it with `decision: approved` plus the `claude_auto_decide_salvage` marker.
 
 ### [Suggestion Title] ({importance}) — Approved
 **Reason**: {reason}
@@ -439,6 +439,12 @@ Suggestions whose decision was offloaded to the judge agent — via `--agent-dec
      --state-file "$STATE_FILE" --phase "apply-task-suggestions"
    ```
    Include the output (if non-empty) at the end of the summary report.
+
+   **Check the task graph the batches left.** Each batch edited one corner of `tasks.md` and none saw the whole of it:
+   ```bash
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util check-tasks "{tasks_file}"
+   ```
+   Every `[TASKS_GRAPH_WARNING]` line goes into the summary report under a `## Consistency warnings` heading and into what you tell the user; do not edit `tasks.md` yourself to clear one. `[TASKS_GRAPH_OK]` needs no mention.
 
    **Then update the HTML review report** so the decisions show up there too. This overlays every human/judge-agent decision recorded in `state.json` onto the existing `{plan}/review-tasks/report.html`, giving each finding an **Approved / Salvaged / Skipped** badge plus an expandable detail with the kept/dropped notes:
    ```bash
