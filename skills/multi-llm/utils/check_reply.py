@@ -24,7 +24,10 @@ For every task it prints one ``[REPLY_OK]`` or ``[REPLY_INVALID]`` line and exit
   ``status`` that is one of the three verdicts, and the entries cover the task's
   ``group_ids`` exactly — a missing, extra or foreign ``group_hash`` is reported
   by name, because the merge discards a foreign hash and marks a missing one
-  ``validation_failed``.
+  ``validation_failed``. An entry's id is its ``group_hash``, else its
+  ``group_id``: the merge joins on ``group_hash or group_id``, and a check
+  stricter than the merge re-asks a subagent for a reply the merge would have
+  used, then calls the batch failed (adversarial review, 2026-10-02).
 
 Other kinds are only checked for being JSON: their shape is checked by their own
 reaggregation. Advisory about nothing else: it never edits or deletes a file.
@@ -88,11 +91,11 @@ def check_task_reply(task: Dict[str, Any], phase_dir: str) -> List[str]:
                 f"groups[{position}] status {entry.get('status')!r} is not one of "
                 + ", ".join(_VERDICTS)
             )
-        group_hash = entry.get("group_hash")
+        group_hash = entry.get("group_hash") or entry.get("group_id")
         if isinstance(group_hash, str) and group_hash:
             seen.append(group_hash)
         else:
-            problems.append(f"groups[{position}] has no group_hash")
+            problems.append(f"groups[{position}] has no group_hash (or group_id)")
     expected = [str(item) for item in task.get("group_ids") or []]
     if expected:
         missing = [item for item in expected if item not in seen]

@@ -49,6 +49,46 @@ class TestTasksGraphWarnings:
         assert tasks_graph_warnings("# nothing here\n") == []
 
 
+class TestDependenciesComeFromTheDependenciesLine:
+    """Adversarial review, 2026-10-02: prose read as dependencies.
+
+    The decomposer's dependency reader also matches "after", "requires" and
+    "depends on" in the narrative, so a sentence named ids nobody declared.
+    """
+
+    TASKS = [
+        {"id": "T001", "title": "Setup",
+         "description": "Create the scaffold. The loop ticks after 3 frames.",
+         "depends_on": [], "acceptance_criteria": ["requires 2 passes to settle"]},
+        {"id": "T002", "title": "Physics", "description": "Add physics.",
+         "depends_on": ["T001"]},
+    ]
+
+    def test_a_rendered_task_list_with_such_prose_has_no_warning(self):
+        from update_plan_tasks import generate_tasks_markdown
+
+        markdown = generate_tasks_markdown(self.TASKS, "plan.md")
+        assert "ticks after 3 frames" in markdown
+        assert tasks_graph_warnings(markdown) == []
+
+    def test_the_rendered_line_is_still_read(self):
+        """A forward edge on the `**Dependencies**:` line is still caught."""
+        from update_plan_tasks import generate_tasks_markdown
+
+        tasks = [dict(self.TASKS[0], depends_on=["T002"]),
+                 dict(self.TASKS[1], depends_on=[])]
+        warnings = tasks_graph_warnings(generate_tasks_markdown(tasks, "plan.md"))
+        assert any("T001 depends on T002, listed after it" in w for w in warnings)
+
+    def test_a_sentence_naming_a_dependency_is_not_one(self):
+        text = _doc(
+            "### Task T001: Do T001\n\n**Dependencies**: None\n\n"
+            "Run it after T002 has warmed the cache; depends on T009 at runtime.\n\n",
+            _task("T002", ["T001"]),
+        )
+        assert tasks_graph_warnings(text) == []
+
+
 class TestMain:
     def test_prints_warnings_and_still_exits_zero(self, tmp_path, capsys):
         path = tmp_path / "tasks.md"
