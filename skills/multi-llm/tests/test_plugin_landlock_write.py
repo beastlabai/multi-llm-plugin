@@ -1091,3 +1091,92 @@ class TestTheJailLinesAreRepeatedAtThePhasesClose:
         closing = [ln for ln in lines if "closing summary:" in ln]
         # Only this phase's line, never an earlier phase's.
         assert closing == [f"[write-subagents] closing summary: {line}"]
+
+
+# ===========================================================================
+# Every declared set is checked before batch 1 (fix round 4, 2026-10-02)
+# ===========================================================================
+
+class TestEveryDeclaredSetIsCheckedBeforeBatchOne:
+    """The repo-wide refusal (F1 "Protected paths": a declared new top-level
+    entry, a protected path, a denied entry) used to be asked per task, right
+    before that task's own dispatch, so an implement run paid for every batch
+    ahead of the refused one and then exited 3 naming F6 — a remedy (switch
+    ``driver.subagent_runner``) that then had to be applied to a half-done
+    phase. Every declared set is known at materialization, so they are all
+    checked under the recorded rung before the first dispatch."""
+
+    def _tasks(self, repo: Repo, *, bad_index: int = 2, count: int = 3):
+        (repo.root / "src").mkdir(exist_ok=True)
+        tasks = []
+        for index in range(count):
+            path = repo.root / "src" / f"t{index}.py"
+            path.write_text(f"x = {index}\n", encoding="utf-8")
+            declared = [repo.root / "Makefile"] if index == bad_index else [path]
+            tasks.append(repo.task(
+                index, kind="implement", task_id=f"T00{index + 1}",
+                declared=declared, expected_ids=[f"T00{index + 1}"],
+                prior_changes_id=f"T00{index + 1}",
+            ))
+        return tasks
+
+    def _edit(self, index: int):
+        def step(repo: Repo):
+            path = repo.root / "src" / f"t{index}.py"
+            path.write_text(path.read_text() + "edited\n", encoding="utf-8")
+            return claim("applied"), stream()
+        return step
+
+    def test_a_late_task_declaring_a_new_root_entry_refuses_the_run_before_batch_one(
+        self, repo, monkeypatch,
+    ):
+        fake = FakeExecutor(repo, monkeypatch).script(self._edit(0), self._edit(1))
+        lines: list = []
+        tasks = self._tasks(repo)
+        result = repo.scheduler(tasks, kind="implement", write_target=None,
+                                lines=lines, finalize=False).run()
+        assert result.exit_code == 3
+        assert fake.dispatches == [], [d["task_id"] for d in fake.dispatches]
+        assert result.batches_dispatched == []
+        assert (repo.root / "src" / "t0.py").read_text() == "x = 0\n"
+        text = "\n".join(result.messages)
+        assert "T003" in text and "Makefile would be a new entry directly in" in text
+        assert "driver.subagent_runner" in text and "(F6)" in text
+        assert "Nothing was dispatched" in text
+        report = repo.report()
+        rejected = [row for row in report["tasks"] if row["task_id"] == "T003"]
+        assert rejected and rejected[0]["status"] == executor.STATUS_REJECTED
+
+    def test_a_task_already_done_on_resume_is_not_checked(self, repo, monkeypatch):
+        """A finished task is never dispatched again, so its declared set —
+        which may have landed on codex's own sandbox — does not refuse the
+        resumed run."""
+        fake = FakeExecutor(repo, monkeypatch).script(self._edit(1), self._edit(2))
+        tasks = self._tasks(repo, bad_index=0)
+        executor.persist_result(tasks[0], str(repo.phase_dir), {
+            "status": "applied", "ids": ["T001"], "files_touched": [],
+            "summary": "done earlier",
+            "verdict": {"write_outcome": "applied", "status": "ok", "ok": True},
+        })
+        result = repo.scheduler(tasks, kind="implement", write_target=None,
+                                resume=True, finalize=False).run()
+        assert result.exit_code == 0, result.messages
+        assert [d["task_id"] for d in fake.dispatches] == ["T002", "T003"]
+
+    def test_on_codex_s_own_sandbox_nothing_is_checked_and_every_batch_runs(
+        self, repo, monkeypatch,
+    ):
+        """The refusal is the jail's: with codex's own ``workspace-write`` the
+        declared set is codex's to allow, so the pre-batch check asks nothing."""
+        def make_top(repo: Repo):
+            (repo.root / "Makefile").write_text("all:\n", encoding="utf-8")
+            return claim("applied"), stream()
+
+        fake = FakeExecutor(repo, monkeypatch, rung=None).script(
+            self._edit(0), self._edit(1), make_top,
+        )
+        tasks = self._tasks(repo)
+        result = repo.scheduler(tasks, kind="implement", write_target=None,
+                                finalize=False).run()
+        assert result.exit_code == 0, result.messages
+        assert [d["task_id"] for d in fake.dispatches] == ["T001", "T002", "T003"]

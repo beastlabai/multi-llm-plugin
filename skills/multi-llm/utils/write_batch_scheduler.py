@@ -1115,6 +1115,97 @@ class WriteBatchScheduler:
             f"plugin's Landlock jail: {reason} Nothing was spawned."
         )
 
+    def _refuse_declared_sets_before_batch_one(
+        self,
+        ordered: Sequence[Tuple[int, List[Dict[str, Any]]]],
+        result: SchedulerResult,
+    ) -> bool:
+        """Ask :meth:`_repo_wide_refusal` of EVERY task the run will dispatch
+        before the first dispatch; ``True`` when the run is refused.
+
+        Every declared set is known at materialization (``write_tasks.json``),
+        and the per-task check in :meth:`_dispatch_executor` used to be the
+        only one: an implement run whose seventh task declared a new
+        top-level ``Makefile`` paid for batches 1–6 and then exited 3 naming
+        F6, whose remedy (switch ``driver.subagent_runner``) then had to be
+        applied to a half-done phase (fix round 4, 2026-10-02). Checked here
+        under the rung the preflight records for each task's runner, and only
+        for a dispatch that will run on the plugin-landlock rung: on codex's
+        own sandbox the same write is codex's to allow. A task ``--resume``
+        skips as already done is never dispatched, so its declared set — which
+        may have landed on another rung — is not asked. A refused runner is
+        left for the batch loop, which reports it in its own words (D3k rung
+        1). The per-task check stays as the backstop.
+        """
+        if (
+            self.respond is not None
+            or self.jail_request is None
+            or self.write_scope != WRITE_SCOPE_REPO_WIDE
+        ):
+            return False
+        profile = profile_for_kind(self.kind)
+        refused: List[TaskOutcome] = []
+        first_index: Optional[int] = None
+        for batch_index, batch_tasks in ordered:
+            for task in batch_tasks:
+                task_id = str(task.get("task_id", ""))
+                if (
+                    result.human_plan.is_skipped(task_id)
+                    or task.get("executor_role") == "human"
+                    or (self.resume and self._already_done(task))
+                ):
+                    continue
+                runner = self.forced_runner or resolve_task_runner(
+                    task, anchor=self.anchor
+                )
+                try:
+                    self._preflight(runner, profile)
+                except ExecutorError:
+                    return False
+                if self._recorded_rung(runner, profile) != SANDBOX_RUNG_PLUGIN_LANDLOCK:
+                    continue
+                request = self._task_request(task)
+                if request is None:
+                    continue
+                refusal = self._repo_wide_refusal(task, request)
+                if refusal is None:
+                    continue
+                refused.append(TaskOutcome(
+                    task_id=task_id, kind=self.kind, runner=self.invoker,
+                    status=STATUS_REJECTED, profile=profile, reason=refusal,
+                ))
+                if first_index is None:
+                    first_index = batch_index
+        if not refused:
+            return False
+        result.outcomes.extend(refused)
+        result.stopped_at_batch = first_index
+        result.exit_code = EXIT_NEEDS_HUMAN
+        if self.state is not None:
+            with self._effects_lock:
+                for outcome in refused:
+                    self.state.update_task_status(
+                        outcome.task_id, "failed", reason=outcome.reason
+                    )
+                self.state.save()
+        lines = [
+            "",
+            f"ERROR: {len(refused)} of this run's write task(s) declare a path "
+            f"the plugin's Landlock jail cannot grant, so the run was refused "
+            f"before its first batch. Nothing was dispatched, no file was "
+            f"modified, and the {self.phase} phase is NOT marked completed.",
+        ]
+        for outcome in refused:
+            # The same row shape as `_stop_message`'s, so a reader (and the
+            # acceptance test) finds `<task>: rejected — <why>` either way.
+            lines.append(f"  - {outcome.task_id}: {outcome.status} — {outcome.reason}")
+        result.messages.extend(lines)
+        for line in lines[1:]:
+            self.log(f"[write-subagents] {line.strip()}")
+        result.report_path = self._write_report(result)
+        self._mirror_status(result)
+        return True
+
     def _grant_mismatch(self, task: Dict[str, Any]) -> Optional[str]:
         """Why ``task``'s declared set is not this phase's grant, or ``None``.
 
@@ -1603,7 +1694,13 @@ class WriteBatchScheduler:
             # run's `write_batch_report.json` / `subagent_batch_report.json`.
             return result
 
-        # 3. The batches, in order, each verified before the next is dispatched.
+        # 3. Every declared set under the recorded rung, before the first
+        # dispatch: a repo-wide refusal that waits for its own batch costs
+        # every batch ahead of it (fix round 4, 2026-10-02).
+        if self._refuse_declared_sets_before_batch_one(ordered, result):
+            return result
+
+        # 4. The batches, in order, each verified before the next is dispatched.
         # Mirrored once before the first dispatch so `progress.step` reads
         # `applying` for the whole stretch rather than only from the first
         # *finished* task — the in-batch mirror runs after a dispatch returns,
@@ -1673,7 +1770,7 @@ class WriteBatchScheduler:
                 self._mirror_status(result)
                 return result
 
-        # 4. Finalization is part of the contract, not the caller's courtesy.
+        # 5. Finalization is part of the contract, not the caller's courtesy.
         if self.finalize:
             self._finalize(result)
         result.report_path = self._write_report(result)
