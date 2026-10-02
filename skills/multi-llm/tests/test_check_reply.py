@@ -77,6 +77,35 @@ class TestCheckTaskReply:
         assert f"missing group_hash: {HASH_B}" in problems
         assert "foreign group_hash: cccc000000000000" in problems
 
+    def test_a_reply_keyed_by_group_id_passes_as_the_merge_takes_it(self, tmp_path):
+        """Adversarial review, 2026-10-02: the merge joins on `group_hash or
+        group_id`, so a check that demanded `group_hash` re-asked the subagent
+        for a reply reaggregation would have used, then called it failed."""
+        from utils.validation import merge_batched_validation_results
+
+        reply = _reply(HASH_A, HASH_B)
+        for entry in reply["groups"]:
+            entry["group_id"] = entry.pop("group_hash")
+        _write(tmp_path, reply)
+        assert check_task_reply(_task(tmp_path), str(tmp_path)) == []
+
+        merged = merge_batched_validation_results(
+            str(tmp_path),
+            {"batches": [{"batch_index": 0, "group_indices": [0, 1],
+                          "group_ids": [HASH_A, HASH_B]}]},
+            2,
+        )
+        assert [r["status"] for r in merged] == ["valid", "valid"]
+
+    def test_a_reply_with_no_id_at_all_is_still_reported(self, tmp_path):
+        reply = _reply(HASH_A, HASH_B)
+        for entry in reply["groups"]:
+            del entry["group_hash"]
+        _write(tmp_path, reply)
+        problems = " | ".join(check_task_reply(_task(tmp_path), str(tmp_path)))
+        assert "groups[0] has no group_hash (or group_id)" in problems
+        assert f"missing group_hash: {HASH_A}, {HASH_B}" in problems
+
     def test_an_unknown_status_is_reported(self, tmp_path):
         _write(tmp_path, _reply(HASH_A, HASH_B, status="maybe"))
         assert "status 'maybe'" in check_task_reply(_task(tmp_path), str(tmp_path))[0]
