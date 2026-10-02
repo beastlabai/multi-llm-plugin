@@ -262,6 +262,13 @@ class TestTheListContents:
             assert base.env_allowlist_admits(name, variable), variable
 
     @pytest.mark.parametrize("name", _registry_names())
+    def test_the_review_index_copy_reaches_every_reviewer(self, name):
+        """`intent_to_add_untracked` exports its private index copy here; a
+        reviewer that cannot see it diffs against the user's index, where the
+        untracked files under review do not exist."""
+        assert base.env_allowlist_admits(name, "GIT_INDEX_FILE")
+
+    @pytest.mark.parametrize("name", _registry_names())
     def test_proxies_pass_in_both_cases(self, name):
         """Lower-case `http_proxy`/`https_proxy` are aider/libcurl's spelling."""
         for variable in (
