@@ -434,9 +434,16 @@ def _private_index_copy(cwd: Optional[str]) -> str:
     if not source:
         stdout, _, _ = _run_git("rev-parse", "--git-path", "index", cwd=cwd)
         source = stdout.strip()
-        if not os.path.isabs(source):
-            source = os.path.join(cwd or os.getcwd(), source)
+    # Either value can be relative, and both are relative to where git runs
+    # (`cwd`), not to this process's own directory: a git hook exports
+    # `GIT_INDEX_FILE=.git/index`, and resolving that against the process cwd
+    # pointed the copy at a directory that did not exist, so `git add -N`
+    # failed on its lock file and no untracked file reached the reviewers
+    # (adversarial review, 2026-10-02).
+    if not os.path.isabs(source):
+        source = os.path.join(cwd or os.getcwd(), source)
     source = os.path.abspath(source)
+    _sweep_dead_index_copies(os.path.dirname(source))
     name = f"multi-llm-index.{os.getpid()}.{time.monotonic_ns()}"
     target = os.path.join(os.path.dirname(source), name)
     try:
@@ -452,6 +459,44 @@ def _private_index_copy(cwd: Optional[str]) -> str:
         else:
             os.unlink(target)
     return target
+
+
+#: The private index copies, as :func:`_private_index_copy` names them:
+#: ``multi-llm-index.<pid>.<monotonic ns>`` plus git's own ``.lock`` sibling.
+_INDEX_COPY_NAME = re.compile(r"^multi-llm-index\.(\d+)\.\d+(\.lock)?$")
+
+
+def _sweep_dead_index_copies(git_dir: str) -> None:
+    """Remove the index copies a killed run left behind in *git_dir*.
+
+    The ``finally`` in :func:`intent_to_add_untracked` cannot run under
+    SIGKILL, so a hard-killed review leaves ``multi-llm-index.<pid>.<ns>`` (and
+    its ``.lock``) in the git directory forever: harmless to git, which never
+    reads them, but they accumulate (adversarial review, 2026-10-02). A copy
+    is swept only when the pid in its name is not alive; this process's own
+    copies (a nested block) and another live run's are left alone. Best
+    effort: a directory that cannot be listed, or a file that cannot be
+    removed, changes nothing about the run.
+    """
+    try:
+        from .process_control import process_alive
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.process_control import process_alive
+    try:
+        names = os.listdir(git_dir)
+    except OSError:
+        return
+    for name in names:
+        match = _INDEX_COPY_NAME.match(name)
+        if not match:
+            continue
+        pid = int(match.group(1))
+        if pid == os.getpid() or process_alive(pid):
+            continue
+        try:
+            os.unlink(os.path.join(git_dir, name))
+        except OSError:
+            pass
 
 
 def _restore_index_var(had: bool, previous: Optional[str]) -> None:
