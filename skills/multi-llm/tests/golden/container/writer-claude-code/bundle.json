@@ -643,8 +643,8 @@
               "LOW": [],
               "MEDIUM": []
             },
-            "claude_decide_item_ids": [],
-            "decision_mode": "claude_auto_decide",
+            "decision_mode": "judge_auto_decide",
+            "judge_decide_item_ids": [],
             "mode": "by-importance",
             "prompt_strategy": "single_batch",
             "total_count": 0
@@ -1403,8 +1403,8 @@
               "LOW": [],
               "MEDIUM": []
             },
-            "claude_decide_item_ids": [],
-            "decision_mode": "claude_auto_decide",
+            "decision_mode": "judge_auto_decide",
+            "judge_decide_item_ids": [],
             "mode": "by-importance",
             "prompt_strategy": "single_batch",
             "total_count": 0
@@ -2202,8 +2202,8 @@
               "LOW": [],
               "MEDIUM": []
             },
-            "claude_decide_item_ids": [],
-            "decision_mode": "claude_auto_decide",
+            "decision_mode": "judge_auto_decide",
+            "judge_decide_item_ids": [],
             "mode": "by-importance",
             "prompt_strategy": "single_batch",
             "total_count": 0
