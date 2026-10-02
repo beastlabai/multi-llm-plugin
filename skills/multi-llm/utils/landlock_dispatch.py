@@ -691,8 +691,35 @@ def wrap_argv(
     argv.extend(str(a) for a in resolved_argv)
     child_env = dict(env)
     child_env["TMPDIR"] = context.tmpdir
-    child_env.update(child_env_redirects(context))
+    child_env.update(merge_env_redirects(env, child_env_redirects(context)))
     return argv, child_env
+
+
+#: The redirects that are option *lists* rather than paths: the redirect is
+#: prepended to an inherited value instead of replacing it.
+_PREPENDED_REDIRECTS: Tuple[str, ...] = ("PYTEST_ADDOPTS",)
+
+
+def merge_env_redirects(
+    env: Mapping[str, str], redirects: Mapping[str, str]
+) -> Dict[str, str]:
+    """``redirects`` with each option-list variable prepended to the value
+    ``env`` already carries (fix round 4, 2026-10-02).
+
+    ``PYTEST_ADDOPTS`` is a list of options pytest reads ahead of argv, and
+    the parent's value (``-p no:cacheprovider --import-mode=importlib`` in a
+    CI job, say) used to be clobbered by the ``-o cache_dir=…`` redirect, so
+    the jailed pytest ran without the options the project relies on. The
+    redirect goes first and the inherited value keeps the last word, exactly
+    as a ``-o cache_dir`` the runner passes on argv does. A path redirect
+    (``UV_CACHE_DIR`` and the rest) replaces, as before.
+    """
+    merged = dict(redirects)
+    for name in _PREPENDED_REDIRECTS:
+        inherited = (env.get(name) or "").strip()
+        if name in merged and inherited:
+            merged[name] = f"{merged[name]} {inherited}"
+    return merged
 
 
 #: Placeholders a preview renders in place of per-attempt paths.
@@ -1920,6 +1947,7 @@ __all__ = [
     "allow_entries",
     "canary_env",
     "child_env_redirects",
+    "merge_env_redirects",
     "repo_wide_declared_refusal",
     "repo_wide_env_redirects",
     "repo_wide_plan",
