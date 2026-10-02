@@ -577,9 +577,10 @@ class TestTheWriteGate:
 
     def test_repo_wide_takes_the_rung_with_the_enumerations_controls(self, repo, wrapper, gate):
         """Step 3b: a repo-wide grant walks the rung like the step-3 scopes.
-        Its probe's positive control is the enumeration's first directory and
-        its extra negative targets are the protected directories that exist
-        (`.multi-llm/` here: the probe's own workdir makes it)."""
+        Its probe hands the canary no positive target in the tree (the
+        $TMPDIR write is the control, 2026-10-02) and its extra negative
+        targets are the protected directories that exist (`.multi-llm/`
+        here: the probe's own workdir makes it)."""
         (repo / "src").mkdir()
         request = _plan_request(repo, scope="repo-wide", kind="implement")
         assert gate(_JailLadder(), PROFILE_AGENT_WRITE, request) == "plugin-landlock"
@@ -588,7 +589,7 @@ class TestTheWriteGate:
         ) == "plugin-landlock"
         assert executor.sandbox_rung("fakecodex:m", PROFILE_AGENT_WRITE, write_scope="plan-file") is None
         [probe] = wrapper.records(probe=True)
-        assert probe["env"]["MULTI_LLM_CANARY_WRITE_DIR"] == os.path.realpath(repo / "src")
+        assert probe["env"]["MULTI_LLM_CANARY_WRITE_DIR"] is None
         assert os.path.realpath(repo / ".multi-llm") in probe["env"]["MULTI_LLM_CANARY_DENY_DIRS"]
         assert probe["env"]["MULTI_LLM_CANARY_WRITE_FILE"] is None
         assert probe["env"]["UV_CACHE_DIR"] == os.path.join(probe["env"]["TMPDIR"], "uv-cache")
