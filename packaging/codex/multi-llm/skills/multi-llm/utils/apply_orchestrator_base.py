@@ -82,6 +82,11 @@ from .human_decisions import (
     ingest_verdicts,
     judge_labels,
     native_judge_label,
+    is_judge_source,
+    judge_outcome,
+    judge_source_label,
+    judge_status_label,
+    JUDGE_SKIPPED_STATUS,
     judge_item_from_group,
     record_verdicts,
     write_judge_tasks,
@@ -1476,8 +1481,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             # `reason`) and the `decision_source` that says who decided. The
             # marker is the key `apply_verdicts_to_work_set` stamps on the group.
             decision_source = str(g.get("decision_source") or "")
-            if decision_source.startswith("claude_auto_decide"):
-                skip_status = "claude_skipped"
+            if is_judge_source(decision_source):
+                skip_status = JUDGE_SKIPPED_STATUS
                 reason = g.get("reason") or reason
             elif status == "skipped":
                 # A skip with no `decision_source`: `_skip_unjudged`'s groups,
@@ -2299,6 +2304,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 if reason:
                     print(f"      reason: {reason}")
 
+        for warning in self.consistency_warnings():
+            print(f"\n[CONSISTENCY_WARNING] {warning}")
+
         # The decision summary, folded in: every skip with the status and the
         # specific reason validation gave it, plus its group id so the skip can
         # be looked up in the review report.
@@ -2308,7 +2316,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 gid = str(item.get("group_id") or "")
                 label = f" [{gid[:8]}]" if gid else ""
                 print(
-                    f"  - [{item.get('status', 'unknown')}] "
+                    f"  - [{judge_status_label(item.get('status'))}] "
                     f"{item.get('title', 'Unknown')}{label}"
                 )
                 if item.get("reason"):
@@ -2327,10 +2335,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 title = titles.get(group_id, group_id)
                 context = record.get("batch_context") or {}
                 print(
-                    f"  - [{record.get('decision', 'unknown')}] {title} "
+                    f"  - [{judge_outcome(record)}] {title} "
                     f"[{group_id[:8]}]"
                 )
-                print(f"      source: {context.get('decision_source', 'unknown')}")
+                print(f"      source: {judge_source_label(context.get('decision_source'))}")
                 if record.get("reason"):
                     print(f"      reason: {record['reason']}")
 
@@ -2342,6 +2350,15 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # ------------------------------------------------------------------
     # The executor leg's own summary report and decisions overlay (F3)
     # ------------------------------------------------------------------
+
+    def consistency_warnings(self) -> List[str]:
+        """Problems the finished edits left in the file they edited (advisory).
+
+        Nothing by default. A phase whose artifact is a graph overrides it
+        (apply-task-suggestions re-checks ``tasks.md``), because its batches
+        each edit one corner of that graph and none of them sees the whole.
+        """
+        return []
 
     def claude_decisions(self) -> Dict[str, Dict[str, Any]]:
         """This phase's recorded decisions that a judge subagent made.
@@ -2360,11 +2377,26 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         return {
             group_id: record
             for group_id, record in (recorded or {}).items()
-            if str(
+            if is_judge_source(
                 ((record or {}).get("batch_context") or {}).get("decision_source")
-                or ""
-            ).startswith("claude_auto_decide")
+            )
         }
+
+    @staticmethod
+    def _judge_breakdown(decided: Dict[str, Dict[str, Any]]) -> str:
+        """`` (N approved, N salvaged, N skipped)`` for the summary's count line.
+
+        The same three counts the ingest line prints, so one run never reports
+        a salvage as "salvaged" in one place and "approved" in another.
+        """
+        if not decided:
+            return ""
+        outcomes = [judge_outcome(record) for record in decided.values()]
+        return (
+            f" ({outcomes.count('approved')} approved, "
+            f"{outcomes.count('salvaged')} salvaged, "
+            f"{outcomes.count('skipped')} skipped)"
+        )
 
     @staticmethod
     def _judges_of(decided: Dict[str, Dict[str, Any]]) -> List[str]:
@@ -2499,7 +2531,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             f"- Batches processed: {len(ok)}/{len(outcomes)}",
             f"- {nouns.capitalize()} applied: {item_counts['applied']}",
             f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
-            f"- Decided by the judge agent: {len(decided)}",
+            f"- Decided by the judge agent: {len(decided)}"
+            + self._judge_breakdown(decided),
         ]
         if item_counts["no-op"]:
             lines.append(f"- {nouns.capitalize()} needing no changes: {item_counts['no-op']}")
@@ -2585,10 +2618,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 lines.append(
                     f"### {titles.get(group_id, group_id)} "
                     f"({context.get('importance_at_decision', 'MEDIUM')}) — "
-                    f"{str(record.get('decision', 'unknown')).capitalize()}"
+                    f"{judge_outcome(record).capitalize()}"
                 )
                 lines.append(f"**Group**: `{group_id}`")
-                lines.append(f"**Source**: {context.get('decision_source', 'unknown')}")
+                lines.append(f"**Source**: {judge_source_label(context.get('decision_source'))}")
                 if context.get("salvaged_description"):
                     lines.append(f"**Kept**: {context['salvaged_description']}")
                 if context.get("dropped"):
@@ -2597,12 +2630,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     lines.append(f"**Reason**: {record['reason']}")
                 lines.append("")
 
+        warnings = self.consistency_warnings()
+        if warnings:
+            lines += ["## Consistency warnings", ""]
+            lines += [f"- {warning}" for warning in warnings]
+            lines.append("")
+
         if self.formatted_skipped:
             lines += [f"## Skipped {nouns.title()}", ""]
             for item in self.formatted_skipped:
                 lines.append(
                     f"### {item.get('title', 'Unknown')} "
-                    f"[{item.get('status', 'unknown')}]"
+                    f"[{judge_status_label(item.get('status'))}]"
                 )
                 gid = str(item.get("group_id") or "")
                 if gid:

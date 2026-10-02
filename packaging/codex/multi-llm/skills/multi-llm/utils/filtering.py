@@ -3,6 +3,7 @@
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
+from .human_decisions import is_judge_source
 from .importance import get_highest_importance
 
 # Import error type constants (will be added to validation.py)
@@ -370,7 +371,6 @@ def validate_claude_decide_items_honored(
     if not item_ids:
         return True, []  # Nothing pre-marked, nothing to audit.
 
-    claude_sources = {"claude_auto_decide", "claude_auto_decide_salvage"}
     is_valid = True
 
     for gid in item_ids:
@@ -385,12 +385,12 @@ def validate_claude_decide_items_honored(
             continue
         batch_ctx = decision.get("batch_context") or {}
         source = batch_ctx.get("decision_source")
-        if source not in claude_sources:
+        if not is_judge_source(source):
             is_valid = False
             warnings.append(
                 f"WARNING: report-pre-marked 'Let the agent decide' item {gid} was "
                 f"recorded with decision_source {source!r}, not a judge-agent "
-                f"source ({' / '.join(sorted(claude_sources))}). It may have "
+                f"source (claude_auto_decide / claude_auto_decide_salvage). It may have "
                 f"been prompted instead of auto-decided."
             )
 

@@ -584,6 +584,7 @@ class ResultContext:
         self.progress: Optional[Dict[str, Any]] = None
         self.progress_lines: Optional[List[str]] = None
         self.user_next_step: Optional[Dict[str, Any]] = None
+        self.user_resume: Optional[Dict[str, Any]] = None
         self._emitted = False
 
     # -- recording ------------------------------------------------------
@@ -766,6 +767,21 @@ class ResultContext:
         """
         self.user_next_step = copy.deepcopy(obj) if obj is not None else None
 
+    def set_user_resume(self, obj: Optional[Dict[str, Any]]) -> None:
+        """Record the command that *resumes* a stopped write phase, for the user.
+
+        ``{"phase", "command"}``: the same phase, in the host's own spelling
+        (``utils.next_phase.resume_command``). Not ``user_next_step``, which
+        names the *next* phase and is never set on a failed run, and never
+        ``next``, which a tool route auto-follows: a needs-human stop is where a
+        person decides, so this is for the user to type and nothing may run it.
+        Set only by ``util next-command --blocked``, which the tool routes ask
+        after an exit 3 (2026-10-02: both routes ended a blocked ``implement``
+        with tool-call JSON or a raw ``uv run`` argv, and no command the user
+        could type). ``None`` leaves the line byte-for-byte what it was.
+        """
+        self.user_resume = copy.deepcopy(obj) if obj is not None else None
+
     # -- emitting -------------------------------------------------------
     def payload(self, exit_code: int) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
@@ -810,6 +826,8 @@ class ResultContext:
             and exit_code not in (EXIT_ERROR, EXIT_NEEDS_HUMAN)
         ):
             payload["user_next_step"] = copy.deepcopy(self.user_next_step)
+        if self.user_resume is not None:
+            payload["user_resume"] = copy.deepcopy(self.user_resume)
         return payload
 
     def emit(self, exit_code: int, stream=None) -> None:
@@ -958,6 +976,12 @@ def record_user_next_step(obj: Optional[Dict[str, Any]]) -> None:
     """
     if _ACTIVE is not None:
         _ACTIVE.set_user_next_step(obj)
+
+
+def record_user_resume(obj: Optional[Dict[str, Any]]) -> None:
+    """Record ``user_resume``, if a dispatcher run is active; else a no-op."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_user_resume(obj)
 
 
 # ---------------------------------------------------------------------------

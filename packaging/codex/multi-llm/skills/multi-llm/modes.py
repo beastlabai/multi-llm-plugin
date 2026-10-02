@@ -415,7 +415,9 @@ TOOL_OUTCOMES_LINE = (
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
     "call to make: copy its `command`, and each `optional_before` command, into your "
-    "report, each in its own fenced block, and stop. Only `next` is a call."
+    "report, each in its own fenced block, and stop. Only `next` is a call. A "
+    "needs-human result's `resume_command` is the same kind of thing: the user's to "
+    "type, never a call."
 )
 
 #: The route signal's one owner (plans/next-phase-command.md §2.1, "Knowing the
@@ -499,7 +501,9 @@ NEEDS_HUMAN_MESSAGE = {
     "template": (
         "Stop here: this run is blocked and needs a human. {phase} {error} "
         "Report to the user what was being run (`argv`), that line, and the "
-        "`options`. The dispatcher's output is included as it was rendered, "
+        "`options`; an `options` entry is a tool call for you, never a command "
+        "for the user to type, so do not print one as a command. The "
+        "dispatcher's output is included as it was rendered, "
         "except that every runnable command in it was replaced by a pointer and "
         "spelled as a tool call in `options`, in the order it appeared, and its "
         "result line is in `result` instead; do not paraphrase the output. Do "
@@ -511,6 +515,17 @@ NEEDS_HUMAN_MESSAGE = {
     "review_completed": (
         "The `{phase}` review finished, found what it was told to stop on, and "
         "needs your decision."
+    ),
+    # Appended (never substituted) when the result carries `resume_command`: the
+    # one command here that IS for the user to type. 2026-10-02: the run's
+    # options were all the user was shown, as tool-call JSON on Codex and as
+    # `call multi_llm with …` plus the agent-facing `human` sentence on OpenCode,
+    # with "Pick an option and I'll run it" in a headless run.
+    "resume": (
+        "`resume_command` is what the user types to resume this phase once the "
+        "cause above is fixed. Give it to the user verbatim in its own fenced "
+        "block, as the way forward. It is never a tool call and never a shell "
+        "command: do not run it, and do not offer to run it for them."
     ),
     "phase_unnamed": "Nothing in the result line names the phase that was running.",
     "phase_unknown": (
@@ -528,8 +543,8 @@ NEEDS_HUMAN_MESSAGE = {
 #: plugin after the scraped tool calls, as ``{human: <this sentence>}``, so an
 #: agent reading the options finds "ask the user" beside "run this again".
 NEEDS_HUMAN_OPTION = (
-    "stop here and report to the user; send back one of the options above only "
-    "after the user has picked one"
+    "(a note to you, not a command and not for the user) stop here and report; "
+    "send back one of the options above only after the user has picked one"
 )
 
 #: The one exit 3 that is not an unfinished run. ``review-code --fail-on-high``

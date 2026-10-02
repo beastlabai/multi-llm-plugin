@@ -1258,6 +1258,87 @@ def retire_salvage_artifacts(
     return retired
 
 
+#: Basenames that are never a per-model result file: every artifact a phase dir
+#: holds that is also a ``*.json``. The union of what the two reaggregate globs
+#: exclude, so a retire-by-selection can never rename a file those would not
+#: have read as a model.
+NON_MODEL_JSON_MARKERS = (
+    'grouped', 'validation', 'salvage', 'revalidation', 'consolidated',
+    'consolidation', 'issues', 'fix_tasks', 'report_data', 'subagent_batch_report',
+    'subagent_dry_run', 'write_batch_report', 'write_tasks',
+)
+
+#: Suffix of a result retired because its model left the selection.
+RETIRED_UNSELECTED = "stale-unselected"
+
+
+def retire_unselected_results(
+    phase_dir: str, model_specs: Sequence[str]
+) -> List[str]:
+    """Rename the per-model results (and logs) of specs this run does not select.
+
+    Stale detection elsewhere is keyed by the *slot* (``<stem>.json`` and the
+    scope ledger), so a model whose spec changed between runs --
+    ``codex:gpt-6-luna`` becoming ``codex:gpt-6-luna:high`` -- leaves
+    ``codex_gpt-6-luna.json`` and ``log_codex_gpt-6-luna.txt`` behind beside the
+    new slot's files (measured 2026-10-02, Codex ``review-code``). The fan-out's
+    own report is built from this run's results, so nothing leaked there, but
+    the next ``--reaggregate`` globs the phase dir and would count the old
+    model's findings in a report whose ``models_requested`` never named it.
+
+    Called by a **fan-out** only, with the run's selection, before any model
+    starts. ``--reaggregate`` never calls it, so a dir that legitimately keeps
+    several models' results still reaggregates whole. Same naming as
+    ``retire_result_from_another_scope``: ``<stem>.json.stale-unselected``,
+    renamed and never deleted, no longer matching ``*.json``; the log follows
+    as ``log_<stem>.txt.stale-unselected``. Only a file whose body is a JSON
+    list is a result: an unreadable or non-list file is left alone, because
+    renaming something this function cannot identify would be the guess.
+
+    Returns:
+        The new result-file paths (logs are renamed with them, not listed).
+    """
+    selected = {sanitize_model_name(spec) for spec in model_specs}
+    retired: List[str] = []
+    for path in sorted(Path(phase_dir).glob("*.json")):
+        name = path.name
+        if any(marker in name for marker in NON_MODEL_JSON_MARKERS):
+            continue
+        stem = name[: -len(".json")]
+        if stem in selected:
+            continue
+        try:
+            if not isinstance(json.loads(path.read_text(encoding="utf-8")), list):
+                continue
+        except (OSError, ValueError):
+            continue
+        moved = [(path, path.with_name(f"{name}.{RETIRED_UNSELECTED}"))]
+        log = path.with_name(f"log_{stem}.txt")
+        if log.exists():
+            moved.append((log, log.with_name(f"{log.name}.{RETIRED_UNSELECTED}")))
+        for source, target in moved:
+            if target.exists():
+                target = target.with_name(
+                    f"{target.name}.{datetime.now().strftime('%Y%m%dT%H%M%S%f')}"
+                )
+            try:
+                os.replace(source, target)
+            except OSError as exc:
+                print(
+                    f"Warning: could not retire {source.name} (model not in this "
+                    f"run's selection): {exc}",
+                    file=sys.stderr,
+                )
+                break
+        else:
+            retired.append(str(moved[0][1]))
+            print(
+                f"[SELECTION_CHANGED] {stem}: not in this run's selection; "
+                f"retired {name} as {moved[0][1].name}"
+            )
+    return retired
+
+
 def retire_stale_validation(phase_dir: str, *, reason: str) -> Optional[str]:
     """Rename ``validation.json`` to ``validation.<stamp>.stale.json`` (D7).
 
@@ -2261,7 +2342,7 @@ def announce_retired_rungs(
       cache (``subagent_executor.recorded_rung_retirements``) recorded the rung
       ``skipped`` because the codex version is at or above its ``removed_at``,
       or ``retired`` because its probe printed the rung's removal panic. The
-      line then says the rung is measured unavailable from that version,
+      line then says the rung has been unavailable since that version,
       *whatever the previous run recorded* — a plan's first run included, the
       case the transition below misses. A timeout or any other probe failure
       never triggers it.
@@ -2925,7 +3006,7 @@ def sandbox_bypassed_notice(provider_name: str, probe: Any = None) -> str:
     that stem when ``probe`` — the ``SandboxProbeResult`` — shows the walk
     tried a rung first: each rung with its outcome and, when it was probed,
     its probe tail (``fallback rung 'landlock' unavailable (codex 0.156.1:
-    "…")``), or ``not tried: unavailable from codex 0.156.1, measured`` when
+    "…")``), or ``not tried: removed since codex 0.156.1 (installed: 0.159.3)`` when
     the version skipped it. Without ``probe`` the stem alone is returned. The
     stem says which runner,
     why its own sandbox is not in the path, which config key governs it (and
@@ -5965,7 +6046,13 @@ def aggregate_results(
     if failure_line:
         report_lines.append(failure_line)
     report_lines += [
-        f"**Groups:** {len(groups_to_display) if groups_to_display else 0}",
+        # `G<n>` below counts from 1; `group_index` in grouped.json,
+        # validation.json and validation_tasks.json counts from 0 (G12 is
+        # group_index 11). A host reading both reported "group 11" beside a
+        # report that says G12 (2026-10-01, Claude Code review-plan); the bracketed
+        # hash is the number-free key.
+        f"**Groups:** {len(groups_to_display) if groups_to_display else 0} "
+        "(`G<n>` counts from 1; `group_index` in the JSON files counts from 0)",
         f"**Suggestions:** {high_count} HIGH, {medium_count} MEDIUM, {low_count} LOW ({total_suggestions} total)",
     ]
 
@@ -7372,6 +7459,10 @@ async def run_review_orchestration(
         phase_dir, model_specs, anchor=plan_path, timeout=args.timeout
     )
 
+    # A model whose spec changed since the last run has no slot here to retire
+    # its old files; a re-aggregate would read them back (#30).
+    retire_unselected_results(phase_dir, model_specs)
+
     # Run all models
     results = await run_all_models(
         model_specs,
@@ -7626,7 +7717,10 @@ async def run_review_orchestration(
             grouped_path = os.path.join(phase_dir, "grouped.json")
             # D7: the previous run's verdicts belong to the grouping this write
             # replaces; retired in the same step so no later reaggregate finds them.
-            retire_stale_validation(phase_dir, reason="grouped.json rewritten by a re-run")
+            # Round-wide: a surviving `validation_batch_<n>.json` of the previous
+            # grouping would be skipped as "already complete" by the executor and
+            # then discarded by the merge as a foreign group_hash (#25).
+            retire_stale_validation_round(phase_dir, reason="grouped.json rewritten by a re-run")
             with open(grouped_path, 'w', encoding='utf-8') as f:
                 json.dump(save_groups_payload(grouped), f, indent=2)
             print(f"Grouped suggestions saved to: {grouped_path}")
@@ -7721,8 +7815,8 @@ async def run_review_orchestration(
 
                     print(f"\nValidation prepared for subagent execution.")
                     print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-                    print(f"HIGH priority: {stats.get('high_count', 0)}")
-                    print(f"Normal priority: {stats.get('normal_count', 0)}")
+                    print(f"HIGH priority groups: {stats.get('high_count', 0)}")
+                    print(f"Normal priority groups: {stats.get('normal_count', 0)}")
 
                     # Resolved here, from the running skill dir, because the task
                     # file stores only the durable mode + plan pair (D1c).

@@ -80,6 +80,10 @@ __all__ = [
     "ingest_verdicts",
     "judge_labels",
     "native_judge_label",
+    "is_judge_source",
+    "judge_source_label",
+    "judge_outcome",
+    "judge_status_label",
     "record_verdicts",
     "apply_verdicts_to_work_set",
 ]
@@ -111,6 +115,51 @@ _RECORDED_DECISION = {
 
 _ACTION_PLAIN = "claude_auto_decide"
 _ACTION_SALVAGE = "claude_auto_decide_salvage"
+
+#: What a decision the judge made is stored as. The ``claude_`` spelling is a
+#: persisted key (``state.json``'s ``batch_context``, ``orchestrator_output.json``,
+#: the golden bundles, the instructions' filters) and stays as written; it is not
+#: a user-facing word. The 2026-10-01 run showed ``source: claude_auto_decide``
+#: and ``[claude_skipped]`` under a Codex judge, because the agent-decide plan
+#: renamed the labels but not these. Everything a user reads goes through the
+#: label functions below, never these strings.
+JUDGE_SOURCE_PREFIX = "claude_auto_decide"
+JUDGE_SKIPPED_STATUS = "claude_skipped"
+
+
+def is_judge_source(source: Any) -> bool:
+    """Whether a ``decision_source``/``batch_action`` marks a judge's decision."""
+    return str(source or "").startswith(JUDGE_SOURCE_PREFIX)
+
+
+def judge_source_label(source: Any) -> str:
+    """The host-neutral words for a ``decision_source``; unknown sources pass through."""
+    text = str(source or "")
+    if text == _ACTION_SALVAGE:
+        return "judge agent (salvaged)"
+    if is_judge_source(text):
+        return "judge agent"
+    return text or "unknown"
+
+
+def judge_status_label(status: Any) -> str:
+    """The host-neutral words for a skipped item's ``status``."""
+    return "skipped by judge" if status == JUDGE_SKIPPED_STATUS else str(status or "unknown")
+
+
+def judge_outcome(record: Dict[str, Any]) -> str:
+    """``approved`` / ``salvaged`` / ``skipped`` for a recorded judge decision.
+
+    A salvage is recorded with ``decision == "approved"`` plus the salvage
+    marker (see :data:`_RECORDED_DECISION`), so the marker, not ``decision``,
+    says it. Reading ``decision`` alone is what made one run's ingest line say
+    "1 salvaged" and its ``summary.md`` say "Approved" for the same item.
+    """
+    context = (record or {}).get("batch_context") or {}
+    if _ACTION_SALVAGE in (context.get("decision_source"), context.get("batch_action")):
+        return "salvaged"
+    return str((record or {}).get("decision") or "unknown")
+
 
 #: Who judged when nothing better is known: the host's own agent, unnamed.
 NATIVE_JUDGE = "host agent"
@@ -439,10 +488,31 @@ def judge_labels(
                 continue
             runner = prov.get("runner") or runner
             runner_by_path[os.path.realpath(path)] = str(runner)
-    return {
-        group_id: runner_by_path.get(os.path.realpath(path), fallback)
-        for group_id, path in sources.items()
-    }
+    labels: Dict[str, str] = {}
+    for group_id, path in sources.items():
+        runner = runner_by_path.get(os.path.realpath(path))
+        if runner is None:
+            runner = _with_declared_model(fallback, path)
+        labels[group_id] = runner
+    return labels
+
+
+def _with_declared_model(fallback: str, path: str) -> str:
+    """A native judge's label, plus the model it says it is, when it said.
+
+    "claude-code host agent" names no model (2026-10-01). The verdict file's
+    optional ``judge`` is the subagent's own account of itself, so it only
+    qualifies a native label, never "unrecorded" or an executor's.
+    """
+    if not str(fallback).endswith("host agent"):
+        return fallback
+    try:
+        with open(path, "r", encoding="utf-8") as handle:
+            declared = (json.load(handle) or {}).get("judge")
+    except (OSError, json.JSONDecodeError, AttributeError):
+        return fallback
+    declared = str(declared or "").strip()
+    return f"{declared} ({fallback})" if declared and len(declared) <= 80 else fallback
 
 
 def _decided_reason(judge: str, reason: str) -> str:

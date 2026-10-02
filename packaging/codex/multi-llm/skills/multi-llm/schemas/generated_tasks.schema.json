@@ -32,7 +32,8 @@
         "files_to_modify",
         "acceptance_criteria",
         "estimated_complexity",
-        "executor_role"
+        "executor_role",
+        "subagent_type"
       ],
       "properties": {
         "id": {"type": "string", "pattern": "^T[0-9]{3}$"},
@@ -45,20 +46,11 @@
         "estimated_complexity": {"enum": ["low", "medium", "high"]},
         "executor_role": {"enum": ["agent", "human"]},
         "subagent_type": {
-          "enum": ["general-purpose", "human"],
-          "description": "Optional Claude-Code-only metadata; must agree with executor_role."
+          "type": ["string", "null"],
+          "enum": ["general-purpose", "human", null],
+          "description": "Optional Claude-Code-only metadata, so required-but-nullable: OpenAI's strict structured-output subset needs every property in `required` (measured 2026-10-01: codex declined this schema on `subagent_type` alone), and null is how a reply says it has none. The invoker supplies null when a reply leaves the key out (subagent_executor.normalize_result). When non-null it must agree with executor_role; that rule lives in task_decomposer.validate_generated_tasks because OpenAI's strict subset does not list allOf/if/then (the former allOf here is gone, not weakened)."
         }
-      },
-      "allOf": [
-        {
-          "if": {"required": ["executor_role"], "properties": {"executor_role": {"const": "human"}}},
-          "then": {"properties": {"subagent_type": {"const": "human"}}}
-        },
-        {
-          "if": {"required": ["executor_role"], "properties": {"executor_role": {"const": "agent"}}},
-          "then": {"properties": {"subagent_type": {"const": "general-purpose"}}}
-        }
-      ]
+      }
     }
   }
 }
