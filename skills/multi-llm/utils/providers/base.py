@@ -253,6 +253,12 @@ WRITE_SCOPES: Tuple[str, ...] = (
 #: The scopes the rung serves today. ``repo-wide`` stays refused until step 3b
 #: (protected-path enumeration and the toolchain decision of step 1b).
 WRITE_SCOPES_ON_RUNG: Tuple[str, ...] = (WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS)
+#: The scopes F5's consent (plan step 6) may take to the uncontained rung when
+#: the jail could not take the dispatch: the step-3 scopes alone. ``repo-wide``
+#: never reaches the uncontained rung by consent (2026-10-02, step 3b: the
+#: safer reading of "the ``unsandboxed`` rung never reachable" for repo-wide
+#: edits; widening F5 to them is a separate user decision).
+WRITE_SCOPES_BY_CONSENT: Tuple[str, ...] = (WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS)
 
 #: What a contained rung's probe canary prints (on stderr, exit non-zero) when
 #: the write it attempted was **not** denied — the fail-open shape: the flag
@@ -392,6 +398,18 @@ class JailRequest:
     or the output folder) it is ``None`` and the grant is a file rule on
     ``target``, because a dir rule there would grant sibling plans or
     ``state.json`` (``landlock_dispatch.default_tasks_dir`` decides).
+
+    A ``repo-wide`` request (plan step 3b, 2026-10-02) carries no target. Its
+    grant is the enumeration of the repository root at dispatch
+    (``landlock_dispatch.repo_wide_plan``): ``output_dir`` is this run's
+    output folder, protected beside ``.git``, ``.codex`` and ``.multi-llm``;
+    ``deny_patterns`` is ``driver.write_paths.deny``, whose whole-entry
+    matches get no rule; ``declared`` is the batch's declared file set
+    (absolute, resolved), which makes the entries covering it required and
+    is what ``jail_denied_edits`` counts as in scope. The lane fills
+    ``declared`` per task with ``dataclasses.replace``; the phase-level
+    request the preflight probes with carries none, so no per-task path ever
+    reaches a cache key.
     """
 
     repo_root: str
@@ -399,6 +417,9 @@ class JailRequest:
     write_scope: Optional[str] = None
     target: Optional[str] = None
     target_dir: Optional[str] = None
+    output_dir: Optional[str] = None
+    deny_patterns: Tuple[str, ...] = ()
+    declared: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -438,6 +459,14 @@ class JailContext:
     @property
     def target_dir(self) -> Optional[str]:
         return self.request.target_dir
+
+    @property
+    def output_dir(self) -> Optional[str]:
+        return self.request.output_dir
+
+    @property
+    def declared(self) -> Tuple[str, ...]:
+        return self.request.declared
 
 
 def rung_removed_for_version(rung: "SandboxRung", version: Optional[str]) -> bool:

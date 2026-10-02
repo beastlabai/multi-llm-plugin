@@ -599,12 +599,12 @@ class TestTheAllowList:
         (tasks_dir / "tasks.md").write_text("")
         assert ld.default_tasks_dir(str(plan), str(tasks_dir / "tasks.md")) == str(tasks_dir)
 
-    @pytest.mark.parametrize("scope", [WRITE_SCOPE_REPO_WIDE, "everything"])
-    def test_an_unserved_scope_is_refused(self, lay, scope):
+    def test_an_unknown_scope_is_refused(self, lay):
+        # `repo-wide` is served since step 3b (tests/test_landlock_repo_wide.py).
         with pytest.raises(ld.JailRefused) as excinfo:
-            ld.allow_entries(_ctx(lay, scope, target=lay.plan))
+            ld.allow_entries(_ctx(lay, "everything", target=lay.plan))
         assert excinfo.value.reason == "scope-not-served"
-        assert "repo-wide" in excinfo.value.message
+        assert "everything" in excinfo.value.message
 
     @pytest.mark.parametrize("which", ["plan-file", "tasks-dir", "tasks-file"])
     def test_a_missing_target_is_refused_and_nothing_is_created(self, lay, which):
@@ -723,7 +723,7 @@ class TestTheWrap:
 
     def test_a_grant_that_cannot_be_built_wraps_nothing(self, lay):
         with pytest.raises(ld.JailRefused):
-            ld.wrap_argv(self.RESOLVED, RUNG, _ctx(lay, WRITE_SCOPE_REPO_WIDE, target=lay.plan), {})
+            ld.wrap_argv(self.RESOLVED, RUNG, _ctx(lay, "everything", target=lay.plan), {})
 
     @pytest.mark.parametrize("resolved", [
         RESOLVED,

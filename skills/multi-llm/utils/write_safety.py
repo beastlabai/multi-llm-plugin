@@ -253,7 +253,7 @@ def file_sha256(path: str) -> Optional[str]:
 # D3l — the declared write policy
 # ---------------------------------------------------------------------------
 
-def _glob_to_regex(pattern: str) -> "re.Pattern[str]":
+def glob_to_regex(pattern: str) -> "re.Pattern[str]":
     """Translate a ``write_paths`` glob into an anchored regex over POSIX paths.
 
     ``**/`` spans zero or more directories (so ``**/.env`` matches both ``.env``
@@ -288,6 +288,10 @@ def _glob_to_regex(pattern: str) -> "re.Pattern[str]":
         index += 1
     out.append("$")
     return re.compile("".join(out))
+
+
+#: The pre-rename spelling, kept for callers that imported it.
+_glob_to_regex = glob_to_regex
 
 
 @dataclass
