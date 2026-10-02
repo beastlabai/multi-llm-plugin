@@ -1011,17 +1011,17 @@ class TestFixBatchPromptsChangeCodeOnly:
     """Issue 31: the batch that "approved" a finding edited the plan and tasks.md."""
 
     def test_single_fix_prompt_forbids_editing_the_plan(self):
-        from utils.code_fix_batcher import CODE_ONLY_RULE, format_fix_batch_prompt
+        from utils.code_fix_batcher import code_only_rule, format_fix_batch_prompt
 
         fixes = [{"file": "index.html", "title": "t", "description": "d",
                   "line_range": [1, 2]}]
         batch = CodeFixBatch(file_key="index.html", fixes=fixes, batch_type="single")
         prompt = format_fix_batch_prompt(batch, "plans/p.md", "HEAD~1")
-        assert CODE_ONLY_RULE in prompt
+        assert code_only_rule("plans/p.md") in prompt
         assert "approved deviation" in prompt
 
     def test_multi_fix_prompt_forbids_editing_the_plan(self):
-        from utils.code_fix_batcher import CODE_ONLY_RULE, format_fix_batch_prompt
+        from utils.code_fix_batcher import code_only_rule, format_fix_batch_prompt
 
         fixes = [
             {"file": "index.html", "title": "a", "description": "d", "line_range": [1, 2]},
@@ -1029,5 +1029,44 @@ class TestFixBatchPromptsChangeCodeOnly:
         ]
         batch = CodeFixBatch(file_key="index.html", fixes=fixes, batch_type="file")
         prompt = format_fix_batch_prompt(batch, "plans/p.md", "HEAD~1")
-        assert CODE_ONLY_RULE in prompt
+        assert code_only_rule("plans/p.md") in prompt
         assert "needs a plan decision" in prompt
+
+
+class TestTheCodeOnlyRuleNamesThisRunsPlan:
+    """Adversarial review, 2026-10-02: "Do NOT edit the plan file or any task
+    list" plus "change code only" refused a reviewer's fix on a README, a doc or
+    a repo's own tracked plans/*.md as "not applied: needs a plan decision"."""
+
+    def _readme_batch(self):
+        fixes = [{"file": "docs/setup.md", "title": "Wrong install command",
+                  "description": "d", "line_range": [3, 4]}]
+        return CodeFixBatch(file_key="docs/setup.md", fixes=fixes, batch_type="single")
+
+    def test_the_rule_names_the_plan_and_its_task_list_by_path(self, tmp_path):
+        from utils.code_fix_batcher import format_fix_batch_prompt
+
+        plan = tmp_path / "racing-game.md"
+        plan.write_text("# Plan\n<!-- TASKS_FILE: racing-game/tasks/tasks.md -->\n",
+                        encoding="utf-8")
+        prompt = format_fix_batch_prompt(self._readme_batch(), str(plan), "HEAD~1")
+        assert f"this run's plan (`{plan}`)" in prompt
+        assert f"its task list (`{tmp_path / 'racing-game/tasks/tasks.md'}`)" in prompt
+
+    def test_markdown_outside_the_plan_stays_fixable(self, tmp_path):
+        from utils.code_fix_batcher import format_fix_batch_prompt
+
+        prompt = format_fix_batch_prompt(
+            self._readme_batch(), str(tmp_path / "p.md"), "HEAD~1",
+            tasks_path="plans/p/tasks/tasks.md")
+        assert "Change code only" not in prompt
+        assert "any task list" not in prompt
+        assert "markdown included" in prompt
+        assert "a README, a doc or another plan in the diff" in prompt
+        assert "its task list (`plans/p/tasks/tasks.md`)" in prompt
+
+    def test_without_a_marker_the_task_list_is_described(self, tmp_path):
+        from utils.code_fix_batcher import code_only_rule
+
+        rule = code_only_rule(str(tmp_path / "missing.md"))
+        assert "or the task list generated from it" in rule

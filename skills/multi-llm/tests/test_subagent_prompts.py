@@ -755,6 +755,21 @@ class TestPlanReviewStaysOutOfTaskDecomposition:
         assert "no task breakdown" in prompt
         assert 'is "invalid"' in prompt
 
+    def test_a_missing_ordering_constraint_stays_a_design_gap(self):
+        """Adversarial review, 2026-10-02: "implementation order ... is invalid"
+        read literally would also throw out "the plan never says the data
+        migration must precede the schema switch", which is a design gap."""
+        rule = "A missing ordering\nconstraint between parts of the design"
+        prompt = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS
+        )
+        assert rule in prompt
+        assert "is a design gap, judged on its merits" in prompt
+        text = (SKILL_ROOT / "prompts" / "plan_review.txt").read_text(encoding="utf-8")
+        assert ("A missing ordering constraint between parts of the design "
+                "(a data migration that must precede the schema switch) is a "
+                "design gap, not a task order: report it.") in text
+
     def test_code_review_and_review_tasks_validation_do_not_get_the_plan_rule(self):
         tasks = build_validation_prompt(
             plan_excerpt=PLAN_EXCERPT,

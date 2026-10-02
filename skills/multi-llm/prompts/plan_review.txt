@@ -10,7 +10,7 @@ Read this file to understand the proposed implementation. The plan should contai
 4. Testing strategy and acceptance criteria
 
 ## Out of Scope: Task Decomposition
-Breaking the plan into implementation tasks, with their ids, dependencies and order, is a separate later phase (task generation) that works from the plan as written. A plan is a design document, not a task list. Do NOT report that the plan lacks a task breakdown, task list, implementation order, dependency graph or milestones, and do not suggest adding one. Do still report a missing or unclear design decision that would block someone writing those tasks, and an existing order or dependency in the plan that is wrong.
+Breaking the plan into implementation tasks, with their ids, dependencies and order, is a separate later phase (task generation) that works from the plan as written. A plan is a design document, not a task list. Do NOT report that the plan lacks a task breakdown, task list, implementation order, dependency graph or milestones, and do not suggest adding one. Do still report a missing or unclear design decision that would block someone writing those tasks, and an existing order or dependency in the plan that is wrong. A missing ordering constraint between parts of the design (a data migration that must precede the schema switch) is a design gap, not a task order: report it.
 
 ## Your Task
 1. Read the plan file at the path above

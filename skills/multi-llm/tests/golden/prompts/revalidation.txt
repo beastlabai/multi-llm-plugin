@@ -88,7 +88,9 @@ ids, dependencies and an order, is a later phase (task generation). A finding
 whose only complaint is that the plan has no task breakdown, task list,
 implementation order, dependency graph or milestones is "invalid": not
 applicable to a plan review. A finding that names a concrete design gap which
-would block writing those tasks is judged on that gap.
+would block writing those tasks is judged on that gap. A missing ordering
+constraint between parts of the design (a data migration that must precede the
+schema switch) is a design gap, judged on its merits.
 
 ## Reply
 

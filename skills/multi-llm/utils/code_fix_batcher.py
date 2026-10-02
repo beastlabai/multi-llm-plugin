@@ -17,10 +17,12 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 try:
+    from .plan_updater import get_tasks_file_path
     from .prior_changes import entries as prior_changes_entries
     from .prior_changes import entry_id, stable_key
     from .subagent_tasks import subagent_type_for_role
 except ImportError:
+    from utils.plan_updater import get_tasks_file_path
     from utils.prior_changes import entries as prior_changes_entries
     from utils.prior_changes import entry_id, stable_key
     from utils.subagent_tasks import subagent_type_for_role
@@ -410,19 +412,54 @@ def _implementation_record_block(output_dir: Optional[str], batch_files: Sequenc
     )
 
 
-#: Appended to every fix-batch prompt's instructions. A code-fix phase changes
-#: code. The 2026-10-02 Codex run's judge salvaged "bring plan and code back into
-#: agreement" into "record the look-ahead as an approved deviation in the plan and
-#: T009", and the batch then edited ``plans/racing-game.md`` and ``tasks.md`` where
-#: the reviewers had asked for a code fix. Blessing a deviation in the plan is a
-#: human call, so the default is to leave the plan alone and say so.
-CODE_ONLY_RULE = (
-    "Change code only. Do NOT edit the plan file or any task list/tasks file "
-    "(not to record an \"approved deviation\", not to make the plan match the "
-    "code). If a fix can only be satisfied by changing the plan, or the plan "
-    "should be what moves, make no edit for that fix and report it as "
-    "\"not applied: needs a plan decision\"."
-)
+def _tasks_file_named_by(plan_path: str) -> Optional[str]:
+    """The task list the plan's ``<!-- TASKS_FILE: … -->`` marker names, or None.
+
+    Spelled the way ``plan_path`` is (relative stays relative). Best-effort and
+    silent: a plan that cannot be read, or carries no marker, gets the generic
+    wording in :func:`code_only_rule`.
+    """
+    try:
+        with open(plan_path, "r", encoding="utf-8") as handle:
+            raw = get_tasks_file_path(handle.read())
+    except (OSError, UnicodeDecodeError, TypeError):
+        return None
+    if not raw:
+        return None
+    return os.path.normpath(os.path.join(os.path.dirname(plan_path), raw))
+
+
+def code_only_rule(plan_path: str, tasks_path: Optional[str] = None) -> str:
+    """The rule appended to every fix-batch prompt's instructions.
+
+    A code-fix phase leaves the plan alone. The 2026-10-02 Codex run's judge
+    salvaged "bring plan and code back into agreement" into "record the
+    look-ahead as an approved deviation in the plan and T009", and the batch
+    then edited ``plans/racing-game.md`` and ``tasks.md`` where the reviewers
+    had asked for a code fix. Blessing a deviation in the plan is a human call,
+    so the default is to leave the plan alone and say so.
+
+    It names THIS run's plan and task list rather than "the plan file or any
+    task list": a review-code diff can carry markdown of its own (a README,
+    docs, a repo's own tracked ``plans/*.md``), the judge treats every item
+    with a ``file`` as a code fix, and under "change code only" a finding on
+    such a file came back "not applied: needs a plan decision" (adversarial
+    review, 2026-10-02).
+    """
+    protected = f"this run's plan (`{plan_path}`)"
+    if tasks_path:
+        protected += f" or its task list (`{tasks_path}`)"
+    else:
+        protected += " or the task list generated from it"
+    return (
+        f"Do NOT edit {protected} (not to record an \"approved deviation\", not "
+        "to make the plan match the code). Every other file a fix names is "
+        "yours to change, markdown included: a fix on a README, a doc or another "
+        "plan in the diff is applied like any code fix. If a fix can only be "
+        "satisfied by changing this run's plan or task list, or that plan should "
+        "be what moves, make no edit for that fix and report it as "
+        "\"not applied: needs a plan decision\"."
+    )
 
 
 def format_fix_batch_prompt(
@@ -430,6 +467,7 @@ def format_fix_batch_prompt(
     plan_path: str,
     base_ref: str = "HEAD~1",
     output_dir: Optional[str] = None,
+    tasks_path: Optional[str] = None,
 ) -> str:
     """
     Format a batch of fixes into a prompt for a subagent.
@@ -445,6 +483,8 @@ def format_fix_batch_prompt(
             implement phase's ``prior_changes.jsonl`` for the "Implementation
             record" section (F3). Optional — with none given (or no matching
             entries) the section is omitted, exactly as before.
+        tasks_path: This run's task list, named in :func:`code_only_rule`.
+            Optional — read off the plan's ``TASKS_FILE`` marker when omitted.
 
     Raises:
         ValueError: If the batch contains no fixes.
@@ -457,6 +497,7 @@ def format_fix_batch_prompt(
     implementation_record = _implementation_record_block(
         output_dir, [f.get("file", "") for f in fixes]
     )
+    rule = code_only_rule(plan_path, tasks_path or _tasks_file_named_by(plan_path))
 
     if len(fixes) == 1:
         # Single fix - use detailed format
@@ -492,7 +533,7 @@ def format_fix_batch_prompt(
 3. Make the necessary fix
 4. Verify your fix doesn't break anything (run typecheck if applicable)
 5. Do NOT make any other changes beyond this specific fix
-6. {CODE_ONLY_RULE}
+6. {rule}
 
 Return: Brief summary of what you changed."""
 
@@ -544,7 +585,7 @@ Return: Brief summary of what you changed."""
    - Ensure it integrates smoothly with surrounding code
 5. Do NOT make any changes beyond these specific fixes
 6. Run typecheck if applicable to verify no regressions
-7. {CODE_ONLY_RULE}
+7. {rule}
 
 ## Return Format
 
