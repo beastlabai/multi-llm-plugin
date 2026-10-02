@@ -19,12 +19,26 @@ try:
     from .stream_bootstrap import bootstrap_streams
     from .json_extractor import sanitize_model_name
     from .metrics import describe_usage
+    from .judge_vocab import (
+        JUDGE_AUTO_DECIDE,
+        JUDGE_AUTO_DECIDE_SALVAGE,
+        JUDGE_DECIDED,
+        canonical_value,
+        upgrade_legacy,
+    )
 except ImportError:
     # Direct script invocation (`python utils/html_report_generator.py`):
     # sys.path[0] is the utils/ directory, so import the sibling module directly.
     from stream_bootstrap import bootstrap_streams
     from json_extractor import sanitize_model_name
     from metrics import describe_usage
+    from judge_vocab import (
+        JUDGE_AUTO_DECIDE,
+        JUDGE_AUTO_DECIDE_SALVAGE,
+        JUDGE_DECIDED,
+        canonical_value,
+        upgrade_legacy,
+    )
 
 logger = logging.getLogger(__name__)
 
@@ -2448,16 +2462,17 @@ def _normalize_human_decision(record: Dict[str, Any]) -> Dict[str, Any]:
     the camelCase fields the template's ``getHumanDecisionInfo()`` reads,
     collapsing everything to a single ``outcome`` of approved / salvaged /
     skipped. A salvaged item is recorded with ``decision == "approved"`` and a
-    ``claude_auto_decide_salvage`` marker, so the marker — not ``decision`` —
-    determines the outcome.
+    ``judge_auto_decide_salvage`` marker, so the marker — not ``decision`` —
+    determines the outcome. A record in the ``claude_*`` spelling an earlier
+    version wrote is read through ``judge_vocab.canonical_value``, so it renders
+    the same and the sidecar it is written back to carries only the new names.
     """
     bc = record.get("batch_context") or {}
-    source = bc.get("decision_source") or bc.get("batch_action") or "user"
+    decision_source = canonical_value(bc.get("decision_source"))
+    batch_action = canonical_value(bc.get("batch_action"))
+    source = decision_source or batch_action or "user"
     decision = record.get("decision")
-    is_salvage = (
-        bc.get("decision_source") == "claude_auto_decide_salvage"
-        or bc.get("batch_action") == "claude_auto_decide_salvage"
-    )
+    is_salvage = JUDGE_AUTO_DECIDE_SALVAGE in (decision_source, batch_action)
     if is_salvage:
         outcome = "salvaged"
     elif decision == "approved":
@@ -2469,7 +2484,7 @@ def _normalize_human_decision(record: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "outcome": outcome,
         "decision": decision,
-        "claudeDecided": str(source).startswith("claude_auto_decide"),
+        JUDGE_DECIDED: str(source).startswith(JUDGE_AUTO_DECIDE),
         "source": source,
         "reason": record.get("reason", "") or "",
         "salvagedDescription": bc.get("salvaged_description", "") or "",
@@ -2500,7 +2515,7 @@ def _overlay_human_decisions(
         "approved": 0,
         "salvaged": 0,
         "skipped": 0,
-        "claudeDecided": 0,
+        JUDGE_DECIDED: 0,
         "total": 0,
     }
     matched = 0
@@ -2515,8 +2530,8 @@ def _overlay_human_decisions(
         summary["total"] += 1
         if info["outcome"] in summary:
             summary[info["outcome"]] += 1
-        if info["claudeDecided"]:
-            summary["claudeDecided"] += 1
+        if info[JUDGE_DECIDED]:
+            summary[JUDGE_DECIDED] += 1
     report_data["humanDecisionsSummary"] = summary
     return matched
 
@@ -2560,7 +2575,7 @@ def regenerate_report_with_human_decisions(
     sidecar = phase_dir / "report_data.json"
     if not sidecar.exists():
         return None, 0
-    report_data = json.loads(sidecar.read_text(encoding="utf-8"))
+    report_data = upgrade_legacy(json.loads(sidecar.read_text(encoding="utf-8")))
     matched = _overlay_human_decisions(report_data, human_decisions or {})
     style = template_style or report_data.get("templateStyle", "pr")
     template = _load_report_template(style)
@@ -2598,7 +2613,7 @@ def _read_human_decisions_from_state(
     word (``apply-code-fixes``) or the phase_name it is stored under
     (``apply-fixes``) and land on the same decisions.
     """
-    state = json.loads(Path(state_file).read_text(encoding="utf-8"))
+    state = upgrade_legacy(json.loads(Path(state_file).read_text(encoding="utf-8")))
     key_phase = _APPLY_PHASE_STATE_KEYS.get(apply_phase, apply_phase)
     return state.get(f"human_decisions_{key_phase}", {}) or {}
 

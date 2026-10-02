@@ -27,6 +27,7 @@ from utils.apply_orchestrator_base import (
     build_common_arg_parser,
 )
 from utils.cli_common import dispatcher_prefix
+from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE
 from utils.apply_output_helpers import (
     build_skipped_output,
     emit_json_output,
@@ -232,8 +233,8 @@ Bulk Approval Examples:
         }
         # Per-item routing flag: reviewer pre-marked this group "Let the agent
         # decide" in the report. Routed to the per-item judge without prompting.
-        if group.get("claude_decide"):
-            formatted["decision_mode"] = "claude_auto_decide"
+        if group.get(JUDGE_DECIDE):
+            formatted["decision_mode"] = JUDGE_AUTO_DECIDE
         return formatted
 
     def generate_batch_prompts(self, batches: List[SuggestionBatch]) -> List[Dict[str, Any]]:

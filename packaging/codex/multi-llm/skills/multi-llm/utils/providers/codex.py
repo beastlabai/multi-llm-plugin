@@ -21,7 +21,9 @@ from .base import (
     SANDBOX_RUNG_PLUGIN_LANDLOCK,
     SANDBOX_RUNG_UNSANDBOXED,
     WRITE_SCOPE_PLAN_FILE,
+    WRITE_SCOPE_REPO_WIDE,
     WRITE_SCOPE_TASKS,
+    WRITE_SCOPES_BY_CONSENT,
     WRITE_SCOPES_ON_RUNG,
     HOST_POSTURE_FULL_ACCESS,
     JailContext,
@@ -364,6 +366,10 @@ CANARY_ENV_SEEDED = "MULTI_LLM_CANARY_SEEDED"
 CANARY_ENV_PYTHON = "MULTI_LLM_CANARY_PYTHON"
 CANARY_ENV_WRITE_FILE = "MULTI_LLM_CANARY_WRITE_FILE"
 CANARY_ENV_WRITE_DIR = "MULTI_LLM_CANARY_WRITE_DIR"
+#: Extra negative targets (step 3b, `repo-wide`): `os.pathsep`-joined
+#: directories in which creating a file must be denied — `.git/`, the run's
+#: output folder and the other protected roots that exist.
+CANARY_ENV_DENY_DIRS = "MULTI_LLM_CANARY_DENY_DIRS"
 
 #: What the rung's canary prints (stderr, exit 5) when a write it must be able
 #: to make — in its own $TMPDIR, or a write profile's own target — failed: a
@@ -391,14 +397,16 @@ _TRUNCATE_SNIPPET = (
 #: The plugin-landlock rung's canary (run by `codex sandbox` under
 #: `sandbox_mode="danger-full-access"`, inside the jail). Controls, in order:
 #: negative — creating a file in `.multi-llm/tmp` (prepared and proven writable
-#: *outside* the jail by the walk) must be denied; truncation — the seeded file
+#: *outside* the jail by the walk) must be denied, and so must creating one in
+#: each extra negative directory of `$MULTI_LLM_CANARY_DENY_DIRS` (step 3b: a
+#: repo-wide grant's `.git/` and output folder); truncation — the seeded file
 #: (`$MULTI_LLM_CANARY_SEEDED`, in the same negative target) must not be
 #: truncatable, and the parent compares its bytes afterwards too; positive — a
 #: file created and removed in `$TMPDIR`, and for a write profile its own target
 #: (`: >> <file>` opens the plan or tasks file for writing without changing it;
-#: a tasks dir gets a file created and removed). Only when every control holds
-#: does it print SANDBOX_CANARY_DENIED (split, so an echoing CLI cannot forge it)
-#: and exit 0.
+#: a tasks dir, or a repo-wide grant's first enumerated directory, gets a file
+#: created and removed). Only when every control holds does it print
+#: SANDBOX_CANARY_DENIED (split, so an echoing CLI cannot forge it) and exit 0.
 PLUGIN_LANDLOCK_CANARY_SCRIPT = (
     f'd={LANDLOCK_CANARY_WORKDIR}; f="$d/sandbox-canary-$$"; '
     f'if [ ! -d "$d" ] || [ -z "${CANARY_ENV_SEEDED}" ] '
@@ -407,6 +415,11 @@ PLUGIN_LANDLOCK_CANARY_SCRIPT = (
     'rc=0; '
     'if (: > "$f") 2>/dev/null; then rm -f "$f"; rc=3; fi; '
     '[ -e "$f" ] && rc=3; '
+    f'if [ -n "${CANARY_ENV_DENY_DIRS}" ]; then '
+    f'for nd in $(printf %s "${CANARY_ENV_DENY_DIRS}" | tr : " "); do '
+    'g="$nd/sandbox-canary-$$"; '
+    'if (: > "$g") 2>/dev/null; then rm -f "$g"; rc=3; fi; '
+    '[ -e "$g" ] && rc=3; done; fi; '
     f'"${CANARY_ENV_PYTHON}" -I -S -c \'{_TRUNCATE_SNIPPET}\' "${CANARY_ENV_SEEDED}" '
     '2>/dev/null; t=$?; '
     'if [ "$t" -eq 0 ]; then rc=3; '
@@ -466,8 +479,9 @@ WRITE_FALLBACK_RUNGS: Tuple[SandboxRung, ...] = (PLUGIN_LANDLOCK_RUNG,)
 #: The step-3 opt-in. The user decided on 2026-09-30 that codex editing jobs run
 #: on the plugin-landlock rung despite its known escapes ("Codex editing jobs
 #: should run the new setup despite known escapes"), for the plan-file and
-#: tasks write scopes only. With it `False`, `agent-write` answers no policy and
-#: no ladder, exactly as before step 3.
+#: tasks write scopes, and on 2026-10-02 (step 3b) for repo-wide edits too.
+#: With it `False`, `agent-write` answers no policy and no ladder, exactly as
+#: before step 3.
 WRITE_RUNG_OPT_IN = True
 
 _RUNGS_BY_NAME = {rung.name: rung for rung in SANDBOX_FALLBACK_RUNGS}
@@ -496,6 +510,30 @@ JAIL_DEVELOPER_TARGET_FILE = (
     "save through a temporary file and a rename, mv over it, or deleting and "
     "re-creating it."
 )
+#: The repo-wide grant's sentences (step 3b, 2026-10-02): what the enumeration
+#: grants, what it protects, and the two shapes a top-level entry cannot take
+#: (F1 "Protected paths": the root and each enumerated ancestor get no rule).
+JAIL_DEVELOPER_TARGET_REPO = (
+    " You may edit existing files anywhere in the repository {root} and create "
+    "files inside its existing subdirectories, except these, which are denied: "
+    ".git/, .codex/, .multi-llm/, this run's output folder {output_dir}, and "
+    "the paths driver.write_paths denies. The repository root itself{ancestors} "
+    "is not writable: nothing can be created, renamed or deleted directly "
+    "there (a missing .venv, node_modules or lock file cannot be made there), "
+    "and a top-level file can only be edited in place with apply_patch or a "
+    "shell redirect, never replaced (sed -i, a temp-file save, mv)."
+)
+#: Step 1b's decision (measured 2026-10-02 on codex 0.160.0), for `repo-wide`
+#: only: the toolchain paths that stay denied, so the runner reads such an
+#: EACCES as the jail's. uv's cache, pytest's cache, npm's cache and Python's
+#: bytecode are redirected under $TMPDIR instead
+#: (`landlock_dispatch.repo_wide_env_redirects`).
+JAIL_DEVELOPER_DENIED_TOOLCHAIN = (
+    " /tmp and /dev/shm are denied: put temporary files under $TMPDIR "
+    "(tempfile already does). uv, pytest, npm and Python bytecode already use "
+    "caches under $TMPDIR; any other tool's cache outside the repository is "
+    "denied unless you point it under $TMPDIR."
+)
 #: Step 1c's decision (measured 2026-09-30 on codex 0.159.0/0.159.1): what stays
 #: denied on the rung, named so the model reads such an EACCES as the jail's and
 #: not the code's. `git status`'s index refresh, Python's `__pycache__` and
@@ -523,14 +561,38 @@ def jail_developer_instructions(context: JailContext) -> str:
     fallback). The lane decided ``target_dir``; nothing is guessed here.
     """
     text = JAIL_DEVELOPER_INSTRUCTIONS.format(tmpdir=context.tmpdir)
-    if context.write_scope and context.target:
+    if context.write_scope == WRITE_SCOPE_REPO_WIDE:
+        text += repo_wide_developer_sentences(context)
+    elif context.write_scope and context.target:
         if context.target_dir:
             text += JAIL_DEVELOPER_TARGET_DIR.format(target=context.target_dir)
         else:
             text += JAIL_DEVELOPER_TARGET_FILE.format(target=context.target)
     if JAIL_DEVELOPER_DENIED_PATHS:
         text += JAIL_DEVELOPER_DENIED_PATHS
+    if context.write_scope == WRITE_SCOPE_REPO_WIDE:
+        text += JAIL_DEVELOPER_DENIED_TOOLCHAIN
     return text
+
+
+def repo_wide_developer_sentences(context: JailContext) -> str:
+    """The ``repo-wide`` grant's sentences, naming the root, this run's output
+    folder and each enumerated ancestor (``plans/`` above the output folder),
+    from the same enumeration the allow-list is built from."""
+    try:
+        from ..landlock_dispatch import repo_wide_plan
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.landlock_dispatch import repo_wide_plan  # type: ignore[no-redef]
+    plan = repo_wide_plan(context.request)
+    ancestors = ""
+    if plan.ancestors:
+        ancestors = " (and " + ", ".join(
+            os.path.relpath(a, plan.root) + "/" for a in plan.ancestors
+        ) + ")"
+    output_dir = context.output_dir or "(none)"
+    return JAIL_DEVELOPER_TARGET_REPO.format(
+        root=plan.root, output_dir=output_dir, ancestors=ancestors,
+    )
 
 
 def _toml_basic_string(value: str) -> str:
@@ -930,6 +992,10 @@ def _require_write_context(profile: str, context: Optional[JailContext]) -> None
             f"codex's {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung does not serve the "
             f"{scope!r} write scope (served: {', '.join(WRITE_SCOPES_ON_RUNG)})"
         )
+    if scope == WRITE_SCOPE_REPO_WIDE:
+        # The grant is the enumeration of the repository root at dispatch
+        # (step 3b); it names no single target.
+        return
     if not getattr(context, "target", None):
         raise ValueError(
             f"codex's {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung needs the {scope!r} "
@@ -1376,10 +1442,11 @@ class CodexProvider(LLMProvider):
         F5 (plan step 6, user decision 2026-09-30) adds one route: ``agent-write``
         on ``unsandboxed`` renders only with a ``consent`` whose posture is
         ``danger-full-access`` — the chat's own full-access mode, exported per
-        call — and whose ``write_scope`` the rung serves
-        (:data:`WRITE_SCOPES_ON_RUNG`: ``repo-wide``, or no scope at all,
-        raises here whatever the gates decided), and the gates hand it over
-        only after the plugin-landlock rung could not take the dispatch.
+        call — and whose ``write_scope`` is a step-3 scope
+        (:data:`WRITE_SCOPES_BY_CONSENT`: ``repo-wide``, or no scope at all,
+        raises here whatever the gates decided — step 3b put repo-wide edits
+        on the jail, never on the uncontained rung), and the gates hand it
+        over only after the plugin-landlock rung could not take the dispatch.
         """
         if (
             profile in SANDBOX_WRITE_FALLBACK_PROFILES
@@ -1393,13 +1460,14 @@ class CodexProvider(LLMProvider):
                     f"{consent.posture!r})"
                 )
             scope = getattr(consent, "write_scope", None)
-            if scope not in WRITE_SCOPES_ON_RUNG:
+            if scope not in WRITE_SCOPES_BY_CONSENT:
                 raise ValueError(
                     f"codex runs the {profile!r} profile unsandboxed under the "
                     f"chat's {HOST_POSTURE_FULL_ACCESS!r} posture only for the "
-                    f"write scopes the {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung "
-                    f"serves ({', '.join(WRITE_SCOPES_ON_RUNG)}); got "
-                    f"{scope!r}"
+                    f"write scopes F5 covers "
+                    f"({', '.join(WRITE_SCOPES_BY_CONSENT)}; repo-wide edits "
+                    f"run on the {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung alone); "
+                    f"got {scope!r}"
                 )
             cmd = argv
             cmd[cmd.index("--sandbox") + 1] = SANDBOX_FALLBACK_VALUE

@@ -53,9 +53,15 @@ from .filtering import (
     filter_user_skipped_groups,
     resolve_bulk_option_conflicts,
     should_bypass_no_selection_confirmation,
-    validate_claude_decide_items_honored,
+    validate_judge_decide_items_honored,
 )
 from .importance import get_highest_importance
+from .judge_vocab import (
+    JUDGE_AUTO_DECIDE,
+    JUDGE_DECIDE,
+    JUDGE_DECIDE_ITEM_IDS,
+    canonical_value,
+)
 from .output_handler import derive_prefix, find_output_dir, get_phase_dir
 from .provider_registry import set_run_anchor
 from .report_parser import load_html_selections, merge_selections
@@ -132,24 +138,26 @@ class OrchestratorError(Exception):
 # user_selections.json / consolidated_user_selections.json / a hand-edited
 # Markdown checkbox label) is warned-and-ignored at the apply boundary rather
 # than written verbatim into ``validation_status`` (which would produce a bogus
-# status that silently falls through ``filter_items``). ``claude_decide`` is a
-# *routing marker*, not a status: an allowlisted ``claude_decide`` is handed to
-# ``_route_claude_decide_marker`` and never assigned to ``validation_status``.
+# status that silently falls through ``filter_items``). ``judge_decide`` is a
+# *routing marker*, not a status: an allowlisted ``judge_decide`` is handed to
+# ``_route_judge_decide_marker`` and never assigned to ``validation_status``.
 # ``needs-human-decision`` is accepted because the consolidated surface can emit
-# it as an override value.
+# it as an override value. Every check site reads the value through
+# ``judge_vocab.canonical_value`` first, so a selections file written before the
+# rename (``claude_decide``) is accepted as the same marker.
 VALID_OVERRIDE_VALUES: frozenset = frozenset(
-    {"valid", "invalid", "claude_decide", "needs-human-decision"}
+    {"valid", "invalid", JUDGE_DECIDE, "needs-human-decision"}
 )
 
 
 def _format_override_target(value: str) -> str:
     """Render an override value for the dry-run/no-selection override print.
 
-    ``claude_decide`` is a routing marker, not a validation status, so label it
-    as such instead of printing a bare ``-> claude_decide`` (which misreads as a
+    ``judge_decide`` is a routing marker, not a validation status, so label it
+    as such instead of printing a bare ``-> judge_decide`` (which misreads as a
     status change).
     """
-    if value == "claude_decide":
+    if canonical_value(value) == JUDGE_DECIDE:
         return "Let the agent decide (routing marker)"
     return value
 
@@ -174,8 +182,8 @@ def apply_unattended_defaults(args: argparse.Namespace) -> argparse.Namespace:
 
     Mutates and returns *args* (argparse namespaces are the shared carrier here).
     """
-    if getattr(args, "yes", False) and not getattr(args, "claude_decide", False):
-        args.claude_decide = True
+    if getattr(args, "yes", False) and not getattr(args, "agent_decide", False):
+        args.agent_decide = True
     return args
 
 
@@ -303,7 +311,7 @@ def build_common_arg_parser(
     parser.add_argument(
         AGENT_DECIDE_FLAG,
         *LEGACY_AGENT_DECIDE_FLAGS,
-        dest="claude_decide",
+        dest="agent_decide",
         action="store_true",
         help=(
             "Let the judge agent decide each needs-human-decision item with its "
@@ -571,9 +579,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # `_record_resolution` for why they have to be buffered rather than
         # written straight through to `.status.json`.
         self._pending_resolutions: List[Tuple[str, str]] = []
-        claude_decide_before = getattr(args, "claude_decide", False)
+        agent_decide_before = getattr(args, "agent_decide", False)
         apply_unattended_defaults(args)
-        if not claude_decide_before and getattr(args, "claude_decide", False):
+        if not agent_decide_before and getattr(args, "agent_decide", False):
             self._record_resolution(
                 _unattended.row(10).site_id,
                 f"{AGENT_DECIDE_FLAG} implied by --yes: needs-human-decision items "
@@ -602,16 +610,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # Group hashes / suggestion ids the reviewer pre-marked "Let the agent
         # decide" in the report. A routing marker, not a validation status —
         # marked items keep validation_status == "needs-human-decision" and
-        # carry group["claude_decide"] = True so they reach the per-item judge.
+        # carry group["judge_decide"] = True so they reach the per-item judge.
         #
         # NOTE: write-only diagnostic mirror. Nothing in the production code
         # paths READS this set — all routing/filtering/formatting is driven by
-        # group["claude_decide"] and the per-item decision_mode flag. It exists
+        # group["judge_decide"] and the per-item decision_mode flag. It exists
         # purely as an observable record for tests/diagnostics and does NOT gate
-        # any runtime behavior. (The _write_outputs() claude_decide audit keys
-        # off build_human_review_config()["claude_decide_item_ids"], not this
+        # any runtime behavior. (The _write_outputs() judge_decide audit keys
+        # off build_human_review_config()["judge_decide_item_ids"], not this
         # set.) Do not assume populating it changes how items are routed.
-        self.claude_decide_overrides: Set[str] = set()
+        self.judge_decide_overrides: Set[str] = set()
 
         # Filtering results
         self.valid: List[Dict[str, Any]] = []
@@ -920,7 +928,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # Step 8: Warn on contradictory --agent-decide combinations.
         # --agent-decide only affects items that remain needs-human-decision;
         # bulk flags that drain that bucket leave it with nothing to judge.
-        if getattr(self.args, "claude_decide", False):
+        if getattr(self.args, "agent_decide", False):
             draining_flags = [
                 name
                 for name, flag in (
@@ -1539,9 +1547,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         of that set, so an unattended run and an interactive one that picked "Let
         the agent decide" produce the same prompt for the same items.
         """
-        if getattr(self.args, "claude_decide", False):
+        if getattr(self.args, "agent_decide", False):
             return list(self.needs_human)
-        return [g for g in self.needs_human if g.get("claude_decide")]
+        return [g for g in self.needs_human if g.get(JUDGE_DECIDE)]
 
     def human_decision_phase_dir(self) -> str:
         """The phase dir judging tasks and verdict files live in."""
@@ -1828,7 +1836,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             }
 
         # Post-hoc audit: verify every report-pre-marked "Let the agent decide"
-        # item actually reached the judge (decision_source == claude_*), rather
+        # item actually reached the judge (decision_source == judge_*), rather
         # than being prompted interactively or dropped. This is the runtime
         # backstop for the per-item routing the apply instructions perform; it
         # surfaces warnings but never fails the run (a sibling of the
@@ -1839,7 +1847,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             recorded_decisions = self.state.get_all_human_decisions(
                 self.phase_name
             )
-            cd_ok, cd_warnings = validate_claude_decide_items_honored(
+            cd_ok, cd_warnings = validate_judge_decide_items_honored(
                 self.build_human_review_config(),
                 recorded_decisions,
             )
@@ -2137,19 +2145,112 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         apply-code-fixes partitions by ``file_key``), and it is honest for the
         single-target phases too since it reflects what actually moved rather
         than the phase's own convention.
+
+        Read from :meth:`_phase_rows`, so a ``--resume`` still names the files
+        an earlier run of this phase changed.
         """
         touched: List[str] = []
         seen: Set[str] = set()
-        for outcome in getattr(self.write_result, "outcomes", None) or []:
-            if not getattr(outcome, "ok", False) and (
-                getattr(outcome, "write_outcome", None) != "partial-application"
+        for row in self._phase_rows():
+            if not self._row_ok(row) and (
+                row.get("write_outcome") != "partial-application"
             ):
                 continue
-            for touched_path in getattr(outcome, "files_touched", None) or []:
+            for touched_path in row.get("files_touched") or []:
                 if touched_path and touched_path not in seen:
                     seen.add(touched_path)
                     touched.append(touched_path)
         return touched
+
+    def _phase_rows(self) -> List[Dict[str, Any]]:
+        """Every batch row of this phase, earlier runs' first (#28).
+
+        The scheduler's own ``report_rows()``, the rows
+        ``write_batch_report.json`` carries, so ``summary.md``, the result
+        block and the report cannot disagree. On a ``--resume`` they include
+        the rows an interrupted run of this review cycle recorded, flagged
+        ``from_earlier_run``, and never rows of an earlier cycle (the
+        scheduler drops a report that predates the review). Built from this
+        run's outcomes when the result has no rows of its own.
+        """
+        result = self.write_result
+        report_rows = getattr(result, "report_rows", None)
+        if callable(report_rows):
+            return [dict(row) for row in report_rows()]
+        rows: List[Dict[str, Any]] = []
+        for outcome in getattr(result, "outcomes", None) or []:
+            rows.append({
+                "task_id": str(getattr(outcome, "task_id", "")),
+                "status": getattr(outcome, "status", None),
+                "write_outcome": getattr(outcome, "write_outcome", None),
+                "runner": getattr(outcome, "runner", None),
+                "duration_seconds": getattr(outcome, "duration_seconds", 0.0),
+                "reason": getattr(outcome, "reason", None),
+                "files_touched": list(getattr(outcome, "files_touched", None) or []),
+                "output_path": getattr(outcome, "output_path", None),
+                "expected_ids": list(getattr(outcome, "expected_ids", None) or []),
+                "skipped": bool(getattr(outcome, "skipped", False)),
+            })
+        return rows
+
+    @staticmethod
+    def _row_ok(row: Dict[str, Any]) -> bool:
+        return row.get("status") == "ok"
+
+    def _row_item_ids(self, row: Dict[str, Any]) -> List[str]:
+        """The items a row's batch carried: the row's own ``expected_ids``,
+        else this run's materialized task of the same id."""
+        own = row.get("expected_ids")
+        if own:
+            return [str(item) for item in own]
+        for task in self.write_tasks:
+            if str(task.get("task_id", "")) == str(row.get("task_id", "")):
+                return [str(item) for item in task.get("expected_ids") or []]
+        return []
+
+    @staticmethod
+    def _row_provenance(row: Dict[str, Any]) -> str:
+        """The marker a row from before this run carries, else ``""``."""
+        if row.get("from_earlier_run"):
+            return " (earlier run)"
+        if row.get("skipped"):
+            # A resume skip whose earlier row the scheduler could not supply
+            # (that run left no report, or its report belonged to an earlier
+            # review): this run reused the result file and dispatched nothing.
+            return " (earlier result, not dispatched again)"
+        return ""
+
+    def _rows_provenance_note(self, rows: List[Dict[str, Any]]) -> str:
+        """`` (N from an earlier run of this phase, …)`` for a count line."""
+        earlier = sum(1 for row in rows if row.get("from_earlier_run"))
+        reused = sum(
+            1 for row in rows
+            if row.get("skipped") and not row.get("from_earlier_run")
+        )
+        parts = []
+        if earlier:
+            parts.append(f"{earlier} from an earlier run of this phase")
+        if reused:
+            parts.append(f"{reused} earlier result(s) reused")
+        if not parts:
+            return ""
+        return f" ({', '.join(parts)}, not dispatched again)"
+
+    def _items_by_member_id(self) -> Dict[str, Dict[str, Any]]:
+        """``member id -> formatted item`` over this run's batches.
+
+        Each materialized task's ``expected_ids`` are its batch's items in
+        order (``write_phase_bridge``), so an earlier run's row, whose
+        positional id may now name another batch, still finds its own items.
+        """
+        items: Dict[str, Dict[str, Any]] = {}
+        for task, batch in zip(self.write_tasks, self.batches):
+            if not isinstance(batch, dict):
+                continue
+            members = self._batch_member_items(batch)
+            for member_id, item in zip(task.get("expected_ids") or [], members):
+                items.setdefault(str(member_id), item)
+        return items
 
     def _record_write_artifacts(self, output_path: str) -> None:
         """Hand back the files this phase produced, on the executor leg.
@@ -2228,21 +2329,19 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             path for path in paths.values() if path and os.path.exists(path)
         )
 
-    def _write_item_counts(self, outcomes: List[Any]) -> Dict[str, int]:
+    def _write_item_counts(self, rows: List[Dict[str, Any]]) -> Dict[str, int]:
         """Count items by the scheduler's verdict, rather than dispatch success.
 
         An ``ok`` dispatch may be a no-op or a clean failure. Neither is
-        evidence that its requested changes were applied.
+        evidence that its requested changes were applied. Counted over
+        :meth:`_phase_rows`, the rows the report lists, so the count lines
+        agree with the table under them.
         """
-        expected_by_task = {
-            str(task.get("task_id", "")): list(task.get("expected_ids") or [])
-            for task in self.write_tasks
-        }
         counts = {"applied": 0, "no-op": 0, "clean-failure": 0}
-        for outcome in outcomes:
-            verdict = getattr(outcome, "write_outcome", None)
-            if getattr(outcome, "ok", False) and verdict in counts:
-                counts[verdict] += len(expected_by_task.get(outcome.task_id, []))
+        for row in rows:
+            verdict = row.get("write_outcome")
+            if self._row_ok(row) and verdict in counts:
+                counts[verdict] += len(self._row_item_ids(row))
         return counts
 
     def print_write_outcome_summary(self) -> None:
@@ -2257,13 +2356,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         good part, existed only inside ``orchestrator_output.json``.
         """
         result = self.write_result
-        outcomes = list(getattr(result, "outcomes", None) or [])
-        expected_by_task = {
-            str(task.get("task_id", "")): list(task.get("expected_ids") or [])
-            for task in self.write_tasks
-        }
-        ok = [o for o in outcomes if getattr(o, "ok", False)]
-        item_counts = self._write_item_counts(outcomes)
+        rows = self._phase_rows()
+        ok = [row for row in rows if self._row_ok(row)]
+        item_counts = self._write_item_counts(rows)
         target = self.write_target_file()
         touched = self._touched_files()
 
@@ -2279,7 +2374,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(f"File: {target}")
         else:
             print(f"Files changed: {', '.join(touched) if touched else '(none)'}")
-        print(f"Batches: {len(ok)}/{len(outcomes)} ok")
+        print(
+            f"Batches: {len(ok)}/{len(rows)} ok"
+            + self._rows_provenance_note(rows)
+        )
         print(f"{self.item_noun_plural.capitalize()} applied: {item_counts['applied']}")
         if item_counts["no-op"]:
             print(f"{self.item_noun_plural.capitalize()} needing no changes: {item_counts['no-op']}")
@@ -2289,18 +2387,19 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if getattr(result, "stopped_at_batch", None) is not None:
             print(f"Stopped at batch: {result.stopped_at_batch}")
 
-        if outcomes:
+        if rows:
             print("\nBatches:")
-            for outcome in outcomes:
-                count = len(expected_by_task.get(outcome.task_id, []))
-                verdict = getattr(outcome, "write_outcome", None) or "-"
+            for row in rows:
+                count = len(self._row_item_ids(row))
+                verdict = row.get("write_outcome") or "-"
                 print(
-                    f"  {outcome.task_id}: {outcome.status} ({verdict}), "
+                    f"  {row.get('task_id')}{self._row_provenance(row)}: "
+                    f"{row.get('status')} ({verdict}), "
                     f"{count} {self.item_noun}(s), "
-                    f"{getattr(outcome, 'duration_seconds', 0.0):.1f}s, "
-                    f"runner {getattr(outcome, 'runner', '') or '(none)'}"
+                    f"{float(row.get('duration_seconds') or 0.0):.1f}s, "
+                    f"runner {row.get('runner') or '(none)'}"
                 )
-                reason = getattr(outcome, "reason", None)
+                reason = row.get("reason")
                 if reason:
                     print(f"      reason: {reason}")
 
@@ -2326,7 +2425,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # report, but that step lives on the native leg only, so before
         # this the one decision a `--yes --exec-subagents` run actually *made*
         # reached no output the phase wrote (measured 2026-09-16).
-        decided = self.claude_decisions()
+        decided = self.judge_decisions()
         if decided:
             print(f"\nDecided by the judge agent ({len(decided)}):")
             print(f"  judge: {', '.join(self._judges_of(decided))}")
@@ -2360,13 +2459,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         return []
 
-    def claude_decisions(self) -> Dict[str, Dict[str, Any]]:
+    def judge_decisions(self) -> Dict[str, Dict[str, Any]]:
         """This phase's recorded decisions that a judge subagent made.
 
         The same filter the instructions' ``## Decided by the judge agent`` section
         specifies: ``human_decisions_{phase}`` entries whose
-        ``batch_context.decision_source`` is ``claude_auto_decide`` or
-        ``claude_auto_decide_salvage``.
+        ``batch_context.decision_source`` is ``judge_auto_decide`` or
+        ``judge_auto_decide_salvage`` (or the ``claude_*`` spelling of either
+        that a run started before the rename recorded).
         """
         if self.state is None:
             return {}
@@ -2437,7 +2537,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         return list(batch.get("fixes") or batch.get("suggestions") or [])
 
     @staticmethod
-    def _read_batch_result_notes(output_path: Optional[str]) -> Optional[str]:
+    def _read_batch_result_notes(
+        output_path: Optional[str], item_ids: Optional[List[str]] = None
+    ) -> Optional[str]:
         """Best-effort read of a write batch's own ``notes`` field (F10).
 
         ``notes`` (``schemas/write_batch_result.schema.json``) is the runner's
@@ -2446,6 +2548,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         batch's own account of *why* (e.g. "Fix 1: car.accel 32->28 per plan
         §8.") survives past verification. Silent on any read/parse failure —
         the field is optional and this is reporting, never gating.
+
+        With ``item_ids``, a file whose own ``ids`` name none of them is
+        another batch's: an apply result file is named by position, and a
+        resumed run may have rewritten it for the batch that now holds it.
         """
         if not output_path or not os.path.isfile(output_path):
             return None
@@ -2454,8 +2560,35 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 data = json.load(handle)
         except (OSError, json.JSONDecodeError):
             return None
-        notes = data.get("notes") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        returned = [str(i) for i in data.get("ids") or []]
+        if item_ids and returned and not set(returned) & set(item_ids):
+            return None
+        notes = data.get("notes")
         return notes if isinstance(notes, str) and notes.strip() else None
+
+    def _row_items(
+        self, row: Dict[str, Any], item_ids: List[str]
+    ) -> List[Dict[str, Any]]:
+        """The formatted items (titles, files) a report row's batch carried.
+
+        This run's batch of the same id when it holds the same items — task
+        and batch are materialized from the same ``self.batches`` list, in the
+        same order (``run_write_executor``), so a positional zip joins them —
+        else the items found by member id: an earlier run's row whose
+        positional id now names another batch.
+        """
+        task_id = str(row.get("task_id", ""))
+        for task, batch in zip(self.write_tasks, self.batches):
+            if str(task.get("task_id", "")) != task_id or not isinstance(batch, dict):
+                continue
+            task_ids = [str(i) for i in task.get("expected_ids") or []]
+            if not row.get("expected_ids") or sorted(task_ids) == sorted(item_ids):
+                return self._batch_member_items(batch)
+            break
+        by_id = self._items_by_member_id()
+        return [by_id[i] for i in item_ids if i in by_id]
 
     def write_apply_summary_report(self) -> Optional[str]:
         """Write ``{phase}/summary.md`` — the report the instructions promise (F3).
@@ -2487,23 +2620,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             )
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         result = self.write_result
-        outcomes = list(getattr(result, "outcomes", None) or [])
-        expected_by_task = {
-            str(task.get("task_id", "")): list(task.get("expected_ids") or [])
-            for task in self.write_tasks
-        }
-        # Task and batch are materialized from the same `self.batches` list, in
-        # the same order (`run_write_executor`), so a positional zip joins each
-        # outcome's task_id back to the batch dict that carries its fix/
-        # suggestion titles and file/line_range — data `TaskOutcome` never kept.
-        batch_by_task_id = {
-            str(task.get("task_id", "")): batch
-            for task, batch in zip(self.write_tasks, self.batches)
-            if isinstance(batch, dict)
-        }
-        ok = [o for o in outcomes if getattr(o, "ok", False)]
-        item_counts = self._write_item_counts(outcomes)
-        decided = self.claude_decisions()
+        # #28: the phase's rows, not this run's outcomes — a `--resume` keeps
+        # the batches an interrupted run of this review cycle finished, marked
+        # "(earlier run)" with that run's runner, duration and verdict. The
+        # count lines below are computed from the same rows as the table.
+        rows = self._phase_rows()
+        ok = [row for row in rows if self._row_ok(row)]
+        item_counts = self._write_item_counts(rows)
+        decided = self.judge_decisions()
         titles = self._titles_by_group_id()
         nouns = self.item_noun_plural
 
@@ -2528,7 +2652,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
             "## Summary",
-            f"- Batches processed: {len(ok)}/{len(outcomes)}",
+            f"- Batches processed: {len(ok)}/{len(rows)}"
+            + self._rows_provenance_note(rows),
             f"- {nouns.capitalize()} applied: {item_counts['applied']}",
             f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
             f"- Decided by the judge agent: {len(decided)}"
@@ -2556,21 +2681,26 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             "## Applied Changes",
             "",
         ]
-        if outcomes:
-            for outcome in outcomes:
-                count = len(expected_by_task.get(outcome.task_id, []))
-                verdict = getattr(outcome, "write_outcome", None) or "-"
+        if rows:
+            for row in rows:
+                item_ids = self._row_item_ids(row)
+                verdict = row.get("write_outcome") or "-"
                 lines.append(
-                    f"### {outcome.task_id} — {outcome.status} ({verdict})"
+                    f"### {row.get('task_id')}{self._row_provenance(row)} — "
+                    f"{row.get('status')} ({verdict})"
                 )
                 lines.append(
-                    f"**{nouns.capitalize()}**: {count}  "
-                    f"**Duration**: {getattr(outcome, 'duration_seconds', 0.0):.1f}s  "
-                    f"**Runner**: {getattr(outcome, 'runner', '') or '(none)'}"
+                    f"**{nouns.capitalize()}**: {len(item_ids)}  "
+                    f"**Duration**: {float(row.get('duration_seconds') or 0.0):.1f}s  "
+                    f"**Runner**: {row.get('runner') or '(none)'}"
                 )
-                items = self._batch_member_items(
-                    batch_by_task_id.get(outcome.task_id)
-                )
+                items = self._row_items(row, item_ids)
+                if not items and item_ids and row.get("from_earlier_run"):
+                    # An earlier batch whose items this run no longer selects:
+                    # its ids are all that is left to name them by.
+                    lines.append(
+                        "**Items**: " + ", ".join(f"`{i}`" for i in item_ids)
+                    )
                 if items:
                     item_status = {
                         "applied": "Applied",
@@ -2591,11 +2721,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                             else:
                                 lines.append(f"   - File: {file_path}")
                 notes = self._read_batch_result_notes(
-                    getattr(outcome, "output_path", None)
+                    row.get("output_path"), item_ids
                 )
                 if notes:
                     lines.append(f"**Notes**: {notes}")
-                reason = getattr(outcome, "reason", None)
+                reason = row.get("reason")
                 if reason:
                     lines.append(f"**Reason**: {reason}")
                 lines.append("")
@@ -2813,6 +2943,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # `repo-wide`) passes none; its entries come from step 3b's
         # enumeration, never from a target.
         write_target = artifact if self.has_single_write_target else None
+        # Every run resumes — a re-run must never apply a landed batch twice —
+        # except `--fresh`, which declares prior progress void (`_setup` has
+        # already cleared the decisions, the processed items and the
+        # prior-changes log): every batch is dispatched again, no result file
+        # counts as done, no earlier row is carried and no snapshot reused.
+        # That is implement's run without `--resume`. It used to resume as
+        # well, so a user who reverted the target and asked to start over got
+        # exit 0 with every batch "already complete". `--resume` wins over
+        # `--fresh` (the retry builder drops `--fresh` beside it, too).
+        fresh = bool(getattr(self.args, "fresh", False)) and not getattr(
+            self.args, "resume", False
+        )
         try:
             scheduler = WriteBatchScheduler(
                 tasks=tasks,
@@ -2822,7 +2964,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 state=self.state,
                 plan_file=self.plan_path,
                 anchor=self.plan_path,
-                resume=True,
+                resume=not fresh,
                 dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
                 write_target=write_target,
             )
@@ -3109,30 +3251,30 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 by_importance[imp].append(item)
 
         mode = getattr(self.args, "batch_review_mode", "by-importance")
-        claude_decide = bool(getattr(self.args, "claude_decide", False))
+        agent_decide = bool(getattr(self.args, "agent_decide", False))
         return {
             "mode": mode,
             "batch_enabled": mode != "individual",
-            # When "claude_auto_decide", the host agent skips the interactive
+            # When "judge_auto_decide", the host agent skips the interactive
             # batch-review prompt and evaluates each needs-human-decision item
             # itself ("Let the agent decide" mode). See
             # references/human-decision-batch.md.
-            "decision_mode": "claude_auto_decide" if claude_decide else "interactive",
+            "decision_mode": JUDGE_AUTO_DECIDE if agent_decide else "interactive",
             "prompt_strategy": "single_batch" if mode != "individual" else "per_item",
             "by_importance": by_importance,
             "total_count": len(self.formatted_human),
             "batch_prompt_template": "batch_approval_v1",
             # Convenience index of items the reviewer pre-marked "Let the agent
             # decide" in the report. The authoritative per-item signal is the
-            # per-item ``decision_mode == "claude_auto_decide"`` flag the
+            # per-item ``decision_mode == "judge_auto_decide"`` flag the
             # formatters emit; this list lets the instructions find them without
             # scanning every item. The global ``decision_mode`` above stays
             # "interactive" unless --agent-decide was passed; per-item routing
             # is purely additive.
-            "claude_decide_item_ids": [
+            JUDGE_DECIDE_ITEM_IDS: [
                 it.get("group_id", "")
                 for it in self.formatted_human
-                if it.get("decision_mode") == "claude_auto_decide"
+                if it.get("decision_mode") == JUDGE_AUTO_DECIDE
             ],
         }
 
@@ -3175,24 +3317,24 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         return ""
 
-    def _route_claude_decide_marker(
+    def _route_judge_decide_marker(
         self, group: Dict[str, Any], key: Any, value: str
     ) -> bool:
-        """Handle a ``claude_decide`` override as a routing marker, not a status.
+        """Handle a ``judge_decide`` override as a routing marker, not a status.
 
-        Returns ``True`` if *value* was a ``claude_decide`` marker (the caller
+        Returns ``True`` if *value* was a ``judge_decide`` marker (the caller
         should skip the ``validation_status`` assignment), ``False`` otherwise.
 
-        A ``claude_decide`` marker keeps the item in ``needs_human`` and tags it
+        A ``judge_decide`` marker keeps the item in ``needs_human`` and tags it
         so the per-item "Let the agent decide" judge picks it up at apply time; it
         must NEVER be written into ``validation_status`` (which is not a real
         status and would silently fall through ``filter_items``).
         """
-        if value == "claude_decide":
-            group["claude_decide"] = True
-            # Diagnostics-only mirror; routing is driven by group["claude_decide"]
+        if canonical_value(value) == JUDGE_DECIDE:
+            group[JUDGE_DECIDE] = True
+            # Diagnostics-only mirror; routing is driven by group["judge_decide"]
             # above, not by this set (see declaration note in __init__).
-            self.claude_decide_overrides.add(key)
+            self.judge_decide_overrides.add(key)
             # A surfaced reason so the routing is visible in logs/reports. Not a
             # setdefault no-op — the item already carries a needs-human reason.
             group["validation_reason"] = "Routed to the judge agent by reviewer"
@@ -3216,7 +3358,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         for group in self.merged:
             ghash = group.get("group_hash", "")
             if ghash and ghash in self.validation_overrides:
-                value = self.validation_overrides[ghash]
+                value = canonical_value(self.validation_overrides[ghash])
                 if value not in VALID_OVERRIDE_VALUES:
                     print(
                         f"WARNING: ignoring unknown validation override "
@@ -3225,8 +3367,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         file=sys.stderr,
                     )
                     continue
-                # Route "claude_decide" as a marker, never as a status.
-                if self._route_claude_decide_marker(group, ghash, value):
+                # Route "judge_decide" as a marker, never as a status.
+                if self._route_judge_decide_marker(group, ghash, value):
                     override_count += 1
                     continue
                 old_status = group.get("validation_status", "unknown")
@@ -3244,7 +3386,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """Apply per-suggestion validation overrides to ``self.merged``.
 
         ``invalid`` drops the suggestion; ``valid`` flags it (and promotes the
-        group if *all* survivors are valid); ``claude_decide`` is a routing
+        group if *all* survivors are valid); ``judge_decide`` is a routing
         marker that keeps the suggestion and, after the loop, routes the whole
         containing group to the per-item judge (the apply-time review unit is a
         group, so the marker is propagated up — including the mixed-group case
@@ -3268,9 +3410,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     matched_key = positional_id
 
                 if matched_key is not None:
-                    override_status = self.suggestion_validation_overrides[
-                        matched_key
-                    ]
+                    override_status = canonical_value(
+                        self.suggestion_validation_overrides[matched_key]
+                    )
                     if override_status not in VALID_OVERRIDE_VALUES:
                         print(
                             f"WARNING: ignoring unknown per-suggestion "
@@ -3283,11 +3425,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         sugg["_user_override_invalid"] = True
                     elif override_status == "valid":
                         sugg["_user_override_valid"] = True
-                    elif override_status == "claude_decide":
+                    elif override_status == JUDGE_DECIDE:
                         # Routing marker: keep the suggestion (do NOT drop or
                         # promote) and tag it. Propagated to the group below so
                         # the whole group routes to the per-item judge.
-                        sugg["claude_decide"] = True
+                        sugg[JUDGE_DECIDE] = True
                     sugg_override_count += 1
                     modified = True
 
@@ -3302,16 +3444,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # apply_group_validation_overrides, or per-suggestion in the
                 # loop above) is an affirmative "route to the judge" request and
                 # must win over a "valid" promotion. Without this guard, a group
-                # marked claude_decide whose surviving suggestions are all
+                # marked judge_decide whose surviving suggestions are all
                 # individually "valid" would be promoted to "valid" while still
-                # carrying claude_decide=True; filter_items only honours
-                # claude_decide in the needs-human-decision branch, so the group
+                # carrying judge_decide=True; filter_items only honours
+                # judge_decide in the needs-human-decision branch, so the group
                 # would auto-apply and bypass the judge.
-                marked_claude_decide = group.get("claude_decide") or any(
-                    s.get("claude_decide") for s in remaining
+                marked_judge_decide = group.get(JUDGE_DECIDE) or any(
+                    s.get(JUDGE_DECIDE) for s in remaining
                 )
                 if (
-                    not marked_claude_decide
+                    not marked_judge_decide
                     and remaining
                     and all(s.get("_user_override_valid") for s in remaining)
                     and group.get("validation_status")
@@ -3326,20 +3468,20 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     group["user_override"] = True
 
                 # Reconcile per-suggestion -> group granularity: if any
-                # surviving suggestion is "claude_decide", route the whole
+                # surviving suggestion is "judge_decide", route the whole
                 # group to the judge (the apply-time review unit is a group,
                 # and the formatters only inspect the group). This also covers
-                # the mixed-group case (one claude_decide suggestion alongside
+                # the mixed-group case (one judge_decide suggestion alongside
                 # other untouched needs-human suggestions).
                 if any(
-                    s.get("claude_decide")
+                    s.get(JUDGE_DECIDE)
                     for s in group.get("suggestions", [])
                 ):
-                    group["claude_decide"] = True
-                    # Diagnostics-only mirror; the group["claude_decide"] flag
+                    group[JUDGE_DECIDE] = True
+                    # Diagnostics-only mirror; the group["judge_decide"] flag
                     # above is what actually routes the group to the judge (see
                     # declaration note in __init__). This set is never read.
-                    self.claude_decide_overrides.add(
+                    self.judge_decide_overrides.add(
                         group.get("group_hash", "")
                     )
 

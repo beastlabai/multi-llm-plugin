@@ -1046,12 +1046,21 @@
       return 'multi-llm-selections-consolidated-' + reportData.planPath;
     }
 
+    function migrateLegacyOverrides(overrides) {
+      if (!overrides) return;
+      Object.keys(overrides).forEach(function(k) {
+        if (overrides[k] === 'claude_decide') overrides[k] = 'judge_decide';
+      });
+    }
+
     function loadSelections() {
       var stored = localStorage.getItem(getStorageKey());
       if (stored) {
         try {
           var parsed = JSON.parse(stored);
           if (parsed.skipped_groups) selections.skipped_groups = parsed.skipped_groups;
+          // A selection saved before the judge rename says 'claude_decide' (utils/judge_vocab.py).
+          migrateLegacyOverrides(parsed.validation_overrides);
           if (parsed.validation_overrides) selections.validation_overrides = parsed.validation_overrides;
           if (parsed._labels) selections._labels = parsed._labels;
           if (parsed.last_file_export_at) selections.last_file_export_at = parsed.last_file_export_at;
@@ -1321,7 +1330,7 @@
           '<option value="invalid"' + (overrideVal === 'invalid' ? ' selected' : '') + '>Mark Invalid</option>' +
           '<option value="needs-human-decision"' + (overrideVal === 'needs-human-decision' ? ' selected' : '') + '>Needs Human Attention</option>' +
           (validationStatus === 'needs-human-decision' ?
-            '<option value="claude_decide"' + (overrideVal === 'claude_decide' ? ' selected' : '') + '>Let the agent decide</option>' : '') +
+            '<option value="judge_decide"' + (overrideVal === 'judge_decide' ? ' selected' : '') + '>Let the agent decide</option>' : '') +
           '</select>' +
           '<label class="skip-control">' +
           '<input type="checkbox" data-cg-id="' + escapeHtml(cgId) + '"' + (isSkipped ? ' checked' : '') + '>' +

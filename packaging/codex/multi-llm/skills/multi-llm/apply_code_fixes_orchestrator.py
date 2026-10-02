@@ -29,6 +29,7 @@ from utils.apply_orchestrator_base import (
     build_common_arg_parser,
 )
 from utils.cli_common import dispatcher_prefix
+from utils.judge_vocab import JUDGE_AUTO_DECIDE, JUDGE_DECIDE, canonical_value
 from utils.apply_output_helpers import (
     build_skipped_output,
     emit_json_output,
@@ -78,7 +79,7 @@ from utils.validation import (
 # so their marks can conflict. Safety-first, the same order
 # parse_validation_overrides_issues applies inside a single issue block.
 _OVERRIDE_PRECEDENCE: Dict[str, int] = {
-    "claude_decide": 1,
+    JUDGE_DECIDE: 1,
     "valid": 2,
     "needs-human-decision": 3,
     "invalid": 4,
@@ -356,8 +357,8 @@ def format_fix_for_output(group: Dict[str, Any], index: int) -> Dict[str, Any]:
 
     # Per-item routing flag: a reviewer pre-marked this group "Let the agent
     # decide" in the report. Routed to the per-item judge without prompting.
-    if group.get("claude_decide"):
-        formatted["decision_mode"] = "claude_auto_decide"
+    if group.get(JUDGE_DECIDE):
+        formatted["decision_mode"] = JUDGE_AUTO_DECIDE
 
     return formatted
 
@@ -783,7 +784,7 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         ``_group_hash_for_issue``; hash keys (HTML / consolidated decisions)
         already name a group. Two members of one group can carry conflicting
         marks, so the same safety-first precedence a single block uses applies
-        across members: invalid > needs-human-decision > valid > claude_decide.
+        across members: invalid > needs-human-decision > valid > judge_decide.
         """
         if not self.validation_overrides:
             return
@@ -791,6 +792,7 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         # group_hash -> (the key the user wrote, the override value)
         by_hash: Dict[str, Tuple[Any, str]] = {}
         for key, value in self.validation_overrides.items():
+            value = canonical_value(value)
             if value not in VALID_OVERRIDE_VALUES:
                 print(
                     f"WARNING: ignoring unknown validation override {value!r} "
@@ -818,8 +820,8 @@ Finalization (run by the host AFTER every batch has been applied and verified):
             if entry is None:
                 continue
             matched_key, value = entry
-            # Route "claude_decide" as a marker, never as a status.
-            if self._route_claude_decide_marker(group, matched_key, value):
+            # Route "judge_decide" as a marker, never as a status.
+            if self._route_judge_decide_marker(group, matched_key, value):
                 override_count += 1
                 continue
             old_status = group.get("validation_status", "unknown")

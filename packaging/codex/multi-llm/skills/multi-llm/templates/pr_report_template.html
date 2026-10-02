@@ -605,7 +605,7 @@
     }
 
     /* Human/agent decision (post-apply overlay) */
-    .badge-claude-decision {
+    .badge-judge-decision {
       background: var(--bg-hover);
       color: var(--text-secondary);
     }
@@ -2122,6 +2122,13 @@
       return 'multi-llm-selections-' + selections.phase + '-' + selections.plan_path;
     }
 
+    function migrateLegacyOverrides(overrides) {
+      if (!overrides) return;
+      Object.keys(overrides).forEach(function(k) {
+        if (overrides[k] === 'claude_decide') overrides[k] = 'judge_decide';
+      });
+    }
+
     function loadSelections() {
       var stored = localStorage.getItem(getStorageKey());
       if (stored) {
@@ -2137,6 +2144,8 @@
             parsed.skipped_suggestions.forEach(function(s) { migratedSugg[String(s)] = true; });
             parsed.skipped_suggestions = migratedSugg;
           }
+          // A selection saved before the judge rename says 'claude_decide' (utils/judge_vocab.py).
+          migrateLegacyOverrides(parsed.validation_overrides);
           selections = Object.assign({}, selections, parsed);
         } catch (e) {
           console.error('Failed to load selections:', e);
@@ -4392,11 +4401,11 @@
       var hd = group.humanDecision || group.human_decision;
       if (!hd) return null;
       var outcome = hd.outcome || hd.decision || 'decided';
-      var claudeDecided = hd.claudeDecided === true ||
-        (typeof hd.source === 'string' && hd.source.indexOf('claude_auto_decide') === 0);
+      var judgeDecided = hd.judgeDecided === true ||
+        (typeof hd.source === 'string' && hd.source.indexOf('judge_auto_decide') === 0);
       return {
         outcome: outcome,
-        claudeDecided: claudeDecided,
+        judgeDecided: judgeDecided,
         reason: hd.reason || '',
         salvagedDescription: hd.salvagedDescription || hd.salvaged_description || '',
         dropped: hd.dropped || '',
@@ -4406,7 +4415,7 @@
     }
 
     function decisionMaker(info) {
-      if (!info.claudeDecided) return 'User';
+      if (!info.judgeDecided) return 'User';
       return info.judge ? 'Agent (' + info.judge + ')' : 'Agent';
     }
 
@@ -4414,7 +4423,7 @@
       var info = getHumanDecisionInfo(group);
       if (!info) return '';
       var label = decisionMaker(info) + ': ' + info.outcome;
-      return '<span class="badge badge-claude-decision badge-decision-' + escapeHtml(info.outcome) + '"' +
+      return '<span class="badge badge-judge-decision badge-decision-' + escapeHtml(info.outcome) + '"' +
         ' title="' + escapeHtml(info.reason) + '">⚙ ' + escapeHtml(label) + '</span>';
     }
 
@@ -4626,7 +4635,7 @@
         html += '<option value="invalid"' + (selections.validation_overrides[groupHashKey] === 'invalid' ? ' selected' : '') + '>Override: invalid</option>';
         html += '<option value="needs-human-decision"' + (selections.validation_overrides[groupHashKey] === 'needs-human-decision' ? ' selected' : '') + '>Override: needs-human</option>';
         if (vs === 'needs-human-decision') {
-          html += '<option value="claude_decide"' + (selections.validation_overrides[groupHashKey] === 'claude_decide' ? ' selected' : '') + '>Let the agent decide</option>';
+          html += '<option value="judge_decide"' + (selections.validation_overrides[groupHashKey] === 'judge_decide' ? ' selected' : '') + '>Let the agent decide</option>';
         }
         html += '</select>';
       }

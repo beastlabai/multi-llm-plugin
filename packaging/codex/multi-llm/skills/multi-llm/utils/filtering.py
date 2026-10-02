@@ -1,9 +1,11 @@
 """Shared filtering logic for suggestions and code fixes."""
 
+import copy
 import sys
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 from .human_decisions import is_judge_source
+from .judge_vocab import JUDGE_DECIDE, JUDGE_DECIDE_ITEM_IDS, upgrade_legacy
 from .importance import get_highest_importance
 
 # Import error type constants (will be added to validation.py)
@@ -176,12 +178,12 @@ def filter_items(
         # A "Let the agent decide" marker is an affirmative "route to the judge"
         # request and must never be auto-approved, regardless of the underlying
         # validation_status. This guards against conflicting overrides (e.g. a
-        # group marked claude_decide that also got promoted to "valid", or a
-        # group-level "valid" override alongside a per-suggestion claude_decide)
+        # group marked judge_decide that also got promoted to "valid", or a
+        # group-level "valid" override alongside a per-suggestion judge_decide)
         # where the marker would otherwise fall through the status-specific
         # branches below. An explicit bulk *skip* still wins, matching the
         # needs-human-decision branch.
-        if group.get("claude_decide") and not (
+        if group.get(JUDGE_DECIDE) and not (
             effective["skip_all"] or skip_human_review
         ):
             needs_human.append(group)
@@ -212,10 +214,10 @@ def filter_items(
             # needs_human (never auto-approved/flipped to valid). Bulk *skip*
             # (--skip-all-human) is still honoured below — an explicit skip is a
             # safety choice, not a default-skip candidate.
-            # NOTE: claude_decide is also handled by the status-agnostic guard
+            # NOTE: judge_decide is also handled by the status-agnostic guard
             # at the top of the loop; this branch-local check is a redundant
             # safety net kept for self-documentation.
-            if group.get("claude_decide") and not (
+            if group.get(JUDGE_DECIDE) and not (
                 effective["skip_all"] or skip_human_review
             ):
                 needs_human.append(group)
@@ -337,7 +339,7 @@ def validate_batch_mode_honored(
     return is_valid, warnings
 
 
-def validate_claude_decide_items_honored(
+def validate_judge_decide_items_honored(
     human_review_config: Dict[str, Any],
     recorded_decisions: Dict[str, Any],
 ) -> Tuple[bool, List[str]]:
@@ -347,10 +349,11 @@ def validate_claude_decide_items_honored(
     by the host agent following the prose in the apply instructions; this is a
     post-hoc audit (a sibling of :func:`validate_batch_mode_honored`), not a
     hard pre-flight gate. For every id in
-    ``human_review_config["claude_decide_item_ids"]`` it checks that a decision
+    ``human_review_config["judge_decide_item_ids"]`` it checks that a decision
     was recorded and that the decision's ``batch_context.decision_source`` is
-    ``claude_auto_decide`` or ``claude_auto_decide_salvage`` (i.e. it was
-    actually routed to the judge, not prompted or skipped).
+    ``judge_auto_decide`` or ``judge_auto_decide_salvage`` (i.e. it was
+    actually routed to the judge, not prompted or skipped). A config or a
+    record in the ``claude_*`` spelling an earlier version wrote reads the same.
 
     Args:
         human_review_config: The human_review_config from orchestrator output.
@@ -365,9 +368,8 @@ def validate_claude_decide_items_honored(
     """
     warnings: List[str] = []
 
-    item_ids = [
-        gid for gid in human_review_config.get("claude_decide_item_ids", []) if gid
-    ]
+    config = upgrade_legacy(copy.deepcopy(dict(human_review_config or {})))
+    item_ids = [gid for gid in config.get(JUDGE_DECIDE_ITEM_IDS, []) if gid]
     if not item_ids:
         return True, []  # Nothing pre-marked, nothing to audit.
 
@@ -390,7 +392,7 @@ def validate_claude_decide_items_honored(
             warnings.append(
                 f"WARNING: report-pre-marked 'Let the agent decide' item {gid} was "
                 f"recorded with decision_source {source!r}, not a judge-agent "
-                f"source (claude_auto_decide / claude_auto_decide_salvage). It may have "
+                f"source (judge_auto_decide / judge_auto_decide_salvage). It may have "
                 f"been prompted instead of auto-decided."
             )
 
