@@ -421,6 +421,19 @@ worker_receipt_is_null_provenance: verified
 #     0731 build, $0.0108 / $1.28 per M, which also hangs under opencode
 #     `--variant`).
 #   * NEVER `anthropic/claude-haiku-4.5` through OpenRouter ($1 / $5 per M).
+# SUBSCRIPTIONS FIRST (operator decision 2026-10-02). codex and claude-code run
+# on the developer's OWN subscription whenever the credential file `creds.yaml`
+# allowlists for them is present (`harness.default_host_creds` -> `fallback`),
+# and fall back to the OpenRouter pins above only when it is absent:
+#   * codex on the Codex subscription -> `gpt-6-luna`, reasoning effort `high`.
+#   * claude-code on the Claude subscription -> `sonnet`.
+#   * opencode declares no `subscription:` block and ALWAYS uses OpenRouter.
+# The pin lives in each host's `subscription.model` block, read by
+# `entrypoint.subscription_model` and recorded by `harness`. MLLM_E2E_HOST_CREDS
+# still forces one mode on every row. Nothing from a subscription credential is
+# ever written to a tracked file: the copied files are scrubbed by value from
+# every artifact (`entrypoint.fallback_secret_values`), and `runs/` and
+# `records/` are gitignored.
 # A per-run override goes through MLLM_HOST_MODEL (outranks row and host pins).
 # Slugs named in attempt logs, `detail:` and `usd:` rows below are HISTORY; only
 # `model:` blocks are live. Pins switched 2026-10-01 carry `provenance: unmeasured`
@@ -686,6 +699,21 @@ hosts:
         on that row may be the model rather than our shim. The verified Anthropic
         fallback is `anthropic/claude-haiku-4.5` ($1/M in) — measured working
         through the skin on 2026-08-14.
+    # THE SUBSCRIPTION PIN (operator decision 2026-10-02, see the MODEL POLICY
+    # block above `hosts:`): the model a `fallback` row drives on the developer's
+    # own Claude subscription. The OpenRouter `model:` pins above, row pins
+    # included, are OpenRouter slugs and do not apply on that path.
+    subscription:
+      model:
+        slug: "sonnet"
+        provenance: unmeasured
+        resolved_on: "2026-10-02"
+        why: >
+          Claude Code on the subscription costs nothing on the OpenRouter key,
+          and the memory rule for test runs is Haiku or Sonnet there. Sonnet is
+          the one the 2026-10-01 three-host run drove through all eight phases
+          (plans/2026-10-01-three-host-racing-run.md); `sonnet` is Claude Code's
+          own alias, which its catalog resolves.
     auth_check: none
     auth_check_note: >
       claude-code declares no auth_check (utils/providers/claude_code.py:115), so
@@ -3455,6 +3483,21 @@ hosts:
         on that row may be the model rather than our shim. The verified Anthropic
         fallback is `anthropic/claude-haiku-4.5` ($1/M in) — measured working
         through the skin on 2026-08-14.
+    # THE SUBSCRIPTION PIN (operator decision 2026-10-02, see the MODEL POLICY
+    # block above `hosts:`): the model a `fallback` row drives on the developer's
+    # own Codex subscription, and the reasoning effort the entrypoint writes into
+    # that row's synthesized `config.toml` (`model_reasoning_effort`).
+    subscription:
+      model:
+        slug: "gpt-6-luna"
+        effort: "high"
+        provenance: unmeasured
+        resolved_on: "2026-10-02"
+        why: >
+          OPERATOR CHOICE (2026-10-02): codex test runs use GPT-6 Luna at high
+          effort on the user's Codex subscription. `gpt-6-luna` is in `codex
+          debug models` with `high` among its supported reasoning levels
+          (measured 2026-10-02, codex-cli 0.159.3); there is no `gpt-6.1-luna`.
     auth_check:
       probe: ["codex", "login", "status"]
       provenance: verified
@@ -4427,6 +4470,10 @@ hosts:
         on that row may be the model rather than our shim. The verified Anthropic
         fallback is `anthropic/claude-haiku-4.5` ($1/M in) — measured working
         through the skin on 2026-08-14.
+    # NO `subscription:` BLOCK, on purpose (operator decision 2026-10-02):
+    # opencode always runs on the OpenRouter key. `MLLM_E2E_HOST_CREDS=fallback`
+    # can still force its stored auth.json in, which then drives the OpenRouter
+    # `model:` pin above with the entrypoint's warning.
     auth_check:
       probe: ["opencode", "auth", "list"]
       provenance: verified

@@ -1,0 +1,280 @@
+"""Subscription-first credentials for the container lanes, pinned offline.
+
+Operator decision 2026-10-02 (``tests/container/host_matrix.yaml``'s MODEL POLICY
+block): codex and claude-code run on the developer's OWN subscription whenever
+the credential file ``creds.yaml`` allowlists for them is present, and on the
+OpenRouter key otherwise; opencode always runs on the key. codex drives
+``gpt-6-luna`` at reasoning effort ``high``, claude-code drives ``sonnet``.
+
+Every one of those facts is only ever exercised by a credentialed Docker run, so
+a regression would be found by an invoice or by a subscription token in a run
+artifact. This module grades the resolver, the model pin, the codex config the
+entrypoint writes and the two by-value scrubs with no daemon, no network and no
+real credential.
+
+**The filename is deliberately not ``test_container_*``**, for the reason
+``test_host_model_pin.py`` gives: that glob is what the image ships and what the
+marker-gating check enumerates.
+"""
+
+from __future__ import annotations
+
+import base64
+import importlib
+import json
+import sys
+import tomllib
+from pathlib import Path
+
+import pytest
+
+from .container import entrypoint
+from .container import harness
+
+#: Retyped on purpose: this is the assertion, so reading it from the matrix it
+#: guards would make the module agree with any edit at all.
+CODEX_SUBSCRIPTION = {"slug": "gpt-6-luna", "effort": "high"}
+CLAUDE_SUBSCRIPTION = {"slug": "sonnet"}
+
+
+def _fake_jwt(claims: dict) -> str:
+    """An unsigned three-part token whose payload is CLAIMS (never verified)."""
+    def part(obj: dict) -> str:
+        raw = json.dumps(obj).encode("utf-8")
+        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+    return f"{part({'alg': 'none'})}.{part(claims)}.sig"
+
+
+@pytest.fixture
+def creds_policy(monkeypatch, tmp_path):
+    """Point `creds.yaml`'s allowlist at files under TMP_PATH, none created yet."""
+    files = {host: tmp_path / host / "credential.json"
+             for host in ("codex", "claude-code", "opencode")}
+    policy = {"allowlist": {host: [{"source": str(path), "dest": f"/run/creds/{host}",
+                                    "mode": "ro"}]
+                            for host, path in files.items()}}
+    monkeypatch.setattr(harness, "load_creds_policy", lambda: policy)
+    monkeypatch.delenv(harness.HOST_CREDS_ENV, raising=False)
+
+    def present(host: str) -> Path:
+        files[host].parent.mkdir(parents=True, exist_ok=True)
+        files[host].write_text("{}", encoding="utf-8")
+        return files[host]
+
+    return present
+
+
+class TestTheSubscriptionPins:
+    def test_codex_drives_luna_at_high(self):
+        pin = harness.subscription_pin("codex")
+        assert {k: pin.get(k) for k in CODEX_SUBSCRIPTION} == CODEX_SUBSCRIPTION
+        assert harness.subscription_model_spec("codex") == "gpt-6-luna:high"
+
+    def test_claude_code_drives_sonnet(self):
+        pin = harness.subscription_pin("claude-code")
+        assert pin.get("slug") == CLAUDE_SUBSCRIPTION["slug"]
+        assert not pin.get("effort")
+
+    def test_opencode_has_no_subscription_pin(self):
+        """Operator decision: opencode always runs on the OpenRouter key."""
+        assert harness.subscription_pin("opencode") == {}
+
+    def test_the_openrouter_pins_are_untouched(self):
+        """Subscription-first adds a path; it does not move the key path's pins."""
+        hosts = harness.load_host_matrix()
+        assert hosts["codex"]["model"]["slug"] == "deepseek/deepseek-v4.1-flash"
+        assert hosts["claude-code"]["model"]["slug"] == "openai/gpt-6-luna"
+
+
+class TestWhichCredentialARowTakes:
+    def test_a_present_codex_login_selects_the_subscription(self, creds_policy):
+        creds_policy("codex")
+        assert harness.default_host_creds("codex") == "fallback"
+
+    def test_a_present_claude_login_selects_the_subscription(self, creds_policy):
+        creds_policy("claude-code")
+        assert harness.default_host_creds("claude-code") == "fallback"
+
+    def test_an_absent_login_falls_back_to_openrouter(self, creds_policy):
+        assert harness.default_host_creds("codex") == "openrouter"
+        assert harness.default_host_creds("claude-code") == "openrouter"
+
+    def test_opencode_takes_the_key_even_with_a_stored_login(self, creds_policy):
+        creds_policy("opencode")
+        assert harness.default_host_creds("opencode") == "openrouter"
+
+    def test_the_env_still_forces_one_mode_on_every_row(self, creds_policy,
+                                                         monkeypatch):
+        creds_policy("codex")
+        monkeypatch.setenv(harness.HOST_CREDS_ENV, "openrouter")
+        assert harness.default_host_creds("codex") == "openrouter"
+        monkeypatch.setenv(harness.HOST_CREDS_ENV, "fallback")
+        assert harness.default_host_creds("opencode") == "fallback"
+
+
+class TestTheModelTheEntrypointDrives:
+    @pytest.fixture(autouse=True)
+    def _no_override(self, monkeypatch):
+        monkeypatch.delenv("MLLM_HOST_MODEL", raising=False)
+
+    def _entry(self, host: str) -> dict:
+        return dict(harness.load_host_matrix()[host])
+
+    def test_a_subscription_row_drives_the_subscription_pin(self):
+        assert entrypoint.pinned_model(self._entry("codex"), None,
+                                       "fallback") == "gpt-6-luna"
+        assert entrypoint.pinned_model(self._entry("claude-code"), None,
+                                       "fallback") == "sonnet"
+
+    def test_a_row_pin_does_not_apply_on_the_subscription(self):
+        """Row pins are OpenRouter slugs; a vendor catalog may not serve them."""
+        entry = self._entry("claude-code")
+        row = {"model": {"slug": "openai/gpt-6-luna"}}
+        assert entrypoint.pinned_model(entry, row, "fallback") == "sonnet"
+        assert entrypoint.pinned_model(entry, row) == "openai/gpt-6-luna"
+
+    def test_the_key_path_is_unchanged(self):
+        assert entrypoint.pinned_model(self._entry("codex")) == \
+            "deepseek/deepseek-v4.1-flash"
+
+    def test_a_host_without_a_pin_keeps_its_openrouter_slug(self):
+        entry = self._entry("opencode")
+        assert entrypoint.pinned_model(entry, None, "fallback") == \
+            entry["model"]["slug"]
+
+    def test_the_operator_override_still_wins(self, monkeypatch):
+        monkeypatch.setenv("MLLM_HOST_MODEL", "gpt-6-sol")
+        assert entrypoint.pinned_model(self._entry("codex"), None,
+                                       "fallback") == "gpt-6-sol"
+
+    def test_the_effort_rides_with_the_pin(self):
+        assert entrypoint.subscription_model(self._entry("codex")) == \
+            ("gpt-6-luna", "high")
+
+    def test_a_malformed_effort_is_refused(self):
+        entry = {"subscription": {"model": {"slug": "x", "effort": 'high"\nevil'}}}
+        with pytest.raises(SystemExit):
+            entrypoint.subscription_model(entry)
+
+    def test_the_host_argv_names_the_subscription_model(self):
+        entry = self._entry("codex")
+        row = next(r for r in entry["rows"] if r.get("args"))
+        argv = entrypoint.build_host_argv(entry, row, "fallback")
+        assert argv[argv.index("--model") + 1] == "gpt-6-luna"
+        argv = entrypoint.build_host_argv(entry, row)
+        assert argv[argv.index("--model") + 1] == "deepseek/deepseek-v4.1-flash"
+
+
+class TestTheCodexConfigCarriesTheEffort:
+    def test_the_effort_is_a_root_key(self):
+        """After the `[projects."…"]` header it would belong to that table."""
+        config = tomllib.loads(entrypoint._codex_fallback_config("high"))
+        assert config["model_reasoning_effort"] == "high"
+        assert config["projects"][str(entrypoint.WORKSPACE)]["trust_level"] == "trusted"
+
+    def test_no_effort_writes_no_key(self):
+        config = tomllib.loads(entrypoint._codex_fallback_config(""))
+        assert "model_reasoning_effort" not in config
+
+
+class TestTheRecordNamesTheSubscriptionModel:
+    @pytest.fixture(autouse=True)
+    def _no_daemon(self, monkeypatch):
+        monkeypatch.setattr(harness, "cli_version",
+                            lambda cli, image=harness.DEFAULT_IMAGE: None)
+
+    def _record(self, host: str, row_id: str, creds: str, out_dir: Path) -> dict:
+        row = harness.Row(row_id=row_id, lane="host", host=host, creds=creds)
+        result = harness.RowResult(row=row, exit_code=0, wall_clock_s=1.0,
+                                   out_dir=out_dir)
+        return harness.row_record(row, result)
+
+    def test_a_codex_subscription_row_records_luna_high(self, tmp_path):
+        record = self._record("codex", "codex-ask", "fallback", tmp_path)
+        assert record.get("model") == "gpt-6-luna"
+        assert record.get("effort") == "high"
+
+    def test_the_record_schema_admits_the_effort(self):
+        """`rows[]` is `additionalProperties: false`; an unlisted key fails it."""
+        rows = harness.load_record_schema()["properties"]["rows"]["items"]
+        assert rows["additionalProperties"] is False
+        assert "effort" in rows["properties"]
+
+    def test_a_key_row_records_the_openrouter_pin(self, tmp_path):
+        record = self._record("codex", "codex-ask", "openrouter", tmp_path)
+        assert record.get("model") == "deepseek/deepseek-v4.1-flash"
+        assert "effort" not in record
+
+
+class TestNoSubscriptionValueSurvivesTheScrub:
+    """Both by-value scrubs reach nested tokens and the claims inside a JWT."""
+
+    EMAIL = "dev@ex.io"          # under 20 characters, on purpose
+    ACCOUNT = "acct-0123456789abcdef0123"
+
+    def _codex_auth(self) -> dict:
+        return {"OPENAI_API_KEY": None,
+                "tokens": {"id_token": _fake_jwt({"email": self.EMAIL,
+                                                  "sub": self.ACCOUNT}),
+                           "access_token": "at-" + "x" * 40,
+                           "refresh_token": "rt-" + "y" * 40,
+                           "account_id": self.ACCOUNT},
+                "last_refresh": "2026-10-02T00:00:00Z"}
+
+    def test_the_host_lane_scrub(self, tmp_path):
+        path = tmp_path / "auth.json"
+        path.write_text(json.dumps(self._codex_auth()), encoding="utf-8")
+        secrets = entrypoint.fallback_secret_values([path])
+        for value in (self.EMAIL, self.ACCOUNT, "at-" + "x" * 40, "rt-" + "y" * 40):
+            assert value in secrets
+        assert secrets == sorted(secrets, key=len, reverse=True)
+
+    def test_the_live_lane_scrub(self, monkeypatch):
+        monkeypatch.syspath_prepend(str(harness.HERE))
+        monkeypatch.setattr(sys, "path", list(sys.path))  # undo the module's insert
+        live_provider = importlib.import_module("live_provider")
+        material = json.dumps({"claudeAiOauth": {"accessToken": "sk-ant-" + "a" * 40,
+                                                 "refreshToken": "sk-ant-" + "b" * 40,
+                                                 "subscriptionType": "max"}})
+        secrets = live_provider.credential_strings(material)
+        assert "sk-ant-" + "a" * 40 in secrets
+        assert "sk-ant-" + "b" * 40 in secrets
+        codex = live_provider.credential_strings(json.dumps(self._codex_auth()))
+        assert self.EMAIL in codex and self.ACCOUNT in codex
+        text = f"logged in as {self.EMAIL} ({self.ACCOUNT})"
+        redacted = live_provider.redact(text, [material, *codex])
+        assert self.EMAIL not in redacted and self.ACCOUNT not in redacted
+
+
+class TestTheLiveLaneUsesTheSubscription:
+    @pytest.fixture
+    def live(self, monkeypatch):
+        monkeypatch.delenv(harness.LIVE_CREDS_ENV, raising=False)
+        return importlib.import_module("tests.test_container_live_provider")
+
+    def test_a_present_login_selects_the_subscription_variant(self, live,
+                                                              monkeypatch):
+        monkeypatch.setattr(harness, "subscription_available", lambda cli: True)
+        monkeypatch.setattr(harness, "subscription_sources",
+                            lambda cli: [Path(f"/home/dev/{cli}.json")])
+        codex = live._subscription_variant("codex")
+        assert codex["model"] == "gpt-6-luna:high"
+        assert codex["credential_file"] == ".codex/auth.json"
+        claude = live._subscription_variant("claude-code")
+        assert claude["model"] == "sonnet"
+        assert "ANTHROPIC_BASE_URL" in claude["env_drop"]
+
+    def test_opencode_never_takes_one(self, live, monkeypatch):
+        monkeypatch.setattr(harness, "subscription_available", lambda cli: True)
+        assert live._subscription_variant("opencode") is None
+
+    def test_the_key_can_be_forced(self, live, monkeypatch):
+        monkeypatch.setattr(harness, "subscription_available", lambda cli: True)
+        monkeypatch.setenv(harness.LIVE_CREDS_ENV, "openrouter")
+        assert live._subscription_variant("codex") is None
+
+    def test_the_openrouter_fallbacks_follow_the_policy(self, live):
+        """Never Haiku through OpenRouter; v4.1-flash rather than the 0731 build."""
+        assert live.LIVE_MODEL_OVERRIDES["claude-code"]["slug"] == "openai/gpt-6-luna"
+        assert live.LIVE_MODEL_OVERRIDES["codex"]["slug"] == \
+            "deepseek/deepseek-v4.1-flash"

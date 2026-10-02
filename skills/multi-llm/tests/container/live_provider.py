@@ -33,6 +33,8 @@ from ``/opt/mllm/skill``.
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
 import json
 import os
 import shutil
@@ -119,6 +121,58 @@ ENV_CAPTURE_PREFIXES = (
 ENV_CAPTURE_NAMES = (
     "DO_NOT_TRACK", "NO_UPDATE_NOTIFIER", "NPM_CONFIG_UPDATE_NOTIFIER",
 )
+
+
+def _jwt_claims(token: str) -> list[str]:
+    """Identifying string claims in a JWT payload (ids, emails); [] when not a JWT."""
+    parts = token.split(".")
+    if len(parts) != 3 or not parts[1]:
+        return []
+    try:
+        claims = json.loads(base64.urlsafe_b64decode(
+            (parts[1] + "=" * (-len(parts[1]) % 4)).encode("ascii")))
+    except (ValueError, binascii.Error, UnicodeError):
+        return []
+    found: list[str] = []
+    _walk_strings(claims, found, decode_jwt=False)
+    return found
+
+
+def _walk_strings(node, found: list, decode_jwt: bool = True) -> None:
+    if isinstance(node, str):
+        if len(node) >= 20 or ("@" in node and len(node) >= 5):
+            found.append(node)
+        if decode_jwt:
+            found.extend(_jwt_claims(node))
+    elif isinstance(node, dict):
+        for value in node.values():
+            _walk_strings(value, found, decode_jwt)
+    elif isinstance(node, list):
+        for value in node:
+            _walk_strings(value, found, decode_jwt)
+
+
+def credential_strings(material: str) -> list[str]:
+    """Every value a file credential's bytes could leak, for by-value redaction.
+
+    NESTED, not only top-level: a subscription file keeps its tokens one level
+    down (codex `tokens.{id_token,access_token,refresh_token,account_id}`,
+    claude-code `claudeAiOauth.{accessToken,refreshToken}`), so reading only
+    top-level strings scrubbed none of them. Plus the claims inside any JWT
+    (codex's `id_token` carries the account email base64-encoded) and any
+    email-shaped value, because a CLI that prints "logged in as …" emits those
+    in clear. Not JSON: the whole blob, already in the caller's list, is all
+    there is.
+    """
+    try:
+        document = json.loads(material)
+    except ValueError:
+        return []
+    found: list[str] = []
+    _walk_strings(document, found)
+    # Longest first, so a value containing another is replaced before the
+    # shorter one splits it.
+    return sorted(set(found), key=len, reverse=True)
 
 
 def redact(text: str, secrets) -> str:
@@ -440,12 +494,7 @@ def main() -> int:
     #: config prints the token, not the JSON.
     secrets = [value for value in (key, material) if value]
     if material:
-        try:
-            for value in json.loads(material).values():
-                if isinstance(value, str):
-                    secrets.append(value)
-        except (ValueError, AttributeError):
-            pass  # not JSON: the whole blob is already in `secrets`
+        secrets.extend(credential_strings(material))
 
     # ---- Egress: enforced, or the row does not run ------------------------ #
     #
@@ -528,22 +577,6 @@ def main() -> int:
                 config_roots[var] = str(target)
         evidence["config_roots"] = config_roots
 
-        # A file credential lands in this run's disposable HOME, at the path the
-        # CLI's own resolution rule looks in, owned by this process and mode
-        # 0600. It is never the developer's file: the bytes came through the
-        # environment precisely because that file cannot be mounted readable
-        # here, and nothing in this container can write back to it.
-        if args.credential_file:
-            target = home / args.credential_file
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(material, encoding="utf-8")
-                target.chmod(0o600)
-            except OSError as exc:
-                return bail(f"could not stage {args.cli}'s credential at "
-                            f"{target} ({exc})", EXIT_CONTROL_UNAVAILABLE)
-            evidence["credential_staged_at"] = str(target)
-
         # A SEED THIS LANE MUST NOT RENDER IS NOT THE SAME AS A CLI THAT NEEDS
         # NO SEED, and the evidence says which one this row is. `--no-seed`
         # means the tree exists and is a stub artifact; the absent-tree case
@@ -572,6 +605,26 @@ def main() -> int:
         if problems:
             return bail("seed pre-flight failed: " + "; ".join(problems),
                         EXIT_CONTROL_UNAVAILABLE)
+
+        # A file credential lands in this run's disposable HOME, at the path the
+        # CLI's own resolution rule looks in, owned by this process and mode
+        # 0600. STAGED LAST, after the seed is rendered, its drops applied and
+        # its guards run: codex's seed ships a stub `.codex/auth.json` at the
+        # very path a subscription credential lands on, so a credential staged
+        # first was overwritten by the copy and then deleted by the drop. It is
+        # never the developer's file: the bytes came through the environment
+        # precisely because that file cannot be mounted readable here, and
+        # nothing in this container can write back to it.
+        if args.credential_file:
+            target = home / args.credential_file
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(material, encoding="utf-8")
+                target.chmod(0o600)
+            except OSError as exc:
+                return bail(f"could not stage {args.cli}'s credential at "
+                            f"{target} ({exc})", EXIT_CONTROL_UNAVAILABLE)
+            evidence["credential_staged_at"] = str(target)
 
         # ---- Argv and env come from the SHIPPED adapter ------------------- #
         from utils.provider_registry import get_provider

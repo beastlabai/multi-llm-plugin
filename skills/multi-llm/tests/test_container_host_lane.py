@@ -41,6 +41,7 @@ tier claim something it cannot observe.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -693,23 +694,26 @@ def _refuse_empty_lane(config, utc: str) -> None:
         "make e2e-container-host-discovery", returncode=1)
 
 
-#: The credential mode the credentialed rows run under. `openrouter` (the
-#: default) is the dedicated, spend-capped key; `fallback` is C6a's documented
-#: subscription / vendor-auth mode (`creds.yaml`'s `:ro` mounts, copied into
-#: the tmpfs $HOME by the entrypoint), which forwards NO OpenRouter variable into
-#: the container (`harness.build_run_argv`). Typed per run, never a default:
-#: `MLLM_E2E_HOST_CREDS=fallback` with an `MLLM_HOST_MODEL` the vendor account
-#: serves (the matrix pins are OpenRouter slugs). The fixture still reads the
-#: OpenRouter key's own usage around each row, so a fallback row that somehow
-#: spent on the key shows up as a non-zero delta rather than as nothing.
-HOST_CREDS_ENV = "MLLM_E2E_HOST_CREDS"
+#: The credential mode the credentialed rows run under, PER HOST since the
+#: operator decision of 2026-10-02 (host_matrix.yaml's MODEL POLICY block).
+#: `fallback` is C6a's subscription / vendor-auth mode (`creds.yaml`'s `:ro`
+#: mounts, copied into the tmpfs $HOME by the entrypoint), which forwards NO
+#: OpenRouter variable into the container (`harness.build_run_argv`) and drives
+#: the host's `subscription.model` pin; `openrouter` is the dedicated,
+#: spend-capped key. codex and claude-code take `fallback` whenever their
+#: allowlisted credential file is present, else `openrouter`; opencode has no
+#: subscription pin and always takes `openrouter` (`harness.default_host_creds`).
+#: `MLLM_E2E_HOST_CREDS` forces one mode on every row. When the OpenRouter key is
+#: also set, the fixture still reads its usage around a fallback row, so one that
+#: somehow spent on the key shows up as a non-zero delta rather than as nothing.
+HOST_CREDS_ENV = harness.HOST_CREDS_ENV
 
 
-def _host_lane_creds() -> str:
-    value = (os.environ.get(HOST_CREDS_ENV) or "openrouter").strip()
+def _host_lane_creds(host: str) -> str:
+    value = harness.default_host_creds(host)
     if value not in ("openrouter", "fallback"):
         pytest.fail(f"{HOST_CREDS_ENV}={value!r}: the credentialed rows run under "
-                    f"`openrouter` (the default) or `fallback`, nothing else")
+                    f"`openrouter` or `fallback`, nothing else")
     return value
 
 
@@ -724,7 +728,11 @@ def graded(request, posture, utc):
     enforced by the party doing the billing.
     """
     host, row_id = request.param
-    if not os.environ.get("OPENROUTER_API_KEY"):
+    # THE MODE FIRST: a subscription row needs no OpenRouter key at all, so the
+    # key is required only of a row that will spend on it.
+    creds = _host_lane_creds(host)
+    have_key = bool(os.environ.get("OPENROUTER_API_KEY"))
+    if creds == "openrouter" and not have_key:
         # A named skip, a census entry, and — unless the operator asked for an
         # empty lane — a non-zero `not-run`, because a lane that executed nothing
         # must never read as a lane that passed everything.
@@ -747,11 +755,16 @@ def graded(request, posture, utc):
         pytest.fail(f"host lane: {exc}. Declare `cost_budget_usd` on the row.")
     # FAIL CLOSED on the opening readback: nothing has been spent on this row
     # yet, so stopping the lane here costs nothing and brackets nothing wrongly.
-    try:
-        before = _key_usage()
-    except host_spend.SpendUnobservable as exc:
-        pytest.exit(f"host lane: refusing to start {row_id} — {exc}",
-                    returncode=1)
+    # A subscription row with no key in the environment has no OpenRouter spend
+    # to bracket: the vendor's own quota is its ceiling, which this rig cannot
+    # read (the entrypoint's credential census says so).
+    before = None
+    if have_key:
+        try:
+            before = _key_usage()
+        except host_spend.SpendUnobservable as exc:
+            pytest.exit(f"host lane: refusing to start {row_id} — {exc}",
+                        returncode=1)
 
     # The provider fan-out identity: every model call the workflow makes is
     # dispatched by name through /opt/mllm/bin and lands on the stub. The HOST's
@@ -845,7 +858,6 @@ def graded(request, posture, utc):
     if not specs:
         specs = [runner_spec] if runner_spec else []
 
-    creds = _host_lane_creds()
     row = harness.Row(
         row_id=row_id, lane="host", host=host, creds=creds,
         # The fan-out, unioned with the runner (and the host on the negative
@@ -886,10 +898,11 @@ def graded(request, posture, utc):
     # the lane's remaining headroom. Bounded by a poll interval plus the
     # endpoint's settling lag, NOT a hard cap; see `host_spend`'s docstring.
     # It brackets BOTH attempts of a never-started retry, which reuse the name.
-    watch = host_spend.RowWatch.for_row(
+    watch = (host_spend.RowWatch.for_row(
         matrix_row, _Spend.ledger, before,
         stop_row=lambda: harness._stop_container(harness.container_name(row)))
-    with watch:
+        if before is not None else None)
+    with (watch or contextlib.nullcontext()):
         result = harness.run_row(row, posture=posture, utc=utc)
     # `result.attempt` is 2 on a row the driver re-ran after a never-started
     # first attempt (`harness.never_started_signature`), and 1 on every other
@@ -902,14 +915,15 @@ def graded(request, posture, utc):
     # FAIL CLOSED on the closing readback too — but without throwing away the
     # row that already ran: it is graded, and the NEXT row is refused, because
     # the lane total is now a number nobody measured.
-    try:
-        after = _key_usage()
-    except host_spend.SpendUnobservable as exc:
-        _Spend.ledger.unobservable = f"{row_id}'s closing readback: {exc}"
-        after = None
+    after = None
+    if before is not None:
+        try:
+            after = _key_usage()
+        except host_spend.SpendUnobservable as exc:
+            _Spend.ledger.unobservable = f"{row_id}'s closing readback: {exc}"
     if after is not None:
         _Spend.ledger.charge(before, after)
-    if watch.tripped:
+    if watch is not None and watch.tripped:
         # A distinct outcome, on disk beside the bundle and in the census, and
         # a failure of every test graded on this row: a row stopped mid-turn
         # proves nothing about the product either way.
@@ -1630,7 +1644,8 @@ class TestTheSpendWasMeasured:
                 f"{result.row.row_id}: --creds fallback runs on the vendor's own "
                 f"subscription, whose spend this rig cannot read (the credential "
                 f"census says so); the OpenRouter key is not in the container, and "
-                f"the fixture's own readback of it brackets the row regardless")
+                f"when it is set in the driver's environment the fixture's own "
+                f"readback of it still brackets the row")
         usage = result.usage
         assert usage, f"{result.row.host}: no usage readback recorded for the row"
         assert usage.get("delta_usd") is not None, (

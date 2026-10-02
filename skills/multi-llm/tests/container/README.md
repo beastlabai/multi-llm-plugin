@@ -692,10 +692,24 @@ worker's stdio at `{phase}/orchestrator-run.log`, never at the descriptors it wa
 handed, so the `uv` wrapper that exec'd it captures nothing. The payload is on
 the launcher's receipt, the verdict is in the worker's log and `.status.json`.
 
-**Subscription (documented fallback).** Narrow `:ro` mounts copied into a tmpfs
-`$HOME`. `~/.claude.json` is **never** mounted — 87 KB of per-project history and
-MCP definitions that routinely embed third-party keys — a minimal one is
-synthesized instead.
+**Subscription (the default for codex and claude-code since 2026-10-02).** Narrow
+`:ro` mounts copied into a tmpfs `$HOME`. `~/.claude.json` is **never** mounted —
+87 KB of per-project history and MCP definitions that routinely embed third-party
+keys — a minimal one is synthesized instead. A codex or claude-code row takes this
+path whenever the file `creds.yaml` allowlists for it exists
+(`harness.default_host_creds`), and the OpenRouter key otherwise; opencode always
+takes the key. On it, codex drives `gpt-6-luna` with `model_reasoning_effort =
+"high"` written into its synthesized `config.toml`, and claude-code drives
+`sonnet` — the `subscription.model` pins in `host_matrix.yaml`, which outrank the
+OpenRouter row and host pins there (`MLLM_HOST_MODEL` still outranks both).
+`MLLM_E2E_HOST_CREDS=openrouter|fallback` forces one mode on every row. A
+subscription row needs no `OPENROUTER_API_KEY`; when one is set its usage is still
+bracketed, so a row that somehow spent on it shows a delta. The live provider lane
+follows the same rule (`LIVE_SUBSCRIPTIONS` in `test_container_live_provider.py`,
+`MLLM_LIVE_CREDS=openrouter` to force the key). Nothing from a subscription file
+reaches a tracked file: the copied bytes, every nested token and the claims inside
+a JWT (an `id_token` carries the account email) are scrubbed by value from every
+artifact, and `runs/` and `records/` are gitignored.
 
 > **Required, not recommended:** the host lane runs on a **dedicated OpenRouter key
 > carrying a key-level spend limit.** Our own guard (`host_spend.py`) is two

@@ -144,6 +144,67 @@ def load_host_matrix() -> dict:
     return dict((document or {}).get("hosts") or {})
 
 
+#: The one variable that FORCES a credential mode on every credentialed host-lane
+#: row (`openrouter` or `fallback`). Unset, each host picks its own mode through
+#: `default_host_creds`.
+HOST_CREDS_ENV = "MLLM_E2E_HOST_CREDS"
+
+#: The live provider lane's counterpart: `openrouter` forces every row back onto
+#: the OpenRouter key; unset, a CLI with a subscription pin uses the developer's
+#: own subscription whenever its credential file is present.
+LIVE_CREDS_ENV = "MLLM_LIVE_CREDS"
+
+
+def subscription_pin(host: str) -> dict:
+    """`host_matrix.yaml`'s `subscription.model` block for HOST, or `{}`.
+
+    A host WITHOUT this block never runs on a subscription by default (opencode,
+    by operator decision 2026-10-02): its rows stay on the OpenRouter key.
+    """
+    entry = load_host_matrix().get(host) or {}
+    return dict(((entry.get("subscription") or {}).get("model")) or {})
+
+
+def subscription_sources(host: str) -> list[Path]:
+    """The developer-side credential files `creds.yaml` allowlists for HOST.
+
+    Paths only: nothing here opens a file. The same list `fallback_binds` mounts,
+    so "is the subscription available" and "what gets mounted" cannot disagree.
+    """
+    entries = (load_creds_policy().get("allowlist") or {}).get(host) or []
+    return [Path(str(e["source"])).expanduser() for e in entries if e.get("source")]
+
+
+def subscription_available(host: str) -> bool:
+    """True when HOST has a subscription pin and every allowlisted file exists."""
+    if not str(subscription_pin(host).get("slug") or "").strip():
+        return False
+    sources = subscription_sources(host)
+    return bool(sources) and all(path.is_file() for path in sources)
+
+
+def default_host_creds(host: str) -> str:
+    """The credential mode a credentialed host-lane row runs under.
+
+    Operator decision 2026-10-02: codex and claude-code use the developer's own
+    subscription when its credential file is present (`fallback`), else the
+    OpenRouter key; opencode has no subscription pin and always takes the key.
+    `MLLM_E2E_HOST_CREDS` still forces one mode for every row.
+    """
+    forced = (os.environ.get(HOST_CREDS_ENV) or "").strip()
+    if forced:
+        return forced
+    return "fallback" if subscription_available(host) else "openrouter"
+
+
+def subscription_model_spec(host: str) -> str:
+    """The subscription pin as a `model[:effort]` spec, or "" when HOST has none."""
+    pin = subscription_pin(host)
+    slug = str(pin.get("slug") or "").strip()
+    effort = str(pin.get("effort") or "").strip()
+    return f"{slug}:{effort}" if slug and effort else slug
+
+
 @functools.lru_cache(maxsize=1)
 def load_capabilities() -> dict:
     """`hosts/capabilities.yaml`, for the provenance a green row can promote."""
@@ -2400,8 +2461,20 @@ def row_record(row: Row, result: RowResult, outcome: str | None = None,
             if matrix_row.get("id") == row.row_id:
                 pin = ((matrix_row.get("model") or {}).get("slug")) or pin
                 break
+        # ON A SUBSCRIPTION ROW THE OPENROUTER PINS ARE NOT WHAT RAN: the host
+        # drove its `subscription.model`, the slug the entrypoint resolves first
+        # on that path. A host with no such block keeps the OpenRouter pin, which
+        # is also what the entrypoint falls back to (with its warning).
+        effort = ""
+        if entry["credential_mode"] == "fallback":
+            subscription = subscription_pin(row.host)
+            if subscription.get("slug"):
+                pin = subscription["slug"]
+                effort = str(subscription.get("effort") or "")
         if pin and entry["credential_mode"] in ("openrouter", "fallback"):
             entry["model"] = str(pin)
+            if effort:
+                entry["effort"] = effort
     version = cli_version(row.host or row.cli, image)
     if version:
         entry["cli_version"] = version

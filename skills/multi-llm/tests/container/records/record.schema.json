@@ -49,7 +49,8 @@
           },
           "mode": {"type": "string"},
           "cli_version": {"type": "string"},
-          "model": {"type": "string", "description": "The PINNED slug from host_matrix.yaml, never a run-time 'cheapest' lookup."},
+          "model": {"type": "string", "description": "The PINNED slug from host_matrix.yaml, never a run-time 'cheapest' lookup. On a `fallback` (subscription) row it is the host's `subscription.model` slug when the host declares one."},
+          "effort": {"type": "string", "description": "The reasoning effort pinned beside a subscription model (`subscription.model.effort`), present only when one is declared."},
           "credential_mode": {"enum": ["openrouter", "fallback", "none", "discovery-only"]},
           "outcome": {"enum": ["pass", "fail", "skip", "not-run", "cap-hit"]},
           "reason": {
