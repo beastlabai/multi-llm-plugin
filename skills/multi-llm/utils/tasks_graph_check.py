@@ -19,18 +19,19 @@ Advisory: it prints one ``[TASKS_GRAPH_WARNING]`` line per finding and exits 0
 unless the file cannot be read (2), so a finding never fails a phase that did
 write its edits.
 
-A task's dependencies are read from its ``**Dependencies**:`` line alone (what
-``update_plan_tasks.generate_tasks_markdown`` renders for every task), never from
-its prose: ``TaskDecomposer._extract_dependencies`` also matches "after",
-"requires" and "depends on" anywhere in the section, so "ticks after 3 frames"
-became a dependency on ``T3`` and the check warned about an id nobody wrote
-(adversarial review, 2026-10-02).
+A task's dependencies are read from its dependency line alone (the
+``**Dependencies**:`` ``update_plan_tasks.generate_tasks_markdown`` renders for
+every task), never from its prose, by
+:func:`utils.task_decomposer.declared_dependencies` — the reader ``implement``
+parses with, so the two cannot disagree about a graph. Before it was shared, the
+decomposer also matched "after", "requires" and "depends on" anywhere in the
+section, so "ticks after 3 frames" became a dependency on ``T3`` (adversarial
+review, 2026-10-02).
 """
 
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 from typing import List, Optional, Sequence
 
@@ -43,36 +44,14 @@ except ImportError:  # pragma: no cover - direct-script import shim
 
 WARNING_PREFIX = "[TASKS_GRAPH_WARNING]"
 
-#: A task's metadata line naming its dependencies: ``**Dependencies**: T001, T002``
-#: as rendered, plus the ``**Depends on**:`` spelling an edit batch may write.
-#: Anchored to a whole line and to the bold label, so a sentence never matches.
-_DEPENDENCIES_LINE = re.compile(
-    r"^\s*(?:[-*]\s+)?\*{2}\s*(?:dependencies|depends\s+on)\s*"
-    r"(?::\s*\*{2}|\*{2}\s*:)(?P<ids>[^\n]*)$",
-    re.IGNORECASE | re.MULTILINE,
-)
-
-
-class _RenderedDependencies(TaskDecomposer):
-    """The task decomposer with its dependency reading narrowed to the line.
-
-    Everything else (sections, ids, their order) is the decomposer's own, so the
-    ids checked are the ids ``implement`` parses.
-    """
-
-    def _extract_dependencies(self, description: str) -> List[str]:
-        deps: List[str] = []
-        for line in _DEPENDENCIES_LINE.finditer(description):
-            for token in re.findall(r"\bT?\d+\b", line.group("ids")):
-                normalized = token if token.startswith("T") else f"T{token}"
-                if normalized not in deps:
-                    deps.append(normalized)
-        return deps
-
 
 def tasks_graph_warnings(tasks_markdown: str) -> List[str]:
-    """Every inconsistency in a rendered ``tasks.md``'s task graph; empty is fine."""
-    tasks = _RenderedDependencies().parse_plan(tasks_markdown)
+    """Every inconsistency in a rendered ``tasks.md``'s task graph; empty is fine.
+
+    Parsed by ``implement``'s own ``TaskDecomposer``, so the sections, ids,
+    order and dependencies checked are the ones ``implement`` runs.
+    """
+    tasks = TaskDecomposer().parse_plan(tasks_markdown)
     if not tasks:
         return []
     records = [{"id": task.id, "depends_on": list(task.depends_on)} for task in tasks]
