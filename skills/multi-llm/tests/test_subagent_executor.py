@@ -1071,6 +1071,21 @@ class TestBatchOutcome:
         (tmp_path / "validation_batch_0.json").write_text("{not json", encoding="utf-8")
         assert executor.task_is_complete(task, str(tmp_path)) is False
 
+    def test_a_batch_result_for_another_grouping_is_not_treated_as_complete(self, tmp_path):
+        """#25: a previous round's `validation_batch_0.json` parses and validates,
+        but names group hashes this task was not assigned -- it must re-dispatch."""
+        task = _validation_batch(tmp_path, hashes=("aaaa000000000000",))
+        result = {
+            "groups": [{"group_index": 0, "group_hash": "bbbb111111111111",
+                        "status": "valid", "reason": "old round", "confidence": 1.0}],
+            "metadata": {"model": "m", "schema_version": "2.1"},
+        }
+        (tmp_path / "validation_batch_0.json").write_text(json.dumps(result), encoding="utf-8")
+        assert executor.task_is_complete(task, str(tmp_path)) is False
+        result["groups"][0]["group_hash"] = "aaaa000000000000"
+        (tmp_path / "validation_batch_0.json").write_text(json.dumps(result), encoding="utf-8")
+        assert executor.task_is_complete(task, str(tmp_path)) is True
+
     def test_the_report_is_invisible_to_the_reaggregation_glob(self):
         """A non-model JSON file in a phase dir must be excluded everywhere."""
         base = Path(__file__).parent.parent
@@ -3971,6 +3986,31 @@ class TestInvalidModelIsFatal:
         assert executor._recorded_runners(str(tmp_path)) == {
             "a": "codex:gpt-5.5", "f": "codex:gpt-5.5",
         }
+
+    def test_a_recorded_runner_pins_only_the_round_it_was_recorded_for(self, tmp_path):
+        """#29: a forced re-review is a new round with new inputs; the previous
+        run's runner (the session model, recorded before the project set
+        `driver.subagent_runner`) must not pin it. Same key, or no key at all
+        (an older report), still pins."""
+        report = {"tasks": [{"task_id": "a", "runner": "codex:gpt-6-astra", "status": "ok"}],
+                  "pin_key": "old-round"}
+        path = tmp_path / executor.BATCH_REPORT_FILENAME
+        path.write_text(json.dumps(report), encoding="utf-8")
+        assert executor._recorded_runners(str(tmp_path), pin_key="new-round") == {}
+        assert executor._recorded_runners(str(tmp_path), pin_key="old-round") == {
+            "a": "codex:gpt-6-astra"}
+        del report["pin_key"]
+        path.write_text(json.dumps(report), encoding="utf-8")
+        assert executor._recorded_runners(str(tmp_path), pin_key="new-round") == {
+            "a": "codex:gpt-6-astra"}
+
+    def test_the_pin_key_follows_the_round_and_the_inputs(self, tmp_path):
+        one = [_validation_batch(tmp_path, hashes=("aaaa000000000000",))]
+        two = [_validation_batch(tmp_path, hashes=("bbbb111111111111",))]
+        assert executor._pin_key(one) == executor._pin_key(list(one))
+        assert executor._pin_key(one) != executor._pin_key(two)
+        changed = [dict(one[0], inputs={**one[0]["inputs"], "reviewed_code_sha256": "zz"})]
+        assert executor._pin_key(one) != executor._pin_key(changed)
 
     def test_a_config_repair_replaces_the_rejected_runner_on_re_invocation(
         self, tmp_path, runner_env

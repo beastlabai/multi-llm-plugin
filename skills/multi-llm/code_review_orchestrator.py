@@ -93,6 +93,7 @@ from utils.review_orchestrator_base import (
     retire_salvage_artifacts,
     retire_stale_validation,
     retire_stale_validation_round,
+    retire_unselected_results,
     salvage_failure_fields,
     salvage_failure_kind,
     salvage_source,
@@ -3201,7 +3202,8 @@ def generate_review_report(
     if validated_groups:
         lines.append(
             f"**Groups:** {len(validated_groups)} "
-            "(issues that report the same finding are one group)"
+            "(issues that report the same finding are one group; `group_index` "
+            "in the JSON files counts from 0)"
         )
 
     # Add validation summary if available. §6 T6.1: the four counts come from
@@ -4641,6 +4643,11 @@ async def main(argv: Optional[List[str]] = None) -> int:
             cwd=git_root,
         )
 
+        # A model whose spec changed since the last run (`codex:x` becoming
+        # `codex:x:high`) has no slot in this run to retire its old files, and a
+        # later `--reaggregate` would read them back into this run's report (#30).
+        retire_unselected_results(str(detach_phase_dir), model_specs)
+
         # Run reviews - agents receive the resolved, ordered scope (labelled
         # with its source), the diff set, and the base ref
         results = await run_all_reviews(
@@ -4945,7 +4952,10 @@ async def main(argv: Optional[List[str]] = None) -> int:
                 grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
                 # D7: the previous run's verdicts belong to the grouping this write
                 # replaces; retired in the same step so no later reaggregate finds them.
-                retire_stale_validation(str(grouped_path.parent), reason="grouped.json rewritten by a re-run")
+                # Round-wide, not `validation.json` alone: the batch replies are that
+                # grouping's verdicts too, and a survivor is skipped as "already
+                # complete" by the executor (2026-10-02, #25).
+                retire_stale_validation_round(str(grouped_path.parent), reason="grouped.json rewritten by a re-run")
                 with open(grouped_path, 'w', encoding='utf-8') as f:
                     json.dump(save_groups_payload(grouped_list), f, indent=2)
                 print(f"Grouped issues saved to: {grouped_path}")
@@ -5032,8 +5042,8 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
                     print(f"\nValidation prepared for subagent execution.")
                     print(f"Groups to validate: {stats.get('total_groups', len(grouped))}")
-                    print(f"HIGH priority: {stats.get('high_count', 0)}")
-                    print(f"Normal priority: {stats.get('normal_count', 0)}")
+                    print(f"HIGH priority groups: {stats.get('high_count', 0)}")
+                    print(f"Normal priority groups: {stats.get('normal_count', 0)}")
                     # Fully resolved: a skill-dir placeholder no shell expands is
                     # the bug. Still starts with `uv run`, so Claude Code's
                     # Bash(uv:*) allow rule keeps matching.
@@ -5099,7 +5109,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
             else:
                 validated_groups_for_report = []
                 grouped_path = get_output_paths(plan_path, "code_review_grouped", phase='code-review')
-                retire_stale_validation(str(grouped_path.parent), reason="review returned no issues")
+                retire_stale_validation_round(str(grouped_path.parent), reason="review returned no issues")
                 grouped_path.write_text(json.dumps(save_groups_payload([]), indent=2), encoding="utf-8")
                 validation_path = get_output_paths(plan_path, "code_review_validation", phase='code-review')
                 validation_path.write_text("[]\n", encoding="utf-8")

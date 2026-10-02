@@ -1894,6 +1894,35 @@ class TestIntentToAddUntracked:
         after_diff = _run(["git", "diff", "HEAD", "--", "new.py"], temp_git_repo).stdout
         assert after_diff == ""
 
+    def test_never_writes_the_real_index(self, temp_git_repo, monkeypatch):
+        """#23: the mark lives in a private index copy exported as
+        GIT_INDEX_FILE. The user's `.git/index` is byte-identical throughout, the
+        variable is restored, and no copy is left in the git dir."""
+        import os
+
+        monkeypatch.delenv("GIT_INDEX_FILE", raising=False)
+        (temp_git_repo / "new.py").write_text("print('hello')\n", encoding="utf-8")
+        real = temp_git_repo / ".git" / "index"
+        before = real.read_bytes()
+
+        with intent_to_add_untracked(["new.py"]) as touched:
+            assert touched == ["new.py"]
+            assert os.environ["GIT_INDEX_FILE"] != str(real)
+            assert real.read_bytes() == before
+            assert "hello" in _run(["git", "diff", "HEAD", "--", "new.py"], temp_git_repo).stdout
+            # What a user's own terminal sees (no inherited variable): untracked.
+            clean_env = {k: v for k, v in os.environ.items() if k != "GIT_INDEX_FILE"}
+            status = subprocess.run(
+                ["git", "status", "--porcelain", "--", "new.py"],
+                cwd=str(temp_git_repo), capture_output=True, text=True, env=clean_env,
+            ).stdout
+            assert status.startswith("??")
+
+        assert "GIT_INDEX_FILE" not in os.environ
+        assert real.read_bytes() == before
+        assert not [p for p in (temp_git_repo / ".git").iterdir()
+                    if p.name.startswith("multi-llm-index.")]
+
     def test_skips_already_staged(self, temp_git_repo):
         """Files already staged (with content) should not be touched; they
         remain staged after the context exits."""

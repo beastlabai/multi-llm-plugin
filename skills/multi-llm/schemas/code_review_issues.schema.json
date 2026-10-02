@@ -11,7 +11,7 @@
       "importance": { "type": "string", "enum": ["high", "medium", "low"] },
       "file": { "type": "string" },
       "line_range": {
-        "type": "array",
+        "type": ["array", "null"],
         "items": { "type": "integer" },
         "minItems": 2,
         "maxItems": 2

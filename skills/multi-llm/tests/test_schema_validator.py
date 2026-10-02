@@ -195,6 +195,17 @@ class TestValidateCodeReviewIssues:
         assert len(errors) == 0 or "Schema not found" in str(errors)
 
 
+    def test_a_null_line_range_is_a_file_level_finding_not_a_warning(self):
+        """#23: two reviewers answered `"line_range": null` for a finding about a
+        file that does not exist yet; every consumer already reads it as absent."""
+        base = {"title": "t", "desc": "d", "importance": "high",
+                "file": "index.html", "type": "missing"}
+        assert validate_code_review_issues([{**base, "line_range": None}]) == (True, [])
+        # A range of the wrong type still warns.
+        is_valid, errors = validate_code_review_issues([{**base, "line_range": "1-2"}])
+        assert not is_valid and errors
+
+
 class TestDropNonRecordEntries:
     """The guard that acts on the verdict ``validate_code_review_issues`` prints.
 

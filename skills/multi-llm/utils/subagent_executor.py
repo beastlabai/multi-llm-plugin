@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import inspect
 import json
 import os
@@ -884,6 +885,11 @@ class BatchReport:
     #: by another host since — by content, never by mtime. Empty (and absent
     #: from the report) when nothing was persisted.
     batch_provenance: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    #: :func:`_pin_key` of the task list this report dispatched. A recorded
+    #: runner is a pin only for a re-dispatch of the *same* round and inputs
+    #: (:func:`_recorded_runners`); a report that carries no key (written before
+    #: it existed) pins as it always did. Empty means "not recorded".
+    pin_key: str = ""
     invoker: str = "executor"
 
     @property
@@ -938,6 +944,7 @@ class BatchReport:
             "batch_provenance": {
                 task_id: dict(row) for task_id, row in self.batch_provenance.items()
             },
+            **({"pin_key": self.pin_key} if self.pin_key else {}),
             "counts": self.counts(),
             "usage": self.usage_totals(),
             "tasks": [o.to_dict() for o in self.outcomes],
@@ -4905,7 +4912,40 @@ def task_is_complete(task: Dict[str, Any], phase_dir: str) -> bool:
         data = json.loads(target.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError):
         return False
-    return not validate_result(str(task.get("kind", "")), data)
+    if validate_result(str(task.get("kind", "")), data):
+        return False
+    return not _result_names_foreign_groups(task, data)
+
+
+def _result_names_foreign_groups(task: Dict[str, Any], data: Any) -> bool:
+    """Whether a batch result echoes a group hash this task was not assigned.
+
+    A task file that lists ``group_ids`` (a validation or revalidation batch)
+    says which groups its result may speak about. A file left by an earlier round
+    answers a different grouping, so it must not count as done: measured
+    2026-10-02 on a Codex ``review-code --force``, a ``validation_batch_0.json``
+    from the previous day (judged against an empty repo, hashes of the old
+    groups) parsed and schema-validated, was skipped as "already complete", and
+    the merge then discarded every row as a foreign ``group_hash`` -- all three
+    groups ended ``validation_failed`` and the new code was never validated.
+    The same test the merge applies (``merge_batch_validations`` routes by
+    ``group_hash``), moved in front of the re-dispatch decision. A result row
+    with no hash is not foreign (the merge falls back to its index for those).
+    """
+    assigned = task.get("group_ids")
+    if not isinstance(assigned, list) or not assigned or not isinstance(data, dict):
+        return False
+    groups = data.get("groups")
+    if not isinstance(groups, list):
+        return False
+    allowed = {str(item) for item in assigned}
+    for row in groups:
+        if not isinstance(row, dict):
+            continue
+        echoed = row.get("group_hash") or row.get("group_id")
+        if echoed and str(echoed) not in allowed:
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -7422,7 +7462,9 @@ def run_tasks(
             report.write()
         return report
 
-    recorded = _recorded_runners(phase_dir, kind)
+    pin_key = _pin_key(tasks)
+    report.pin_key = pin_key
+    recorded = _recorded_runners(phase_dir, kind, pin_key=pin_key)
     # §7.3a: read before this dispatch overwrites the report, so a resumed
     # (skipped) task keeps the provenance its original dispatch recorded.
     previous_provenance = _recorded_provenance(phase_dir, kind) or {}
@@ -8036,7 +8078,31 @@ async def _gather(
     )
 
 
-def _recorded_runners(phase_dir: str, kind: str = "") -> Dict[str, str]:
+def _pin_key(tasks: Sequence[Dict[str, Any]]) -> str:
+    """What a recorded runner is a pin *for*: the round plus the batch inputs.
+
+    :func:`subagent_tasks.task_round` fingerprints which groups each output
+    answers; the first task's ``inputs`` (plan, grouped file, diff base, reviewed
+    code) say what they were judged against. A forced re-review that changes
+    either is a new dispatch, not a re-dispatch.
+    """
+    try:
+        from .subagent_tasks import task_round
+    except ImportError:  # pragma: no cover
+        from utils.subagent_tasks import task_round
+    first_inputs = next(
+        (t.get("inputs") for t in tasks if isinstance(t, dict) and t.get("inputs")),
+        None,
+    )
+    canonical = json.dumps(
+        [task_round(tasks), first_inputs], sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _recorded_runners(
+    phase_dir: str, kind: str = "", *, pin_key: str = ""
+) -> Dict[str, str]:
     """Runners pinned by a previous batch report, for a re-dispatch (D3o).
 
     **A recorded runner whose recorded status is fatal is not a pin, it is a
@@ -8058,6 +8124,15 @@ def _recorded_runners(phase_dir: str, kind: str = "") -> Dict[str, str]:
     :func:`_batch_report_filename`. Omitted by the one caller that can never
     collide (``_authoritative_validator_runner``, always a validation-family
     kind), where it defaults to the bare name exactly as before.
+
+    ``pin_key`` (2026-10-02, #29): the current batch's :func:`_pin_key`. A report
+    that recorded a *different* key was written for another round or other
+    inputs, and its runners are not pins for this batch. Measured on a Codex
+    ``review-code --force``: the previous day's validation report recorded the
+    session model (``codex:gpt-6-astra``, before the project set
+    ``driver.subagent_runner: claude-code:sonnet``), and the forced re-review
+    re-used that pin instead of the configured runner. A report with no key, or a
+    caller that passes none, pins exactly as before.
     """
     path = Path(phase_dir) / _batch_report_filename(kind)
     if not path.exists():
@@ -8065,6 +8140,9 @@ def _recorded_runners(phase_dir: str, kind: str = "") -> Dict[str, str]:
     try:
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return {}
+    recorded_key = document.get("pin_key") if isinstance(document, dict) else None
+    if pin_key and recorded_key and recorded_key != pin_key:
         return {}
     rows = [
         row for row in document.get("tasks", [])
