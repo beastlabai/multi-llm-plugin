@@ -1246,15 +1246,31 @@ class JailDenials:
 
 _DENIAL_LINE = re.compile(r"permission denied|\[errno 13\]|os error 13|eacces", re.IGNORECASE)
 _PATH_TOKEN = re.compile(r"([^\s'\"`:,;()\[\]{}<>|]+)")
+#: The one shape every measured denial takes: the tool that was denied names
+#: itself at column 0, then a colon (``/bin/bash: line 1: f.txt: Permission
+#: denied``, ``sh: 1: cannot create f.txt: …``, ``rm: cannot remove 'x': …``,
+#: ``fatal: Unable to create '.git/index.lock': …``, ``sed: couldn't open
+#: temporary file ./sedAbC: …``, ``tee: x: …``, Python's terminal
+#: ``PermissionError: [Errno 13] …`` and node's ``Error: EACCES: permission
+#: denied, open 'x'``, bracketed when logged). A test suite's own report of
+#: a ``PermissionError`` has none of it: pytest indents the exception with
+#: ``E   ``, the short summary starts ``FAILED <id> - ``, a test id carries
+#: the words inside brackets, and a printed ``str(exc)`` starts with
+#: ``[Errno 13]`` (fix round 4, 2026-10-02: such a line used to resolve to a
+#: declared path or a new root name, and a nothing-moved batch read FAILED).
+_DENIAL_TOOL_PREFIX = re.compile(r"^\[?[\w./+-]+: ")
 
 
 def _denied_paths_in(output: str) -> List[str]:
     """The paths named on ``Permission denied`` / ``[Errno 13]`` lines of one
-    command's output (``sh: 1: cannot create f.txt: Permission denied``,
-    ``PermissionError: [Errno 13] Permission denied: 'p.txt'``)."""
+    command's output, in the shapes the measured denials take (a tool naming
+    itself at column 0, :data:`_DENIAL_TOOL_PREFIX`): ``sh: 1: cannot create
+    f.txt: Permission denied``, ``PermissionError: [Errno 13] Permission
+    denied: 'p.txt'``. A line of test output that merely quotes such an
+    error names nothing."""
     found: List[str] = []
     for line in (output or "").splitlines():
-        if not _DENIAL_LINE.search(line):
+        if not _DENIAL_TOOL_PREFIX.match(line) or not _DENIAL_LINE.search(line):
             continue
         quoted = re.findall(r"'([^']+)'|\"([^\"]+)\"", line)
         candidates = [a or b for a, b in quoted]
