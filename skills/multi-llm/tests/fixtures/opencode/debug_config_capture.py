@@ -2,7 +2,7 @@
 """Capture ``opencode debug config`` offline for plan §8 T8.1 ($0, no model call).
 
 Writes ``debug_config.<version>.json`` beside this file, in the
-``auth_list.1.18.32.json`` style (``opencode_version``, ``argv``, ``captured``,
+``auth_list.<version>.json`` style (``opencode_version``, ``argv``, ``captured``,
 ``cases``). Every case runs the real binary from a scratch HOME under a cleared
 environment (``env -i`` equivalent: only the variables the case names, plus
 ``HOME``/``PATH``), with ``OPENCODE_DISABLE_MODELS_FETCH=1`` and stdin
@@ -23,6 +23,7 @@ is a separate, container-lane step and is not run by this script.
 usage: TMPDIR=<scratch> debug_config_capture.py [--bin PATH]
 """
 import argparse
+import datetime
 import json
 import os
 import shutil
@@ -260,7 +261,7 @@ def main():
         "opencode_version": version,
         "argv": ["opencode", "debug", "config"],
         "captured": (
-            "2026-09-25, host, scratch HOME per case under a cleared env "
+            f"{datetime.date.today().isoformat()}, debug_config_capture.py: host, scratch HOME per case under a cleared env "
             "(HOME, PATH=/usr/bin:/bin, OPENCODE_DISABLE_MODELS_FETCH=1 plus the "
             "case's own env), stdin /dev/null, no network, no model call; every "
             "apiKey a sk-canary-not-a-key-<n> canary; scratch paths rewritten to /rig"
