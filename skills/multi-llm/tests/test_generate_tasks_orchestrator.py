@@ -300,6 +300,10 @@ class TestBothInvokers:
         assert executor_result == native_result, (
             "whichever invoker ran, the persisted document must be identical"
         )
+        # Issue #17: the log never carries a raw `uv run … review-tasks` line
+        # beside the next-command block; only that block names the next step.
+        assert "Next: uv run" not in captured
+        assert "multi_llm.py review-tasks" not in captured
         # And both closed the loop.
         for plan in (executor_plan, native_plan):
             assert "<!-- TASKS_FILE:" in plan.read_text(encoding="utf-8")

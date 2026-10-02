@@ -622,6 +622,18 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
             "poll": ["status", "--view", "run", "--wait"],
             "abort": ["status", "--abort"],
             "instructions": ["util", "instructions"],
+            # The one lookup a server makes after an exit 3, to hand the user a
+            # command they can type: `util next-command <plan> --blocked
+            # <mode> --host <id>` prints the same-phase `--resume` command in
+            # this route's spelling and carries it in the result line's
+            # `user_resume`. Additive within schema v5 (no bump): a server that
+            # finds the key absent skips the lookup, so an older surface only
+            # loses the command, never the result.
+            "resume": {
+                "argv": ["util", "next-command"],
+                "option": "--blocked",
+                "result_key": "user_resume",
+            },
             "host_option": "--host",
             "run_id_option": RUN_ID_OPTION,
             # The variable the plugin sets to the model the host session is

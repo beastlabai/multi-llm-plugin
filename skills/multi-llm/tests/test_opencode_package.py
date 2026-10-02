@@ -1693,6 +1693,22 @@ script = json.loads(
 )
 argv = sys.argv[1:]
 
+# `util next-command <plan> --blocked <mode> --host <id>` (issue #5): answered
+# from the environment and logged apart, so it takes no step of the run's own
+# script and no line of the argv log the rows count.
+if "--blocked" in argv:
+    with open(log + ".resume", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(argv) + "\n")
+    if os.environ.get("STUB_RESUME_FAIL"):
+        sys.exit(1)
+    plan, mode = argv[argv.index("--") + 5], argv[argv.index("--blocked") + 1]
+    command = os.environ.get("STUB_RESUME_COMMAND") or (
+        "/multi-llm --" + mode + " " + plan + " --resume")
+    print("MULTI_LLM_RESULT: " + json.dumps({
+        "mode": "util next-command", "state": "done", "exit": 0, "artifacts": [],
+        "next": None, "user_resume": {"phase": mode, "command": command}}))
+    sys.exit(0)
+
 with open(log, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(argv) + "\n")
 # One line per child when a row asks for it, in spawn order: the variables
@@ -4650,8 +4666,153 @@ class TestPlanSigil:
             [launch, done],
         )
         argv = _dispatcher_argv(calls[0])
-        assert argv[1] == str(Path(result["anchor"]) / "plans" / "x.md")
+        # The sigil off, nothing resolved: the user's own spelling reaches the
+        # dispatcher (issue #15), and the child runs in the anchor.
+        assert argv[1] == "plans/x.md"
         assert not any(token.startswith("@") for token in argv)
+
+
+class TestPlanSpelling:
+    """Issue #15 (2026-10-02): the dispatcher received the anchor-resolved path,
+    so every next command printed it absolute although the user typed a relative
+    one. The launch now carries the user's spelling; the child's cwd is the anchor."""
+
+    def test_the_spelling_helper_strips_the_sigil_and_resolves_nothing(self, built_package):
+        paths = node_json(
+            """
+            emit({
+              relative: T.planSpelling("plans/x.md"),
+              sigil: T.planSpelling("@plans/x.md"),
+              dotted: T.planSpelling("./plans/../plans/x.md"),
+              absolute: T.planSpelling("/abs/x.md"),
+              bare: T.planSpelling("@"),
+              empty: T.planSpelling(""),
+            })
+            """,
+            built_package,
+        )
+        assert paths == {"relative": "plans/x.md", "sigil": "plans/x.md",
+                         "dotted": "./plans/../plans/x.md", "absolute": "/abs/x.md",
+                         "bare": "@", "empty": ""}
+
+    def test_a_continuation_of_the_same_plan_keeps_the_typed_spelling(
+        self, built_package, uv_stub, tmp_path
+    ):
+        absolute = str(tmp_path / "plans" / "x.md")
+        launch = {"exit": 0, "stdout": [
+            "run_id: R1", "log: /l", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+        first = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":'
+            + json.dumps(f"uv run -- python multi_llm.py review-plan {absolute} "
+                         "--reaggregate --host opencode") + "}"]}
+        second_launch = {"exit": 0, "stdout": [
+            "run_id: R2", "log: /l2", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":null}']}
+        _, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "plans/x.md", "question": "",
+             "extra_flags": []},
+            [launch, first, second_launch, done],
+        )
+        argvs = [_dispatcher_argv(call) for call in calls]
+        launches = [argv for argv in argvs if "--detach" in argv]
+        polls = [argv for argv in argvs if "--run-id" in argv]
+        assert [argv[1] for argv in launches] == ["plans/x.md", "plans/x.md"]
+        assert all(argv[1] == absolute for argv in polls)
+
+
+class TestResumeCommand:
+    """Issue #5: a blocked write phase leaves the user a command they can type.
+
+    The dispatcher builds the host-spelled `--resume` command
+    (`util next-command --blocked`); this plugin only asks and relays it."""
+
+    IMPLEMENT = {"mode": "implement", "plan": "plans/x.md", "question": "",
+                 "extra_flags": []}
+
+    LAUNCH = {"exit": 0, "stdout": [
+        "run_id: R", "log: /l", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+    BLOCKED = {"exit": 3, "stdout": [
+        'MULTI_LLM_RESULT: {"state":"needs-human","exit":3,"artifacts":[],'
+        '"next":null,"error":"batch 0 refused"}']}
+
+    def _resume_calls(self, uv_stub):
+        path = Path(str(uv_stub.log_path) + ".resume")
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+    def test_the_result_carries_it_and_the_message_says_how_to_use_it(
+        self, built_package, uv_stub
+    ):
+        result, calls = uv_stub.run(
+            built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED])
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        assert result["resume_command"] == "/multi-llm --implement plans/x.md --resume"
+        assert result["message"].endswith(surface["needs_human_message"]["resume"])
+        assert result.get("next") is None
+        assert len(calls) == 2  # the launch and the poll: nothing re-ran
+
+    def test_it_asks_with_the_users_spelling_the_word_and_the_host(
+        self, built_package, uv_stub
+    ):
+        uv_stub.run(built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED])
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        resume = surface["dispatcher"]["resume"]
+        (asked,) = self._resume_calls(uv_stub)
+        assert _dispatcher_argv(asked) == resume["argv"] + [
+            "plans/x.md", resume["option"], "implement",
+            surface["dispatcher"]["host_option"], surface["host"]]
+
+    def test_the_agent_facing_option_does_not_read_as_a_command(
+        self, built_package, uv_stub
+    ):
+        result, _ = uv_stub.run(
+            built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED])
+        human = result["options"][-1]["human"]
+        assert human.startswith("(a note to you, not a command")
+        assert all("resume_command" not in option for option in result["options"])
+
+    def test_only_an_exit_3_asks(self, built_package, uv_stub):
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":null}']}
+        result, _ = uv_stub.run(built_package, self.IMPLEMENT, [self.LAUNCH, done])
+        assert "resume_command" not in result
+        assert self._resume_calls(uv_stub) == []
+
+    def test_a_failed_lookup_leaves_the_result_as_it_was(self, built_package, uv_stub):
+        result, _ = uv_stub.run(
+            built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED],
+            extra_env={"STUB_RESUME_FAIL": "1"})
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        assert "resume_command" not in result
+        assert not result["message"].endswith(surface["needs_human_message"]["resume"])
+        assert result["state"] == surface["dispatcher"]["states"]["needs_human"]
+
+    def test_a_surface_without_the_entry_skips_the_lookup(self, built_package, uv_stub):
+        """Additive within schema v5: an older surface only loses the command."""
+        assert "resume" in json.loads(
+            (built_package / "dist" / "cli-surface.json").read_text())["dispatcher"]
+        out = node_json(
+            """
+            const bare = structuredClone(surface)
+            delete bare.dispatcher.resume
+            emit(await T.fetchResumeCommand({
+              values: { word: "implement", plan: "/a/x.md", planArg: "x.md" },
+              surface: bare, env: {}, uv: "/nonexistent", anchor: "/tmp",
+            }))
+            """,
+            built_package,
+        )
+        assert out is None
+
+    def test_the_plugin_spells_none_of_the_lookup(self, built_package):
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        resume = surface["dispatcher"]["resume"]
+        source = (REPO_ROOT / "packaging" / "opencode" / "src" / "index.mjs").read_text()
+        for word in [*resume["argv"], resume["option"]]:
+            assert f'"{word}"' not in source, word
 
 
 # ===========================================================================

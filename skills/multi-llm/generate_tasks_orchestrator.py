@@ -68,7 +68,6 @@ from utils.cli_common import (
     EXIT_NEEDS_HUMAN,
     EXIT_OK,
     build_parent_parser,
-    dispatcher_command,
     record_artifact,
     record_next,
 )
@@ -539,11 +538,11 @@ def consume_document(plan_path: Path, result_path: str) -> int:
         phase_dir, step="complete", tasks_total=len(tasks), tasks_done=len(tasks)
     )
     print(f"\nTask generation complete: {len(tasks)} task(s) in {tasks_path}")
-    print(
-        "Next: "
-        + dispatcher_command("review-tasks", plan_path)
-        + "  (optional task review before implementation)"
-    )
+    # No "Next: uv run … review-tasks" line here (issue #17, 2026-10-02): it sat
+    # beside `[NEXT_COMMAND]` in the log, and a dispatcher command is not a
+    # command for the user. The next step, `review-tasks` included as the
+    # optional one, is the `[NEXT_COMMAND]` block `multi_llm.main` prints in the
+    # host's own spelling (`utils/next_phase.py`).
     return EXIT_OK
 
 

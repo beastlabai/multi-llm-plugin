@@ -38,7 +38,12 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
   `user_next_step`.** They are two different things. `MULTI_LLM_RESULT.next`,
   when it is not `null`, *continues this phase*: the phase has not finished (a
   `--reaggregate` or a `status` poll is still owed), so copy it exactly, and
-  report nothing as a next step that the run did not name. `user_next_step`
+  report nothing as a next step that the run did not name. Copy it character
+  for character, never re-typed: its plan path as printed, no flag added or
+  dropped (not a `--plan-file` spelling, not without the `--quick --yes` it
+  carries), and read the dispatcher's output whole: piping it through `cut`,
+  `head` or `grep` chops the very `MULTI_LLM_RESULT` line you must read.
+  `user_next_step`
   *starts the next phase*: it is the user's to type, never yours to run, and it
   ends the report as the next rule says.
 - **End the report with the next phase's command — copied, never composed.**
@@ -63,12 +68,23 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
       own completion write included, because run earlier it answers from a
       phase not yet recorded: the dispatcher's
       `util next-command "<plan-path>" --after <the mode you ran>`, behind the
-      same `uv run … multi_llm.py` prefix as every command in the core. Its
-      `MULTI_LLM_RESULT` line carries `user_next_step`, and the
-      `[NEXT_COMMAND]` lines above it hold the same strings.
+      same `uv run … multi_llm.py` prefix as every command in the core, with the
+      plan path as the user typed it. Run it even when a `[NEXT_COMMAND]` line
+      is already on screen: a `--reaggregate` (or any other `next`) run names
+      the plan by its absolute path, and the command is printed with the path
+      the user typed. Its `MULTI_LLM_RESULT` line carries `user_next_step`, and
+      the `[NEXT_COMMAND]` lines above it hold the same strings.
+    - *When a lookup answers nothing.* A lookup whose output has no
+      `[NEXT_COMMAND]` or `[WORKFLOW_COMPLETE]` line, and whose result line has
+      no `user_next_step`, found no next command: that is its whole answer.
+      Write nothing under `### Next Steps` for it, and do not fill the gap: not
+      with a status view's `suggested next:` (a phase name, not a command), not
+      with a default, and never with a command assembled from the plan path.
+      (2026-10-02: a Claude Code `--status` ran the lookup, got nothing, and
+      the report invented a command from the plan path.)
 
-    `ask` and `init` are not workflow phases: on every host they run no
-    lookup and end with no command.
+    `ask`, `init` and `status` are not workflow phases: on every host they run
+    no lookup and end with no command.
   - *What to write under `### Next Steps`.* `user_next_step.command` alone in a
     fenced block, copied character for character. Any `optional_before`
     entries follow it, never precede it: the line "Optional, before that:",

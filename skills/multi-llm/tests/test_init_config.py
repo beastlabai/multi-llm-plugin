@@ -347,6 +347,37 @@ class TestEndToEndInit:
         assert "gemini" in merged["providers"]
         _reset_cache()
 
+    @pytest.mark.parametrize("host, route_env, expected", [
+        (None, None, "/multi-llm:multi-llm --review-plan <plan> --quick"),
+        ("claude-code", None, "/multi-llm:multi-llm --review-plan <plan> --quick"),
+        ("codex", None,
+         "Use the multi-llm skill with exactly these arguments: "
+         "--review-plan <plan> --quick"),
+        ("codex", "package", "$multi-llm:multi-llm --review-plan <plan> --quick"),
+        ("opencode", None, "/multi-llm --review-plan <plan> --quick"),
+        ("opencode", "package", "/multi-llm --review-plan <plan> --quick"),
+    ])
+    def test_the_smoke_test_is_spelled_for_the_host_init_ran_from(
+        self, tmp_path, monkeypatch, capsys, host, route_env, expected
+    ):
+        """Issue #12 (2026-10-02): every host was told the Claude Code spelling."""
+        import modes
+
+        _git_init(tmp_path)
+        monkeypatch.setattr(init_config, "_available_providers", lambda cfg: ["claude-code"])
+        monkeypatch.delenv(modes.ROUTE_ENV, raising=False)
+        monkeypatch.delenv("MULTI_LLM_HOST", raising=False)
+        if route_env:
+            monkeypatch.setenv(modes.ROUTE_ENV, route_env)
+        _reset_cache()
+        argv = ["--dir", str(tmp_path)] + (["--host", host] if host else [])
+        assert init_config.main(argv) == 0
+        out = capsys.readouterr().out
+        assert f"Smoke-test it, e.g.:  {expected}\n" in out
+        if host in ("codex", "opencode"):
+            assert "/multi-llm:multi-llm" not in out
+        _reset_cache()
+
     def test_no_providers_block_warning_on_subsequent_run(self, tmp_path, monkeypatch, capsys):
         _git_init(tmp_path)
         monkeypatch.setattr(init_config, "_available_providers", lambda cfg: ["claude-code"])

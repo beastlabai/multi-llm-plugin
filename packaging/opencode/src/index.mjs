@@ -512,7 +512,11 @@ function composeDispatcherArgv(row, values, surface) {
   const argv = [values.word ?? row.name]
   for (const kind of row.positionals) {
     if (kind === surface.positional_kinds.plan && values.plan) {
-      argv.push(values.plan)
+      // The user's own spelling when the caller kept one (`planArg`), else the
+      // resolved path: the dispatcher runs in the anchor, so a relative plan
+      // names the same file, and it is the spelling the run records as
+      // `plan_arg` and a finished phase's next command is printed with.
+      argv.push(values.planArg || values.plan)
     } else if (kind === surface.positional_kinds.question && values.question) {
       argv.push(values.question)
     }
@@ -680,11 +684,29 @@ async function resolveSessionModel(client, ctx, budgetMs = SESSION_MODEL_BUDGET_
  * the refusal names what the user typed instead of a missing argument.
  */
 function normalizePlan(plan, anchor) {
+  const spelled = planSpelling(plan)
+  if (!spelled) return ""
+  return path.isAbsolute(spelled) ? spelled : path.resolve(anchor, spelled)
+}
+
+/**
+ * The plan as the user spelled it: the sigil off and `~` expanded, **nothing
+ * resolved**.
+ *
+ * `normalizePlan` makes the path absolute so this server can name the file, and
+ * that is also the string the dispatcher used to receive, record as `plan_arg`
+ * and print in every next command (2026-10-02, issue #15: a user who typed
+ * `plans/racing-game.md` was told to type `/multi-llm --implement
+ * /tmp/…/plans/racing-game.md`). The child runs in the anchor, so a relative
+ * spelling resolves to the same file there, and the launch passes this one.
+ * Everything this server composes for itself (the polls, the abort) keeps the
+ * absolute path.
+ */
+function planSpelling(plan) {
   if (!plan) return ""
   const sigilless =
     plan.startsWith("@") && plan.length > 1 ? plan.slice(1) : plan
-  const expanded = expandHome(sigilless)
-  return path.isAbsolute(expanded) ? expanded : path.resolve(anchor, expanded)
+  return expandHome(sigilless)
 }
 
 // ---------------------------------------------------------------------------
@@ -1674,6 +1696,10 @@ async function runWorkflow({
     const outcome = await cycle(checked.mode, {
       word: args.mode,
       plan: args.plan,
+      // The dispatcher's `next` names the plan absolutely; when that is the
+      // plan this call was typed with, the continuation keeps the user's
+      // spelling so its own next-phase command does too.
+      planArg: args.plan === values.plan ? values.planArg : undefined,
       question: args.question,
       extraFlags: args.extra_flags,
     })
@@ -2494,6 +2520,48 @@ async function fetchInstructions({ row, surface, ctx, env, uv, anchor }) {
     .trimEnd()
 }
 
+/**
+ * `util next-command <plan> --blocked <mode> --host <id>`: the command that
+ * resumes a blocked write phase, as the result line's `user_resume.command`, or
+ * `null`.
+ *
+ * Asked after an exit 3 so the user is left with something to type: the
+ * dispatcher's own output names the retry as a raw `uv run` argv (redacted
+ * here) and the options as tool calls, and neither is a command a person types.
+ * The string is built in Python from the host's `next_command` template for this
+ * route, so this file spells none of it, and it is the user's to type: nothing
+ * here (or in `isMechanical`) ever runs it. A surface without the `resume` entry,
+ * a spawn failure, a non-zero exit or an empty answer all give `null`: an
+ * advisory lookup never changes the result it decorates.
+ */
+async function fetchResumeCommand({ values, surface, ctx, env, uv, anchor }) {
+  const resume = surface.dispatcher.resume
+  const plan = values.planArg || values.plan
+  if (!resume || !plan || !values.word) return null
+  const argv = [
+    ...resume.argv,
+    plan,
+    resume.option,
+    values.word,
+    surface.dispatcher.host_option,
+    surface.host,
+  ]
+  const child = await runChild({
+    uv,
+    argv: composeSpawnArgv(uv, argv, surface, env),
+    cwd: anchor,
+    env,
+    signal: ctx?.abort,
+    marker: surface.dispatcher.result_marker,
+    banner: surface.dispatcher.banner.fields,
+  })
+  if (child.spawnError || child.code !== surface.dispatcher.exit_codes.ok) {
+    return null
+  }
+  const command = child.result?.[resume.result_key]?.command
+  return typeof command === "string" && command.trim() ? command : null
+}
+
 // ---------------------------------------------------------------------------
 // The plugin
 // ---------------------------------------------------------------------------
@@ -2715,6 +2783,7 @@ async function execute(args, ctx, surface, client) {
       // The word as sent, so an alias reaches the dispatcher unexpanded.
       word: args.mode,
       plan: normalizePlan(args.plan, anchor),
+      planArg: planSpelling(args.plan),
       question: args.question,
       extraFlags: args.extra_flags,
     }
@@ -2742,6 +2811,21 @@ async function execute(args, ctx, surface, client) {
         row, surface, ctx, env, uv, anchor,
       })
       if (instructions) outcome.instructions = instructions
+    }
+    // A blocked run owes the user a command they can type: the same phase,
+    // resumed, in this route's own spelling. Asked of the dispatcher (which
+    // owns the spelling), after the result is composed, and only for an exit 3.
+    if (
+      outcome.state === surface.dispatcher.states.needs_human &&
+      outcome.exit === surface.dispatcher.exit_codes.needs_human
+    ) {
+      const resume = await fetchResumeCommand({
+        values, surface, ctx, env, uv, anchor,
+      })
+      if (resume) {
+        outcome.resume_command = resume
+        outcome.message = `${outcome.message} ${surface.needs_human_message.resume}`
+      }
     }
     // Echoed for the same reason `anchor` is: a wrong one is otherwise
     // invisible, surfacing as "why did it review with THAT model" rather than
@@ -2804,6 +2888,8 @@ const __testing = {
   loadSurface,
   nextAsToolCall,
   normalizePlan,
+  planSpelling,
+  fetchResumeCommand,
   parseDispatcherCommand,
   redactCommand,
   relayCounts,

@@ -821,3 +821,84 @@ def test_the_notice_and_the_next_step_agree_after_an_unfinished_implement(
     assert not answer.complete
     assert answer.phase == workflow["suggested_next"]
     assert answer.command.endswith("--implement plans/foo.md --resume")
+
+
+# --- resume of the SAME phase after a needs-human stop (#5, 2026-10-02) -------
+
+class TestResumeCommand:
+    """`resume_command` / `util next-command --blocked`: the one command a user
+    can type after a blocked write phase, in the route's own spelling."""
+
+    @pytest.mark.parametrize("host,route,prefix", ROUTES, ids=ROUTE_IDS)
+    def test_every_route_spells_it_for_the_user(self, host, route, prefix):
+        assert np_.resume_command(P, host, route, "implement") == \
+            f"{prefix}--implement {P} --resume"
+
+    @pytest.mark.parametrize("mode", [
+        "implement", "apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
+    ])
+    def test_the_four_write_phases_resume(self, mode):
+        assert np_.resume_command(P, "codex", "package", mode) == \
+            f"$multi-llm:multi-llm --{mode} {P} --resume"
+
+    @pytest.mark.parametrize("mode", [
+        "review-plan", "review-tasks", "review-code", "generate-tasks", "full",
+        "status", "ask", "init",
+    ])
+    def test_every_other_mode_has_none(self, mode):
+        assert np_.resume_command(P, "codex", "package", mode) is None
+
+    def test_the_plan_stays_as_typed_and_is_quoted_for_the_reader(self):
+        assert np_.resume_command("plans/my plan.md", "opencode", "package", "implement") \
+            == '/multi-llm --implement "plans/my plan.md" --resume'
+
+    def test_it_is_never_a_dispatcher_command(self):
+        """Both servers redact `uv run … multi_llm.py` strings; a host spelling survives."""
+        for host, route, _prefix in ROUTES:
+            command = np_.resume_command(P, host, route, "implement")
+            assert "uv run" not in command and "multi_llm.py" not in command
+
+    def test_a_route_without_a_template_raises(self):
+        with pytest.raises(ValueError):
+            np_.resume_command(P, "claude-code", "package", "implement")
+
+    def _run(self, argv, monkeypatch, capsys):
+        record = {}
+        monkeypatch.setattr(cli_common, "record_user_resume",
+                            lambda obj: record.setdefault("v", obj))
+        code = np_.main(argv)
+        return code, capsys.readouterr(), record.get("v")
+
+    def test_util_prints_the_line_and_sets_the_key(self, monkeypatch, capsys):
+        monkeypatch.setenv(modes.ROUTE_ENV, "package")
+        code, out, key = self._run(
+            [P, "--blocked", "implement", "--host", "codex"], monkeypatch, capsys)
+        assert code == 0
+        assert out.out == f"[RESUME_COMMAND] $multi-llm:multi-llm --implement {P} --resume\n"
+        assert key == {"phase": "implement",
+                       "command": f"$multi-llm:multi-llm --implement {P} --resume"}
+
+    def test_util_prints_nothing_for_a_mode_with_no_resume(self, monkeypatch, capsys):
+        code, out, key = self._run(
+            [P, "--blocked", "review-code", "--host", "codex"], monkeypatch, capsys)
+        assert (code, out.out, key) == (0, "", None)
+
+    def test_util_reads_no_state_and_needs_no_plan_file(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)  # the plan does not exist and nothing is created
+        code, _out, _key = self._run(
+            ["plans/ghost.md", "--blocked", "implement", "--host", "opencode"],
+            monkeypatch, capsys)
+        assert code == 0 and not (tmp_path / "plans").exists()
+
+    def test_after_and_blocked_exclude_each_other(self, monkeypatch, capsys):
+        code, out, _key = self._run(
+            [P, "--after", "implement", "--blocked", "implement"], monkeypatch, capsys)
+        assert code == 3 and "mutually exclusive" in out.err
+
+    def test_the_result_line_carries_user_resume_even_on_exit_3(self):
+        ctx = cli_common.ResultContext("implement", "implement")
+        ctx.set_user_resume({"phase": "implement", "command": "x"})
+        assert ctx.payload(cli_common.EXIT_NEEDS_HUMAN)["user_resume"] == \
+            {"phase": "implement", "command": "x"}
+        assert "user_resume" not in cli_common.ResultContext(
+            "implement", "implement").payload(cli_common.EXIT_NEEDS_HUMAN)
