@@ -705,8 +705,15 @@ class TestTheEnabledKindsTakeTheRung:
         assert [row.get("sandbox_rung") for row in report["tasks"]] == ["plugin-landlock"] * count
         assert [row["write_outcome"] for row in report["tasks"]] == ["applied"] * count
 
-        # One rung probe, for this scope's grant, then two wrapped dispatches.
-        [probe] = scratch.wrapper.records(probe=True)
+        # One rung probe for this scope's grant, then the wrapped dispatches.
+        # A step-3 phase's closing next-step block asks the early warning,
+        # which probes once more under the repo-wide scope key (the cache is
+        # scope-keyed): that probe carries the enumeration's deny dirs and
+        # is not this phase's.
+        probes = scratch.wrapper.records(probe=True)
+        own = [r for r in probes if (r["env"]["MULTI_LLM_CANARY_DENY_DIRS"] is None) == (scope != "repo-wide")]
+        [probe] = own
+        assert len(probes) == (1 if scope == "repo-wide" else 2), probes
         rows = scratch.wrapper.records(probe=False)
         assert len(rows) == len(scratch.exec_calls()) == len(scratch.write_calls()) == count
         real_target = os.path.realpath(target)

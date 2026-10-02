@@ -3504,7 +3504,18 @@ def repo_wide_write_refusal(
     refusal text is the dispatch's own, led by F6 and ending in "Nothing was
     dispatched." Advisory: any failure other than the refusal reads as
     ``None``, because a warning that may be wrong is worse than none.
+
+    Silent: :func:`_detect_sandbox` prints the preflight's own lines (the
+    ``unknown`` note says "Dispatching anyway", which is wrong for a reader
+    that dispatches nothing), so both streams are swallowed here; the only
+    output is the warning the caller renders from the returned text. The
+    decision is cached under the repo-wide scope key, so a read-only phase or
+    a step-3 write phase that ends with the next-step block costs one rung
+    probe for this scope on top of its own.
     """
+    import contextlib
+    import io
+
     try:
         from .write_safety import resolve_repo_root
     except ImportError:  # pragma: no cover - direct-script import shim
@@ -3516,10 +3527,11 @@ def repo_wide_write_refusal(
             repo_root=repo_root, kind="implement", write_scope=WRITE_SCOPE_REPO_WIDE,
             output_dir=os.path.realpath(output_dir) if output_dir else None,
         )
-        _detect_sandbox(
-            provider_name, key=key, spec=str(spec), profile=PROFILE_AGENT_WRITE,
-            anchor=anchor, jail_request=request,
-        )
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            _detect_sandbox(
+                provider_name, key=key, spec=str(spec), profile=PROFILE_AGENT_WRITE,
+                anchor=anchor, jail_request=request,
+            )
     except RunnerRejected as exc:
         return exc.message
     except Exception:  # noqa: BLE001 - advisory, never a failed status or init

@@ -1642,6 +1642,34 @@ class TestEarlySandboxWarning:
         assert len(jailhost.wrapper.records(probe=True)) == 1
         assert jailhost.wrapper.records(probe=False) == []
 
+    @pytest.mark.parametrize("leg", ["standard-unreadable", "rung-hang"])
+    def test_the_warnings_probe_prints_nothing_whatever_it_decides(
+        self, jailhost, monkeypatch, capsys, leg,
+    ):
+        """`_detect_sandbox` prints the preflight's own notes — on an
+        unreadable standard probe "… recording sandbox 'unknown'. Dispatching
+        anyway …", which is wrong for a reader that dispatches nothing — so
+        the warning's probe swallows both streams. An unreadable standard
+        probe draws no warning (a warning that may be wrong is worse than
+        none); a rung probe that gave no answer is a refusal for a write, and
+        warns. Measured 2026-10-02: the next-command emitters' stderr had to
+        stay empty on the codex routes."""
+        from utils import subagent_executor as executor
+        jailhost.configure(runner="codex:gpt-5.5")
+        if leg == "standard-unreadable":
+            monkeypatch.setattr(executor, "_run_sandbox_probe", lambda *a, **k: None)
+        else:
+            jailhost.wrapper.set(probe="hang")
+            monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
+        capsys.readouterr()
+        payload = jailhost.status(host_id="claude-code")
+        captured = capsys.readouterr()
+        assert captured.out == "" and captured.err == "", captured
+        if leg == "standard-unreadable":
+            assert "warning" not in payload["phases"]["implement"]
+        else:
+            assert "its probe gave no answer" in payload["phases"]["implement"]["warning"]
+
     def test_a_usable_jail_stays_silent(self, jailhost):
         jailhost.configure(runner="codex:gpt-5.5")
         payload = jailhost.status(host_id="claude-code")
