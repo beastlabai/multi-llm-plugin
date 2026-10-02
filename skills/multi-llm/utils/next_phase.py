@@ -270,14 +270,19 @@ def resolve_route(
 # The builder
 # ---------------------------------------------------------------------------
 
-def _workflow_payload(plan_path: Path) -> Dict[str, Any]:
-    """``get_workflow_status`` for *plan_path*, as ``run_status`` computes it."""
+def _workflow_payload(plan_path: Path, host_id: str) -> Dict[str, Any]:
+    """``get_workflow_status`` for *plan_path*, as ``run_status`` computes it.
+
+    *host_id* is the emitter's host: the early sandbox warning on the payload
+    resolves the subagent runner for it (adversarial review, 2026-10-02).
+    """
     from .output_handler import output_dir_path
     from .state_manager import StateManager
 
     prereq = _skill_module("check_workflow_prerequisites")
     return prereq.get_workflow_status(
-        StateManager(plan_path), plan_path, output_dir_path(plan_path)
+        StateManager(plan_path), plan_path, output_dir_path(plan_path),
+        host_id=host_id,
     )
 
 
@@ -343,7 +348,7 @@ def next_phase_commands(
 
     if workflow is None:
         source = plan_arg if plan_path is None else plan_path
-        workflow = _workflow_payload(Path(os.path.abspath(str(source))))
+        workflow = _workflow_payload(Path(os.path.abspath(str(source))), host_id)
     phases: Dict[str, Dict[str, Any]] = workflow.get("phases") or {}
     order: List[str] = list(modes.PREREQUISITE_PHASES)
     done = tuple(prereq.DONE_STATUSES)
@@ -395,6 +400,9 @@ def next_phase_commands(
             warning=warning_of(primary),
         )
 
+    def is_stale(phase: str) -> bool:
+        return bool((phases.get(phase) or {}).get("stale"))
+
     status = status_of(start)
     if status == "in_progress":
         # A resumable phase is its own answer; the span walk does not run.
@@ -415,17 +423,20 @@ def next_phase_commands(
     # OpenCode and Codex racing runs: implement had ended `needs-human` after a
     # write-gate refusal, and apply-code-fixes then answered `complete` while
     # the notice said `suggested next: implement`; review-code answered
-    # `--apply-code-fixes` against the same notice. Started means `in_progress`
-    # or a seeded task list (`tasks_total`): a phase never begun that sits
-    # before a standalone start stays skipped over (a standalone review-code on
-    # a fresh plan still walks to apply-code-fixes, "starting mid-workflow
-    # never sends the user back").
+    # `--apply-code-fixes` against the same notice. Started means `in_progress`,
+    # a seeded task list (`tasks_total`) or a `stale` completion (it ran to
+    # the end once; adversarial review, 2026-10-02: `--after apply-code-fixes`
+    # under a stale code-review answered `complete`): a phase never begun that
+    # sits before a standalone start stays skipped over (a standalone
+    # review-code on a fresh plan still walks to apply-code-fixes, "starting
+    # mid-workflow never sends the user back").
     earlier = next(
         (
             phase for phase in order[:index]
             if phase not in prereq.OPTIONAL_PHASES and is_open(phase)
             and (status_of(phase) == "in_progress"
-                 or (phases.get(phase) or {}).get("tasks_total"))
+                 or (phases.get(phase) or {}).get("tasks_total")
+                 or is_stale(phase))
         ),
         None,
     )
@@ -435,6 +446,17 @@ def next_phase_commands(
             command=command_for(earlier),
             optional_before=optional_steps(order[: order.index(earlier)]),
             warning=warning_of(earlier),
+        )
+    if is_stale(start):
+        # A stale start (completed before implement's latest completion) is
+        # its own answer once nothing earlier is open — the gate is off here,
+        # since under it a stale start is "not on record" and returned None
+        # above (exit 0 at a pending marker must print nothing). `util
+        # next-command --after review-code` on the Codex run of 2026-10-02
+        # walked past the stale review to apply-code-fixes while the notice
+        # beside it said `suggested next: code-review`.
+        return NextPhase(
+            phase=start, command=command_for(start), warning=warning_of(start),
         )
     primary = next(
         (
@@ -483,6 +505,9 @@ def resume_command(
     host_id: str,
     route: Optional[str],
     mode_word: str,
+    *,
+    plan_path: Optional[Union[str, Path]] = None,
+    workflow: Optional[Dict[str, Any]] = None,
 ) -> Optional[str]:
     """The host-spelled command that resumes *mode_word*'s write phase, or ``None``.
 
@@ -501,6 +526,21 @@ def resume_command(
     a ``--force`` the dispatcher already prints as ``next``. *plan_arg* is used
     verbatim, never resolved. A (host, route) pair with no template raises
     ``ValueError``, as in :func:`next_phase_commands`.
+
+    And only a phase with progress on record answers: the one the workflow
+    payload (*workflow*, else ``get_workflow_status`` read for *plan_path*,
+    default ``os.path.abspath(plan_arg)``) shows ``in_progress`` — a completed
+    batch, or a completed implement task, that a bare re-invocation would redo.
+    Every other exit 3 is not something ``--resume`` fixes: a prerequisite
+    refusal (``PREREQUISITE_UNMET``) and a stop on pending human-task
+    decisions both land before anything is recorded, and the phase's own
+    message names the way forward. The servers pass through whatever this
+    says and attach nothing when it says nothing; before the adversarial
+    review (2026-10-02) they attached ``--resume`` to every write-phase exit 3,
+    and ``util next-command does-not-exist.md --blocked implement`` printed
+    one for a plan that does not exist. The same rule as
+    :func:`next_phase_commands`'s ``command_for``: ``in_progress`` is the one
+    status that spells ``--resume``.
     """
     modes = _skill_module("modes")
     mode = modes.resolve(mode_word)
@@ -510,6 +550,12 @@ def resume_command(
 
     template = _host_capabilities().next_command_template(host_id, route)
     if mode.phase not in PHASE_BY_WRITE_KIND.values():
+        return None
+    if workflow is None:
+        source = plan_arg if plan_path is None else plan_path
+        workflow = _workflow_payload(Path(os.path.abspath(str(source))), host_id)
+    phases: Dict[str, Dict[str, Any]] = workflow.get("phases") or {}
+    if (phases.get(mode.phase) or {}).get("status") != "in_progress":
         return None
     args = f"--{mode.name} {quote_plan_arg(plan_arg)} {RESUME_FLAG}"
     return template.replace(ARGS_SLOT, args)
@@ -638,6 +684,7 @@ def emit_resume(
     host_id: str,
     mode_word: str,
     *,
+    plan_path: Optional[Union[str, Path]] = None,
     stream=None,
     stderr=None,
     strict: bool = False,
@@ -646,14 +693,22 @@ def emit_resume(
 
     :func:`emit_answer`'s sibling for ``util next-command --blocked``; the
     same failure rule (one stderr line, ``None`` or :class:`LookupFailed`).
-    Nothing is printed for a mode that has no resume command.
+    Nothing is printed for a mode that has no resume command, or for a plan
+    whose ``state.json`` does not exist: nothing can be in progress there, and
+    the workflow read would create the plan's output dir (as in
+    :func:`emit_answer`).
     """
     from . import cli_common
 
     err = sys.stderr if stderr is None else stderr
     try:
+        source = plan_arg if plan_path is None else plan_path
+        if not _state_file(os.path.abspath(str(source))).is_file():
+            return None
         route = resolve_route(host_id, stderr=err)
-        command = resume_command(plan_arg, host_id, route, mode_word)
+        command = resume_command(
+            plan_arg, host_id, route, mode_word, plan_path=plan_path,
+        )
         if command is None:
             return None
         out = sys.stdout if stream is None else stream
@@ -686,7 +741,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     gate is off) and ``--after`` as ``after_mode``. Exit 0 with the block on
     stdout and the key set, or with nothing printed when there is no answer;
     exit 3 with one stderr line for an unknown ``--after``, a missing plan, or
-    a workflow read / builder that raised.
+    a workflow read / builder that raised. ``--blocked`` answers from the same
+    ``state.json`` and refuses a missing plan the same way (adversarial review,
+    2026-10-02: it skipped the plan check and read no state).
     """
     import argparse
 
@@ -725,22 +782,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    if args.blocked is not None:
-        if args.after is not None:
-            print("ERROR: --blocked and --after are mutually exclusive.",
-                  file=sys.stderr)
-            return 3
-        if modes.resolve(args.blocked) is None:
-            print(f"ERROR: unknown --blocked mode '{args.blocked}'.",
-                  file=sys.stderr)
-            return 3
-        host_id = _host_capabilities().resolve_host_id(explicit=args.host)
-        try:
-            emit_resume(args.plan, host_id, args.blocked, strict=True)
-        except LookupFailed:
-            return 3
-        return 0
-
+    if args.blocked is not None and args.after is not None:
+        print("ERROR: --blocked and --after are mutually exclusive.",
+              file=sys.stderr)
+        return 3
+    if args.blocked is not None and modes.resolve(args.blocked) is None:
+        print(f"ERROR: unknown --blocked mode '{args.blocked}'.",
+              file=sys.stderr)
+        return 3
     if args.after is not None and modes.resolve(args.after) is None:
         aliases = ", ".join(f"{a}={t}" for a, t in sorted(modes.ALIASES.items()))
         print(
@@ -754,6 +803,16 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"ERROR: plan file not found: {plan_path}", file=sys.stderr)
         return 3
     host_id = _host_capabilities().resolve_host_id(explicit=args.host)
+
+    if args.blocked is not None:
+        try:
+            emit_resume(
+                args.plan, host_id, args.blocked, plan_path=plan_path, strict=True,
+            )
+        except LookupFailed:
+            return 3
+        return 0
+
     try:
         emit_answer(
             args.plan, host_id, None,

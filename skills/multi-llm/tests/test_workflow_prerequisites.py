@@ -1319,8 +1319,11 @@ class TestStaleApplyBatchesAfterReviewRerun:
                     started_at="2026-01-01T10:00:00+00:00")
         assert _status(plan)["phases"]["apply-suggestions"]["status"] == "pending"
 
-    def test_a_review_that_is_not_completed_keeps_the_mark(self, tmp_path):
-        """Staleness is judged only against a completed review."""
+    def test_a_review_that_is_not_completed_never_marks_in_progress(self, tmp_path):
+        """A review not `completed` has no cycle for the batches to belong to,
+        so they are an earlier one's (adversarial review, 2026-10-02; until
+        then "staleness is judged only against a completed review" kept the
+        mark)."""
         plan = _workflow_plan(tmp_path)
         _put(plan, "code-review", "grouped.json", _ONE_FINDING)
         _record(plan, completed=_BEFORE_CODE_REVIEW,
@@ -1328,7 +1331,49 @@ class TestStaleApplyBatchesAfterReviewRerun:
         state = StateManager(plan)
         state.state["metrics_progress"] = {"apply-code-fixes": {"started_at": _OLD}}
         state.save()
-        assert _status(plan)["phases"]["apply-code-fixes"]["status"] == "in_progress"
+        assert _status(plan)["phases"]["apply-code-fixes"]["status"] == "pending"
+
+    def test_a_review_stale_after_implement_takes_its_cycles_batches_with_it(
+        self, tmp_path
+    ):
+        """The Codex run of 2026-10-02 (`stale/` repro): code-review and
+        apply-code-fixes completed 2026-10-01T23:30/23:40, implement
+        2026-10-02T11:59, `apply-fix-batch-0` completed. `status` showed
+        `code-review: pending, apply-code-fixes: in_progress` and
+        `next-command --after review-code` answered
+        `--apply-code-fixes <plan> --resume`, which replays the stale cycle's
+        recorded decisions — exactly what the predate rule exists to prevent."""
+        from utils import next_phase
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "code-review", "grouped.json", _ONE_FINDING)
+        _record(plan, completed=_BEFORE_CODE_REVIEW + ("code-review", "apply-code-fixes"),
+                tasks={"apply-fix-batch-0": "completed"})
+        state = StateManager(plan)
+        state.state["phases_completed"].update({
+            "code-review": "2026-10-01T23:30:00.000000",
+            "apply-code-fixes": "2026-10-01T23:40:00.000000",
+            "implement": "2026-10-02T11:59:24.913927",
+        })
+        state.state["metrics"] = {"apply-code-fixes": [
+            {"label": "apply-fix-batch-0", "timestamp": "2026-10-01T23:35:00.000000"}]}
+        state.save()
+        payload = _status(plan)
+        assert payload["phases"]["code-review"]["status"] == "pending"
+        assert payload["phases"]["apply-code-fixes"]["status"] == "pending"
+        assert payload["suggested_next"] == "code-review"
+        # The gate off, both answers name the stale review itself — as the
+        # notice beside them does — and neither carries `--resume`:
+        # `--after review-code` used to walk past the stale start, and
+        # `--after apply-code-fixes` answered `complete` (a stale phase was
+        # not "started" to the earlier-phase rule).
+        for after in ("review-code", "apply-code-fixes"):
+            answer = next_phase.next_phase_commands(
+                "plans/x.md", "codex", None, None, after_mode=after, plan_path=plan)
+            assert answer.phase == "code-review", after
+            assert answer.command.endswith("--review-code plans/x.md"), after
+        # Under the gate a stale finished phase is still not on record.
+        assert next_phase.next_phase_commands(
+            "plans/x.md", "codex", None, "review-code", plan_path=plan) is None
 
 
 class TestUnappliedGroupsNoticeOnItsPhase:
@@ -1592,3 +1637,139 @@ class TestEarlySandboxWarning:
         assert lines[0] == f"{next_phase.RUNNER_WARNING_MARKER} {answer.warning}"
         assert lines[1].startswith(next_phase.NEXT_COMMAND_MARKER + " ")
         assert "warning" not in answer.to_dict()  # user_next_step is unchanged
+
+
+class TestEarlySandboxWarningResolvesTheReadersHost:
+    """Adversarial review, 2026-10-02 (`repro_warning.py`): the warning
+    resolved the runner for `$MULTI_LLM_HOST`-else-claude-code, while every
+    server and shim declares the host only as `--host codex` on the argv. On
+    the claude-code entry the ladder has no `session` rung, so the codex
+    session's `codex:gpt-6-luna` fell to `claude-code:sonnet` and the warning
+    never fired on either tool route — while the dispatch, which resolves
+    `--host` off the argv, refused. No resolver monkeypatch here: the real
+    ladder, the real host entries."""
+
+    EVIDENCE = {"progress": {"sandbox_fallback": {"codex:gpt-6-luna": "plugin-landlock"}}}
+
+    @pytest.fixture
+    def plan(self, tmp_path, monkeypatch):
+        # Its own git root, so no project providers.yaml is in reach and the
+        # `StateManager` reads a HEAD (its first write records one).
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t",
+                        "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                        "-m", "root"], check=True)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("MULTI_LLM_HOST", raising=False)
+        monkeypatch.setenv("MULTI_LLM_HOST_SESSION_MODEL", "gpt-6-luna")
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"))
+        _put(plan, "review-plan", ".status.json", self.EVIDENCE)
+        return plan
+
+    def _payload(self, plan, **kw):
+        return prereq.get_workflow_status(
+            StateManager(plan), plan, output_dir_path(plan), **kw)
+
+    def test_the_dispatch_and_the_warning_resolve_the_same_runner(self, plan):
+        from utils.provider_registry import resolve_subagent_runner
+        spec, layer = resolve_subagent_runner("full", anchor=str(plan), host_id="codex")
+        assert (spec, layer) == ("codex:gpt-6-luna", "session")
+        warning = self._payload(plan, host_id="codex")["phases"]["implement"]["warning"]
+        assert "'codex:gpt-6-luna'" in warning and "plugin-landlock" in warning
+
+    def test_the_claude_code_host_has_no_session_rung_and_draws_none(self, plan):
+        assert "warning" not in self._payload(plan, host_id="claude-code")["phases"]["implement"]
+
+    def test_with_no_host_handed_in_the_argv_decides_as_the_executor_does(
+        self, plan, monkeypatch
+    ):
+        monkeypatch.setattr(sys, "argv", ["multi_llm.py", "status", str(plan), "--host", "codex"])
+        assert "warning" in self._payload(plan)["phases"]["implement"]
+        monkeypatch.setattr(sys, "argv", ["multi_llm.py", "status", str(plan)])
+        assert "warning" not in self._payload(plan)["phases"]["implement"]
+
+    def test_every_reader_hands_its_host_through(self, plan, capsys):
+        from utils import next_phase, run_status
+        with pytest.raises(SystemExit) as exit_:  # --status sys.exit()s
+            prereq.main(["--plan-file", str(plan), "--status", "--host", "codex"])
+        assert exit_.value.code == 0
+        assert "notices" in json.loads(capsys.readouterr().out)
+        assert run_status.main(
+            ["--plan-file", str(plan), "--view", "workflow", "--host", "codex"]) == 0
+        assert "notices" in json.loads(capsys.readouterr().out)
+        assert next_phase.main([str(plan), "--after", "generate-tasks", "--host", "codex"]) == 0
+        out = capsys.readouterr().out
+        assert out.startswith(next_phase.RUNNER_WARNING_MARKER + " ")
+        assert "'codex:gpt-6-luna'" in out
+
+
+class TestStaleCompletionIsFlagged:
+    """S3 (adversarial review, 2026-10-02): a stale completion reads `pending`
+    and the payload says so, so `status`'s run view can tell a done run whose
+    phase went stale from one not yet marked, and never offers the
+    `--reaggregate` that would re-stamp it."""
+
+    def _plan(self, tmp_path, **stamps):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "code-review", "grouped.json", _ONE_FINDING)
+        _record(plan, completed=_BEFORE_CODE_REVIEW + ("code-review", "apply-code-fixes"))
+        state = StateManager(plan)
+        for phase, stamp in stamps.items():
+            state.state["phases_completed"][phase.replace("_", "-")] = stamp
+        state.save()
+        return plan
+
+    def test_a_stale_review_and_its_fixes_carry_the_flag_and_both_dates(self, tmp_path):
+        plan = self._plan(tmp_path, code_review=_OLD, apply_code_fixes=_OLD, implement=_NEW)
+        phases = _status(plan)["phases"]
+        for phase in ("code-review", "apply-code-fixes"):
+            assert phases[phase] == {
+                "status": "pending", "stale": True,
+                "completed_at": _OLD, "implemented_at": _NEW,
+            }, phase
+
+    def test_a_plain_pending_phase_carries_no_flag(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=_BEFORE_CODE_REVIEW)
+        assert _status(plan)["phases"]["code-review"] == {"status": "pending"}
+
+    def test_a_fresh_review_is_completed_not_stale(self, tmp_path):
+        plan = self._plan(tmp_path, implement=_OLD, code_review=_NEW, apply_code_fixes=_NEW)
+        assert "stale" not in _status(plan)["phases"]["code-review"]
+
+
+class TestImplementWithEveryTaskDoneIsInProgress:
+    """S6 (adversarial review, 2026-10-02): every task completed but the phase
+    unmarked — `driver.verify_command` failed, or the run died before
+    `mark_phase_completed` — read `pending`, and the earlier-phase rule routed
+    a later phase's answer to a bare `--implement <plan>`, which re-dispatches
+    every task (`format_batches_for_output` filters only under `--resume`)."""
+
+    def _plan(self, tmp_path, tasks):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"),
+                tasks=tasks)
+        return plan
+
+    def test_done_equals_total_reads_in_progress(self, tmp_path):
+        entry = _status(self._plan(tmp_path, {"T001": "completed", "T002": "completed"}))
+        assert entry["phases"]["implement"]["status"] == "in_progress"
+        assert (entry["phases"]["implement"]["tasks_done"],
+                entry["phases"]["implement"]["tasks_total"]) == (2, 2)
+        assert entry["suggested_next"] == "implement"
+
+    def test_the_answer_after_a_later_phase_carries_resume(self, tmp_path):
+        from utils import next_phase
+        plan = self._plan(tmp_path, {"T001": "completed", "T002": "completed"})
+        answer = next_phase.next_phase_commands(
+            "plans/x.md", "claude-code", None, None, after_mode="review-code", plan_path=plan)
+        assert answer.phase == "implement"
+        assert answer.command.endswith("--implement plans/x.md --resume")
+
+    def test_nothing_done_stays_pending(self, tmp_path):
+        """A seeded list with no completed task (a stop before the first
+        dispatch) is not progress a bare re-run would redo."""
+        entry = _status(self._plan(tmp_path, {"T001": "pending", "T002": "failed"}))
+        assert entry["phases"]["implement"]["status"] == "pending"
+        assert entry["phases"]["implement"]["tasks_total"] == 2
