@@ -2934,6 +2934,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # `repo-wide`) passes none; its entries come from step 3b's
         # enumeration, never from a target.
         write_target = artifact if self.has_single_write_target else None
+        # Every run resumes — a re-run must never apply a landed batch twice —
+        # except `--fresh`, which declares prior progress void (`_setup` has
+        # already cleared the decisions, the processed items and the
+        # prior-changes log): every batch is dispatched again, no result file
+        # counts as done, no earlier row is carried and no snapshot reused.
+        # That is implement's run without `--resume`. It used to resume as
+        # well, so a user who reverted the target and asked to start over got
+        # exit 0 with every batch "already complete". `--resume` wins over
+        # `--fresh` (the retry builder drops `--fresh` beside it, too).
+        fresh = bool(getattr(self.args, "fresh", False)) and not getattr(
+            self.args, "resume", False
+        )
         try:
             scheduler = WriteBatchScheduler(
                 tasks=tasks,
@@ -2943,7 +2955,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 state=self.state,
                 plan_file=self.plan_path,
                 anchor=self.plan_path,
-                resume=True,
+                resume=not fresh,
                 dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
                 write_target=write_target,
             )

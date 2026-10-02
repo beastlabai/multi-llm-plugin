@@ -1530,3 +1530,55 @@ class TestARenumberedApplyBatchKeepsItsOwnRollbackPoint(_ApplyRig):
         assert plan.read_text(encoding="utf-8").startswith(before_run + "run1\n")
         assert "run1\nrun1\n" not in plan.read_text(encoding="utf-8")
 
+
+class TestFreshDispatchesEveryApplyBatchAgain(_ApplyRig):
+    """`--fresh` clears decisions, processed items and the prior-changes log,
+    but the executor leg built its scheduler with `resume=True`
+    unconditionally, so every batch whose result file existed was skipped as
+    "already complete": a user who reverted the plan and asked to start over
+    got exit 0 and nothing applied."""
+
+    def test_fresh_re_applies_every_batch_after_the_plan_was_reverted(self, repo):
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        original = plan.read_text(encoding="utf-8")
+        assert self._run(repo, plan, sum(ids, []), content="run1\n") == 0
+        plan.write_text(original, encoding="utf-8")
+
+        log = repo.tmp_path / "fresh-calls.jsonl"
+        repo.monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
+        assert self._run(repo, plan, sum(ids, []), "--fresh", content="run2\n") == 0
+        dispatched = [
+            json.loads(line) for line in log.read_text().splitlines()
+            if json.loads(line).get("prompt")
+        ]
+        assert len(dispatched) == 3
+        assert plan.read_text(encoding="utf-8") == original + "run2\n" * 3
+
+        rows = self._report(plan)
+        assert not any(r.get("from_earlier_run") or r.get("skipped") for r in rows)
+        summary = self._summary(plan)
+        assert "(earlier" not in summary
+        assert "- Batches processed: 3/3\n" in summary
+
+    def test_without_fresh_a_re_run_still_skips_what_already_landed(self, repo):
+        """The guard against applying a batch twice is untouched."""
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        assert self._run(repo, plan, sum(ids, []), content="run1\n") == 0
+        applied = plan.read_text(encoding="utf-8")
+        assert self._run(repo, plan, sum(ids, []), content="run2\n") == 0
+        assert plan.read_text(encoding="utf-8") == applied
+        assert all(r.get("from_earlier_run") for r in self._report(plan))
+
+    def test_resume_beside_fresh_still_resumes(self, repo):
+        """`--resume` behaviour is unchanged, even with `--fresh` beside it."""
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        assert self._run(repo, plan, ids[0], content="run1\n") == 3
+        assert self._run(
+            repo, plan, sum(ids, []), "--resume", "--fresh", content="run2\n") == 0
+        rows = self._report(plan)
+        assert [(r["task_id"], bool(r.get("from_earlier_run"))) for r in rows] == [
+            ("apply-batch-0", True), ("apply-batch-1", False),
+            ("apply-batch-2", False)]
