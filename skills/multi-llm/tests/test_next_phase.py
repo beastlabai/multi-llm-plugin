@@ -239,6 +239,28 @@ ROWS = [
      "review-code", None,
      A(f"--apply-code-fixes {P}")),
 
+    # -- a started, unfinished phase before the finished one comes first ----
+    # (2026-10-02: the walk used to start after the finished phase, so the
+    # `user_next_step` disagreed with the `suggested next` on the same result)
+    ("apply-code-fixes-finished-while-implement-in-progress->implement-resume",
+     S(UP_TO_TASKS + ("code-review", "apply-code-fixes"),
+       tasks=IMPLEMENT_PARTIAL, files=CR_FINDING),
+     "apply-code-fixes", None,
+     A(f"--implement {P} --resume",
+       ("review-tasks", f"--review-tasks {P}", WHY_REVIEW_TASKS))),
+    ("review-code-finished-while-implement-seeded-not-run->implement",
+     S(UP_TO_TASKS + ("code-review",),
+       tasks={"T001": "pending", "T002": "pending"}, files=CR_FINDING),
+     "review-code", None,
+     A(f"--implement {P}",
+       ("review-tasks", f"--review-tasks {P}", WHY_REVIEW_TASKS))),
+    ("after-apply-code-fixes-while-implement-in-progress",
+     S(UP_TO_TASKS + ("code-review", "apply-code-fixes"),
+       tasks=IMPLEMENT_PARTIAL, files=CR_FINDING),
+     None, "apply-code-fixes",
+     A(f"--implement {P} --resume",
+       ("review-tasks", f"--review-tasks {P}", WHY_REVIEW_TASKS))),
+
     # -- the gate: the finished phase is not on record ---------------------
     ("gate-review-plan-pending", S(), "review-plan", None, None),
     ("gate-apply-suggestions-pending",
@@ -778,3 +800,24 @@ class TestResolveRoute:
         ]:
             route, _lines = _resolve(host, env, skill_root=root)
             assert host_capabilities.next_command_template(host, route).endswith("{args}")
+
+
+@pytest.mark.parametrize("finished", ["review-code", "apply-code-fixes"])
+def test_the_notice_and_the_next_step_agree_after_an_unfinished_implement(
+    tmp_path, finished
+):
+    """#3/#4: the result's `suggested next` (workflow view) and `user_next_step`
+    come from two walks; a started implement that never completed is the one
+    place they used to name different phases (or `complete`)."""
+    plan = _build(tmp_path, S(
+        UP_TO_TASKS + ("code-review", "apply-code-fixes"),
+        tasks={"T001": "completed", "T002": "pending"}, files=CR_FINDING,
+    ))
+    workflow = _workflow(plan)
+    assert workflow["suggested_next"] == "implement"
+    answer = np_.next_phase_commands(
+        P, "claude-code", None, finished, plan_path=plan, workflow=workflow
+    )
+    assert not answer.complete
+    assert answer.phase == workflow["suggested_next"]
+    assert answer.command.endswith("--implement plans/foo.md --resume")

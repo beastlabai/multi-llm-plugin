@@ -1207,6 +1207,12 @@ def _date_cycle(plan, phase, review, reviewed_at, *, started_at=None, metric_at=
     """
     state = StateManager(plan)
     state.state["phases_completed"][review] = reviewed_at
+    # These cycles are about a review re-run, not about implement finishing
+    # after a review: keep implement's completion (stamped "now" by `_record`)
+    # older than every date the cycle uses, or a code review stamped _OLD/_NEW
+    # would read as stale for that reason instead.
+    if "implement" in state.state["phases_completed"]:
+        state.state["phases_completed"]["implement"] = "2025-12-31T10:00:00"
     if started_at is not None:
         state.state.setdefault("metrics_progress", {})[phase] = {
             "started_at": started_at}
@@ -1375,3 +1381,183 @@ class TestUpstreamSkipNoticePrecedence:
         assert state.is_phase_skipped("apply-suggestions")
         assert state.is_phase_completed("apply-suggestions")
         assert prereq.upstream_skip_notices(state) == []
+
+
+class TestReviewStaleAfterImplement:
+    """A code review (and the fixes applied from it) that predates implement's
+    latest completion judged an earlier state of the code (#26, 2026-10-02:
+    the Codex run reviewed an empty repo, then implement ran)."""
+
+    def _stamp(self, plan, **stamps):
+        state = StateManager(plan)
+        for phase, stamp in stamps.items():
+            state.state["phases_completed"][phase.replace("_", "-")] = stamp
+        state.save()
+
+    def _plan(self, tmp_path, **stamps):
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "code-review", "grouped.json", _ONE_FINDING)
+        _record(plan, completed=_BEFORE_CODE_REVIEW + ("code-review", "apply-code-fixes"))
+        self._stamp(plan, **stamps)
+        return plan
+
+    def test_reviews_older_than_implement_read_pending(self, tmp_path):
+        plan = self._plan(
+            tmp_path, code_review=_OLD, apply_code_fixes=_OLD, implement=_NEW)
+        payload = _status(plan)
+        assert payload["phases"]["code-review"]["status"] == "pending"
+        assert payload["phases"]["apply-code-fixes"]["status"] == "pending"
+        assert payload["suggested_next"] == "code-review"
+        state = StateManager(plan)
+        assert not state.is_phase_completed("code-review")
+        assert not state.is_phase_completed("apply-code-fixes")
+        assert state.phase_completion_is_stale("code-review")
+        # the record itself is untouched
+        assert state.state["phases_completed"]["code-review"] == _OLD
+
+    def test_the_next_step_after_implement_is_the_review_not_the_fixes(self, tmp_path):
+        from utils import next_phase
+        plan = self._plan(
+            tmp_path, code_review=_OLD, apply_code_fixes=_OLD, implement=_NEW)
+        answer = next_phase.next_phase_commands(
+            "plans/x.md", "claude-code", None, "implement", plan_path=plan)
+        assert answer.phase == "code-review"
+
+    def test_reviews_newer_than_implement_stay_completed(self, tmp_path):
+        plan = self._plan(
+            tmp_path, implement=_OLD, code_review=_NEW, apply_code_fixes=_NEW)
+        payload = _status(plan)
+        assert payload["phases"]["code-review"]["status"] == "completed"
+        assert payload["phases"]["apply-code-fixes"]["status"] == "completed"
+        assert payload["suggested_next"] is None
+
+    @pytest.mark.parametrize("bad", ["not-a-date", "", None, 12345])
+    def test_an_unreadable_date_keeps_the_completion(self, tmp_path, bad):
+        plan = self._plan(tmp_path, code_review=bad, implement=_NEW)
+        assert StateManager(plan).is_phase_completed("code-review")
+
+    def test_only_the_two_reviewing_phases_go_stale(self, tmp_path):
+        plan = self._plan(tmp_path, generate_tasks=_OLD, implement=_NEW)
+        state = StateManager(plan)
+        assert state.is_phase_completed("generate-tasks")
+        assert not state.phase_completion_is_stale("generate-tasks")
+
+    def test_a_plain_review_code_is_not_refused_as_completed(self, tmp_path):
+        """The completed-phase guard (exit 2) and its artifact auto-heal both
+        used to resurrect the stale review; a plain run takes the --force path."""
+        import subprocess
+        plan = self._plan(tmp_path, code_review=_OLD, implement=_NEW)
+        result = subprocess.run(
+            [sys.executable, str(Path(prereq.__file__).parent / "code_review_orchestrator.py"),
+             "--plan-file", str(plan), "--models", "test:model"],
+            capture_output=True, text=True, timeout=30, encoding="utf-8",
+        )
+        assert "already been completed" not in result.stdout
+        assert "was complete but not marked" not in result.stdout
+        assert "re-running it" in result.stdout
+
+
+class TestEarlySandboxWarning:
+    """#1: implement / apply-code-fixes are refused on a codex host whose own
+    sandbox cannot start; the workflow view now says so from recorded evidence,
+    before phase 6 (Codex racing run, 2026-10-02)."""
+
+    @staticmethod
+    def _evidence(plan, *, phase="apply-suggestions", progress=None):
+        progress = progress if progress is not None else {
+            "write_subagents": {"tasks": [
+                {"task_id": "apply-batch-0", "sandbox_rung": "plugin-landlock"},
+            ]},
+        }
+        _put(plan, phase, ".status.json", {"progress": progress})
+
+    @pytest.fixture
+    def resolver(self, monkeypatch):
+        from utils import provider_registry
+        calls = []
+
+        def fake(tier="full", anchor=None, host_id=None, skip_session=False):
+            calls.append(anchor)
+            return fake.spec, "project"
+
+        fake.spec = "codex:gpt-6-astra"
+        monkeypatch.setattr(provider_registry, "resolve_subagent_runner", fake)
+        fake.calls = calls
+        return fake
+
+    def _plan(self, tmp_path, **kw):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"))
+        self._evidence(plan, **kw)
+        return plan
+
+    def test_recorded_fallback_and_codex_runner_warn_on_both_write_phases(
+        self, tmp_path, resolver
+    ):
+        payload = _status(self._plan(tmp_path))
+        warning = payload["phases"]["implement"]["warning"]
+        assert warning == payload["phases"]["apply-code-fixes"]["warning"]
+        assert payload["notices"] == [warning]
+        assert "plugin-landlock" in warning and "'codex:gpt-6-astra'" in warning
+        assert payload["suggested_next"] == "implement"
+
+    def test_the_remedy_is_the_refusals_own_sentence(self, tmp_path, resolver):
+        from utils.subagent_executor import F6_LEAD
+        warning = _status(self._plan(tmp_path))["phases"]["implement"]["warning"]
+        assert F6_LEAD.format(key="driver.subagent_runner") in warning
+
+    @pytest.mark.parametrize("progress", [
+        {"sandbox_fallback": {"codex:gpt-6-luna": "plugin-landlock"}},
+        {"sandbox_bypassed": ["codex:gpt-6-luna"]},
+    ])
+    def test_the_read_fanouts_records_count_too(self, tmp_path, resolver, progress):
+        plan = self._plan(tmp_path, phase="review-plan", progress=progress)
+        assert "warning" in _status(plan)["phases"]["implement"]
+
+    def test_a_runner_already_switched_away_from_codex_draws_no_warning(
+        self, tmp_path, resolver
+    ):
+        resolver.spec = "claude-code:sonnet"
+        payload = _status(self._plan(tmp_path))
+        assert "warning" not in payload["phases"]["implement"]
+        assert "notices" not in payload
+
+    def test_no_recorded_evidence_resolves_nothing(self, tmp_path, resolver):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"))
+        _put(plan, "apply-suggestions", ".status.json", {"progress": {
+            "write_subagents": {"tasks": [{"task_id": "apply-batch-0"}]}}})
+        assert "warning" not in _status(plan)["phases"]["implement"]
+        assert resolver.calls == []  # no config read, no probe: status stays cheap
+
+    def test_a_finished_implement_and_apply_code_fixes_draw_no_warning(
+        self, tmp_path, resolver
+    ):
+        plan = self._plan(tmp_path)
+        _put(plan, "code-review", "grouped.json", _ONE_FINDING)
+        _record(plan, completed=("implement", "code-review", "apply-code-fixes"))
+        phases = _status(plan)["phases"]
+        assert "warning" not in phases["implement"]
+        assert "warning" not in phases["apply-code-fixes"]
+
+    def test_an_unreadable_config_draws_no_warning(self, tmp_path, monkeypatch):
+        from utils import provider_registry
+
+        def boom(*a, **kw):
+            raise RuntimeError("broken override")
+
+        monkeypatch.setattr(provider_registry, "resolve_subagent_runner", boom)
+        assert "warning" not in _status(self._plan(tmp_path))["phases"]["implement"]
+
+    def test_the_next_step_that_points_at_implement_carries_it(
+        self, tmp_path, resolver
+    ):
+        from utils import next_phase
+        plan = self._plan(tmp_path)
+        answer = next_phase.next_phase_commands(
+            "plans/x.md", "codex", None, "generate-tasks", plan_path=plan)
+        assert answer.phase == "implement" and answer.warning
+        lines = next_phase.render_next_phase_lines(answer)
+        assert lines[0] == f"{next_phase.RUNNER_WARNING_MARKER} {answer.warning}"
+        assert lines[1].startswith(next_phase.NEXT_COMMAND_MARKER + " ")
+        assert "warning" not in answer.to_dict()  # user_next_step is unchanged

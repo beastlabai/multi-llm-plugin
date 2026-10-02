@@ -4231,6 +4231,15 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
     # Guard against re-running already-completed phase (expensive LLM calls)
     state_guard = get_or_create_state(plan_path)
+    if not args.force and state_guard.phase_completion_is_stale("code-review"):
+        # Implement completed after this review did, so the review judged an
+        # earlier state of the code (2026-10-02: the empty repository, before
+        # implement existed). `is_phase_completed` already reads it as pending;
+        # the artifacts it left in the phase dir must not auto-heal it back to
+        # complete below, so a plain run takes the `--force` path.
+        print("NOTE: code-review was completed before the latest implement; "
+              "re-running it (as --force)")
+        args.force = True
     if state_guard.is_phase_completed("code-review") and not args.force:
         phase_dir_check = get_phase_dir(plan_path, 'code-review')
         print("ERROR: Phase 'code-review' has already been completed for this plan.")

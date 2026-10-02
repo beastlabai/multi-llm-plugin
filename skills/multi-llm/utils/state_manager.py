@@ -21,6 +21,28 @@ logger = logging.getLogger(__name__)
 ID_ALGO_VERSION = 1
 CURRENT_FORMAT_VERSION = 2
 
+#: The phases that judge implement's output. A completion of one of them that
+#: predates implement's latest completion reviewed (or fixed) an earlier
+#: state of the code: typically the empty repository a review was run against
+#: before implement existed, or code implement has since rewritten
+#: (2026-10-02, Codex racing run: a plain `--review-code` was refused as
+#: already done, and implement's next step pointed at `--apply-code-fixes` on
+#: that stale review).
+PHASES_STALED_BY_IMPLEMENT = ("code-review", "apply-code-fixes")
+
+
+def _parse_completion_time(value) -> Optional[datetime]:
+    """A ``phases_completed`` timestamp as a naive local datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
 
 def compute_plan_hash(plan_path: Path) -> str:
     """Hash a plan's content the way ``state.json``'s ``plan_hash`` records it.
@@ -753,9 +775,34 @@ class StateManager:
         if phase == "review-plan":
             self.mark_review_phase_completed()
 
+    def phase_completion_is_stale(self, phase: str) -> bool:
+        """Whether *phase*'s recorded completion predates implement's.
+
+        Only the two phases that judge implement's output are ever stale
+        (:data:`PHASES_STALED_BY_IMPLEMENT`), and only when both timestamps
+        parse: a missing or unreadable date keeps the completion, since the
+        absence of a date is not staleness (the rule
+        ``check_workflow_prerequisites._apply_batches_predate_review`` applies
+        to apply batches after a review re-run).
+        """
+        if phase not in PHASES_STALED_BY_IMPLEMENT:
+            return False
+        completed = self.state.get("phases_completed", {})
+        recorded = _parse_completion_time(completed.get(phase))
+        implemented = _parse_completion_time(completed.get("implement"))
+        if recorded is None or implemented is None:
+            return False
+        return recorded < implemented
+
     def is_phase_completed(self, phase: str) -> bool:
         """
         Check if a workflow phase is completed.
+
+        A ``code-review`` or ``apply-code-fixes`` completion recorded before
+        implement's latest completion is not one (see
+        :meth:`phase_completion_is_stale`): the raw record stays in
+        ``phases_completed``, but every reader — the next-step builder, the
+        completed-phase guard, ``status`` — sees the phase as pending again.
 
         Args:
             phase: Phase name to check
@@ -763,7 +810,9 @@ class StateManager:
         Returns:
             True if the phase has been marked as completed
         """
-        return phase in self.state.get("phases_completed", {})
+        if phase not in self.state.get("phases_completed", {}):
+            return False
+        return not self.phase_completion_is_stale(phase)
 
     def mark_phase_skipped(self, phase: str, reason: str) -> None:
         """

@@ -43,6 +43,10 @@ NEXT_COMMAND_MARKER = "[NEXT_COMMAND]"
 NEXT_COMMAND_OPTIONAL_WHY_MARKER = "[NEXT_COMMAND_OPTIONAL_WHY]"
 NEXT_COMMAND_OPTIONAL_MARKER = "[NEXT_COMMAND_OPTIONAL]"
 WORKFLOW_COMPLETE_MARKER = "[WORKFLOW_COMPLETE]"
+#: One line above the block when the command it names is certain to be refused
+#: (``check_workflow_prerequisites.repo_wide_sandbox_warning``). Not a command
+#: marker: no consumer of the block reads it as one.
+RUNNER_WARNING_MARKER = "[RUNNER_WARNING]"
 
 #: The one slot every ``next_command`` template ends with (schema pattern
 #: ``^[^{}]+\{args\}$``). Filled with ``str.replace``, never ``str.format``.
@@ -91,6 +95,10 @@ class NextPhase:
     command: Optional[str]
     optional_before: Tuple[OptionalStep, ...] = ()
     complete: bool = False
+    #: The workflow payload's early warning on *phase*'s entry (a refusal the
+    #: command is certain to hit), rendered above the block and never part of
+    #: ``user_next_step``.
+    warning: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
@@ -342,6 +350,9 @@ def next_phase_commands(
     def is_open(phase: str) -> bool:
         return status_of(phase) not in done
 
+    def warning_of(phase: str) -> Optional[str]:
+        return (phases.get(phase) or {}).get("warning") or None
+
     def command_for(phase: str) -> str:
         mode_word = _mode_word(modes, phase)
         args = f"--{mode_word} {quote_plan_arg(plan_arg)}"
@@ -377,18 +388,50 @@ def next_phase_commands(
             phase=primary,
             command=command_for(primary),
             optional_before=optional_steps(order[: order.index(primary)]),
+            warning=warning_of(primary),
         )
 
     status = status_of(start)
     if status == "in_progress":
         # A resumable phase is its own answer; the span walk does not run.
-        return NextPhase(phase=start, command=command_for(start))
+        return NextPhase(
+            phase=start, command=command_for(start), warning=warning_of(start),
+        )
     if gated and status not in done:
         # The finished phase is not on record: exit 0 at a pending marker, a
         # native first call, a fresh detach invoker. Not a finished phase.
         return None
 
     index = order.index(start)
+    # A required phase BEFORE the finished one that was STARTED and not
+    # finished comes first: the workflow is not complete, and not at the next
+    # phase, while it stands. `suggested_next` (the notice on the same result
+    # line, `status`) names it, so a walk that began after the finished phase
+    # named another phase than the notice beside it. Measured 2026-10-02 on the
+    # OpenCode and Codex racing runs: implement had ended `needs-human` after a
+    # write-gate refusal, and apply-code-fixes then answered `complete` while
+    # the notice said `suggested next: implement`; review-code answered
+    # `--apply-code-fixes` against the same notice. Started means `in_progress`
+    # or a seeded task list (`tasks_total`): a phase never begun that sits
+    # before a standalone start stays skipped over (a standalone review-code on
+    # a fresh plan still walks to apply-code-fixes, "starting mid-workflow
+    # never sends the user back").
+    earlier = next(
+        (
+            phase for phase in order[:index]
+            if phase not in prereq.OPTIONAL_PHASES and is_open(phase)
+            and (status_of(phase) == "in_progress"
+                 or (phases.get(phase) or {}).get("tasks_total"))
+        ),
+        None,
+    )
+    if earlier is not None:
+        return NextPhase(
+            phase=earlier,
+            command=command_for(earlier),
+            optional_before=optional_steps(order[: order.index(earlier)]),
+            warning=warning_of(earlier),
+        )
     primary = next(
         (
             phase for phase in order[index + 1:]
@@ -404,6 +447,7 @@ def next_phase_commands(
         phase=primary,
         command=command_for(primary),
         optional_before=optional_steps(order[index + 1: order.index(primary)]),
+        warning=warning_of(primary),
     )
 
 
@@ -440,7 +484,10 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     """
     if answer.complete:
         return [WORKFLOW_COMPLETE_MARKER]
-    lines = [f"{NEXT_COMMAND_MARKER} {answer.command}"]
+    lines = []
+    if answer.warning:
+        lines.append(f"{RUNNER_WARNING_MARKER} {answer.warning}")
+    lines.append(f"{NEXT_COMMAND_MARKER} {answer.command}")
     for step in answer.optional_before:
         lines.append(f"{NEXT_COMMAND_OPTIONAL_WHY_MARKER} {step.why}")
         lines.append(f"{NEXT_COMMAND_OPTIONAL_MARKER} {step.command}")
