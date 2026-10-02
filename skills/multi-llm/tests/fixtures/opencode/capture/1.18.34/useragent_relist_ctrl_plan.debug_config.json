@@ -1,0 +1,43 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "stub": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "stub",
+      "options": {
+        "baseURL": "http://127.0.0.1:PORT/v1",
+        "apiKey": "***"
+      },
+      "models": {
+        "m": {
+          "name": "m",
+          "tool_call": true
+        }
+      }
+    }
+  },
+  "model": "stub/m",
+  "small_model": "stub/m",
+  "agent": {
+    "plan": {
+      "permission": {
+        "external_directory": {
+          "/rig/shared/*": "allow",
+          "/rig/shared/private/*": "deny",
+          "*": "deny"
+        },
+        "read": {
+          "*.env": "deny",
+          "*.env.*": "deny",
+          "*.env.example": "allow"
+        },
+        "doom_loop": "deny"
+      },
+      "options": {}
+    }
+  },
+  "mode": {},
+  "plugin": [],
+  "command": {},
+  "username": "unknown"
+}

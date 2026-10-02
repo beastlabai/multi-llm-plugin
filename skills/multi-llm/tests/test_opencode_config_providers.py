@@ -10,10 +10,10 @@ declared only in config, and the auth probe under the dispatch env.
 * T8.4 + T8.13 — ``_detect_auth``: the lazy config leg, the ``config`` state,
   the widened cache key, and the probe running under ``dispatch_child_env``.
 
-Every ``debug config`` here is canned (the 1.18.32 capture in
-``tests/fixtures/opencode/debug_config.1.18.32.json``, or a literal); the spawn
+Every ``debug config`` here is canned (the pinned release's capture,
+``tests/fixtures/opencode/debug_config.<pin>.json``, or a literal); the spawn
 seam ``opencode._spawn_debug_config`` is patched, so nothing runs a real
-binary. ``auth list`` is the committed 1.18.32 envelope.
+binary. ``auth list`` is the committed envelope of the same release.
 """
 
 from __future__ import annotations
@@ -39,11 +39,10 @@ from utils.providers.base import (  # noqa: E402
     PROFILE_GENERATE,
 )
 
-FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
-DEBUG_CONFIG = json.loads(
-    (FIXTURES / "debug_config.1.18.32.json").read_text(encoding="utf-8")
-)
-AUTH_LIST = json.loads((FIXTURES / "auth_list.1.18.32.json").read_text(encoding="utf-8"))
+from tests import opencode_fixtures as oc_pin  # noqa: E402
+
+DEBUG_CONFIG = json.loads(oc_pin.DEBUG_CONFIG.read_text(encoding="utf-8"))
+AUTH_LIST = json.loads(oc_pin.AUTH_LIST.read_text(encoding="utf-8"))
 
 KEY = "driver.subagent_runner"
 
@@ -140,7 +139,10 @@ class TestTheReduction:
         [
             ("custom_inline_key", "stub", True, True),
             ("custom_keyless", "keyless", True, False),
-            ("custom_envkey_unset", "envkey", True, False),
+            # 1.18.34 masks every declared key as "***", an unset `{env:}`
+            # reference included (1.18.32 printed ""): `has_key` now means
+            # "declared". Custom rows pass on `custom` either way.
+            ("custom_envkey_unset", "envkey", True, True),
             ("custom_envkey_set", "envkey", True, True),
             ("builtin_override_keyed", "openrouter", False, True),
             ("builtin_override_keyless", "openrouter", False, False),
@@ -156,6 +158,21 @@ class TestTheReduction:
     ):
         declared, _ = self._read(monkeypatch, _stdout(case))
         assert declared.providers[prefix] == oc.ProviderDecl(custom, has_key)
+
+    def test_the_pinned_build_masks_every_key(self):
+        """MEASURED on the pin: `debug config` prints every declared `apiKey`
+        as `"***"`, whatever its value — a canary, an unset `{env:}`
+        reference, an empty string. Pinned so a change is noticed: an unmasked
+        build would put the T8.3 env-key refusal back in reach."""
+        for case, run in DEBUG_CONFIG["cases"].items():
+            assert "sk-canary" not in run["stdout"], case
+        keyed = ("custom_inline_key", "custom_envkey_unset", "custom_envkey_set",
+                 "builtin_override_keyed", "jsonc_commented", "project_layer",
+                 "opencode_config_file")
+        for case in keyed:
+            providers = json.loads(_stdout(case))["provider"]
+            keys = {block["options"]["apiKey"] for block in providers.values()}
+            assert keys == {"***"}, case
 
     @pytest.mark.parametrize(
         "case", ["nothing_declared", "project_layer_disabled", "hermetic_pure_permission_only"]
@@ -637,7 +654,14 @@ class TestTheProbeRunsUnderTheDispatchEnv:
         assert probe.calls[0]["active"] is None
 
     def _env_keyed_reader(self, monkeypatch):
-        """`debug config` whose `{env:MY_TEST_KEY}` resolves in the env it gets."""
+        """`debug config` whose `{env:MY_TEST_KEY}` resolves in the env it gets.
+
+        The keyless half is 1.18.32's plaintext shape (`"apiKey": ""`). The
+        pinned build masks every declared key as `"***"` (an unset reference
+        included, `TestTheReduction.test_the_pinned_build_masks_every_key`), so
+        there this refusal never fires and the dispatch fails `auth_failed`
+        instead; the reducer keeps honouring an empty key for any build that
+        prints one."""
         keyed = _stdout("builtin_override_keyed")
         keyless = json.dumps({"provider": {"openrouter": {"options": {"apiKey": ""}}}})
         seen: List[Optional[Dict[str, str]]] = []

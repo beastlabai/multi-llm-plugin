@@ -8,7 +8,7 @@ debugged here first, over streams in each host's recorded shape:
 * codex: `codex exec --json` NDJSON (`item.completed` items; the shapes of
   `tests/fixtures/codex/0.156.1/mcp_tool_call.jsonl`);
 * opencode: `opencode run --format json` events (`tool_use` / `text` parts; the
-  shapes of `tests/fixtures/opencode/run_review.1.18.30.jsonl`);
+  shapes of `tests/fixtures/opencode/capture/<pin>/run_review.jsonl`);
 * claude-code: the `--output-format json` result envelope;
 * receipts: what `wrapper._write_receipt` writes.
 

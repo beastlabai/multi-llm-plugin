@@ -110,7 +110,7 @@ export MLLM_E2E_MATRIX_TIMEOUT_S
         e2e-container-latest-host e2e-live-provider e2e-lock-update e2e-verify-record \
         e2e-clean e2e-prune \
         opencode-stage opencode-package opencode-package-check-ci \
-        opencode-package-check opencode-publish \
+        opencode-package-check opencode-publish opencode-bump opencode-latest-check \
         codex-regen codex-package codex-package-check-ci codex-package-check \
         codex-publish
 
@@ -139,6 +139,8 @@ help:
 	@echo "  make opencode-package-check-ci    A4 rows 1-6: no Docker, no registry, no opencode binary"
 	@echo "  make opencode-package-check       the FULL gate: rows 7-9 too; stamps only if all ran"
 	@echo "  make opencode-publish             refuses unless the full gate passed on these exact bytes"
+	@echo "  make opencode-bump VERSION=x.y.z  move every opencode pin to one release; re-capture its fixtures (\$$0)"
+	@echo "  make opencode-latest-check        exit 1 when npm has a newer opencode than the pin"
 	@echo
 	@echo "Codex plugin, checked in at $(CODEX_PKG)/multi-llm (see $(CODEX_PKG)/README.md)"
 	@echo
@@ -744,6 +746,23 @@ opencode-package-check: opencode-package-check-ci
 opencode-publish:
 	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/build.py --check-stamp
 	cd $(OPENCODE_PKG) && npm publish --provenance --access public
+
+# THE SUPPORTED OPENCODE IS ITS NEWEST RELEASE, AND ONLY THAT ONE. It is the
+# adapter's min_version and verified_version at once, and engines.opencode, the
+# package README, the container's opencode-ai pin, lockfile and cli-versions.lock
+# row and the mock's --version all name it; tests/test_opencode_version_pins.py
+# fails on any one that does not. `opencode-bump` is the one way to move them:
+# it re-captures the fixtures from that release offline ($0, a localhost stub)
+# and rewrites every pin, writing nothing before its npm steps succeeded
+# (packaging/opencode/bump.py). `opencode-latest-check` is the drift probe: exit
+# 1 when npm's latest opencode-ai is newer than the pin. A make target, not a
+# scheduled workflow, like the container lane's own drift probes.
+opencode-bump:
+	@test -n "$(VERSION)" || { echo "usage: make opencode-bump VERSION=<x.y.z>   (make opencode-latest-check names the newest)"; exit 1; }
+	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/bump.py set "$(VERSION)"
+
+opencode-latest-check:
+	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/bump.py check
 
 
 # --------------------------------------------------------------------------- #

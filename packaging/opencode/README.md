@@ -21,9 +21,11 @@ the package directory already exists. `"opencode-multi-llm"` resolves to
 freezes identically. Upgrading means **bumping the pin and restarting** — that is
 the whole update story, and there is no `opencode plugin update`.
 
-Requires **OpenCode 1.18.18 or newer** (declared in `engines`, and enforced: an
+Requires **OpenCode 1.18.34 or newer** (declared in `engines`, and enforced: an
 older host refuses the plugin with a clear compatibility error) and
-[uv](https://docs.astral.sh/uv/) on the machine.
+[uv](https://docs.astral.sh/uv/) on the machine. Each release of this package
+supports the OpenCode release that was newest when it was cut, and only that
+one; `opencode upgrade` moves an older host there.
 
 ### Installing a local build — a **directory**, never the `.tgz`
 
@@ -176,11 +178,11 @@ path argument, the detached worker's process-group signalling, and where OpenCod
 roots its cache. macOS is in the same position. This release is validated on
 Linux.
 
-**Stream parsing is best-effort above opencode 1.18.12.** The shipped parser
-fixtures were captured from that release, and this package's declared floor
-(1.18.18) sits above it, so this holds for every install on this route. Output
-that does not match the captured shapes degrades to a best-effort read rather
-than failing.
+**Stream parsing is best-effort above opencode 1.18.34.** The shipped parser
+fixtures were captured from that release, which is also this package's declared
+floor. On a newer OpenCode a run prints one warning line, and output that does
+not match the captured shapes degrades to a best-effort read rather than
+failing.
 
 ## License
 

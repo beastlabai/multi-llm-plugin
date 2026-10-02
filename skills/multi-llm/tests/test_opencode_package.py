@@ -250,9 +250,10 @@ class TestManifest:
 
         This is the one field in the manifest whose correct value lives in
         *other* files, so it is the field most likely to go stale while still
-        looking deliberate. The floor is 1.18.18 because that is the container's
-        own version and the lowest ever executed — never the dev box's 1.18.21,
-        and never lower without a recorded run of that lower version.
+        looking deliberate. Since 2026-10-02 the floor is the one supported
+        opencode release — the container's own pin, the parser-fixture pin and
+        the adapter's ``min_version`` at once (``make opencode-bump`` moves all
+        of them; ``test_opencode_version_pins.py`` holds them equal).
 
         Second half of the same row: the floor must sit **at or above** the
         parser-fixture pin, so the package's declared floor does not disagree

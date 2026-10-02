@@ -64,6 +64,10 @@
 # — rather than silently dropped or left asserting a shape the seeder can never
 # reproduce.
 #
+# RE-SEEDED 2026-10-02 for one pin move, opencode 1.18.33 -> 1.18.34 (`make
+# opencode-bump`, the newest release being the only supported one): the help
+# digest and the derived options are unchanged, so only the row's version moved.
+#
 # Captured 2026-08-14 against the pinned image, offline. `options` is derived from
 # each adapter's own build_command()/build_agent_command() across every profile it
 # declares — never hand-listed — so the contract cannot drift from what we
@@ -429,7 +433,7 @@ clis:
 
   - cli: opencode
     binary: opencode
-    version: "1.18.33"
+    version: "1.18.34"
     probe: ok
     help_invocation: "opencode run --help"
     help_sha256: d62299ebc267afdf5bab2c07fbfe1a6625cc8769cb7073b3bad975e9531c5732

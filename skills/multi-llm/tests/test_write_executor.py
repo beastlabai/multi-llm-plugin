@@ -4068,7 +4068,8 @@ class TestThePhaseRunsTheRepositorysOwnCheck:
 # (plans/opencode-validator-false-rate-limit-and-denied-turn.md §4.4 step 4)
 # ===========================================================================
 
-_OPENCODE_DENIED = Path(__file__).parent / "fixtures" / "opencode" / "1.18.32"
+from tests import opencode_fixtures as _oc_pin  # noqa: E402
+
 _DENIED_SENTENCE = (
     "opencode ended the turn after an auto-rejected permission "
     "(external_directory /etc/*); no final answer"
@@ -4080,7 +4081,7 @@ def _install_denied_opencode(env: "WriteEnv") -> Dict[str, Path]:
     """An `opencode` that edits (optionally), then replays the b38de8bb denied
     turn: exit 0, no final answer, the `auto-rejecting` stderr line.
 
-    Version and auth probes answer like a logged-in 1.18.32. Only a dispatch
+    Version and auth probes answer like a logged-in pinned release. Only a dispatch
     (`--agent build`) is counted, performs the edit named by `T48_EDIT` and
     dumps its environment to `T48_ENV_DUMP`, so the spawn count is exact and
     the env the child really received can be compared with what the host sinks
@@ -4093,7 +4094,7 @@ def _install_denied_opencode(env: "WriteEnv") -> Dict[str, Path]:
     script.write_text(
         "#!/bin/sh\n"
         'case "$1" in\n'
-        '  --version|-V) echo "opencode 1.18.32"; exit 0;;\n'
+        f'  --version|-V) echo "opencode {_oc_pin.PIN}"; exit 0;;\n'
         "  auth) printf 'Credentials\\n  anthropic  oauth\\n'; exit 0;;\n"
         "esac\n"
         "cat >/dev/null\n"
@@ -4104,8 +4105,8 @@ def _install_denied_opencode(env: "WriteEnv") -> Dict[str, Path]:
         '    if [ -n "$T48_ENV_DUMP" ]; then env > "$T48_ENV_DUMP"; fi\n'
         "    ;;\n"
         "esac\n"
-        f'cat "{_OPENCODE_DENIED / "denied_permission_turn_end.jsonl"}"\n'
-        f'cat "{_OPENCODE_DENIED / "denied_permission_turn_end.stderr.txt"}" >&2\n'
+        f'cat "{_oc_pin.capture("denied_turn")}"\n'
+        f'cat "{_oc_pin.capture("denied_turn", ".stderr.txt")}" >&2\n'
         "exit 0\n",
         encoding="utf-8",
     )

@@ -40,7 +40,7 @@ from utils.providers.base import (  # noqa: E402
     PROFILE_GENERATE,
 )
 
-CAPTURE_ROOT = Path(__file__).parent / "fixtures" / "opencode" / "capture"
+from tests.opencode_fixtures import CAPTURE as CAPTURE_ROOT  # noqa: E402  (capture/<pin>/)
 FLOOR, CEILING = oc.OpenCodeProvider.CONTINUE_LOOP_ON_DENY_RANGE
 
 #: The three rows as the rig measured them (§4.2 step 1), before the built-in
@@ -331,14 +331,17 @@ class TestTheBuiltinAllows:
 # --------------------------------------------------------------------------- #
 
 class TestContinueLoopOnDenyGate:
-    def test_the_range_is_its_own_constant(self):
-        assert (FLOOR, CEILING) == ("1.17.15", "1.18.34")
-        assert oc.OpenCodeProvider.verified_version != CEILING
+    def test_the_range_is_the_support_window(self):
+        """One release is supported, so the measured range is that release."""
+        provider = oc.OpenCodeProvider
+        assert (FLOOR, CEILING) == (provider.min_version, provider.verified_version)
+        assert FLOOR == CEILING
 
-    def test_the_ceiling_is_backed_by_a_committed_rig_capture(self):
-        """The bound moves only on a rig measurement (opencode.py's comment): the
-        ceiling's own capture must exist and show the key keeping the loop going."""
-        rig = Path(__file__).parent / "fixtures" / "opencode" / "capture" / CEILING
+    def test_the_window_is_backed_by_a_committed_rig_capture(self):
+        """Every bump re-runs the rig on the new release: its capture must
+        exist and show the key keeping the loop going."""
+        rig = CAPTURE_ROOT
+        assert rig.name == CEILING
         rows = {
             line.split("\t")[0]: line.split("\t")
             for line in (rig / "summary.tsv").read_text("utf-8").splitlines()
@@ -348,7 +351,7 @@ class TestContinueLoopOnDenyGate:
             assert "tool_posts=2" in cont and "finish=stop" in cont
             assert "exit=0" in cont
 
-    @pytest.mark.parametrize("version", [FLOOR, CEILING])
+    @pytest.mark.parametrize("version", sorted({FLOOR, CEILING}))
     def test_in_range_it_is_present(self, provider, dispatch_env, capsys, version):
         for profile in (PROFILE_AGENT_READONLY, PROFILE_GENERATE):
             document = _content(provider, profile, runner_version=version)
@@ -374,10 +377,8 @@ class TestContinueLoopOnDenyGate:
         assert capsys.readouterr().err == ""
 
     def test_below_a_single_build_range_is_silent_too(self, capsys):
-        """The plan's own example: `verified_version` under a 1.18.32-only range."""
-        assert not oc.continue_loop_on_deny_allowed(
-            oc.OpenCodeProvider.verified_version, ("1.18.32", "1.18.32")
-        )
+        """The shipped range is a single build: a lower one is silent."""
+        assert not oc.continue_loop_on_deny_allowed("1.18.33", (FLOOR, CEILING))
         assert capsys.readouterr().err == ""
 
     @pytest.mark.parametrize("version", [None, "", "unknown"])
@@ -482,7 +483,7 @@ class TestTheVersionComesFromThePreflight:
 # --------------------------------------------------------------------------- #
 
 def _rig_cases(case: str) -> list:
-    found = sorted(CAPTURE_ROOT.glob(f"*/{case}.config.json"))
+    found = sorted(CAPTURE_ROOT.glob(f"{case}.config.json"))
     assert found, f"rig case {case} is not committed under {CAPTURE_ROOT}"
     return found
 

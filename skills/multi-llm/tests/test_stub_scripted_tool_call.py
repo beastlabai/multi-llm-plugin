@@ -660,7 +660,7 @@ TEXT_SCRIPT = {key: value for key, value in CHAT_SCRIPT.items()
                if key != "terminal"}
 TEXT_SCRIPT["after_output"] = "text"
 
-#: What opencode 1.18.32 hands the model for a `deny` rule (T4.6 rig,
+#: What opencode (1.18.32 on) hands the model for a `deny` rule (T4.6 rig,
 #: `tests/fixtures/opencode/capture/SCHEMA.md`), trimmed.
 DENY_TEXT = ("The user has specified a rule which prevents you from using this "
              "specific tool call. Here are some of the relevant rules "

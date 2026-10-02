@@ -861,17 +861,14 @@ class TestOtherAdaptersThatEndATurnShort:
     terminal is measured only at exit 1. cline's cut stream is pinned in
     ``tests/test_cline_reducer.py``; opencode's denied turn is here."""
 
-    OPENCODE = SKILL_ROOT / "tests" / "fixtures" / "opencode" / "1.18.32"
-
     def _opencode(self, name):
+        from tests.opencode_fixtures import read
         from utils.providers.opencode import OpenCodeProvider
 
-        stdout = (self.OPENCODE / f"{name}.jsonl").read_text(encoding="utf-8")
-        stderr = (self.OPENCODE / f"{name}.stderr.txt").read_text(encoding="utf-8")
-        return OpenCodeProvider(), stdout, stderr
+        return OpenCodeProvider(), read(name), read(name, ".stderr.txt")
 
     def test_opencodes_denied_turn_is_incomplete(self):
-        provider, stdout, stderr = self._opencode("denied_permission_turn_end")
+        provider, stdout, stderr = self._opencode("denied_turn")
         # The pin is live: the last message is narration the hook would hand
         # the ask lane as its answer text.
         assert provider.salvage_text(stdout).startswith("I'll read")
@@ -889,7 +886,7 @@ class TestOtherAdaptersThatEndATurnShort:
     def test_opencodes_turn_that_continued_past_a_deny_is_not(self):
         # `continue_loop_on_deny`: the same auto-reject, then a final answer and
         # a `stop`.
-        provider, stdout, stderr = self._opencode("continue_loop_on_deny")
+        provider, stdout, stderr = self._opencode("s41_cont_read")
         assert "auto-rejecting" in stderr
         assert "incomplete" not in provider.parse_output(stdout, stderr)
 

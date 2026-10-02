@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils import llm_client  # noqa: E402
 from utils.llm_client import ANSWER_TEXT_KEY, invoke_with_provider  # noqa: E402
+from tests.opencode_fixtures import PIN as _OPENCODE_PIN  # noqa: E402
 from utils.provider_registry import get_provider  # noqa: E402
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -185,7 +186,7 @@ _CAPTURED: Dict[str, Tuple[str, str]] = {
     "codex": ("codex:gpt-5", "codex/gpt5_sol_single_message.jsonl"),
     # opencode has no success row: its capture-rig reply is the prose
     # `FINAL ANSWER`, which is what gets swapped.
-    "opencode": ("opencode:openrouter/stub", "opencode/capture/1.18.32/s41_cont_read.jsonl"),
+    "opencode": ("opencode:openrouter/stub", f"opencode/capture/{_OPENCODE_PIN}/s41_cont_read.jsonl"),
     "copilot": ("copilot:gpt-5", "copilot/success.jsonl"),
     "muse": ("muse:stub-model", "muse/success.stdout.txt"),
     "claude-code": ("claude-code:haiku", "claude-code/success.stdout.txt"),

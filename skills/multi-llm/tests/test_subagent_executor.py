@@ -3537,19 +3537,19 @@ class TestProviderCapabilityDeclarations:
 # D4 — `invalid_model` is rung 1, fatal, refused at the probe, and repairable
 # ---------------------------------------------------------------------------
 
-_OPENCODE_FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
+from tests import opencode_fixtures as _oc_pin  # noqa: E402
 
-#: The two streams `opencode run --model opencode/sonnet` really wrote (opencode
-#: 1.18.x, `--print-logs --log-level ERROR`): a wrapper error event on stdout
-#: with an `err_…` ref and no cause, and the `ProviderModelNotFoundError` with
-#: its "Did you mean" list on stderr. Verbatim from the incident's
-#: `failed/validation-batch-0.attempt1.json`, which is what D5's fixture is.
-_INVALID_MODEL_STDOUT = (_OPENCODE_FIXTURES / "invalid-model.stdout.txt").read_text(
-    encoding="utf-8"
-)
-_INVALID_MODEL_STDERR = (_OPENCODE_FIXTURES / "invalid-model.stderr.txt").read_text(
-    encoding="utf-8"
-)
+_OPENCODE_FIXTURES = _oc_pin.ROOT
+
+#: The two streams `opencode run --model opencode/sonnet` writes on the pin
+#: (`--print-logs --log-level ERROR`, the rig's `invalid_model` case): a wrapper
+#: error event on stdout with an `err_…` ref and no cause, and the
+#: `ProviderModelNotFoundError` with its "Did you mean" list on stderr — the
+#: shape of the incident's `failed/validation-batch-0.attempt1.json` (D5).
+_INVALID_MODEL_STDOUT = _oc_pin.read("invalid_model")
+_INVALID_MODEL_STDERR = _oc_pin.read("invalid_model", ".stderr.txt")
+#: The suggestion list the pinned catalog prints for `opencode/sonnet`.
+_DID_YOU_MEAN = "Did you mean: claude-sonnet-5, claude-sonnet-4, claude-sonnet-4-5?"
 _REJECTED_SPEC = "opencode:opencode/sonnet"
 
 #: The same wrapper on stdout, but a stderr whose `error=` is a genuine server
@@ -3568,7 +3568,7 @@ def _install_opencode_capture(
 ) -> None:
     """Replace the mock `opencode` with a CLI that replays one captured failure.
 
-    Version and auth probes answer like a logged-in 1.18.12; every other
+    Version and auth probes answer like a logged-in pinned release; every other
     invocation — the nested-exec probe and the dispatch alike — drains stdin,
     writes the two captured streams and exits ``exit_code``. A shell script
     rather than a mock knob, so the bytes the real ``OpencodeProvider`` parses
@@ -3585,7 +3585,7 @@ def _install_opencode_capture(
             f"""\
             #!/bin/sh
             case "$1" in
-              --version|-V) echo "opencode 1.18.12"; exit 0;;
+              --version|-V) echo "opencode {_oc_pin.PIN}"; exit 0;;
               auth) printf 'Credentials\\n  anthropic  oauth\\n'; exit 0;;
             esac
             cat >/dev/null
@@ -3646,7 +3646,7 @@ class TestInvalidModelIsFatal:
             "the runner rejected the model id 'opencode:opencode/sonnet' (the fix "
             "is a config edit, never a retry). Stream tail: '"
         )
-        assert "Did you mean: claude-sonnet-4, claude-sonnet-5, claude-sonnet-4-5?" in reason
+        assert _DID_YOU_MEAN in reason
 
     # -- step 3: the probe row ----------------------------------------------
 
@@ -3743,7 +3743,7 @@ class TestInvalidModelIsFatal:
         # repair): this test's runner comes from the env-pointed config.
         assert f"Runner: driver.subagent_runner (env) = '{_REJECTED_SPEC}'" in err
         assert "Runner said:" in err
-        assert "Did you mean: claude-sonnet-4, claude-sonnet-5, claude-sonnet-4-5?" in err
+        assert _DID_YOU_MEAN in err
         assert "Options" in err
         assert "Repair first:" in err
         assert f"re-invoke with `{retry}`" in err
@@ -4621,7 +4621,7 @@ class TestCredentialFreeModels:
     def test_the_refusal_quotes_the_stream_the_verdict_came_from(
         self, monkeypatch
     ):
-        """opencode 1.18.32 prints a bare colour reset on stderr on every run.
+        """opencode (1.18.32 on) prints a bare colour reset on stderr on every run.
 
         The refusal used to quote ``stderr or stdout``, i.e. ``'\\x1b[0m\\n'``,
         which read as "the probe printed nothing" and sent the container-lane
@@ -4632,8 +4632,7 @@ class TestCredentialFreeModels:
         import json as _json
 
         fixture = _json.loads(
-            (Path(__file__).parent / "fixtures" / "opencode"
-             / "auth_list.1.18.32.json").read_text(encoding="utf-8")
+            _oc_pin.AUTH_LIST.read_text(encoding="utf-8")
         )["cases"]["empty"]
         completed = subprocess.CompletedProcess(
             args=["opencode", "auth", "list"], returncode=fixture["exit"],
@@ -6253,13 +6252,8 @@ class TestFailureCaptureRotation:
 # (plans/opencode-validator-false-rate-limit-and-denied-turn.md)
 # ---------------------------------------------------------------------------
 
-_OPENCODE_1_18_32 = _OPENCODE_FIXTURES / "1.18.32"
-_DENIED_STDOUT = (_OPENCODE_1_18_32 / "denied_permission_turn_end.jsonl").read_text(
-    encoding="utf-8"
-)
-_DENIED_STDERR = (
-    _OPENCODE_1_18_32 / "denied_permission_turn_end.stderr.txt"
-).read_text(encoding="utf-8")
+_DENIED_STDOUT = _oc_pin.read("denied_turn")
+_DENIED_STDERR = _oc_pin.read("denied_turn", ".stderr.txt")
 _DENIED_SENTENCE = (
     "opencode ended the turn after an auto-rejected permission "
     "(external_directory /etc/*); no final answer"

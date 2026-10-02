@@ -1,0 +1,5 @@
+[91m[1mError: [0mConfiguration is invalid at OPENCODE_CONFIG_CONTENT
+↳ Expected PermissionActionConfig, got "maybe" agent.plan.permission.external_directory
+↳ Expected PermissionActionConfig, got "maybe" agent.plan.permission.external_directory
+↳ Expected PermissionActionConfig, got "maybe" agent.plan.permission.external_directory
+↳ Expected PermissionActionConfig, got "maybe" agent.plan.permission.external_directory

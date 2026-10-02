@@ -53,6 +53,7 @@ from utils.providers.omp import (
     max_time_value,
 )
 from utils.providers.opencode import OpenCodeProvider
+from tests import opencode_fixtures as oc_pin
 from utils.providers.pi import PiProvider
 from utils.providers import qwen_code as qwen_code_module
 from utils.providers.qwen_code import QwenCodeProvider
@@ -2411,13 +2412,13 @@ class TestOpenCodeRealSchema:
         assert provider.describe_failure(stdout, "") == "ProviderAuthError"
 
     def test_real_capture_auth_error(self, provider):
-        """Verbatim capture from a live opencode 1.18.8 auth failure.
+        """The real binary's auth failure, captured offline on the pin.
 
-        The CLI wrote this to *stdout* and left stderr empty, exiting 1 --
-        the reason describe_failure exists.
+        The rig's `auth_error` case (a declared built-in `google` provider with
+        no key): the CLI writes the error event to *stdout* and exits 1 -- the
+        reason describe_failure exists. A live 1.18.8 failure had the same line.
         """
-        fixture = Path(__file__).parent / "fixtures" / "opencode" / "provider_auth_error.jsonl"
-        stdout = fixture.read_text(encoding="utf-8")
+        stdout = oc_pin.read("auth_error")
 
         assert provider.describe_failure(stdout, "") == (
             "ProviderAuthError: Google Generative AI API key is missing. Pass it using "
@@ -2425,7 +2426,7 @@ class TestOpenCodeRealSchema:
         )
 
     def test_real_capture_invalid_model_composes_the_stderr_cause(self, provider):
-        """Verbatim capture from a live opencode 1.18.x `--model opencode/sonnet`.
+        """The real binary on `--model opencode/sonnet`, captured offline on the pin.
 
         stdout carries only a wrapper — an `err_…` ref and no cause — and the
         `ProviderModelNotFoundError` with its "Did you mean" list is on stderr
@@ -2434,14 +2435,13 @@ class TestOpenCodeRealSchema:
         exit-3 line for this capture, which D4 owns (the classifier's verdict
         replaces this text there; see `test_subagent_executor.py`).
         """
-        fixtures = Path(__file__).parent / "fixtures" / "opencode"
-        stdout = (fixtures / "invalid-model.stdout.txt").read_text(encoding="utf-8")
-        stderr = (fixtures / "invalid-model.stderr.txt").read_text(encoding="utf-8")
+        stdout = oc_pin.read("invalid_model")
+        stderr = oc_pin.read("invalid_model", ".stderr.txt")
 
         assert provider.describe_failure(stdout, stderr) == (
             "UnknownError: Unexpected server error. Check server logs for details. "
             "(ProviderModelNotFoundError: Model not found: opencode/sonnet. Did you "
-            "mean: claude-sonnet-4, claude-sonnet-5, claude-sonnet-4-5?)"
+            "mean: claude-sonnet-5, claude-sonnet-4, claude-sonnet-4-5?)"
         )
         # The stdout-only behaviour is kept when stderr has no such line.
         assert provider.describe_failure(stdout, "") == (
@@ -6433,7 +6433,7 @@ class TestClassifyFailure:
 #: that value in parentheses. So stderr is declared *enrichment* that may change
 #: the text: blanking it must leave a non-``None`` answer that is a **prefix** of
 #: the composed one. Encoded as a value rather than an exemption, so the row
-#: stays graded against ``tests/fixtures/opencode/invalid-model.*``.
+#: stays graded against the rig's ``invalid_model`` capture.
 #:
 #: ``claude-code`` and ``cursor-agent`` joined on 2026-09-17, from one live
 #: ``review-code`` fan-out whose two failed slots were both recorded as the bare
@@ -10457,8 +10457,9 @@ class TestVendorTextOnTheFourEchoingAdapters:
         assert _c1_adapter(provider).classify_failure(stdout, "", 0) == expected
 
 
-OPENCODE_FIXTURES = Path(__file__).parent / "fixtures" / "opencode"
-OPENCODE_1_18_32 = OPENCODE_FIXTURES / "1.18.32"
+OPENCODE_FIXTURES = oc_pin.ROOT
+#: The rig's stream captures (`capture/<pin>/`) the adapter is graded on.
+OC_STREAM_CASES = ("run_review", "denied_turn", "s41_cont_read", "auth_error", "invalid_model")
 
 
 def _oc_fixture(name):
@@ -10477,7 +10478,7 @@ OC_429_EVENT = _oc_event(
         "message": "Rate limit exceeded", "statusCode": 429, "isRetryable": True,
     }},
 )
-#: The same shape for an auth failure, as `provider_auth_error.jsonl` records it.
+#: The same shape for an auth failure, as the rig's `auth_error` case records it.
 OC_AUTH_EVENT = _oc_event(
     "error", timestamp=1, sessionID="ses_0",
     error={"name": "ProviderAuthError", "data": {
@@ -10614,7 +10615,7 @@ class TestOpenCodeVendorText:
         """Every committed opencode capture: a subsequence, and no stderr."""
         paths = sorted(
             p for p in list(OPENCODE_FIXTURES.iterdir())
-            + list(OPENCODE_1_18_32.iterdir())
+            + list(oc_pin.CAPTURE.iterdir())
             if p.is_file() and p.suffix in (".txt", ".jsonl", ".json")
         )
         assert paths
@@ -10633,11 +10634,11 @@ class TestOpenCodeVendorText:
 #: synthetic text); `None` is an empty stream.
 OC_GRADED_CAPTURES = (
     # id,                       stdout,                                   stderr,                                    exit, before,          after
-    ("provider_auth_error",    "provider_auth_error.jsonl",              None,                                      1,    "auth_failed",   "auth_failed"),
-    ("invalid-model",          "invalid-model.stdout.txt",               "invalid-model.stderr.txt",                1,    "invalid_model", "invalid_model"),
-    ("run_review.1.18.30",     "run_review.1.18.30.jsonl",               None,                                      0,    None,            None),
-    ("denied_turn_1.18.32",    "1.18.32/denied_permission_turn_end.jsonl", "1.18.32/denied_permission_turn_end.stderr.txt", 0, "rate_limited", "runner_error"),
-    ("continue_loop_on_deny",  "1.18.32/continue_loop_on_deny.jsonl",    "1.18.32/continue_loop_on_deny.stderr.txt", 0,   None,            None),
+    ("auth_error",             ("rig", "auth_error"),                    ("rig", "auth_error.stderr"),             1,    "auth_failed",   "auth_failed"),
+    ("invalid_model",          ("rig", "invalid_model"),                 ("rig", "invalid_model.stderr"),          1,    "invalid_model", "invalid_model"),
+    ("run_review",             ("rig", "run_review"),                    ("rig", "run_review.stderr"),             0,    None,            None),
+    ("denied_turn",            ("rig", "denied_turn"),                   ("rig", "denied_turn.stderr"),            0,    "rate_limited",  "runner_error"),
+    ("continue_loop_on_deny",  ("rig", "s41_cont_read"),                 ("rig", "s41_cont_read.stderr"),          0,    None,            None),
     ("synthetic 429 event",    ("literal", OC_429_EVENT),                None,                                      1,    "rate_limited",  "rate_limited"),
     ("synthetic 429 stderr",   None,                                     ("literal", OC_429_STDERR),                1,    "rate_limited",  "rate_limited"),
 )
@@ -10646,9 +10647,11 @@ OC_GRADED_CAPTURES = (
 def _oc_stream(spec):
     if spec is None:
         return ""
-    if isinstance(spec, tuple):
-        return spec[1]
-    return _oc_fixture(spec)
+    kind, value = spec
+    if kind == "rig":
+        case, _, stream = value.partition(".")
+        return oc_pin.read(case, ".stderr.txt" if stream == "stderr" else ".jsonl")
+    return value
 
 
 class _OpenCodeBeforeT21(OpenCodeProvider):
@@ -10673,17 +10676,17 @@ class TestOpenCodeCapturesKeepTheirVerdict:
     @pytest.mark.parametrize("case", ["empty", "stored", "env_only",
                                       "config_provider_only"])
     def test_the_auth_list_capture_is_not_a_failure_either_way(self, case):
-        """`auth_list.1.18.32.json` is an auth probe, not a run; graded anyway."""
-        data = json.loads(_oc_fixture("auth_list.1.18.32.json"))["cases"][case]
+        """`auth_list.<pin>.json` is an auth probe, not a run; graded anyway."""
+        data = json.loads(oc_pin.AUTH_LIST.read_text("utf-8"))["cases"][case]
         out, err = data["stdout"], data["stderr"]
         assert _OpenCodeBeforeT21().classify_failure(out, err, 0) is None
         assert OpenCodeProvider().classify_failure(out, err, 0) is None
 
     @pytest.mark.parametrize(
-        "case", sorted(json.loads(_oc_fixture("debug_config.1.18.32.json"))["cases"])
+        "case", sorted(json.loads(oc_pin.DEBUG_CONFIG.read_text("utf-8"))["cases"])
     )
     def test_the_debug_config_capture_is_not_a_failure_either_way(self, case):
-        """`debug_config.1.18.32.json` (plan §8 T8.1) is a config read, not a
+        """`debug_config.<pin>.json` (plan §8 T8.1) is a config read, not a
         run, and nothing hands its stdout to `classify_failure` (the reader
         reduces it in memory). Graded anyway, every case exit 0. One case reads
         as a failure both before and after T2.1: `builtin_override_keyless`
@@ -10692,7 +10695,7 @@ class TestOpenCodeCapturesKeepTheirVerdict:
         unrecognised text and the `timeout` pattern matches. Pinned so a
         change is noticed; it would matter only if this output were ever
         classified."""
-        data = json.loads(_oc_fixture("debug_config.1.18.32.json"))["cases"][case]
+        data = json.loads(oc_pin.DEBUG_CONFIG.read_text("utf-8"))["cases"][case]
         out, err = data["stdout"], data["stderr"]
         assert data["exit"] == 0
         expected = "timeout" if case == "builtin_override_keyless" else None
@@ -10700,24 +10703,30 @@ class TestOpenCodeCapturesKeepTheirVerdict:
         assert OpenCodeProvider().classify_failure(out, err, 0) == expected
 
     def test_every_committed_capture_is_graded(self):
-        """A new capture under tests/fixtures/opencode/ must join the table."""
+        """Every stream case of the rig joins the table, and nothing but the
+        pin's two probe captures sits beside the rig (an older release's
+        capture is removed when the pin moves, never kept beside it)."""
         graded = {
-            spec for row in OC_GRADED_CAPTURES for spec in row[1:3]
-            if isinstance(spec, str)
-        } | {"auth_list.1.18.32.json", "debug_config.1.18.32.json"}
+            spec[1].partition(".")[0] for row in OC_GRADED_CAPTURES for spec in row[1:3]
+            if isinstance(spec, tuple) and spec[0] == "rig"
+        }
+        assert graded == set(OC_STREAM_CASES)
+        for case in graded:
+            assert oc_pin.capture(case).is_file(), case
         committed = {
-            str(p.relative_to(OPENCODE_FIXTURES))
-            for p in list(OPENCODE_FIXTURES.iterdir()) + list(OPENCODE_1_18_32.iterdir())
+            p.name for p in OPENCODE_FIXTURES.iterdir()
             if p.is_file() and p.suffix in (".txt", ".jsonl", ".json")
         }
-        assert committed == graded
+        assert committed == {oc_pin.AUTH_LIST.name, oc_pin.DEBUG_CONFIG.name}
+        releases = [
+            p.name for p in (OPENCODE_FIXTURES / "capture").iterdir()
+            if p.is_dir() and p.name[:1].isdigit()
+        ]
+        assert releases == [oc_pin.PIN]
 
 
 def _denied_turn():
-    return (
-        (OPENCODE_1_18_32 / "denied_permission_turn_end.jsonl").read_text(encoding="utf-8"),
-        (OPENCODE_1_18_32 / "denied_permission_turn_end.stderr.txt").read_text(encoding="utf-8"),
-    )
+    return oc_pin.read("denied_turn"), oc_pin.read("denied_turn", ".stderr.txt")
 
 
 class TestOpenCodeDeniedTurn:
@@ -10760,7 +10769,7 @@ class TestOpenCodeDeniedTurn:
         assert provider.classify_failure(stdout, stderr, 0) == expected
 
     def test_without_stderr_the_tool_use_alone_fires(self, provider):
-        """1.18.32's PermissionRejectedError carries no fields (read from the
+        """The pin's PermissionRejectedError carries no fields (read from the
         binary), so without the stderr line the sentence omits the
         parenthetical rather than inventing one."""
         stdout, _ = _denied_turn()
@@ -10772,7 +10781,7 @@ class TestOpenCodeDeniedTurn:
         )
 
     def test_a_tool_use_payload_that_names_the_permission_is_parsed(self, provider):
-        """Hypothetical shape (no 1.18.32 build writes it): if the rejected
+        """Hypothetical shape (the pinned build does not write it): if the rejected
         `tool_use`'s `part.state.error` ever carries `run`'s own
         `permission requested: <permission> (<pattern>)` words, they are read
         from there when stderr is absent."""
@@ -10807,14 +10816,14 @@ class TestOpenCodeDeniedTurn:
     def test_continue_loop_on_deny_is_not_a_denied_turn(self, provider):
         """MEASURED: stderr still says `auto-rejecting`, but the turn finished
         `stop` with an answer. stderr alone must never fire the check."""
-        stdout = (OPENCODE_1_18_32 / "continue_loop_on_deny.jsonl").read_text(encoding="utf-8")
-        stderr = (OPENCODE_1_18_32 / "continue_loop_on_deny.stderr.txt").read_text(encoding="utf-8")
+        stdout = oc_pin.read("s41_cont_read")
+        stderr = oc_pin.read("s41_cont_read", ".stderr.txt")
         assert "auto-rejecting" in stderr
         assert provider.classify_structural(stdout, stderr, 0) is None
         assert provider.classify_failure(stdout, stderr, 0) is None
 
     def test_a_healthy_run_is_not_a_denied_turn(self, provider):
-        stdout = _oc_fixture("run_review.1.18.30.jsonl")
+        stdout = oc_pin.read("run_review")
         assert provider.classify_structural(stdout, "", 0) is None
         assert provider.classify_failure(stdout, "", 0) is None
 
@@ -11779,23 +11788,21 @@ class TestClassifyLadderOrder:
         assert "invalid model, then server" in doc
 
 
-class TestOpenCodeStreamCapturesAcrossThePin:
-    """D3 step 5: the parser is graded on BOTH shipped opencode captures.
+class TestOpenCodeStreamCapturesOnThePin:
+    """The parser is graded on the real binary's streams at the pin.
 
-    `OpenCodeProvider.verified_version` stays `1.18.12` — it is a floor other
-    files are asserted against (`test_opencode_package.py` pins `engines.opencode`
-    between it and the container pin), and moving it is a support-window decision
-    with its own checklist. What D3 adds instead is evidence: a real 1.18.30
-    `opencode run --format json` stream captured beside the 1.18.8 auth-error
-    fixture, so a stream-shape break on a newer release surfaces as a red test
-    rather than as a version number nobody moved.
+    opencode supports its newest release only: `min_version` and
+    `verified_version` are one version, and the rig (`capture/run.sh`) captures
+    these streams from that release offline, against a localhost stub, at every
+    bump. So a stream-shape break on a new release surfaces here as a red test
+    on the bump, rather than as a version number nobody moved.
 
-    `run_review.1.18.30.jsonl` is the reviewer's own stdout from the D3
-    validation-batch gate (2026-09-11, zero-credential HOME, `opencode/big-pickle`,
-    `--pure` under the hermetic redirect): four `step_start`/`step_finish` pairs,
-    four `tool_use`/`tool` pairs, two `text` parts, no `error` event. The review
-    itself went to a file, so the text is prose and `parse_output` reports no
-    JSON — which is the correct reading of that stream, not a parser miss.
+    `run_review` scripts the shape of a real review turn (the D3 gate's 1.18.30
+    `opencode/big-pickle` reviewer, 2026-09-11): four `step_start`/`step_finish`
+    pairs, four `tool_use`s, two `text` parts, no `error` event, with that run's
+    per-step token counts. The review itself went to a file, so the text is
+    prose and `parse_output` reports no JSON — which is the correct reading of
+    that stream, not a parser miss.
     """
 
     @pytest.fixture
@@ -11805,17 +11812,14 @@ class TestOpenCodeStreamCapturesAcrossThePin:
         return get_provider("opencode")
 
     @pytest.fixture
-    def stream_1_18_30(self):
-        path = Path(__file__).parent / "fixtures" / "opencode" / "run_review.1.18.30.jsonl"
-        return path.read_text(encoding="utf-8")
+    def review_stream(self):
+        return oc_pin.read("run_review")
 
-    @pytest.fixture
-    def stream_1_18_8(self):
-        path = Path(__file__).parent / "fixtures" / "opencode" / "provider_auth_error.jsonl"
-        return path.read_text(encoding="utf-8")
+    def test_the_floor_is_the_capture_release(self, provider):
+        assert provider.min_version == provider.verified_version == oc_pin.PIN
 
-    def test_the_1_18_30_capture_is_a_real_event_stream(self, stream_1_18_30):
-        events = [json.loads(line) for line in stream_1_18_30.splitlines() if line]
+    def test_the_review_capture_is_a_real_event_stream(self, review_stream):
+        events = [json.loads(line) for line in review_stream.splitlines() if line]
         kinds = [event["type"] for event in events]
         assert kinds.count("step_start") == 4
         assert kinds.count("step_finish") == 4
@@ -11823,9 +11827,9 @@ class TestOpenCodeStreamCapturesAcrossThePin:
         assert kinds.count("text") == 2
         assert "error" not in kinds
 
-    def test_usage_is_summed_over_every_step_on_1_18_30(self, provider, stream_1_18_30):
+    def test_usage_is_summed_over_every_step(self, provider, review_stream):
         """Reading the last step alone would under-report a multi-step run."""
-        usage = provider.parse_usage(stream_1_18_30, "")
+        usage = provider.parse_usage(review_stream, "")
         assert usage == {
             "input_tokens": 11489,
             "output_tokens": 1764,
@@ -11835,8 +11839,8 @@ class TestOpenCodeStreamCapturesAcrossThePin:
             "tool_uses": 4,
         }
 
-    def test_the_text_parts_are_read_in_order_on_1_18_30(self, provider, stream_1_18_30):
-        result = provider.parse_output(stream_1_18_30, "")
+    def test_the_text_parts_are_read_in_order(self, provider, review_stream):
+        result = provider.parse_output(review_stream, "")
         raw = str(result.get("raw") or "")
         assert raw.startswith("Now let me explore the codebase")
         assert "JSON written to" in raw
@@ -11844,28 +11848,24 @@ class TestOpenCodeStreamCapturesAcrossThePin:
         assert result["success"] is False
         assert "No valid JSON" in str(result.get("error"))
 
-    def test_a_clean_1_18_30_stream_reports_no_failure(self, provider, stream_1_18_30):
-        assert provider.describe_failure(stream_1_18_30, "") is None
-        assert provider.classify_failure(stream_1_18_30, "", 0) is None
+    def test_a_clean_review_stream_reports_no_failure(self, provider, review_stream):
+        assert provider.describe_failure(review_stream, "") is None
+        assert provider.classify_failure(review_stream, "", 0) is None
 
-    def test_the_1_18_8_auth_error_is_still_read(self, provider, stream_1_18_8):
-        """Both pins graded in one place: the older capture keeps its verdict."""
-        assert provider.describe_failure(stream_1_18_8, "") == (
+    def test_the_auth_error_is_read(self, provider):
+        stdout = oc_pin.read("auth_error")
+        assert provider.describe_failure(stdout, "") == (
             "ProviderAuthError: Google Generative AI API key is missing. Pass it using "
             "the 'apiKey' parameter or the GOOGLE_GENERATIVE_AI_API_KEY environment variable."
         )
-        assert provider.classify_failure(stream_1_18_8, "", 1) == STATUS_AUTH_FAILED
+        assert provider.classify_failure(stdout, "", 1) == STATUS_AUTH_FAILED
 
-    def test_the_pin_did_not_move(self, provider):
-        """The capture is evidence beside the pin, never a reason to move it."""
-        assert provider.verified_version == "1.18.12"
-
-    def test_the_1_18_32_denied_turn_is_read(self, provider):
-        """T2.3: run b38de8bb's validator, whole events only, redacted.
+    def test_the_denied_turn_is_read(self, provider):
+        """T2.3: run b38de8bb's shape, reproduced by the rig's `denied_turn`.
 
         exit 0, two `step_finish tool-calls`, a rejected bash `tool_use` and no
-        text answer. Its tool output quotes plan text about rate limits, which
-        is how it was recorded `rate_limited`; it is `runner_error` now.
+        final answer. Its tool output quotes plan text about rate limits, which
+        is how b38de8bb was recorded `rate_limited`; it is `runner_error` now.
         """
         stdout, stderr = _denied_turn()
         events = [json.loads(line) for line in stdout.splitlines() if line]
@@ -11880,7 +11880,7 @@ class TestOpenCodeStreamCapturesAcrossThePin:
             and "rejected permission" in event["part"]["state"].get("error", "")
         ]
         assert [event["part"]["tool"] for event in rejected] == ["bash"]
-        assert {event["sessionID"] for event in events} == {"ses_" + "0" * 26}
+        assert len({event["sessionID"] for event in events}) == 1
         assert stderr.strip().endswith(
             "permission requested: external_directory (/etc/*); auto-rejecting"
         )

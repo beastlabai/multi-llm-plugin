@@ -1,0 +1,118 @@
+{
+ "opencode_version": "1.18.34",
+ "note": "a healthy review turn: four steps, four tool calls, two text parts, finish stop",
+ "argv": [
+  "opencode",
+  "run",
+  "--pure",
+  "--agent",
+  "build",
+  "--format",
+  "json",
+  "--print-logs",
+  "--log-level",
+  "ERROR",
+  "--model",
+  "stub/m",
+  "Review the plan at /rig/work/plans/tiny.md and write the JSON array of findings to /rig/work/plans/tiny/review-plan/opencode_stub_m.json."
+ ],
+ "env": {
+  "HOME": "/rig/home",
+  "XDG_CONFIG_HOME": "/rig/cfg",
+  "XDG_DATA_HOME": "/rig/data",
+  "XDG_CACHE_HOME": "/rig/cache",
+  "XDG_STATE_HOME": "/rig/state",
+  "TMPDIR": "/rig/tmp",
+  "OPENCODE_DISABLE_MODELS_FETCH": "1",
+  "OPENCODE_DISABLE_AUTOUPDATE": "1",
+  "OPENCODE_DISABLE_PROJECT_CONFIG": "1"
+ },
+ "OPENCODE_CONFIG_CONTENT": null,
+ "global_opencode_json": {
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+   "stub": {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "stub",
+    "options": {
+     "baseURL": "http://127.0.0.1:PORT/v1",
+     "apiKey": "x"
+    },
+    "models": {
+     "m": {
+      "name": "m",
+      "tool_call": true
+     }
+    }
+   }
+  },
+  "model": "stub/m",
+  "small_model": "stub/m"
+ },
+ "managed_opencode_json": null,
+ "org_config": null,
+ "stub_tool_call": null,
+ "stub_script": {
+  "turns": [
+   {
+    "calls": [
+     {
+      "tool": "read",
+      "args": {
+       "filePath": "/rig/work/plans/tiny.md"
+      }
+     }
+    ],
+    "usage": {
+     "input": 9324,
+     "output": 92
+    }
+   },
+   {
+    "text": "Now let me explore the codebase to understand what context might be relevant.",
+    "calls": [
+     {
+      "tool": "read",
+      "args": {
+       "filePath": "/rig/work"
+      }
+     },
+     {
+      "tool": "bash",
+      "args": {
+       "command": "ls -la /rig/work/plans/tiny/ 2>/dev/null || echo \"Directory does not exist\"",
+       "description": "List the review directory"
+      }
+     }
+    ],
+    "usage": {
+     "input": 346,
+     "output": 245,
+     "cached": 9280
+    }
+   },
+   {
+    "calls": [
+     {
+      "tool": "write",
+      "args": {
+       "filePath": "/rig/work/plans/tiny/review-plan/opencode_stub_m.json",
+       "content": "[\n  {\n    \"title\": \"Missing problem statement\",\n    \"importance\": \"medium\",\n    \"description\": \"The plan names the flag but not the problem it solves.\",\n    \"suggestion\": \"State which user need --verbose answers.\"\n  }\n]"
+      }
+     }
+    ],
+    "usage": {
+     "input": 461,
+     "output": 1329,
+     "cached": 9600
+    }
+   }
+  ],
+  "final": "JSON written to /rig/work/plans/tiny/review-plan/opencode_stub_m.json",
+  "final_usage": {
+   "input": 1358,
+   "output": 98,
+   "cached": 10048
+  }
+ }
+}

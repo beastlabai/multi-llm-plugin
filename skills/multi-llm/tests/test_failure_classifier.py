@@ -49,6 +49,7 @@ from utils.retry_ladder import (  # noqa: E402
     STATUS_TIMEOUT,
 )
 from utils.subagent_tasks import build_inputs, make_task  # noqa: E402
+from tests import opencode_fixtures as oc_pin  # noqa: E402
 
 
 SKILL_DIR = Path(__file__).parent.parent
@@ -123,11 +124,9 @@ CODEX_RETRY_LIMIT_429 = (
     "stream error: exceeded retry limit, last status: 429 Too Many Requests"
 )
 
-#: tests/fixtures/opencode/provider_auth_error.jsonl — a live opencode auth
-#: failure, 304 bytes on **stdout** with stderr empty.
-OPENCODE_PROVIDER_AUTH_ERROR = (
-    Path(__file__).parent / "fixtures" / "opencode" / "provider_auth_error.jsonl"
-).read_text(encoding="utf-8")
+#: The capture rig's `auth_error` case on the pin: opencode's auth failure, an
+#: `error` event on **stdout** (stderr carries only `--print-logs` lines).
+OPENCODE_PROVIDER_AUTH_ERROR = oc_pin.read("auth_error")
 
 #: `opencode auth list`, exit **0**, scratch HOME/XDG dirs, 2026-08-16. A
 #: logged-out opencode prints this and exits 0; today the probe reads that as
@@ -447,19 +446,15 @@ class TestOpencodeAuthListExitsZeroWhenLoggedOut:
         ) is not False
 
 
-#: `opencode auth list` on **1.18.32**, captured raw from the container image
-#: (no TTY, stdin /dev/null, scratch HOME). The strings above are the 1.18.12-era
-#: hand transcriptions; this is the byte-exact envelope of the pinned image
-#: build, ANSI and all, so the verdict is graded on both pins.
-OPENCODE_AUTH_LIST_1_18_32 = json.loads(
-    (
-        Path(__file__).parent / "fixtures" / "opencode" / "auth_list.1.18.32.json"
-    ).read_text(encoding="utf-8")
-)
+#: `opencode auth list` on the pin (`auth_list_capture.py`: no TTY, stdin
+#: /dev/null, scratch HOME). The strings above are the 1.18.12-era hand
+#: transcriptions; this is the byte-exact envelope of the supported release,
+#: ANSI and all, so the verdict is graded on both.
+OPENCODE_AUTH_LIST = json.loads(oc_pin.AUTH_LIST.read_text(encoding="utf-8"))
 
 
-class TestOpencodeAuthList_1_18_32:
-    """The 1.18.32 envelope: same count lines, with colour escapes around them.
+class TestOpencodeAuthListOnThePin:
+    """The pinned envelope: same count lines, with colour escapes around them.
 
     Two things it changes and one it does not. stdout now carries ``\\x1b[90m``
     before the path and each entry's type; stderr is exactly ``\\x1b[0m\\n`` on
@@ -468,7 +463,7 @@ class TestOpencodeAuthList_1_18_32:
     no new reading; these tests hold that true.
     """
 
-    CASES = OPENCODE_AUTH_LIST_1_18_32["cases"]
+    CASES = OPENCODE_AUTH_LIST["cases"]
 
     def _classify(self, case):
         run = self.CASES[case]
@@ -477,7 +472,7 @@ class TestOpencodeAuthList_1_18_32:
         )
 
     def test_the_fixture_is_the_pinned_build(self):
-        assert OPENCODE_AUTH_LIST_1_18_32["opencode_version"] == "1.18.32"
+        assert OPENCODE_AUTH_LIST["opencode_version"] == oc_pin.PIN
         for case, run in self.CASES.items():
             assert run["exit"] == 0, case
             assert run["stderr"] == "\x1b[0m\n", case
@@ -503,7 +498,7 @@ class TestOpencodeAuthList_1_18_32:
         ``OpenCodeProvider.config_credential_source``, which reads the
         dispatch's own resolved config through ``opencode debug config`` and
         records the auth state ``config`` — see
-        ``TestConfigDeclaredProviders_1_18_32`` below. The container lane's
+        ``TestConfigDeclaredProvidersOnThePin`` below. The container lane's
         stub runner still passes on its seeded stored credential in stage 1.
         """
         assert (
@@ -513,18 +508,14 @@ class TestOpencodeAuthList_1_18_32:
         assert self._classify("config_provider_only") is False
 
 
-#: `opencode debug config` on 1.18.32, one case per §8.2 verdict-table row
+#: `opencode debug config` on the pin, one case per §8.2 verdict-table row
 #: plus jsonc, project layer, `OPENCODE_CONFIG`, and the hermetic
 #: content/`--pure` cases (plan §8 T8.1). Every `apiKey` is a canary.
-OPENCODE_DEBUG_CONFIG_1_18_32 = json.loads(
-    (
-        Path(__file__).parent / "fixtures" / "opencode" / "debug_config.1.18.32.json"
-    ).read_text(encoding="utf-8")
-)
+OPENCODE_DEBUG_CONFIG = json.loads(oc_pin.DEBUG_CONFIG.read_text(encoding="utf-8"))
 CANARY = "sk-canary-not-a-key-"
 
 
-class TestConfigDeclaredProviders_1_18_32:
+class TestConfigDeclaredProvidersOnThePin:
     """Plan §8 T8.7: `auth list` says `0 credentials`; the config leg decides.
 
     Every case drives ``subagent_executor._detect_auth`` end to end with the
@@ -534,8 +525,8 @@ class TestConfigDeclaredProviders_1_18_32:
     where the user's own resolved config is the dispatch's config.
     """
 
-    DEBUG = OPENCODE_DEBUG_CONFIG_1_18_32["cases"]
-    AUTH = OPENCODE_AUTH_LIST_1_18_32["cases"]
+    DEBUG = OPENCODE_DEBUG_CONFIG["cases"]
+    AUTH = OPENCODE_AUTH_LIST["cases"]
 
     @pytest.fixture(autouse=True)
     def _setup(self, tmp_path, monkeypatch):

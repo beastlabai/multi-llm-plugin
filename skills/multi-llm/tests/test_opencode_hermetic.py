@@ -585,7 +585,7 @@ class TestUserConfigReader:
     reader failure never changes today's verdict."""
 
     #: `debug config` for a user whose only config is a commented
-    #: `opencode.jsonc` declaring `only-in-jsonc` (the 1.18.32 capture's
+    #: `opencode.jsonc` declaring `only-in-jsonc` (the debug-config capture's
     #: `jsonc_commented` shape: opencode parses what `json.load` cannot).
     JSONC_RESOLVED = json.dumps({
         "$schema": "https://opencode.ai/config.json",

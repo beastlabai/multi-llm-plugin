@@ -1,0 +1,3 @@
+{"i": 0, "path": "/v1/chat/completions", "tools": false, "nmsgs": 3, "tool_results": []}
+{"i": 1, "path": "/v1/chat/completions", "tools": true, "nmsgs": 2, "tool_results": []}
+{"i": 2, "path": "/v1/chat/completions", "tools": true, "nmsgs": 4, "tool_results": ["<path>/rig/work/docs/plan.md</path>\n<type>file</type>\n<content>\n1: # Search plan\n2: \n3: The public search endpoint enforces a rate limit of 30 requests per minute per client.\n4: Each hit is recorded with rate_limit_hit(client_id) in the history table.\n5: A client over the limit gets HTTP 429 with a Retry-After header.\n\n(End of file - total 5 lines)\n</content>"]}
