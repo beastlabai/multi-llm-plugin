@@ -14,7 +14,7 @@ from utils.filtering import (
     resolve_bulk_option_conflicts,
     filter_items,
     validate_batch_mode_honored,
-    validate_claude_decide_items_honored,
+    validate_judge_decide_items_honored,
     generate_batch_id,
     should_bypass_no_selection_confirmation,
     ERROR_TYPE_AMBIGUOUS,
@@ -656,7 +656,7 @@ class TestShouldBypassNoSelectionConfirmation:
 
 
 class TestClaudeDecideBeatsBulkApproval:
-    """Section 4d: a per-item claude_decide marker beats bulk approval."""
+    """Section 4d: a per-item judge_decide marker beats bulk approval."""
 
     def _group(self, **extra):
         g = {
@@ -667,9 +667,9 @@ class TestClaudeDecideBeatsBulkApproval:
         g.update(extra)
         return g
 
-    def test_claude_decide_not_auto_approved_by_approve_all(self):
+    def test_judge_decide_not_auto_approved_by_approve_all(self):
         """A marked group lands in needs_human, not valid, under --approve-all."""
-        groups = [self._group(claude_decide=True)]
+        groups = [self._group(judge_decide=True)]
         valid, needs_human, skipped, _ = filter_items(
             groups, approve_all_human=True
         )
@@ -680,9 +680,9 @@ class TestClaudeDecideBeatsBulkApproval:
         assert needs_human[0]["validation_status"] == "needs-human-decision"
         assert needs_human[0].get("auto_approved") is not True
 
-    def test_claude_decide_not_auto_approved_by_approve_importance(self):
+    def test_judge_decide_not_auto_approved_by_approve_importance(self):
         """A marked HIGH group is not auto-approved by --approve-importance HIGH."""
-        groups = [self._group(claude_decide=True)]
+        groups = [self._group(judge_decide=True)]
         valid, needs_human, skipped, _ = filter_items(
             groups, approve_importance_levels=["HIGH"]
         )
@@ -691,7 +691,7 @@ class TestClaudeDecideBeatsBulkApproval:
 
     def test_unmarked_group_still_auto_approved(self):
         """The short-circuit is scoped to marked groups only."""
-        groups = [self._group()]  # no claude_decide
+        groups = [self._group()]  # no judge_decide
         valid, needs_human, skipped, _ = filter_items(
             groups, approve_all_human=True
         )
@@ -701,7 +701,7 @@ class TestClaudeDecideBeatsBulkApproval:
 
     def test_bulk_skip_still_honoured_for_marked_group(self):
         """Bulk *skip* still applies to a marked group (skip is a safety choice)."""
-        groups = [self._group(claude_decide=True)]
+        groups = [self._group(judge_decide=True)]
         valid, needs_human, skipped, _ = filter_items(
             groups, skip_all_human=True
         )
@@ -713,40 +713,40 @@ class TestValidateClaudeDecideItemsHonored:
     """Section 4c: post-hoc audit that pre-marked items reached the judge."""
 
     def test_empty_when_no_marked_items(self):
-        is_valid, warnings = validate_claude_decide_items_honored(
-            {"claude_decide_item_ids": []}, {}
+        is_valid, warnings = validate_judge_decide_items_honored(
+            {"judge_decide_item_ids": []}, {}
         )
         assert is_valid is True
         assert warnings == []
 
     def test_ok_when_all_routed_to_judge(self):
-        config = {"claude_decide_item_ids": ["h1", "h2"]}
+        config = {"judge_decide_item_ids": ["h1", "h2"]}
         decisions = {
-            "h1": {"batch_context": {"decision_source": "claude_auto_decide"}},
-            "h2": {"batch_context": {"decision_source": "claude_auto_decide_salvage"}},
+            "h1": {"batch_context": {"decision_source": "judge_auto_decide"}},
+            "h2": {"batch_context": {"decision_source": "judge_auto_decide_salvage"}},
         }
-        is_valid, warnings = validate_claude_decide_items_honored(config, decisions)
+        is_valid, warnings = validate_judge_decide_items_honored(config, decisions)
         assert is_valid is True
         assert warnings == []
 
     def test_flags_missing_decision(self):
-        config = {"claude_decide_item_ids": ["h1"]}
-        is_valid, warnings = validate_claude_decide_items_honored(config, {})
+        config = {"judge_decide_item_ids": ["h1"]}
+        is_valid, warnings = validate_judge_decide_items_honored(config, {})
         assert is_valid is False
         assert any("h1" in w for w in warnings)
 
     def test_flags_wrong_source(self):
-        config = {"claude_decide_item_ids": ["h1"]}
+        config = {"judge_decide_item_ids": ["h1"]}
         decisions = {
             "h1": {"batch_context": {"decision_source": "interactive"}},
         }
-        is_valid, warnings = validate_claude_decide_items_honored(config, decisions)
+        is_valid, warnings = validate_judge_decide_items_honored(config, decisions)
         assert is_valid is False
         assert any("interactive" in w for w in warnings)
 
     def test_flags_decision_without_batch_context(self):
-        config = {"claude_decide_item_ids": ["h1"]}
+        config = {"judge_decide_item_ids": ["h1"]}
         decisions = {"h1": {"decision": "approved"}}
-        is_valid, warnings = validate_claude_decide_items_honored(config, decisions)
+        is_valid, warnings = validate_judge_decide_items_honored(config, decisions)
         assert is_valid is False
         assert len(warnings) == 1

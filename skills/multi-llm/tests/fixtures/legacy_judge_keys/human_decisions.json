@@ -1,0 +1,48 @@
+{
+  "3b810046f0a56e8c": {
+    "decision": "skipped",
+    "reason": "Agent decide [codex:gpt-6-astra]: not decidable from the text",
+    "timestamp": "2026-10-01T14:02:11.120394",
+    "batch_context": {
+      "batch_id": "claude_decide_efabfefb",
+      "batch_action": "claude_auto_decide",
+      "decision_source": "claude_auto_decide",
+      "importance_at_decision": "LOW",
+      "judge": "codex:gpt-6-astra"
+    }
+  },
+  "9a9a9a9a9a9a9a9a": {
+    "decision": "approved",
+    "reason": "Agent decide [codex:gpt-6-astra] (salvaged): kept the retry cap; dropped the jitter rewrite",
+    "timestamp": "2026-10-01T14:02:11.120871",
+    "batch_context": {
+      "batch_id": "claude_decide_efabfefb",
+      "batch_action": "claude_auto_decide_salvage",
+      "decision_source": "claude_auto_decide_salvage",
+      "importance_at_decision": "MEDIUM",
+      "judge": "codex:gpt-6-astra",
+      "salvaged_description": "Cap upload retries at three attempts.",
+      "dropped": "the jitter rewrite"
+    }
+  },
+  "5c5c5c5c5c5c5c5c": {
+    "decision": "approved",
+    "reason": "Agent decide [codex:gpt-6-astra]: a sound guard",
+    "timestamp": "2026-10-01T14:02:11.121002",
+    "batch_context": {
+      "batch_id": "claude_decide_efabfefb",
+      "batch_action": "claude_auto_decide",
+      "decision_source": "claude_auto_decide",
+      "importance_at_decision": "HIGH",
+      "judge": "codex:gpt-6-astra"
+    }
+  },
+  "deadbeef00000000": {
+    "decision": "approved",
+    "reason": "the user said so",
+    "timestamp": "2026-10-01T13:58:40.004112",
+    "batch_context": {
+      "decision_source": "user"
+    }
+  }
+}

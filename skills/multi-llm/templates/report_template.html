@@ -1329,6 +1329,13 @@
       return 'multi-llm-selections-' + selections.phase + '-' + selections.plan_path;
     }
 
+    function migrateLegacyOverrides(overrides) {
+      if (!overrides) return;
+      Object.keys(overrides).forEach(function(k) {
+        if (overrides[k] === 'claude_decide') overrides[k] = 'judge_decide';
+      });
+    }
+
     function loadSelections() {
       const stored = localStorage.getItem(getStorageKey());
       if (stored) {
@@ -1345,6 +1352,8 @@
             parsed.skipped_suggestions.forEach(function(s) { migratedSugg[String(s)] = true; });
             parsed.skipped_suggestions = migratedSugg;
           }
+          // A selection saved before the judge rename says 'claude_decide' (utils/judge_vocab.py).
+          migrateLegacyOverrides(parsed.validation_overrides);
           selections = { ...selections, ...parsed };
         } catch (e) {
           console.error('Failed to load selections:', e);
@@ -1695,7 +1704,7 @@
                   '<option value="valid"' + (suggOverride === 'valid' ? ' selected' : '') + '>Mark Valid</option>' +
                   '<option value="invalid"' + (suggOverride === 'invalid' ? ' selected' : '') + '>Mark Invalid</option>' +
                   (validationStatus === 'needs-human-decision' ?
-                    '<option value="claude_decide"' + (suggOverride === 'claude_decide' ? ' selected' : '') + '>Let the agent decide</option>' : '') +
+                    '<option value="judge_decide"' + (suggOverride === 'judge_decide' ? ' selected' : '') + '>Let the agent decide</option>' : '') +
                   '</select>';
               }
             }
@@ -1792,7 +1801,7 @@
               '<option value="valid"' + (selections.validation_overrides[groupHashKey] === 'valid' ? ' selected' : '') + '>Mark Valid</option>' +
               '<option value="invalid"' + (selections.validation_overrides[groupHashKey] === 'invalid' ? ' selected' : '') + '>Mark Invalid</option>' +
               (validationStatus === 'needs-human-decision' ?
-                '<option value="claude_decide"' + (selections.validation_overrides[groupHashKey] === 'claude_decide' ? ' selected' : '') + '>Let the agent decide</option>' : '') +
+                '<option value="judge_decide"' + (selections.validation_overrides[groupHashKey] === 'judge_decide' ? ' selected' : '') + '>Let the agent decide</option>' : '') +
               '</select>' : '')) +
           '</div>' +
           '<div class="group-badges">';

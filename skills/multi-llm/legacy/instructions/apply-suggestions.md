@@ -362,9 +362,9 @@ uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/utils/metr
 
 Follow the human decision batch mode process in `references/human-decision-batch.md`.
 
-**Auto-route report-pre-marked items first**: before prompting for anything, partition `needs_human_review` into (a) the **pre-marked judge set** — every suggestion whose `group_id` is in `human_review_config.claude_decide_item_ids` or that carries `decision_mode == "claude_auto_decide"` — and (b) the remaining **interactive set**. Run **"Let the Agent Decide" Mode** (per the criteria in `references/human-decision-batch.md`) on the pre-marked judge set **without any prompt**, then handle only the interactive set with the flow below. These suggestions were chosen in the report's "Let the agent decide" dropdown/checkbox; they are the per-item equivalent of `--agent-decide` scoped to just those suggestions.
+**Auto-route report-pre-marked items first**: before prompting for anything, partition `needs_human_review` into (a) the **pre-marked judge set** — every suggestion whose `group_id` is in `human_review_config.judge_decide_item_ids` or that carries `decision_mode == "judge_auto_decide"` — and (b) the remaining **interactive set**. Run **"Let the Agent Decide" Mode** (per the criteria in `references/human-decision-batch.md`) on the pre-marked judge set **without any prompt**, then handle only the interactive set with the flow below. These suggestions were chosen in the report's "Let the agent decide" dropdown/checkbox; they are the per-item equivalent of `--agent-decide` scoped to just those suggestions.
 
-**Check `human_review_config.decision_mode` first**: if it is `"claude_auto_decide"` (the user passed `--agent-decide`), do NOT prompt the user — go straight to "Let the Agent Decide" Mode and evaluate every `needs-human-decision` item autonomously per the criteria in that reference. By default, **partially-valid items are salvaged** (rewritten to their worthwhile core and applied) rather than skipped; only items with nothing worthwhile are skipped entirely.
+**Check `human_review_config.decision_mode` first**: if it is `"judge_auto_decide"` (the user passed `--agent-decide`), do NOT prompt the user — go straight to "Let the Agent Decide" Mode and evaluate every `needs-human-decision` item autonomously per the criteria in that reference. By default, **partially-valid items are salvaged** (rewritten to their worthwhile core and applied) rather than skipped; only items with nothing worthwhile are skipped entirely.
 
 Context line for individual review display: `Type: {type}, Section: {reference}`
 
@@ -409,7 +409,7 @@ After all batches are processed, create `{prefix}_applied_suggestions.md`:
 
 judge: {judge}
 
-Items whose decision was offloaded to the judge agent — via `--agent-decide`, the batch "Let the agent decide" option, or a per-item "Let the agent decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `claude_auto_decide` or `claude_auto_decide_salvage`. Omit this section if there are none. `{judge}` is the runner spec that actually judged (e.g. `codex:<chat model>`, the session model, under `--exec-subagents` on Codex — or an explicit `driver.subagent_runner` override, or the `codex:gpt-6-astra` host floor when that is what resolved), or the host agent on a host with native subagents.
+Items whose decision was offloaded to the judge agent — via `--agent-decide`, the batch "Let the agent decide" option, or a per-item "Let the agent decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `judge_auto_decide` or `judge_auto_decide_salvage`. Omit this section if there are none. `{judge}` is the runner spec that actually judged (e.g. `codex:<chat model>`, the session model, under `--exec-subagents` on Codex — or an explicit `driver.subagent_runner` override, or the `codex:gpt-6-astra` host floor when that is what resolved), or the host agent on a host with native subagents.
 
 ### [Suggestion Title] ({importance}) — Approved
 **Reason**: {reason}

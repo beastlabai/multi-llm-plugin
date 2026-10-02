@@ -8,6 +8,11 @@ import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+try:
+    from .judge_vocab import JUDGE_DECIDE, upgrade_legacy
+except ImportError:  # pragma: no cover - imported with utils/ on sys.path
+    from judge_vocab import JUDGE_DECIDE, upgrade_legacy
+
 # Regex for extracting display hashes from bracket notation in report headers.
 # Matches 8-16 char lowercase hex strings inside square brackets.
 _HASH_RE = re.compile(r'\[([0-9a-f]{8,16})\]')
@@ -587,7 +592,8 @@ def load_html_selections(
 
     try:
         content = selections_path.read_text(encoding='utf-8')
-        data = json.loads(content)
+        # A report exported before the judge rename says `claude_decide`.
+        data = upgrade_legacy(json.loads(content))
     except FileNotFoundError:
         return None
     except json.JSONDecodeError:
@@ -738,12 +744,12 @@ def parse_validation_overrides_groups(report_path: str) -> Dict[str, str]:
         v1: ## G1: Theme              (legacy -- mapped via grouped.json)
 
     If both "Mark valid" and "Mark invalid" are checked, "invalid" wins (safety-first).
-    "Let the agent decide" maps to "claude_decide" (precedence: invalid > valid >
-    claude_decide).
+    "Let the agent decide" maps to "judge_decide" (precedence: invalid > valid >
+    judge_decide).
 
     Returns:
         Dict mapping group hash to override value ("valid", "invalid", or
-        "claude_decide")
+        "judge_decide")
     """
     if not Path(report_path).exists():
         return {}
@@ -779,20 +785,20 @@ def parse_validation_overrides_groups(report_path: str) -> Dict[str, str]:
             block, re.IGNORECASE
         ))
         # Check for "Let the agent decide" checkbox (routing marker, not a status)
-        claude_decide_checked = bool(re.search(
+        judge_decide_checked = bool(re.search(
             r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
             block, re.IGNORECASE
         ))
 
-        # Precedence: invalid > valid > claude_decide (an explicit valid/invalid
+        # Precedence: invalid > valid > judge_decide (an explicit valid/invalid
         # is a firmer signal than "you decide").
         override_val = None
         if invalid_checked:
             override_val = "invalid"  # invalid wins if both checked
         elif valid_checked:
             override_val = "valid"
-        elif claude_decide_checked:
-            override_val = "claude_decide"
+        elif judge_decide_checked:
+            override_val = JUDGE_DECIDE
 
         if override_val:
             if hash_val:
@@ -839,12 +845,12 @@ def parse_suggestion_validation_overrides(report_path: str) -> Dict[str, str]:
         v1: ### G1S2: Title              (legacy -- mapped via grouped.json)
 
     If both "Mark valid" and "Mark invalid" are checked, "invalid" wins (safety-first).
-    "Let the agent decide" maps to "claude_decide" (precedence: invalid > valid >
-    claude_decide).
+    "Let the agent decide" maps to "judge_decide" (precedence: invalid > valid >
+    judge_decide).
 
     Returns:
         Dict mapping suggestion hash to override value ("valid", "invalid", or
-        "claude_decide")
+        "judge_decide")
     """
     if not Path(report_path).exists():
         return {}
@@ -879,19 +885,19 @@ def parse_suggestion_validation_overrides(report_path: str) -> Dict[str, str]:
             block, re.IGNORECASE
         ))
         # Check for "Let the agent decide" checkbox (routing marker, not a status)
-        claude_decide_checked = bool(re.search(
+        judge_decide_checked = bool(re.search(
             r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
             block, re.IGNORECASE
         ))
 
-        # Precedence: invalid > valid > claude_decide.
+        # Precedence: invalid > valid > judge_decide.
         override_val = None
         if invalid_checked:
             override_val = "invalid"  # invalid wins if both checked
         elif valid_checked:
             override_val = "valid"
-        elif claude_decide_checked:
-            override_val = "claude_decide"
+        elif judge_decide_checked:
+            override_val = JUDGE_DECIDE
 
         if override_val:
             if hash_val:
@@ -939,12 +945,12 @@ def parse_validation_overrides_issues(report_path: str) -> Dict[int, str]:
         - [ ] Mark invalid
 
     If both "Mark valid" and "Mark invalid" are checked, "invalid" wins (safety-first).
-    "Let the agent decide" maps to "claude_decide" (precedence: invalid > valid >
-    claude_decide).
+    "Let the agent decide" maps to "judge_decide" (precedence: invalid > valid >
+    judge_decide).
 
     Returns:
         Dict mapping issue index (1-based) to override value ("valid",
-        "invalid", or "claude_decide")
+        "invalid", or "judge_decide")
     """
     if not Path(report_path).exists():
         return {}
@@ -977,18 +983,18 @@ def parse_validation_overrides_issues(report_path: str) -> Dict[int, str]:
             block, re.IGNORECASE
         ))
         # Check for "Let the agent decide" checkbox (routing marker, not a status)
-        claude_decide_checked = bool(re.search(
+        judge_decide_checked = bool(re.search(
             r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
             block, re.IGNORECASE
         ))
 
-        # Precedence: invalid > valid > claude_decide.
+        # Precedence: invalid > valid > judge_decide.
         if invalid_checked:
             overrides[issue_idx] = "invalid"  # invalid wins if both checked
         elif valid_checked:
             overrides[issue_idx] = "valid"
-        elif claude_decide_checked:
-            overrides[issue_idx] = "claude_decide"
+        elif judge_decide_checked:
+            overrides[issue_idx] = JUDGE_DECIDE
 
     return overrides
 
@@ -1035,11 +1041,11 @@ def parse_consolidated_validation_overrides(report_path: str) -> Dict[str, str]:
         - [ ] Mark invalid
         - [ ] Needs human attention
 
-    4-state priority: invalid > needs-human-decision > valid > claude_decide.
+    4-state priority: invalid > needs-human-decision > valid > judge_decide.
 
     Returns:
         Dict mapping consolidated_id (12-char hex) to override value
-        ("valid", "invalid", "needs-human-decision", or "claude_decide")
+        ("valid", "invalid", "needs-human-decision", or "judge_decide")
     """
     if not Path(report_path).exists():
         return {}
@@ -1077,13 +1083,13 @@ def parse_consolidated_validation_overrides(report_path: str) -> Dict[str, str]:
             block, re.IGNORECASE
         ))
         # Check for "Let the agent decide" checkbox (routing marker, not a status)
-        claude_decide_checked = bool(re.search(
+        judge_decide_checked = bool(re.search(
             r'-\s*\[\s*[^\]\s]+\s*\]\s*let\s+(?:claude|the\s+agent)\s+decide',
             block, re.IGNORECASE
         ))
 
         # 4-state priority: invalid > needs-human-decision > valid >
-        # claude_decide (an explicit invalid/needs-human/valid is a firmer
+        # judge_decide (an explicit invalid/needs-human/valid is a firmer
         # signal than "you decide").
         if invalid_checked:
             overrides[consolidated_id] = "invalid"
@@ -1091,8 +1097,8 @@ def parse_consolidated_validation_overrides(report_path: str) -> Dict[str, str]:
             overrides[consolidated_id] = "needs-human-decision"
         elif valid_checked:
             overrides[consolidated_id] = "valid"
-        elif claude_decide_checked:
-            overrides[consolidated_id] = "claude_decide"
+        elif judge_decide_checked:
+            overrides[consolidated_id] = JUDGE_DECIDE
 
     return overrides
 
@@ -1130,7 +1136,8 @@ def load_consolidated_html_selections(
 
     try:
         content = selections_path.read_text(encoding='utf-8')
-        data = json.loads(content)
+        # A report exported before the judge rename says `claude_decide`.
+        data = upgrade_legacy(json.loads(content))
     except FileNotFoundError:
         return None
     except json.JSONDecodeError:

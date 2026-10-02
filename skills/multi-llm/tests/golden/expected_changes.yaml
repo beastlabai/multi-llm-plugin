@@ -786,6 +786,24 @@ changes:
       plan and tasks.md to record an "approved deviation" where the reviewers
       had asked for a code fix.
 
+  # ---------------------------------------------------------------------------
+  # Issue 18 of the 2026-10-01 three-host run: the judge's persisted names are
+  # host-neutral (`utils/judge_vocab.py`). On Codex the judge was
+  # `codex:gpt-6-astra`, yet everything it left on disk said `claude_*`.
+  # `human_review_config.claude_decide_item_ids` became `judge_decide_item_ids`
+  # in the same place; it is an empty list in this fixture, which flattens to no
+  # leaf, so only the mode value is reported.
+  # ---------------------------------------------------------------------------
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/human_review_config/decision_mode
+    rationale: >
+      `--yes` implies `--agent-decide`, whose mode is now written
+      `judge_auto_decide` (was `claude_auto_decide`). Readers still accept the
+      old spelling through `judge_vocab.canonical_value`.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/human_review_config/decision_mode
+    rationale: >
+      The same rename in apply-suggestions' output, from the shared
+      `ApplyOrchestratorBase.build_human_review_config`.
+
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
 #

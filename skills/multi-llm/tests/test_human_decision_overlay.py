@@ -28,8 +28,8 @@ SALVAGE_REC = {
     "decision": "approved",
     "reason": "Claude auto-decide (salvaged): kept null-check; dropped retry wrapper",
     "batch_context": {
-        "batch_action": "claude_auto_decide_salvage",
-        "decision_source": "claude_auto_decide_salvage",
+        "batch_action": "judge_auto_decide_salvage",
+        "decision_source": "judge_auto_decide_salvage",
         "salvaged_description": "Add null-check before user.profile",
         "dropped": "speculative retry wrapper",
         "importance_at_decision": "MEDIUM",
@@ -39,8 +39,8 @@ APPROVE_REC = {
     "decision": "approved",
     "reason": "Claude auto-decide: sound bug fix",
     "batch_context": {
-        "batch_action": "claude_auto_decide",
-        "decision_source": "claude_auto_decide",
+        "batch_action": "judge_auto_decide",
+        "decision_source": "judge_auto_decide",
         "importance_at_decision": "HIGH",
     },
 }
@@ -48,8 +48,8 @@ SKIP_REC = {
     "decision": "skipped",
     "reason": "Claude auto-decide: purely subjective",
     "batch_context": {
-        "batch_action": "claude_auto_decide",
-        "decision_source": "claude_auto_decide",
+        "batch_action": "judge_auto_decide",
+        "decision_source": "judge_auto_decide",
         "importance_at_decision": "LOW",
     },
 }
@@ -65,23 +65,23 @@ class TestNormalizeHumanDecision:
         # decision == "approved" but the salvage marker must win.
         info = _normalize_human_decision(SALVAGE_REC)
         assert info["outcome"] == "salvaged"
-        assert info["claudeDecided"] is True
+        assert info["judgeDecided"] is True
         assert info["salvagedDescription"] == "Add null-check before user.profile"
         assert info["dropped"] == "speculative retry wrapper"
 
     def test_approve_outcome(self):
         info = _normalize_human_decision(APPROVE_REC)
         assert info["outcome"] == "approved"
-        assert info["claudeDecided"] is True
+        assert info["judgeDecided"] is True
 
     def test_skip_outcome(self):
         info = _normalize_human_decision(SKIP_REC)
         assert info["outcome"] == "skipped"
-        assert info["claudeDecided"] is True
+        assert info["judgeDecided"] is True
 
     def test_user_decision_not_marked_claude(self):
         info = _normalize_human_decision(USER_REC)
-        assert info["claudeDecided"] is False
+        assert info["judgeDecided"] is False
         assert info["outcome"] == "approved"
 
     def test_the_judge_is_carried_to_the_badge(self):
@@ -94,7 +94,7 @@ class TestNormalizeHumanDecision:
     def test_missing_batch_context_is_safe(self):
         info = _normalize_human_decision({"decision": "skipped"})
         assert info["outcome"] == "skipped"
-        assert info["claudeDecided"] is False
+        assert info["judgeDecided"] is False
         assert info["salvagedDescription"] == ""
 
 
@@ -133,7 +133,7 @@ class TestOverlayHumanDecisions:
             "approved": 1,
             "salvaged": 1,
             "skipped": 1,
-            "claudeDecided": 3,
+            "judgeDecided": 3,
             "total": 3,
         }
 

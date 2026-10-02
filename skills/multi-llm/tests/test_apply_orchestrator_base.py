@@ -154,7 +154,7 @@ def _make_args(**overrides) -> argparse.Namespace:
         "accept_stale_consolidation": False,
         "no_confirm": True,  # Skip confirmation prompts in tests
         "include_high": False,
-        "claude_decide": False,
+        "agent_decide": False,
     }
     defaults.update(overrides)
     return argparse.Namespace(**defaults)
@@ -1005,31 +1005,31 @@ class TestBuildCommonArgParser:
         assert args.skip is True
         assert args.base_ref == "main"
 
-    def test_claude_decide_default_false(self):
-        """--claude-decide defaults to False when not passed."""
+    def test_agent_decide_default_false(self):
+        """--agent-decide defaults to False when not passed."""
         parser = build_common_arg_parser("Test", "")
         args = parser.parse_args(["--plan-file", "t.md"])
-        assert args.claude_decide is False
+        assert args.agent_decide is False
 
-    def test_claude_decide_flag(self):
-        """--claude-decide sets args.claude_decide to True."""
+    def test_legacy_claude_decide_flag(self):
+        """The legacy --claude-decide spelling sets args.agent_decide to True."""
         parser = build_common_arg_parser("Test", "")
         args = parser.parse_args(["--plan-file", "t.md", "--claude-decide"])
-        assert args.claude_decide is True
+        assert args.agent_decide is True
 
-    def test_claude_decide_alias(self):
-        """--let-claude-decide is an alias for --claude-decide."""
+    def test_legacy_let_claude_decide_alias(self):
+        """The legacy --let-claude-decide spelling is an alias for --agent-decide."""
         parser = build_common_arg_parser("Test", "")
         args = parser.parse_args(["--plan-file", "t.md", "--let-claude-decide"])
-        assert args.claude_decide is True
+        assert args.agent_decide is True
 
     @pytest.mark.parametrize(
         "spelling", ["--agent-decide", "--claude-decide", "--let-claude-decide"]
     )
-    def test_every_spelling_sets_claude_decide(self, spelling):
+    def test_every_spelling_sets_agent_decide(self, spelling):
         parser = build_common_arg_parser("Test", "")
         args = parser.parse_args(["--plan-file", "t.md", spelling])
-        assert args.claude_decide is True
+        assert args.agent_decide is True
 
     def test_help_leads_with_agent_decide(self):
         text = build_common_arg_parser("Test", "").format_help()
@@ -1043,7 +1043,7 @@ class TestBuildCommonArgParser:
 
 
 class TestClaudeDecideDecisionMode:
-    """Tests that --claude-decide surfaces in human_review_config."""
+    """Tests that --agent-decide surfaces in human_review_config."""
 
     def _config(self, **arg_overrides):
         orch = MockApplyOrchestrator(_make_args(**arg_overrides))
@@ -1051,19 +1051,19 @@ class TestClaudeDecideDecisionMode:
         return orch.build_human_review_config()
 
     def test_decision_mode_interactive_by_default(self):
-        """Without --claude-decide, decision_mode is 'interactive'."""
-        config = self._config(claude_decide=False)
+        """Without --agent-decide, decision_mode is 'interactive'."""
+        config = self._config(agent_decide=False)
         assert config["decision_mode"] == "interactive"
 
-    def test_decision_mode_claude_auto_decide_when_flag_set(self):
-        """With --claude-decide, decision_mode is 'claude_auto_decide'."""
-        config = self._config(claude_decide=True)
-        assert config["decision_mode"] == "claude_auto_decide"
+    def test_decision_mode_judge_auto_decide_when_flag_set(self):
+        """With --agent-decide, decision_mode is 'judge_auto_decide'."""
+        config = self._config(agent_decide=True)
+        assert config["decision_mode"] == "judge_auto_decide"
 
     def test_decision_mode_independent_of_batch_mode(self):
         """decision_mode is set even when batch_review_mode is 'individual'."""
-        config = self._config(claude_decide=True, batch_review_mode="individual")
-        assert config["decision_mode"] == "claude_auto_decide"
+        config = self._config(agent_decide=True, batch_review_mode="individual")
+        assert config["decision_mode"] == "judge_auto_decide"
         assert config["batch_enabled"] is False
 
 
@@ -1461,21 +1461,21 @@ class TestHtmlValidationOverrideKeyNormalization:
 
         assert orch.validation_overrides == {"aaaa1111bbbb2222": "invalid"}
 
-    def test_claude_decide_round_trips_from_user_selections(self, tmp_path):
-        """A 'claude_decide' override survives ingest verbatim (group + suggestion)."""
+    def test_judge_decide_round_trips_from_user_selections(self, tmp_path):
+        """A 'judge_decide' override survives ingest verbatim (group + suggestion)."""
         orch = self._orch_with_groups(
             [{"group_hash": "aaaa1111bbbb2222", "theme": "First",
               "suggestions": [{"suggestion_hash": "s1"}]}]
         )
         review_dir = self._write_selections(
             tmp_path,
-            {"aaaa1111bbbb2222": "claude_decide", "G1S1": "claude_decide"},
+            {"aaaa1111bbbb2222": "judge_decide", "G1S1": "judge_decide"},
         )
 
         orch.load_html_selections(review_dir, {})
 
-        assert orch.validation_overrides == {"aaaa1111bbbb2222": "claude_decide"}
-        assert orch.suggestion_validation_overrides == {"G1S1": "claude_decide"}
+        assert orch.validation_overrides == {"aaaa1111bbbb2222": "judge_decide"}
+        assert orch.suggestion_validation_overrides == {"G1S1": "judge_decide"}
 
     def test_all_digit_hash_not_treated_as_index(self, tmp_path):
         """A known group_hash that happens to be all digits stays a hash key."""
@@ -5131,13 +5131,13 @@ class TestOldWordingReportStillRoutesToTheJudge:
 
 
 class TestClaudeDecideGroupOverride:
-    """Group-level claude_decide override is a routing marker, not a status."""
+    """Group-level judge_decide override is a routing marker, not a status."""
 
     def _orch(self, **arg_overrides):
         return MockApplyOrchestrator(_make_args(**arg_overrides))
 
-    def test_group_claude_decide_keeps_needs_human_and_tags(self):
-        """claude_decide override keeps needs-human-decision and tags the group."""
+    def test_group_judge_decide_keeps_needs_human_and_tags(self):
+        """judge_decide override keeps needs-human-decision and tags the group."""
         orch = self._orch()
         orch.merged = [
             {
@@ -5147,20 +5147,20 @@ class TestClaudeDecideGroupOverride:
                 "suggestions": [],
             }
         ]
-        orch.validation_overrides = {"abc123": "claude_decide"}
+        orch.validation_overrides = {"abc123": "judge_decide"}
         orch.apply_group_validation_overrides()
 
         g = orch.merged[0]
-        # Status is NOT changed to "claude_decide" (it is not a real status).
+        # Status is NOT changed to "judge_decide" (it is not a real status).
         assert g["validation_status"] == "needs-human-decision"
-        assert g["claude_decide"] is True
-        assert "abc123" in orch.claude_decide_overrides
+        assert g["judge_decide"] is True
+        assert "abc123" in orch.judge_decide_overrides
         assert g["validation_reason"] == "Routed to the judge agent by reviewer"
-        # claude_decide is a marker, not a user-approved override.
+        # judge_decide is a marker, not a user-approved override.
         assert g.get("user_override") is not True
 
-    def test_group_claude_decide_never_becomes_status(self):
-        """No code path may set validation_status == 'claude_decide'."""
+    def test_group_judge_decide_never_becomes_status(self):
+        """No code path may set validation_status == 'judge_decide'."""
         orch = self._orch()
         orch.merged = [
             {
@@ -5169,9 +5169,9 @@ class TestClaudeDecideGroupOverride:
                 "suggestions": [],
             }
         ]
-        orch.validation_overrides = {"h1": "claude_decide"}
+        orch.validation_overrides = {"h1": "judge_decide"}
         orch.apply_group_validation_overrides()
-        assert orch.merged[0]["validation_status"] != "claude_decide"
+        assert orch.merged[0]["validation_status"] != "judge_decide"
 
     def test_unknown_override_value_warned_and_ignored(self, capsys):
         """A typo/stale override value is warned-and-ignored, not applied."""
@@ -5190,7 +5190,7 @@ class TestClaudeDecideGroupOverride:
         # Underlying status is retained; the value did not become a status.
         assert g["validation_status"] == "needs-human-decision"
         assert g.get("user_override") is not True
-        assert "h1" not in orch.claude_decide_overrides
+        assert "h1" not in orch.judge_decide_overrides
         captured = capsys.readouterr()
         assert "bogus_value" in captured.err
 
@@ -5211,13 +5211,13 @@ class TestClaudeDecideGroupOverride:
 
 
 class TestClaudeDecideSuggestionOverride:
-    """Per-suggestion claude_decide override propagates to the group."""
+    """Per-suggestion judge_decide override propagates to the group."""
 
     def _orch(self, **arg_overrides):
         return MockApplyOrchestrator(_make_args(**arg_overrides))
 
-    def test_suggestion_claude_decide_keeps_group_needs_human(self):
-        """A claude_decide suggestion keeps its group needs-human (not promoted/dropped)."""
+    def test_suggestion_judge_decide_keeps_group_needs_human(self):
+        """A judge_decide suggestion keeps its group needs-human (not promoted/dropped)."""
         orch = self._orch()
         orch.merged = [
             {
@@ -5228,19 +5228,19 @@ class TestClaudeDecideSuggestionOverride:
                 ],
             }
         ]
-        orch.suggestion_validation_overrides = {"G1S1": "claude_decide"}
+        orch.suggestion_validation_overrides = {"G1S1": "judge_decide"}
         orch.apply_suggestion_validation_overrides()
 
         g = orch.merged[0]
         assert g["validation_status"] == "needs-human-decision"
-        assert g["claude_decide"] is True
-        assert "g1hash" in orch.claude_decide_overrides
+        assert g["judge_decide"] is True
+        assert "g1hash" in orch.judge_decide_overrides
         # The suggestion is not dropped.
         assert len(g["suggestions"]) == 1
-        assert g["suggestions"][0].get("claude_decide") is True
+        assert g["suggestions"][0].get("judge_decide") is True
 
-    def test_mixed_group_one_claude_decide_propagates(self):
-        """One claude_decide suggestion alongside untouched ones still routes the group."""
+    def test_mixed_group_one_judge_decide_propagates(self):
+        """One judge_decide suggestion alongside untouched ones still routes the group."""
         orch = self._orch()
         orch.merged = [
             {
@@ -5254,18 +5254,18 @@ class TestClaudeDecideSuggestionOverride:
             }
         ]
         # Only the middle suggestion is marked.
-        orch.suggestion_validation_overrides = {"G1S2": "claude_decide"}
+        orch.suggestion_validation_overrides = {"G1S2": "judge_decide"}
         orch.apply_suggestion_validation_overrides()
 
         g = orch.merged[0]
-        assert g["claude_decide"] is True
-        assert "mixhash" in orch.claude_decide_overrides
+        assert g["judge_decide"] is True
+        assert "mixhash" in orch.judge_decide_overrides
         # No suggestion dropped; group still needs-human.
         assert len(g["suggestions"]) == 3
         assert g["validation_status"] == "needs-human-decision"
 
-    def test_claude_decide_suggestion_not_dropped_as_invalid(self):
-        """claude_decide must not land in the invalid-drop set."""
+    def test_judge_decide_suggestion_not_dropped_as_invalid(self):
+        """judge_decide must not land in the invalid-drop set."""
         orch = self._orch()
         orch.merged = [
             {
@@ -5278,55 +5278,55 @@ class TestClaudeDecideSuggestionOverride:
             }
         ]
         orch.suggestion_validation_overrides = {
-            "G1S1": "claude_decide",
+            "G1S1": "judge_decide",
             "G1S2": "invalid",
         }
         orch.apply_suggestion_validation_overrides()
         g = orch.merged[0]
-        # S2 (invalid) dropped, S1 (claude_decide) kept.
+        # S2 (invalid) dropped, S1 (judge_decide) kept.
         assert len(g["suggestions"]) == 1
         assert g["suggestions"][0]["title"] == "A"
-        assert g["claude_decide"] is True
+        assert g["judge_decide"] is True
 
 
 class TestBuildHumanReviewConfigClaudeDecide:
-    """build_human_review_config exposes claude_decide_item_ids."""
+    """build_human_review_config exposes judge_decide_item_ids."""
 
     def _config(self, formatted_human, **arg_overrides):
         orch = MockApplyOrchestrator(_make_args(**arg_overrides))
         orch.formatted_human = formatted_human
         return orch.build_human_review_config()
 
-    def test_claude_decide_item_ids_lists_marked_items(self):
-        """Only items with decision_mode == claude_auto_decide are listed."""
+    def test_judge_decide_item_ids_lists_marked_items(self):
+        """Only items with decision_mode == judge_auto_decide are listed."""
         formatted = [
             {"group_id": "h1", "importance": "HIGH",
-             "decision_mode": "claude_auto_decide"},
+             "decision_mode": "judge_auto_decide"},
             {"group_id": "h2", "importance": "MEDIUM"},
             {"group_id": "h3", "importance": "LOW",
-             "decision_mode": "claude_auto_decide"},
+             "decision_mode": "judge_auto_decide"},
         ]
         config = self._config(formatted)
-        assert config["claude_decide_item_ids"] == ["h1", "h3"]
+        assert config["judge_decide_item_ids"] == ["h1", "h3"]
         # Per-item routing does not flip the global decision_mode.
         assert config["decision_mode"] == "interactive"
 
     def test_no_marked_items_empty_list(self):
-        """No pre-marked items -> empty claude_decide_item_ids."""
+        """No pre-marked items -> empty judge_decide_item_ids."""
         formatted = [{"group_id": "h1", "importance": "HIGH"}]
         config = self._config(formatted)
-        assert config["claude_decide_item_ids"] == []
+        assert config["judge_decide_item_ids"] == []
         assert config["decision_mode"] == "interactive"
 
     def test_global_flag_does_not_change_per_item_index(self):
-        """--claude-decide flips the global mode; the per-item index is unchanged."""
+        """--agent-decide flips the global mode; the per-item index is unchanged."""
         formatted = [
             {"group_id": "h1", "importance": "HIGH",
-             "decision_mode": "claude_auto_decide"},
+             "decision_mode": "judge_auto_decide"},
         ]
-        config = self._config(formatted, claude_decide=True)
-        assert config["decision_mode"] == "claude_auto_decide"
-        assert config["claude_decide_item_ids"] == ["h1"]
+        config = self._config(formatted, agent_decide=True)
+        assert config["decision_mode"] == "judge_auto_decide"
+        assert config["judge_decide_item_ids"] == ["h1"]
 
 
 # ======================================================================
@@ -6149,15 +6149,15 @@ class TestAJudgedSkipReachesEveryOutputThePhaseWrites:
         # What `apply_verdicts_to_work_set` does to a skipped group.
         group["validation_status"] = "skipped"
         group["reason"] = "Claude auto-decide: not decidable from the text"
-        group["decision_source"] = "claude_auto_decide"
+        group["decision_source"] = "judge_auto_decide"
         orch.skipped.append(group)
 
         orch._rebuild_formatted_skipped()
         assert len(orch.formatted_skipped) == len(orch.skipped) == 1
         entry = orch.formatted_skipped[0]
         assert entry["group_id"] == "3b810046f0a56e8c"
-        assert entry["status"] == "claude_skipped"
-        assert entry["decision_source"] == "claude_auto_decide"
+        assert entry["status"] == "judge_skipped"
+        assert entry["decision_source"] == "judge_auto_decide"
         assert entry["reason"] == (
             "Claude auto-decide: not decidable from the text"
         )
@@ -6207,7 +6207,7 @@ class TestAJudgedSkipReachesEveryOutputThePhaseWrites:
             "suggestions": [{"title": "J", "desc": "d", "importance": "LOW"}],
             "validation_status": "skipped",
             "reason": "Claude auto-decide: subjective",
-            "decision_source": "claude_auto_decide",
+            "decision_source": "judge_auto_decide",
         }
 
         class JudgingOrch(MockApplyOrchestrator):
@@ -6225,7 +6225,7 @@ class TestAJudgedSkipReachesEveryOutputThePhaseWrites:
         orch = JudgingOrch(_make_args(plan_file=str(plan_path), yes=True))
         assert orch.run() == 0
         assert len(orch.formatted_skipped) == len(orch.skipped) == 1
-        assert orch.formatted_skipped[0]["status"] == "claude_skipped"
+        assert orch.formatted_skipped[0]["status"] == "judge_skipped"
 
 
 class TestTheExecutorLegRunsStepSeven:
@@ -6248,9 +6248,9 @@ class TestTheExecutorLegRunsStepSeven:
             decision="skipped",
             reason="Agent decide [codex:gpt-6-astra]: not decidable from the text",
             batch_context={
-                "batch_id": "claude_decide_efabfefb",
-                "batch_action": "claude_auto_decide",
-                "decision_source": "claude_auto_decide",
+                "batch_id": "judge_decide_efabfefb",
+                "batch_action": "judge_auto_decide",
+                "decision_source": "judge_auto_decide",
                 "importance_at_decision": "LOW",
                 "judge": "codex:gpt-6-astra",
             },
@@ -6258,7 +6258,7 @@ class TestTheExecutorLegRunsStepSeven:
         orch.state.save()
         return orch
 
-    def test_claude_decisions_selects_only_judge_sourced_records(self, tmp_path):
+    def test_judge_decisions_selects_only_judge_sourced_records(self, tmp_path):
         orch = self._orchestrator_with_a_decision(tmp_path)
         orch.state.record_human_decision(
             phase=orch.phase_name, group_id="deadbeef00000000",
@@ -6266,7 +6266,7 @@ class TestTheExecutorLegRunsStepSeven:
             batch_context={"decision_source": "user"},
         )
         orch.state.save()
-        assert list(orch.claude_decisions()) == ["3b810046f0a56e8c"]
+        assert list(orch.judge_decisions()) == ["3b810046f0a56e8c"]
 
     def test_the_result_block_names_what_the_judge_decided(self, tmp_path, capsys):
         orch = self._orchestrator_with_a_decision(tmp_path)
@@ -6279,7 +6279,7 @@ class TestTheExecutorLegRunsStepSeven:
         # The persisted marker is a storage key, not a word for the user: a
         # Codex judge's decision used to print `source: claude_auto_decide`.
         assert "source: judge agent" in out
-        assert "claude_auto_decide" not in out
+        assert "judge_auto_decide" not in out
         assert "not decidable from the text" in out
 
     def test_the_summary_report_the_instructions_advertise_is_written(
@@ -6297,7 +6297,7 @@ class TestTheExecutorLegRunsStepSeven:
         assert "`--agent-decide`" in text
         assert "Raise T001 to high (LOW) — Skipped" in text
         assert "**Source**: judge agent" in text
-        assert "claude_auto_decide" not in text
+        assert "judge_auto_decide" not in text
         assert "Decided by the judge agent: 1 (0 approved, 0 salvaged, 1 skipped)" in text
 
     def test_a_salvage_reads_as_salvaged_in_the_log_the_report_and_the_count(
@@ -6315,8 +6315,8 @@ class TestTheExecutorLegRunsStepSeven:
             decision="approved",
             reason="Agent decide [codex:gpt-6-astra] (salvaged): kept the core",
             batch_context={
-                "batch_action": "claude_auto_decide_salvage",
-                "decision_source": "claude_auto_decide_salvage",
+                "batch_action": "judge_auto_decide_salvage",
+                "decision_source": "judge_auto_decide_salvage",
                 "salvaged_description": "the core",
                 "dropped": "the rest",
                 "importance_at_decision": "MEDIUM",
@@ -6339,12 +6339,12 @@ class TestTheExecutorLegRunsStepSeven:
         orch = self._orchestrator_with_a_decision(tmp_path)
         orch.formatted_skipped = [
             {"group_id": "3b810046f0a56e8c", "title": "Raise T001 to high",
-             "status": "claude_skipped", "reason": "subjective"}
+             "status": "judge_skipped", "reason": "subjective"}
         ]
         orch.print_write_outcome_summary()
         out = capsys.readouterr().out
         assert "[skipped by judge] Raise T001 to high" in out
-        assert "claude_skipped" not in out
+        assert "judge_skipped" not in out
         text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
         assert "### Raise T001 to high [skipped by judge]" in text
 

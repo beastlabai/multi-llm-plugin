@@ -1,0 +1,12 @@
+{
+  "format_version": 2,
+  "phase": "review-plan",
+  "exported_at": "2026-10-01T13:40:02.000Z",
+  "skipped_groups": [],
+  "skipped_suggestions": [],
+  "edited_descriptions": {},
+  "validation_overrides": {
+    "aaaa1111bbbb2222": "claude_decide",
+    "G2S1": "claude_decide"
+  }
+}

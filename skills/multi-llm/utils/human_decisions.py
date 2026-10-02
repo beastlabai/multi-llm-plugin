@@ -39,6 +39,13 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 try:
+    from .judge_vocab import (
+        JUDGE_AUTO_DECIDE,
+        JUDGE_AUTO_DECIDE_SALVAGE,
+        JUDGE_BATCH_ID_PREFIX,
+        JUDGE_SKIPPED,
+        canonical_value,
+    )
     from .schema_validator import validate_human_decision_verdicts
     from .subagent_prompts import build_human_decision_judge_prompt
     from .subagent_tasks import (
@@ -51,6 +58,13 @@ try:
         write_task_file,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
+    from utils.judge_vocab import (
+        JUDGE_AUTO_DECIDE,
+        JUDGE_AUTO_DECIDE_SALVAGE,
+        JUDGE_BATCH_ID_PREFIX,
+        JUDGE_SKIPPED,
+        canonical_value,
+    )
     from utils.schema_validator import validate_human_decision_verdicts
     from utils.subagent_prompts import build_human_decision_judge_prompt
     from utils.subagent_tasks import (
@@ -113,28 +127,27 @@ _RECORDED_DECISION = {
     DECISION_SALVAGE: "approved",
 }
 
-_ACTION_PLAIN = "claude_auto_decide"
-_ACTION_SALVAGE = "claude_auto_decide_salvage"
+_ACTION_PLAIN = JUDGE_AUTO_DECIDE
+_ACTION_SALVAGE = JUDGE_AUTO_DECIDE_SALVAGE
 
-#: What a decision the judge made is stored as. The ``claude_`` spelling is a
-#: persisted key (``state.json``'s ``batch_context``, ``orchestrator_output.json``,
-#: the golden bundles, the instructions' filters) and stays as written; it is not
-#: a user-facing word. The 2026-10-01 run showed ``source: claude_auto_decide``
-#: and ``[claude_skipped]`` under a Codex judge, because the agent-decide plan
-#: renamed the labels but not these. Everything a user reads goes through the
-#: label functions below, never these strings.
-JUDGE_SOURCE_PREFIX = "claude_auto_decide"
-JUDGE_SKIPPED_STATUS = "claude_skipped"
+#: What a decision the judge made is stored as: ``judge_auto_decide`` /
+#: ``judge_auto_decide_salvage`` on ``batch_context``, ``judge_skipped`` on a
+#: skipped item. These are persisted keys, not user-facing words — everything a
+#: user reads goes through the label functions below. Every reader here also
+#: accepts the ``claude_*`` spellings an earlier version wrote, through
+#: ``judge_vocab.canonical_value`` (the one legacy map).
+JUDGE_SOURCE_PREFIX = JUDGE_AUTO_DECIDE
+JUDGE_SKIPPED_STATUS = JUDGE_SKIPPED
 
 
 def is_judge_source(source: Any) -> bool:
     """Whether a ``decision_source``/``batch_action`` marks a judge's decision."""
-    return str(source or "").startswith(JUDGE_SOURCE_PREFIX)
+    return str(canonical_value(source or "")).startswith(JUDGE_SOURCE_PREFIX)
 
 
 def judge_source_label(source: Any) -> str:
     """The host-neutral words for a ``decision_source``; unknown sources pass through."""
-    text = str(source or "")
+    text = str(canonical_value(source or ""))
     if text == _ACTION_SALVAGE:
         return "judge agent (salvaged)"
     if is_judge_source(text):
@@ -144,7 +157,9 @@ def judge_source_label(source: Any) -> str:
 
 def judge_status_label(status: Any) -> str:
     """The host-neutral words for a skipped item's ``status``."""
-    return "skipped by judge" if status == JUDGE_SKIPPED_STATUS else str(status or "unknown")
+    if canonical_value(status) == JUDGE_SKIPPED_STATUS:
+        return "skipped by judge"
+    return str(status or "unknown")
 
 
 def judge_outcome(record: Dict[str, Any]) -> str:
@@ -156,7 +171,8 @@ def judge_outcome(record: Dict[str, Any]) -> str:
     "1 salvaged" and its ``summary.md`` say "Approved" for the same item.
     """
     context = (record or {}).get("batch_context") or {}
-    if _ACTION_SALVAGE in (context.get("decision_source"), context.get("batch_action")):
+    markers = (context.get("decision_source"), context.get("batch_action"))
+    if _ACTION_SALVAGE in (canonical_value(marker) for marker in markers):
         return "salvaged"
     return str((record or {}).get("decision") or "unknown")
 
@@ -525,7 +541,7 @@ def _decided_reason(judge: str, reason: str) -> str:
 
 def _batch_id(group_ids: Sequence[str]) -> str:
     """Deterministic batch id for a judged set (stable across re-runs)."""
-    return "claude_decide_" + content_hash("|".join(sorted(group_ids)))[:8]
+    return JUDGE_BATCH_ID_PREFIX + content_hash("|".join(sorted(group_ids)))[:8]
 
 
 def record_verdicts(
@@ -542,7 +558,7 @@ def record_verdicts(
     The three-value ``decision`` is a *wire* vocabulary; what lands in state is
     today's translation exactly: ``approve`` -> ``approved``, ``skip`` ->
     ``skipped``, ``salvage`` -> ``approved`` carrying
-    ``batch_action``/``decision_source`` ``claude_auto_decide_salvage`` plus
+    ``batch_action``/``decision_source`` ``judge_auto_decide_salvage`` plus
     ``salvaged_description`` and ``dropped`` in ``batch_context``. That is what
     makes a run judged through the executor produce the same recorded records —
     and therefore the same report overlay — as the interactive path that judged

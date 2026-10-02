@@ -53,9 +53,15 @@ from .filtering import (
     filter_user_skipped_groups,
     resolve_bulk_option_conflicts,
     should_bypass_no_selection_confirmation,
-    validate_claude_decide_items_honored,
+    validate_judge_decide_items_honored,
 )
 from .importance import get_highest_importance
+from .judge_vocab import (
+    JUDGE_AUTO_DECIDE,
+    JUDGE_DECIDE,
+    JUDGE_DECIDE_ITEM_IDS,
+    canonical_value,
+)
 from .output_handler import derive_prefix, find_output_dir, get_phase_dir
 from .provider_registry import set_run_anchor
 from .report_parser import load_html_selections, merge_selections
@@ -132,24 +138,26 @@ class OrchestratorError(Exception):
 # user_selections.json / consolidated_user_selections.json / a hand-edited
 # Markdown checkbox label) is warned-and-ignored at the apply boundary rather
 # than written verbatim into ``validation_status`` (which would produce a bogus
-# status that silently falls through ``filter_items``). ``claude_decide`` is a
-# *routing marker*, not a status: an allowlisted ``claude_decide`` is handed to
-# ``_route_claude_decide_marker`` and never assigned to ``validation_status``.
+# status that silently falls through ``filter_items``). ``judge_decide`` is a
+# *routing marker*, not a status: an allowlisted ``judge_decide`` is handed to
+# ``_route_judge_decide_marker`` and never assigned to ``validation_status``.
 # ``needs-human-decision`` is accepted because the consolidated surface can emit
-# it as an override value.
+# it as an override value. Every check site reads the value through
+# ``judge_vocab.canonical_value`` first, so a selections file written before the
+# rename (``claude_decide``) is accepted as the same marker.
 VALID_OVERRIDE_VALUES: frozenset = frozenset(
-    {"valid", "invalid", "claude_decide", "needs-human-decision"}
+    {"valid", "invalid", JUDGE_DECIDE, "needs-human-decision"}
 )
 
 
 def _format_override_target(value: str) -> str:
     """Render an override value for the dry-run/no-selection override print.
 
-    ``claude_decide`` is a routing marker, not a validation status, so label it
-    as such instead of printing a bare ``-> claude_decide`` (which misreads as a
+    ``judge_decide`` is a routing marker, not a validation status, so label it
+    as such instead of printing a bare ``-> judge_decide`` (which misreads as a
     status change).
     """
-    if value == "claude_decide":
+    if canonical_value(value) == JUDGE_DECIDE:
         return "Let the agent decide (routing marker)"
     return value
 
@@ -174,8 +182,8 @@ def apply_unattended_defaults(args: argparse.Namespace) -> argparse.Namespace:
 
     Mutates and returns *args* (argparse namespaces are the shared carrier here).
     """
-    if getattr(args, "yes", False) and not getattr(args, "claude_decide", False):
-        args.claude_decide = True
+    if getattr(args, "yes", False) and not getattr(args, "agent_decide", False):
+        args.agent_decide = True
     return args
 
 
@@ -303,7 +311,7 @@ def build_common_arg_parser(
     parser.add_argument(
         AGENT_DECIDE_FLAG,
         *LEGACY_AGENT_DECIDE_FLAGS,
-        dest="claude_decide",
+        dest="agent_decide",
         action="store_true",
         help=(
             "Let the judge agent decide each needs-human-decision item with its "
@@ -571,9 +579,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # `_record_resolution` for why they have to be buffered rather than
         # written straight through to `.status.json`.
         self._pending_resolutions: List[Tuple[str, str]] = []
-        claude_decide_before = getattr(args, "claude_decide", False)
+        agent_decide_before = getattr(args, "agent_decide", False)
         apply_unattended_defaults(args)
-        if not claude_decide_before and getattr(args, "claude_decide", False):
+        if not agent_decide_before and getattr(args, "agent_decide", False):
             self._record_resolution(
                 _unattended.row(10).site_id,
                 f"{AGENT_DECIDE_FLAG} implied by --yes: needs-human-decision items "
@@ -602,16 +610,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # Group hashes / suggestion ids the reviewer pre-marked "Let the agent
         # decide" in the report. A routing marker, not a validation status —
         # marked items keep validation_status == "needs-human-decision" and
-        # carry group["claude_decide"] = True so they reach the per-item judge.
+        # carry group["judge_decide"] = True so they reach the per-item judge.
         #
         # NOTE: write-only diagnostic mirror. Nothing in the production code
         # paths READS this set — all routing/filtering/formatting is driven by
-        # group["claude_decide"] and the per-item decision_mode flag. It exists
+        # group["judge_decide"] and the per-item decision_mode flag. It exists
         # purely as an observable record for tests/diagnostics and does NOT gate
-        # any runtime behavior. (The _write_outputs() claude_decide audit keys
-        # off build_human_review_config()["claude_decide_item_ids"], not this
+        # any runtime behavior. (The _write_outputs() judge_decide audit keys
+        # off build_human_review_config()["judge_decide_item_ids"], not this
         # set.) Do not assume populating it changes how items are routed.
-        self.claude_decide_overrides: Set[str] = set()
+        self.judge_decide_overrides: Set[str] = set()
 
         # Filtering results
         self.valid: List[Dict[str, Any]] = []
@@ -920,7 +928,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # Step 8: Warn on contradictory --agent-decide combinations.
         # --agent-decide only affects items that remain needs-human-decision;
         # bulk flags that drain that bucket leave it with nothing to judge.
-        if getattr(self.args, "claude_decide", False):
+        if getattr(self.args, "agent_decide", False):
             draining_flags = [
                 name
                 for name, flag in (
@@ -1539,9 +1547,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         of that set, so an unattended run and an interactive one that picked "Let
         the agent decide" produce the same prompt for the same items.
         """
-        if getattr(self.args, "claude_decide", False):
+        if getattr(self.args, "agent_decide", False):
             return list(self.needs_human)
-        return [g for g in self.needs_human if g.get("claude_decide")]
+        return [g for g in self.needs_human if g.get(JUDGE_DECIDE)]
 
     def human_decision_phase_dir(self) -> str:
         """The phase dir judging tasks and verdict files live in."""
@@ -1828,7 +1836,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             }
 
         # Post-hoc audit: verify every report-pre-marked "Let the agent decide"
-        # item actually reached the judge (decision_source == claude_*), rather
+        # item actually reached the judge (decision_source == judge_*), rather
         # than being prompted interactively or dropped. This is the runtime
         # backstop for the per-item routing the apply instructions perform; it
         # surfaces warnings but never fails the run (a sibling of the
@@ -1839,7 +1847,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             recorded_decisions = self.state.get_all_human_decisions(
                 self.phase_name
             )
-            cd_ok, cd_warnings = validate_claude_decide_items_honored(
+            cd_ok, cd_warnings = validate_judge_decide_items_honored(
                 self.build_human_review_config(),
                 recorded_decisions,
             )
@@ -2417,7 +2425,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # report, but that step lives on the native leg only, so before
         # this the one decision a `--yes --exec-subagents` run actually *made*
         # reached no output the phase wrote (measured 2026-09-16).
-        decided = self.claude_decisions()
+        decided = self.judge_decisions()
         if decided:
             print(f"\nDecided by the judge agent ({len(decided)}):")
             print(f"  judge: {', '.join(self._judges_of(decided))}")
@@ -2451,13 +2459,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         return []
 
-    def claude_decisions(self) -> Dict[str, Dict[str, Any]]:
+    def judge_decisions(self) -> Dict[str, Dict[str, Any]]:
         """This phase's recorded decisions that a judge subagent made.
 
         The same filter the instructions' ``## Decided by the judge agent`` section
         specifies: ``human_decisions_{phase}`` entries whose
-        ``batch_context.decision_source`` is ``claude_auto_decide`` or
-        ``claude_auto_decide_salvage``.
+        ``batch_context.decision_source`` is ``judge_auto_decide`` or
+        ``judge_auto_decide_salvage`` (or the ``claude_*`` spelling of either
+        that a run started before the rename recorded).
         """
         if self.state is None:
             return {}
@@ -2618,7 +2627,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         rows = self._phase_rows()
         ok = [row for row in rows if self._row_ok(row)]
         item_counts = self._write_item_counts(rows)
-        decided = self.claude_decisions()
+        decided = self.judge_decisions()
         titles = self._titles_by_group_id()
         nouns = self.item_noun_plural
 
@@ -3242,30 +3251,30 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 by_importance[imp].append(item)
 
         mode = getattr(self.args, "batch_review_mode", "by-importance")
-        claude_decide = bool(getattr(self.args, "claude_decide", False))
+        agent_decide = bool(getattr(self.args, "agent_decide", False))
         return {
             "mode": mode,
             "batch_enabled": mode != "individual",
-            # When "claude_auto_decide", the host agent skips the interactive
+            # When "judge_auto_decide", the host agent skips the interactive
             # batch-review prompt and evaluates each needs-human-decision item
             # itself ("Let the agent decide" mode). See
             # references/human-decision-batch.md.
-            "decision_mode": "claude_auto_decide" if claude_decide else "interactive",
+            "decision_mode": JUDGE_AUTO_DECIDE if agent_decide else "interactive",
             "prompt_strategy": "single_batch" if mode != "individual" else "per_item",
             "by_importance": by_importance,
             "total_count": len(self.formatted_human),
             "batch_prompt_template": "batch_approval_v1",
             # Convenience index of items the reviewer pre-marked "Let the agent
             # decide" in the report. The authoritative per-item signal is the
-            # per-item ``decision_mode == "claude_auto_decide"`` flag the
+            # per-item ``decision_mode == "judge_auto_decide"`` flag the
             # formatters emit; this list lets the instructions find them without
             # scanning every item. The global ``decision_mode`` above stays
             # "interactive" unless --agent-decide was passed; per-item routing
             # is purely additive.
-            "claude_decide_item_ids": [
+            JUDGE_DECIDE_ITEM_IDS: [
                 it.get("group_id", "")
                 for it in self.formatted_human
-                if it.get("decision_mode") == "claude_auto_decide"
+                if it.get("decision_mode") == JUDGE_AUTO_DECIDE
             ],
         }
 
@@ -3308,24 +3317,24 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """
         return ""
 
-    def _route_claude_decide_marker(
+    def _route_judge_decide_marker(
         self, group: Dict[str, Any], key: Any, value: str
     ) -> bool:
-        """Handle a ``claude_decide`` override as a routing marker, not a status.
+        """Handle a ``judge_decide`` override as a routing marker, not a status.
 
-        Returns ``True`` if *value* was a ``claude_decide`` marker (the caller
+        Returns ``True`` if *value* was a ``judge_decide`` marker (the caller
         should skip the ``validation_status`` assignment), ``False`` otherwise.
 
-        A ``claude_decide`` marker keeps the item in ``needs_human`` and tags it
+        A ``judge_decide`` marker keeps the item in ``needs_human`` and tags it
         so the per-item "Let the agent decide" judge picks it up at apply time; it
         must NEVER be written into ``validation_status`` (which is not a real
         status and would silently fall through ``filter_items``).
         """
-        if value == "claude_decide":
-            group["claude_decide"] = True
-            # Diagnostics-only mirror; routing is driven by group["claude_decide"]
+        if canonical_value(value) == JUDGE_DECIDE:
+            group[JUDGE_DECIDE] = True
+            # Diagnostics-only mirror; routing is driven by group["judge_decide"]
             # above, not by this set (see declaration note in __init__).
-            self.claude_decide_overrides.add(key)
+            self.judge_decide_overrides.add(key)
             # A surfaced reason so the routing is visible in logs/reports. Not a
             # setdefault no-op — the item already carries a needs-human reason.
             group["validation_reason"] = "Routed to the judge agent by reviewer"
@@ -3349,7 +3358,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         for group in self.merged:
             ghash = group.get("group_hash", "")
             if ghash and ghash in self.validation_overrides:
-                value = self.validation_overrides[ghash]
+                value = canonical_value(self.validation_overrides[ghash])
                 if value not in VALID_OVERRIDE_VALUES:
                     print(
                         f"WARNING: ignoring unknown validation override "
@@ -3358,8 +3367,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         file=sys.stderr,
                     )
                     continue
-                # Route "claude_decide" as a marker, never as a status.
-                if self._route_claude_decide_marker(group, ghash, value):
+                # Route "judge_decide" as a marker, never as a status.
+                if self._route_judge_decide_marker(group, ghash, value):
                     override_count += 1
                     continue
                 old_status = group.get("validation_status", "unknown")
@@ -3377,7 +3386,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         """Apply per-suggestion validation overrides to ``self.merged``.
 
         ``invalid`` drops the suggestion; ``valid`` flags it (and promotes the
-        group if *all* survivors are valid); ``claude_decide`` is a routing
+        group if *all* survivors are valid); ``judge_decide`` is a routing
         marker that keeps the suggestion and, after the loop, routes the whole
         containing group to the per-item judge (the apply-time review unit is a
         group, so the marker is propagated up — including the mixed-group case
@@ -3401,9 +3410,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     matched_key = positional_id
 
                 if matched_key is not None:
-                    override_status = self.suggestion_validation_overrides[
-                        matched_key
-                    ]
+                    override_status = canonical_value(
+                        self.suggestion_validation_overrides[matched_key]
+                    )
                     if override_status not in VALID_OVERRIDE_VALUES:
                         print(
                             f"WARNING: ignoring unknown per-suggestion "
@@ -3416,11 +3425,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         sugg["_user_override_invalid"] = True
                     elif override_status == "valid":
                         sugg["_user_override_valid"] = True
-                    elif override_status == "claude_decide":
+                    elif override_status == JUDGE_DECIDE:
                         # Routing marker: keep the suggestion (do NOT drop or
                         # promote) and tag it. Propagated to the group below so
                         # the whole group routes to the per-item judge.
-                        sugg["claude_decide"] = True
+                        sugg[JUDGE_DECIDE] = True
                     sugg_override_count += 1
                     modified = True
 
@@ -3435,16 +3444,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # apply_group_validation_overrides, or per-suggestion in the
                 # loop above) is an affirmative "route to the judge" request and
                 # must win over a "valid" promotion. Without this guard, a group
-                # marked claude_decide whose surviving suggestions are all
+                # marked judge_decide whose surviving suggestions are all
                 # individually "valid" would be promoted to "valid" while still
-                # carrying claude_decide=True; filter_items only honours
-                # claude_decide in the needs-human-decision branch, so the group
+                # carrying judge_decide=True; filter_items only honours
+                # judge_decide in the needs-human-decision branch, so the group
                 # would auto-apply and bypass the judge.
-                marked_claude_decide = group.get("claude_decide") or any(
-                    s.get("claude_decide") for s in remaining
+                marked_judge_decide = group.get(JUDGE_DECIDE) or any(
+                    s.get(JUDGE_DECIDE) for s in remaining
                 )
                 if (
-                    not marked_claude_decide
+                    not marked_judge_decide
                     and remaining
                     and all(s.get("_user_override_valid") for s in remaining)
                     and group.get("validation_status")
@@ -3459,20 +3468,20 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     group["user_override"] = True
 
                 # Reconcile per-suggestion -> group granularity: if any
-                # surviving suggestion is "claude_decide", route the whole
+                # surviving suggestion is "judge_decide", route the whole
                 # group to the judge (the apply-time review unit is a group,
                 # and the formatters only inspect the group). This also covers
-                # the mixed-group case (one claude_decide suggestion alongside
+                # the mixed-group case (one judge_decide suggestion alongside
                 # other untouched needs-human suggestions).
                 if any(
-                    s.get("claude_decide")
+                    s.get(JUDGE_DECIDE)
                     for s in group.get("suggestions", [])
                 ):
-                    group["claude_decide"] = True
-                    # Diagnostics-only mirror; the group["claude_decide"] flag
+                    group[JUDGE_DECIDE] = True
+                    # Diagnostics-only mirror; the group["judge_decide"] flag
                     # above is what actually routes the group to the judge (see
                     # declaration note in __init__). This set is never read.
-                    self.claude_decide_overrides.add(
+                    self.judge_decide_overrides.add(
                         group.get("group_hash", "")
                     )
 
