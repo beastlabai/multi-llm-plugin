@@ -1561,10 +1561,14 @@ class OpenCodeProvider(LLMProvider):
     #: (T4.0, offline against a stub provider, the T4.6 rig under
     #: `tests/fixtures/opencode/capture/`) on 1.17.15, 1.18.18, 1.18.23, 1.18.30
     #: and 1.18.32: accepted silently, and a rejected permission no longer ends
-    #: the turn on any of them. The deny rows themselves were accepted on all
-    #: five too, so they carry no version gate and `min_version` stays. Widen
+    #: the turn on any of them. 2026-10-02: the full 68-case rig re-run on the
+    #: installed 1.18.34 (`capture/1.18.34/`) gave a `summary.tsv` identical to
+    #: 1.18.32's, so the ceiling moved there; the version-lag WARN that omitted
+    #: the key on 1.18.34 was this bound lagging the install, not a regression.
+    #: The deny rows themselves were accepted on all
+    #: six too, so they carry no version gate and `min_version` stays. Widen
     #: either bound only on a new rig measurement.
-    CONTINUE_LOOP_ON_DENY_RANGE = ("1.17.15", "1.18.32")
+    CONTINUE_LOOP_ON_DENY_RANGE = ("1.17.15", "1.18.34")
 
     # §7.2 — per-adapter pattern overrides, EXTENDING the base sets (never
     # replacing them: the base entries are audited-clean and shared).

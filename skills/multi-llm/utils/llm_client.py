@@ -519,6 +519,29 @@ def _cut_bytes(text: str, limit: int, marker: str) -> str:
     return encoded[:keep].decode("utf-8", errors="ignore") + marker
 
 
+def _cut_bytes_middle(text: str, limit: int, marker: str) -> str:
+    """``text`` cut to ``limit`` UTF-8 bytes, head **and tail** kept, ``marker`` between.
+
+    A stream's end is where its answer is: codex's final ``agent_message`` and
+    ``turn.completed`` come last, after a few multi-KB ``aggregated_output`` lines
+    (2026-10-01, Claude Code review-code: a head-only cut left a log ending at the
+    diff read, and its "0 issues" verdict could not be audited). A quarter of the
+    budget keeps the opening, the rest keeps the ending. The marker is charged
+    against ``limit``, as in :func:`_cut_bytes`.
+    """
+    encoded = text.encode("utf-8", errors="replace")
+    if len(encoded) <= limit:
+        return text
+    room = max(0, limit - len(marker.encode("utf-8")))
+    head = room // 4
+    tail = room - head
+    return (
+        encoded[:head].decode("utf-8", errors="ignore")
+        + marker
+        + (encoded[len(encoded) - tail:].decode("utf-8", errors="ignore") if tail else "")
+    )
+
+
 def _bound_stream(text: str) -> str:
     """One captured stream, bounded per §4.4 — **after** it has been redacted.
 
@@ -540,10 +563,10 @@ def _bound_stream(text: str) -> str:
         _cut_bytes(line, MAX_LOG_LINE_BYTES, f" ... [line truncated at {MAX_LOG_LINE_BYTES} B]")
         for line in lines
     ]
-    return _cut_bytes(
+    return _cut_bytes_middle(
         "\n".join(bounded),
         MAX_LOG_STREAM_BYTES,
-        f"\n... [stream truncated at {MAX_LOG_STREAM_BYTES} B]",
+        f"\n... [stream truncated at {MAX_LOG_STREAM_BYTES} B; middle elided]\n",
     )
 
 

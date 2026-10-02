@@ -190,7 +190,7 @@ use_legacy_landlock` makes every `workspace-write` dispatch panic (exit 101),
 write phases included; the flag is only safe as the per-dispatch `-c` rung 1
 adds, and `doctor` warns if your codex config sets it. Rung 1 is read-only only
 and rides a feature codex marked deprecated (measured at 0.155.1) and removed
-(measured unavailable from 0.156.1): on a current codex the walk skips it by
+(measured: removed since 0.156.1): on a current codex the walk skips it by
 version, `auto` goes on to rung 2 and `contained` refuses.
 
 Because the default is already the widest value, a cloned repository's

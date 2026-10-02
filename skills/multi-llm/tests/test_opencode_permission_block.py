@@ -332,8 +332,21 @@ class TestTheBuiltinAllows:
 
 class TestContinueLoopOnDenyGate:
     def test_the_range_is_its_own_constant(self):
-        assert (FLOOR, CEILING) == ("1.17.15", "1.18.32")
+        assert (FLOOR, CEILING) == ("1.17.15", "1.18.34")
         assert oc.OpenCodeProvider.verified_version != CEILING
+
+    def test_the_ceiling_is_backed_by_a_committed_rig_capture(self):
+        """The bound moves only on a rig measurement (opencode.py's comment): the
+        ceiling's own capture must exist and show the key keeping the loop going."""
+        rig = Path(__file__).parent / "fixtures" / "opencode" / "capture" / CEILING
+        rows = {
+            line.split("\t")[0]: line.split("\t")
+            for line in (rig / "summary.tsv").read_text("utf-8").splitlines()
+        }
+        for agent in ("plan", "build"):
+            cont = rows[f"t40_cont_{agent}"]
+            assert "tool_posts=2" in cont and "finish=stop" in cont
+            assert "exit=0" in cont
 
     @pytest.mark.parametrize("version", [FLOOR, CEILING])
     def test_in_range_it_is_present(self, provider, dispatch_env, capsys, version):

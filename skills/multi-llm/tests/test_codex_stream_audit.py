@@ -90,8 +90,30 @@ class TestTheCapturedFixtures:
             (FIXTURES / "read_only_clean.jsonl").read_text(), "")
         assert usage["input_tokens"] == 7 and usage["output_tokens"] == 7
 
-    def test_the_verified_version_is_the_capture_version(self):
-        assert CodexProvider().verified_version == "0.156.1"
+    def test_the_verified_version_is_the_newest_recapture(self):
+        assert CodexProvider().verified_version == "0.160.0"
+
+    @pytest.mark.parametrize("name", [
+        "read_only_clean.jsonl", "quoting_render.jsonl", "collab_spawn_agent.jsonl",
+    ])
+    def test_the_0_160_0_recapture_parses_and_keeps_the_0_156_1_event_shapes(self, name):
+        """2026-10-02: the offline rig re-run on 0.160.0 (the version-lag WARN's
+        cause was the pin trailing the install). Same event kinds, same keys."""
+        newer = FIXTURES.parent / "0.160.0" / name
+        result = CodexProvider().parse_output(newer.read_text(), "")
+        assert result["success"] is True and result["data"] == []
+
+        def kinds(path):
+            seen = set()
+            for line in path.read_text().splitlines():
+                if line.startswith("{"):
+                    event = json.loads(line)
+                    seen.add((event["type"], (event.get("item") or {}).get("type")))
+            return seen
+
+        # 0.156.1 also emitted an `error` item (a deprecation notice) that 0.160.0
+        # no longer does; nothing the parser reads is new.
+        assert kinds(newer) - kinds(FIXTURES / name) == set()
 
     def test_command_is_one_wrapped_string_and_shlex_recovers_the_argv(self):
         commands = [e["item"]["command"] for e in _events("quoting_render.jsonl")

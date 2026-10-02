@@ -8407,6 +8407,7 @@ class TestCodexProvider:
             "--sandbox",
             "workspace-write",
             "--json",
+            "-c", "features.plugins=false",
             "--ephemeral",
             "--skip-git-repo-check",
             "--model",
@@ -8434,6 +8435,7 @@ class TestCodexProvider:
             "--sandbox",
             "workspace-write",
             "--json",
+            "-c", "features.plugins=false",
             "--ephemeral",
             "--skip-git-repo-check",
             "--output-schema",
@@ -8456,6 +8458,7 @@ class TestCodexProvider:
                 "--sandbox",
                 "workspace-write",
                 "--json",
+                "-c", "features.plugins=false",
                 "--ephemeral",
                 "--skip-git-repo-check",
                 "--model",
@@ -8482,6 +8485,7 @@ class TestCodexProvider:
             "--sandbox",
             "workspace-write",
             "--json",
+            "-c", "features.plugins=false",
             "--ephemeral",
             "--skip-git-repo-check",
             "--model",
@@ -8506,6 +8510,7 @@ class TestCodexProvider:
             "--sandbox",
             "workspace-write",
             "--json",
+            "-c", "features.plugins=false",
             "--ephemeral",
             "--skip-git-repo-check",
             "--model",
@@ -8525,6 +8530,7 @@ class TestCodexProvider:
             "--sandbox",
             "workspace-write",
             "--json",
+            "-c", "features.plugins=false",
             "--ephemeral",
             "--skip-git-repo-check",
             "--model",
@@ -8539,6 +8545,7 @@ class TestCodexProvider:
         cmd = provider.build_command("p", "gpt-5.5")
 
         assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "-c", "features.plugins=false",
                        "--ephemeral", "--skip-git-repo-check",
                        "--model", "gpt-5.5", "p"]
 
@@ -8547,6 +8554,7 @@ class TestCodexProvider:
         cmd = provider.build_command("p", "gpt-5.5:turbo")
 
         assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "-c", "features.plugins=false",
                        "--ephemeral", "--skip-git-repo-check",
                        "--model", "gpt-5.5:turbo", "p"]
 
@@ -8555,6 +8563,7 @@ class TestCodexProvider:
         cmd = provider.build_command("p", "gpt-5.5:HIGH")
 
         assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "-c", "features.plugins=false",
                        "--ephemeral", "--skip-git-repo-check",
                        "--model", "gpt-5.5:HIGH", "p"]
 
@@ -8563,6 +8572,7 @@ class TestCodexProvider:
         cmd = provider.build_command("p", "gpt-5.5:")
 
         assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "-c", "features.plugins=false",
                        "--ephemeral", "--skip-git-repo-check",
                        "--model", "gpt-5.5:", "p"]
 
@@ -8571,6 +8581,7 @@ class TestCodexProvider:
         cmd = provider.build_command("p", "high")
 
         assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "-c", "features.plugins=false",
                        "--ephemeral", "--skip-git-repo-check",
                        "--model", "high", "p"]
 
@@ -8579,6 +8590,7 @@ class TestCodexProvider:
         cmd = provider.build_command("p", ":high")
 
         assert cmd == ["codex", "exec", "--sandbox", "workspace-write", "--json",
+                       "-c", "features.plugins=false",
                        "--ephemeral", "--skip-git-repo-check",
                        "--model", ":high", "p"]
 
@@ -8637,6 +8649,7 @@ class TestCodexProvider:
         cmd = provider.build_agent_command("p", "gpt-5.5", PROFILE_AGENT_READONLY)
 
         assert cmd == ["codex", "exec", "--sandbox", "read-only", "--json",
+                       "-c", "features.plugins=false",
                        "--ephemeral", "--skip-git-repo-check",
                        "--model", "gpt-5.5", "p"]
 
@@ -9819,6 +9832,7 @@ PRE_L5_ARGV = {
     ],
     "codex": [
         "codex", "exec", "--sandbox", "workspace-write", "--json",
+        "-c", "features.plugins=false",
         "--ephemeral", "--skip-git-repo-check", "--model", "gpt-5.5",
         PRE_L5_ARGV_PROMPT,
     ],
@@ -11357,6 +11371,9 @@ T3_CODEX_CORPUS = (
     ("0.156.1/code_mode_writes.jsonl",             None,                 None),
     ("0.156.1/code_mode_writes.rollout.jsonl",     None,                 None),
     ("0.156.1/collab_spawn_agent.jsonl",           None,                 None),
+    ("0.160.0/collab_spawn_agent.jsonl",           None,                 None),
+    ("0.160.0/quoting_render.jsonl",               None,                 None),
+    ("0.160.0/read_only_clean.jsonl",              None,                 None),
     ("0.156.1/exec_session.jsonl",                 None,                 None),
     ("0.156.1/mcp_tool_call.jsonl",                None,                 None),
     ("0.156.1/quoting_render.jsonl",               None,                 None),
@@ -11877,3 +11894,21 @@ class TestOpenCodeStreamCapturesAcrossThePin:
         )
         assert result["incomplete"] is True
         assert provider.classify_failure(stdout, stderr, 0) == "runner_error"
+
+
+class TestCodexSlotsStartWithoutThePlugins:
+    """2026-10-02: a nested ``codex exec`` booted the user's installed plugins, so
+    every review slot started multi-llm's own MCP server, whose venv Python wrote
+    ``__pycache__/*.pyc`` into the watched ``$CODEX_HOME/plugins`` tree and fired
+    ``[CODEX_HOME_CHECK]`` on every slot. ``-c features.plugins=false`` stops it."""
+
+    def test_every_codex_argv_leg_carries_the_plugins_off_pair(self):
+        from utils.providers.codex import PLUGINS_OFF_PAIR, CodexProvider
+
+        provider = CodexProvider()
+        cmd = provider.build_command("p", "gpt-5.5")
+        assert PLUGINS_OFF_PAIR == ("-c", "features.plugins=false")
+        at = cmd.index("-c")
+        assert tuple(cmd[at:at + 2]) == PLUGINS_OFF_PAIR
+        assert at < cmd.index("--ephemeral") < cmd.index("--skip-git-repo-check")
+        assert cmd[2:4] == ["--sandbox", cmd[3]], "--sandbox keeps its fixed offset"

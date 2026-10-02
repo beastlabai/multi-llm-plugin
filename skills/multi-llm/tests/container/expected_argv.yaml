@@ -235,6 +235,7 @@ entries:
       "--model": "<model>"
       "--sandbox": "read-only"
       "--skip-git-repo-check": null
+      "-c": "features.plugins=false"
     tail: []
     prompt: stdin
     min_records: 0
@@ -250,6 +251,7 @@ entries:
       "--model": "<model>"
       "--sandbox": "workspace-write"
       "--skip-git-repo-check": null
+      "-c": "features.plugins=false"
     tail: ["<prompt>"]
     prompt: argv
     min_records: 0
@@ -265,6 +267,7 @@ entries:
       "--model": "<model>"
       "--sandbox": "workspace-write"
       "--skip-git-repo-check": null
+      "-c": "features.plugins=false"
     tail: []
     prompt: stdin
     min_records: 0
@@ -306,6 +309,7 @@ entries:
       "--model": "<model>"
       "--sandbox": "danger-full-access"
       "--skip-git-repo-check": null
+      "-c": "features.plugins=false"
     tail: ["<prompt>"]
     prompt: argv
     min_records: 1
@@ -321,6 +325,7 @@ entries:
       "--model": "<model>"
       "--sandbox": "danger-full-access"
       "--skip-git-repo-check": null
+      "-c": "features.plugins=false"
     tail: []
     prompt: stdin
     min_records: 1

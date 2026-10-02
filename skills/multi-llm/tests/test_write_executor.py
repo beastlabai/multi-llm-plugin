@@ -1046,7 +1046,7 @@ class TestScheduler:
         batch_report = json.loads(
             (env.phase_dir / "subagent_batch_report.json").read_text()
         )
-        assert batch_report["runner_versions"] == {"codex:gpt-5.5": "0.156.1"}
+        assert batch_report["runner_versions"] == {"codex:gpt-5.5": "0.160.0"}
 
     def test_the_batch_report_names_write_tasks_json(self, env):
         """N9: the write path never takes a `task_file` argument the way

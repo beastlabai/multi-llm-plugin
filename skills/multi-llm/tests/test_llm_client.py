@@ -969,6 +969,28 @@ class TestHardFailureStdoutExcerpt:
         assert len(excerpt.encode("utf-8")) <= MAX_LOG_STREAM_BYTES
         assert "stream truncated" in excerpt
 
+    def test_the_byte_cut_keeps_the_end_of_the_stream_where_the_answer_is(
+        self, mock_subprocess, mock_provider_available
+    ):
+        """2026-10-01: a head-only cut left a codex log ending at the diff read.
+
+        Codex JSONL is a few huge ``aggregated_output`` lines followed by the final
+        ``agent_message``; the cut must keep that ending and put the marker between.
+        """
+        stdout = "\n".join(
+            ["h" * 30_000, "m" * 30_000, '{"type":"item.completed","text":"FINAL-VERDICT"}']
+        )
+        mock_subprocess.return_value = self._failed_run(stdout, "")
+
+        result = invoke_with_provider(prompt="Test", model_spec="cursor-agent:gpt-4")
+
+        excerpt = result["details"]["stdout_excerpt"]
+        assert len(excerpt.encode("utf-8")) <= MAX_LOG_STREAM_BYTES
+        assert excerpt.startswith("h")
+        assert excerpt.endswith("FINAL-VERDICT\"}")
+        assert "stream truncated at" in excerpt
+        assert excerpt.index("stream truncated") < excerpt.index("FINAL-VERDICT")
+
     # -- the refactor's own guard rails --------------------------------------
 
     def test_the_zero_exit_parse_failure_still_attaches_the_excerpt_it_always_did(

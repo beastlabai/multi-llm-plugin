@@ -13,8 +13,9 @@ written. The managed-config layer is reached through opencode's own
 `OPENCODE_TEST_MANAGED_CONFIG_DIR` override. The org-config layer is reached by
 seeding the scratch data-dir DB with an account whose URL is the stub.
 
-Versions: **1.18.32** (installed) and **1.17.15** (`min_version`) with every
-case. **1.18.18, 1.18.23 and 1.18.30** ran the T4.0 subset (`t40_{none,cont,block,blockcont}_*`
+Versions: **1.18.32** and **1.17.15** (`min_version`) with every case; **1.18.34**
+(re-run 2026-10-02 on the then-installed build, all 68 cases, `summary.tsv` identical
+to 1.18.32's). **1.18.18, 1.18.23 and 1.18.30** ran the T4.0 subset (`t40_{none,cont,block,blockcont}_*`
 and `q2_ustar_agentlayer_*`). The older builds were extracted from the npm
 cache; `run.sh` shows how.
 
