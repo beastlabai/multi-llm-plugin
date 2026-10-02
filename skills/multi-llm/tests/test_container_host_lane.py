@@ -667,6 +667,19 @@ class _Census:
         return path
 
 
+def _rows_still_runnable(config) -> bool:
+    """True when some declared row of this tier has a credential to run under.
+
+    Per row, as `graded` decides it: a subscription (`fallback`) row needs no key,
+    an `openrouter` row needs `OPENROUTER_API_KEY`. Decided 2026-10-02 with the
+    keyless subscription run: `make e2e-container-host` no longer demands the key.
+    """
+    declared = set(_declared_for_tier(config))
+    have_key = bool(os.environ.get("OPENROUTER_API_KEY"))
+    return any(harness.default_host_creds(host) == "fallback" or have_key
+               for host, row in CREDENTIALED_PAIRS if row in declared)
+
+
 def _refuse_empty_lane(config, utc: str) -> None:
     """`not-run` is its own outcome, and it exits non-zero (C6).
 
@@ -681,6 +694,12 @@ def _refuse_empty_lane(config, utc: str) -> None:
     """
     path = _Census.write(config, utc)
     if _Census.ran:
+        return
+    # A keyless run on the subscription skips the opencode rows (the first rows
+    # in the schedule) BEFORE any codex or claude-code row has run, so "nothing
+    # ran yet" is not "nothing will run": refuse only once no declared row is
+    # left that its own credential mode could execute.
+    if _rows_still_runnable(config):
         return
     if config.getoption("allow_empty_host_lane", default=False):
         return

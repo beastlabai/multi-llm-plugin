@@ -120,6 +120,9 @@ ENV_CAPTURE_PREFIXES = (
 #: vendor prefix and so cannot be matched by :data:`ENV_CAPTURE_PREFIXES`.
 ENV_CAPTURE_NAMES = (
     "DO_NOT_TRACK", "NO_UPDATE_NOTIFIER", "NPM_CONFIG_UPDATE_NOTIFIER",
+    # claude-code's switch against the claude.ai connectors proxy: unprefixed
+    # (it begins ENABLE_), set by this lane's LIVE_ENV_OVERRIDES, graded by OPT_OUTS.
+    "ENABLE_CLAUDEAI_MCP_SERVERS",
 )
 
 

@@ -278,3 +278,53 @@ class TestTheLiveLaneUsesTheSubscription:
         assert live.LIVE_MODEL_OVERRIDES["claude-code"]["slug"] == "openai/gpt-6-luna"
         assert live.LIVE_MODEL_OVERRIDES["codex"]["slug"] == \
             "deepseek/deepseek-v4.1-flash"
+
+
+class TestAKeylessSubscriptionRunIsNotRefusedAsEmpty:
+    """`make e2e-container-host` no longer demands the key (2026-10-02).
+
+    opencode is the first scheduled host and has no subscription, so it skips
+    BEFORE any codex row has run; the old `_refuse_empty_lane` read that as an
+    empty lane and killed the run. Offline: the real module, a fake config.
+    """
+
+    class _Config:
+        def __init__(self, expression):
+            self.expression = expression
+
+        def getoption(self, name, default=None):
+            return {"markexpr": self.expression}.get(name, default)
+
+    @pytest.fixture
+    def lane(self, monkeypatch, tmp_path):
+        lane = importlib.import_module("tests.test_container_host_lane")
+        monkeypatch.setattr(harness, "RUNS", tmp_path)
+        monkeypatch.setattr(lane._Census, "ran", [])
+        monkeypatch.setattr(lane._Census, "skipped", [])
+        monkeypatch.delenv(harness.HOST_CREDS_ENV, raising=False)
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        return lane
+
+    PROVIDER = "container and live and not live_native_phase and not live_next_command"
+
+    def test_a_subscription_row_is_left_to_run(self, lane, monkeypatch):
+        monkeypatch.setattr(harness, "subscription_available",
+                            lambda host: host in ("codex", "claude-code"))
+        config = self._Config(self.PROVIDER)
+        lane._refuse_empty_lane(config, "20261002T000000Z")        # must not exit
+
+    def test_no_subscription_and_no_key_is_still_not_run(self, lane, monkeypatch):
+        monkeypatch.setattr(harness, "subscription_available", lambda host: False)
+        config = self._Config(self.PROVIDER)
+        config.getoption = lambda name, default=None: (
+            self.PROVIDER if name == "markexpr" else False)
+        with pytest.raises(pytest.exit.Exception):
+            lane._refuse_empty_lane(config, "20261002T000000Z")
+
+    def test_the_makefile_gate_no_longer_exits(self):
+        makefile = (Path(__file__).resolve().parents[3] / "Makefile").read_text(
+            encoding="utf-8")
+        body = makefile.split("\ne2e-container-host: e2e-image\n", 1)[1].split(
+            "\n\n", 1)[0]
+        assert "exit 1" not in body, "a subscription-only run must be allowed"
+        assert "OPENROUTER_API_KEY" in body
