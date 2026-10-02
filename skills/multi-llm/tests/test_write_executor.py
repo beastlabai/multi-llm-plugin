@@ -1896,6 +1896,47 @@ class TestSecuritySet:
         ]) == 0
         assert env.plan.read_text() != "hand-repaired\n"
 
+    def test_restore_batch_without_a_completion_record_is_unverified(
+        self, env, capsys
+    ):
+        """A snapshot with no completion record to verify against (the run died
+        before classifying) is restored only under --force, and says so."""
+        env.edits([_patch_edit(env.plan, "half\n")],
+                  result={"status": "failed", "ids": [],
+                          "files_touched": ["plans/p.md"], "summary": "broke"})
+        original = env.plan.read_text()
+        env.scheduler([env.apply_task(0)]).run()
+        audit = env.phase_dir / "subagent_audit.jsonl"
+        audit.write_text("".join(
+            line for line in audit.read_text().splitlines(keepends=True)
+            if json.loads(line).get("event") != "completed"
+        ), encoding="utf-8")
+
+        code = restore_batch.main([
+            "--phase-dir", str(env.phase_dir), "--task-id", "apply-batch-0",
+        ])
+        out = capsys.readouterr()
+        assert code == 3
+        assert env.plan.read_text() != original
+        assert "UNVERIFIED" in out.out + out.err
+        assert restore_batch.main([
+            "--phase-dir", str(env.phase_dir), "--task-id", "apply-batch-0",
+            "--force",
+        ]) == 0
+        assert env.plan.read_text() == original
+
+    def test_a_completion_record_names_the_batchs_items(self, env):
+        """`expected_ids` on the `completed` line is what lets restore find a
+        renumbered apply batch's record by its items rather than its slot."""
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        env.scheduler([env.apply_task(0)]).run()
+        audit = write_safety.AuditLog(str(env.phase_dir))
+        assert audit.completion_for("apply-batch-0")["expected_ids"] == ["s0"]
+        assert audit.completion_for("other", expected_ids=["s0"]) is not None
+        assert audit.completion_for("apply-batch-0", expected_ids=["s9"]) is None
+
     def test_restore_batch_all_failed_finds_the_batch_from_the_audit_log(self, env):
         env.edits([_patch_edit(env.plan, "half\n")],
                   result={"status": "failed", "ids": [],
