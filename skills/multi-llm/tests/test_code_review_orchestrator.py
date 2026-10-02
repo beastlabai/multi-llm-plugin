@@ -1992,6 +1992,9 @@ class TestThePhaseTickerCoversTheRestOfThePhase:
         )
         fake_state.mark_phase_completed = MagicMock()
         fake_state.save = MagicMock()
+        # The reaggregate branch refuses a review older than implement
+        # (2026-10-02); a bare MagicMock answers that probe truthily.
+        fake_state.phase_completion_is_stale = MagicMock(return_value=False)
 
         args = _make_args(plan_path, reaggregate=True, skip_validation=True)
 

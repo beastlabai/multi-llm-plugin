@@ -1456,6 +1456,37 @@ class TestReviewStaleAfterImplement:
         assert "was complete but not marked" not in result.stdout
         assert "re-running it" in result.stdout
 
+    @staticmethod
+    def _reaggregate(plan):
+        import subprocess
+        return subprocess.run(
+            [sys.executable, str(Path(prereq.__file__).parent / "code_review_orchestrator.py"),
+             "--plan-file", str(plan), "--reaggregate"],
+            capture_output=True, text=True, timeout=30, encoding="utf-8",
+        )
+
+    def test_a_reaggregate_of_a_stale_review_is_refused_not_restamped(self, tmp_path):
+        """Adversarial review, 2026-10-02: the reaggregate branch returned
+        before the stale guard and ended in `mark_phase_completed`, so a review
+        of the empty repository was re-stamped newer than implement with no
+        model run, and apply-code-fixes applied its findings."""
+        plan = self._plan(tmp_path, code_review=_OLD, implement=_NEW)
+        result = self._reaggregate(plan)
+        assert result.returncode == 3, result.stdout + result.stderr
+        assert "completed before the latest implement" in result.stdout
+        assert "--force" in result.stdout
+        assert "Reaggregation complete" not in result.stdout
+        state = StateManager(plan)
+        assert state.state["phases_completed"]["code-review"] == _OLD
+        assert state.phase_completion_is_stale("code-review")
+
+    def test_a_reaggregate_of_a_current_review_still_runs(self, tmp_path):
+        plan = self._plan(tmp_path, implement=_OLD, code_review=_NEW)
+        result = self._reaggregate(plan)
+        assert result.returncode == 0, result.stdout + result.stderr
+        assert "completed before the latest implement" not in result.stdout
+        assert "=== REAGGREGATE MODE ===" in result.stdout
+
 
 class TestEarlySandboxWarning:
     """#1: implement / apply-code-fixes are refused on a codex host whose own
