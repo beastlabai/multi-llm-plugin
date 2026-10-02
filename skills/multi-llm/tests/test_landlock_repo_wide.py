@@ -15,6 +15,7 @@ skips without it (fails under ``MULTI_LLM_REQUIRE_LANDLOCK=1``).
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -446,7 +447,7 @@ class TestTheCanary:
     def test_canary_env_names_the_first_directory_and_every_protected_dir(self, wide):
         env = ld.canary_env(_ctx(wide))
         assert env[codex_mod.CANARY_ENV_WRITE_DIR] == str(wide.repo / "src")
-        assert env[codex_mod.CANARY_ENV_DENY_DIRS].split(os.pathsep) == [
+        assert env[codex_mod.CANARY_ENV_DENY_DIRS].split("\n") == [
             str(wide.repo / ".git"), str(wide.repo / ".codex"),
             str(wide.repo / ".multi-llm"), str(wide.out),
         ]
@@ -476,6 +477,112 @@ class TestTheCanary:
             assert f"dir:{wide.repo}" not in allowed
         # The canary script reads the extra targets.
         assert codex_mod.CANARY_ENV_DENY_DIRS in codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT
+
+
+def _plain_repo(root: Path, *dirs: str) -> SimpleNamespace:
+    """A repo for the permissions-jailed canary: a `.git` directory (made, not
+    initialised — the canary stats it, nothing reads it), the probe workdir
+    the walk would have prepared, the directories named, and a codex home
+    beside it. `root` may carry a space."""
+    repo = root / "repo"
+    for d in (".git", ".multi-llm/tmp", *dirs):
+        (repo / d).mkdir(parents=True, exist_ok=True)
+    home = root / "codex-home"
+    home.mkdir(parents=True, exist_ok=True)
+    return SimpleNamespace(root=root, repo=repo, home=home)
+
+
+@contextlib.contextmanager
+def _perms_jail(probe, *read_only: Path):
+    """Tier 1's stand-in for the kernel: inside an entered `rung_probe`, the
+    seeded file goes 0444 and the probe workdir, its `.multi-llm/` parent and
+    every `read_only` directory 0555, so a write there fails on plain permissions exactly as the
+    jail would deny it, while `$TMPDIR` stays writable. Everything is restored
+    before the context (and the probe's own clean-up) runs on."""
+    seeded = Path(probe.seeded)
+    workdir = seeded.parent
+    # `.multi-llm/` (the workdir's parent) is itself a protected root and so
+    # always one of the negative targets.
+    dirs = [workdir, workdir.parent, *read_only]
+    try:
+        seeded.chmod(0o444)
+        for d in dirs:
+            d.chmod(0o555)
+        yield
+    finally:
+        for d in reversed(dirs):
+            d.chmod(0o755)
+        seeded.chmod(0o644)
+
+
+@pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0,
+                    reason="plain permissions deny nothing to root")
+class TestTheCanaryUnderPlainPermissions:
+    """The canary script's reading of its targets, with the kernel stood in
+    for by file permissions (adversarial review, 2026-10-02: the extra
+    negative targets were handed to the script `os.pathsep`-joined and
+    word-split by the shell, so a repository path holding a space or a colon
+    produced nonexistent targets that read as denied)."""
+
+    @pytest.fixture
+    def sh(self):
+        path = shutil.which("sh")
+        if not path:  # pragma: no cover
+            pytest.skip("no sh on PATH")
+        return path
+
+    def _probe(self, plain, sh, **request):
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(plain.root),
+               "CODEX_HOME": str(plain.home)}
+        req = JailRequest(repo_root=str(plain.repo), kind="implement",
+                          write_scope=WRITE_SCOPE_REPO_WIDE, **request)
+        return ld.rung_probe(RUNG, req, [sh, "-c", codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT],
+                             cwd=str(plain.repo), env=env)
+
+    def test_the_controls_hold_when_every_target_is_denied(self, tmp_path, sh):
+        plain = _plain_repo(tmp_path, "src")
+        with self._probe(plain, sh) as probe, _perms_jail(probe, plain.repo / ".git"):
+            proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert SANDBOX_CANARY_DENIED in proc.stdout
+
+    def test_a_repository_path_with_a_space_keeps_its_negative_targets(self, tmp_path, sh):
+        """`.git/` left writable under a path with a space must fail the
+        canary: the target is the one directory, not two fragments of it."""
+        plain = _plain_repo(tmp_path / "with space", "src")
+        with self._probe(plain, sh) as probe, _perms_jail(probe):
+            assert str(plain.repo / ".git") in probe.env[codex_mod.CANARY_ENV_DENY_DIRS]
+            proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
+        assert proc.returncode == 3, (proc.returncode, proc.stdout, proc.stderr)
+        assert SANDBOX_CANARY_DENIED not in proc.stdout
+        assert "not denied" in proc.stderr
+
+    def test_a_repository_path_with_a_colon_keeps_its_negative_targets(self, tmp_path, sh):
+        plain = _plain_repo(tmp_path / "a:b", "src")
+        with self._probe(plain, sh) as probe, _perms_jail(probe):
+            proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
+        assert proc.returncode == 3, (proc.returncode, proc.stdout, proc.stderr)
+        assert SANDBOX_CANARY_DENIED not in proc.stdout
+
+    def test_a_negative_target_that_is_not_a_directory_is_a_setup_failure(self, tmp_path, sh):
+        """A target the script cannot stat is a mis-handed target, never a
+        denied write: the control that would pass vacuously stops the probe."""
+        plain = _plain_repo(tmp_path, "src")
+        with self._probe(plain, sh) as probe, _perms_jail(probe, plain.repo / ".git"):
+            env = dict(probe.env)
+            env[codex_mod.CANARY_ENV_DENY_DIRS] += "\n" + str(plain.repo / "gone")
+            proc = _run(ld.unwrap_argv(probe.argv), env, plain.repo)
+        assert proc.returncode == codex_mod.LANDLOCK_CANARY_SETUP_EXIT, (proc.stdout, proc.stderr)
+        assert codex_mod.LANDLOCK_CANARY_TARGET_FAILED in proc.stderr
+        assert SANDBOX_CANARY_DENIED not in proc.stdout
+
+    def test_a_target_holding_a_newline_cannot_be_handed_over(self, tmp_path, sh):
+        """The one byte the hand-over cannot carry: the probe is a setup
+        failure (the walk's `unknown`), never a pass on a split target."""
+        plain = _plain_repo(tmp_path, "src", "plans/a\nb")
+        with pytest.raises(ld.ProbeSetupFailed, match="newline"):
+            with self._probe(plain, sh, output_dir=str(plain.repo / "plans" / "a\nb")):
+                pass
 
 
 # ===========================================================================
@@ -733,7 +840,7 @@ class TestTheRealJailRepoWide:
         env = dict(os.environ, CODEX_HOME=str(wide.home))
         resolved = [sh, "-c", codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT]
         with ld.rung_probe(RUNG, _request(wide), resolved, cwd=str(wide.repo), env=env) as probe:
-            assert probe.env[codex_mod.CANARY_ENV_DENY_DIRS].split(os.pathsep)[0] == str(wide.repo / ".git")
+            assert probe.env[codex_mod.CANARY_ENV_DENY_DIRS].split("\n")[0] == str(wide.repo / ".git")
             proc = _run(probe.argv, probe.env, wide.repo)
             assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
             assert SANDBOX_CANARY_DENIED in proc.stdout

@@ -366,10 +366,20 @@ CANARY_ENV_SEEDED = "MULTI_LLM_CANARY_SEEDED"
 CANARY_ENV_PYTHON = "MULTI_LLM_CANARY_PYTHON"
 CANARY_ENV_WRITE_FILE = "MULTI_LLM_CANARY_WRITE_FILE"
 CANARY_ENV_WRITE_DIR = "MULTI_LLM_CANARY_WRITE_DIR"
-#: Extra negative targets (step 3b, `repo-wide`): `os.pathsep`-joined
+#: Extra negative targets (step 3b, `repo-wide`): **newline**-separated
 #: directories in which creating a file must be denied — `.git/`, the run's
-#: output folder and the other protected roots that exist.
+#: output folder and the other protected roots that exist. Newline, never
+#: `os.pathsep` or a space: the script splits on it alone (`IFS`, globbing
+#: off), so a repository path holding a space or a colon stays one target —
+#: `os.pathsep`-joined and word-split, `/home/me/my repo/.git` became two
+#: nonexistent targets that read as denied (adversarial review, 2026-10-02).
+#: A target the script cannot stat as a directory is a setup failure
+#: (`LANDLOCK_CANARY_TARGET_FAILED`), never a pass; a path holding a newline
+#: cannot be handed over at all and `landlock_dispatch.canary_env` refuses it.
 CANARY_ENV_DENY_DIRS = "MULTI_LLM_CANARY_DENY_DIRS"
+LANDLOCK_CANARY_TARGET_FAILED = (
+    "multi-llm sandbox canary: setup failed (a negative target is not a directory)"
+)
 
 #: What the rung's canary prints (stderr, exit 5) when a write it must be able
 #: to make — in its own $TMPDIR, or a write profile's own target — failed: a
@@ -415,11 +425,13 @@ PLUGIN_LANDLOCK_CANARY_SCRIPT = (
     'rc=0; '
     'if (: > "$f") 2>/dev/null; then rm -f "$f"; rc=3; fi; '
     '[ -e "$f" ] && rc=3; '
-    f'if [ -n "${CANARY_ENV_DENY_DIRS}" ]; then '
-    f'for nd in $(printf %s "${CANARY_ENV_DENY_DIRS}" | tr : " "); do '
+    f'if [ -n "${CANARY_ENV_DENY_DIRS}" ]; then o="$IFS"; IFS=\'\n\'; set -f; '
+    f'for nd in ${CANARY_ENV_DENY_DIRS}; do '
+    f'if [ ! -d "$nd" ]; then echo "{LANDLOCK_CANARY_TARGET_FAILED}" >&2; '
+    f'exit {LANDLOCK_CANARY_SETUP_EXIT}; fi; '
     'g="$nd/sandbox-canary-$$"; '
     'if (: > "$g") 2>/dev/null; then rm -f "$g"; rc=3; fi; '
-    '[ -e "$g" ] && rc=3; done; fi; '
+    '[ -e "$g" ] && rc=3; done; IFS="$o"; set +f; fi; '
     f'"${CANARY_ENV_PYTHON}" -I -S -c \'{_TRUNCATE_SNIPPET}\' "${CANARY_ENV_SEEDED}" '
     '2>/dev/null; t=$?; '
     'if [ "$t" -eq 0 ]; then rc=3; '
