@@ -405,7 +405,7 @@ After all batches are processed, create `{prefix}_applied_fixes.md`:
 
 judge: {judge}
 
-Fixes whose decision was offloaded to the judge agent — via `--agent-decide`, the batch "Let the agent decide" option, or a per-item "Let the agent decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `judge_auto_decide` or `judge_auto_decide_salvage`. Omit this section if there are none. `{judge}` is the runner spec that actually judged (e.g. `codex:<chat model>`, the session model, under `--exec-subagents` on Codex — or an explicit `driver.subagent_runner` override, or the `codex:gpt-6-astra` host floor when that is what resolved), or the host agent on a host with native subagents.
+Fixes whose decision was offloaded to the judge agent — via `--agent-decide`, the batch "Let the agent decide" option, or a per-item "Let the agent decide" selection. Read these from `state.json`: the `human_decisions_{phase}` entries whose `batch_context.decision_source` is `judge_auto_decide` or `judge_auto_decide_salvage` (a run recorded before the judge rename may carry them as `claude_auto_decide` / `claude_auto_decide_salvage`: the same two markers, read the same way). Omit this section if there are none. `{judge}` is the runner spec that actually judged (e.g. `codex:<chat model>`, the session model, under `--exec-subagents` on Codex — or an explicit `driver.subagent_runner` override, or the `codex:gpt-6-astra` host floor when that is what resolved), or the host agent on a host with native subagents.
 
 ### [Fix Title] ({importance}) — Approved
 **Reason**: {reason}
