@@ -6036,6 +6036,7 @@ def _generated_document(*, drop=()):
             "acceptance_criteria": ["it works in a named, checkable way"],
             "estimated_complexity": "low",
             "executor_role": "agent",
+            "subagent_type": None,
         }
         for key in drop:
             task.pop(key, None)

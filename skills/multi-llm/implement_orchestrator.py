@@ -1300,10 +1300,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         # Get parallel batches
         batches = decomposer.get_parallel_batches()
-        print(f"Organized into {len(batches)} execution batches")
-
         # Format for output
         output_batches = format_batches_for_output(batches, skip_completed=args.resume, plan_preamble=plan_preamble, plan_path=plan_path_str, all_tasks=decomposer.tasks)
+
+        # The result line counts what dispatches ("0/13 batches"), and a manual
+        # task is a graph node that dispatches nothing, so a bare "15 execution
+        # batches" read as two more than the run would ever report (2026-10-01).
+        manual_in_output = sum(
+            1 for b in output_batches for t in b["tasks"]
+            if t.get("executor_role") == "human"
+        )
+        dispatching = sum(len(b["tasks"]) for b in output_batches) - manual_in_output
+        print(
+            f"Organized into {len(batches)} execution batches: {dispatching} "
+            f"task(s) to dispatch"
+            + (f", {manual_in_output} manual task(s) it does not run"
+               if manual_in_output else "")
+        )
 
         # Count pending tasks
         pending_count = sum(len(b["tasks"]) for b in output_batches)
@@ -1357,11 +1370,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"\nWould write to: {args.output}")
         sys.exit(0)
 
-    # Write output JSON
+    # Write output JSON, for the one reader that needs it: the driving agent of
+    # the native path, which `Output file:` hands it. The write executor reads
+    # `write_tasks.json` in the phase dir instead, so an `--exec-subagents` run
+    # that never needed `.multi-llm/tmp/` used to create it, `.gitignore`
+    # included, even when it was refused at preflight and dispatched nothing
+    # (2026-10-02). `--detach` without the executor still writes it: the worker
+    # re-enters here and reaches this point itself.
     output_path = Path(args.output)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    _write_temp_dir_gitignore(output_path.parent)
-    output_path.write_text(json.dumps(output_data, indent=2), encoding="utf-8")
+
+    def write_native_handoff() -> None:
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_temp_dir_gitignore(output_path.parent)
+        output_path.write_text(json.dumps(output_data, indent=2), encoding="utf-8")
+
+    executor_backed = bool(
+        getattr(args, "exec_subagents", False)
+        or getattr(args, "dry_run_subagents", False)
+    )
+    if not executor_backed:
+        write_native_handoff()
 
     # --- the detach boundary (D4) ---------------------------------------------
     # Crossed here, before the write executor and independently of it: `implement`

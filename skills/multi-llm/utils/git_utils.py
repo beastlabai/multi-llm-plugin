@@ -291,6 +291,33 @@ def list_untracked_files(directory: str) -> List[str]:
         return []
     return [path for path in stdout.split("\0") if path]
 
+def ignored_paths(paths: Iterable[str], *, cwd: Optional[str] = None) -> Set[str]:
+    """The subset of ``paths`` git ignores, as the strings given.
+
+    ``git check-ignore`` without ``--no-index``, so a *tracked* file that a
+    pattern happens to match is not reported: only untracked-and-ignored paths
+    (transcripts, build output, caches) come back. Best-effort: outside a
+    repository, or when git fails, nothing is ignored, because dropping a path
+    on a guess is worse than keeping it. ``-z`` both ways so no path is C-quoted.
+    """
+    candidates = [path for path in paths if path]
+    if not candidates:
+        return set()
+    where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
+    try:
+        result = subprocess.run(
+            ["git", "check-ignore", "-z", "--stdin"],
+            input="\0".join(candidates) + "\0",
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            **where,
+        )
+    except OSError:
+        return set()
+    if result.returncode not in (0, 1):  # 128: not a repository, bad path
+        return set()
+    return {path for path in result.stdout.split("\0") if path}
+
+
 def get_staged_files() -> List[str]:
     """Get list of currently staged files."""
     stdout, _, _ = _run_git("diff", "--cached", "--name-only")

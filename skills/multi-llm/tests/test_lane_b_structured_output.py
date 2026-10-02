@@ -86,6 +86,7 @@ GENERATED_TASKS_DOC = {
             "acceptance_criteria": ["src/foundation.py exports the interface"],
             "estimated_complexity": "low",
             "executor_role": "agent",
+            "subagent_type": None,
         },
     ],
 }
@@ -267,30 +268,19 @@ def lane(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def strict_probe(tmp_path, monkeypatch):
-    """Point ``generate-tasks`` at a strict-clean copy of its own schema.
+def strict_probe():
+    """The shipped ``generated_tasks.schema.json``, which codex can now carry.
 
-    codex's ``--output-schema`` is OpenAI *strict* structured output and **no
-    shipped schema satisfies it** (§15.2 finding 5), so the file transport — the
-    sidecar half of this task — is unreachable through a shipped file. The probe
-    is ``generated_tasks.schema.json`` with its one optional property removed,
-    which makes it strict-clean while leaving :data:`GENERATED_TASKS_DOC` valid
-    against **both** it and the real file ``validate_result`` uses. That double
-    validity is the point: the sidecar test must not be able to pass by
-    weakening the kind's own result check.
+    Until 2026-10-02 no shipped schema satisfied OpenAI's strict structured
+    output (§15.2 finding 5), so this fixture handed the sidecar tests a
+    hand-stripped copy. ``subagent_type`` is required-but-nullable now, so the
+    real file is the probe and the tests below exercise the file transport
+    through it.
     """
-    real = json.loads(
+    return json.loads(
         (Path(__file__).parent.parent / "schemas" / "generated_tasks.schema.json")
         .read_text(encoding="utf-8")
     )
-    probe = copy.deepcopy(real)
-    probe["$defs"]["generated_task"]["properties"].pop("subagent_type", None)
-    (tmp_path / "probe.schema.json").write_text(json.dumps(probe), encoding="utf-8")
-    table = dict(so.PHASE_SCHEMA_FILE)
-    table["generate-tasks"] = "probe.schema.json"
-    monkeypatch.setattr(so, "SCHEMA_DIR", tmp_path)
-    monkeypatch.setattr(so, "PHASE_SCHEMA_FILE", table)
-    return probe
 
 
 # --------------------------------------------------------------------------- #
@@ -601,3 +591,20 @@ class TestFailsBeforeSpawn:
         assert outcome.rung == 7
         assert lane.calls == []  # no partial argv reached the CLI
         assert len(outcome.attempts) <= 1
+
+
+class TestGeneratedTasksSchemaIsStrictClean:
+    """#9 (2026-10-01 three-host run): codex declined the schema on
+    `<root>.tasks[]: every property must be required; missing subagent_type`
+    and generate-tasks fell back to a `recovered` parse."""
+
+    def test_codex_can_carry_the_shipped_schema(self, strict_probe):
+        assert so._strict_openai_errors(strict_probe) == []
+
+    def test_a_named_subagent_type_must_still_agree_with_the_role(self):
+        from utils.task_decomposer import validate_generated_tasks
+        tasks = copy.deepcopy(GENERATED_TASKS_DOC["tasks"])
+        tasks[0]["subagent_type"] = "human"
+        assert any("disagrees" in p for p in validate_generated_tasks(tasks))
+        tasks[0]["subagent_type"] = "general-purpose"
+        assert validate_generated_tasks(tasks) == []
