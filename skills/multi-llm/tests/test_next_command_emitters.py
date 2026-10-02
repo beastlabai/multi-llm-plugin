@@ -793,7 +793,7 @@ class TestTheTerminalPoll:
         _terminal_record(plan, "ask/why-0badc0de", mode="ask", plan_file=str(plan),
                          plan_arg=P)
 
-        def unreadable(plan_path):
+        def unreadable(plan_path, **_kw):
             raise AssertionError("an ask poll has no phase to answer for")
 
         monkeypatch.setattr(run_status, "_workflow_payload", unreadable)
@@ -815,7 +815,7 @@ class TestTheTerminalPoll:
     ):
         _code, _out, _err, before = _run(_poll(P, "--view", "run"), capsys)
 
-        def unreadable(plan_path):
+        def unreadable(plan_path, **_kw):
             raise OSError("state.json unreadable")
 
         monkeypatch.setattr(run_status, "_workflow_payload", unreadable)

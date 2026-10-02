@@ -827,40 +827,94 @@ def test_the_notice_and_the_next_step_agree_after_an_unfinished_implement(
 
 class TestResumeCommand:
     """`resume_command` / `util next-command --blocked`: the one command a user
-    can type after a blocked write phase, in the route's own spelling."""
+    can type after a blocked write phase, in the route's own spelling — and
+    only for a phase with progress on record (adversarial review, 2026-10-02:
+    every write-phase exit 3 got one, a prerequisite refusal and a
+    non-existent plan included)."""
+
+    @staticmethod
+    def _in_progress(*phases):
+        return {"phases": {phase: {"status": "in_progress"} for phase in phases}}
 
     @pytest.mark.parametrize("host,route,prefix", ROUTES, ids=ROUTE_IDS)
     def test_every_route_spells_it_for_the_user(self, host, route, prefix):
-        assert np_.resume_command(P, host, route, "implement") == \
-            f"{prefix}--implement {P} --resume"
+        assert np_.resume_command(
+            P, host, route, "implement", workflow=self._in_progress("implement")
+        ) == f"{prefix}--implement {P} --resume"
 
     @pytest.mark.parametrize("mode", [
         "implement", "apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
     ])
     def test_the_four_write_phases_resume(self, mode):
-        assert np_.resume_command(P, "codex", "package", mode) == \
-            f"$multi-llm:multi-llm --{mode} {P} --resume"
+        phase = modes.resolve(mode).phase
+        assert np_.resume_command(
+            P, "codex", "package", mode, workflow=self._in_progress(phase)
+        ) == f"$multi-llm:multi-llm --{mode} {P} --resume"
 
     @pytest.mark.parametrize("mode", [
         "review-plan", "review-tasks", "review-code", "generate-tasks", "full",
         "status", "ask", "init",
     ])
     def test_every_other_mode_has_none(self, mode):
-        assert np_.resume_command(P, "codex", "package", mode) is None
+        workflow = self._in_progress(*modes.PREREQUISITE_PHASES)
+        assert np_.resume_command(P, "codex", "package", mode, workflow=workflow) is None
 
     def test_the_plan_stays_as_typed_and_is_quoted_for_the_reader(self):
-        assert np_.resume_command("plans/my plan.md", "opencode", "package", "implement") \
-            == '/multi-llm --implement "plans/my plan.md" --resume'
+        assert np_.resume_command(
+            "plans/my plan.md", "opencode", "package", "implement",
+            workflow=self._in_progress("implement"),
+        ) == '/multi-llm --implement "plans/my plan.md" --resume'
 
     def test_it_is_never_a_dispatcher_command(self):
         """Both servers redact `uv run … multi_llm.py` strings; a host spelling survives."""
         for host, route, _prefix in ROUTES:
-            command = np_.resume_command(P, host, route, "implement")
+            command = np_.resume_command(
+                P, host, route, "implement", workflow=self._in_progress("implement"))
             assert "uv run" not in command and "multi_llm.py" not in command
 
     def test_a_route_without_a_template_raises(self):
         with pytest.raises(ValueError):
-            np_.resume_command(P, "claude-code", "package", "implement")
+            np_.resume_command(P, "claude-code", "package", "implement",
+                               workflow=self._in_progress("implement"))
+
+    # -- which exit 3 gets one: read from state.json, the util's decision -----
+
+    def test_a_partly_implemented_plan_resumes(self, tmp_path):
+        plan = _build(tmp_path, S(UP_TO_TASKS, tasks=IMPLEMENT_PARTIAL))
+        assert np_.resume_command(P, "codex", "package", "implement", plan_path=plan) \
+            == f"$multi-llm:multi-llm --implement {P} --resume"
+
+    def test_a_finalize_that_failed_resumes(self, tmp_path):
+        """Every task completed, phase unmarked (`driver.verify_command` failed):
+        `--resume` dispatches nothing and re-runs the check it owes."""
+        plan = _build(tmp_path, S(UP_TO_TASKS, tasks={"T001": "completed", "T002": "completed"}))
+        assert np_.resume_command(P, "codex", "package", "implement", plan_path=plan) \
+            is not None
+
+    def test_a_prerequisite_refusal_has_none(self, tmp_path):
+        """`implement` refused for PREREQUISITE_UNMET (generate-tasks not run):
+        nothing started, and `--resume` would hit the same gate."""
+        plan = _build(tmp_path, S(("review-plan", "apply-suggestions")))
+        assert np_.resume_command(P, "codex", "package", "implement", plan_path=plan) is None
+
+    def test_a_stop_before_the_first_dispatch_has_none(self, tmp_path):
+        """Tasks seeded, none completed (pending human-task decisions,
+        `write_batch_scheduler`'s fail-closed stop): the phase's own message
+        names `--human-task <id>=done|skip`, and `--resume` would stop again."""
+        plan = _build(tmp_path, S(UP_TO_TASKS, tasks={"T001": "pending", "T002": "pending"}))
+        assert np_.resume_command(P, "codex", "package", "implement", plan_path=plan) is None
+
+    def test_an_apply_phase_with_a_completed_batch_resumes_and_without_one_does_not(
+        self, tmp_path
+    ):
+        plan = _build(tmp_path, S(("review-plan",), files=RP_VALID,
+                                  tasks={"apply-batch-0": "completed"}))
+        assert np_.resume_command(P, "opencode", None, "apply-suggestions", plan_path=plan) \
+            == f"/multi-llm --apply-suggestions {P} --resume"
+        plan = _build(tmp_path / "other", S(("review-plan",), files=RP_VALID,
+                                            tasks={"apply-batch-0": "failed"}))
+        assert np_.resume_command(P, "opencode", None, "apply-suggestions", plan_path=plan) \
+            is None
 
     def _run(self, argv, monkeypatch, capsys):
         record = {}
@@ -869,7 +923,9 @@ class TestResumeCommand:
         code = np_.main(argv)
         return code, capsys.readouterr(), record.get("v")
 
-    def test_util_prints_the_line_and_sets_the_key(self, monkeypatch, capsys):
+    def test_util_prints_the_line_and_sets_the_key(self, tmp_path, monkeypatch, capsys):
+        _build(tmp_path, S(UP_TO_TASKS, tasks=IMPLEMENT_PARTIAL))
+        monkeypatch.chdir(tmp_path)
         monkeypatch.setenv(modes.ROUTE_ENV, "package")
         code, out, key = self._run(
             [P, "--blocked", "implement", "--host", "codex"], monkeypatch, capsys)
@@ -878,17 +934,45 @@ class TestResumeCommand:
         assert key == {"phase": "implement",
                        "command": f"$multi-llm:multi-llm --implement {P} --resume"}
 
-    def test_util_prints_nothing_for_a_mode_with_no_resume(self, monkeypatch, capsys):
+    def test_util_prints_nothing_for_a_mode_with_no_resume(self, tmp_path, monkeypatch, capsys):
+        _build(tmp_path, S(UP_TO_TASKS, tasks=IMPLEMENT_PARTIAL))
+        monkeypatch.chdir(tmp_path)
         code, out, key = self._run(
             [P, "--blocked", "review-code", "--host", "codex"], monkeypatch, capsys)
         assert (code, out.out, key) == (0, "", None)
 
-    def test_util_reads_no_state_and_needs_no_plan_file(self, tmp_path, monkeypatch, capsys):
-        monkeypatch.chdir(tmp_path)  # the plan does not exist and nothing is created
-        code, _out, _key = self._run(
+    def test_util_prints_nothing_for_a_phase_never_started(self, tmp_path, monkeypatch, capsys):
+        """The 0defcbd symptom: `--blocked implement` after a PREREQUISITE_UNMET
+        refusal printed `--implement <plan> --resume`."""
+        _build(tmp_path, S(("review-plan", "apply-suggestions")))
+        monkeypatch.chdir(tmp_path)
+        code, out, key = self._run(
+            [P, "--blocked", "implement", "--host", "codex"], monkeypatch, capsys)
+        assert (code, out.out, key) == (0, "", None)
+
+    def test_util_refuses_a_missing_plan_as_after_does(self, tmp_path, monkeypatch, capsys):
+        """S5: `--blocked` skipped the plan-exists check `--after` makes;
+        `util next-command does-not-exist.md --blocked implement` printed a
+        resume command for a plan that does not exist."""
+        monkeypatch.chdir(tmp_path)
+        code, out, key = self._run(
             ["plans/ghost.md", "--blocked", "implement", "--host", "opencode"],
             monkeypatch, capsys)
-        assert code == 0 and not (tmp_path / "plans").exists()
+        assert code == 3 and out.out == "" and key is None
+        assert "plan file not found" in out.err
+        assert not (tmp_path / "plans").exists()
+
+    def test_util_reads_no_state_for_a_plan_with_none(self, tmp_path, monkeypatch, capsys):
+        """A plan whose state.json does not exist: nothing is in progress, and
+        the lookup creates no output dir (as `emit_answer` promises)."""
+        plan = tmp_path / "plans" / "foo.md"
+        plan.parent.mkdir()
+        plan.write_text("# foo\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        code, out, key = self._run(
+            [P, "--blocked", "implement", "--host", "opencode"], monkeypatch, capsys)
+        assert (code, out.out, key) == (0, "", None)
+        assert not output_dir_path(plan).exists()
 
     def test_after_and_blocked_exclude_each_other(self, monkeypatch, capsys):
         code, out, _key = self._run(

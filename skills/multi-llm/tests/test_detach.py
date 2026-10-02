@@ -1275,6 +1275,88 @@ class TestStatusSurface:
         assert str(cli_common.skill_dir()) in out
         assert "{SKILL_DIR}" not in out
 
+    def test_a_done_run_under_a_stale_phase_is_a_rerun_never_a_reaggregate(
+        self, tmp_path, capsys
+    ):
+        """S3 (adversarial review, 2026-10-02, the Codex `stale/` run): a
+        code-review completed before implement's latest completion reads
+        `pending`, and the done run under it fell into the "not yet marked
+        completed" note, whose `advance it with:` was the run's own
+        `--reaggregate` — which re-stamps the stale review. The view now
+        says the run judged the code before the latest implement and offers a
+        plain re-run."""
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "code-review")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-done-0003", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "review-code", "replay_flags": ["--quick"],
+        })
+        status_file.write_status(str(phase), {
+            "phase": "code-review", "state": "complete",
+            "reaggregate_mode": "review-code", "plan_file": str(plan),
+            "replay_flags": ["--quick"],
+        })
+        state = StateManager(plan)
+        for name in ("review-plan", "apply-suggestions", "generate-tasks",
+                     "implement", "code-review"):
+            state.mark_phase_completed(name)
+        state.state["phases_completed"]["code-review"] = "2026-10-01T23:30:00"
+        state.state["phases_completed"]["implement"] = "2026-10-02T11:59:24"
+        state.save()
+
+        assert run_status.main(["--plan-file", str(plan), "--host", "codex"]) == 0
+        out = capsys.readouterr().out
+        assert ("workflow phase: pending (stale: completed 2026-10-01T23:30:00, "
+                "before implement's latest completion 2026-10-02T11:59:24)") in out
+        assert "judged the code before the latest implement; re-run it" in out
+        rerun = [line for line in out.splitlines() if "re-run it with:" in line]
+        assert len(rerun) == 1
+        assert " review-code " in rerun[0] and "--quick" in rerun[0]
+        assert "--reaggregate" not in rerun[0] and "--force" not in rerun[0]
+        assert "not yet marked completed" not in out
+        assert "advance it with" not in out
+        assert "--reaggregate" not in out
+
+    def test_a_stale_apply_phase_under_a_stale_review_names_the_review(
+        self, tmp_path, capsys
+    ):
+        """The `stale/` run's other done run: apply-code-fixes is stale too,
+        and its own re-run is refused until code-review has re-run, so the
+        review is what the note offers."""
+        from utils.state_manager import StateManager
+
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "apply-fixes")
+        status_file.claim_run(str(phase), {
+            "run_id": "run-done-0004", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "apply-code-fixes", "replay_flags": ["--agent-decide"],
+        })
+        status_file.write_status(str(phase), {"phase": "apply-code-fixes", "state": "complete"})
+        state = StateManager(plan)
+        for name in ("review-plan", "apply-suggestions", "generate-tasks",
+                     "implement", "code-review", "apply-code-fixes"):
+            state.mark_phase_completed(name)
+        state.state["phases_completed"]["code-review"] = "2026-10-01T23:30:00"
+        state.state["phases_completed"]["apply-code-fixes"] = "2026-10-01T23:40:00"
+        state.state["phases_completed"]["implement"] = "2026-10-02T11:59:24"
+        state.save()
+
+        assert run_status.main(["--plan-file", str(plan)]) == 0
+        out = capsys.readouterr().out
+        assert "workflow phase: pending (stale: completed 2026-10-01T23:40:00" in out
+        assert "re-run code-review first" in out
+        rerun = [line for line in out.splitlines() if "re-run it with:" in line]
+        assert len(rerun) == 1
+        assert " review-code " in rerun[0] and "apply-code-fixes" not in rerun[0]
+        assert "--agent-decide" not in rerun[0]  # another run's flags never ride along
+        assert "--reaggregate" not in out and "advance it with" not in out
+
     def test_complete_phase_state_renders_as_finished(self, tmp_path, capsys):
         """§Fix2: a run whose phase machine reached ``complete`` renders as
         finished on all three of ``status``'s state lines — not stuck showing
