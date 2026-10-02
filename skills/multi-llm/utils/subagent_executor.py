@@ -97,6 +97,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         WRITE_SCOPE_PLAN_FILE,
         WRITE_SCOPE_REPO_WIDE,
         WRITE_SCOPE_TASKS,
+        WRITE_SCOPES_BY_CONSENT,
         WRITE_SCOPES_ON_RUNG,
         WritePostureConsent,
         host_write_posture_consent,
@@ -217,6 +218,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         WRITE_SCOPE_PLAN_FILE,
         WRITE_SCOPE_REPO_WIDE,
         WRITE_SCOPE_TASKS,
+        WRITE_SCOPES_BY_CONSENT,
         WRITE_SCOPES_ON_RUNG,
         WritePostureConsent,
         host_write_posture_consent,
@@ -498,7 +500,8 @@ PROFILE_BY_KIND = {
 #: and derived the same way — never read from the task JSON (plan
 #: codex-sandbox-unavailable §6 F1 "How a dispatch receives its grant",
 #: 2026-09-30). ``plan-file`` is one file rule on the plan, ``tasks`` the tasks
-#: directory (or file); ``repo-wide`` waits for plan step 3b and is refused on
+#: directory (or file); ``repo-wide`` (step 3b, 2026-10-02) the enumerated
+#: repository entries outside the protected set, and is refused on
 #: the rung. A write kind missing from this map is refused, never widened.
 WRITE_SCOPE_BY_KIND = {
     "apply_suggestions": WRITE_SCOPE_PLAN_FILE,
@@ -3093,8 +3096,8 @@ def cached_sandbox_verdict(
       ``verdict`` and the ``walk`` key add its scope and — for ``plan-file``
       and ``tasks``, whose positive control writes it — its target; never a
       per-task declared path, a slot ``TMPDIR`` or an allow list. A write
-      scope the rung does not serve (``repo-wide`` before step 3b, or none)
-      walks no rung. Read-only keys are unchanged.
+      scope the rung does not serve (an unmapped kind: none) walks no rung.
+      Read-only keys are unchanged.
     """
     host = _current_host_id()
     version = (
@@ -3322,8 +3325,8 @@ def _jail_rung_sentence(
     (plan §7 "Step 4: the refusal's wording in each state").
 
     Kept off the rung (whatever the rung's state): a write profile with the
-    step-3 opt-in off, a write dispatch with no grant, ``repo-wide`` before
-    step 3b, a ``sandbox_fallback`` value that does not reach the rung, or
+    step-3 opt-in off, a write dispatch with no grant, a scope the rung does
+    not serve, a ``sandbox_fallback`` value that does not reach the rung, or
     ``MULTI_LLM_CODEX_SKIP_RUNG``. Otherwise the rung's own outcome: Landlock
     unavailable (the wrapper's exit 126 and its note), or a failed self-test
     (the failing control or path, and both codex versions when the installed
@@ -3347,9 +3350,9 @@ def _jail_rung_sentence(
             ))
         if write_scope not in WRITE_SCOPES_ON_RUNG:
             return kept_off(case=(
-                f"{write_scope} edits (apply-code-fixes, implement) wait for "
-                f"plan step 3b; until then they need a non-Codex runner (F6, "
-                f"as above)"
+                f"the {write_scope!r} write scope is not one the jail serves "
+                f"({', '.join(WRITE_SCOPES_ON_RUNG)}); such a job needs a "
+                f"non-Codex runner (F6, as above)"
             ))
     if policy == SANDBOX_FALLBACK_OFF:
         return kept_off(case=(
@@ -3431,9 +3434,11 @@ def _write_consent_bypass_line(
 
 def _render_target(request: Optional[JailRequest]) -> Optional[str]:
     """The write target a notice names: the tasks directory under a dir rule,
-    else the file, with ``$HOME`` as ``~``."""
+    else the file; the repository root for ``repo-wide``; ``$HOME`` as ``~``."""
     if request is None:
         return None
+    if request.write_scope == WRITE_SCOPE_REPO_WIDE:
+        return landlock_dispatch.render_home(request.repo_root)
     shown = request.target_dir or request.target
     return landlock_dispatch.render_home(shown) if shown else None
 
@@ -3519,13 +3524,13 @@ def _detect_sandbox(
 
     Plan codex-sandbox-unavailable (2026-09-30):
 
-    * **Write profiles (step 3).** ``agent-write`` computes its policy too, and
-      reaches exactly one rung, the plugin's Landlock jail, through
+    * **Write profiles (steps 3 and 3b).** ``agent-write`` computes its policy
+      too, and reaches exactly one rung, the plugin's Landlock jail, through
       :func:`write_rung_allowed` — ``auto`` alone, and only for a
-      ``jail_request`` whose scope the rung serves (``plan-file``, ``tasks``).
-      ``repo-wide`` (and a write dispatch with no scope) walks no rung and is
-      refused naming the case, step 3b and F6. A failed rung probe is refused,
-      never walked on. The decision key adds the scope.
+      ``jail_request`` whose scope the rung serves (``plan-file``, ``tasks``
+      and, since 2026-10-02, ``repo-wide``). A write dispatch with no scope
+      walks no rung and is refused naming the case and F6. A failed rung
+      probe is refused, never walked on. The decision key adds the scope.
     * **The incidental grade.** A rung of the ``incidental`` grade prints one
       ``[SANDBOX_INCIDENTAL]`` line (executor lane: no mode check, a warn-only
       home check), never ``[SANDBOX_BYPASSED]`` or ``[SANDBOX_FALLBACK]``.
@@ -3626,11 +3631,11 @@ def _detect_sandbox(
                 _sandbox_decision_key(spec, profile, scope, None)
             ] = rung.name
             return _sandbox_state_word(rung.name)
-        # F5 serves the scopes the rung serves and no wider: repo-wide edits
-        # (`apply-code-fixes`, `implement`) stay refused on this host until
-        # plan step 3b, whatever the chat's posture (conductor decision
-        # 2026-09-30, from the run's scope: "repo-wide stays refused").
-        if write and consent is not None and scope in WRITE_SCOPES_ON_RUNG:
+        # F5 serves the step-3 scopes alone (`WRITE_SCOPES_BY_CONSENT`):
+        # repo-wide edits (`apply-code-fixes`, `implement`) run on the jail
+        # since step 3b and never reach the uncontained rung by consent,
+        # whatever the chat's posture (the safer reading, 2026-10-02).
+        if write and consent is not None and scope in WRITE_SCOPES_BY_CONSENT:
             stopped = any(
                 outcome in (RUNG_UNPROBED, RUNG_UNKNOWN)
                 for _, outcome in (verdict.walk or ())
@@ -5180,10 +5185,11 @@ class _JailSpawn:
 
 class SandboxBackstopViolation(ExecutorError):
     """An ``agent-write`` argv carrying ``danger-full-access`` reached the spawn
-    without the jail's wrapper prefix or an F5 consent, or with one whose write
-    scope the rung does not serve (plan step 3's backstop). Raised before
+    without the jail's wrapper prefix or an F5 consent, or with a grant whose
+    write scope the rung does not serve, or an F5 consent whose scope F5 does
+    not cover (``repo-wide``; plan steps 3 and 3b's backstop). Raised before
     ``Popen``: a write profile never renders the uncontained value unwrapped,
-    nor for a ``repo-wide`` scope, whatever a gate above got wrong."""
+    whatever a gate above got wrong."""
 
 
 def _wrapping_rung(provider: Any, profile: str, rung_id: Optional[str]) -> Optional[SandboxRung]:
@@ -5539,10 +5545,11 @@ def _spawn_in_context(
     on the full stdout) and the home comparison. Only paths, classes and
     counts travel back, on the capture.
 
-    **Backstop** (plan step 3): an ``agent-write`` argv carrying
+    **Backstop** (plan steps 3 and 3b): an ``agent-write`` argv carrying
     ``danger-full-access`` that is neither wrapped nor backed by an F5 consent
-    — or whose jail grant or consent names a write scope outside
-    :data:`WRITE_SCOPES_ON_RUNG` — raises :class:`SandboxBackstopViolation`
+    — or whose jail grant names a write scope outside
+    :data:`WRITE_SCOPES_ON_RUNG`, or whose consent names one outside
+    :data:`WRITE_SCOPES_BY_CONSENT` — raises :class:`SandboxBackstopViolation`
     before ``Popen``.
     """
     capture = _Capture()
@@ -5622,22 +5629,25 @@ def _spawn_in_context(
                 f"prefix or the chat's F5 consent. A write profile never runs "
                 f"uncontained unwrapped. Nothing was spawned."
             )
-        # The grant's scope, not only its presence: the jail and F5 serve the
-        # scopes in WRITE_SCOPES_ON_RUNG alone, so a repo-wide (or unscoped)
-        # write is refused here even if a gate upstream let it through.
+        # The grant's scope, not only its presence: the jail serves the
+        # scopes in WRITE_SCOPES_ON_RUNG and F5 the narrower
+        # WRITE_SCOPES_BY_CONSENT, so an unscoped write — or a repo-wide one
+        # by consent — is refused here even if a gate upstream let it through.
         if wrapped:
             grant = "the plugin's Landlock jail"
             scope = getattr(getattr(jail, "request", None), "write_scope", None)
+            served = WRITE_SCOPES_ON_RUNG
         else:
             grant = "the chat's F5 consent"
             scope = getattr(write_consent, "write_scope", None)
-        if scope not in WRITE_SCOPES_ON_RUNG:
+            served = WRITE_SCOPES_BY_CONSENT
+        if scope not in served:
             raise SandboxBackstopViolation(
                 f"Refusing to spawn {spec}: an agent-write argv carries "
                 f"{HOST_POSTURE_FULL_ACCESS} under {grant} for write scope "
                 f"{scope!r}, which it does not serve (served: "
-                f"{', '.join(WRITE_SCOPES_ON_RUNG)}; repo-wide edits stay "
-                f"refused). Nothing was spawned."
+                f"{', '.join(served)}; repo-wide edits run on the jail "
+                f"alone). Nothing was spawned."
             )
 
     home_before = None
@@ -5894,6 +5904,14 @@ def _missing_write_grant(
             f"its grant's write scope is {request.write_scope!r}, not "
             f"{scope!r} (the scope of kind {kind!r})"
         )
+    if scope == WRITE_SCOPE_REPO_WIDE:
+        # The grant is the enumeration of the repository root (step 3b):
+        # no single target, but the root and the run's output folder.
+        if not request.repo_root:
+            return "its repo-wide grant names no repository root"
+        if not request.output_dir:
+            return "its repo-wide grant names no output folder to protect"
+        return None
     if not request.target:
         return f"its {scope} grant names no target"
     return None

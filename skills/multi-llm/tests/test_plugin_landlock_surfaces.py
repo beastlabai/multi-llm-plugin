@@ -12,7 +12,7 @@ What is pinned here:
   resolved base allow-list, and — in every state — the switch that skips it
   alone; while the switch is set the rung is shown skipped and no rung probe
   spawns; a bad switch value is reported, never a crash; the agent-write row
-  names the write rung, its scopes, repo-wide edits staying refused, the open
+  names the write rung, its scopes (repo-wide included since step 3b), the open
   network and F5's clause, and the verdict and exit code do not move;
 * where the rung probes ok under `auto` the AppArmor/sysctl repair is re-headed
   as a system-level alternative and printed in full; where it is absent (the
@@ -213,13 +213,15 @@ class TestDoctorWithAPassingJail:
         write_row = _sub_row(out, "agent-write:")
         assert write_row.startswith(
             "    agent-write: runs on plugin-landlock (probe ok) — plugin-landlock "
-            "serves the plan-file and tasks scopes (apply-suggestions, "
-            "apply-task-suggestions)"
+            "serves the plan-file, tasks and repo-wide scopes (apply-suggestions, "
+            "apply-task-suggestions, apply-code-fixes, implement)"
         )
         for clause in (
             "it stops stray writes, not the model",
             "network access is not confined on this rung, unlike codex's own workspace-write",
-            "repo-wide edits (apply-code-fixes, implement) stay refused (step 3b)",
+            "repo-wide edits (apply-code-fixes, implement) run on it too, with "
+            ".git/, .codex/, .multi-llm/ and the run's output folder kept "
+            "read-only (step 3b)",
             "a chat in danger-full-access posture may run writes unsandboxed only when this rung fails",
         ):
             assert clause in write_row, clause
@@ -255,8 +257,8 @@ class TestDoctorWithAPassingJail:
         assert rung["allow_list"] and rung["allow_list_error"] is None
         write = sandbox["agent_write"]
         assert write["status"] == doctor.WRITE_RUNS_ON_RUNG
-        assert write["scopes"] == ["plan-file", "tasks"]
-        assert write["refused_scopes"] == ["repo-wide"]
+        assert write["scopes"] == ["plan-file", "tasks", "repo-wide"]
+        assert write["refused_scopes"] == []
         # The repair's text is unchanged; only its heading moves.
         assert data["repair"] == doctor._repair_block()
         assert data["repair_is_system_alternative"] is True
@@ -340,9 +342,9 @@ class TestDoctorWithAnUnusableJail:
         assert row.endswith(f"; {SWITCH} skips this rung alone")
         write_row = _sub_row(out, "agent-write:")
         assert write_row.startswith(
-            "    agent-write: refused — plugin-landlock serves the plan-file and "
-            "tasks scopes (apply-suggestions, apply-task-suggestions), and its "
-            "probe here says absent"
+            "    agent-write: refused — plugin-landlock serves the plan-file, tasks "
+            "and repo-wide scopes (apply-suggestions, apply-task-suggestions, "
+            "apply-code-fixes, implement), and its probe here says absent"
         )
         assert "a chat in danger-full-access posture may run writes unsandboxed only when this rung fails" in write_row
         assert doctor.REPAIR_HEADING in out

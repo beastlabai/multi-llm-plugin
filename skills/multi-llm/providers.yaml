@@ -448,15 +448,16 @@ providers:
     # trigger, and `codex features list` no longer naming the flag retires the
     # rung (auto falls back to rung 2, contained to refusal).
     #
-    # Write profiles (user decision 2026-09-30): under `auto`, and only when
-    # codex's own workspace-write sandbox cannot start, `apply-suggestions`
-    # (the plan file, in place) and `apply-task-suggestions` (the tasks dir or
-    # file) run on rung 2 and no other rung; `contained` and `off` refuse them,
-    # and `apply-code-fixes`/`implement` stay refused. One exception (F5): a
-    # codex chat that is itself in `danger-full-access` lets such a plan-file or
-    # tasks write the jail could not take run on rung 3. The AppArmor repair
-    # restores codex's own sandbox (network confined) and is still the only
-    # route for the repo-wide write phases.
+    # Write profiles (user decisions 2026-09-30 and 2026-10-02): under `auto`,
+    # and only when codex's own workspace-write sandbox cannot start,
+    # `apply-suggestions` (the plan file, in place), `apply-task-suggestions`
+    # (the tasks dir or file) and, since step 3b, `apply-code-fixes` and
+    # `implement` (every repository entry outside .git, .codex, .multi-llm and
+    # the run's output folder; never the root itself) run on rung 2 and no
+    # other rung; `contained` and `off` refuse them. One exception (F5): a
+    # codex chat that is itself in `danger-full-access` lets a plan-file or
+    # tasks write the jail could not take run on rung 3 — never a repo-wide
+    # one. The AppArmor repair restores codex's own sandbox (network confined).
     #
     # What rung 3 gives up, in plain words: for a codex read-only slot, no OS
     # boundary of any kind between the model's shell and this machine — reads

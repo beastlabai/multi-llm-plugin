@@ -165,19 +165,26 @@ stays one line per slot. doctor's BROKEN row names the value in force and the
 rung it selected.
 
 The write phases follow a narrower rule. Where codex's own `workspace-write`
-sandbox starts, they use it, whatever the key says. Where it cannot start, two
-of them run on rung 2 alone, and only under `auto`: `apply-suggestions` (scope
+sandbox starts, they use it, whatever the key says. Where it cannot start, they
+run on rung 2 alone, and only under `auto`: `apply-suggestions` (scope
 `plan-file`: the jail lets codex write the plan file and nothing else in the
-repository, in place) and `apply-task-suggestions` (scope `tasks`: the default
-`plans/<stem>/tasks/` directory, else the tasks file). Each batch on the rung
-prints the stray-writes-only line first, which also says network access is not
+repository, in place), `apply-task-suggestions` (scope `tasks`: the default
+`plans/<stem>/tasks/` directory, else the tasks file) and, since 2026-10-02,
+`apply-code-fixes` and `implement` (scope `repo-wide`: every existing
+repository entry outside `.git`, `.codex`, `.multi-llm` and the run's own
+output folder, enumerated at each dispatch — a batch can edit any file and
+create files inside existing subdirectories, but cannot create, rename or
+delete a top-level entry, cannot write the protected set, and can edit a
+top-level file only in place; a task declaring a new top-level file is refused
+before dispatch, naming the non-Codex runner). Each batch on the rung prints
+the stray-writes-only line first, which also says network access is not
 confined there (codex's own `workspace-write` confines it). `contained` and
 `off` refuse them, and a write never falls to rung 1 or to rung 3 — with one
 exception: when the codex chat that started the run is itself in
 `danger-full-access`, a plan-file or tasks write the jail could not take runs
 on rung 3 under `auto`, because you already gave that chat unconfined write
-access. `apply-code-fixes` and `implement` stay off the jail and off rung 3
-alike, so on such a machine they refuse codex whatever the chat's posture. The refusal leads with the way out that needs no change to the
+access; a repo-wide batch never takes rung 3, whatever the chat's posture. The
+refusal leads with the way out that needs no change to the
 machine — set `driver.subagent_runner` to a runner that is not Codex (for
 example `claude-code:<model>`) in `.multi-llm/providers.yaml` — then says why
 codex cannot run here and why the jail did not take the job, and ends "Nothing
@@ -219,8 +226,12 @@ only to `$CODEX_HOME`, a fresh 0700 `TMPDIR` made for each attempt under your
 temp directory (and removed afterwards), `/dev/null` and, where they exist,
 `/dev/ptmx` and `/dev/pts`. `GIT_OPTIONAL_LOCKS=0`, `PYTHONPYCACHEPREFIX` and
 `npm_config_cache` send git's, Python's and npm's incidental writes into that
-`TMPDIR`. A write phase adds its one target (the plan file, or the tasks
-directory or file). The allow-list is not configurable.
+`TMPDIR`; a repo-wide batch also gets `UV_CACHE_DIR` and a pytest `cache_dir`
+there, so `uv run pytest` and `npm test` complete inside the jail, while
+`/tmp` and `/dev/shm` stay denied. A write phase adds its grant: the plan
+file, the tasks directory or file, or — for `apply-code-fixes` and
+`implement` — one rule per repository entry outside the protected set, never
+a rule on the repository root. The allow-list is not configurable.
 
 - **When it is used.** Only after codex's own sandbox probe says `unavailable`;
   a sandbox that starts is used unchanged. The kernel must offer Landlock ABI 3

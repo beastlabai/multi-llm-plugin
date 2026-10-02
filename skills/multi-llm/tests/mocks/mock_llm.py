@@ -1474,10 +1474,21 @@ def run_codex_sandbox(argv: List[str]) -> int:
     inherited cwd — a mock has no sandbox to offer — and its exit code is the
     verdict, unless ``MOCK_LLM_SANDBOX_BROKEN=1`` replays the machine this was
     written on: the bwrap line on stderr, exit 1, and the command never runs.
+
+    ``MOCK_LLM_SANDBOX_RUNS_FULL_ACCESS=1`` (plan step 3b, 2026-10-02) refines
+    the replay the way the real binary behaves: ``danger-full-access`` needs no
+    bubblewrap, so under that policy the command runs (inside whatever jail the
+    plugin wrapped this process in), while ``workspace-write`` and
+    ``read-only`` still die on the bwrap line. Opt-in, so every test written
+    against the plain replay keeps its walk.
     """
     if os.environ.get("MOCK_LLM_SANDBOX_BROKEN") == "1":
-        print(BWRAP_BROKEN_LINE, file=sys.stderr)
-        return 1
+        full_access = any(
+            "sandbox_mode" in arg and "danger-full-access" in arg for arg in argv
+        )
+        if not (full_access and os.environ.get("MOCK_LLM_SANDBOX_RUNS_FULL_ACCESS") == "1"):
+            print(BWRAP_BROKEN_LINE, file=sys.stderr)
+            return 1
     if "--" not in argv:
         print("error: codex sandbox needs `-- <command>`", file=sys.stderr)
         return 2

@@ -23,6 +23,7 @@ from .base import (
     WRITE_SCOPE_PLAN_FILE,
     WRITE_SCOPE_REPO_WIDE,
     WRITE_SCOPE_TASKS,
+    WRITE_SCOPES_BY_CONSENT,
     WRITE_SCOPES_ON_RUNG,
     HOST_POSTURE_FULL_ACCESS,
     JailContext,
@@ -478,8 +479,9 @@ WRITE_FALLBACK_RUNGS: Tuple[SandboxRung, ...] = (PLUGIN_LANDLOCK_RUNG,)
 #: The step-3 opt-in. The user decided on 2026-09-30 that codex editing jobs run
 #: on the plugin-landlock rung despite its known escapes ("Codex editing jobs
 #: should run the new setup despite known escapes"), for the plan-file and
-#: tasks write scopes only. With it `False`, `agent-write` answers no policy and
-#: no ladder, exactly as before step 3.
+#: tasks write scopes, and on 2026-10-02 (step 3b) for repo-wide edits too.
+#: With it `False`, `agent-write` answers no policy and no ladder, exactly as
+#: before step 3.
 WRITE_RUNG_OPT_IN = True
 
 _RUNGS_BY_NAME = {rung.name: rung for rung in SANDBOX_FALLBACK_RUNGS}
@@ -990,6 +992,10 @@ def _require_write_context(profile: str, context: Optional[JailContext]) -> None
             f"codex's {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung does not serve the "
             f"{scope!r} write scope (served: {', '.join(WRITE_SCOPES_ON_RUNG)})"
         )
+    if scope == WRITE_SCOPE_REPO_WIDE:
+        # The grant is the enumeration of the repository root at dispatch
+        # (step 3b); it names no single target.
+        return
     if not getattr(context, "target", None):
         raise ValueError(
             f"codex's {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung needs the {scope!r} "
@@ -1436,10 +1442,11 @@ class CodexProvider(LLMProvider):
         F5 (plan step 6, user decision 2026-09-30) adds one route: ``agent-write``
         on ``unsandboxed`` renders only with a ``consent`` whose posture is
         ``danger-full-access`` — the chat's own full-access mode, exported per
-        call — and whose ``write_scope`` the rung serves
-        (:data:`WRITE_SCOPES_ON_RUNG`: ``repo-wide``, or no scope at all,
-        raises here whatever the gates decided), and the gates hand it over
-        only after the plugin-landlock rung could not take the dispatch.
+        call — and whose ``write_scope`` is a step-3 scope
+        (:data:`WRITE_SCOPES_BY_CONSENT`: ``repo-wide``, or no scope at all,
+        raises here whatever the gates decided — step 3b put repo-wide edits
+        on the jail, never on the uncontained rung), and the gates hand it
+        over only after the plugin-landlock rung could not take the dispatch.
         """
         if (
             profile in SANDBOX_WRITE_FALLBACK_PROFILES
@@ -1453,13 +1460,14 @@ class CodexProvider(LLMProvider):
                     f"{consent.posture!r})"
                 )
             scope = getattr(consent, "write_scope", None)
-            if scope not in WRITE_SCOPES_ON_RUNG:
+            if scope not in WRITE_SCOPES_BY_CONSENT:
                 raise ValueError(
                     f"codex runs the {profile!r} profile unsandboxed under the "
                     f"chat's {HOST_POSTURE_FULL_ACCESS!r} posture only for the "
-                    f"write scopes the {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung "
-                    f"serves ({', '.join(WRITE_SCOPES_ON_RUNG)}); got "
-                    f"{scope!r}"
+                    f"write scopes F5 covers "
+                    f"({', '.join(WRITE_SCOPES_BY_CONSENT)}; repo-wide edits "
+                    f"run on the {SANDBOX_RUNG_PLUGIN_LANDLOCK!r} rung alone); "
+                    f"got {scope!r}"
                 )
             cmd = argv
             cmd[cmd.index("--sandbox") + 1] = SANDBOX_FALLBACK_VALUE

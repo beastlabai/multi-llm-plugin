@@ -42,7 +42,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace as _dc_replace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -384,9 +384,9 @@ def write_scope_for_kind(kind: str) -> Optional[str]:
     """The ``write_scope`` a write kind's dispatches carry, or ``None``.
 
     ``plan-file`` for apply-suggestions, ``tasks`` for apply-task-suggestions,
-    ``repo-wide`` for apply-code-fixes and implement (refused on the rung until
-    plan step 3b). An unmapped kind gets ``None``, which the executor refuses
-    on the rung rather than widening it.
+    ``repo-wide`` for apply-code-fixes and implement (on the rung since plan
+    step 3b, 2026-10-02). An unmapped kind gets ``None``, which the executor
+    refuses on the rung rather than widening it.
     """
     table = getattr(_executor, "WRITE_SCOPE_BY_KIND", None)
     if not isinstance(table, dict):
@@ -804,9 +804,11 @@ class WriteBatchScheduler:
             ``tasks`` scopes it is the grant's target, and every task's declared
             set must resolve to exactly it, on every rung, before its snapshot.
             ``None`` for implement and apply-code-fixes (``repo-wide`` takes its
-            entries from step 3b's enumeration, never from a target); a
-            ``plan-file``/``tasks`` phase built without one carries no grant, and
-            the executor refuses it on the rung.
+            entries from the step-3b enumeration of the repository root, with
+            this run's output folder and ``driver.write_paths.deny`` on the
+            request, never from a target); a ``plan-file``/``tasks`` phase
+            built without one carries no grant, and the executor refuses it on
+            the rung.
     """
 
     def __init__(
@@ -875,9 +877,10 @@ class WriteBatchScheduler:
         # never a per-task path, so nothing a task file says can widen it.
         self.write_scope = write_scope_for_kind(kind)
         self.write_target = self._checked_write_target(write_target)
-        self.jail_request = self._build_jail_request()
-
+        # The policy first: a repo-wide request carries its deny list (an
+        # entry the policy denies as a whole gets no jail rule, step 3b).
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
+        self.jail_request = self._build_jail_request()
         self.audit = AuditLog(self.phase_dir)
         self.snapshots: Dict[str, TaskSnapshot] = {}
         #: Task ids whose pre-batch snapshot was REUSED from an earlier
@@ -996,6 +999,10 @@ class WriteBatchScheduler:
         self._jail_notes: Dict[str, str] = {}
         #: The denials themselves, for the report row.
         self._jail_denials: Dict[str, Dict[str, Any]] = {}
+        #: Step 3b: ``task_id -> JailRequest`` as handed to the executor (the
+        #: phase's request plus the task's declared set under ``repo-wide``),
+        #: for the jail verdict's in-grant reading.
+        self._dispatch_requests: Dict[str, JailRequest] = {}
         #: Tasks whose verdict came from the jail (a denied edit or a replaced
         #: target) and failed the batch: no prior-changes entry is appended for
         #: them. ``prior_changes.append`` is idempotent on ``(id, phase)``, so
@@ -1044,12 +1051,20 @@ class WriteBatchScheduler:
         ``plan-file`` and ``tasks`` carry the target; ``tasks`` also carries a
         ``target_dir`` — a dir rule — only when the tasks file sits in the
         plan's default ``plans/<stem>/tasks/`` (``default_tasks_dir``), and a
-        file rule on the tasks file anywhere else. ``repo-wide`` carries no
-        target: the executor refuses it on the rung until step 3b.
+        file rule on the tasks file anywhere else. ``repo-wide`` (step 3b)
+        carries no target but this run's output folder (protected) and the
+        policy's deny patterns; each dispatch adds its own declared set
+        (:meth:`_task_request`), which never reaches a cache key.
         """
         if not self.write_scope:
             return None
         repo_root = os.path.realpath(self.repo_root)
+        if self.write_scope == WRITE_SCOPE_REPO_WIDE:
+            return JailRequest(
+                repo_root=repo_root, kind=self.kind, write_scope=self.write_scope,
+                output_dir=os.path.realpath(self.output_dir),
+                deny_patterns=tuple(self.policy.deny),
+            )
         if self.write_scope not in WRITE_SCOPES_ON_RUNG:
             return JailRequest(
                 repo_root=repo_root, kind=self.kind, write_scope=self.write_scope,
@@ -1065,6 +1080,39 @@ class WriteBatchScheduler:
         return JailRequest(
             repo_root=repo_root, kind=self.kind, write_scope=self.write_scope,
             target=self.write_target, target_dir=target_dir,
+        )
+
+    def _task_request(self, task: Dict[str, Any]) -> Optional[JailRequest]:
+        """The request one dispatch hands the executor: the phase's, plus —
+        under ``repo-wide`` — this task's declared set (absolute, resolved
+        against the repo root), so the entries covering it are required and
+        ``jail_denied_edits`` counts denials on it as in scope (step 3b)."""
+        request = self.jail_request
+        if request is None or self.write_scope != WRITE_SCOPE_REPO_WIDE:
+            return request
+        declared = []
+        for path in declared_file_set(task):
+            candidate = path if os.path.isabs(path) else os.path.join(self.repo_root, path)
+            declared.append(os.path.abspath(candidate))
+        return _dc_replace(request, declared=tuple(declared))
+
+    def _repo_wide_refusal(self, task: Dict[str, Any], request: JailRequest) -> Optional[str]:
+        """Why this batch's declared set cannot be granted on the jail, or
+        ``None`` (F1 "Protected paths": a declared new entry at the repository
+        root or directly under an enumerated ancestor, a protected path, a
+        path the policy denies as a whole — refused before dispatch, naming
+        F6). Only asked when the dispatch will run on the plugin-landlock
+        rung: on codex's own sandbox such a write is codex's to allow."""
+        try:
+            plan = _landlock.repo_wide_plan(request)
+            reason = _landlock.repo_wide_declared_refusal(plan, request.declared)
+        except _landlock.JailRefused as exc:
+            reason = exc.message
+        if reason is None:
+            return None
+        return (
+            f"Refusing to dispatch write task {task.get('task_id')} on the "
+            f"plugin's Landlock jail: {reason} Nothing was spawned."
         )
 
     def _grant_mismatch(self, task: Dict[str, Any]) -> Optional[str]:
@@ -2543,6 +2591,20 @@ class WriteBatchScheduler:
         self._runner_versions[runner] = str(info.get("version") or "unknown")
         rung = self._recorded_rung(runner, profile)
         self._dispatch_rungs[task_id] = rung
+        request = self._task_request(task)
+        if request is not None:
+            self._dispatch_requests[task_id] = request
+        if (
+            request is not None
+            and request.write_scope == WRITE_SCOPE_REPO_WIDE
+            and rung == SANDBOX_RUNG_PLUGIN_LANDLOCK
+        ):
+            refusal = self._repo_wide_refusal(task, request)
+            if refusal is not None:
+                return TaskOutcome(
+                    task_id=task_id, kind=self.kind, runner=self.invoker,
+                    status=STATUS_REJECTED, profile=profile, reason=refusal,
+                )
         self._announce_rung(runner, batch_index)
 
         def before_attempt(context: Dict[str, Any]) -> None:
@@ -2586,10 +2648,8 @@ class WriteBatchScheduler:
             return self._moved_since_dispatch(context["task_id"], snapshot)
 
         extra: Dict[str, Any] = {}
-        if self.jail_request is not None and _accepts_keyword(
-            dispatch_task, "jail_request"
-        ):
-            extra["jail_request"] = self.jail_request
+        if request is not None and _accepts_keyword(dispatch_task, "jail_request"):
+            extra["jail_request"] = request
         return dispatch_task(
             task,
             phase_dir=self.phase_dir,
@@ -3192,9 +3252,14 @@ class WriteBatchScheduler:
         """``path`` repo-relative when it lies under the root, else as given."""
         return relative_to_root(path, self.repo_root)
 
-    def _in_grant(self, path: str) -> bool:
-        """Whether the resolved ``path`` is inside this phase's write grant."""
+    def _in_grant(self, path: str, task_id: Optional[str] = None) -> bool:
+        """Whether the resolved ``path`` is inside this phase's write grant —
+        under ``repo-wide``, inside the dispatch's declared set."""
         request = self.jail_request
+        if request is not None and request.write_scope == WRITE_SCOPE_REPO_WIDE:
+            handed = self._dispatch_requests.get(task_id or "")
+            declared = {os.path.realpath(p) for p in (handed.declared if handed else ())}
+            return os.path.realpath(path) in declared
         if request is None or not request.target:
             return False
         resolved = os.path.realpath(path)
@@ -3308,7 +3373,7 @@ class WriteBatchScheduler:
             paths = [self._relative(p) for p in denials.denied_paths()]
             in_grant = [
                 self._relative(p) for p in denials.denied_paths()
-                if self._in_grant(p) or p in replaced
+                if self._in_grant(p, outcome.task_id) or p in replaced
             ]
             outside = [p for p in paths if p not in in_grant]
             denied_text = (
@@ -3379,7 +3444,16 @@ class WriteBatchScheduler:
         def verb(paths: Sequence[str], one: str, many: str) -> str:
             return one if len(paths) == 1 else many
 
-        if in_grant:
+        if in_grant and request is not None and request.write_scope == WRITE_SCOPE_REPO_WIDE:
+            parts.append(
+                f"{', '.join(in_grant)} {verb(in_grant, 'is', 'are')} in this "
+                f"batch's declared set, which the jail granted: the allow-list "
+                f"may not grant the write shape the runner used (a top-level "
+                f"file can only be edited in place with apply_patch or a "
+                f"shell redirect, never replaced through a temp file or mv; "
+                f"nothing can be created directly in the repository root)."
+            )
+        elif in_grant:
             target = self._relative(request.target) if request and request.target else "the target"
             if request is not None and request.target_dir:
                 parts.append(
