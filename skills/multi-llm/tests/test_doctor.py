@@ -705,7 +705,9 @@ class TestDoctorNamesTheRetiredRung:
         line = _codex_line(out)
         assert "sandbox BROKEN: " + BWRAP_BROKEN_LINE in line
         assert "(fallback: auto — codex runs unsandboxed for read-only phases" in line
-        assert "→ landlock unavailable: removed since codex 0.156.1 (measured)" in line
+        assert "→ landlock unusable since codex 0.156.1 (panics; measured)" in line
+        # Not "removed": codex 0.160.0 still lists the feature (2026-10-02).
+        assert "removed since" not in line
         assert "`sandbox_fallback: contained` refuses them like writes" in line
         # The plugin's jail is absent here, so the read-phase choice is still
         # today's (2026-09-30: it names plugin-landlock only when that probes ok).
@@ -749,7 +751,7 @@ class TestDoctorNamesTheRetiredRung:
             "(fallback: auto → plugin-landlock — codex runs read-only phases on "
             "the plugin's Landlock jail, which stops stray writes, not the model"
         ) in line
-        assert "→ landlock unavailable: removed since codex 0.156.1 (measured)" in line
+        assert "→ landlock unusable since codex 0.156.1 (panics; measured)" in line
         assert (
             "; read phases: `sandbox_fallback: contained` refuses them like "
             "writes, `auto` runs them on plugin-landlock (the [SANDBOX_INCIDENTAL] line)"
@@ -782,7 +784,7 @@ class TestDoctorNamesTheRetiredRung:
         out = capsys.readouterr().out
         line = _codex_line(out)
         assert shown in line
-        assert "removed since" not in line
+        assert "unusable since" not in line
         assert "profile bwrap /usr/bin/bwrap flags=(unconfined)" in out
         assert doctor.main(["--budget", "10", "--json"]) == 3
         assert json.loads(capsys.readouterr().out)["repair"] == doctor._repair_block()

@@ -3118,9 +3118,9 @@ def sandbox_bypassed_notice(provider_name: str, probe: Any = None) -> str:
     that stem when ``probe`` — the ``SandboxProbeResult`` — shows the walk
     tried a rung first: each rung with its outcome and, when it was probed,
     its probe tail (``fallback rung 'landlock' unavailable (codex 0.156.1:
-    "…")``), or ``not tried: removed since codex 0.156.1 (installed: 0.159.3)`` when
-    the version skipped it. Without ``probe`` the stem alone is returned. The
-    stem says which runner,
+    "…")``), or ``not tried: unusable since codex 0.156.1 (panics; measured;
+    installed: 0.159.3)`` when the version skipped it. Without ``probe`` the
+    stem alone is returned. The stem says which runner,
     why its own sandbox is not in the path, which config key governs it (and
     so which word turns it off), and — the clause that cannot be left out —
     that nothing stands between the model's shell and this machine. It is
