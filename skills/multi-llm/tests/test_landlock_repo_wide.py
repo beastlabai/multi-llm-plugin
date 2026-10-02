@@ -584,3 +584,23 @@ class TestTheRealJailRepoWide:
             proc = _run(probe.argv, leaky, wide.repo)
             assert proc.returncode == 3, (proc.returncode, proc.stdout, proc.stderr)
             assert SANDBOX_CANARY_DENIED not in proc.stdout
+
+
+class TestAnInheritedPytestAddopts:
+    def test_the_redirect_is_prepended_to_the_inherited_value(self, wide):
+        """The parent's ``PYTEST_ADDOPTS`` (``-p no:cacheprovider
+        --import-mode=importlib`` in a CI job, say) used to be clobbered by
+        the redirect, so the child's pytest ran without the options the
+        project relies on. The redirect is prepended; the inherited value
+        keeps the last word, as argv does."""
+        inherited = "-p no:cacheprovider --import-mode=importlib"
+        _argv, env = ld.wrap_argv(["codex", "exec"], RUNG, _ctx(wide),
+                                  {"PATH": "/bin", "PYTEST_ADDOPTS": inherited})
+        assert env["PYTEST_ADDOPTS"] == (
+            f"-o cache_dir={wide.slot / 'pytest-cache'} {inherited}"
+        )
+
+    def test_an_empty_inherited_value_is_just_the_redirect(self, wide):
+        _argv, env = ld.wrap_argv(["codex", "exec"], RUNG, _ctx(wide),
+                                  {"PATH": "/bin", "PYTEST_ADDOPTS": ""})
+        assert env["PYTEST_ADDOPTS"] == f"-o cache_dir={wide.slot / 'pytest-cache'}"
