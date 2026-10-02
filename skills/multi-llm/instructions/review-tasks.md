@@ -305,7 +305,7 @@ Five rules govern the loop:
    configured it; state that number there instead. Announcing an interval you are
    not waiting is worse than announcing none.
 
-**Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results.
+**Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results. Pass the **same `--models` selection as the original run** (`models_requested` in `{plan}/review-tasks/.status.json`), never only the missing ones: the orchestrator skips the models that already have a result, and the run's report covers only the models passed.
 
 ### 4. Interrupted-run Recovery (conditional -- only if the background run was interrupted or the log shows no completion markers)
 
@@ -314,12 +314,13 @@ If the detached orchestrator was interrupted or `{plan}/review-tasks/orchestrato
 1. Read `{plan}/review-tasks/.status.json`
 2. Based on `state` field: `models_running` -> check which `{model}.json` files exist; `models_complete`/`grouping_complete` -> check for `grouped.json`, `validation_tasks.json`; `validation_pending` -> proceed to validation; `complete` -> report results
 3. If no `.status.json` -> fall back to file-based resume detection (step 2)
-4. **With `--yes`: always resume, never ask** (D6 row 3) -- re-run only the
-   missing models with `--force`, never `--rerun-all`. A model that fails twice in
+4. **With `--yes`: always resume, never ask** (D6 row 3) -- re-run with
+   `--force` and the original run's full `--models` selection (only the
+   missing models actually run), never `--rerun-all`. A model that fails twice in
    one run is reported, not retried again: `[PARTIAL_RESULTS: <model>,...]`,
    `MULTI_LLM_RESULT.state: "partial"`, exit **0**. Zero results is exit **3**
    naming the retry command.
-5. Without `--yes`, **ask the user**, showing which models completed/failed, offering: (a) Proceed with partial results, (b) Resume -- re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
+5. Without `--yes`, **ask the user**, showing which models completed/failed, offering: (a) Proceed with partial results, (b) Resume -- re-run only the missing models (`--force` with the original full `--models` selection), (c) Re-run everything from scratch (`--force --rerun-all`)
 
 ### 5. Salvage Handling (Post-Orchestrator)
 

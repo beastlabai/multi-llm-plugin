@@ -1493,6 +1493,10 @@ def _review_state():
         }.get(key, default)
     )
     state.is_phase_completed = MagicMock(return_value=False)
+    # Nothing completed, so nothing is stale: the reaggregate branch refuses a
+    # review older than implement (2026-10-02), and a bare MagicMock answers
+    # that probe truthily.
+    state.phase_completion_is_stale = MagicMock(return_value=False)
     state.state = {"phases_completed": {}}
     return state
 

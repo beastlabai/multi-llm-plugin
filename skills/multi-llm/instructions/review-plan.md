@@ -330,7 +330,7 @@ to bare `python`.
       configured it; state that number there instead. Announcing an interval you are
       not waiting is worse than announcing none.
 
-   **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results.
+   **Resume**: re-invoking with `--force` RESUMES (keeps already-completed per-model result files, runs only the missing models); `--rerun-all` forces a full re-run discarding existing per-model results. Pass the **same `--models` selection as the original run** (`models_requested` in `{plan}/review-plan/.status.json`), never only the missing ones: the orchestrator skips the models that already have a result, and the run's report covers only the models passed.
 
 5. **Interrupted-run Recovery** (conditional — only if the background run was interrupted or the log shows no completion markers)
 
@@ -344,7 +344,8 @@ to bare `python`.
       - `complete` → report results
    3. If no `.status.json` → fall back to existing file-based resume detection (step 3)
    4. **With `--yes` (or `--non-interactive`): always resume, never ask** (D6
-      row 3). Re-run only the missing models with `--force`; never `--rerun-all`
+      row 3). Re-run with `--force` and the original run's full `--models`
+      selection (only the missing models actually run); never `--rerun-all`
       (it discards work that succeeded). If a model fails a second time in the
       same run, reaggregate with what exists: the orchestrator — the fan-out or
       `--reaggregate` alike — prints `[PARTIAL_RESULTS: <model>,…]`, names the
@@ -359,7 +360,7 @@ to bare `python`.
    5. Without `--yes`, **ask the user**, showing:
       - Which models completed successfully
       - Which models failed or were interrupted
-      - Options: (a) Proceed with partial results (`--reaggregate`), (b) Resume — re-run only the missing models (`--force`), (c) Re-run everything from scratch (`--force --rerun-all`)
+      - Options: (a) Proceed with partial results (`--reaggregate`), (b) Resume — re-run only the missing models (`--force` with the original full `--models` selection), (c) Re-run everything from scratch (`--force --rerun-all`)
 
 6. **Salvage Handling (Post-Orchestrator):**
 

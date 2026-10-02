@@ -2168,11 +2168,122 @@ class TestARegroupRetiresTheVerdictsItOrphans:
         )
         assert "[VALIDATION_RETIRED] validation_batch_0." in out
 
+    def _seed_round(self, phase_dir, hashes):
+        """A completed validation round whose batch echoes *hashes*."""
+        (phase_dir / "validation_batch_0.json").write_text(json.dumps({"groups": [
+            {"group_hash": h, "group_index": i, "status": "valid", "reasoning": "r"}
+            for i, h in enumerate(hashes)
+        ]}), encoding="utf-8")
+        (phase_dir / "validation_batch_0.prompt.txt").write_text("p", encoding="utf-8")
+        (phase_dir / "validation_tasks.json").write_text("{}", encoding="utf-8")
+        (phase_dir / "validation.json").write_text('{"groups": []}', encoding="utf-8")
 
-class TestAModelDroppedFromTheSelectionIsRetired:
+    @staticmethod
+    def _hashes(phase_dir):
+        payload = json.loads((phase_dir / "grouped.json").read_text(encoding="utf-8"))
+        return [g["group_hash"] for g in payload["groups"]]
+
+    def test_a_regroup_to_the_same_hashes_keeps_the_completed_batches(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """Adversarial review, 2026-10-02: a `--force` resume that skips every
+        model regroups to identical hashes; retiring the whole round there
+        re-dispatched every completed batch. Only `validation.json` goes."""
+        plan, phase_dir, _ = _run_cro_fanout(tmp_path, _two_model_findings())
+        hashes = self._hashes(phase_dir)
+        assert hashes
+        self._seed_round(phase_dir, hashes)
+        real_args = _fanout_args
+        monkeypatch.setattr(
+            sys.modules[__name__], "_fanout_args",
+            lambda *a, **k: _forced(real_args(*a, **k)),
+        )
+        capsys.readouterr()
+
+        _run_cro_fanout(tmp_path, _two_model_findings())
+        out = capsys.readouterr().out
+
+        assert self._hashes(phase_dir) == hashes
+        assert (phase_dir / "validation_batch_0.json").exists()
+        assert (phase_dir / "validation_batch_0.prompt.txt").exists()
+        assert (phase_dir / "validation_tasks.json").exists()
+        assert not (phase_dir / "validation.json").exists()
+        assert not any(n.startswith("validation_batch_0.") and ".stale." in n
+                       for n in os.listdir(phase_dir))
+        assert "[VALIDATION_RETIRED] validation." in out
+        assert "[VALIDATION_RETIRED] validation_batch_0." not in out
+
+    def test_a_regroup_to_other_hashes_still_retires_the_round(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """#25 stays fixed: the Codex follow-up's batch answered the empty-repo
+        grouping; the re-review's grouping has other hashes, so the round goes."""
+        plan, phase_dir, _ = _run_cro_fanout(
+            tmp_path, {_REAL_SPECS[0]: _unrelated_issues(["Implementation missing"])},
+        )
+        old_hashes = self._hashes(phase_dir)
+        self._seed_round(phase_dir, old_hashes)
+        real_args = _fanout_args
+        monkeypatch.setattr(
+            sys.modules[__name__], "_fanout_args",
+            lambda *a, **k: _forced(real_args(*a, **k)),
+        )
+        capsys.readouterr()
+
+        _run_cro_fanout(tmp_path, _two_model_findings())
+        out = capsys.readouterr().out
+
+        assert set(self._hashes(phase_dir)) != set(old_hashes)
+        for name in ("validation.json", "validation_tasks.json",
+                     "validation_batch_0.json", "validation_batch_0.prompt.txt"):
+            assert not (phase_dir / name).exists(), name
+        assert "[VALIDATION_RETIRED] validation_batch_0." in out
+
+    def test_the_helper_decides_on_the_recorded_hashes(self, tmp_path, capsys):
+        grouped = [{"group_hash": "aa", "theme": "t"}, {"group_hash": "bb", "theme": "u"}]
+        write = lambda groups: (tmp_path / "grouped.json").write_text(  # noqa: E731
+            json.dumps(rob.save_groups_payload(groups)), encoding="utf-8")
+
+        def seed():
+            for name in ("validation.json", "validation_tasks.json", "validation_batch_0.json"):
+                (tmp_path / name).write_text("{}", encoding="utf-8")
+
+        def live():
+            return sorted(p.name for p in tmp_path.glob("validation*.json")
+                          if ".stale." not in p.name)
+
+        # Equal sets: the merged file alone.
+        write(grouped); seed()
+        retired = rob.retire_validation_for_regroup(str(tmp_path), list(reversed(grouped)), reason="r")
+        assert [Path(p).name.split(".")[0] for p in retired] == ["validation"]
+        assert live() == ["validation_batch_0.json", "validation_tasks.json"]
+        # A hash moved: the round.
+        seed()
+        retired = rob.retire_validation_for_regroup(
+            str(tmp_path), [grouped[0], {"group_hash": "cc"}], reason="r")
+        assert sorted(Path(p).name.split(".")[0] for p in retired) == sorted(
+            ["validation", "validation_tasks", "validation_batch_0"])
+        assert live() == []
+        # A duplicated hash on disk vs two distinct groups now: not the same grouping.
+        write([grouped[0], grouped[0]]); seed()
+        rob.retire_validation_for_regroup(str(tmp_path), grouped, reason="r")
+        assert live() == []
+        # No grouped.json, or an unstamped (v1) one: unknown is different.
+        (tmp_path / "grouped.json").unlink(); seed()
+        rob.retire_validation_for_regroup(str(tmp_path), grouped, reason="r")
+        assert live() == []
+        (tmp_path / "grouped.json").write_text('[{"theme": "no hash"}]', encoding="utf-8"); seed()
+        rob.retire_validation_for_regroup(str(tmp_path), [{"theme": "no hash"}], reason="r")
+        assert live() == []
+
+
+class TestARespelledModelSlotIsRetired:
     """#30: stale detection is keyed by slot, so a respelled model
     (`codex:gpt-6-luna` -> `codex:gpt-6-luna:high`) left its old result and log
-    beside the new slot's, for the next `--reaggregate` to read back."""
+    beside the new slot's, for the next `--reaggregate` to read back. Only a
+    *respelling* of a selected spec is retired (adversarial review, 2026-10-02):
+    the documented resume passes `--models <missing>`, and retiring every
+    unselected stem renamed the completed models' results on that resume."""
 
     def _seed(self, phase_dir):
         (phase_dir / "codex_gpt-6-luna.json").write_text('[{"title": "old"}]', encoding="utf-8")
@@ -2181,7 +2292,7 @@ class TestAModelDroppedFromTheSelectionIsRetired:
         (phase_dir / "grouped.json").write_text('{"groups": []}', encoding="utf-8")
         (phase_dir / "weird.json").write_text('{"not": "a result"}', encoding="utf-8")
 
-    def test_helper_retires_only_unselected_list_results_and_their_logs(self, tmp_path, capsys):
+    def test_helper_retires_only_respelled_list_results_and_their_logs(self, tmp_path, capsys):
         self._seed(tmp_path)
         retired = rob.retire_unselected_results(
             str(tmp_path), ["codex:gpt-6-luna:high"]
@@ -2194,11 +2305,70 @@ class TestAModelDroppedFromTheSelectionIsRetired:
         # selected slot, bookkeeping and an unidentifiable file all stay.
         for kept in ("codex_gpt-6-luna_high.json", "grouped.json", "weird.json"):
             assert (tmp_path / kept).exists()
-        assert "[SELECTION_CHANGED] codex_gpt-6-luna" in capsys.readouterr().out
+        out = capsys.readouterr().out
+        assert "[SELECTION_CHANGED] codex_gpt-6-luna: respelled as codex:gpt-6-luna:high" in out
         assert rob.retire_unselected_results(str(tmp_path), ["codex:gpt-6-luna:high"]) == []
+
+    def test_the_resume_selection_keeps_every_completed_model(self, tmp_path, capsys):
+        """`repro_retire.py`: the real Codex `code-review` dir, resumed with
+        `--models pi:...` (the one missing model). Before the fix every other
+        model's result and log was renamed `.stale-unselected`."""
+        for stem in ("codex_gpt-6-luna_high", "pi_openrouter_deepseek_deepseek-v4_1-flash"):
+            (tmp_path / f"{stem}.json").write_text('[{"title": "kept"}]', encoding="utf-8")
+            (tmp_path / f"log_{stem}.txt").write_text("log", encoding="utf-8")
+        before = sorted(p.name for p in tmp_path.iterdir())
+
+        for selection in (
+            ["pi:openrouter/deepseek/deepseek-v4.1-flash"],
+            ["codex:gpt-6-luna:high"],
+            ["codex:gpt-6-luna:high", "pi:openrouter/deepseek/deepseek-v4.1-flash"],
+        ):
+            assert rob.retire_unselected_results(str(tmp_path), selection) == [], selection
+            assert sorted(p.name for p in tmp_path.iterdir()) == before
+        assert "[SELECTION_CHANGED]" not in capsys.readouterr().out
+
+    def test_a_respelling_is_recognised_in_both_directions(self, tmp_path):
+        """`:high` -> bare retires `_high`; another effort retires the old one;
+        a different provider's or model's stem is never a respelling."""
+        for stem in ("codex_gpt-6-luna", "codex_gpt-6-luna_high",
+                     "codex_gpt-6-luna_low", "codex_gpt-6-astra", "pi_gpt-6-luna"):
+            (tmp_path / f"{stem}.json").write_text("[]", encoding="utf-8")
+
+        retired = rob.retire_unselected_results(str(tmp_path), ["codex:gpt-6-luna:medium"])
+
+        assert sorted(os.path.basename(r) for r in retired) == [
+            "codex_gpt-6-luna.json.stale-unselected",
+            "codex_gpt-6-luna_high.json.stale-unselected",
+            "codex_gpt-6-luna_low.json.stale-unselected",
+        ]
+        assert (tmp_path / "codex_gpt-6-astra.json").exists()
+        assert (tmp_path / "pi_gpt-6-luna.json").exists()
+
+    def test_respelled_stems_follow_the_providers_effort_ladder(self):
+        stems = rob.respelled_result_stems(["codex:gpt-6-luna:high"])
+        assert stems["codex_gpt-6-luna"] == "codex:gpt-6-luna:high"
+        assert stems["codex_gpt-6-luna_low"] == "codex:gpt-6-luna:high"
+        assert "codex_gpt-6-luna_high" not in stems
+        # `ultra` is codex's inbound-only alias: a spec may carry it.
+        assert "codex_gpt-6-luna_ultra" in stems
+        # A model id's own `:free` tail is not an effort, so the bare stem is
+        # not a respelling of it.
+        stems = rob.respelled_result_stems(["pi:openrouter/deepseek/deepseek-v4.1-flash:free"])
+        assert "pi_openrouter_deepseek_deepseek-v4_1-flash" not in stems
+        # Both spellings selected at once: neither is a respelling to retire.
+        assert rob.respelled_result_stems(["codex:gpt-6-luna", "codex:gpt-6-luna:high"]) == {
+            "codex_gpt-6-luna_" + e: "codex:gpt-6-luna"
+            for e in sorted(rob._effort_vocabulary("codex")) if e != "high"
+        }
+        # No adapter (a test double): the canonical rungs still apply.
+        assert "test_model" in rob.respelled_result_stems(["test:model:high"])
 
     def test_the_code_review_fanout_retires_them(self, tmp_path, monkeypatch):
         phase_dir = cro.get_phase_dir(tmp_path / "auth-feature.md", "code-review")
+        # A respelling of `claude-code:sonnet-4.6` (one of `_REAL_SPECS`)...
+        (phase_dir / "claude-code_sonnet-4_6_high.json").write_text("[]", encoding="utf-8")
+        (phase_dir / "log_claude-code_sonnet-4_6_high.txt").write_text("x", encoding="utf-8")
+        # ...and a model that merely left the selection, which stays.
         (phase_dir / "codex_gpt-6-luna.json").write_text("[]", encoding="utf-8")
         (phase_dir / "log_codex_gpt-6-luna.txt").write_text("x", encoding="utf-8")
         real_args = _fanout_args
@@ -2207,9 +2377,11 @@ class TestAModelDroppedFromTheSelectionIsRetired:
             lambda *a, **k: _forced(real_args(*a, **k)),
         )
         _run_cro_fanout(tmp_path, _two_model_findings())
-        assert not (phase_dir / "codex_gpt-6-luna.json").exists()
-        assert (phase_dir / "codex_gpt-6-luna.json.stale-unselected").exists()
-        assert (phase_dir / "log_codex_gpt-6-luna.txt.stale-unselected").exists()
+        assert not (phase_dir / "claude-code_sonnet-4_6_high.json").exists()
+        assert (phase_dir / "claude-code_sonnet-4_6_high.json.stale-unselected").exists()
+        assert (phase_dir / "log_claude-code_sonnet-4_6_high.txt.stale-unselected").exists()
+        assert (phase_dir / "codex_gpt-6-luna.json").exists()
+        assert (phase_dir / "log_codex_gpt-6-luna.txt").exists()
 
 
 def _as_legacy_file(phase_dir, status):
