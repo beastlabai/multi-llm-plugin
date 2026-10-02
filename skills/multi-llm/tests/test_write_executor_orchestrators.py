@@ -1279,12 +1279,8 @@ def _validation(statuses):
     }
 
 
-class TestAnApplyResumeKeepsTheEarlierRunsRows:
-    """#28: implement's `--resume` kept the first run's rows; the apply phases'
-    `summary.md` did not. It was rendered from this run's outcomes, so a batch
-    the stopped run had applied read as this run's (`Runner: executor`, 0.0s,
-    no marker), and a batch whose positional `apply-batch-N` id a changed
-    selection handed to other items vanished from both reports."""
+class _ApplyRig:
+    """The real apply-suggestions orchestrator over the mock runner."""
 
     def _review(self, repo, prefix, statuses=("valid",) * 3):
         """A review-plan cycle on disk, completed now."""
@@ -1316,11 +1312,11 @@ class TestAnApplyResumeKeepsTheEarlierRunsRows:
     def _phase_dir(plan):
         return plan.parent / plan.stem / "apply-suggestions"
 
-    def _run(self, repo, plan, attest, *flags):
+    def _run(self, repo, plan, attest, *flags, content="edit\n"):
         import apply_suggestions_orchestrator as orchestrator
 
         repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
-            {"path": "plans/apply.md", "mode": "patch", "content": "edit\n"}
+            {"path": "plans/apply.md", "mode": "patch", "content": content}
         ]))
         repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(attest))
         return orchestrator.main(
@@ -1339,6 +1335,22 @@ class TestAnApplyResumeKeepsTheEarlierRunsRows:
         lines = summary.splitlines()
         start = lines.index(heading)
         return lines[start:lines.index("", start)]
+
+    def _deselect(self, repo, index):
+        """The user skips one item between the runs (here: in validation)."""
+        statuses = ["valid"] * 3
+        statuses[index] = "invalid"
+        review = repo.root / "plans" / "apply" / "review-plan"
+        (review / "validation.json").write_text(
+            json.dumps(_validation(statuses)), encoding="utf-8")
+
+
+class TestAnApplyResumeKeepsTheEarlierRunsRows(_ApplyRig):
+    """#28: implement's `--resume` kept the first run's rows; the apply phases'
+    `summary.md` did not. It was rendered from this run's outcomes, so a batch
+    the stopped run had applied read as this run's (`Runner: executor`, 0.0s,
+    no marker), and a batch whose positional `apply-batch-N` id a changed
+    selection handed to other items vanished from both reports."""
 
     def test_a_resume_keeps_the_stopped_runs_finished_batch_in_summary_md(self, repo):
         plan = self._review(repo, "one")
@@ -1375,9 +1387,7 @@ class TestAnApplyResumeKeepsTheEarlierRunsRows:
         stopped = next(r for r in self._report(plan) if r["task_id"] == "apply-batch-1")
         assert stopped["write_outcome"] == "partial-application"
 
-        review = repo.root / "plans" / "apply" / "review-plan"
-        (review / "validation.json").write_text(
-            json.dumps(_validation(["valid", "invalid", "valid"])), encoding="utf-8")
+        self._deselect(repo, 1)
         assert self._run(repo, plan, sum(ids, []), "--resume") == 0
 
         rows = self._report(plan)
@@ -1444,3 +1454,79 @@ class TestAnApplyResumeKeepsTheEarlierRunsRows:
         assert summary.count("(earlier result, not dispatched again) — ok") == 3
         assert ("- Batches processed: 3/3 (3 earlier result(s) reused, "
                 "not dispatched again)") in summary
+
+
+class TestARenumberedApplyBatchKeepsItsOwnRollbackPoint(_ApplyRig):
+    """A resume reused `pre_batch/<task_id>/` whenever the declared file set
+    matched, and an apply batch always declares the same one artifact. After
+    the selection changed, `apply-batch-1` named other items, so the new batch
+    inherited the stopped batch's rollback point: `util restore-batch` of the
+    new batch also reverted the stopped batch's edits the user had kept."""
+
+    def test_restoring_the_renumbered_batch_undoes_only_its_own_edit(self, repo):
+        from utils import restore_batch
+
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        before_run = plan.read_text(encoding="utf-8")
+        # Run 1: batch 0 applied, batch 1 a partial application; both edit.
+        assert self._run(repo, plan, ids[0], content="run1\n") == 3
+        after_run1 = plan.read_text(encoding="utf-8")
+        assert after_run1 == before_run + "run1\n" * 2
+
+        # The stopped item is deselected and its edit kept; batch 2's item now
+        # holds `apply-batch-1`.
+        self._deselect(repo, 1)
+        assert self._run(repo, plan, sum(ids, []), "--resume", content="run2\n") == 0
+        assert plan.read_text(encoding="utf-8") == after_run1 + "run2\n"
+
+        phase_dir = self._phase_dir(plan)
+        assert restore_batch.main([
+            "--phase-dir", str(phase_dir), "--task-id", "apply-batch-1",
+        ]) == 0
+        assert plan.read_text(encoding="utf-8") == after_run1
+
+    def test_the_stopped_batchs_own_rollback_point_survives(self, repo):
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        before_run = plan.read_text(encoding="utf-8")
+        assert self._run(repo, plan, ids[0], content="run1\n") == 3
+        self._deselect(repo, 1)
+        assert self._run(repo, plan, sum(ids, []), "--resume", content="run2\n") == 0
+
+        pre_batch = self._phase_dir(plan) / "pre_batch"
+        by_items = {
+            tuple(json.loads(m.read_text())["expected_ids"]): m.parent
+            for m in pre_batch.glob("*/manifest.json")
+        }
+        stopped = by_items[tuple(ids[1])]
+        payload = next((stopped / "files").iterdir()).read_text(encoding="utf-8")
+        assert payload == before_run + "run1\n"
+        assert by_items[tuple(ids[2])].name == "apply-batch-1"
+        # And `util restore-batch` reaches it by the name it was kept under.
+        from utils import restore_batch
+        assert restore_batch.main([
+            "--phase-dir", str(self._phase_dir(plan)), "--task-id", stopped.name,
+        ]) == 0
+        assert plan.read_text(encoding="utf-8") == before_run + "run1\n"
+
+    def test_a_resumed_batch_with_the_same_items_still_reuses_its_snapshot(
+        self, repo
+    ):
+        """The 2026-09-15 rule is unchanged: the same batch, re-dispatched,
+        keeps the rollback point from before its FIRST dispatch."""
+        from utils import restore_batch
+
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        before_run = plan.read_text(encoding="utf-8")
+        assert self._run(repo, plan, ids[0], content="run1\n") == 3
+        assert self._run(repo, plan, sum(ids, []), "--resume", content="run2\n") == 0
+        assert restore_batch.main([
+            "--phase-dir", str(self._phase_dir(plan)), "--task-id", "apply-batch-1",
+            "--force",
+        ]) == 0
+        # Back to before batch 1's first (partial) dispatch.
+        assert plan.read_text(encoding="utf-8").startswith(before_run + "run1\n")
+        assert "run1\nrun1\n" not in plan.read_text(encoding="utf-8")
+

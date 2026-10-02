@@ -3706,7 +3706,11 @@ class WriteBatchScheduler:
                 f"Populate `declared_files`/`snapshot_files` on the materialized "
                 f"task (D3h). Nothing was dispatched."
             )
-        reused = self._reusable_snapshot(task_id, files) if self.resume else None
+        expected_ids = [str(i) for i in (task.get("expected_ids") or [])]
+        reused = (
+            self._reusable_snapshot(task_id, files, expected_ids)
+            if self.resume else None
+        )
         if reused is not None:
             self.log(
                 f"[write-subagents] {task_id}: reusing the pre-batch snapshot a "
@@ -3718,13 +3722,14 @@ class WriteBatchScheduler:
             return reused
         snapshot = TaskSnapshot.take(
             phase_dir=self.phase_dir, task_id=task_id, files=files,
-            root=self.repo_root,
+            root=self.repo_root, expected_ids=expected_ids,
         )
         self.snapshots[task_id] = snapshot
         return snapshot
 
     def _reusable_snapshot(
-        self, task_id: str, files: Sequence[str]
+        self, task_id: str, files: Sequence[str],
+        expected_ids: Sequence[str] = (),
     ) -> Optional[TaskSnapshot]:
         """A previous run's snapshot for this batch, when it still applies.
 
@@ -3740,9 +3745,31 @@ class WriteBatchScheduler:
         Reused only when the manifest names the same declared set, byte for
         byte; a batch whose file set changed (the D2g resume guard should have
         refused it first) takes a fresh snapshot.
+
+        And only when it was taken for the same items, the rule
+        :func:`_same_batch_row` applies to report rows. An apply batch always
+        declares its one artifact and its id is positional, so after a
+        selection change the batch now holding ``apply-batch-1`` inherited the
+        stopped ``apply-batch-1``'s rollback point, and ``util restore-batch``
+        of the new batch also reverted the edits the stopped batch left in
+        place (#28 follow-up). That snapshot is another batch's: it is set
+        aside (renamed, never deleted) and this batch takes its own. A
+        manifest that records no items (written before they were recorded)
+        falls back to the id, as before.
         """
         existing = TaskSnapshot.load(self.phase_dir, task_id)
         if existing is None:
+            return None
+        recorded_ids = existing.expected_ids or []
+        if recorded_ids and expected_ids and (
+            sorted(recorded_ids) != sorted(str(i) for i in expected_ids)
+        ):
+            moved_to = existing.set_aside()
+            self.log(
+                f"[write-subagents] {task_id}: the pre-batch snapshot under "
+                f"that id was taken for other items (an earlier run's batch); "
+                f"kept at {moved_to} and a fresh snapshot taken for this batch."
+            )
             return None
         try:
             wanted = sorted(
