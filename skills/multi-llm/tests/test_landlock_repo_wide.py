@@ -221,6 +221,92 @@ class TestTheEnumeration:
         ]
 
 
+class TestTheHooksPathAndTheProvidersConfigAreProtected:
+    """Fix round 4 (2026-10-02). ``core.hooksPath`` names a directory git
+    runs unconfined on the user's next commit; outside ``.git/`` it was an
+    ordinary entry with a dir rule, so a jailed batch could plant a hook
+    there. ``MULTI_LLM_PROVIDERS_CONFIG`` is the config whose
+    ``verify_command`` the next run executes unjailed; pointed inside the
+    repository it was a ruled file. Both join the protected set when they
+    resolve inside the repository, as the output folder does."""
+
+    def test_a_relative_hooks_path_is_protected_and_never_ruled(self, wide):
+        (wide.repo / ".husky").mkdir()
+        (wide.repo / ".husky" / "pre-commit").write_text("#!/bin/sh\n")
+        _git(wide.repo, "config", "core.hooksPath", ".husky")
+        plan = ld.repo_wide_plan(_request(wide))
+        assert str(wide.repo / ".husky") in plan.protected
+        assert ".husky" not in {_rel(wide, e.path) for e in plan.entries}
+        assert str(wide.repo / ".husky") in plan.negative_dirs()
+        assert plan.write_dir() == str(wide.repo / "src")
+        refusal = ld.repo_wide_declared_refusal(plan, [str(wide.repo / ".husky" / "pre-commit")])
+        assert refusal and "protected path" in refusal and "(F6)" in refusal
+
+    def test_an_absolute_hooks_path_inside_the_repo_makes_its_parent_an_ancestor(self, wide):
+        (wide.repo / "tools" / "hooks").mkdir(parents=True)
+        (wide.repo / "tools" / "lint.sh").write_text("")
+        _git(wide.repo, "config", "core.hooksPath", str(wide.repo / "tools" / "hooks"))
+        plan = ld.repo_wide_plan(_request(wide))
+        assert str(wide.repo / "tools" / "hooks") in plan.protected
+        assert [_rel(wide, a) for a in plan.ancestors] == ["plans", "tools"]
+        names = {_rel(wide, e.path) for e in plan.entries}
+        assert "tools/lint.sh" in names and "tools" not in names and "tools/hooks" not in names
+
+    def test_a_hooks_path_outside_the_repo_changes_nothing(self, wide, tmp_path):
+        outside = tmp_path / "githooks"
+        outside.mkdir()
+        _git(wide.repo, "config", "core.hooksPath", str(outside))
+        plan = ld.repo_wide_plan(_request(wide))
+        assert [_rel(wide, p) for p in plan.protected] == [
+            ".git", ".hg", ".svn", ".codex", ".multi-llm", "plans/plan",
+        ]
+
+    def test_a_hooks_path_under_git_is_already_covered(self, wide):
+        _git(wide.repo, "config", "core.hooksPath", ".git/hooks")
+        plan = ld.repo_wide_plan(_request(wide))
+        assert [_rel(wide, p) for p in plan.protected] == [
+            ".git", ".hg", ".svn", ".codex", ".multi-llm", "plans/plan",
+        ]
+
+    def test_a_providers_config_inside_the_repo_is_protected(self, wide, monkeypatch):
+        (wide.repo / "config").mkdir()
+        config = wide.repo / "config" / "providers.yaml"
+        config.write_text("driver:\n  verify_command: true\n")
+        (wide.repo / "config" / "other.yaml").write_text("")
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
+        plan = ld.repo_wide_plan(_request(wide))
+        assert str(config) in plan.protected
+        assert [_rel(wide, a) for a in plan.ancestors] == ["config", "plans"]
+        names = {_rel(wide, e.path) for e in plan.entries}
+        assert "config/other.yaml" in names and "config/providers.yaml" not in names
+        assert str(config) not in plan.negative_dirs()
+        refusal = ld.repo_wide_declared_refusal(plan, [str(config)])
+        assert refusal and "protected path" in refusal
+
+    def test_a_relative_providers_config_resolves_against_the_cwd(self, wide, monkeypatch):
+        config = wide.repo / "providers.yaml"
+        config.write_text("")
+        monkeypatch.chdir(wide.repo)
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", "providers.yaml")
+        plan = ld.repo_wide_plan(_request(wide))
+        assert str(config) in plan.protected
+        assert "providers.yaml" not in {_rel(wide, e.path) for e in plan.entries}
+
+    @pytest.mark.parametrize("where", ["outside", "unset", "under-.multi-llm"])
+    def test_a_providers_config_elsewhere_changes_nothing(self, wide, monkeypatch, tmp_path, where):
+        if where == "outside":
+            monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(tmp_path / "providers.yaml"))
+        elif where == "under-.multi-llm":
+            monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG",
+                               str(wide.repo / ".multi-llm" / "providers.yaml"))
+        else:
+            monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)
+        plan = ld.repo_wide_plan(_request(wide))
+        assert [_rel(wide, p) for p in plan.protected] == [
+            ".git", ".hg", ".svn", ".codex", ".multi-llm", "plans/plan",
+        ]
+
+
 # ===========================================================================
 # Tier 1: the declared set — required entries and the pre-dispatch refusals
 # ===========================================================================
@@ -591,6 +677,41 @@ class TestTheRealJailRepoWide:
         assert (wide.repo / "tests/test_app.py").read_text().endswith("t\n")
         assert "scratch.txt" in scratch
         assert not list(Path("/tmp").glob("mllm-3b-*"))
+
+    def test_the_hooks_path_and_the_providers_config_are_denied(self, wide, sh, monkeypatch):
+        """Fix round 4: a ``core.hooksPath`` outside ``.git/`` and a
+        ``MULTI_LLM_PROVIDERS_CONFIG`` inside the repository are denied and
+        byte-identical afterwards, while the declared edit beside them lands."""
+        (wide.repo / ".husky").mkdir()
+        (wide.repo / ".husky" / "pre-commit").write_text("#!/bin/sh\n")
+        _git(wide.repo, "config", "core.hooksPath", ".husky")
+        (wide.repo / "config").mkdir()
+        config = wide.repo / "config" / "providers.yaml"
+        config.write_text("driver:\n  verify_command: true\n")
+        (wide.repo / "config" / "other.yaml").write_text("x\n")
+        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
+        cases = [
+            ("hook", "echo x >> .husky/pre-commit"),
+            ("newhook", "echo x > .husky/post-commit"),
+            ("cfg", "echo x >> config/providers.yaml"),
+            ("cfgnew", "echo x > config/new.yaml"),
+            ("cfgmv", "mv config/other.yaml config/providers.yaml"),
+        ]
+        positives = [("sibling", "echo y >> config/other.yaml"), ("edit", "echo edited > src/app.py")]
+        before = {str(p): _tree_hashes(p) for p in (wide.repo / ".husky", wide.repo / ".git")}
+        config_before = config.read_text()
+        proc, _scratch = self._run_jailed(
+            wide, sh, _script(cases + positives), declared=(wide.repo / "src/app.py",),
+        )
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        results = dict(line.split("=", 1) for line in proc.stdout.split())
+        assert all(results[name] != "0" for name, _ in cases), results
+        assert all(results[name] == "0" for name, _ in positives), results
+        assert {str(p): _tree_hashes(p) for p in (wide.repo / ".husky", wide.repo / ".git")} == before
+        assert config.read_text() == config_before
+        assert sorted(os.listdir(wide.repo / "config")) == ["other.yaml", "providers.yaml"]
+        assert (wide.repo / "config" / "other.yaml").read_text() == "x\ny\n"
+        assert (wide.repo / "src" / "app.py").read_text() == "edited\n"
 
     def test_the_same_script_unjailed_names_what_the_jail_stops(self, wide, sh):
         """The control: outside the jail the denied cases land, so the pass
