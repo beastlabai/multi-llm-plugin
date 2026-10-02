@@ -140,3 +140,21 @@ class TestApplyTaskSuggestionsHook:
         prompt = orch._generate_single_batch_prompt(batch)
         assert "Consistency across tasks" in prompt
         assert "never leave two tasks that both define it" in prompt
+
+
+class TestTheInstructionNamesAPathTheHostHas:
+    """Adversarial review, 2026-10-02: `util check-tasks "{tasks_file}"` was an
+    authoring placeholder `render_instruction_text` never substitutes (it knows
+    SKILL_DIR, UV_RUN_FLAGS, DEFAULT_MODE and NEEDS_HUMAN_RULE), so the host saw
+    the brace token literally."""
+
+    def test_the_check_tasks_line_points_at_orchestrator_output(self):
+        from utils.cli_common import render_instruction_text
+
+        text = (SKILL_ROOT / "instructions" / "apply-task-suggestions.md").read_text(
+            encoding="utf-8")
+        rendered = render_instruction_text(text, "/skill dir")
+        (line,) = [l for l in rendered.splitlines() if "util check-tasks" in l]
+        assert "{tasks_file}" not in line
+        assert line.rstrip().endswith(
+            'util check-tasks "<tasks_file from orchestrator_output.json>"')

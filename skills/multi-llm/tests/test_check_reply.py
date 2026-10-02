@@ -141,3 +141,35 @@ class TestMain:
     def test_it_is_a_registered_util_command(self):
         from multi_llm import UTIL_COMMANDS
         assert UTIL_COMMANDS["check-reply"][0] == "utils.check_reply"
+
+
+class TestRevalidationRunsTheCheckToo:
+    """Adversarial review, 2026-10-02: only the three review cores told the host
+    to check a validation reply. Revalidation in apply-suggestions and
+    apply-code-fixes dispatches the same subagents with the same failure mode,
+    and `check_reply` already handles kind `revalidation`."""
+
+    @staticmethod
+    def _paragraph(text: str) -> str:
+        start = text.index("**Check each reply right after you write it.**")
+        end = text.index("leave its file as it is and say so.", start)
+        return " ".join(text[start:end].split())
+
+    def test_each_revalidating_core_carries_the_review_paragraph(self):
+        instructions = SKILL_ROOT / "instructions"
+        review = self._paragraph(
+            (instructions / "review-plan.md").read_text(encoding="utf-8"))
+        for name, phase in (("apply-suggestions.md", "review-plan"),
+                            ("apply-code-fixes.md", "code-review")):
+            text = (instructions / name).read_text(encoding="utf-8")
+            assert self._paragraph(text) == review.replace(
+                '"{plan}/review-plan/validation_tasks.json"',
+                f'"{{plan}}/{phase}/revalidation_tasks.json"'), name
+            # Above both the single- and the multi-batch path.
+            assert text.index("util check-reply") < text.index(
+                "#### Single Batch: `[REVALIDATION_PENDING]`"), name
+
+    def test_a_revalidation_task_is_checked_like_a_validation_one(self, tmp_path):
+        _write(tmp_path, _reply(HASH_A))
+        problems = check_task_reply(_task(tmp_path, kind="revalidation"), str(tmp_path))
+        assert problems == [f"missing group_hash: {HASH_B}"]
