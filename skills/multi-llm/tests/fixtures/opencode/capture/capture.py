@@ -70,6 +70,23 @@ def bash(target):
 
 
 OUT = "{R}/outside/f.txt"  # an out-of-cwd file that is not a host file
+#: Any egress a non-stub case might attempt dies on a closed local port; the
+#: stub itself is reached directly.
+NO_EGRESS = {"HTTP_PROXY": "http://127.0.0.1:9", "HTTPS_PROXY": "http://127.0.0.1:9",
+             "NO_PROXY": "127.0.0.1,localhost"}
+TINY_PLAN = "# Tiny plan\n\nAdd a `--verbose` flag to the CLI and log each step.\n"
+REVIEW_OUT = "{R}/work/plans/tiny/review-plan/opencode_stub_m.json"
+REVIEW_JSON = json.dumps([{
+    "title": "Missing problem statement", "importance": "medium",
+    "description": "The plan names the flag but not the problem it solves.",
+    "suggestion": "State which user need --verbose answers."}], indent=2)
+#: Plan text that talks about rate limits: in a tool output it must never decide
+#: a verdict (run b38de8bb was recorded `rate_limited` on exactly this).
+RATE_LIMIT_PLAN = (
+    "# Search plan\n\n"
+    "The public search endpoint enforces a rate limit of 30 requests per minute per client.\n"
+    "Each hit is recorded with rate_limit_hit(client_id) in the history table.\n"
+    "A client over the limit gets HTTP 429 with a Retry-After header.\n")
 SHARED_USER = {"permission": {"external_directory": {
     "{R}/shared/*": "allow", "{R}/shared/private/*": "deny"}}}
 SHARED_EXT = {"*": "deny", "{R}/shared/*": "allow", "{R}/shared/private/*": "deny"}
@@ -93,9 +110,11 @@ def _cases():
     c = {}
 
     def add(name, agent, call, content=None, user=None, pure=True, env=None,
-            managed=None, org=None, note=""):
+            managed=None, org=None, note="", **stream):
         c[name] = dict(agent=agent, call=call, content=content, user=user or {},
-                       pure=pure, env=env or {}, managed=managed, org=org, note=note)
+                       pure=pure, env=env or {}, managed=managed, org=org, note=note,
+                       model=stream.pop("model", "stub/m"), prompt=stream.pop("prompt", None),
+                       files=stream.pop("files", {}), script=stream)
 
     # §4.1's table: `--agent plan --pure`, config in OPENCODE_CONFIG_CONTENT.
     add("s41_ask_read", "plan", read("/etc/hostname"), note="default ask: auto-reject ends the turn (b38de8bb signature)")
@@ -193,6 +212,43 @@ def _cases():
         note="active-org account config (from the data-dir DB) agent.plan '*':allow")
     add("org_agent_dbmem_plan", "plan", read(OUT), agent_block("plan"), org=HOSTILE_AGENT,
         env={"OPENCODE_DB": ":memory:"}, note="same account DB, OPENCODE_DB=:memory:")
+
+    # The parser's stream fixtures (the adapter's `verified_version` grades on
+    # these). Multi-step turns scripted through stub.py's `turns`; usage per
+    # step is (input, output, cached) as opencode reports it in `step_finish`.
+    add("run_review", "build", None, pure=True, files={"plans/tiny.md": TINY_PLAN},
+        prompt="Review the plan at {R}/work/plans/tiny.md and write the JSON array "
+               "of findings to " + REVIEW_OUT + ".",
+        turns=[
+            {"calls": [read("{R}/work/plans/tiny.md")],
+             "usage": {"input": 9324, "output": 92}},
+            {"text": "Now let me explore the codebase to understand what context might be relevant.",
+             "calls": [read("{R}/work"),
+                       {"tool": "bash", "args": {
+                           "command": "ls -la {R}/work/plans/tiny/ 2>/dev/null || echo \"Directory does not exist\"",
+                           "description": "List the review directory"}}],
+             "usage": {"input": 346, "output": 245, "cached": 9280}},
+            {"calls": [{"tool": "write", "args": {"filePath": REVIEW_OUT, "content": REVIEW_JSON}}],
+             "usage": {"input": 461, "output": 1329, "cached": 9600}},
+        ],
+        final="JSON written to " + REVIEW_OUT, final_usage={"input": 1358, "output": 98, "cached": 10048},
+        note="a healthy review turn: four steps, four tool calls, two text parts, finish stop")
+    add("denied_turn", "plan", None, pure=True, files={"docs/plan.md": RATE_LIMIT_PLAN},
+        prompt="Validate the plan's claims against the repository.",
+        turns=[
+            {"text": "I'll read the plan sections and check the rate limit claims.",
+             "calls": [read("{R}/work/docs/plan.md")]},
+            {"text": "I'll read the host name the plan's deployment section names.",
+             "calls": [bash("/etc/hostname")]},
+        ],
+        note="b38de8bb's shape: plan text about rate limits in a completed read, then an "
+             "auto-rejected bash ends the turn")
+    add("auth_error", "plan", None, pure=True, model="google/gemini-2.5-flash",
+        prompt="Reply with the single word OK.", user={"provider": {"google": {}}},
+        env=NO_EGRESS, note="a declared built-in provider with no key: ProviderAuthError, no request")
+    add("invalid_model", "plan", None, pure=True, model="opencode/sonnet",
+        prompt="Reply with the single word OK.", env=NO_EGRESS,
+        note="a model the catalog does not carry: the UnknownError wrapper, cause on stderr")
 
     # Controls: what a schema rejection looks like on each build.
     add("t40_badperm_plan", "plan", read(OUT), {"agent": {"plan": {"permission": {"external_directory": "maybe"}}}},
@@ -292,10 +348,15 @@ def run_case(binary, version, name, spec, scratch, outdir):
                     (os.path.join(R, "work/README.md"), "rig\n")):
         with open(p, "w") as f:
             f.write(body)
-    subprocess.run(["git", "init", "-q", "."], cwd=os.path.join(R, "work"), check=True)
-
     port = _free_port()
     m = {"R": R, "DATA": DATA, "TMP": TMP, "PORT": str(port)}
+    for rel, body in spec["files"].items():
+        path = os.path.join(R, "work", rel)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            f.write(_sub(body, m))
+    subprocess.run(["git", "init", "-q", "."], cwd=os.path.join(R, "work"), check=True)
+
     call = _sub(spec["call"], m)
     content = _sub(spec["content"], m)
     user = {"$schema": "https://opencode.ai/config.json",
@@ -303,14 +364,19 @@ def run_case(binary, version, name, spec, scratch, outdir):
                                   "options": {"baseURL": "http://127.0.0.1:%d/v1" % port, "apiKey": "x"},
                                   "models": {"m": {"name": "m", "tool_call": True}}}},
             "model": "stub/m", "small_model": "stub/m"}
-    user.update(_sub(spec["user"], m))
+    for key, value in _sub(spec["user"], m).items():
+        if key == "provider":
+            user["provider"].update(value)
+        else:
+            user[key] = value
     with open(os.path.join(R, "cfg/opencode/opencode.json"), "w") as f:
         json.dump(user, f, indent=1)
     managed = _sub(spec["managed"], m)
     if managed is not None:
         with open(os.path.join(R, "managed/opencode.json"), "w") as f:
             json.dump(managed, f, indent=1)
-    stub_spec = dict(call)
+    stub_spec = dict(call or {})
+    stub_spec.update(_sub(spec["script"], m))
     if spec["org"] is not None:
         stub_spec["org_config"] = _sub(spec["org"], m)
     with open(os.path.join(R, "stub.json"), "w") as f:
@@ -332,10 +398,13 @@ def run_case(binary, version, name, spec, scratch, outdir):
         time.sleep(0.5)
         if spec["org"] is not None:
             _seed_org(binary, {k: v for k, v in env.items() if k != "OPENCODE_DB"}, cwd, port)
-        target = call["args"].get("filePath") or call["args"]["command"]
+        if spec["prompt"] is not None:
+            prompt = _sub(spec["prompt"], m)
+        else:
+            prompt = "please read " + (call["args"].get("filePath") or call["args"]["command"])
         pure = ["--pure"] if spec["pure"] else []
         argv = [binary, "run"] + pure + ["--agent", spec["agent"], "--format", "json", "--print-logs",
-                                         "--log-level", "ERROR", "--model", "stub/m", "please read " + target]
+                                         "--log-level", "ERROR", "--model", spec["model"], prompt]
         with open(os.path.join(R, "stdout.jsonl"), "w") as so, open(os.path.join(R, "stderr.txt"), "w") as se:
             p = subprocess.Popen(argv, env=env, cwd=cwd, stdin=subprocess.DEVNULL, stdout=so, stderr=se)
             try:
@@ -372,7 +441,7 @@ def run_case(binary, version, name, spec, scratch, outdir):
         "opencode_version": version, "note": spec["note"], "argv": ["opencode"] + argv[1:],
         "env": shown_env, "OPENCODE_CONFIG_CONTENT": content, "global_opencode_json": user,
         "managed_opencode_json": managed, "org_config": stub_spec.get("org_config"),
-        "stub_tool_call": call}, indent=1) + "\n")
+        "stub_tool_call": call, "stub_script": _sub(spec["script"], m) or None}, indent=1) + "\n")
     leaks = [os.path.expanduser("~"), os.path.basename(os.path.expanduser("~")), scratch, red.host]
     for path in written:
         text = open(path).read()
