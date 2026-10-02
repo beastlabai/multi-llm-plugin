@@ -42,6 +42,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -347,7 +348,12 @@ VCS_DIR_NAMES: Tuple[str, ...] = (".git", ".hg", ".svn")
 #: ``workspace-write`` keeps it and ``.git`` read-only too) and ``.multi-llm``
 #: (``providers.yaml``, the ``runs/`` registry, ``tmp/``). The run's output
 #: folder (``state.json``, the snapshots, the rollback store, the audit log)
-#: joins them from the request's ``output_dir``.
+#: joins them from the request's ``output_dir``, and two more join when they
+#: resolve inside the repository (:func:`extra_protected_paths`, fix round 4,
+#: 2026-10-02): the repository's ``core.hooksPath`` (``.husky/`` and the
+#: like — hooks git runs unconfined on the user's next commit, which outside
+#: ``.git/`` were an ordinary ruled entry) and the ``MULTI_LLM_PROVIDERS_CONFIG``
+#: file (the config whose ``verify_command`` the next run executes unjailed).
 PROTECTED_ROOT_NAMES: Tuple[str, ...] = VCS_DIR_NAMES + (".codex", ".multi-llm")
 
 #: The non-Codex runner, named by every refusal of a declared path the grant
@@ -451,6 +457,61 @@ def _denies_entry(rel: str, is_dir: bool, patterns: Sequence[Any]) -> Optional[s
     return None
 
 
+def git_hooks_path(root: str) -> Optional[str]:
+    """The repository's effective ``core.hooksPath``, resolved (``~`` and a
+    relative value against ``root``, where git runs hooks; symlinks
+    followed), or ``None`` when unset, unreadable, or ``root`` holds no
+    ``.git``. Read through ``git config`` itself so the global and system
+    layers count as they do for git."""
+    if not os.path.lexists(os.path.join(root, ".git")):
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "config", "--get", "core.hooksPath"],
+            capture_output=True, text=True, timeout=10,
+            env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = proc.stdout.strip() if proc.returncode == 0 else ""
+    if not value:
+        return None
+    value = os.path.expanduser(value)
+    if not os.path.isabs(value):
+        value = os.path.join(root, value)
+    return os.path.realpath(value)
+
+
+def providers_config_path() -> Optional[str]:
+    """The ``MULTI_LLM_PROVIDERS_CONFIG`` file as the registry resolves it
+    (CWD-anchored when relative), ``realpath``'d, or ``None`` when unset."""
+    try:
+        from .provider_registry import _resolve_env_path
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.provider_registry import _resolve_env_path  # type: ignore[no-redef]
+    try:
+        path = _resolve_env_path()
+    except Exception:  # noqa: BLE001 - a bad value is the loader's to report
+        return None
+    return os.path.realpath(str(path)) if path else None
+
+
+def extra_protected_paths(root: str, protected: Sequence[str]) -> List[str]:
+    """The paths that join the protected set beyond :data:`PROTECTED_ROOT_NAMES`
+    and the output folder (fix round 4, 2026-10-02): the hooks directory and
+    the providers config, each only when it resolves inside ``root``, is not
+    the root, and is not already under a protected path (a ``core.hooksPath``
+    of ``.git/hooks``, a config at ``.multi-llm/providers.yaml``)."""
+    extra: List[str] = []
+    for path in (git_hooks_path(root), providers_config_path()):
+        if not path or path == root or not _inside(path, root):
+            continue
+        if any(_inside(path, guarded) for guarded in [*protected, *extra]):
+            continue
+        extra.append(path)
+    return extra
+
+
 def repo_wide_plan(request: JailRequest) -> RepoWidePlan:
     """Enumerate the repository root for a ``repo-wide`` grant (F1 "Protected
     paths": prevention by enumeration, never a repo-root rule).
@@ -458,8 +519,10 @@ def repo_wide_plan(request: JailRequest) -> RepoWidePlan:
     Symlinks are resolved first: a top-level link gets no rule of its own
     (the wrapper refuses a symlink entry; a link into the tree is covered by
     its target's own entry, a link into the protected set or out of the
-    repository by nothing). A protected path gets no rule. An ancestor of a
-    protected path is descended and enumerated the same way. Every other
+    repository by nothing). A protected path — the fixed names, the output
+    folder, the hooks directory and the providers config when they lie
+    inside the repository (:func:`extra_protected_paths`) — gets no rule. An
+    ancestor of a protected path is descended and enumerated the same way. Every other
     entry gets a dir rule (directory) or a file rule (anything else), unless
     ``driver.write_paths`` denies it as a whole. The enumeration is a snapshot
     taken now: an entry made mid-dispatch is not writable by that child.
@@ -476,6 +539,7 @@ def repo_wide_plan(request: JailRequest) -> RepoWidePlan:
         out = os.path.realpath(request.output_dir)
         if _inside(out, root) and out != root:
             protected.append(out)
+    protected.extend(extra_protected_paths(root, protected))
     protected_set = set(protected)
     ancestors: set = set()
     for path in protected:
@@ -551,7 +615,8 @@ def repo_wide_declared_refusal(plan: RepoWidePlan, declared: Sequence[str]) -> O
                     f"{shown} lies under the protected path "
                     f"{render_home(guarded)}, which the plugin's Landlock jail "
                     f"keeps read-only on every repo-wide batch (.git, .codex, "
-                    f".multi-llm and this run's output folder). {REPO_WIDE_F6}"
+                    f".multi-llm, this run's output folder, the git hooks "
+                    f"directory and the providers config). {REPO_WIDE_F6}"
                 )
         for denied_path, pattern in plan.denied:
             if _inside(path, denied_path):
@@ -1966,6 +2031,9 @@ __all__ = [
     "merge_env_redirects",
     "repo_wide_declared_refusal",
     "repo_wide_env_redirects",
+    "extra_protected_paths",
+    "git_hooks_path",
+    "providers_config_path",
     "repo_wide_plan",
     "classify_denied_path",
     "compare_home",
