@@ -2704,12 +2704,12 @@ class TestCodeFixesClaudeDecideOverride:
     def _make_orchestrator(self):
         orch = ApplyCodeFixesOrchestrator.__new__(ApplyCodeFixesOrchestrator)
         orch.validation_overrides = {}
-        orch.claude_decide_overrides = set()
+        orch.judge_decide_overrides = set()
         orch.merged = []
         return orch
 
-    def test_claude_decide_by_integer_issue_key(self):
-        """An integer-keyed claude_decide override is routed as a marker."""
+    def test_judge_decide_by_integer_issue_key(self):
+        """An integer-keyed judge_decide override is routed as a marker."""
         orch = self._make_orchestrator()
         orch.merged = [
             {
@@ -2718,17 +2718,17 @@ class TestCodeFixesClaudeDecideOverride:
                 "suggestions": [],
             }
         ]
-        orch.validation_overrides = {1: "claude_decide"}  # 1-based issue index
+        orch.validation_overrides = {1: "judge_decide"}  # 1-based issue index
         orch.apply_group_validation_overrides()
 
         g = orch.merged[0]
         assert g["validation_status"] == "needs-human-decision"
-        assert g["validation_status"] != "claude_decide"
-        assert g["claude_decide"] is True
-        assert 1 in orch.claude_decide_overrides
+        assert g["validation_status"] != "judge_decide"
+        assert g["judge_decide"] is True
+        assert 1 in orch.judge_decide_overrides
 
-    def test_claude_decide_by_group_hash_key(self):
-        """A hash-keyed claude_decide override (HTML/consolidated) is routed too."""
+    def test_judge_decide_by_group_hash_key(self):
+        """A hash-keyed judge_decide override (HTML/consolidated) is routed too."""
         orch = self._make_orchestrator()
         orch.merged = [
             {
@@ -2737,13 +2737,13 @@ class TestCodeFixesClaudeDecideOverride:
                 "suggestions": [],
             }
         ]
-        orch.validation_overrides = {"cf_hash": "claude_decide"}
+        orch.validation_overrides = {"cf_hash": "judge_decide"}
         orch.apply_group_validation_overrides()
 
         g = orch.merged[0]
         assert g["validation_status"] == "needs-human-decision"
-        assert g["claude_decide"] is True
-        assert "cf_hash" in orch.claude_decide_overrides
+        assert g["judge_decide"] is True
+        assert "cf_hash" in orch.judge_decide_overrides
 
     def test_unknown_value_warned_and_ignored(self, capsys):
         """A typo/stale override on a code-fix is warned-and-ignored."""
@@ -2761,7 +2761,7 @@ class TestCodeFixesClaudeDecideOverride:
         g = orch.merged[0]
         assert g["validation_status"] == "needs-human-decision"
         assert g.get("user_override") is not True
-        assert 1 not in orch.claude_decide_overrides
+        assert 1 not in orch.judge_decide_overrides
         assert "garbage" in capsys.readouterr().err
 
     def test_valid_override_unaffected(self):
@@ -2800,9 +2800,9 @@ class TestFormatFixForOutputClaudeDecide:
         assert "decision_mode" not in result
 
     def test_decision_mode_for_marked_fix(self):
-        result = format_fix_for_output(self._group(claude_decide=True), 0)
+        result = format_fix_for_output(self._group(judge_decide=True), 0)
         assert result["group_id"] == "fix_g_hash"
-        assert result["decision_mode"] == "claude_auto_decide"
+        assert result["decision_mode"] == "judge_auto_decide"
 
 
 class TestOrchestratorOutputClaudeDecideShape:
@@ -2811,7 +2811,7 @@ class TestOrchestratorOutputClaudeDecideShape:
     def _orch(self, tmp_path):
         orch = ApplyCodeFixesOrchestrator.__new__(ApplyCodeFixesOrchestrator)
         orch.args = argparse.Namespace(
-            plan_file="p.md", batch_review_mode="by-importance", claude_decide=False
+            plan_file="p.md", batch_review_mode="by-importance", agent_decide=False
         )
         orch.out_dir = str(tmp_path)
         orch.plan_path = "p.md"
@@ -2834,7 +2834,7 @@ class TestOrchestratorOutputClaudeDecideShape:
         marked = orch.format_item_for_output(
             {"group_hash": "h_marked", "theme": "M",
              "validation_status": "needs-human-decision",
-             "claude_decide": True,
+             "judge_decide": True,
              "suggestions": [{"title": "A", "desc": "a", "file": "a.py",
                               "type": "bug", "importance": "HIGH"}]},
             0,
@@ -2858,12 +2858,12 @@ class TestOrchestratorOutputClaudeDecideShape:
         # Every human-review item carries group_id == source group_hash.
         assert {it["group_id"] for it in nhr} == {"h_marked", "h_plain"}
         # Only the marked item carries the per-item routing flag.
-        marked_items = [it for it in nhr if it.get("decision_mode") == "claude_auto_decide"]
+        marked_items = [it for it in nhr if it.get("decision_mode") == "judge_auto_decide"]
         assert len(marked_items) == 1
         assert marked_items[0]["group_id"] == "h_marked"
 
         cfg = on_disk["human_review_config"]
-        assert cfg["claude_decide_item_ids"] == ["h_marked"]
+        assert cfg["judge_decide_item_ids"] == ["h_marked"]
         # Per-item routing does not flip the global mode.
         assert cfg["decision_mode"] == "interactive"
 
@@ -2891,7 +2891,7 @@ class TestReportCheckboxesResolveThroughTheIssueMap:
         orch.merged = [dict(g) for g in groups]
         orch.issue_to_group_map = issue_map
         orch.validation_overrides = {}
-        orch.claude_decide_overrides = set()
+        orch.judge_decide_overrides = set()
         return orch
 
     def _report(self, tmp_path, marked):
@@ -3230,7 +3230,7 @@ class TestIdenticalFindingsInTwoFilesEndToEnd:
         orch.merged = [dict(g) for g in grouped]
         orch.issue_to_group_map = build_issue_to_group_map(issues_path, grouped)
         orch.validation_overrides = {}
-        orch.claude_decide_overrides = set()
+        orch.judge_decide_overrides = set()
 
         hashes, _sugg_ids, _old = orch.parse_skips_from_report(str(report_path))
         assert hashes == {self._group_holding(grouped, issues[number - 1])}

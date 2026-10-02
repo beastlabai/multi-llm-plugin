@@ -2329,7 +2329,7 @@ class TestMergeConsolidatedSelections:
         assert all(isinstance(k, str) and isinstance(v, str) for k, v in overrides.items())
 
 class TestParseAgentDecideOverrides:
-    """`Let the agent decide` checkbox -> "claude_decide" across all parsers."""
+    """`Let the agent decide` checkbox -> "judge_decide" across all parsers."""
 
     def test_group(self, tmp_path):
         report = tmp_path / "report.md"
@@ -2338,7 +2338,7 @@ class TestParseAgentDecideOverrides:
 - [x] Let the agent decide
 """, encoding="utf-8")
         assert parse_validation_overrides_groups(str(report)) == {
-            "aabb000000000001": "claude_decide"}
+            "aabb000000000001": "judge_decide"}
 
     def test_suggestion(self, tmp_path):
         report = tmp_path / "report.md"
@@ -2347,7 +2347,7 @@ class TestParseAgentDecideOverrides:
 - [x] Let the agent decide
 """, encoding="utf-8")
         assert parse_suggestion_validation_overrides(str(report)) == {
-            "ccdd000000000001": "claude_decide"}
+            "ccdd000000000001": "judge_decide"}
 
     def test_issue(self, tmp_path):
         report = tmp_path / "report.md"
@@ -2355,7 +2355,7 @@ class TestParseAgentDecideOverrides:
 - [ ] Mark valid
 - [x] Let the agent decide
 """, encoding="utf-8")
-        assert parse_validation_overrides_issues(str(report)) == {1: "claude_decide"}
+        assert parse_validation_overrides_issues(str(report)) == {1: "judge_decide"}
 
     def test_consolidated(self, tmp_path):
         report = tmp_path / "report.md"
@@ -2364,15 +2364,15 @@ class TestParseAgentDecideOverrides:
 - [x] Let the agent decide
 """, encoding="utf-8")
         assert parse_consolidated_validation_overrides(str(report)) == {
-            "abc123def456": "claude_decide"}
+            "abc123def456": "judge_decide"}
 
 
 class TestParseClaudeDecideOverrides:
     """The legacy `Let Claude decide` wording, as reports already on disk carry it,
-    still maps to "claude_decide" across all parsers."""
+    still maps to "judge_decide" across all parsers."""
 
     # --- Group parser ---
-    def test_group_claude_decide(self, tmp_path):
+    def test_group_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""## G1 [aabb000000000001]: Theme
 - [ ] Skip this group
@@ -2382,9 +2382,9 @@ class TestParseClaudeDecideOverrides:
 **Validation:** ? Needs Review
 """, encoding="utf-8")
         result = parse_validation_overrides_groups(str(report))
-        assert result == {"aabb000000000001": "claude_decide"}
+        assert result == {"aabb000000000001": "judge_decide"}
 
-    def test_group_precedence_invalid_over_claude_decide(self, tmp_path):
+    def test_group_precedence_invalid_over_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""## G1 [aabb000000000001]: Theme
 - [ ] Mark valid
@@ -2394,7 +2394,7 @@ class TestParseClaudeDecideOverrides:
         result = parse_validation_overrides_groups(str(report))
         assert result == {"aabb000000000001": "invalid"}
 
-    def test_group_precedence_valid_over_claude_decide(self, tmp_path):
+    def test_group_precedence_valid_over_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""## G1 [aabb000000000001]: Theme
 - [x] Mark valid
@@ -2405,7 +2405,7 @@ class TestParseClaudeDecideOverrides:
         assert result == {"aabb000000000001": "valid"}
 
     # --- Suggestion parser ---
-    def test_suggestion_claude_decide(self, tmp_path):
+    def test_suggestion_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""### G1S1 [ccdd000000000001]: Title
 - [ ] Skip
@@ -2414,9 +2414,9 @@ class TestParseClaudeDecideOverrides:
 - [x] Let Claude decide
 """, encoding="utf-8")
         result = parse_suggestion_validation_overrides(str(report))
-        assert result == {"ccdd000000000001": "claude_decide"}
+        assert result == {"ccdd000000000001": "judge_decide"}
 
-    def test_suggestion_precedence_valid_over_claude_decide(self, tmp_path):
+    def test_suggestion_precedence_valid_over_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""### G1S1 [ccdd000000000001]: Title
 - [x] Mark valid
@@ -2426,7 +2426,7 @@ class TestParseClaudeDecideOverrides:
         assert result == {"ccdd000000000001": "valid"}
 
     # --- Issues parser (code review) ---
-    def test_issue_claude_decide(self, tmp_path):
+    def test_issue_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""### 1. Title
 - [ ] Skip
@@ -2435,9 +2435,9 @@ class TestParseClaudeDecideOverrides:
 - [x] Let Claude decide
 """, encoding="utf-8")
         result = parse_validation_overrides_issues(str(report))
-        assert result == {1: "claude_decide"}
+        assert result == {1: "judge_decide"}
 
-    def test_issue_precedence_invalid_over_claude_decide(self, tmp_path):
+    def test_issue_precedence_invalid_over_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""### 1. Title
 - [x] Mark invalid
@@ -2447,7 +2447,7 @@ class TestParseClaudeDecideOverrides:
         assert result == {1: "invalid"}
 
     # --- Consolidated parser (4-state precedence) ---
-    def test_consolidated_claude_decide_alone(self, tmp_path):
+    def test_consolidated_judge_decide_alone(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""## CG1 [abc123def456]: Section
 - [ ] Mark valid
@@ -2456,9 +2456,9 @@ class TestParseClaudeDecideOverrides:
 - [x] Let Claude decide
 """, encoding="utf-8")
         result = parse_consolidated_validation_overrides(str(report))
-        assert result == {"abc123def456": "claude_decide"}
+        assert result == {"abc123def456": "judge_decide"}
 
-    def test_consolidated_invalid_beats_claude_decide(self, tmp_path):
+    def test_consolidated_invalid_beats_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""## CG1 [abc123def456]: Section
 - [x] Mark invalid
@@ -2467,7 +2467,7 @@ class TestParseClaudeDecideOverrides:
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "invalid"}
 
-    def test_consolidated_valid_beats_claude_decide(self, tmp_path):
+    def test_consolidated_valid_beats_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""## CG1 [abc123def456]: Section
 - [x] Mark valid
@@ -2476,7 +2476,7 @@ class TestParseClaudeDecideOverrides:
         result = parse_consolidated_validation_overrides(str(report))
         assert result == {"abc123def456": "valid"}
 
-    def test_consolidated_needs_human_beats_claude_decide(self, tmp_path):
+    def test_consolidated_needs_human_beats_judge_decide(self, tmp_path):
         report = tmp_path / "report.md"
         report.write_text("""## CG1 [abc123def456]: Section
 - [ ] Mark valid

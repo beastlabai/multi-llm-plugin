@@ -1,0 +1,84 @@
+{
+  "format_version": 2,
+  "plan_file": "plans/upload-retries.md",
+  "to_apply": [
+    {
+      "index": 0,
+      "group_id": "9a9a9a9a9a9a9a9a",
+      "title": "Retry uploads",
+      "description": "Cap upload retries at three attempts.",
+      "importance": "MEDIUM",
+      "validation_status": "valid",
+      "auto_approved": true,
+      "auto_approval_reason": "Agent decide [codex:gpt-6-astra]: kept the retry cap"
+    }
+  ],
+  "needs_human_review": [
+    {
+      "index": 1,
+      "group_id": "6d6d6d6d6d6d6d6d",
+      "title": "Rename the upload queue",
+      "description": "Call it the transfer queue.",
+      "importance": "LOW",
+      "validation_status": "needs-human-decision",
+      "validation_reason": "Routed to the judge agent by reviewer",
+      "decision_mode": "claude_auto_decide"
+    }
+  ],
+  "skipped_items": [
+    {
+      "group_id": "3b810046f0a56e8c",
+      "title": "T001 complexity underestimated",
+      "importance": "LOW",
+      "status": "claude_skipped",
+      "reason": "Agent decide [codex:gpt-6-astra]: not decidable from the text",
+      "decision_source": "claude_auto_decide"
+    },
+    {
+      "group_id": "7e7e7e7e7e7e7e7e",
+      "title": "Rewrite the plan in YAML",
+      "importance": "LOW",
+      "status": "invalid",
+      "reason": "Out of scope"
+    }
+  ],
+  "user_skipped_items": [],
+  "skipped_count": 2,
+  "human_review_config": {
+    "mode": "by-importance",
+    "batch_enabled": true,
+    "decision_mode": "claude_auto_decide",
+    "prompt_strategy": "single_batch",
+    "by_importance": {
+      "HIGH": [],
+      "MEDIUM": [],
+      "LOW": [
+        {
+          "index": 1,
+          "group_id": "6d6d6d6d6d6d6d6d",
+          "title": "Rename the upload queue",
+          "importance": "LOW",
+          "validation_status": "needs-human-decision",
+          "decision_mode": "claude_auto_decide"
+        }
+      ]
+    },
+    "total_count": 1,
+    "batch_prompt_template": "batch_approval_v1",
+    "claude_decide_item_ids": [
+      "6d6d6d6d6d6d6d6d"
+    ]
+  },
+  "edited_descriptions": [],
+  "summary": {
+    "total_groups": 4,
+    "valid_count": 1,
+    "needs_human_count": 1,
+    "skipped_count": 2,
+    "user_skipped_count": 0,
+    "batch_count": 1,
+    "validation_failed_count": 0,
+    "auto_approved_count": 1,
+    "edited_description_count": 0
+  }
+}

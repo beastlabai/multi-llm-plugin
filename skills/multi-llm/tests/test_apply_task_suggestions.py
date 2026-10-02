@@ -1346,12 +1346,12 @@ class TestFormatItemClaudeDecide:
         # Unmarked group carries no decision_mode.
         assert "decision_mode" not in result
 
-    def test_decision_mode_for_claude_decide_group(self):
-        """A claude_decide-marked group emits decision_mode == claude_auto_decide."""
+    def test_decision_mode_for_judge_decide_group(self):
+        """A judge_decide-marked group emits decision_mode == judge_auto_decide."""
         orch = self._make_orchestrator()
-        result = orch.format_item_for_output(self._group(claude_decide=True), 0)
+        result = orch.format_item_for_output(self._group(judge_decide=True), 0)
         assert result["group_id"] == "task_g_hash"
-        assert result["decision_mode"] == "claude_auto_decide"
+        assert result["decision_mode"] == "judge_auto_decide"
 
 
 class TestOrchestratorOutputClaudeDecideShape:
@@ -1360,7 +1360,7 @@ class TestOrchestratorOutputClaudeDecideShape:
     def _orch(self, tmp_path):
         orch = ApplyTaskSuggestionsOrchestrator.__new__(ApplyTaskSuggestionsOrchestrator)
         orch.args = argparse.Namespace(
-            plan_file="p.md", batch_review_mode="by-importance", claude_decide=False
+            plan_file="p.md", batch_review_mode="by-importance", agent_decide=False
         )
         orch.out_dir = str(tmp_path)
         orch.plan_path = "p.md"
@@ -1387,7 +1387,7 @@ class TestOrchestratorOutputClaudeDecideShape:
         marked = orch.format_item_for_output(
             {"group_hash": "h_marked", "theme": "M",
              "validation_status": "needs-human-decision",
-             "claude_decide": True,
+             "judge_decide": True,
              "suggestions": [{"title": "A", "desc": "a", "reference": "T001",
                               "importance": "HIGH"}]},
             0,
@@ -1411,12 +1411,12 @@ class TestOrchestratorOutputClaudeDecideShape:
         # Every human-review item carries group_id == source group_hash.
         assert {it["group_id"] for it in nhr} == {"h_marked", "h_plain"}
         # Only the marked item carries the per-item routing flag.
-        marked_items = [it for it in nhr if it.get("decision_mode") == "claude_auto_decide"]
+        marked_items = [it for it in nhr if it.get("decision_mode") == "judge_auto_decide"]
         assert len(marked_items) == 1
         assert marked_items[0]["group_id"] == "h_marked"
 
         cfg = on_disk["human_review_config"]
-        assert cfg["claude_decide_item_ids"] == ["h_marked"]
+        assert cfg["judge_decide_item_ids"] == ["h_marked"]
         # Per-item routing does not flip the global mode.
         assert cfg["decision_mode"] == "interactive"
 

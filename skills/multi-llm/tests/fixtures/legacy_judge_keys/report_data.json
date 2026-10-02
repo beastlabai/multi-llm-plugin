@@ -1,0 +1,37 @@
+{
+  "templateStyle": "pr",
+  "dataSource": "grouped",
+  "planPath": "plans/upload-retries.md",
+  "groups": [
+    {
+      "groupHash": "3b810046f0a56e8c",
+      "theme": "Complexity estimate",
+      "humanDecision": {
+        "outcome": "skipped",
+        "decision": "skipped",
+        "claudeDecided": true,
+        "source": "claude_auto_decide",
+        "reason": "Agent decide [codex:gpt-6-astra]: not decidable from the text",
+        "salvagedDescription": "",
+        "dropped": "",
+        "importanceAtDecision": "LOW",
+        "judge": "codex:gpt-6-astra"
+      }
+    },
+    {
+      "groupHash": "9a9a9a9a9a9a9a9a",
+      "theme": "Retry uploads"
+    },
+    {
+      "groupHash": "deadbeef00000000",
+      "theme": "Logging"
+    }
+  ],
+  "humanDecisionsSummary": {
+    "approved": 0,
+    "salvaged": 0,
+    "skipped": 1,
+    "claudeDecided": 1,
+    "total": 1
+  }
+}

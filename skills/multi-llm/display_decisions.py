@@ -23,12 +23,14 @@ sys.path.insert(0, str(Path(__file__).parent))
 
 from utils.stream_bootstrap import bootstrap_streams
 from utils.human_decisions import judge_source_label
+from utils.judge_vocab import JUDGE_SKIPPED, upgrade_legacy
 from utils.output_handler import sanitize_prefix, get_phase_dir
 
 
 def load_output(path: str) -> dict:
+    # An output written before the judge rename says `claude_skipped`.
     with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+        return upgrade_legacy(json.load(f))
 
 
 def get_title(item: dict) -> str:
@@ -143,10 +145,10 @@ def display(data: dict, phase: str) -> None:
     # is a decision the judge agent made on the user's behalf about an item
     # validation could not settle — and this command is the one surface whose
     # whole job is to say what was decided.
-    claude_skipped = [i for i in skipped_items if i.get("status") == "claude_skipped"]
+    judge_skipped = [i for i in skipped_items if i.get("status") == JUDGE_SKIPPED]
     other_skipped = [i for i in skipped_items
                      if i.get("status") not in ("invalid", "bulk_skipped",
-                                                "below_priority", "claude_skipped")]
+                                                "below_priority", JUDGE_SKIPPED)]
 
     if invalid_items:
         print(f"  x INVALID ({len(invalid_items)} {item_noun_plural})")
@@ -174,9 +176,9 @@ def display(data: dict, phase: str) -> None:
             counter += 1
         print()
 
-    if claude_skipped:
-        print(f"  ! SKIPPED BY THE JUDGE AGENT ({len(claude_skipped)} {item_noun_plural})")
-        for item in claude_skipped:
+    if judge_skipped:
+        print(f"  ! SKIPPED BY THE JUDGE AGENT ({len(judge_skipped)} {item_noun_plural})")
+        for item in judge_skipped:
             title = get_title(item)
             imp = importance_badge(get_importance(item))
             reason = item.get("reason", "")

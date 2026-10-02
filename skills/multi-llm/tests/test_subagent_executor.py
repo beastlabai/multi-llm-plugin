@@ -1777,7 +1777,7 @@ class TestEveryKindReachesItsConsumer:
                 return str(phase_dir / "orchestrator_output.json")
 
         args = argparse.Namespace(
-            plan_file=str(plan), claude_decide=True, yes=False, exec_subagents=True,
+            plan_file=str(plan), agent_decide=True, yes=False, exec_subagents=True,
         )
         orch = _Orchestrator(args)
         orch.plan_path = str(plan)
@@ -1800,7 +1800,8 @@ class TestEveryKindReachesItsConsumer:
         assert orch.needs_human == []
         assert [g["group_hash"] for g in orch.valid] == ["aaaa000000000000"]
         decisions = json.dumps(orch.state.state)
-        assert "claude_auto_decide" in decisions
+        assert "judge_auto_decide" in decisions
+        assert "claude_auto_decide" not in decisions
 
     def test_the_native_invoker_refuses_a_schema_invalid_reply(self, tmp_path):
         """The native path validates too — it is not a trusted write channel."""

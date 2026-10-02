@@ -3,7 +3,7 @@
 When the orchestrator output includes `human_review_config`, use batch mode for efficient review of `needs-human-decision` items.
 
 **Under `--yes` (or `--non-interactive`) nothing in this file renders.** `--yes`
-implies `--agent-decide`, so `decision_mode` is always `"claude_auto_decide"` and
+implies `--agent-decide`, so `decision_mode` is always `"judge_auto_decide"` and
 the guard below routes every item to the judge — no batch summary, no per-item
 prompt, no 4-option cap to work around (D6 row 10). The batching described here
 exists only for the attended path.
@@ -13,7 +13,7 @@ exists only for the attended path.
 Before prompting for ANY needs-human-decision item, check:
 
 0. Read `human_review_config.decision_mode` from orchestrator output.
-   If it is `"claude_auto_decide"` (set by the `--agent-decide` flag, which
+   If it is `"judge_auto_decide"` (set by the `--agent-decide` flag, which
    **`--yes` sets for you** — D6 row 10, so an unattended run always lands here):
    - Do NOT prompt the user at all — skip the batch summary AND any
      per-item AskUserQuestion.
@@ -23,8 +23,8 @@ Before prompting for ANY needs-human-decision item, check:
 0a. **Partition `needs_human_review` before doing anything else.** Split the items
     into two sets:
     - **Pre-marked judge set** — every item whose `group_id` appears in
-      `human_review_config.claude_decide_item_ids`, **OR** that carries a per-item
-      `decision_mode == "claude_auto_decide"` field. (The id list is a convenience
+      `human_review_config.judge_decide_item_ids`, **OR** that carries a per-item
+      `decision_mode == "judge_auto_decide"` field. (The id list is a convenience
       index; the authoritative per-item signal is the `decision_mode` field — fall
       back to scanning that flag if an item has no stable id.)
     - **Interactive set** — all remaining items.
@@ -36,10 +36,10 @@ Before prompting for ANY needs-human-decision item, check:
        include them in any batch summary.
     2. **Then continue the steps below for the interactive set only** — the normal
        batch summary / individual prompts. (If the global
-       `decision_mode == "claude_auto_decide"` from step 0, every item is already
+       `decision_mode == "judge_auto_decide"` from step 0, every item is already
        in the pre-marked set by construction, so the interactive set is empty.)
     3. This per-item path is independent of `batch_enabled` / `mode`; it is the
-       per-item analogue of the global `claude_auto_decide` mode.
+       per-item analogue of the global `judge_auto_decide` mode.
 1. Otherwise, for the **interactive set** read `human_review_config.batch_enabled`
    from orchestrator output
 2. If `batch_enabled == true`:
@@ -68,11 +68,11 @@ Use AskUserQuestion:
 Trigger this mode when **any** of the following hold:
 - the user selects "Let the agent decide" in the batch-approval prompt — scope: **all** `needs-human-decision` items, **or**
 - the user selects "Let the agent decide" for a single item in an individual / legacy per-item prompt — scope: **just that one item**, **or**
-- `human_review_config.decision_mode == "claude_auto_decide"` (the user passed
+- `human_review_config.decision_mode == "judge_auto_decide"` (the user passed
   `--agent-decide` on the command line, so no prompt is shown) — scope: **all** `needs-human-decision` items, **or**
 - **reviewer pre-marked items via report override** — every item whose `group_id`
-  is in `human_review_config.claude_decide_item_ids`, **or** that carries a per-item
-  `decision_mode == "claude_auto_decide"` field (set via the report's "Let the agent
+  is in `human_review_config.judge_decide_item_ids`, **or** that carries a per-item
+  `decision_mode == "judge_auto_decide"` field (set via the report's "Let the agent
   decide" dropdown/checkbox) — scope: **exactly those items**. This is **distinct
   from** the global `--agent-decide` trigger above: that flag targets **all**
   needs-human items, whereas this per-item trigger targets only the items the
@@ -167,8 +167,8 @@ Approve / skip:
   "batch_context": {
     "batch_id": "{generated}",
     "judge": "{judge}",
-    "batch_action": "claude_auto_decide",
-    "decision_source": "claude_auto_decide",
+    "batch_action": "judge_auto_decide",
+    "decision_source": "judge_auto_decide",
     "importance_at_decision": "{importance}"
   }
 }
@@ -184,8 +184,8 @@ Salvage (note `decision` stays `"approved"`):
   "batch_context": {
     "batch_id": "{generated}",
     "judge": "{judge}",
-    "batch_action": "claude_auto_decide_salvage",
-    "decision_source": "claude_auto_decide_salvage",
+    "batch_action": "judge_auto_decide_salvage",
+    "decision_source": "judge_auto_decide_salvage",
     "importance_at_decision": "{importance}",
     "salvaged_description": "{the rewritten description that was applied}",
     "dropped": "{brief note on what was intentionally left out}"
@@ -233,4 +233,4 @@ For each item, use AskUserQuestion:
   - "Let the agent decide" -> Offload just this item to the judge agent: run **"Let the Agent Decide" Mode** scoped to this single item (spawn one judging subagent per **Delegate the judgment to a subagent**), then apply the original (approve), apply the rewritten description (salvage), or skip per the subagent's verdict, and continue to the next item
   - "Skip all remaining" -> Exit early
 
-The **Let the agent decide** option lets a user who is unsure about a specific item hand that one decision to the judge agent; it behaves exactly like `--agent-decide` would for that item (Approve / Salvage / Skip, with salvage preferred over skipping a partially-valid item). Record its outcome with the same `claude_auto_decide` / `claude_auto_decide_salvage` markers shown under **State Recording** so reports and `--resume` treat it identically to a flag-driven auto-decision.
+The **Let the agent decide** option lets a user who is unsure about a specific item hand that one decision to the judge agent; it behaves exactly like `--agent-decide` would for that item (Approve / Salvage / Skip, with salvage preferred over skipping a partially-valid item). Record its outcome with the same `judge_auto_decide` / `judge_auto_decide_salvage` markers shown under **State Recording** so reports and `--resume` treat it identically to a flag-driven auto-decision.

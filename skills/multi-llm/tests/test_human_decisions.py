@@ -413,10 +413,10 @@ class TestRecording:
         assert record["decision"] == "approved"
         assert record["reason"] == "Agent decide [host agent]: sound"
         context = record["batch_context"]
-        assert context["batch_action"] == "claude_auto_decide"
-        assert context["decision_source"] == "claude_auto_decide"
+        assert context["batch_action"] == "judge_auto_decide"
+        assert context["decision_source"] == "judge_auto_decide"
         assert context["importance_at_decision"] == "MEDIUM"
-        assert context["batch_id"].startswith("claude_decide_")
+        assert context["batch_id"].startswith("judge_decide_")
         assert "salvaged_description" not in context
 
     def test_skip_records_skipped(self, tmp_path):
@@ -429,7 +429,7 @@ class TestRecording:
                         items_by_group={})
         record = state.get_human_decision("apply-fixes", GROUP_A)
         assert record["decision"] == "skipped"
-        assert record["batch_context"]["batch_action"] == "claude_auto_decide"
+        assert record["batch_context"]["batch_action"] == "judge_auto_decide"
 
     def test_salvage_records_approved_with_the_salvage_markers(self, tmp_path):
         state = self._state(tmp_path)
@@ -456,8 +456,8 @@ class TestRecording:
             "dropped the queue"
         )
         context = record["batch_context"]
-        assert context["batch_action"] == "claude_auto_decide_salvage"
-        assert context["decision_source"] == "claude_auto_decide_salvage"
+        assert context["batch_action"] == "judge_auto_decide_salvage"
+        assert context["decision_source"] == "judge_auto_decide_salvage"
         assert context["salvaged_description"] == "Only the retry."
         assert context["dropped"] == "the queue"
         assert context["importance_at_decision"] == "HIGH"
@@ -483,7 +483,7 @@ class TestRecording:
             for group_id in (GROUP_A, GROUP_B)
         }
         assert outcomes[GROUP_A]["outcome"] == "salvaged"
-        assert outcomes[GROUP_A]["claudeDecided"] is True
+        assert outcomes[GROUP_A]["judgeDecided"] is True
         assert outcomes[GROUP_B]["outcome"] == "skipped"
 
     def test_batch_id_is_stable_across_re_ingest(self, tmp_path):
@@ -564,7 +564,7 @@ class TestWorkSetRewrite:
         assert group["suggestions"][0]["desc"] == "Only the retry."
         assert "Original description" not in json.dumps(group)
         assert group["salvaged_description"] == "Only the retry."
-        assert group["decision_source"] == "claude_auto_decide_salvage"
+        assert group["decision_source"] == "judge_auto_decide_salvage"
 
     def test_salvage_collapses_the_group_to_one_narrowed_suggestion(self):
         group = _group(GROUP_A)
@@ -611,7 +611,7 @@ class TestWorkSetRewrite:
 class TestOrchestratorHook:
     """The apply orchestrators call the ingest after the judging phase."""
 
-    def _orchestrator(self, tmp_path, claude_decide=True):
+    def _orchestrator(self, tmp_path, agent_decide=True):
         import argparse
 
         from utils.apply_orchestrator_base import ApplyOrchestratorBase
@@ -633,7 +633,7 @@ class TestOrchestratorHook:
                 return str(phase_dir / "orchestrator_output.json")
 
         args = argparse.Namespace(
-            plan_file=str(plan), claude_decide=claude_decide, yes=False
+            plan_file=str(plan), agent_decide=agent_decide, yes=False
         )
         orch = _Orchestrator(args)
         orch.plan_path = str(plan)
@@ -649,17 +649,17 @@ class TestOrchestratorHook:
         document = json.loads((phase_dir / JUDGE_TASKS_FILENAME).read_text())
         assert [t["group_id"] for t in tasks_of(document)] == [GROUP_A, GROUP_B]
 
-    def test_scope_is_the_pre_marked_items_without_claude_decide(self, tmp_path):
-        orch, phase_dir = self._orchestrator(tmp_path, claude_decide=False)
+    def test_scope_is_the_pre_marked_items_without_agent_decide(self, tmp_path):
+        orch, phase_dir = self._orchestrator(tmp_path, agent_decide=False)
         marked = _group(GROUP_A)
-        marked["claude_decide"] = True
+        marked["judge_decide"] = True
         orch.needs_human = [marked, _group(GROUP_B)]
         orch._handle_human_decisions()
         document = json.loads((phase_dir / JUDGE_TASKS_FILENAME).read_text())
         assert [t["group_id"] for t in tasks_of(document)] == [GROUP_A]
 
     def test_nothing_is_materialized_when_no_item_is_in_scope(self, tmp_path):
-        orch, phase_dir = self._orchestrator(tmp_path, claude_decide=False)
+        orch, phase_dir = self._orchestrator(tmp_path, agent_decide=False)
         orch.needs_human = [_group(GROUP_A)]
         orch._handle_human_decisions()
         assert not (phase_dir / JUDGE_TASKS_FILENAME).exists()
@@ -700,8 +700,8 @@ class TestOrchestratorHook:
         assert len(orch.formatted_skipped) == len(orch.skipped) == 1
         entry = orch.formatted_skipped[0]
         assert entry["group_id"] == GROUP_A
-        assert entry["status"] == "claude_skipped"
-        assert entry["decision_source"] == "claude_auto_decide"
+        assert entry["status"] == "judge_skipped"
+        assert entry["decision_source"] == "judge_auto_decide"
         assert entry["reason"].startswith("Agent decide [")
 
     def test_unattended_run_skips_a_group_the_judge_did_not_cover(self, tmp_path, capsys):
@@ -803,7 +803,7 @@ class TestTheJudgeIsNamed:
         assert "Claude" not in record["reason"]
         assert record["batch_context"]["judge"] == self.RUNNER
         # Persisted vocabulary is unchanged for old readers.
-        assert record["batch_context"]["decision_source"].startswith("claude_auto_decide")
+        assert record["batch_context"]["decision_source"].startswith("judge_auto_decide")
 
         needs, valid, skipped = [_group(GROUP_A)], [], []
         apply_verdicts_to_work_set(verdicts=ingest.verdicts, needs_human=needs,
@@ -905,30 +905,30 @@ class TestHostNeutralJudgeProvenance:
     def test_the_persisted_markers_are_still_recognised(self):
         from utils.human_decisions import is_judge_source
 
-        assert is_judge_source("claude_auto_decide")
-        assert is_judge_source("claude_auto_decide_salvage")
+        assert is_judge_source("judge_auto_decide")
+        assert is_judge_source("judge_auto_decide_salvage")
         assert not is_judge_source("user")
         assert not is_judge_source(None)
 
     def test_labels_are_host_neutral(self):
         from utils.human_decisions import judge_source_label, judge_status_label
 
-        assert judge_source_label("claude_auto_decide") == "judge agent"
-        assert judge_source_label("claude_auto_decide_salvage") == "judge agent (salvaged)"
+        assert judge_source_label("judge_auto_decide") == "judge agent"
+        assert judge_source_label("judge_auto_decide_salvage") == "judge agent (salvaged)"
         assert judge_source_label("user") == "user"
-        assert judge_status_label("claude_skipped") == "skipped by judge"
+        assert judge_status_label("judge_skipped") == "skipped by judge"
         assert judge_status_label("invalid") == "invalid"
-        for text in (judge_source_label("claude_auto_decide"),
-                     judge_status_label("claude_skipped")):
+        for text in (judge_source_label("judge_auto_decide"),
+                     judge_status_label("judge_skipped")):
             assert "claude" not in text.lower()
 
     def test_a_salvage_is_salvaged_though_stored_as_approved(self):
         from utils.human_decisions import judge_outcome
 
         salvage = {"decision": "approved",
-                   "batch_context": {"decision_source": "claude_auto_decide_salvage"}}
+                   "batch_context": {"decision_source": "judge_auto_decide_salvage"}}
         plain = {"decision": "approved",
-                 "batch_context": {"decision_source": "claude_auto_decide"}}
+                 "batch_context": {"decision_source": "judge_auto_decide"}}
         assert judge_outcome(salvage) == "salvaged"
         assert judge_outcome(plain) == "approved"
         assert judge_outcome({"decision": "skipped", "batch_context": {}}) == "skipped"

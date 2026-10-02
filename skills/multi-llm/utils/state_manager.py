@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .git_utils import get_current_head, get_branch_name
+from .judge_vocab import upgrade_legacy
 from .schema_validator import validate_state_file
 
 logger = logging.getLogger(__name__)
@@ -479,7 +480,11 @@ class StateManager:
         if self.state_file.exists():
             try:
                 with open(self.state_file, "r", encoding="utf-8") as f:
-                    self.state = json.load(f)
+                    # A run started before the judge rename recorded its
+                    # decisions as `claude_auto_decide*`; read them as the
+                    # host-neutral names, so `--resume` crosses the upgrade and
+                    # the next save() writes only the new spelling.
+                    self.state = upgrade_legacy(json.load(f))
 
                 # Check for plan changes. Deliberately set-only: the flag is
                 # cleared by whoever CONSUMES it, never by a bare load.
@@ -600,7 +605,7 @@ class StateManager:
             return
         try:
             with open(self.state_file, "r", encoding="utf-8") as f:
-                loaded = json.load(f)
+                loaded = upgrade_legacy(json.load(f))
         except (json.JSONDecodeError, OSError):
             # A corrupt or unreadable file is not worth losing the dict we hold:
             # the next `save()` rewrites it wholesale anyway.

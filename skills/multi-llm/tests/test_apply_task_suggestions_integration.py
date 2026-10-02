@@ -916,8 +916,8 @@ class TestDisplayDecisions:
                     "group_id": "3b810046f0a56e8c",
                     "title": "T001 complexity likely underestimated",
                     "importance": "LOW",
-                    "status": "claude_skipped",
-                    "decision_source": "claude_auto_decide",
+                    "status": "judge_skipped",
+                    "decision_source": "judge_auto_decide",
                     "reason": "Agent decide [codex:gpt-6-astra]: not decidable from the text",
                 },
             ],
@@ -931,7 +931,7 @@ class TestDisplayDecisions:
         assert "x INVALID (1 task suggestions)" in out
         assert "! SKIPPED BY THE JUDGE AGENT (1 task suggestions)" in out
         assert "(judge agent)" in out
-        assert "claude_auto_decide" not in out
+        assert "judge_auto_decide" not in out
         assert "not decidable from the text" in out
         # The judged item must not be counted as a validation skip.
         invalid_block = out.split("INVALID")[1].split("SKIPPED BY THE JUDGE AGENT")[0]

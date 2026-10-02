@@ -975,8 +975,8 @@ class TestConsolidatedClaudeDecide:
         # The existing checkboxes are still present.
         assert "- [ ] Mark valid" in content
 
-    def test_round_trip_claude_decide_preserved_as_marker(self, tmp_path):
-        """A consolidated claude_decide resolves to group indices, kept verbatim."""
+    def test_round_trip_judge_decide_preserved_as_marker(self, tmp_path):
+        """A consolidated judge_decide resolves to group indices, kept verbatim."""
         phase_dir = str(tmp_path)
         groups = [
             _make_group("Theme G1", "Task 1"),
@@ -1017,8 +1017,8 @@ class TestConsolidatedClaudeDecide:
 
         # Resolves to BOTH underlying group indices, preserved as the marker
         # string (NOT flattened into a status).
-        assert overrides.get(0) == "claude_decide"
-        assert overrides.get(1) == "claude_decide"
+        assert overrides.get(0) == "judge_decide"
+        assert overrides.get(1) == "judge_decide"
 
 
 # ===========================================================================

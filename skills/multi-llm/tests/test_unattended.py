@@ -677,27 +677,27 @@ class TestHumanTaskPause:
 # ---------------------------------------------------------------------------
 
 class TestApplyPhaseRows:
-    def test_yes_sets_claude_decide_itself(self):
-        args = argparse.Namespace(yes=True, claude_decide=False)
+    def test_yes_sets_agent_decide_itself(self):
+        args = argparse.Namespace(yes=True, agent_decide=False)
         apply_unattended_defaults(args)
-        assert args.claude_decide is True, (
+        assert args.agent_decide is True, (
             "D5a row 10: --yes sets both --agent-decide and --no-confirm"
         )
 
     def test_without_yes_nothing_is_added(self):
-        args = argparse.Namespace(yes=False, claude_decide=False)
+        args = argparse.Namespace(yes=False, agent_decide=False)
         apply_unattended_defaults(args)
-        assert args.claude_decide is False
+        assert args.agent_decide is False
 
     def test_row_10_names_agent_decide_and_accepts_the_legacy_spellings(self):
         assert un.row(10).flags[0] == "--agent-decide"
         for spelling in ("--agent-decide", "--claude-decide", "--let-claude-decide"):
             assert un.flag_spec(spelling).name == "--agent-decide"
 
-    def test_an_explicit_claude_decide_is_untouched(self):
-        args = argparse.Namespace(yes=True, claude_decide=True)
+    def test_an_explicit_agent_decide_is_untouched(self):
+        args = argparse.Namespace(yes=True, agent_decide=True)
         apply_unattended_defaults(args)
-        assert args.claude_decide is True
+        assert args.agent_decide is True
 
     def test_yes_bypasses_the_no_selection_confirmation(self):
         assert should_bypass_no_selection_confirmation(yes=True) is True
@@ -1253,7 +1253,7 @@ def _stub_apply_args(tmp_path, **flags):
         approve_importance=None, skip_human_review=False, no_batch=False,
         max_batch_size=4, batch_review_mode="by-importance",
         accept_stale_consolidation=False, no_confirm=False, include_high=False,
-        claude_decide=False,
+        agent_decide=False,
     )
     defaults.update(flags)
     return argparse.Namespace(**defaults)
@@ -1269,7 +1269,7 @@ def _stub_apply_run(tmp_path, **flags):
 class TestApplyPhaseRowsAreRecorded:
     """D6's own standard: an auto-selection nobody can see is a degradation."""
 
-    def test_the_yes_that_flips_claude_decide_announces_itself(self, tmp_path, capsys):
+    def test_the_yes_that_flips_agent_decide_announces_itself(self, tmp_path, capsys):
         _stub_apply_run(tmp_path, yes=True)
         out = capsys.readouterr().out
         assert f"[AUTO_RESOLVED] {un.row(10).site_id}:" in out
