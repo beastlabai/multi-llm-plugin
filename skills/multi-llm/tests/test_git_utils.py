@@ -1923,6 +1923,72 @@ class TestIntentToAddUntracked:
         assert not [p for p in (temp_git_repo / ".git").iterdir()
                     if p.name.startswith("multi-llm-index.")]
 
+    def test_a_relative_preset_index_var_resolves_against_cwd(
+        self, temp_git_repo, monkeypatch, tmp_path, capsys
+    ):
+        """A git hook exports `GIT_INDEX_FILE=.git/index`; the copy's source
+        is that path relative to where git runs (`cwd`), not to this process's
+        own directory (adversarial review, 2026-10-02: resolved against the
+        process cwd, the target dir did not exist, `git add -N` failed on its
+        lock file and the file stayed invisible with only a warning)."""
+        import os
+
+        (temp_git_repo / "new.py").write_text("print('hello')\n", encoding="utf-8")
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        monkeypatch.setenv("GIT_INDEX_FILE", ".git/index")
+
+        with intent_to_add_untracked(["new.py"], cwd=str(temp_git_repo)) as touched:
+            assert touched == ["new.py"]
+            copy = os.environ["GIT_INDEX_FILE"]
+            assert os.path.isabs(copy)
+            assert Path(copy).parent == temp_git_repo / ".git"
+            assert "hello" in _run(["git", "diff", "HEAD", "--", "new.py"], temp_git_repo).stdout
+
+        assert os.environ["GIT_INDEX_FILE"] == ".git/index"
+        assert "could not mark untracked files" not in capsys.readouterr().err
+        assert not [p for p in (temp_git_repo / ".git").iterdir()
+                    if p.name.startswith("multi-llm-index.")]
+
+    def test_sweeps_the_copies_a_killed_run_left_behind(self, temp_git_repo, monkeypatch):
+        """SIGKILL skips the `finally`, so a copy named after a dead pid (and
+        its `.lock`) stayed in `.git` forever (adversarial review, 2026-10-02).
+        Entry sweeps those; copies of this process and of another live
+        process are left alone."""
+        import os
+
+        monkeypatch.delenv("GIT_INDEX_FILE", raising=False)
+        git_dir = temp_git_repo / ".git"
+        from utils.process_control import process_alive
+
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        child.wait()
+        dead_pid = child.pid
+        assert not process_alive(dead_pid)
+        gone = [
+            git_dir / f"multi-llm-index.{dead_pid}.111",
+            git_dir / f"multi-llm-index.{dead_pid}.111.lock",
+            git_dir / f"multi-llm-index.{dead_pid}.222",
+        ]
+        kept = [
+            git_dir / f"multi-llm-index.{os.getpid()}.333",
+            git_dir / f"multi-llm-index.1.444",  # init: alive, not ours
+            git_dir / "multi-llm-index.notapid",
+        ]
+        for path in gone + kept:
+            path.write_bytes(b"x")
+        (temp_git_repo / "new.py").write_text("x = 1\n", encoding="utf-8")
+
+        with intent_to_add_untracked(["new.py"]) as touched:
+            assert touched == ["new.py"]
+
+        for path in gone:
+            assert not path.exists(), path.name
+        for path in kept:
+            assert path.exists(), path.name
+            path.unlink()
+
     def test_skips_already_staged(self, temp_git_repo):
         """Files already staged (with content) should not be touched; they
         remain staged after the context exits."""
