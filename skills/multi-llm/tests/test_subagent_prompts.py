@@ -733,3 +733,66 @@ class TestEmbeddedContextAndReply:
         assert '"plan_preamble"' in prompt
         assert '"executor_role": "agent|human"' in prompt
         assert "subagent_type" not in prompt
+
+
+# ---------------------------------------------------------------------------
+# Issues 6, 11 and 31 of the 2026-10-01 three-host run
+# ---------------------------------------------------------------------------
+
+class TestPlanReviewStaysOutOfTaskDecomposition:
+    """Task breakdown belongs to generate-tasks; a plan review must not ask for it."""
+
+    def test_the_reviewer_prompt_does_not_list_tasks_as_plan_content(self):
+        text = (SKILL_ROOT / "prompts" / "plan_review.txt").read_text(encoding="utf-8")
+        assert "Implementation tasks with dependencies" not in text
+        assert "Out of Scope: Task Decomposition" in text
+        assert "Do NOT report that the plan lacks a task breakdown" in text
+
+    def test_a_plan_validation_tells_the_validator_the_scope_rule(self):
+        prompt = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS
+        )
+        assert "no task breakdown" in prompt
+        assert 'is "invalid"' in prompt
+
+    def test_code_review_and_review_tasks_validation_do_not_get_the_plan_rule(self):
+        tasks = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT,
+            suggestion_records=SUGGESTION_RECORDS,
+            context_label="Tasks file",
+        )
+        code = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT,
+            suggestion_records=SUGGESTION_RECORDS,
+            extra_instructions=CODE_REVIEW_VALIDATION_GUIDANCE,
+        )
+        assert "no task breakdown" not in tasks
+        assert "no task breakdown" not in code
+
+
+class TestReplyContractIsRobustToAMalformedReply:
+    def test_validation_and_judge_replies_name_the_bracket_rule(self):
+        validation = build_validation_prompt(
+            plan_excerpt=PLAN_EXCERPT, suggestion_records=SUGGESTION_RECORDS
+        )
+        judge = build_human_decision_judge_prompt([{"group_id": "g", "title": "t"}])
+        for prompt in (validation, judge):
+            assert "a reply that does not parse is thrown away" in prompt
+            assert "balanced brackets" in prompt
+
+
+class TestJudgePrompt:
+    def test_a_code_fix_item_may_not_be_salvaged_into_a_plan_edit(self):
+        prompt = build_human_decision_judge_prompt(
+            [{"group_id": "g", "title": "t", "file": "index.html", "line_range": [1, 2]}]
+        )
+        assert "Never salvage it into an edit" in prompt
+        assert "approved deviation" in prompt
+
+    def test_a_prose_item_carries_no_code_fix_rule(self):
+        prompt = build_human_decision_judge_prompt([{"group_id": "g", "title": "t"}])
+        assert "Never salvage it into an edit" not in prompt
+
+    def test_the_reply_asks_the_judge_to_name_its_model(self):
+        prompt = build_human_decision_judge_prompt([{"group_id": "g", "title": "t"}])
+        assert '"judge": "<the model you are>"' in prompt

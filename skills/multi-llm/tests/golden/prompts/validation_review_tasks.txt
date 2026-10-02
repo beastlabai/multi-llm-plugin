@@ -95,6 +95,10 @@ plan, that change is the text such a claim is judged against.
 
 Print ONE JSON object and nothing else — no prose, no markdown fences, no
 explanation. Do not write any file; whoever invoked you persists your reply.
+Your reply is parsed as-is, and a reply that does not parse is thrown away:
+the first character is `{` and the last is the `}` that closes it. Keep every
+`reason` to one short line with no raw double quotes or line breaks inside it,
+and re-read the object once for balanced brackets before you finish.
 
 {
   "groups": [

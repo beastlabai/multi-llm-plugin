@@ -490,6 +490,15 @@ to bare `python`.
 
    Follow the wave-based spawning strategy in `references/wave-batching.md`.
 
+   **Check each reply right after you write it.** Run
+   `uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util check-reply --tasks-file "{plan}/code-review/validation_tasks.json" --task-id <task_id>`
+   (omit `--task-id` to check every batch). `[REPLY_INVALID]` means the subagent's reply
+   did not parse or did not cover its groups — Sonnet subagents lost a closing `]` on 3 of
+   14 batches in the 2026-10-01 Claude Code run. Re-ask the same subagent once for the
+   whole reply and write the new reply over the file. Never edit, trim or complete a reply
+   yourself, and never assemble one from the parts of two replies. A batch still
+   `[REPLY_INVALID]` after that one re-ask is a failed batch: leave its file as it is and say so.
+
    **Before you continue: verify every batch wrote its file, and do not end your turn before it has.** Confirm that each task's `output_path` exists and is not empty. Re-dispatch any task whose file is missing — exactly as the contract above says — and write its reply yourself; only a batch that comes back empty-handed a second time is a failed batch, and a batch nobody re-dispatched is not one. Spawn batches so their replies return inside this turn, and stay in the turn until the last file is on disk: **you** write these files, not the subagents, and a host that runs one headless turn has no second turn in which to write them — a reply that lands after the turn ends is a batch lost with nothing on disk to say so. Naming the batch you are waiting on is not waiting for it.
 
    3. After ALL batches complete, run the reaggregation command below (rebuilt from `reaggregate_mode` + `plan_file`)

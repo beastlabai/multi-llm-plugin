@@ -53,6 +53,7 @@ from utils.suggestion_batcher import (
     SuggestionBatch,
 )
 from utils.tasks_file import find_tasks_file
+from utils.tasks_graph_check import tasks_graph_warnings
 
 
 class ApplyTaskSuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], SuggestionBatch]):
@@ -91,6 +92,14 @@ class ApplyTaskSuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Sug
     # ----------------------------------------------------------------
     # Argument parser
     # ----------------------------------------------------------------
+
+    def consistency_warnings(self) -> List[str]:
+        """The task graph of ``tasks.md`` as the batches left it (issue 10)."""
+        try:
+            with open(self.tasks_file, "r", encoding="utf-8") as handle:
+                return tasks_graph_warnings(handle.read())
+        except (OSError, UnicodeDecodeError):
+            return []
 
     @classmethod
     def parse_args(cls, argv=None):
@@ -510,6 +519,12 @@ For each suggestion type, follow these rules precisely:
 ### Clarification
 - Rewrite the task description and/or acceptance criteria for clarity
 - ALL canonical fields must be preserved — do not remove or alter fields that are not being clarified
+
+### Consistency across tasks (every type)
+- A task graph is edited by many batches and nobody reads it whole afterwards, so keep it consistent yourself
+- Work moved into one task (a helper, a field, a function) must be removed from, or re-pointed in, the task that used to own it — never leave two tasks that both define it
+- A task that now uses something another task defines MUST list that task in `depends_on`; a new task goes where the tasks that depend on it can follow it, not last, and gets an ID no existing task has
+- Before you finish, re-read every task you touched and every task that depends on one, and fix any disagreement in IDs, dependencies or ordering
 """
 
         if len(suggestions) == 1:

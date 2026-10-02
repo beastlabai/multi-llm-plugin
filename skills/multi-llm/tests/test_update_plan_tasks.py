@@ -793,3 +793,36 @@ class TestHumanTaskRendering:
 
         assert "**Executor**: agent" in result
         assert "**Type**: Manual (user action required)" in result
+
+
+class TestInPlanTaskSections:
+    """Issue 6: apply-suggestions wrote a task list into the plan, then generate-tasks
+    wrote a second one. The script cannot merge them; it names the first."""
+
+    def test_finds_the_headings_the_run_produced(self):
+        from update_plan_tasks import find_in_plan_task_sections
+
+        plan = (
+            "# Plan\n\n## Design\n\ntext\n\n### Tasks\n\n1. a\n\n"
+            "## Implementation tasks\n\n- b\n\n"
+            "### Implementation tasks with dependencies\n\n- c\n"
+        )
+        assert find_in_plan_task_sections(plan) == [
+            "### Tasks", "## Implementation tasks",
+            "### Implementation tasks with dependencies",
+        ]
+
+    def test_its_own_pointer_section_is_not_a_task_list(self):
+        from update_plan_tasks import find_in_plan_task_sections
+
+        plan = (
+            "# Plan\n\n## Implementation Tasks\n\nSee [t](t.md).\n\n"
+            "<!-- TASKS_FILE: plans/p/tasks/tasks.md -->\n"
+        )
+        assert find_in_plan_task_sections(plan) == []
+
+    def test_ordinary_headings_are_not_flagged(self):
+        from update_plan_tasks import find_in_plan_task_sections
+
+        plan = "# Plan\n\n## Subtasks of the design\n\n### Task 3: API\n\n## Testing\n"
+        assert find_in_plan_task_sections(plan) == []

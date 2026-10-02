@@ -6276,7 +6276,10 @@ class TestTheExecutorLegRunsStepSeven:
         assert "  judge: codex:gpt-6-astra" in out
         assert "Claude" not in out.split("Decided by the judge agent")[1]
         assert "[skipped] Raise T001 to high [3b810046]" in out
-        assert "source: claude_auto_decide" in out
+        # The persisted marker is a storage key, not a word for the user: a
+        # Codex judge's decision used to print `source: claude_auto_decide`.
+        assert "source: judge agent" in out
+        assert "claude_auto_decide" not in out
         assert "not decidable from the text" in out
 
     def test_the_summary_report_the_instructions_advertise_is_written(
@@ -6293,7 +6296,57 @@ class TestTheExecutorLegRunsStepSeven:
         assert "judge: codex:gpt-6-astra" in text
         assert "`--agent-decide`" in text
         assert "Raise T001 to high (LOW) — Skipped" in text
-        assert "claude_auto_decide" in text
+        assert "**Source**: judge agent" in text
+        assert "claude_auto_decide" not in text
+        assert "Decided by the judge agent: 1 (0 approved, 0 salvaged, 1 skipped)" in text
+
+    def test_a_salvage_reads_as_salvaged_in_the_log_the_report_and_the_count(
+        self, tmp_path, capsys
+    ):
+        """One run said "1 salvaged" at ingest and "Approved" in summary.md.
+
+        A salvage is stored as `decision: approved` plus the salvage marker, so
+        every surface that read `decision` alone called it approved.
+        """
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        orch.state.record_human_decision(
+            phase=orch.phase_name,
+            group_id="9a9a9a9a9a9a9a9a",
+            decision="approved",
+            reason="Agent decide [codex:gpt-6-astra] (salvaged): kept the core",
+            batch_context={
+                "batch_action": "claude_auto_decide_salvage",
+                "decision_source": "claude_auto_decide_salvage",
+                "salvaged_description": "the core",
+                "dropped": "the rest",
+                "importance_at_decision": "MEDIUM",
+                "judge": "codex:gpt-6-astra",
+            },
+        )
+        orch.state.save()
+        orch.print_write_outcome_summary()
+        out = capsys.readouterr().out
+        assert "[salvaged] " in out
+        assert "source: judge agent (salvaged)" in out
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "(MEDIUM) — Salvaged" in text
+        assert "**Source**: judge agent (salvaged)" in text
+        assert "(0 approved, 1 salvaged, 1 skipped)" in text
+
+    def test_a_judge_skip_is_listed_as_skipped_by_judge_not_claude(
+        self, tmp_path, capsys
+    ):
+        orch = self._orchestrator_with_a_decision(tmp_path)
+        orch.formatted_skipped = [
+            {"group_id": "3b810046f0a56e8c", "title": "Raise T001 to high",
+             "status": "claude_skipped", "reason": "subjective"}
+        ]
+        orch.print_write_outcome_summary()
+        out = capsys.readouterr().out
+        assert "[skipped by judge] Raise T001 to high" in out
+        assert "claude_skipped" not in out
+        text = Path(orch.write_apply_summary_report()).read_text(encoding="utf-8")
+        assert "### Raise T001 to high [skipped by judge]" in text
 
     def test_the_report_names_the_verification_the_template_promised(
         self, tmp_path

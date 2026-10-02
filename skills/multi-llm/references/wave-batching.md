@@ -22,7 +22,7 @@ When there are more than 4 batches, spawn them in waves to control context growt
 ## Error Handling
 
 - Per-subagent timeout: 60 seconds. If a subagent times out, mark that batch as `validation_failed`.
-- If a subagent returns malformed output or fails validation, retry it once (max 1 retry per batch). If still failing, mark it as `validation_failed` and move on.
+- If a subagent returns malformed output or fails validation, retry it once (max 1 retry per batch). `util check-reply` is the test of "malformed" — run it after writing each reply — and the retry is a fresh reply from the subagent, never a repair of the bad one. If still failing, mark it as `validation_failed` and move on.
 - A missing `output_path` spends that same one retry: re-dispatch the batch and write the reply yourself. Only a batch that comes back empty-handed a second time is `validation_failed`. A batch you never re-dispatched is not a failed batch and must not be reported as one — it is a batch the run dropped, and the merge cannot tell the two apart.
 - If any batch in a wave fails (after retry), log the failed batch index and continue to the next wave -- do NOT abort the workflow.
 - After ALL waves complete, report which batches failed (e.g., "Completed {success}/{total} batches. Failed: batch {indices}.").

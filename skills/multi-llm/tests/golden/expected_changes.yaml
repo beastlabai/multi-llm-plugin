@@ -778,6 +778,14 @@ changes:
       plans/next-phase-command.md T5: the `[NEXT_COMMAND]` line of the same
       answer, printed on stdout after the phase's last marker.
 
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/batches
+    rationale: >
+      Issue 31 of the 2026-10-01 three-host run: every fix-batch prompt now ends
+      its instructions with the "change code only" rule
+      (`code_fix_batcher.CODE_ONLY_RULE`), because a code-fix phase edited the
+      plan and tasks.md to record an "approved deviation" where the reviewers
+      had asked for a code fix.
+
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
 #
