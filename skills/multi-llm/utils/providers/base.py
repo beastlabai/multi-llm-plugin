@@ -642,15 +642,23 @@ def sandbox_walk_clause(
             parts.append(said)
             continue
         if outcome == _WALK_OUTCOME_SKIPPED:
-            # "since", not "from": the version named is where the rung was
-            # *removed*, not the one measured. "unavailable from codex 0.156.1,
+            # "since", not "from": the version named is the first one measured
+            # unusable, not the one installed. "unavailable from codex 0.156.1,
             # measured" printed under codex 0.159.3 read as a stale measurement
             # (2026-10-02); the installed build is named when it differs.
+            # "unusable", not "removed": codex 0.160.0 still lists the feature
+            # (`codex features list`: `use_legacy_landlock deprecated false`),
+            # and what was measured is the rung probe's exit-101 panic, so a
+            # reader of "removed" would drop a rung a later codex may serve
+            # again (adversarial review, 2026-10-02). Only the landlock rung
+            # declares `removed_at`, and its measured failure is that panic.
             since = removed.get(name) or version or "?"
-            installed = f" (installed: {version})" if version and version != since else ""
+            facts = ["panics", "measured"]
+            if version and version != since:
+                facts.append(f"installed: {version}")
             parts.append(
-                f"fallback rung {name!r} not tried: removed since "
-                f"{provider_name} {since}{installed}"
+                f"fallback rung {name!r} not tried: unusable since "
+                f"{provider_name} {since} ({'; '.join(facts)})"
             )
             continue
         if outcome == _WALK_OUTCOME_RETIRED:

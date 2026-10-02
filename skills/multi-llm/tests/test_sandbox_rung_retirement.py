@@ -203,10 +203,14 @@ class TestAtOrAboveRemovedAt:
         assert lanes.rung_probes() == []
         assert first.walk == (("landlock", "skipped"), ("unsandboxed", "taken"))
         assert first.bypass and second.reason == first.reason
+        # "unusable", not "removed": the feature is still listed on codex
+        # 0.160.0; the probe's panic is what was measured (2026-10-02).
         assert first.reason.endswith(
-            "; fallback rung 'landlock' not tried: removed since fakecodex "
-            "0.156.1" + ("" if version == "0.156.1" else f" (installed: {version})")
+            "; fallback rung 'landlock' not tried: unusable since fakecodex "
+            "0.156.1 (panics; measured"
+            + ("" if version == "0.156.1" else f"; installed: {version}") + ")"
         )
+        assert "removed" not in first.reason
         capsys.readouterr()
         served = {SPEC: {"sandbox": "bypassed"}, "fakecodex:n": {"sandbox": "bypassed"}}
         # Printed from the version alone — no prior record needed.
@@ -225,7 +229,7 @@ class TestAtOrAboveRemovedAt:
         assert lanes.executor("fakecodex:n") == "bypassed"
         assert lanes.rung_probes() == []
         out = capsys.readouterr().out
-        assert "not tried: removed since fakecodex 0.156.1" in out
+        assert "not tried: unusable since fakecodex 0.156.1 (panics; measured)" in out
         assert len(_retired_lines(out)) == 1
 
     def test_an_unread_version_probes_and_the_outcome_is_authoritative(
@@ -248,7 +252,7 @@ class TestUnderContained:
         lanes.use(_Codexish(version="0.156.1", landlock=CANARY_DENIED, policy="contained"))
         verdict = lanes.fanout()
         assert verdict.refused
-        clause = "fallback rung 'landlock' not tried: removed since fakecodex 0.156.1"
+        clause = "fallback rung 'landlock' not tried: unusable since fakecodex 0.156.1"
         assert clause in verdict.reason
         for spec in (SPEC, "fakecodex:n"):
             with pytest.raises(executor.RunnerRejected) as excinfo:

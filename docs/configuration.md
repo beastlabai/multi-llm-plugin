@@ -189,9 +189,10 @@ alternative: it needs `/etc` and sudo, and gives back codex's own
 use_legacy_landlock` makes every `workspace-write` dispatch panic (exit 101),
 write phases included; the flag is only safe as the per-dispatch `-c` rung 1
 adds, and `doctor` warns if your codex config sets it. Rung 1 is read-only only
-and rides a feature codex marked deprecated (measured at 0.155.1) and removed
-(measured: removed since 0.156.1): on a current codex the walk skips it by
-version, `auto` goes on to rung 2 and `contained` refuses.
+and rides a feature codex marked deprecated (measured at 0.155.1) and that has
+been unusable since 0.156.1 (the rung's probe panics with exit 101; measured,
+while codex 0.160.0 still lists the feature): on a current codex the walk skips
+it by version, `auto` goes on to rung 2 and `contained` refuses.
 
 Because the default is already the widest value, a cloned repository's
 `.multi-llm/providers.yaml` can only narrow the fallback — there is nothing for
