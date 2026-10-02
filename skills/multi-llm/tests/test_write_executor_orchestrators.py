@@ -1503,11 +1503,84 @@ class TestARenumberedApplyBatchKeepsItsOwnRollbackPoint(_ApplyRig):
         payload = next((stopped / "files").iterdir()).read_text(encoding="utf-8")
         assert payload == before_run + "run1\n"
         assert by_items[tuple(ids[2])].name == "apply-batch-1"
-        # And `util restore-batch` reaches it by the name it was kept under.
+        # And `util restore-batch` reaches it by the name it was kept under —
+        # VERIFIED against the stopped batch's own completion record (found
+        # by the items the manifest names, not by the slot id, which the
+        # resumed batch now owns): the file moved since (the resumed batch
+        # applied its edit on top), so it is refused, and `--force` is the
+        # explicit way to take the later edit down with it.
         from utils import restore_batch
+        after_resume = plan.read_text(encoding="utf-8")
         assert restore_batch.main([
             "--phase-dir", str(self._phase_dir(plan)), "--task-id", stopped.name,
+        ]) == 3
+        assert plan.read_text(encoding="utf-8") == after_resume
+        assert restore_batch.main([
+            "--phase-dir", str(self._phase_dir(plan)), "--task-id", stopped.name,
+            "--force",
         ]) == 0
+        assert plan.read_text(encoding="utf-8") == before_run + "run1\n"
+
+    def test_restoring_the_set_aside_snapshot_never_drops_a_users_later_edit(
+        self, repo, capsys
+    ):
+        """Adversarial review of round 3: the set-aside name had no completion
+        record under it, so restore took the "run died before classifying"
+        branch — every entry restored, nothing verified, exit 0 — and wiped
+        both the resumed batch's edit and an edit the user made after it."""
+        from utils import restore_batch
+
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        assert self._run(repo, plan, ids[0], content="run1\n") == 3
+        self._deselect(repo, 1)
+        assert self._run(repo, plan, sum(ids, []), "--resume", content="run2\n") == 0
+        phase_dir = self._phase_dir(plan)
+        stopped = next(
+            m.parent for m in (phase_dir / "pre_batch").glob("*/manifest.json")
+            if json.loads(m.read_text())["expected_ids"] == ids[1])
+        plan.write_text(plan.read_text() + "USER EDIT\n", encoding="utf-8")
+        edited = plan.read_text(encoding="utf-8")
+
+        assert restore_batch.main([
+            "--phase-dir", str(phase_dir), "--task-id", stopped.name]) == 3
+        assert plan.read_text(encoding="utf-8") == edited
+        out = capsys.readouterr().out
+        assert "changed after the run" in out
+        audit = [json.loads(line) for line in
+                 (phase_dir / "subagent_audit.jsonl").read_text().splitlines()]
+        restored = [r for r in audit if r.get("event") == "restored"]
+        assert restored and all(
+            outcome.startswith("skipped:")
+            for outcome in restored[-1]["result"].values())
+
+    def test_all_failed_names_the_stopped_batch_under_its_set_aside_name(
+        self, repo, capsys
+    ):
+        """`--all-failed` keyed its latest-completion map on the slot id, so
+        the resumed batch's clean completion under `apply-batch-1` hid the
+        stopped batch's failure and nothing was listed."""
+        from utils import restore_batch
+
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        before_run = plan.read_text(encoding="utf-8")
+        assert self._run(repo, plan, ids[0], content="run1\n") == 3
+        self._deselect(repo, 1)
+        assert self._run(repo, plan, sum(ids, []), "--resume", content="run2\n") == 0
+        phase_dir = self._phase_dir(plan)
+        stopped = next(
+            m.parent for m in (phase_dir / "pre_batch").glob("*/manifest.json")
+            if json.loads(m.read_text())["expected_ids"] == ids[1])
+
+        capsys.readouterr()  # the orchestrator runs' own stdout
+        code = restore_batch.main([
+            "--phase-dir", str(phase_dir), "--all-failed", "--dry-run", "--json"])
+        listed = json.loads(capsys.readouterr().out)
+        assert code == 0
+        assert list(listed) == [stopped.name]
+        assert restore_batch.main([
+            "--phase-dir", str(phase_dir), "--all-failed", "--force"]) == 0
         assert plan.read_text(encoding="utf-8") == before_run + "run1\n"
 
     def test_a_resumed_batch_with_the_same_items_still_reuses_its_snapshot(

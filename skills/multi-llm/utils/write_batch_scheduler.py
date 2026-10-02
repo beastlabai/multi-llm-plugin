@@ -3604,12 +3604,20 @@ class WriteBatchScheduler:
         # Every branch of `_classify` ends here, so this is the one place the
         # verdict reaches the result file that resume reads (F1).
         self._stamp_verdict(outcome)
+        # The items, so a set-aside snapshot's record is findable by them
+        # once its positional id belongs to another batch; a terminal record
+        # (no `_classify`) reads them off the snapshot the dispatch took.
+        expected_ids = outcome.expected_ids or (
+            (self.snapshots.get(outcome.task_id).expected_ids or [])
+            if self.snapshots.get(outcome.task_id) is not None else []
+        )
         self.audit.completed(
             task_id=outcome.task_id, kind=self.kind, attempt=attempt,
             runner=runner, profile=profile, status=outcome.status,
             write_outcome=outcome.write_outcome, exit_code=exit_code,
             files_touched=outcome.files_touched, observed=observed,
             duration_seconds=duration, reason=outcome.reason,
+            expected_ids=[str(i) for i in expected_ids],
         )
 
     def _stamp_verdict(self, outcome: TaskOutcome) -> None:
