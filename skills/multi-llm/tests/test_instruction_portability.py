@@ -186,9 +186,12 @@ PLACEHOLDER_MANIFEST = {
     # single entry point behind the invariant prefix. 28 -> 30: R1 added the
     # post-loop `apply-code-fixes --mark-completed` finalization command (§10),
     # the native counterpart of the executor's `_finalize` — one more command, so
-    # one more instance of the invariant two-token prefix.
-    "instructions/apply-code-fixes.md": (0, 30),
-    "instructions/apply-suggestions.md": (0, 28),
+    # one more instance of the invariant two-token prefix. +2 on apply-code-fixes
+    # (30 -> 32) and apply-suggestions (28 -> 30): the `util check-reply` command
+    # each revalidation batch runs, as the review cores' validation does
+    # (adversarial review, 2026-10-02).
+    "instructions/apply-code-fixes.md": (0, 32),
+    "instructions/apply-suggestions.md": (0, 30),
     # 26 -> 28: the post-loop `util check-tasks` graph check (issue 10).
     "instructions/apply-task-suggestions.md": (0, 28),
     # 4 -> 6: the hand-rolled question-file dance (write the file, re-resolve the

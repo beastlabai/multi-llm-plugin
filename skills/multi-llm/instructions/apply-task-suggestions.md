@@ -440,9 +440,9 @@ Suggestions whose decision was offloaded to the judge agent — via `--agent-dec
    ```
    Include the output (if non-empty) at the end of the summary report.
 
-   **Check the task graph the batches left.** Each batch edited one corner of `tasks.md` and none saw the whole of it:
+   **Check the task graph the batches left.** Each batch edited one corner of `tasks.md` and none saw the whole of it. Pass the `tasks_file` path from `orchestrator_output.json` (the path the orchestrator printed as `Tasks file:`), the same path the batch loop's snapshot step sets as `$TASKS_PATH`:
    ```bash
-   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util check-tasks "{tasks_file}"
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util check-tasks "<tasks_file from orchestrator_output.json>"
    ```
    Every `[TASKS_GRAPH_WARNING]` line goes into the summary report under a `## Consistency warnings` heading and into what you tell the user; do not edit `tasks.md` yourself to clear one. `[TASKS_GRAPH_OK]` needs no mention.
 
