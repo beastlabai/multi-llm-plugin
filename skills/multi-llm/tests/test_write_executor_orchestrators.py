@@ -347,6 +347,24 @@ class TestImplementOrchestratorWiring:
         assert (repo.root / "src" / "main.py").read_text() == before
         assert not (phase_dir / "pre_batch").exists()
 
+    def test_prose_in_a_task_is_no_edge_in_the_materialized_tasks(self, repo):
+        """Racing run 2026-10-01: implement's parser read "after T003" in a
+        task's narrative as a dependency. The edges `write_tasks.json` carries
+        (what implement batches by and skip-dependents walks) are the
+        declared ones only."""
+        repo.plan.write_text(PLAN.replace(
+            "Implement the core functionality.",
+            "Implement the core functionality. Tune it after T003 has run, "
+            "it requires 2 passes.",
+        ), encoding="utf-8")
+        _seed_generate_tasks(repo)
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--dry-run-subagents",
+        ]) == 0
+        document = json.loads((_phase_dir(repo) / WRITE_TASK_FILENAME).read_text())
+        assert {t["task_id"]: t["depends_on"] for t in document["batches"]} == {
+            "T001": [], "T002": ["T001"], "T003": ["T002"]}
+
     def test_with_the_flag_off_the_orchestrator_emits_task_json_as_before(self, repo):
         """The additivity assertion: the native path is untouched."""
         _seed_generate_tasks(repo)

@@ -89,6 +89,48 @@ class TestDependenciesComeFromTheDependenciesLine:
         assert tasks_graph_warnings(text) == []
 
 
+class TestImplementAndCheckTasksReadOneGraph:
+    """Racing run 2026-10-01 (still open after round 1): check-tasks read the
+    bold `**Dependencies**:` line only, implement read prose too, so one
+    tasks.md was two graphs. Both now call `declared_dependencies`."""
+
+    FIXTURE = _doc(
+        # The hand-written format: a forward edge implement orders by.
+        "### Task T001: Start\nKick it off.\n- Depends on: T003\n\n",
+        # Prose naming a later task: no edge for either reader.
+        "### Task T002: Middle\n**Dependencies**: None\n\n"
+        "Run it after T003 has warmed the cache; requires 2 passes.\n\n",
+        "### Task T003: End\n**Depends on**: none\n\n",
+    )
+
+    def test_check_tasks_warns_about_exactly_the_edges_implement_parses(self):
+        from utils.task_decomposer import TaskDecomposer
+
+        tasks = TaskDecomposer().parse_plan(self.FIXTURE)
+        assert {t.id: t.depends_on for t in tasks} == {
+            "T001": ["T003"], "T002": [], "T003": []}
+        position = {t.id: i for i, t in enumerate(tasks)}
+        forward = [
+            f"{t.id} depends on {', '.join(d for d in t.depends_on if position[d] > position[t.id])}"
+            for t in tasks
+            if any(position.get(d, -1) > position[t.id] for d in t.depends_on)
+        ]
+        warnings = tasks_graph_warnings(self.FIXTURE)
+        assert forward == ["T001 depends on T003"]
+        assert [w.split(",")[0] for w in warnings] == forward
+
+    def test_there_is_one_dependency_reader(self):
+        import utils.tasks_graph_check as check
+        from utils import task_decomposer
+
+        assert check.TaskDecomposer is task_decomposer.TaskDecomposer
+        assert not [
+            name for name, value in vars(check).items()
+            if isinstance(value, type) and issubclass(value, task_decomposer.TaskDecomposer)
+            and value is not task_decomposer.TaskDecomposer
+        ]
+
+
 class TestMain:
     def test_prints_warnings_and_still_exits_zero(self, tmp_path, capsys):
         path = tmp_path / "tasks.md"

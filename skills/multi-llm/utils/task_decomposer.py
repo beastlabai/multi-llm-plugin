@@ -151,6 +151,47 @@ HUMAN_TASK_PATTERNS = (
 )
 
 
+_DEPENDENCY_LABEL = r"(?:dependenc(?:y|ies)|depends?\s+on)"
+
+#: A task's dependency declaration: a whole metadata line, label and colon,
+#: never a sentence. The label is bold — ``**Dependencies**: T001, T002``, the
+#: line ``update_plan_tasks.generate_tasks_markdown`` renders for every task
+#: (``None`` when it has none), and the ``**Depends on**:`` /
+#: ``**Dependencies:**`` an edit batch may write — or plain —
+#: ``- Depends on: T001``, the hand-written plan format the fixtures use —
+#: either one optionally bulleted. ``**Requires**:`` / ``**After**:``, which
+#: the old reader also took, appear in no template, renderer or fixture.
+DEPENDENCIES_LINE = re.compile(
+    r"^\s*(?:[-*]\s+)?"
+    r"(?:\*{2}\s*" + _DEPENDENCY_LABEL + r"\s*(?::\s*\*{2}|\*{2}\s*:)"
+    r"|" + _DEPENDENCY_LABEL + r"\s*:)"
+    r"(?P<ids>[^\n]*)$",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def declared_dependencies(text: str) -> List[str]:
+    """The task ids a task's dependency lines declare, in order, no repeats.
+
+    The one dependency reader: ``implement`` (``TaskDecomposer.parse_plan``)
+    and ``util check-tasks`` both call it, so they cannot disagree. Only
+    :data:`DEPENDENCIES_LINE` counts. The reader it replaced also matched
+    "after", "requires" and "depends on" anywhere in the narrative, so
+    "ticks after 3 frames" declared ``T3`` and "run it after T002 has warmed
+    the cache" an edge to ``T002`` that implement batches by and
+    ``skip-dependents`` walks (three-host racing run, 2026-10-01). On the
+    line, ``T001`` and a bare ``1`` (a ``### Step 1`` plan's ``T1``) are both
+    ids.
+    """
+    deps: List[str] = []
+    for line in DEPENDENCIES_LINE.finditer(text):
+        for token in re.findall(r"\bT?\d+\b", line.group("ids")):
+            normalized = token if token.startswith("T") else f"T{token}"
+            if normalized not in deps:
+                deps.append(normalized)
+    return deps
+
+
 class TaskDecomposer:
     """Decomposes plans into executable tasks with dependency management."""
 
@@ -245,31 +286,8 @@ class TaskDecomposer:
         return tasks
 
     def _extract_dependencies(self, description: str) -> List[str]:
-        """Extract task dependencies from description."""
-        deps = []
-
-        # Pattern: "depends on T001" or "**Depends on**: T001" or "after T002, T003"
-        # The \*{0,2} handles optional markdown bold markers
-        dep_patterns = [
-            r'\*{0,2}depends?\*{0,2}\s+on\*{0,2}:?\s*([T\d,\s]+)',  # depends on / **depends on**
-            r'\*{0,2}after\*{0,2}:?\s*([T\d,\s]+)',                  # after / **after**
-            r'\*{0,2}requires?\*{0,2}:?\s*([T\d,\s]+)',              # requires / **requires**
-            r'\*{0,2}dependencies?\*{0,2}:?\s*([T\d,\s]+)',          # dependencies / **dependencies**
-        ]
-
-        for pattern in dep_patterns:
-            matches = re.findall(pattern, description, re.IGNORECASE)
-            for match in matches:
-                # Skip "none" or empty matches
-                if match.strip().lower() in ('none', 'n/a', ''):
-                    continue
-                task_ids = re.findall(r'T?\d+', match)
-                for tid in task_ids:
-                    normalized = f"T{tid}" if not tid.startswith('T') else tid
-                    if normalized not in deps:
-                        deps.append(normalized)
-
-        return deps
+        """The task's declared dependencies: :func:`declared_dependencies`."""
+        return declared_dependencies(description)
 
     #: The metadata lines ``plan_updater`` renders for every generated task.
     _FILES_LINE = re.compile(

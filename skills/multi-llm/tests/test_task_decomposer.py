@@ -3,6 +3,8 @@
 import sys
 from pathlib import Path
 
+import pytest
+
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -685,3 +687,86 @@ A simple rename.
 """
         tasks = TaskDecomposer().parse_plan(plan)
         assert tasks[0].estimated_complexity == "high"
+
+
+class TestDependenciesComeOnlyFromTheDeclarationLine:
+    """Racing run 2026-10-01, still open after round 1: implement's parser read
+    dependencies out of prose ("ticks after 3 frames" -> T3) while
+    `util check-tasks` read only the declaration line. Both now call
+    `declared_dependencies`."""
+
+    @staticmethod
+    def _deps(body, header="### Task T009: Under test"):
+        plan = (
+            "### Task T001: One\n**Dependencies**: None\n\n"
+            "### Task T002: Two\n**Dependencies**: None\n\n"
+            "### Task T003: Three\n**Dependencies**: None\n\n"
+            f"{header}\n{body}\n"
+        )
+        tasks = TaskDecomposer().parse_plan(plan)
+        return tasks[-1].depends_on
+
+    @pytest.mark.parametrize("prose", [
+        "The loop ticks after 3 frames.",
+        "Run it after T002 has warmed the cache.",
+        "This requires 2 passes to settle.",
+        "It depends on T003 at runtime, not at build time.",
+        "See T3 notes for the edge cases.",
+        "Phase 2 covers the rest.",
+        "**After** 3 retries the client gives up.",
+        "- After: T002 finishes, rerun it by hand.",
+        "- Requires: T001 to be deployed first.",
+        "Dependencies of the renderer are bundled.",
+    ])
+    def test_prose_declares_no_dependency(self, prose):
+        assert self._deps(f"**Dependencies**: None\n\n{prose}\n") == []
+
+    @pytest.mark.parametrize("line,expected", [
+        # What update_plan_tasks renders for every task.
+        ("**Dependencies**: T001, T002", ["T001", "T002"]),
+        ("**Dependencies**: None", []),
+        # The spellings an edit batch may write.
+        ("**Depends on**: T003", ["T003"]),
+        ("**Dependencies:** T001", ["T001"]),
+        ("- **Dependencies**: T002", ["T002"]),
+        # The hand-written plan format the fixtures use.
+        ("- Depends on: T001, T003", ["T001", "T003"]),
+        ("- Depends on: none", []),
+        ("* Depends on: T002", ["T002"]),
+        ("Dependencies: T001", ["T001"]),
+        ("- Dependency: T003", ["T003"]),
+    ])
+    def test_each_declaration_format_is_read(self, line, expected):
+        assert self._deps(f"Narrative first.\n{line}\nMore narrative.\n") == expected
+
+    def test_a_step_numbered_plan_declares_bare_numbers(self):
+        plan = (
+            "### Step 1: Scaffold\nCreate it.\n\n"
+            "### Step 2: Wire\nWire it after 3 frames.\n- Depends on: 1\n"
+        )
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert [t.depends_on for t in tasks] == [[], ["T1"]]
+
+    def test_the_rendered_task_list_round_trips_its_dependencies(self):
+        """generate-tasks' own output: every declared edge comes back, and a
+        description full of dependency words adds none."""
+        from update_plan_tasks import generate_tasks_markdown
+
+        records = [
+            {"id": "T001", "title": "Setup", "depends_on": [],
+             "description": "Ticks after 3 frames; requires 2 passes."},
+            {"id": "T002", "title": "Core", "depends_on": ["T001"],
+             "description": "Depends on T003 at runtime only."},
+            {"id": "T003", "title": "Docs", "depends_on": ["T001", "T002"],
+             "description": "Run after T002 has warmed the cache."},
+        ]
+        tasks = TaskDecomposer().parse_plan(generate_tasks_markdown(records, "p.md"))
+        assert {t.id: t.depends_on for t in tasks} == {
+            r["id"]: r["depends_on"] for r in records}
+
+    def test_the_sample_plan_fixture_still_parses_its_edges(self, sample_plan):
+        tasks = TaskDecomposer().parse_plan(sample_plan.read_text(encoding="utf-8"))
+        assert {t.id: t.depends_on for t in tasks} == {
+            "T001": [], "T002": ["T001"], "T003": ["T002"],
+            "T004": ["T002", "T003"],
+        }
