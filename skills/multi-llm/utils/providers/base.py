@@ -2926,6 +2926,12 @@ VERSION_TOO_NEW = "version-too-new"
 VERSION_ABOVE_VERIFIED = "above-verified"
 
 
+def _upgrade_suffix(provider: Any, minimum: str) -> str:
+    """How a below-floor sentence ends: ``" (run: <upgrade_hint>)."`` or ``"."``."""
+    upgrade = (getattr(provider, "upgrade_hint", "") or "").strip()
+    return f" (run: {upgrade.replace('{version}', minimum)})." if upgrade else "."
+
+
 def version_tuple(text: str) -> Tuple[int, ...]:
     """``text``'s leading integers, component-wise, for **ordering only**.
 
@@ -3088,12 +3094,13 @@ def version_verdict(
     verified = (getattr(provider, "verified_version", "") or "").strip()
 
     if minimum and version_tuple(read) < version_tuple(minimum):
+        how = _upgrade_suffix(provider, minimum)
         return VersionVerdict(
             VERSION_TOO_LOW,
             read,
             f"{label} {read} is older than the minimum this release parses "
             f"({minimum}); its event stream shape is not the one the adapter was "
-            f"written against. Upgrade {label} to >= {minimum}.",
+            f"written against. Upgrade {label} to >= {minimum}{how}",
         )
     if ceiling and version_tuple(read) >= version_tuple(ceiling):
         return VersionVerdict(
@@ -3445,6 +3452,10 @@ class LLMProvider(ABC):
     version_cmd: Tuple[str, ...] = ()
     min_version: str = ""
     verified_version: str = ""
+    #: The command a human runs to reach ``min_version``, with ``{version}``
+    #: standing for it, appended to the below-floor refusal
+    #: (:func:`version_verdict`). Printed, never run; ``""`` names none.
+    upgrade_hint: str = ""
 
     #: M14 (§5.4) — the first build this release **refuses**, exclusive, or ``""``
     #: for "no ceiling". The mirror of ``min_version`` and subject to the same
@@ -4711,7 +4722,7 @@ class LLMProvider(ABC):
             return AvailabilityReport(
                 Availability.VERSION_TOO_LOW,
                 f"{name} {read} is older than the {minimum} this release parses; "
-                f"upgrade {name} to >= {minimum}.",
+                f"upgrade {name} to >= {minimum}{_upgrade_suffix(self, minimum)}",
             )
 
         if auth is False and not credentials_required:

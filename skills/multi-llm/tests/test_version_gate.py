@@ -225,6 +225,25 @@ class TestTheVerdict:
         assert verdict.refuses is True
         assert "0.100.0" in verdict.detail and "0.144.0" in verdict.detail
 
+    def test_below_the_floor_names_the_declared_upgrade_command(self):
+        """`upgrade_hint` is printed with the floor substituted, never run."""
+        provider = _Gated(min_version="1.18.34", upgrade_hint="probe-cli upgrade {version}")
+        verdict = version_verdict(provider, "1.18.20")
+        assert verdict.refuses is True
+        assert verdict.detail.endswith(
+            "Upgrade probe-cli to >= 1.18.34 (run: probe-cli upgrade 1.18.34)."
+        )
+        installed = _Gated(min_version="1.18.34", upgrade_hint="probe-cli upgrade {version}")
+        installed.is_available = lambda: True
+        report = installed.describe_availability(version="1.18.20")
+        assert report.detail.endswith(
+            "upgrade probe-cli to >= 1.18.34 (run: probe-cli upgrade 1.18.34)."
+        )
+
+    def test_without_an_upgrade_hint_the_sentence_is_unchanged(self):
+        verdict = version_verdict(_Gated(min_version="0.144.0"), "0.100.0")
+        assert verdict.detail.endswith("Upgrade probe-cli to >= 0.144.0.")
+
     def test_the_floor_is_inclusive_and_the_ceiling_is_exclusive(self):
         """The declared ceiling is the FIRST refused build, the floor the first allowed."""
         provider = _Gated(min_version="1.0.0", max_version_exclusive="2.0.0")
