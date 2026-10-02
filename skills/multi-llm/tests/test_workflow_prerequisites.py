@@ -1,6 +1,7 @@
 """Tests for workflow prerequisite guards functionality."""
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -1533,112 +1534,206 @@ class TestReviewStaleAfterImplement:
         assert "=== REAGGREGATE MODE ===" in result.stdout
 
 
+class _JailHost:
+    """A scratch git repo whose runner is the mock codex with a broken
+    standard sandbox, a throwaway $CODEX_HOME, and the fake Landlock wrapper
+    scripted per test: the early warning is then the dispatch's own decision
+    (`subagent_executor.repo_wide_write_refusal`), probed for real through
+    the mock, never a resolver stub."""
+
+    def __init__(self, tmp_path, monkeypatch):
+        from tests.test_plugin_landlock_executor import FakeWrapper
+        from tests.test_plugin_landlock_acceptance import MOCK_LLM, SCENARIO_MATCHER
+        from utils import provider_registry as registry
+        from utils import subagent_executor as executor
+        import shutil as _shutil
+
+        self.root = Path(os.path.realpath(tmp_path))
+        self.monkeypatch = monkeypatch
+        home = self.root / "home"
+        self.codex_home = home / ".codex"
+        self.codex_home.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("CODEX_HOME", str(self.codex_home))
+        self.repo = self.root / "repo"
+        self.repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.repo)], check=True)
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.name=t",
+                        "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
+                        "-m", "root"], check=True)
+        monkeypatch.chdir(self.repo)
+        self.plan = self.repo / "plans" / "x.md"
+        self.plan.parent.mkdir()
+        self.plan.write_text("# plan\n", encoding="utf-8")
+        bin_dir = self.root / "bin"
+        bin_dir.mkdir()
+        # The mock answers as whichever CLI its launcher is named: codex (the
+        # runner under test) and opencode (so the opencode host's session rung
+        # resolves to a real opencode spec, which has no sandbox probe).
+        for name in ("codex", "opencode"):
+            (bin_dir / name).symlink_to(MOCK_LLM)
+        _shutil.copyfile(SCENARIO_MATCHER, bin_dir / SCENARIO_MATCHER.name)
+        uv = _shutil.which("uv")
+        if uv:
+            monkeypatch.setenv("MULTI_LLM_UV", uv)
+        monkeypatch.setenv("PATH", os.pathsep.join(
+            [str(bin_dir), str(Path(sys.executable).parent), "/usr/bin", "/bin"]))
+        monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
+        monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
+        for name in ("MULTI_LLM_HOST", "MULTI_LLM_HOST_SESSION_MODEL",
+                     "MULTI_LLM_PROVIDERS_CONFIG", "MULTI_LLM_CODEX_SKIP_RUNG",
+                     "MULTI_LLM_HOST_SANDBOX_POSTURE"):
+            monkeypatch.delenv(name, raising=False)
+        self.wrapper = FakeWrapper(self.root / "wrapper", monkeypatch)
+        self._registry = registry
+        executor.reset_version_cache()
+        self.reset()
+
+    def reset(self):
+        self._registry._config = None
+        self._registry._config_key = None
+
+    def configure(self, runner=None, fallback=None):
+        lines = []
+        if runner:
+            lines += ["driver:", f"  subagent_runner: {runner}"]
+        if fallback:
+            lines += ["providers:", "  codex:", f"    sandbox_fallback: {fallback}"]
+        cfg = self.repo / ".multi-llm"
+        cfg.mkdir(exist_ok=True)
+        (cfg / "providers.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        self.reset()
+
+    def status(self, **kw):
+        self.reset()
+        return prereq.get_workflow_status(
+            StateManager(self.plan), self.plan, output_dir_path(self.plan), **kw)
+
+
+@pytest.fixture
+def jailhost(tmp_path, monkeypatch):
+    host = _JailHost(tmp_path, monkeypatch)
+    yield host
+    host.reset()
+
+
+@pytest.mark.config_override  # the scratch repo's own .multi-llm/providers.yaml is the point
 class TestEarlySandboxWarning:
     """#1: implement / apply-code-fixes are refused on a codex host whose own
-    sandbox cannot start; the workflow view now says so from recorded evidence,
-    before phase 6 (Codex racing run, 2026-10-02)."""
+    sandbox cannot start and whose plugin-landlock rung is unusable; the
+    workflow view says so from the dispatch's own decision, at init and before
+    any phase has run (Codex racing run, 2026-10-02; probe-based since step
+    3b, when a recorded `plugin-landlock` rung stopped meaning a refusal)."""
 
-    @staticmethod
-    def _evidence(plan, *, phase="apply-suggestions", progress=None):
-        progress = progress if progress is not None else {
-            "write_subagents": {"tasks": [
-                {"task_id": "apply-batch-0", "sandbox_rung": "plugin-landlock"},
-            ]},
-        }
-        _put(plan, phase, ".status.json", {"progress": progress})
-
-    @pytest.fixture
-    def resolver(self, monkeypatch):
-        from utils import provider_registry
-        calls = []
-
-        def fake(tier="full", anchor=None, host_id=None, skip_session=False):
-            calls.append(anchor)
-            return fake.spec, "project"
-
-        fake.spec = "codex:gpt-6-astra"
-        monkeypatch.setattr(provider_registry, "resolve_subagent_runner", fake)
-        fake.calls = calls
-        return fake
-
-    def _plan(self, tmp_path, **kw):
-        plan = _workflow_plan(tmp_path)
-        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"))
-        self._evidence(plan, **kw)
-        return plan
-
-    def test_recorded_fallback_and_codex_runner_warn_on_both_write_phases(
-        self, tmp_path, resolver
-    ):
-        payload = _status(self._plan(tmp_path))
+    def test_an_unusable_jail_warns_before_any_phase_ran(self, jailhost):
+        jailhost.configure(runner="codex:gpt-5.5")
+        jailhost.wrapper.set(probe="absent")
+        payload = jailhost.status(host_id="claude-code")
         warning = payload["phases"]["implement"]["warning"]
         assert warning == payload["phases"]["apply-code-fixes"]["warning"]
         assert payload["notices"] == [warning]
-        assert "plugin-landlock" in warning and "'codex:gpt-6-astra'" in warning
-        assert payload["suggested_next"] == "implement"
+        assert warning.startswith("implement and apply-code-fixes will be refused on this machine for driver.subagent_runner 'codex:gpt-5.5': ")
+        assert "The plugin's Landlock jail cannot run here either" in warning
+        assert "Landlock ABI none (ENOSYS)" in warning
+        assert warning.endswith(prereq.REPO_WIDE_REMEDY)
+        assert "Nothing was dispatched." not in warning
+        assert "Refusing to dispatch" not in warning
+        # One standard probe and one rung probe, through the mock, no model.
+        assert len(jailhost.wrapper.records(probe=True)) == 1
+        assert jailhost.wrapper.records(probe=False) == []
 
-    def test_the_remedy_is_the_refusals_own_sentence(self, tmp_path, resolver):
-        from utils.subagent_executor import F6_LEAD
-        warning = _status(self._plan(tmp_path))["phases"]["implement"]["warning"]
-        assert F6_LEAD.format(key="driver.subagent_runner") in warning
-
-    @pytest.mark.parametrize("progress", [
-        {"sandbox_fallback": {"codex:gpt-6-luna": "plugin-landlock"}},
-        {"sandbox_bypassed": ["codex:gpt-6-luna"]},
-    ])
-    def test_the_read_fanouts_records_count_too(self, tmp_path, resolver, progress):
-        plan = self._plan(tmp_path, phase="review-plan", progress=progress)
-        assert "warning" in _status(plan)["phases"]["implement"]
-
-    def test_a_runner_already_switched_away_from_codex_draws_no_warning(
-        self, tmp_path, resolver
-    ):
-        resolver.spec = "claude-code:sonnet"
-        payload = _status(self._plan(tmp_path))
+    def test_a_usable_jail_stays_silent(self, jailhost):
+        jailhost.configure(runner="codex:gpt-5.5")
+        payload = jailhost.status(host_id="claude-code")
         assert "warning" not in payload["phases"]["implement"]
         assert "notices" not in payload
+        assert len(jailhost.wrapper.records(probe=True)) == 1
 
-    def test_no_recorded_evidence_resolves_nothing(self, tmp_path, resolver):
-        plan = _workflow_plan(tmp_path)
-        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"))
-        _put(plan, "apply-suggestions", ".status.json", {"progress": {
-            "write_subagents": {"tasks": [{"task_id": "apply-batch-0"}]}}})
-        assert "warning" not in _status(plan)["phases"]["implement"]
-        assert resolver.calls == []  # no config read, no probe: status stays cheap
+    @pytest.mark.parametrize("case", ["contained", "off", "opt-in-off", "failed-probe"])
+    def test_every_other_refusal_of_the_rung_warns_too(self, jailhost, monkeypatch, case):
+        if case in ("contained", "off"):
+            jailhost.configure(runner="codex:gpt-5.5", fallback=case)
+        else:
+            jailhost.configure(runner="codex:gpt-5.5")
+        if case == "opt-in-off":
+            from utils.providers import codex as codex_module
+            monkeypatch.setattr(codex_module, "WRITE_RUNG_OPT_IN", False)
+        if case == "failed-probe":
+            jailhost.wrapper.set(probe="not_denied")
+        warning = jailhost.status(host_id="claude-code")["phases"]["implement"]["warning"]
+        expected = {
+            "contained": "providers.codex.sandbox_fallback=contained",
+            "off": "providers.codex.sandbox_fallback=off",
+            "opt-in-off": "write jobs are not enabled on it",
+            "failed-probe": "failed its self-test",
+        }[case]
+        assert expected in warning, warning
+        assert warning.endswith(prereq.REPO_WIDE_REMEDY)
 
-    def test_a_finished_implement_and_apply_code_fixes_draw_no_warning(
-        self, tmp_path, resolver
-    ):
-        plan = self._plan(tmp_path)
-        _put(plan, "code-review", "grouped.json", _ONE_FINDING)
-        _record(plan, completed=("implement", "code-review", "apply-code-fixes"))
-        phases = _status(plan)["phases"]
+    def test_a_runner_that_is_not_codex_draws_no_warning_and_no_probe(self, jailhost):
+        jailhost.configure(runner="claude-code:sonnet")
+        jailhost.wrapper.set(probe="absent")
+        payload = jailhost.status(host_id="claude-code")
+        assert "warning" not in payload["phases"]["implement"]
+        assert jailhost.wrapper.records() == []
+
+    def test_a_finished_implement_and_apply_code_fixes_draw_no_warning(self, jailhost):
+        jailhost.configure(runner="codex:gpt-5.5")
+        jailhost.wrapper.set(probe="absent")
+        _put(jailhost.plan, "code-review", "grouped.json", _ONE_FINDING)
+        _record(jailhost.plan, completed=_BEFORE_CODE_REVIEW + ("code-review", "apply-code-fixes"))
+        phases = jailhost.status(host_id="claude-code")["phases"]
         assert "warning" not in phases["implement"]
         assert "warning" not in phases["apply-code-fixes"]
+        assert jailhost.wrapper.records() == []  # nothing open: nothing probed
 
-    def test_an_unreadable_config_draws_no_warning(self, tmp_path, monkeypatch):
+    def test_an_unreadable_config_draws_no_warning(self, jailhost, monkeypatch):
         from utils import provider_registry
 
         def boom(*a, **kw):
             raise RuntimeError("broken override")
 
         monkeypatch.setattr(provider_registry, "resolve_subagent_runner", boom)
-        assert "warning" not in _status(self._plan(tmp_path))["phases"]["implement"]
+        assert "warning" not in jailhost.status(host_id="claude-code")["phases"]["implement"]
 
-    def test_the_next_step_that_points_at_implement_carries_it(
-        self, tmp_path, resolver
-    ):
+    def test_the_next_step_that_points_at_implement_carries_it(self, jailhost):
         from utils import next_phase
-        plan = self._plan(tmp_path)
+        jailhost.configure(runner="codex:gpt-5.5")
+        jailhost.wrapper.set(probe="absent")
+        _record(jailhost.plan, completed=("review-plan", "apply-suggestions", "generate-tasks"))
+        jailhost.reset()
         answer = next_phase.next_phase_commands(
-            "plans/x.md", "codex", None, "generate-tasks", plan_path=plan)
+            "plans/x.md", "claude-code", None, "generate-tasks", plan_path=jailhost.plan)
         assert answer.phase == "implement" and answer.warning
         lines = next_phase.render_next_phase_lines(answer)
         assert lines[0] == f"{next_phase.RUNNER_WARNING_MARKER} {answer.warning}"
         assert lines[1].startswith(next_phase.NEXT_COMMAND_MARKER + " ")
         assert "warning" not in answer.to_dict()  # user_next_step is unchanged
 
+    def test_init_prints_the_warning_for_the_host_it_ran_from(self, jailhost, capsys):
+        """A Codex user learns at `init`, not at phase 6: with the jail
+        unusable the smoke-test block is followed by one [RUNNER_WARNING]
+        line naming the refusal and its remedy; with the jail usable, none."""
+        import init_config
+        from utils import next_phase
+        jailhost.wrapper.set(probe="absent")
+        assert init_config.main(["--dir", str(jailhost.repo), "--host", "codex", "--force"]) == 0
+        out = capsys.readouterr().out
+        lines = [line for line in out.splitlines() if line.startswith(next_phase.RUNNER_WARNING_MARKER)]
+        assert len(lines) == 1, out
+        assert "implement and apply-code-fixes will be refused on this machine" in lines[0]
+        assert "'codex:" in lines[0] and lines[0].endswith(prereq.REPO_WIDE_REMEDY)
+        assert out.index("Smoke-test it") < out.index(next_phase.RUNNER_WARNING_MARKER)
 
+        jailhost.wrapper.set(probe="deny")
+        from utils import subagent_executor as executor
+        executor._SANDBOX_DECISIONS.clear()
+        executor._SANDBOX_PROBE_CACHE.clear()
+        assert init_config.main(["--dir", str(jailhost.repo), "--host", "codex", "--force"]) == 0
+        assert next_phase.RUNNER_WARNING_MARKER not in capsys.readouterr().out
+
+
+@pytest.mark.config_override
 class TestEarlySandboxWarningResolvesTheReadersHost:
     """Adversarial review, 2026-10-02 (`repro_warning.py`): the warning
     resolved the runner for `$MULTI_LLM_HOST`-else-claude-code, while every
@@ -1647,58 +1742,54 @@ class TestEarlySandboxWarningResolvesTheReadersHost:
     session's `codex:gpt-6-luna` fell to `claude-code:sonnet` and the warning
     never fired on either tool route — while the dispatch, which resolves
     `--host` off the argv, refused. No resolver monkeypatch here: the real
-    ladder, the real host entries."""
-
-    EVIDENCE = {"progress": {"sandbox_fallback": {"codex:gpt-6-luna": "plugin-landlock"}}}
+    ladder, the real host entries, the real probe through the mock."""
 
     @pytest.fixture
-    def plan(self, tmp_path, monkeypatch):
-        # Its own git root, so no project providers.yaml is in reach and the
-        # `StateManager` reads a HEAD (its first write records one).
-        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-        subprocess.run(["git", "-C", str(tmp_path), "-c", "user.name=t",
-                        "-c", "user.email=t@t", "commit", "-q", "--allow-empty",
-                        "-m", "root"], check=True)
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.delenv("MULTI_LLM_HOST", raising=False)
+    def plan(self, jailhost, monkeypatch):
         monkeypatch.setenv("MULTI_LLM_HOST_SESSION_MODEL", "gpt-6-luna")
-        plan = _workflow_plan(tmp_path)
-        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"))
-        _put(plan, "review-plan", ".status.json", self.EVIDENCE)
-        return plan
-
-    def _payload(self, plan, **kw):
-        return prereq.get_workflow_status(
-            StateManager(plan), plan, output_dir_path(plan), **kw)
+        jailhost.wrapper.set(probe="absent")
+        _record(jailhost.plan, completed=("review-plan", "apply-suggestions", "generate-tasks"))
+        return jailhost
 
     def test_the_dispatch_and_the_warning_resolve_the_same_runner(self, plan):
         from utils.provider_registry import resolve_subagent_runner
-        spec, layer = resolve_subagent_runner("full", anchor=str(plan), host_id="codex")
+        spec, layer = resolve_subagent_runner("full", anchor=str(plan.plan), host_id="codex")
         assert (spec, layer) == ("codex:gpt-6-luna", "session")
-        warning = self._payload(plan, host_id="codex")["phases"]["implement"]["warning"]
-        assert "'codex:gpt-6-luna'" in warning and "plugin-landlock" in warning
+        warning = plan.status(host_id="codex")["phases"]["implement"]["warning"]
+        assert "'codex:gpt-6-luna'" in warning and "Landlock jail cannot run here" in warning
+
+    def test_the_opencode_route_resolves_its_own_session_model_and_draws_none(self, plan):
+        from utils.provider_registry import resolve_subagent_runner
+        spec, layer = resolve_subagent_runner("full", anchor=str(plan.plan), host_id="opencode")
+        assert spec == "opencode:gpt-6-luna" and layer == "session"
+        assert "warning" not in plan.status(host_id="opencode")["phases"]["implement"]
+
+    def test_the_opencode_route_warns_for_a_configured_codex_runner(self, plan):
+        plan.configure(runner="codex:gpt-5.5")
+        warning = plan.status(host_id="opencode")["phases"]["implement"]["warning"]
+        assert "'codex:gpt-5.5'" in warning
 
     def test_the_claude_code_host_has_no_session_rung_and_draws_none(self, plan):
-        assert "warning" not in self._payload(plan, host_id="claude-code")["phases"]["implement"]
+        assert "warning" not in plan.status(host_id="claude-code")["phases"]["implement"]
 
     def test_with_no_host_handed_in_the_argv_decides_as_the_executor_does(
         self, plan, monkeypatch
     ):
-        monkeypatch.setattr(sys, "argv", ["multi_llm.py", "status", str(plan), "--host", "codex"])
-        assert "warning" in self._payload(plan)["phases"]["implement"]
-        monkeypatch.setattr(sys, "argv", ["multi_llm.py", "status", str(plan)])
-        assert "warning" not in self._payload(plan)["phases"]["implement"]
+        monkeypatch.setattr(sys, "argv", ["multi_llm.py", "status", str(plan.plan), "--host", "codex"])
+        assert "warning" in plan.status()["phases"]["implement"]
+        monkeypatch.setattr(sys, "argv", ["multi_llm.py", "status", str(plan.plan)])
+        assert "warning" not in plan.status()["phases"]["implement"]
 
     def test_every_reader_hands_its_host_through(self, plan, capsys):
         from utils import next_phase, run_status
         with pytest.raises(SystemExit) as exit_:  # --status sys.exit()s
-            prereq.main(["--plan-file", str(plan), "--status", "--host", "codex"])
+            prereq.main(["--plan-file", str(plan.plan), "--status", "--host", "codex"])
         assert exit_.value.code == 0
         assert "notices" in json.loads(capsys.readouterr().out)
         assert run_status.main(
-            ["--plan-file", str(plan), "--view", "workflow", "--host", "codex"]) == 0
+            ["--plan-file", str(plan.plan), "--view", "workflow", "--host", "codex"]) == 0
         assert "notices" in json.loads(capsys.readouterr().out)
-        assert next_phase.main([str(plan), "--after", "generate-tasks", "--host", "codex"]) == 0
+        assert next_phase.main([str(plan.plan), "--after", "generate-tasks", "--host", "codex"]) == 0
         out = capsys.readouterr().out
         assert out.startswith(next_phase.RUNNER_WARNING_MARKER + " ")
         assert "'codex:gpt-6-luna'" in out
