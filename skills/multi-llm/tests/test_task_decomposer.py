@@ -747,6 +747,37 @@ class TestDependenciesComeOnlyFromTheDeclarationLine:
         tasks = TaskDecomposer().parse_plan(plan)
         assert [t.depends_on for t in tasks] == [[], ["T1"]]
 
+    @pytest.mark.parametrize("line,expected", [
+        # Prose after the ids on the SAME line leaked every bare number as an
+        # id (adversarial review of round 3, 2026-10-02).
+        ("**Dependencies**: T001 (see Step 2)", ["T001"]),
+        ("**Dependencies**: T001, T002 (after the API v2)", ["T001", "T002"]),
+        ("**Dependencies**: None (T001 is optional)", []),
+        ("**Dependencies**: N/A", []),
+        ("**Dependencies**: T001 (phase 2 only, section 4.2)", ["T001"]),
+        ("**Dependencies**: T001 — must land before 3 PM", ["T001"]),
+        ("**Dependencies**: T001; T002 is enough", ["T001"]),
+        ("**Dependencies**: T001: lands first, 2 passes", ["T001"]),
+        ("**Depends on**: T003 at runtime (0 otherwise)", ["T003"]),
+        # A bare number is not an id in a T-numbered document.
+        ("**Dependencies**: T001, 2 passes", ["T001"]),
+        # A range names every id in it, and a bulleted list under an empty
+        # label line is the same declaration.
+        ("**Dependencies**: T001-T003", ["T001", "T002", "T003"]),
+        ("**Dependencies**:\n- T001\n- T002 (optional)", ["T001", "T002"]),
+        ("**Dependencies**:\n\n- T001\n- Files to modify: a.py", ["T001"]),
+    ])
+    def test_prose_after_the_ids_declares_nothing(self, line, expected):
+        assert self._deps(f"{line}\nMore narrative.\n") == expected
+
+    def test_a_step_numbered_plan_cuts_prose_too(self):
+        plan = (
+            "### Step 1: Scaffold\nCreate it.\n\n"
+            "### Step 2: Wire\n- Depends on: 1 (see Step 3, 2 passes)\n"
+        )
+        tasks = TaskDecomposer().parse_plan(plan)
+        assert [t.depends_on for t in tasks] == [[], ["T1"]]
+
     def test_the_rendered_task_list_round_trips_its_dependencies(self):
         """generate-tasks' own output: every declared edge comes back, and a
         description full of dependency words adds none."""
