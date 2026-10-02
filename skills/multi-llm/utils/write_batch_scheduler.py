@@ -327,6 +327,26 @@ REVIEW_PHASE_BY_WRITE_KIND: Dict[str, str] = {
 }
 
 
+def _same_batch_row(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
+    """Whether two ``write_batch_report.json`` rows describe the same batch.
+
+    The items a row was materialized for (``expected_ids``) when both rows
+    carry them, else the task id. An apply kind's task ids are positional
+    (``apply-batch-N``): a ``--resume`` after the selection changed (a stopped
+    batch's items skipped in the report) renumbers its batches, and an id
+    match alone replaced the earlier run's ``apply-batch-1`` row, whose edits
+    are still on disk, with a row for different items (#28). ``implement``'s
+    ``expected_ids`` is ``[task_id]``, so it is unaffected. A row without
+    them (refused before any verdict, or a report older than F9) falls back
+    to the id.
+    """
+    left_ids = left.get("expected_ids") or []
+    right_ids = right.get("expected_ids") or []
+    if left_ids and right_ids:
+        return sorted(map(str, left_ids)) == sorted(map(str, right_ids))
+    return str(left.get("task_id", "")) == str(right.get("task_id", ""))
+
+
 def _parse_local_timestamp(value: Any) -> Optional[datetime]:
     """An ISO timestamp as a naive local datetime, or None — the reading
     ``check_workflow_prerequisites._parse_timestamp`` gives ``state.json``."""
@@ -661,25 +681,34 @@ class SchedulerResult:
     def report_rows(self) -> List[Dict[str, Any]]:
         """Every task row of the phase: earlier runs' first, this run's after.
 
-        This run's row replaces an earlier one for the same task, except a
+        This run's row replaces an earlier one for the same batch, except a
         resume *skip*: that row only says "already done", and the earlier run's
         row is the one that holds what was done, so it stays (flagged
-        ``from_earlier_run``).
+        ``from_earlier_run``). "The same batch" is :func:`_same_batch_row`'s:
+        the same items, not merely the same id, because an apply kind's ids
+        are positional and a resume whose selection changed hands
+        ``apply-batch-1`` to other items.
         """
-        current = {
-            o.task_id: {**o.to_dict(), **self.sandbox_records.get(o.task_id, {})}
+        current = [
+            {**o.to_dict(), **self.sandbox_records.get(o.task_id, {})}
             for o in self.outcomes
-        }
+        ]
         rows: List[Dict[str, Any]] = []
-        kept: set = set()
+        stood_in: set = set()
         for earlier in self.earlier_rows:
-            task_id = str(earlier.get("task_id", ""))
-            row = current.get(task_id)
-            if row is not None and not row.get("skipped"):
+            match = next(
+                (index for index, row in enumerate(current)
+                 if _same_batch_row(earlier, row)),
+                None,
+            )
+            if match is not None and not current[match].get("skipped"):
                 continue
+            if match is not None:
+                stood_in.add(match)
             rows.append({**earlier, "from_earlier_run": True})
-            kept.add(task_id)
-        rows.extend(row for task_id, row in current.items() if task_id not in kept)
+        rows.extend(
+            row for index, row in enumerate(current) if index not in stood_in
+        )
         return rows
 
     def to_dict(self) -> Dict[str, Any]:

@@ -1217,3 +1217,212 @@ class TestFullStackDetachedImplement:
         assert any("do T003" in p for p in dispatched)
         assert (phase_dir / "implement_batch_T002.json").is_file()
         assert (phase_dir / "implement_batch_T003.json").is_file()
+
+
+# ---------------------------------------------------------------------------
+# #28, the apply half: an apply phase's summary.md and write_batch_report.json
+# on `--resume` (three-host racing run, 2026-10-01)
+# ---------------------------------------------------------------------------
+
+APPLY_PLAN = """# Apply Plan
+
+## Step 1: Alpha
+Alpha text.
+
+## Step 2: Beta
+Beta text.
+
+## Step 3: Gamma
+Gamma text.
+"""
+
+APPLY_SECTIONS = ("Alpha", "Beta", "Gamma")
+
+
+def _groups(prefix):
+    """One HIGH suggestion per plan section, so each lands in a batch of its own."""
+    return [
+        {"theme": f"{prefix} theme {n}", "category": "c", "models": ["m"],
+         "suggestions": [{
+             "title": f"{prefix} suggestion {n}", "desc": f"Do {prefix} {n}.",
+             "type": "addition", "reference": f"## Step {n + 1}: {name}",
+             "importance": "HIGH", "source_model": "m",
+         }]}
+        for n, name in enumerate(APPLY_SECTIONS)
+    ]
+
+
+def _validation(statuses):
+    return {
+        "metadata": {"schema_version": "2.0", "validated_at": "2026-10-02T10:00:00",
+                     "model": "m", "plan_hash": "x", "total_groups": len(statuses)},
+        "groups": [{"group_index": i, "status": s, "reason": "r", "confidence": 0.9}
+                   for i, s in enumerate(statuses)],
+    }
+
+
+class TestAnApplyResumeKeepsTheEarlierRunsRows:
+    """#28: implement's `--resume` kept the first run's rows; the apply phases'
+    `summary.md` did not. It was rendered from this run's outcomes, so a batch
+    the stopped run had applied read as this run's (`Runner: executor`, 0.0s,
+    no marker), and a batch whose positional `apply-batch-N` id a changed
+    selection handed to other items vanished from both reports."""
+
+    def _review(self, repo, prefix, statuses=("valid",) * 3):
+        """A review-plan cycle on disk, completed now."""
+        from utils.state_manager import get_or_create_state
+
+        plan = repo.root / "plans" / "apply.md"
+        if not plan.exists():
+            plan.write_text(APPLY_PLAN, encoding="utf-8")
+        review = repo.root / "plans" / "apply" / "review-plan"
+        review.mkdir(parents=True, exist_ok=True)
+        (review / "grouped.json").write_text(json.dumps(_groups(prefix)), encoding="utf-8")
+        (review / "validation.json").write_text(
+            json.dumps(_validation(list(statuses))), encoding="utf-8")
+        state = get_or_create_state(plan)
+        state.mark_phase_completed("review-plan")
+        state.save()
+        return plan
+
+    def _ids(self, plan):
+        """Each batch's member ids, as the phase materializes them."""
+        import apply_suggestions_orchestrator as orchestrator
+
+        assert orchestrator.main(
+            ["--plan-file", str(plan), "--yes", "--dry-run-subagents"]) == 0
+        tasks = json.loads((self._phase_dir(plan) / WRITE_TASK_FILENAME).read_text())
+        return [task["expected_ids"] for task in tasks["batches"]]
+
+    @staticmethod
+    def _phase_dir(plan):
+        return plan.parent / plan.stem / "apply-suggestions"
+
+    def _run(self, repo, plan, attest, *flags):
+        import apply_suggestions_orchestrator as orchestrator
+
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "plans/apply.md", "mode": "patch", "content": "edit\n"}
+        ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(attest))
+        return orchestrator.main(
+            ["--plan-file", str(plan), "--yes", "--exec-subagents", *flags])
+
+    def _report(self, plan):
+        return json.loads(
+            (self._phase_dir(plan) / "write_batch_report.json").read_text())["tasks"]
+
+    def _summary(self, plan):
+        return (self._phase_dir(plan) / "summary.md").read_text(encoding="utf-8")
+
+    @staticmethod
+    def _section(summary, heading):
+        """The lines under one `### …` heading, up to the next blank line."""
+        lines = summary.splitlines()
+        start = lines.index(heading)
+        return lines[start:lines.index("", start)]
+
+    def test_a_resume_keeps_the_stopped_runs_finished_batch_in_summary_md(self, repo):
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        # Run 1: batch 0 attested and applied, batch 1 a partial application.
+        assert self._run(repo, plan, ids[0]) == 3
+        assert self._run(repo, plan, sum(ids, []), "--resume") == 0
+
+        rows = self._report(plan)
+        assert [(r["task_id"], bool(r.get("from_earlier_run"))) for r in rows] == [
+            ("apply-batch-0", True), ("apply-batch-1", False),
+            ("apply-batch-2", False)]
+        summary = self._summary(plan)
+        earlier = self._section(summary, "### apply-batch-0 (earlier run) — ok (applied)")
+        # The earlier run's own row, not this run's resume skip of it.
+        assert "**Runner**: codex:gpt-5.5" in earlier[1]
+        assert "executor" not in earlier[1]
+        assert "1. **one suggestion 0** - Applied" in earlier
+        assert "### apply-batch-1 — ok (applied)" in summary
+        assert "### apply-batch-2 — ok (applied)" in summary
+        # The count lines agree with the table under them.
+        assert summary.count("\n### apply-") == len(rows) == 3
+        assert ("- Batches processed: 3/3 (1 from an earlier run of this phase, "
+                "not dispatched again)") in summary
+        assert "- Suggestions applied: 3" in summary
+
+    def test_a_batch_whose_id_a_changed_selection_reused_keeps_its_row(self, repo):
+        """The stopped batch's item is skipped before the resume, so its
+        `apply-batch-1` id goes to the next item. Its partial edits are still
+        in the plan; the row saying so must survive."""
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        assert self._run(repo, plan, ids[0]) == 3
+        stopped = next(r for r in self._report(plan) if r["task_id"] == "apply-batch-1")
+        assert stopped["write_outcome"] == "partial-application"
+
+        review = repo.root / "plans" / "apply" / "review-plan"
+        (review / "validation.json").write_text(
+            json.dumps(_validation(["valid", "invalid", "valid"])), encoding="utf-8")
+        assert self._run(repo, plan, sum(ids, []), "--resume") == 0
+
+        rows = self._report(plan)
+        kept = [r for r in rows if r.get("expected_ids") == ids[1]]
+        assert len(kept) == 1
+        assert kept[0]["from_earlier_run"] is True
+        assert kept[0]["write_outcome"] == "partial-application"
+        # The item that now holds the id is this run's own row beside it.
+        current = [r for r in rows if r["task_id"] == "apply-batch-1"
+                   and not r.get("from_earlier_run")]
+        assert [r["expected_ids"] for r in current] == [ids[2]]
+        summary = self._summary(plan)
+        assert ("### apply-batch-1 (earlier run) — partial_application "
+                "(partial-application)") in summary
+        assert "### apply-batch-1 — ok (applied)" in summary
+        ok = sum(1 for r in rows if r["status"] == "ok")
+        assert f"- Batches processed: {ok}/{len(rows)}" in summary
+        assert summary.count("\n### apply-") == len(rows)
+
+    def test_a_new_review_cycle_drops_the_old_rows_and_never_leaks_them(self, repo):
+        """Cycle 1 stops part-applied; the review is re-run with other
+        findings. Neither cycle 2's first run nor its resume may show a row of
+        cycle 1, and the resume still keeps cycle 2's own earlier row."""
+        plan = self._review(repo, "one")
+        old_ids = self._ids(plan)
+        assert self._run(repo, plan, old_ids[0]) == 3
+
+        plan = self._review(repo, "two")
+        new_ids = self._ids(plan)
+        assert self._run(repo, plan, new_ids[0]) == 3
+        rows = self._report(plan)
+        assert not any(r.get("from_earlier_run") for r in rows)
+        assert "(earlier run)" not in self._summary(plan)
+        assert "- Batches processed: 1/2" in self._summary(plan)
+
+        assert self._run(repo, plan, sum(new_ids, []), "--resume") == 0
+        rows = self._report(plan)
+        old = {i for batch in old_ids for i in batch}
+        assert not any(set(r.get("expected_ids") or []) & old for r in rows)
+        assert [r["expected_ids"] for r in rows if r.get("from_earlier_run")] == [
+            new_ids[0]]
+        summary = self._summary(plan)
+        assert "one suggestion" not in summary
+        assert "- Batches processed: 3/3 (1 from an earlier run" in summary
+
+    def test_a_re_stamped_review_reuses_results_without_claiming_an_earlier_run(
+        self, repo
+    ):
+        """Same findings, review re-stamped: the scheduler still skips every
+        batch whose result and inputs match, but the old cycle's rows (its
+        runner, its duration) are not carried; each row says this run reused
+        an earlier result."""
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        assert self._run(repo, plan, sum(ids, [])) == 0
+        plan = self._review(repo, "one")
+        assert self._run(repo, plan, sum(ids, [])) == 0
+
+        rows = self._report(plan)
+        assert not any(r.get("from_earlier_run") for r in rows)
+        assert all(r.get("skipped") for r in rows)
+        summary = self._summary(plan)
+        assert "(earlier run)" not in summary
+        assert summary.count("(earlier result, not dispatched again) — ok") == 3
+        assert ("- Batches processed: 3/3 (3 earlier result(s) reused, "
+                "not dispatched again)") in summary

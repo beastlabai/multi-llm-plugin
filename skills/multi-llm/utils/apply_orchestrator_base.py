@@ -2137,19 +2137,112 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         apply-code-fixes partitions by ``file_key``), and it is honest for the
         single-target phases too since it reflects what actually moved rather
         than the phase's own convention.
+
+        Read from :meth:`_phase_rows`, so a ``--resume`` still names the files
+        an earlier run of this phase changed.
         """
         touched: List[str] = []
         seen: Set[str] = set()
-        for outcome in getattr(self.write_result, "outcomes", None) or []:
-            if not getattr(outcome, "ok", False) and (
-                getattr(outcome, "write_outcome", None) != "partial-application"
+        for row in self._phase_rows():
+            if not self._row_ok(row) and (
+                row.get("write_outcome") != "partial-application"
             ):
                 continue
-            for touched_path in getattr(outcome, "files_touched", None) or []:
+            for touched_path in row.get("files_touched") or []:
                 if touched_path and touched_path not in seen:
                     seen.add(touched_path)
                     touched.append(touched_path)
         return touched
+
+    def _phase_rows(self) -> List[Dict[str, Any]]:
+        """Every batch row of this phase, earlier runs' first (#28).
+
+        The scheduler's own ``report_rows()``, the rows
+        ``write_batch_report.json`` carries, so ``summary.md``, the result
+        block and the report cannot disagree. On a ``--resume`` they include
+        the rows an interrupted run of this review cycle recorded, flagged
+        ``from_earlier_run``, and never rows of an earlier cycle (the
+        scheduler drops a report that predates the review). Built from this
+        run's outcomes when the result has no rows of its own.
+        """
+        result = self.write_result
+        report_rows = getattr(result, "report_rows", None)
+        if callable(report_rows):
+            return [dict(row) for row in report_rows()]
+        rows: List[Dict[str, Any]] = []
+        for outcome in getattr(result, "outcomes", None) or []:
+            rows.append({
+                "task_id": str(getattr(outcome, "task_id", "")),
+                "status": getattr(outcome, "status", None),
+                "write_outcome": getattr(outcome, "write_outcome", None),
+                "runner": getattr(outcome, "runner", None),
+                "duration_seconds": getattr(outcome, "duration_seconds", 0.0),
+                "reason": getattr(outcome, "reason", None),
+                "files_touched": list(getattr(outcome, "files_touched", None) or []),
+                "output_path": getattr(outcome, "output_path", None),
+                "expected_ids": list(getattr(outcome, "expected_ids", None) or []),
+                "skipped": bool(getattr(outcome, "skipped", False)),
+            })
+        return rows
+
+    @staticmethod
+    def _row_ok(row: Dict[str, Any]) -> bool:
+        return row.get("status") == "ok"
+
+    def _row_item_ids(self, row: Dict[str, Any]) -> List[str]:
+        """The items a row's batch carried: the row's own ``expected_ids``,
+        else this run's materialized task of the same id."""
+        own = row.get("expected_ids")
+        if own:
+            return [str(item) for item in own]
+        for task in self.write_tasks:
+            if str(task.get("task_id", "")) == str(row.get("task_id", "")):
+                return [str(item) for item in task.get("expected_ids") or []]
+        return []
+
+    @staticmethod
+    def _row_provenance(row: Dict[str, Any]) -> str:
+        """The marker a row from before this run carries, else ``""``."""
+        if row.get("from_earlier_run"):
+            return " (earlier run)"
+        if row.get("skipped"):
+            # A resume skip whose earlier row the scheduler could not supply
+            # (that run left no report, or its report belonged to an earlier
+            # review): this run reused the result file and dispatched nothing.
+            return " (earlier result, not dispatched again)"
+        return ""
+
+    def _rows_provenance_note(self, rows: List[Dict[str, Any]]) -> str:
+        """`` (N from an earlier run of this phase, …)`` for a count line."""
+        earlier = sum(1 for row in rows if row.get("from_earlier_run"))
+        reused = sum(
+            1 for row in rows
+            if row.get("skipped") and not row.get("from_earlier_run")
+        )
+        parts = []
+        if earlier:
+            parts.append(f"{earlier} from an earlier run of this phase")
+        if reused:
+            parts.append(f"{reused} earlier result(s) reused")
+        if not parts:
+            return ""
+        return f" ({', '.join(parts)}, not dispatched again)"
+
+    def _items_by_member_id(self) -> Dict[str, Dict[str, Any]]:
+        """``member id -> formatted item`` over this run's batches.
+
+        Each materialized task's ``expected_ids`` are its batch's items in
+        order (``write_phase_bridge``), so an earlier run's row, whose
+        positional id may now name another batch, still finds its own items.
+        """
+        items: Dict[str, Dict[str, Any]] = {}
+        for task, batch in zip(self.write_tasks, self.batches):
+            if not isinstance(batch, dict):
+                continue
+            members = self._batch_member_items(batch)
+            for member_id, item in zip(task.get("expected_ids") or [], members):
+                items.setdefault(str(member_id), item)
+        return items
 
     def _record_write_artifacts(self, output_path: str) -> None:
         """Hand back the files this phase produced, on the executor leg.
@@ -2228,21 +2321,19 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             path for path in paths.values() if path and os.path.exists(path)
         )
 
-    def _write_item_counts(self, outcomes: List[Any]) -> Dict[str, int]:
+    def _write_item_counts(self, rows: List[Dict[str, Any]]) -> Dict[str, int]:
         """Count items by the scheduler's verdict, rather than dispatch success.
 
         An ``ok`` dispatch may be a no-op or a clean failure. Neither is
-        evidence that its requested changes were applied.
+        evidence that its requested changes were applied. Counted over
+        :meth:`_phase_rows`, the rows the report lists, so the count lines
+        agree with the table under them.
         """
-        expected_by_task = {
-            str(task.get("task_id", "")): list(task.get("expected_ids") or [])
-            for task in self.write_tasks
-        }
         counts = {"applied": 0, "no-op": 0, "clean-failure": 0}
-        for outcome in outcomes:
-            verdict = getattr(outcome, "write_outcome", None)
-            if getattr(outcome, "ok", False) and verdict in counts:
-                counts[verdict] += len(expected_by_task.get(outcome.task_id, []))
+        for row in rows:
+            verdict = row.get("write_outcome")
+            if self._row_ok(row) and verdict in counts:
+                counts[verdict] += len(self._row_item_ids(row))
         return counts
 
     def print_write_outcome_summary(self) -> None:
@@ -2257,13 +2348,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         good part, existed only inside ``orchestrator_output.json``.
         """
         result = self.write_result
-        outcomes = list(getattr(result, "outcomes", None) or [])
-        expected_by_task = {
-            str(task.get("task_id", "")): list(task.get("expected_ids") or [])
-            for task in self.write_tasks
-        }
-        ok = [o for o in outcomes if getattr(o, "ok", False)]
-        item_counts = self._write_item_counts(outcomes)
+        rows = self._phase_rows()
+        ok = [row for row in rows if self._row_ok(row)]
+        item_counts = self._write_item_counts(rows)
         target = self.write_target_file()
         touched = self._touched_files()
 
@@ -2279,7 +2366,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(f"File: {target}")
         else:
             print(f"Files changed: {', '.join(touched) if touched else '(none)'}")
-        print(f"Batches: {len(ok)}/{len(outcomes)} ok")
+        print(
+            f"Batches: {len(ok)}/{len(rows)} ok"
+            + self._rows_provenance_note(rows)
+        )
         print(f"{self.item_noun_plural.capitalize()} applied: {item_counts['applied']}")
         if item_counts["no-op"]:
             print(f"{self.item_noun_plural.capitalize()} needing no changes: {item_counts['no-op']}")
@@ -2289,18 +2379,19 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if getattr(result, "stopped_at_batch", None) is not None:
             print(f"Stopped at batch: {result.stopped_at_batch}")
 
-        if outcomes:
+        if rows:
             print("\nBatches:")
-            for outcome in outcomes:
-                count = len(expected_by_task.get(outcome.task_id, []))
-                verdict = getattr(outcome, "write_outcome", None) or "-"
+            for row in rows:
+                count = len(self._row_item_ids(row))
+                verdict = row.get("write_outcome") or "-"
                 print(
-                    f"  {outcome.task_id}: {outcome.status} ({verdict}), "
+                    f"  {row.get('task_id')}{self._row_provenance(row)}: "
+                    f"{row.get('status')} ({verdict}), "
                     f"{count} {self.item_noun}(s), "
-                    f"{getattr(outcome, 'duration_seconds', 0.0):.1f}s, "
-                    f"runner {getattr(outcome, 'runner', '') or '(none)'}"
+                    f"{float(row.get('duration_seconds') or 0.0):.1f}s, "
+                    f"runner {row.get('runner') or '(none)'}"
                 )
-                reason = getattr(outcome, "reason", None)
+                reason = row.get("reason")
                 if reason:
                     print(f"      reason: {reason}")
 
@@ -2437,7 +2528,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         return list(batch.get("fixes") or batch.get("suggestions") or [])
 
     @staticmethod
-    def _read_batch_result_notes(output_path: Optional[str]) -> Optional[str]:
+    def _read_batch_result_notes(
+        output_path: Optional[str], item_ids: Optional[List[str]] = None
+    ) -> Optional[str]:
         """Best-effort read of a write batch's own ``notes`` field (F10).
 
         ``notes`` (``schemas/write_batch_result.schema.json``) is the runner's
@@ -2446,6 +2539,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         batch's own account of *why* (e.g. "Fix 1: car.accel 32->28 per plan
         §8.") survives past verification. Silent on any read/parse failure —
         the field is optional and this is reporting, never gating.
+
+        With ``item_ids``, a file whose own ``ids`` name none of them is
+        another batch's: an apply result file is named by position, and a
+        resumed run may have rewritten it for the batch that now holds it.
         """
         if not output_path or not os.path.isfile(output_path):
             return None
@@ -2454,8 +2551,35 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 data = json.load(handle)
         except (OSError, json.JSONDecodeError):
             return None
-        notes = data.get("notes") if isinstance(data, dict) else None
+        if not isinstance(data, dict):
+            return None
+        returned = [str(i) for i in data.get("ids") or []]
+        if item_ids and returned and not set(returned) & set(item_ids):
+            return None
+        notes = data.get("notes")
         return notes if isinstance(notes, str) and notes.strip() else None
+
+    def _row_items(
+        self, row: Dict[str, Any], item_ids: List[str]
+    ) -> List[Dict[str, Any]]:
+        """The formatted items (titles, files) a report row's batch carried.
+
+        This run's batch of the same id when it holds the same items — task
+        and batch are materialized from the same ``self.batches`` list, in the
+        same order (``run_write_executor``), so a positional zip joins them —
+        else the items found by member id: an earlier run's row whose
+        positional id now names another batch.
+        """
+        task_id = str(row.get("task_id", ""))
+        for task, batch in zip(self.write_tasks, self.batches):
+            if str(task.get("task_id", "")) != task_id or not isinstance(batch, dict):
+                continue
+            task_ids = [str(i) for i in task.get("expected_ids") or []]
+            if not row.get("expected_ids") or sorted(task_ids) == sorted(item_ids):
+                return self._batch_member_items(batch)
+            break
+        by_id = self._items_by_member_id()
+        return [by_id[i] for i in item_ids if i in by_id]
 
     def write_apply_summary_report(self) -> Optional[str]:
         """Write ``{phase}/summary.md`` — the report the instructions promise (F3).
@@ -2487,22 +2611,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             )
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         result = self.write_result
-        outcomes = list(getattr(result, "outcomes", None) or [])
-        expected_by_task = {
-            str(task.get("task_id", "")): list(task.get("expected_ids") or [])
-            for task in self.write_tasks
-        }
-        # Task and batch are materialized from the same `self.batches` list, in
-        # the same order (`run_write_executor`), so a positional zip joins each
-        # outcome's task_id back to the batch dict that carries its fix/
-        # suggestion titles and file/line_range — data `TaskOutcome` never kept.
-        batch_by_task_id = {
-            str(task.get("task_id", "")): batch
-            for task, batch in zip(self.write_tasks, self.batches)
-            if isinstance(batch, dict)
-        }
-        ok = [o for o in outcomes if getattr(o, "ok", False)]
-        item_counts = self._write_item_counts(outcomes)
+        # #28: the phase's rows, not this run's outcomes — a `--resume` keeps
+        # the batches an interrupted run of this review cycle finished, marked
+        # "(earlier run)" with that run's runner, duration and verdict. The
+        # count lines below are computed from the same rows as the table.
+        rows = self._phase_rows()
+        ok = [row for row in rows if self._row_ok(row)]
+        item_counts = self._write_item_counts(rows)
         decided = self.claude_decisions()
         titles = self._titles_by_group_id()
         nouns = self.item_noun_plural
@@ -2528,7 +2643,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             f"**Generated**: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             "",
             "## Summary",
-            f"- Batches processed: {len(ok)}/{len(outcomes)}",
+            f"- Batches processed: {len(ok)}/{len(rows)}"
+            + self._rows_provenance_note(rows),
             f"- {nouns.capitalize()} applied: {item_counts['applied']}",
             f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
             f"- Decided by the judge agent: {len(decided)}"
@@ -2556,21 +2672,26 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             "## Applied Changes",
             "",
         ]
-        if outcomes:
-            for outcome in outcomes:
-                count = len(expected_by_task.get(outcome.task_id, []))
-                verdict = getattr(outcome, "write_outcome", None) or "-"
+        if rows:
+            for row in rows:
+                item_ids = self._row_item_ids(row)
+                verdict = row.get("write_outcome") or "-"
                 lines.append(
-                    f"### {outcome.task_id} — {outcome.status} ({verdict})"
+                    f"### {row.get('task_id')}{self._row_provenance(row)} — "
+                    f"{row.get('status')} ({verdict})"
                 )
                 lines.append(
-                    f"**{nouns.capitalize()}**: {count}  "
-                    f"**Duration**: {getattr(outcome, 'duration_seconds', 0.0):.1f}s  "
-                    f"**Runner**: {getattr(outcome, 'runner', '') or '(none)'}"
+                    f"**{nouns.capitalize()}**: {len(item_ids)}  "
+                    f"**Duration**: {float(row.get('duration_seconds') or 0.0):.1f}s  "
+                    f"**Runner**: {row.get('runner') or '(none)'}"
                 )
-                items = self._batch_member_items(
-                    batch_by_task_id.get(outcome.task_id)
-                )
+                items = self._row_items(row, item_ids)
+                if not items and item_ids and row.get("from_earlier_run"):
+                    # An earlier batch whose items this run no longer selects:
+                    # its ids are all that is left to name them by.
+                    lines.append(
+                        "**Items**: " + ", ".join(f"`{i}`" for i in item_ids)
+                    )
                 if items:
                     item_status = {
                         "applied": "Applied",
@@ -2591,11 +2712,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                             else:
                                 lines.append(f"   - File: {file_path}")
                 notes = self._read_batch_result_notes(
-                    getattr(outcome, "output_path", None)
+                    row.get("output_path"), item_ids
                 )
                 if notes:
                     lines.append(f"**Notes**: {notes}")
-                reason = getattr(outcome, "reason", None)
+                reason = row.get("reason")
                 if reason:
                     lines.append(f"**Reason**: {reason}")
                 lines.append("")

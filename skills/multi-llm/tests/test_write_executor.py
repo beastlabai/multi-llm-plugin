@@ -1188,6 +1188,39 @@ class TestScheduler:
         assert "| T002 | applied |" in text
         assert "recorded by earlier run(s)" in text
 
+    def test_an_earlier_row_is_replaced_only_by_a_row_for_the_same_items(self):
+        """#28, apply half: `apply-batch-N` is positional, so a resume whose
+        selection changed reuses an id for other items. The earlier row is
+        the same batch as this run's only when it names the same items."""
+        from utils.write_batch_scheduler import SchedulerResult
+
+        def outcome(task_id, ids, skipped=False):
+            row = executor.TaskOutcome(
+                task_id=task_id, kind="apply_suggestions", runner="r",
+                status="ok", write_outcome="applied", skipped=skipped,
+            )
+            row.expected_ids = list(ids)
+            return row
+
+        result = SchedulerResult(
+            outcomes=[outcome("apply-batch-0", ["a"], skipped=True),
+                      outcome("apply-batch-1", ["c"]),
+                      outcome("apply-batch-2", ["d"])],
+            earlier_rows=[
+                {"task_id": "apply-batch-0", "expected_ids": ["a"], "runner": "x"},
+                {"task_id": "apply-batch-1", "expected_ids": ["b"], "runner": "x"},
+                {"task_id": "apply-batch-2", "expected_ids": ["d"], "runner": "x"},
+            ],
+        )
+        rows = [(r["task_id"], r["expected_ids"], bool(r.get("from_earlier_run")))
+                for r in result.report_rows()]
+        assert rows == [
+            ("apply-batch-0", ["a"], True),   # stands in for this run's skip
+            ("apply-batch-1", ["b"], True),   # other items: kept beside ...
+            ("apply-batch-1", ["c"], False),  # ... the row now holding the id
+            ("apply-batch-2", ["d"], False),  # redone: this run's row replaces
+        ]
+
     def test_a_resume_after_a_review_rerun_carries_no_rows_of_the_old_cycle(
         self, env
     ):
