@@ -1,0 +1,4 @@
+{
+ "exit": 1,
+ "stderr": "\u001b[91m\u001b[1mError: \u001b[0mConfiguration is invalid at OPENCODE_CONFIG_CONTENT\n\u21b3 Expected PermissionActionConfig, got \"maybe\" agent.plan.permission.external_directory\n\u21b3 Expected PermissionActionConfig, got \"maybe\" agent.plan.permission.external_directory\n\u21b3 Expected PermissionActionConfig, got \"maybe\" agent.plan.permission.external_directory\n\u21b3 Expected PermissionActionConfig, got \"maybe\" agent.plan.permission.external_directory\n"
+}

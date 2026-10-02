@@ -65,6 +65,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from tests.test_provider_fixture_rows import MANIFESTS, SALVAGE_LABELS  # noqa: E402
+from tests.opencode_fixtures import PIN as OC_PIN  # noqa: E402
 from utils.json_extractor import extract_json_from_text, has_salvageable_json  # noqa: E402
 from utils.providers.aider import AiderProvider  # noqa: E402
 from utils.providers.cline import ClineProvider, cline_answer_text  # noqa: E402
@@ -266,65 +267,41 @@ def _codex_stdout_captures() -> Set[str]:
 # text at all when the turn ended on a denied tool call.
 # --------------------------------------------------------------------------- #
 
-#: The T4.0 subset every one of 1.18.18, 1.18.23 and 1.18.30 ran.
-_T40_SUBSET = (
-    "q2_ustar_agentlayer_build", "q2_ustar_agentlayer_plan", "t40_block_build",
-    "t40_block_plan", "t40_blockcont_build", "t40_blockcont_plan", "t40_cont_build",
-    "t40_cont_plan", "t40_none_build", "t40_none_plan",
-)
-#: Every case 1.17.15 (`min_version`) ran; 1.18.32 ran these too.
-_MIN_VERSION_CASES = (
-    "builtin_plansdir_build", "builtin_plansdir_ctrl_build",
+#: The rig's cases (`capture/capture.py:_cases()`), all run on the pin.
+_RIG_CASES = (
+    "auth_error", "builtin_plansdir_build", "builtin_plansdir_ctrl_build",
     "builtin_plansdir_ctrl_plan", "builtin_plansdir_plan", "builtin_skilldir_build",
     "builtin_skilldir_ctrl_build", "builtin_skilldir_ctrl_plan",
     "builtin_skilldir_plan", "builtin_tmp_build", "builtin_tmp_ctrl_build",
     "builtin_tmp_ctrl_plan", "builtin_tmp_plan", "builtin_toolout_build",
-    "builtin_toolout_plan", "envperm_plan", "managed_agent_plan",
-    "managed_toplevel_plan", "org_agent_dbmem_plan", "org_agent_plan",
-    "q2_ustar_agentlayer_build", "q2_ustar_agentlayer_plan",
-    "q2_ustar_toplevel_build", "q2_ustar_toplevel_plan", "s41_ask_bash",
-    "s41_ask_read", "s41_cont_read", "s41_deny_bash", "s41_deny_read",
+    "builtin_toolout_plan", "denied_turn", "envperm_plan", "invalid_model",
+    "managed_agent_plan", "managed_toplevel_plan", "org_agent_dbmem_plan",
+    "org_agent_plan", "q2_ustar_agentlayer_build", "q2_ustar_agentlayer_plan",
+    "q2_ustar_toplevel_build", "q2_ustar_toplevel_plan", "run_review",
+    "s41_ask_bash", "s41_ask_read", "s41_cont_read", "s41_deny_bash", "s41_deny_read",
     "s41_denyallow_file_read", "s41_denyallow_read", "t40_badexp_plan",
     "t40_badperm_plan", "t40_badpermname_plan", "t40_block_build", "t40_block_plan",
     "t40_blockcont_build", "t40_blockcont_plan", "t40_cont_build", "t40_cont_plan",
     "t40_env_block_build", "t40_env_block_plan", "t40_env_none_build",
-    "t40_env_none_plan", "t40_none_build", "t40_none_plan", "t47_private_build",
+    "t40_env_none_plan", "t40_none_build", "t40_none_plan",
+    "t47_inherited_star_build", "t47_inherited_star_ctrl_build", "t47_private_build",
     "t47_private_plan", "t47_shared_build", "t47_shared_plan",
     "t47_shared_toplevel_build", "t47_shared_toplevel_plan", "useragent_dir_build",
-    "useragent_dir_plan", "useragent_star_build", "useragent_star_plan",
-    "write_outofcwd_build",
-)
-#: The cases only 1.18.32 ran.
-_CURRENT_ONLY_CASES = (
-    "t47_inherited_star_build", "t47_inherited_star_ctrl_build",
-    "useragent_relist_build", "useragent_relist_ctrl_build",
+    "useragent_dir_plan", "useragent_relist_build", "useragent_relist_ctrl_build",
     "useragent_relist_ctrl_plan", "useragent_relist_plan",
     "useragent_relist_private_build", "useragent_relist_private_plan",
-    "useragent_ustar_build", "useragent_ustar_ctrl_build",
-    "useragent_ustar_ctrl_plan", "useragent_ustar_plan",
+    "useragent_star_build", "useragent_star_plan", "useragent_ustar_build",
+    "useragent_ustar_ctrl_build", "useragent_ustar_ctrl_plan", "useragent_ustar_plan",
+    "write_outofcwd_build",
 )
 
+#: Every one is `none`: `auth_error` and `invalid_model` are one `error` event
+#: (ProviderAuthError / UnknownError) with no text part; `run_review` closes on
+#: the prose "JSON written to …"; `denied_turn` exits 0 on an auto-rejected
+#: permission whose text parts are only narration, and the raw stream passed
+#: the gate on its tool parts.
 OPENCODE_LABELS: Dict[str, str] = {
-    # One `error` event each (UnknownError / ProviderAuthError): no text part.
-    "invalid-model.stdout.txt": "none",
-    "provider_auth_error.jsonl": "none",
-    # A finished review whose closing text is "JSON written to …": prose.
-    "run_review.1.18.30.jsonl": "none",
-    # Exit 0 on an auto-rejected permission. Its text parts are only narration
-    # ("I'll read the exact plan rows …"), and the raw stream passed the gate
-    # on its tool parts.
-    "1.18.32/denied_permission_turn_end.jsonl": "none",
-    "1.18.32/continue_loop_on_deny.jsonl": "none",
-    **{f"capture/1.17.15/{case}.jsonl": "none" for case in _MIN_VERSION_CASES},
-    **{
-        f"capture/{version}/{case}.jsonl": "none"
-        for version in ("1.18.18", "1.18.23", "1.18.30")
-        for case in _T40_SUBSET
-    },
-    **{
-        f"capture/1.18.32/{case}.jsonl": "none"
-        for case in _MIN_VERSION_CASES + _CURRENT_ONLY_CASES
-    },
+    f"capture/{OC_PIN}/{case}.jsonl": "none" for case in _RIG_CASES
 }
 
 
@@ -455,8 +432,8 @@ TRANSPORT_THAT_PASSED = (
     ("muse", "muse/truncated.stdout.txt"),
     ("codex", "codex/0.156.1/run_0c477c4d_partial.jsonl"),
     ("codex", "codex/0.156.1/code_mode_mcp.jsonl"),
-    ("opencode", "opencode/1.18.32/denied_permission_turn_end.jsonl"),
-    ("opencode", "opencode/run_review.1.18.30.jsonl"),
+    ("opencode", f"opencode/capture/{OC_PIN}/denied_turn.jsonl"),
+    ("opencode", f"opencode/capture/{OC_PIN}/run_review.jsonl"),
     # T2.4: goose's envelope, vibe's transcript and qwen's record array are
     # all answer-shaped to the gate (an object with an array-valued key, or an
     # array), whatever they carry.
@@ -606,7 +583,7 @@ class TestOnlyTheLastMessageCounts:
     def test_opencode_cut_at_a_new_step_drops_the_earlier_narration(self) -> None:
         # run_review: step 2 says "Now let me explore the codebase …", and
         # step 3 starts. Killed there, the last message has no text yet.
-        lines = _lines("opencode/run_review.1.18.30.jsonl")
+        lines = _lines(f"opencode/capture/{OC_PIN}/run_review.jsonl")
         prefix = _prefix_through(
             lines, lambda line: _event_type(line) == "step_start", occurrence=2
         )
@@ -614,7 +591,7 @@ class TestOnlyTheLastMessageCounts:
         assert OpenCodeProvider().salvage_text(prefix) == ""
 
     def test_opencode_takes_the_closing_step_not_the_first(self) -> None:
-        text = OpenCodeProvider().salvage_text(_read("opencode/run_review.1.18.30.jsonl"))
+        text = OpenCodeProvider().salvage_text(_read(f"opencode/capture/{OC_PIN}/run_review.jsonl"))
         assert text.startswith("JSON written to")
         assert "Now let me explore" not in text
 

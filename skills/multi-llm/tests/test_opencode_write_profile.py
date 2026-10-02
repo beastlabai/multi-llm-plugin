@@ -38,7 +38,7 @@ from utils.providers.base import (  # noqa: E402
     PROFILE_GENERATE,
 )
 
-CAPTURE_ROOT = Path(__file__).parent / "fixtures" / "opencode" / "capture"
+from tests.opencode_fixtures import CAPTURE as CAPTURE_ROOT  # noqa: E402  (capture/<pin>/)
 MODEL = "opencode/big-pickle"
 FLOOR, CEILING = oc.OpenCodeProvider.CONTINUE_LOOP_ON_DENY_RANGE
 SENTINEL = "sk-canary-not-a-key-t47"
@@ -546,7 +546,7 @@ class TestTheReadIsMemoised:
 # --------------------------------------------------------------------------- #
 
 def _rig(case: str) -> List[Path]:
-    found = sorted(CAPTURE_ROOT.glob(f"*/{case}.config.json"))
+    found = sorted(CAPTURE_ROOT.glob(f"{case}.config.json"))
     assert found, f"rig case {case} is not committed under {CAPTURE_ROOT}"
     return found
 

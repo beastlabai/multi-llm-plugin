@@ -1,3 +1,4 @@
+auth_error	exit=1	tool_posts=0	tool=-	finish=ERROR-EVENT	auto_rejecting=False	org_get=False	timestamp=2026-10-02T13:51:41.802Z level=ERROR run=1ed83228 message="stream error" providerID=google modelID=gemini-2.5-flash session.id=ses_f031d720affeO4dERfid7Zdvup small=false agent=plan mode=prim
 builtin_plansdir_build	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
 builtin_plansdir_ctrl_build	exit=0	tool_posts=1	tool=error:rejected	finish=tool-calls	auto_rejecting=True	org_get=False	! permission requested: external_directory (/rig/data/opencode/plans/*); auto-rejecting
 builtin_plansdir_ctrl_plan	exit=0	tool_posts=2	tool=completed	finish=stop	auto_rejecting=False	org_get=False	
@@ -12,7 +13,9 @@ builtin_tmp_ctrl_plan	exit=0	tool_posts=2	tool=completed	finish=stop	auto_reject
 builtin_tmp_plan	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
 builtin_toolout_build	exit=0	tool_posts=2	tool=completed	finish=stop	auto_rejecting=False	org_get=False	
 builtin_toolout_plan	exit=0	tool_posts=2	tool=completed	finish=stop	auto_rejecting=False	org_get=False	
+denied_turn	exit=0	tool_posts=2	tool=error:rejected	finish=tool-calls	auto_rejecting=True	org_get=False	! permission requested: external_directory (/etc/*); auto-rejecting
 envperm_plan	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
+invalid_model	exit=1	tool_posts=0	tool=-	finish=ERROR-EVENT	auto_rejecting=False	org_get=False	timestamp=2026-10-02T13:51:44.125Z level=ERROR run=e587b1a4 message="share subscriber failed" type=message.updated cause="Cause([Fail(ProviderModelNotFoundError: Model not found: opencode/sonnet. Did 
 managed_agent_plan	exit=0	tool_posts=2	tool=completed	finish=stop	auto_rejecting=False	org_get=False	
 managed_toplevel_plan	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
 org_agent_dbmem_plan	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
@@ -21,6 +24,7 @@ q2_ustar_agentlayer_build	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	a
 q2_ustar_agentlayer_plan	exit=0	tool_posts=2	tool=error:deny-rule	finish=stop	auto_rejecting=False	org_get=False	
 q2_ustar_toplevel_build	exit=0	tool_posts=2	tool=completed	finish=stop	auto_rejecting=False	org_get=False	
 q2_ustar_toplevel_plan	exit=0	tool_posts=2	tool=completed	finish=stop	auto_rejecting=False	org_get=False	
+run_review	exit=0	tool_posts=4	tool=completed	finish=stop	auto_rejecting=False	org_get=False	
 s41_ask_bash	exit=0	tool_posts=1	tool=error:rejected	finish=tool-calls	auto_rejecting=True	org_get=False	! permission requested: external_directory (/etc/*); auto-rejecting
 s41_ask_read	exit=0	tool_posts=1	tool=error:rejected	finish=tool-calls	auto_rejecting=True	org_get=False	! permission requested: external_directory (/etc/*); auto-rejecting
 s41_cont_read	exit=0	tool_posts=2	tool=error:rejected	finish=stop	auto_rejecting=True	org_get=False	! permission requested: external_directory (/etc/*); auto-rejecting

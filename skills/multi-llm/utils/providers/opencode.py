@@ -298,7 +298,7 @@ def builtin_external_allows(
 ) -> List[str]:
     """The built-in ``external_directory`` allows our ``"*": "deny"`` shadows.
 
-    MEASURED on 1.17.15 and 1.18.32 (the T4.6 rig, cases ``builtin_tmp_{plan,build}`` and
+    MEASURED on the pinned release (the T4.6 rig, cases ``builtin_tmp_{plan,build}`` and
     ``builtin_plansdir_{plan,build}`` against their ``_ctrl`` twins): the
     shared defaults and the agents' own overrides carry these allows *before*
     the agent layer, so by ``findLast`` our deny shadows them and a read the
@@ -315,7 +315,8 @@ def builtin_external_allows(
     from ``env`` (default this process's environment, which is the dispatch
     env for every name read here: ``TMPDIR``/``TMP``/``TEMP``, ``HOME`` and the
     ``XDG_`` family all pass the env allowlist and the hermetic delta unchanged).
-    Re-measure them when the rig moves past 1.18.32.
+    Every bump re-runs the rig, and ``test_opencode_permission_block.py`` reads
+    these globs back out of the new capture's deny errors.
 
     **Known limitation, not re-listed:** the directory of each *discovered
     skill* (the rig's ``builtin_skilldir_*`` case, e.g. a skill under
@@ -802,20 +803,24 @@ def _user_config_paths() -> List[str]:
 # one of those layers the way the dispatch will, including the container
 # wrapper, because it is spawned through the same PATH binary with the same env.
 #
-# It also **prints secrets in plaintext** (an inline `options.apiKey`, a
-# substituted `{env:}` value). So its stdout is reduced in memory, inside
-# :func:`_read_declared_providers`, to booleans and rule lists, and the raw
-# text never leaves that function — not in a return value, not in a log line,
-# not in an exception message.
+# Up to 1.18.32 it **printed secrets in plaintext** (an inline `options.apiKey`,
+# a substituted `{env:}` value); 1.18.34 masks every present `apiKey` as `"***"`
+# — an empty string and an unset `{env:}` reference included (measured
+# 2026-10-02, `debug_config.1.18.34.json`). The stdout is still reduced in
+# memory, inside :func:`_read_declared_providers`, to booleans and rule lists,
+# and the raw text never leaves that function — not in a return value, not in
+# a log line, not in an exception message: the reducer does not rely on the
+# mask. What the mask costs: ``has_key`` now reads "a key is declared", so a
+# built-in override whose `{env:}` key the child never gets passes the auth
+# preflight and fails at dispatch as `auth_failed`, where 1.18.32 refused it.
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: `opencode [--pure] debug config` — "show resolved configuration". A `debug`
 #: subcommand, so its shape is not a contract: every failure reads as "unknown"
-#: and keeps the caller's pre-existing verdict. **Measured at 1.17.15** (the
-#: ``min_version`` floor; pre-flight 2026-09-25, the npm-cache tarball run on a
-#: scratch HOME) and at 1.18.32: `debug config` and `--pure debug config` both
-#: exit 0 there with the same `provider` shape and the inline `apiKey` in
-#: plaintext, so the floor does not need the unknown-fallback — it stays as
+#: and keeps the caller's pre-existing verdict. **Measured on the pinned
+#: release** (`debug_config.<verified_version>.json`, re-captured at every
+#: bump): `debug config` and `--pure debug config` both exit 0 with the same
+#: `provider` shape, so the pin does not need the unknown-fallback — it stays as
 #: defence. `--pure` means only "no external plugins"; it does not stop the
 #: global config loading (the isolation is the hermetic redirect's).
 DEBUG_CONFIG_ARGV: Tuple[str, ...] = ("opencode", "debug", "config")
@@ -838,7 +843,9 @@ class ProviderDecl(NamedTuple):
 
     ``custom`` is :func:`_defines_an_implementation` (an ``npm`` package or an
     ``options.baseURL``); ``has_key`` is a non-empty string ``options.apiKey``
-    after opencode's own ``{env:}`` substitution. Never the key itself.
+    as ``debug config`` prints it — after opencode's own ``{env:}``
+    substitution up to 1.18.32, ``"***"`` for any declared key on 1.18.34,
+    which masks them. Never the key itself.
     """
 
     custom: bool
@@ -1543,32 +1550,35 @@ class OpenCodeProvider(LLMProvider):
     #: entry the day the probe stops answering (see hosts/capabilities.yaml).
     credential_free_models = frozenset({"opencode/big-pickle"})
     version_cmd = ("opencode", "--version")
-    min_version = "1.17.15"
-    # NOT the newest release the parser has been graded on — the release the
-    # DECLARED fixtures were captured from, and a floor `engines.opencode` is
-    # asserted against (test_opencode_package.py). D3 (2026-09-11) added a real
-    # 1.18.30 capture beside them, `tests/fixtures/opencode/run_review.1.18.30.jsonl`,
-    # and grades the parser on both pins rather than moving this one: moving it
-    # is a support-window decision with its own checklist (recaptured fixtures,
-    # this constant, `engines.opencode`, the packaging README, the container
-    # pin and lockfile, cli-versions.lock, host_matrix.yaml, re-recorded rows).
-    verified_version = "1.18.12"
+    # SUPPORT POLICY (2026-10-02): the newest opencode release is the only one
+    # supported, so the floor and the release the parser fixtures were captured
+    # from are one version, always. Below it the executor refuses (exit 3,
+    # naming `upgrade_hint`); above it — a release newer than this commit —
+    # one line warns that stream parsing is best-effort until the next bump.
+    # Every other pin of that version (`engines.opencode`, the container's
+    # `opencode-ai` pin, lockfile and cli-versions.lock row, the mock's
+    # `--version`) follows it, and `tests/test_opencode_version_pins.py` fails
+    # the build on any one that does not. A bump is one command,
+    # `make opencode-bump VERSION=<x.y.z>`: it moves every pin and re-captures
+    # the fixtures offline on that release (`tests/fixtures/opencode/capture/`,
+    # `auth_list.<v>.json`, `debug_config.<v>.json`), and the tests then grade
+    # the parser on the new captures. `make opencode-latest-check` says when
+    # npm has a newer release than this one.
+    min_version = "1.18.34"
+    verified_version = "1.18.34"
+    #: What the below-floor refusal tells the user to run (never executed).
+    upgrade_hint = "opencode upgrade {version}"
     #: T4.2 — the inclusive (floor, ceiling) opencode range in which
     #: `experimental.continue_loop_on_deny: true` is emitted
-    #: (:func:`continue_loop_on_deny_allowed`). Its own constant, not
-    #: `verified_version`: the key was measured above that pin, so using it as
-    #: the ceiling would omit the key on builds shown to honour it. MEASURED
-    #: (T4.0, offline against a stub provider, the T4.6 rig under
-    #: `tests/fixtures/opencode/capture/`) on 1.17.15, 1.18.18, 1.18.23, 1.18.30
-    #: and 1.18.32: accepted silently, and a rejected permission no longer ends
-    #: the turn on any of them. 2026-10-02: the full 68-case rig re-run on the
-    #: installed 1.18.34 (`capture/1.18.34/`) gave a `summary.tsv` identical to
-    #: 1.18.32's, so the ceiling moved there; the version-lag WARN that omitted
-    #: the key on 1.18.34 was this bound lagging the install, not a regression.
-    #: The deny rows themselves were accepted on all
-    #: six too, so they carry no version gate and `min_version` stays. Widen
-    #: either bound only on a new rig measurement.
-    CONTINUE_LOOP_ON_DENY_RANGE = ("1.17.15", "1.18.34")
+    #: (:func:`continue_loop_on_deny_allowed`): the support window itself. The
+    #: rig (`tests/fixtures/opencode/capture/`, cases `s41_cont_read` and
+    #: `t40_cont_*`) measures the key on every bump, and
+    #: `test_opencode_permission_block.py` reads that capture, so the key is
+    #: emitted exactly on the release it was measured on. It was measured on
+    #: every release from 1.17.15 to 1.18.34 (accepted silently; a rejected
+    #: permission no longer ends the turn) while the floor was lower; a newer,
+    #: unmeasured build omits it with one WARN until the next bump.
+    CONTINUE_LOOP_ON_DENY_RANGE = (min_version, verified_version)
 
     # §7.2 — per-adapter pattern overrides, EXTENDING the base sets (never
     # replacing them: the base entries are audited-clean and shared).

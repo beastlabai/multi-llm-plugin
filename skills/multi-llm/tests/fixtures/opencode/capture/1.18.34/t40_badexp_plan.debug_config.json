@@ -1,0 +1,27 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "stub": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "stub",
+      "options": {
+        "baseURL": "http://127.0.0.1:PORT/v1",
+        "apiKey": "***"
+      },
+      "models": {
+        "m": {
+          "name": "m",
+          "tool_call": true
+        }
+      }
+    }
+  },
+  "model": "stub/m",
+  "small_model": "stub/m",
+  "agent": {},
+  "mode": {},
+  "plugin": [],
+  "command": {},
+  "experimental": {},
+  "username": "unknown"
+}

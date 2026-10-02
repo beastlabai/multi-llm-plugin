@@ -331,7 +331,7 @@ clis:
     binary: opencode
     install: npm
     package: "opencode-ai"
-    version: "1.18.33"
+    version: "1.18.34"
     verify:
       command: ["opencode", "--version"]
       pattern: "^(?P<version>\\d+\\.\\d+\\.\\d+)$"

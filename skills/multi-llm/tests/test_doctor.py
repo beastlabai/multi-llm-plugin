@@ -949,14 +949,10 @@ class TestDoctorDetectsAGlobalLandlockFlag:
 # Plan §8 T8.6 / T8.13 — `config-only`, the reader's budget, and the scope
 # ---------------------------------------------------------------------------
 
-_OC_DEBUG = json.loads(
-    (Path(__file__).parent / "fixtures" / "opencode" / "debug_config.1.18.32.json")
-    .read_text(encoding="utf-8")
-)["cases"]
-_OC_AUTH = json.loads(
-    (Path(__file__).parent / "fixtures" / "opencode" / "auth_list.1.18.32.json")
-    .read_text(encoding="utf-8")
-)["cases"]
+from tests import opencode_fixtures as _oc_pin  # noqa: E402
+
+_OC_DEBUG = json.loads(_oc_pin.DEBUG_CONFIG.read_text(encoding="utf-8"))["cases"]
+_OC_AUTH = json.loads(_oc_pin.AUTH_LIST.read_text(encoding="utf-8"))["cases"]
 
 
 class TestDoctorConfigOnly:
@@ -1097,7 +1093,7 @@ class TestDoctorStalledDebugConfig:
         auth = _OC_AUTH["empty"]["stdout"].replace("'", "'\\''")
         _script(clinic, "opencode", (
             'case "$1 $2" in\n'
-            '  "--version ") echo 1.18.32 ;;\n'
+            f'  "--version ") echo {_oc_pin.PIN} ;;\n'
             f"  \"auth list\") printf '%s' '{auth}' ;;\n"
             '  "debug config") exec sleep 5 ;;\n'
             'esac'

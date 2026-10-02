@@ -1,8 +1,8 @@
-# opencode permission capture rig (plan §4.1, §4.2 step 1, T4.0, T4.6-T4.8)
+# opencode capture rig (plan §4.1, §4.2 step 1, T4.0, T4.6-T4.8, and the parser's streams)
 
 Plan: `plans/opencode-validator-false-rate-limit-and-denied-turn.md`.
 
-Captured 2026-09-25, **offline, $0**. The real `opencode run` binary talks to a
+Captured 2026-09-25, re-captured on every opencode bump, **offline, $0**. The real `opencode run` binary talks to a
 localhost chat-completions stub (`stub.py`) configured as a custom `stub`
 provider. It runs under a cleared environment with a scratch HOME/XDG tree,
 `TMPDIR` inside the scratch tree, stdin `/dev/null`,
@@ -13,11 +13,15 @@ written. The managed-config layer is reached through opencode's own
 `OPENCODE_TEST_MANAGED_CONFIG_DIR` override. The org-config layer is reached by
 seeding the scratch data-dir DB with an account whose URL is the stub.
 
-Versions: **1.18.32** and **1.17.15** (`min_version`) with every case; **1.18.34**
-(re-run 2026-10-02 on the then-installed build, all 68 cases, `summary.tsv` identical
-to 1.18.32's). **1.18.18, 1.18.23 and 1.18.30** ran the T4.0 subset (`t40_{none,cont,block,blockcont}_*`
-and `q2_ustar_agentlayer_*`). The older builds were extracted from the npm
-cache; `run.sh` shows how.
+**Versions.** opencode supports its newest release only, and that release is
+both `min_version` and `verified_version` (the pin). The committed directory is
+the pin's, every case: **1.18.34** (2026-10-02, 72 cases). A bump
+(`make opencode-bump VERSION=<x.y.z>`, which drives `run.sh`) captures the new
+release into `<new version>/` and deletes the old directory: git history keeps
+the earlier captures. On 1.18.34 the 68 permission cases gave a `summary.tsv`
+identical to 1.18.32's. While the floor was lower, 1.17.15 and 1.18.32 ran every
+case and 1.18.18, 1.18.23 and 1.18.30 the T4.0 subset; the tables below keep
+those results where they say so.
 
 Reproduce: `./run.sh [--bin PATH] [CASE ...]` (a thin wrapper over
 `capture.py`). The case table is `capture.py:_cases()`. Output goes to
@@ -45,7 +49,8 @@ user name, the scratch path or the host name is still present in any file it
 wrote. The stub's `apiKey` is the literal `"x"`. The account tokens are
 `rig-access`/`rig-refresh`.
 
-**Reading an outcome.** Every case exits 0 except `t40_badperm_plan`.
+**Reading an outcome.** Every case exits 0 except `t40_badperm_plan`,
+`auth_error` and `invalid_model`.
 `summary.tsv` column `tool_posts` counts the stub requests that carried tools:
 
 - `2` means the tool result went back to the model. The last `step_finish`
@@ -53,7 +58,24 @@ wrote. The stub's `apiKey` is the literal `"x"`. The account tokens are
 - `1` means the turn ended on the tool call. The last reason is `tool-calls`,
   and no second request was made.
 
-## Stream shape (identical on 1.17.15 and 1.18.32)
+## The parser's stream cases
+
+Four cases script a whole turn through `stub.py`'s `turns` (one entry per
+model step: optional text, tool calls and usage) rather than one tool call. They
+are what `OpenCodeProvider`'s parser and classifier are graded on
+(`tests/opencode_fixtures.py` names them):
+
+| Case | Shape |
+|---|---|
+| `run_review` | a healthy review turn on `build`: four steps (read, read + bash, write, closing text), two text parts, finish `stop`. The per-step tokens are the D3 gate's real 1.18.30 `opencode/big-pickle` reviewer's |
+| `denied_turn` | run b38de8bb's shape on `plan`: a completed read whose output quotes plan text about rate limits (`rate limit`, `rate_limit_hit`, `429`), then a bash on `/etc/hostname` that `run` auto-rejects: exit 0, two `step_finish tool-calls`, no final answer. b38de8bb itself (1.18.32, a redacted real run) is in git history |
+| `auth_error` | a declared built-in `google` provider with no key: one `ProviderAuthError` event on stdout, exit 1, no request to any provider |
+| `invalid_model` | `--model opencode/sonnet`: the `UnknownError` wrapper on stdout and the `ProviderModelNotFoundError` "Did you mean" cause on stderr, exit 1 |
+
+`auth_error` and `invalid_model` run with `HTTP(S)_PROXY` pointed at a closed
+local port, so any egress they attempted would die; neither attempts one.
+
+## Stream shape (identical on 1.17.15, 1.18.32 and 1.18.34)
 
 - The top-level `type` is one of `step_start`, `tool_use`, `step_finish`,
   `text` or `error`. The payload is under `part`, whose `part.type` is
@@ -131,7 +153,7 @@ position**. The merge order, READ from 1.18.32:
 
 Rows 7 and 8 load on 1.17.15 as well (measured below).
 
-## T4.0 version matrix: config acceptance and effect
+## T4.0 version matrix: config acceptance and effect (measured while the floor was 1.17.15)
 
 The config under test is the §4.2 step 1 block under `agent.<plan|build>.permission`,
 with and without `experimental.continue_loop_on_deny: true`. The target is
@@ -162,12 +184,13 @@ with and without `experimental.continue_loop_on_deny: true`. The target is
   So on a build that lacked `continue_loop_on_deny`, the key would be inert,
   not fatal. The schema entry, `continue_loop_on_deny: optional(Boolean)`, is
   present in the 1.17.15 binary.
-- **Result.** `continue_loop_on_deny` has its effect on 1.17.15. The measured
-  floor is **1.17.15**, and the range is `("1.17.15", "1.18.32")` with all five
-  builds measured. The permission block needs **no version gate and no
-  `min_version` raise**.
+- **Result.** `continue_loop_on_deny` had its effect on every build from 1.17.15
+  to 1.18.34. With the floor at the newest release, the range is the support
+  window (`CONTINUE_LOOP_ON_DENY_RANGE = (min_version, verified_version)`), and
+  `t40_cont_*` / `s41_cont_read` re-measure it at every bump. The permission
+  block needs **no version gate**.
 
-## Every case (1.18.32 and 1.17.15 agree on every row; `summary.tsv`)
+## Every case (1.17.15, 1.18.32 and 1.18.34 agree on every row; `summary.tsv`)
 
 `/etc/hostname` is read only where the plan names it (§4.1 and `q2_ustar_*`).
 Every other case reads a scratch file. "Our block" is the §4.2 step 1 block
@@ -313,7 +336,7 @@ a JSON file and an org-config endpoint added.
 `CASE.debug_config.json` above is this rig's per-case record of the resolved
 config. The §8 reader (`opencode._read_declared_providers`) is graded on a
 separate, model-free capture instead:
-`tests/fixtures/opencode/debug_config.1.18.32.json`, produced by
+`tests/fixtures/opencode/debug_config.<pin>.json`, produced by
 `tests/fixtures/opencode/debug_config_capture.py` with the same scratch-HOME
 procedure (cleared env, `OPENCODE_DISABLE_MODELS_FETCH=1`, stdin `/dev/null`,
 no stub needed because `debug config` makes no model call). It carries one case
@@ -325,4 +348,8 @@ commented `opencode.jsonc`, the project layer with and without
 and the hermetic `OPENCODE_CONFIG_CONTENT` with and without `--pure`, carrying
 the §4.2 permission block under `agent.plan.permission` so the fixture shows the
 reducer ignoring it. Every `apiKey` is a `sk-canary-not-a-key-<n>` canary.
+**1.18.34 masks every declared `apiKey` as `"***"`** (an empty one and an unset
+`{env:}` reference included); 1.18.32 printed them in plaintext, `""` for the
+unset reference. `auth_list.<pin>.json` (`auth_list_capture.py`, same
+procedure) is the `opencode auth list` envelope the auth probe is graded on.
 The in-image repeat through `tests/container/wrapper.py` is not captured yet.

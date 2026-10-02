@@ -1887,7 +1887,9 @@ def test_the_goal_3_sweep_covers_every_adapter_with_captures():
     }
     # kilocode's directory holds only its model catalog (§14).
     assert swept == with_dirs - {"kilocode"}
-    assert len(GOAL_3_ROWS) > 300
+    # Not vacuous. Since 2026-10-02 opencode commits one release's captures
+    # (the 72 rig cases of its pin), not five releases', so the sweep is ~280.
+    assert len(GOAL_3_ROWS) > 250
 
 
 # --------------------------------------------------------------------------- #

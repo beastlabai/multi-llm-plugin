@@ -1,0 +1,60 @@
+{
+ "opencode_version": "1.18.34",
+ "note": "a declared built-in provider with no key: ProviderAuthError, no request",
+ "argv": [
+  "opencode",
+  "run",
+  "--pure",
+  "--agent",
+  "plan",
+  "--format",
+  "json",
+  "--print-logs",
+  "--log-level",
+  "ERROR",
+  "--model",
+  "google/gemini-2.5-flash",
+  "Reply with the single word OK."
+ ],
+ "env": {
+  "HOME": "/rig/home",
+  "XDG_CONFIG_HOME": "/rig/cfg",
+  "XDG_DATA_HOME": "/rig/data",
+  "XDG_CACHE_HOME": "/rig/cache",
+  "XDG_STATE_HOME": "/rig/state",
+  "TMPDIR": "/rig/tmp",
+  "OPENCODE_DISABLE_MODELS_FETCH": "1",
+  "OPENCODE_DISABLE_AUTOUPDATE": "1",
+  "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+  "HTTP_PROXY": "http://127.0.0.1:9",
+  "HTTPS_PROXY": "http://127.0.0.1:9",
+  "NO_PROXY": "127.0.0.1,localhost"
+ },
+ "OPENCODE_CONFIG_CONTENT": null,
+ "global_opencode_json": {
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+   "stub": {
+    "npm": "@ai-sdk/openai-compatible",
+    "name": "stub",
+    "options": {
+     "baseURL": "http://127.0.0.1:PORT/v1",
+     "apiKey": "x"
+    },
+    "models": {
+     "m": {
+      "name": "m",
+      "tool_call": true
+     }
+    }
+   },
+   "google": {}
+  },
+  "model": "stub/m",
+  "small_model": "stub/m"
+ },
+ "managed_opencode_json": null,
+ "org_config": null,
+ "stub_tool_call": null,
+ "stub_script": null
+}

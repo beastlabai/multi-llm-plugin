@@ -2548,10 +2548,15 @@ def _pi_thinking_stream():
 
 def _opencode_tool_stream():
     """opencode killed after a tool call: its last message has no text."""
-    lines = (FIXTURES / "opencode" / "run_review.1.18.30.jsonl").read_text(
-        encoding="utf-8").splitlines()
-    cut = [line for line in lines[:5]]
+    from tests.opencode_fixtures import read
+
+    lines = read("run_review").splitlines()
+    first_tool = next(
+        i for i, line in enumerate(lines) if json.loads(line)["type"] == "tool_use"
+    )
+    cut = lines[:first_tool + 1]
     assert json.loads(cut[-1])["type"] == "tool_use"
+    assert not any(json.loads(line)["type"] == "text" for line in cut)
     return "\n".join(cut) + "\n"
 
 
