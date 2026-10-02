@@ -1941,8 +1941,17 @@ def canary_env(context: JailContext) -> Dict[str, str]:
         if write_dir:
             env[CANARY_ENV_WRITE_DIR] = write_dir
         negatives = plan.negative_dirs()
+        for path in negatives:
+            if "\n" in path:
+                # The one byte the newline-separated hand-over cannot carry:
+                # a setup failure (the walk's ``unknown``), never a target
+                # split in two that the canary would read as denied.
+                raise ProbeSetupFailed(
+                    f"a negative target of the rung probe holds a newline and "
+                    f"cannot be handed to the canary: {render_home(path)!r}"
+                )
         if negatives:
-            env[CANARY_ENV_DENY_DIRS] = os.pathsep.join(negatives)
+            env[CANARY_ENV_DENY_DIRS] = "\n".join(negatives)
         return env
     if not context.write_scope or not context.target:
         return {}
