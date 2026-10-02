@@ -93,6 +93,7 @@ from .providers.base import (
     CATEGORY_SERVER_ERROR,
     CODEX_HOME_CHECK_MARKER,
     INCIDENTAL_LANE_FANOUT,
+    LADDER_RUNGS,
     MODE_CHECK_MARKER,
     PROFILE_GENERATE,
     SANDBOX_BYPASSED_MARKER,
@@ -107,6 +108,7 @@ from .providers.base import (
     sandbox_incidental_notice_text,
     sandbox_rung_retired_notice,
     sandbox_walk_clause,
+    split_reasoning_effort,
     context_length_message,
 )
 from .retry_ladder import (
@@ -1272,10 +1274,52 @@ NON_MODEL_JSON_MARKERS = (
 RETIRED_UNSELECTED = "stale-unselected"
 
 
+def _effort_vocabulary(provider_name: str) -> FrozenSet[str]:
+    """The ``:effort`` names a spec for *provider_name* may carry.
+
+    The adapter's own ``EFFORT_LADDER`` (``accepted_inbound``: what a spec may
+    say, aliases included), the way ``LLMProvider._accepted_efforts`` reads it.
+    A provider with no adapter or no ladder (a test double) gets the canonical
+    rungs, so ``codex:x`` → ``codex:x:high`` is still recognised as a respelling
+    whatever the registry holds.
+    """
+    provider = get_provider(provider_name)
+    module = sys.modules.get(type(provider).__module__) if provider else None
+    ladder = getattr(module, "EFFORT_LADDER", None)
+    try:
+        names = ladder.accepted_inbound if ladder is not None else None
+    except Exception:  # noqa: BLE001 - a ladder is data; never fail a retire on it
+        names = None
+    return frozenset(names) if names else LADDER_RUNGS
+
+
+def respelled_result_stems(model_specs: Sequence[str]) -> Dict[str, str]:
+    """``{stem: selected spec}`` for every result stem that is a *respelling*
+    of a selected spec: the same provider and model under another effort
+    suffix, or none (``codex_gpt-6-luna`` and ``codex_gpt-6-luna_low`` for a
+    selected ``codex:gpt-6-luna:high``). A selected spec's own stem is never
+    listed. Only an effort suffix the provider's ladder names counts, because
+    a model id may itself end in ``:<word>`` (openrouter ``:free``).
+    """
+    selected = {sanitize_model_name(spec) for spec in model_specs}
+    respelled: Dict[str, str] = {}
+    for spec in model_specs:
+        provider_name, _, model = spec.partition(":")
+        if not model:
+            continue
+        efforts = _effort_vocabulary(provider_name)
+        base, _effort = split_reasoning_effort(model, efforts)
+        for variant in (f"{provider_name}:{base}", *(f"{provider_name}:{base}:{e}" for e in sorted(efforts))):
+            stem = sanitize_model_name(variant)
+            if stem not in selected:
+                respelled.setdefault(stem, spec)
+    return respelled
+
+
 def retire_unselected_results(
     phase_dir: str, model_specs: Sequence[str]
 ) -> List[str]:
-    """Rename the per-model results (and logs) of specs this run does not select.
+    """Rename the per-model results (and logs) of a selected spec's respellings.
 
     Stale detection elsewhere is keyed by the *slot* (``<stem>.json`` and the
     scope ledger), so a model whose spec changed between runs --
@@ -1286,9 +1330,22 @@ def retire_unselected_results(
     the next ``--reaggregate`` globs the phase dir and would count the old
     model's findings in a report whose ``models_requested`` never named it.
 
+    Only a **respelling** of a selected spec is retired (same provider and
+    model, another effort suffix or none: :func:`respelled_result_stems`),
+    never every stem outside the selection. The first version retired
+    everything unselected, and the documented resume -- "re-run only the
+    missing models with ``--force``", which a host spells as ``--models
+    <missing>`` -- then renamed every completed model's result and log
+    ``.stale-unselected``, so the resumed report covered the subset and no
+    later ``--reaggregate`` could see the rest (adversarial review,
+    2026-10-02; the previous ``.status.json`` is no guard, because the
+    fan-out has already replaced ``models_requested`` by the time this runs).
+    A result of a model that simply left the selection stays, as it did
+    before #30: the fan-out's report never read it, and a dir that keeps
+    several models' results still reaggregates whole.
+
     Called by a **fan-out** only, with the run's selection, before any model
-    starts. ``--reaggregate`` never calls it, so a dir that legitimately keeps
-    several models' results still reaggregates whole. Same naming as
+    starts. ``--reaggregate`` never calls it. Same naming as
     ``retire_result_from_another_scope``: ``<stem>.json.stale-unselected``,
     renamed and never deleted, no longer matching ``*.json``; the log follows
     as ``log_<stem>.txt.stale-unselected``. Only a file whose body is a JSON
@@ -1298,14 +1355,14 @@ def retire_unselected_results(
     Returns:
         The new result-file paths (logs are renamed with them, not listed).
     """
-    selected = {sanitize_model_name(spec) for spec in model_specs}
+    respelled = respelled_result_stems(model_specs)
     retired: List[str] = []
     for path in sorted(Path(phase_dir).glob("*.json")):
         name = path.name
         if any(marker in name for marker in NON_MODEL_JSON_MARKERS):
             continue
         stem = name[: -len(".json")]
-        if stem in selected:
+        if stem not in respelled:
             continue
         try:
             if not isinstance(json.loads(path.read_text(encoding="utf-8")), list):
@@ -1325,16 +1382,16 @@ def retire_unselected_results(
                 os.replace(source, target)
             except OSError as exc:
                 print(
-                    f"Warning: could not retire {source.name} (model not in this "
-                    f"run's selection): {exc}",
+                    f"Warning: could not retire {source.name} (model respelled "
+                    f"as {respelled[stem]} in this run's selection): {exc}",
                     file=sys.stderr,
                 )
                 break
         else:
             retired.append(str(moved[0][1]))
             print(
-                f"[SELECTION_CHANGED] {stem}: not in this run's selection; "
-                f"retired {name} as {moved[0][1].name}"
+                f"[SELECTION_CHANGED] {stem}: respelled as {respelled[stem]} in "
+                f"this run's selection; retired {name} as {moved[0][1].name}"
             )
     return retired
 
@@ -1459,6 +1516,61 @@ def retire_stale_validation_round(phase_dir: str, *, reason: str) -> List[str]:
         if target:
             retired.append(target)
     return retired
+
+
+def _recorded_group_hashes(grouped_path: str) -> Optional[FrozenSet[str]]:
+    """The ``group_hash`` set of the ``grouped.json`` on disk, or ``None``.
+
+    ``None`` when there is no readable file, or when any group carries no hash
+    (a pre-stamping v1 file): an unknown grouping is a different grouping.
+    """
+    try:
+        with open(grouped_path, "r", encoding="utf-8") as handle:
+            groups = load_groups_payload(json.load(handle))
+    except (OSError, ValueError, TypeError):
+        return None
+    hashes = []
+    for group in groups:
+        ghash = group.get("group_hash") if isinstance(group, dict) else None
+        if not ghash:
+            return None
+        hashes.append(str(ghash))
+    return frozenset(hashes)
+
+
+def retire_validation_for_regroup(
+    phase_dir: str, grouped: List[Dict[str, Any]], *, reason: str
+) -> List[str]:
+    """Retire the verdicts the fan-out's regroup orphans, and no more (D7).
+
+    *grouped* is the stamped grouping about to overwrite ``grouped.json``.
+    When its ``group_hash`` set differs from the file on disk (or there is no
+    readable, stamped file) the whole round goes --
+    :func:`retire_stale_validation_round` -- because a surviving
+    ``validation_batch_<n>.json`` of another grouping is skipped as "already
+    complete" by the executor and then discarded by the merge as a foreign
+    ``group_hash`` (#25, 2026-10-02). When the sets are **equal** the batch
+    files are that grouping's own verdicts, so only ``validation.json`` is
+    retired, as before #25: a ``--force`` resume that skips every model
+    regroups deterministically to the same hashes, and retiring the round
+    there re-dispatched every completed batch -- after one batch timed out
+    under ``--exec-subagents``, or when a host ran ``--force`` where
+    ``--reaggregate`` was meant (adversarial review, 2026-10-02). The
+    executor's own ``_result_names_foreign_groups`` still re-dispatches any
+    stale batch the equal-set case leaves behind. The comparison is on the
+    grouping alone: a plan edited between the rounds moves the task file's
+    ``inputs.plan_sha256``, which is the task file's refusal to make.
+    """
+    current = frozenset(
+        str(group.get("group_hash"))
+        for group in grouped
+        if isinstance(group, dict) and group.get("group_hash")
+    )
+    previous = _recorded_group_hashes(os.path.join(phase_dir, "grouped.json"))
+    if previous is not None and previous == current and len(current) == len(grouped):
+        target = retire_stale_validation(phase_dir, reason=reason)
+        return [target] if target else []
+    return retire_stale_validation_round(phase_dir, reason=reason)
 
 
 def grouped_coverage_gap(
@@ -3006,9 +3118,9 @@ def sandbox_bypassed_notice(provider_name: str, probe: Any = None) -> str:
     that stem when ``probe`` — the ``SandboxProbeResult`` — shows the walk
     tried a rung first: each rung with its outcome and, when it was probed,
     its probe tail (``fallback rung 'landlock' unavailable (codex 0.156.1:
-    "…")``), or ``not tried: removed since codex 0.156.1 (installed: 0.159.3)`` when
-    the version skipped it. Without ``probe`` the stem alone is returned. The
-    stem says which runner,
+    "…")``), or ``not tried: unusable since codex 0.156.1 (panics; measured;
+    installed: 0.159.3)`` when the version skipped it. Without ``probe`` the
+    stem alone is returned. The stem says which runner,
     why its own sandbox is not in the path, which config key governs it (and
     so which word turns it off), and — the clause that cannot be left out —
     that nothing stands between the model's shell and this machine. It is
@@ -7717,10 +7829,13 @@ async def run_review_orchestration(
             grouped_path = os.path.join(phase_dir, "grouped.json")
             # D7: the previous run's verdicts belong to the grouping this write
             # replaces; retired in the same step so no later reaggregate finds them.
-            # Round-wide: a surviving `validation_batch_<n>.json` of the previous
-            # grouping would be skipped as "already complete" by the executor and
-            # then discarded by the merge as a foreign group_hash (#25).
-            retire_stale_validation_round(phase_dir, reason="grouped.json rewritten by a re-run")
+            # Round-wide when the grouping changed: a surviving
+            # `validation_batch_<n>.json` of the previous grouping would be skipped
+            # as "already complete" by the executor and then discarded by the merge
+            # as a foreign group_hash (#25). `validation.json` alone when the hashes
+            # are the same grouping, so a resume that skipped every model does not
+            # re-run its completed batches (adversarial review, 2026-10-02).
+            retire_validation_for_regroup(phase_dir, grouped, reason="grouped.json rewritten by a re-run")
             with open(grouped_path, 'w', encoding='utf-8') as f:
                 json.dump(save_groups_payload(grouped), f, indent=2)
             print(f"Grouped suggestions saved to: {grouped_path}")

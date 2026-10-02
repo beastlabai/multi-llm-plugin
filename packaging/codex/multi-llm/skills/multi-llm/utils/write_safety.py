@@ -310,12 +310,17 @@ class WritePolicy:
         self._allow = [_glob_to_regex(p) for p in self.allow]
         self._deny = [_glob_to_regex(p) for p in self.deny]
 
-    def violation(self, path: str) -> Optional[str]:
-        """The rule ``path`` violates, or ``None`` when the policy permits it.
+    def denied(self, path: str) -> Optional[str]:
+        """The deny-side rule ``path`` hits, or ``None``: the deny list alone.
 
-        Deny wins: a path matched by both lists is denied, because the deny list is
-        the statement of what a code-editing batch has no business touching and an
-        ``allow: ["**"]`` default would otherwise neutralize it entirely.
+        A path outside the pinned root counts as denied here too — nothing
+        outside the root is ever harmless to an executor artifact. What this
+        deliberately does **not** ask is whether an ``allow`` pattern matches:
+        the sweep's "gitignored and harmless" drop needs exactly that
+        distinction (adversarial review, 2026-10-02: under ``allow:
+        ["src/**"]`` an ignored ``logs/run.jsonl`` failed :meth:`violation` on
+        the allow side, stayed in the sweep and became the policy violation
+        #22 was fixed for), while :meth:`violation` keeps asking both.
         """
         relative = relative_to_root(path, self.root)
         if Path(relative).is_absolute() or relative.startswith(".."):
@@ -323,6 +328,19 @@ class WritePolicy:
         for pattern, matcher in zip(self.deny, self._deny):
             if matcher.match(relative):
                 return f"driver.write_paths.deny pattern {pattern!r}"
+        return None
+
+    def violation(self, path: str) -> Optional[str]:
+        """The rule ``path`` violates, or ``None`` when the policy permits it.
+
+        Deny wins: a path matched by both lists is denied, because the deny list is
+        the statement of what a code-editing batch has no business touching and an
+        ``allow: ["**"]`` default would otherwise neutralize it entirely.
+        """
+        denied = self.denied(path)
+        if denied is not None:
+            return denied
+        relative = relative_to_root(path, self.root)
         if not self._allow:
             return "driver.write_paths.allow is empty, so nothing may be written"
         for matcher in self._allow:

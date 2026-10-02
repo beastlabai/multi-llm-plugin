@@ -27,7 +27,7 @@ names the ``sandbox_fallback`` key in force and the rung *that* probe selected
 — ``→ landlock`` (with its ``deprecated_at``), the unsandboxed sentence, a
 refusal, or ``rung unprobed`` when the budget ran out first. A rung the probe
 found retired from this build (its ``removed_at``/panic text, 2026-09-24) is
-named ``removed since codex <removed_at> (measured)``, beside the read-phase
+named ``unusable since codex <removed_at> (panics; measured)``, beside the read-phase
 choice that needs no change to the machine (``sandbox_fallback: contained``
 refuses read phases like writes; ``auto`` runs them under
 ``danger-full-access``); a timeout or any other probe failure is shown as
@@ -935,10 +935,12 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
         removed = list(lost.get("removed_at") or ())
         if lost.get("outcome") in ("retired", "skipped") and removed:
             # Only the probe's own removal panic (or a skip by version) says
-            # this; a timeout or an unrelated failure never does.
+            # this; a timeout or an unrelated failure never does. "unusable",
+            # not "removed": codex 0.160.0 still lists the feature, and the
+            # panic is what was measured (adversarial review, 2026-10-02).
             lost_clause = (
-                f"; → {lost['rung']} unavailable: removed since "
-                f"{provider_name} {removed[0]} (measured)"
+                f"; → {lost['rung']} unusable since "
+                f"{provider_name} {removed[0]} (panics; measured)"
             )
         else:
             dep_version, sentence = (list(lost.get("deprecated_at") or ()) + ["", ""])[:2]

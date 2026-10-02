@@ -120,12 +120,19 @@ Rules:
 #: 2026-10-01 racing-game run validated "the plan has no task breakdown" as valid
 #: on all three hosts (HIGH on one), apply-suggestions wrote a task list into the
 #: plan, and generate-tasks then wrote a second, diverging one.
+#:
+#: The last sentence keeps the rule from swallowing a real sequencing gap: "the
+#: plan never says the data migration must precede the schema switch" reads as
+#: "missing implementation order" to a literal validator, yet it is a constraint
+#: of the design (adversarial review, 2026-10-02).
 PLAN_VALIDATION_SCOPE_GUIDANCE = '''Scope: a plan is a design document. Breaking it into implementation tasks, with
 ids, dependencies and an order, is a later phase (task generation). A finding
 whose only complaint is that the plan has no task breakdown, task list,
 implementation order, dependency graph or milestones is "invalid": not
 applicable to a plan review. A finding that names a concrete design gap which
-would block writing those tasks is judged on that gap.'''
+would block writing those tasks is judged on that gap. A missing ordering
+constraint between parts of the design (a data migration that must precede the
+schema switch) is a design gap, judged on its merits.'''
 
 
 #: Extra guidance for code-review validation, phrased in **capability-neutral**

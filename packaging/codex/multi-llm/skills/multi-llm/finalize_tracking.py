@@ -217,18 +217,32 @@ def main(argv=None) -> int:
         )
         return 1
 
+    given = sorted({f.strip() for f in args.touched if f and f.strip()})
     args.touched = _drop_ignored(args.touched)
     explicit_scope = sorted({f.strip() for f in args.touched if f and f.strip()})
     if args.only_touched and not explicit_scope:
         # Refused before the state file is even read: an empty explicit list
         # would empty `tracked_files`, and review-code would then quietly fall
         # back to the whole `git diff` — the scope this flag exists to replace.
-        print(
-            "ERROR: --only-touched needs at least one --touched <path>: it makes "
-            "tracked_files exactly those paths, and an empty list would send "
-            "review-code back to its git-diff fallback.",
-            file=sys.stderr,
-        )
+        # Said honestly when paths WERE given and every one was gitignored
+        # (adversarial review, 2026-10-02): "needs at least one --touched"
+        # beside a command that passed three sent the reader to the wrong fix.
+        if given:
+            print(
+                f"ERROR: --only-touched was given {len(given)} --touched path(s) "
+                f"and every one is gitignored ({', '.join(given[:5])}"
+                f"{', …' if len(given) > 5 else ''}), so there is nothing to "
+                f"track: tracked_files would be empty, which would send "
+                f"review-code back to its git-diff fallback.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "ERROR: --only-touched needs at least one --touched <path>: it "
+                "makes tracked_files exactly those paths, and an empty list "
+                "would send review-code back to its git-diff fallback.",
+                file=sys.stderr,
+            )
         return 1
 
     state_path = Path(args.state_file)

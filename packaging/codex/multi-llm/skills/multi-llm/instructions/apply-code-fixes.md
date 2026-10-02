@@ -826,6 +826,15 @@ A file whose `tasks_schema_version` is missing or not `2`, or whose recorded
 `inputs` hashes no longer match their sources, is refused with exit 3: re-run the
 phase with `--force` to re-materialize it.
 
+**Check each reply right after you write it.** Run
+`uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util check-reply --tasks-file "{plan}/code-review/revalidation_tasks.json" --task-id <task_id>`
+(omit `--task-id` to check every batch). `[REPLY_INVALID]` means the subagent's reply
+did not parse or did not cover its groups — Sonnet subagents lost a closing `]` on 3 of
+14 batches in the 2026-10-01 Claude Code run. Re-ask the same subagent once for the
+whole reply and write the new reply over the file. Never edit, trim or complete a reply
+yourself, and never assemble one from the parts of two replies. A batch still
+`[REPLY_INVALID]` after that one re-ask is a failed batch: leave its file as it is and say so.
+
 #### Single Batch: `[REVALIDATION_PENDING]`
 
 If `[REVALIDATION_PENDING]` marker is present:

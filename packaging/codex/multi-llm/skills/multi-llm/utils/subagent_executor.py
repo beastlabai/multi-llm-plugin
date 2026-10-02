@@ -4845,9 +4845,15 @@ def normalize_result(kind: str, data: Any) -> List[str]:
                 supplied[key] = supplied.get(key, 0) + 1
         # Required-but-nullable in the schema (OpenAI's strict subset needs every
         # property required) and absent from the prompt's reply shape, so most
-        # replies omit it. Supplied silently: it is optional Claude-only
-        # metadata, and "no value" is what null says.
-        task.setdefault("subagent_type", None)
+        # replies omit it; "no value" is what null says. Counted like the list
+        # keys, not supplied silently: the notes are what makes the native leg
+        # write the completed document back before validating, and a silent
+        # key left a pre-upgrade `task_generation_result.json` schema-invalid
+        # on disk — `task_is_complete` False for a file the phase had consumed
+        # (adversarial review, 2026-10-02).
+        if "subagent_type" not in task:
+            task["subagent_type"] = None
+            supplied["subagent_type"] = supplied.get("subagent_type", 0) + 1
     return [f"{key!r} on {count} task(s)" for key, count in supplied.items()]
 
 
@@ -4856,8 +4862,9 @@ def _report_normalized(kind: str, notes: List[str]) -> None:
     if notes:
         print(
             f"[exec-subagents] {kind}: the reply omitted {', '.join(notes)}; "
-            f"supplied [] before validating (absent and empty mean the same "
-            f"thing to every consumer of this document)."
+            f"supplied the empty value ([] for a list, null for subagent_type) "
+            f"before validating (absent and empty mean the same thing to every "
+            f"consumer of this document)."
         )
 
 

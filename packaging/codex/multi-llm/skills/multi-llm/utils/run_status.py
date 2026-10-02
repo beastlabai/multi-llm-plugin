@@ -468,8 +468,15 @@ def exit_code_for(views: Sequence[Dict[str, Any]]) -> int:
 # Rendering
 # ---------------------------------------------------------------------------
 
-def _workflow_payload(plan_path: Path) -> Dict[str, Any]:
-    """Today's ``--status`` JSON, from today's implementation."""
+def _workflow_payload(
+    plan_path: Path, *, host_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Today's ``--status`` JSON, from today's implementation.
+
+    *host_id* is this poll's ``--host`` (:func:`_reader_host`): the early
+    sandbox warning resolves the subagent runner for it, and the servers
+    declare their host only there (adversarial review, 2026-10-02).
+    """
     from .state_manager import StateManager
 
     try:
@@ -479,7 +486,14 @@ def _workflow_payload(plan_path: Path) -> Dict[str, Any]:
         import check_workflow_prerequisites as prereq  # type: ignore
 
     state = StateManager(plan_path)
-    return prereq.get_workflow_status(state, plan_path, output_dir_path(plan_path))
+    return prereq.get_workflow_status(
+        state, plan_path, output_dir_path(plan_path), host_id=host_id,
+    )
+
+
+def _reader_host(args) -> str:
+    """The host this invocation reads as: ``--host``, else the usual ladder."""
+    return host_capabilities.resolve_host_id(explicit=getattr(args, "host", None))
 
 
 def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> List[str]:
@@ -584,11 +598,40 @@ def render_run_text(
                 started = run.get("started_at")
                 suffix = f" (re-running since {started})" if started else " (re-running)"
                 lines.append(f"      workflow phase: completed{suffix}")
+            elif wf.get("stale"):
+                # Completed, but before implement's latest completion
+                # (`get_workflow_status` marks it `stale`): the done run under
+                # it judged an earlier state of the code. Printed bare,
+                # `pending` under a done run fell into the "not yet marked"
+                # note below, whose `advance it with:` is the run's own
+                # `--reaggregate` — which re-stamps the stale review
+                # (adversarial review, 2026-10-02). The way forward is a plain
+                # re-run of the phase, never the reaggregate.
+                lines.append(
+                    f"      workflow phase: pending (stale: completed "
+                    f"{wf.get('completed_at') or '?'}, before implement's "
+                    f"latest completion {wf.get('implemented_at') or '?'})"
+                )
+                if view["verdict"] == detach.VERDICT_DONE:
+                    # Its own review stale too (apply-code-fixes under a stale
+                    # code-review): the review is what to re-run, since the
+                    # apply phase's gate refuses until it has.
+                    review = _stale_review_of(phase_name, workflow)
+                    lines.append(
+                        "      note: run complete, but it judged the code "
+                        "before the latest implement; re-run "
+                        + (f"{review} first" if review else "it")
+                    )
+                    lines.append(
+                        f"      re-run it with: "
+                        f"{_rerun_command(view, plan_path, mode=review)}"
+                    )
             else:
                 lines.append(f"      workflow phase: {wf_status}")
             if (
                 view["verdict"] == detach.VERDICT_DONE
                 and wf_status == "pending"
+                and not wf.get("stale")
             ):
                 lines.append(
                     "      note: run complete; workflow phase not yet marked "
@@ -1815,6 +1858,43 @@ def _resume_command(view: Dict[str, Any], plan_path: Path) -> str:
     return cli_common.retry_command(mode, *positionals, verb, flags=flags)
 
 
+def _stale_review_of(phase_name: str, workflow: Dict[str, Any]) -> Optional[str]:
+    """The phase name of *phase_name*'s prerequisite review when it is stale too."""
+    try:
+        import check_workflow_prerequisites as prereq  # type: ignore
+    except ImportError:  # pragma: no cover - only when utils/ is sys.path[0]
+        sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent.parent))
+        import check_workflow_prerequisites as prereq  # type: ignore
+    for review in prereq.PHASE_PREREQUISITES.get(phase_name, ()):
+        if ((workflow.get("phases") or {}).get(review) or {}).get("stale"):
+            return review
+    return None
+
+
+def _rerun_command(
+    view: Dict[str, Any], plan_path: Path, *, mode: Optional[str] = None
+) -> str:
+    """The plain re-run of a done run whose phase went stale: no verb at all.
+
+    :func:`_resume_command`'s sibling for the stale case (2026-10-02). A
+    ``--reaggregate`` re-stamps the stale completion from the artifacts the
+    old run left, and ``--force`` is the apply parsers' ``--yes`` alias; the
+    plain command is what each phase answers with on a stale record
+    (``code_review_orchestrator`` takes its ``--force`` path itself). The run's
+    own ``replay_flags`` ride along, as on every retry line — unless *mode*
+    names another phase (its stale review), whose run this view has no flags
+    for.
+    """
+    run = view["run"]
+    if mode is not None:
+        resolved = cli_common._modes().resolve(mode)
+        word = resolved.name if resolved is not None else mode
+        return cli_common.retry_command(word, str(plan_path))
+    word = str(run.get("mode") or view.get("phase") or "review-code")
+    flags = cli_common.current_replay_flags(run.get("replay_flags"), mode=word)
+    return cli_common.retry_command(word, str(plan_path), flags=flags)
+
+
 def _resume_shape(view: Dict[str, Any]) -> "tuple":
     """``(shape, repair, redispatch, kept)`` from the document, in two reads.
 
@@ -2270,7 +2350,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     workflow = None
     if args.view in (VIEW_WORKFLOW, VIEW_ALL):
         try:
-            workflow = _workflow_payload(plan_path)
+            workflow = _workflow_payload(plan_path, host_id=_reader_host(args))
         except Exception as exc:  # unreadable state.json is exit 1, not a crash
             print(json.dumps({"error": f"{type(exc).__name__}: {exc}"}, indent=2))
             return EXIT_ERROR
@@ -2385,7 +2465,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     terminal_workflow: Optional[Dict[str, Any]] = None
     if args.view == VIEW_RUN and terminal_run:
         try:
-            terminal_workflow = _workflow_payload(plan_path)
+            terminal_workflow = _workflow_payload(plan_path, host_id=_reader_host(args))
         except Exception:
             terminal_workflow = None
         if terminal_workflow:
@@ -2606,13 +2686,13 @@ def _emit_user_next_step(
     plan_arg = str(run.get("plan_arg") or run.get("plan_file") or plan_path)
     try:
         if workflow is None:
-            workflow = _workflow_payload(plan_path)
+            workflow = _workflow_payload(plan_path, host_id=_reader_host(args))
     except Exception as exc:  # noqa: BLE001 - advisory: the run view is not
         print(next_phase.lookup_failure_line(exc), file=sys.stderr)
         return
     next_phase.emit_answer(
         plan_arg,
-        host_capabilities.resolve_host_id(explicit=getattr(args, "host", None)),
+        _reader_host(args),
         finished_mode,
         plan_path=plan_path,
         workflow=workflow,
