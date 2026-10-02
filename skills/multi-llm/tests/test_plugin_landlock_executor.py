@@ -12,7 +12,8 @@ rung", Limits), §6 F5, §7 steps 2–4 and 6, §8.2 and §8.3 items 3, 7, 10 an
   uncontained rung, the one shared deadline, and the skip switch;
 * the gate: ``contained`` and ``off`` never reach the rung (``off`` spawns no
   rung probe), ``agent-write`` takes the rung alone and only under ``auto``,
-  ``repo-wide`` is refused on it, F5's consent comes below the rung and is
+  ``repo-wide`` takes it with the enumeration's controls (step 3b), F5's
+  consent comes below the rung for the step-3 scopes alone and is
   never carried over, and the step-4 refusal leads with F6 and names its case;
 * the spawn: the wrapped argv for every read kind, no prefix off the rung,
   a fresh ``TMPDIR`` per attempt that is gone afterwards, the process-group
@@ -95,7 +96,8 @@ record = {{
     "pid": os.getpid(), "pgid": os.getpgid(0),
     "env": {{k: os.environ.get(k) for k in (
         "TMPDIR", "MULTI_LLM_CANARY_SEEDED", "MULTI_LLM_CANARY_WRITE_FILE",
-        "MULTI_LLM_CANARY_WRITE_DIR", "CODEX_HOME", "GIT_OPTIONAL_LOCKS")}},
+        "MULTI_LLM_CANARY_WRITE_DIR", "MULTI_LLM_CANARY_DENY_DIRS", "CODEX_HOME",
+        "GIT_OPTIONAL_LOCKS", "UV_CACHE_DIR", "PYTEST_ADDOPTS")}},
     "tmpdir_exists": os.path.isdir(os.environ.get("TMPDIR") or "/nonexistent"),
 }}
 with open(LOG, "a", encoding="utf-8") as handle:
@@ -286,6 +288,7 @@ def _plan_request(repo_root: Path, *, scope="plan-file", kind="apply_suggestions
     return JailRequest(
         repo_root=str(repo_root), kind=kind, write_scope=scope,
         target=str(plan) if scope != "repo-wide" else None,
+        output_dir=str(repo_root / "plans" / "plan") if scope == "repo-wide" else None,
     )
 
 
@@ -572,18 +575,39 @@ class TestTheWriteGate:
         assert "its probe gave no answer" in str(excinfo.value)
         assert executor._SANDBOX_DECISIONS == {}
 
-    def test_repo_wide_is_refused_before_any_rung_probe(self, repo, wrapper, gate):
-        with pytest.raises(executor.RunnerRejected) as excinfo:
-            gate(_JailLadder(), PROFILE_AGENT_WRITE, _plan_request(repo, scope="repo-wide", kind="implement"))
-        message = str(excinfo.value)
-        assert message.startswith(F6_LEAD)
-        assert "repo-wide edits" in message and "step 3b" in message
-        assert wrapper.records() == []
+    def test_repo_wide_takes_the_rung_with_the_enumerations_controls(self, repo, wrapper, gate):
+        """Step 3b: a repo-wide grant walks the rung like the step-3 scopes.
+        Its probe's positive control is the enumeration's first directory and
+        its extra negative targets are the protected directories that exist
+        (`.multi-llm/` here: the probe's own workdir makes it)."""
+        (repo / "src").mkdir()
+        request = _plan_request(repo, scope="repo-wide", kind="implement")
+        assert gate(_JailLadder(), PROFILE_AGENT_WRITE, request) == "plugin-landlock"
+        assert executor.sandbox_rung(
+            "fakecodex:m", PROFILE_AGENT_WRITE, write_scope="repo-wide",
+        ) == "plugin-landlock"
+        assert executor.sandbox_rung("fakecodex:m", PROFILE_AGENT_WRITE, write_scope="plan-file") is None
+        [probe] = wrapper.records(probe=True)
+        assert probe["env"]["MULTI_LLM_CANARY_WRITE_DIR"] == os.path.realpath(repo / "src")
+        assert os.path.realpath(repo / ".multi-llm") in probe["env"]["MULTI_LLM_CANARY_DENY_DIRS"]
+        assert probe["env"]["MULTI_LLM_CANARY_WRITE_FILE"] is None
+        assert probe["env"]["UV_CACHE_DIR"] == os.path.join(probe["env"]["TMPDIR"], "uv-cache")
+        assert f"dir:{os.path.realpath(repo / 'src')}" in probe["allow"]
+        # `plans/` holds the output folder: descended, never ruled; the root never.
+        assert f"dir:{os.path.realpath(repo / 'plans')}" not in probe["allow"]
+        assert f"file:{os.path.realpath(repo / 'plans' / 'plan.md')}" in probe["allow"]
+        assert f"dir:{os.path.realpath(repo)}" not in probe["allow"]
+        line = executor.write_rung_notice("fakecodex:m", request)
+        assert "write phase, scope repo-wide" in line and "read-only" not in line
+        assert ".git, .codex, .multi-llm and the run's output folder" in line
 
-    def test_plan_file_takes_the_rung_and_repo_wide_is_still_refused(self, repo, wrapper, gate):
+    def test_plan_file_and_repo_wide_are_decided_separately(self, repo, wrapper, gate):
         assert gate(_JailLadder(), PROFILE_AGENT_WRITE, _plan_request(repo)) == "plugin-landlock"
-        with pytest.raises(executor.RunnerRejected):
-            gate(_JailLadder(), PROFILE_AGENT_WRITE, _plan_request(repo, scope="repo-wide", kind="implement"))
+        assert executor.sandbox_rung("fakecodex:m", PROFILE_AGENT_WRITE, write_scope="repo-wide") is None
+        assert gate(_JailLadder(), PROFILE_AGENT_WRITE,
+                    _plan_request(repo, scope="repo-wide", kind="implement")) == "plugin-landlock"
+        assert len(wrapper.records(probe=True)) == 2
+        assert sorted(k.rsplit("|", 1)[1] for k in executor._SANDBOX_DECISIONS) == ["plan-file", "repo-wide"]
 
     def test_a_standard_probe_that_passes_keeps_codex_s_own_sandbox(self, repo, wrapper, gate):
         assert gate(_JailLadder(profile_probe="exit 0"), PROFILE_AGENT_WRITE, _plan_request(repo)) == "ok"
@@ -641,9 +665,9 @@ class TestF5BelowTheRung:
             gate(_JailLadder(), PROFILE_AGENT_WRITE, _plan_request(repo))
 
     def test_never_for_repo_wide_edits(self, repo, wrapper, gate, monkeypatch):
-        # Conductor decision 2026-09-30: this run keeps apply-code-fixes and
-        # implement refused on this host (step 3b out of scope), so the chat's
-        # posture does not open the uncontained rung for them either.
+        # Step 3b (2026-10-02) put repo-wide edits on the jail, never on the
+        # uncontained rung: with the jail unusable the chat's posture does not
+        # open rung 3 for them (`WRITE_SCOPES_BY_CONSENT`), the safer reading.
         wrapper.set(probe="absent")
         monkeypatch.setenv(HOST_SANDBOX_POSTURE_ENV, "danger-full-access")
         with pytest.raises(executor.RunnerRejected):
@@ -903,6 +927,24 @@ class TestTheBackstop:
             )
         assert "Landlock jail" in str(excinfo.value)
         assert spawned == []
+
+    def test_a_wrapped_repo_wide_grant_passes_the_backstop(self, repo, monkeypatch, wrapper):
+        """Step 3b: the jail serves repo-wide, so a wrapped argv under a
+        repo-wide grant is not what the backstop refuses (the stub spawns)."""
+        wrapper_py = landlock_dispatch.WRAPPER_PATHS["landlock_exec"]
+        provider, spawned = self._stub(
+            monkeypatch,
+            [sys.executable, "-I", "-S", wrapper_py, "--",
+             "codex", "exec", "--sandbox", "danger-full-access", "p"],
+        )
+        request = _plan_request(repo, scope="repo-wide", kind="implement")
+        jail = executor._JailSpawn(rung=PLUGIN_LANDLOCK_RUNG, request=request, tmpdir=str(repo / "slot"))
+        (repo / "slot").mkdir()
+        executor._spawn_in_context(
+            provider=provider, model="gpt-5.5", prompt="p", profile=PROFILE_AGENT_WRITE,
+            transport="argv", timeout=5, cwd=str(repo), jail=jail,
+        )
+        assert len(spawned) == 1
 
     def test_the_render_refuses_f5_for_a_scope_the_rung_does_not_serve(self):
         provider = CodexProvider()

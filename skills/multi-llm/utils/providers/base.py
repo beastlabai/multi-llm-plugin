@@ -196,11 +196,11 @@ class WritePostureConsent:
     ``danger-full-access``; the render raises on anything else.
 
     ``write_scope`` is the scope of the dispatch the consent is handed to (the
-    kind map's, never the task JSON's). F5 serves the scopes the jail serves
-    and no wider (:data:`WRITE_SCOPES_ON_RUNG`), so the render and the
-    executor's backstop both refuse a consent whose scope is missing or
-    ``repo-wide`` — the refusal holds there even if a gate upstream let such a
-    dispatch through."""
+    kind map's, never the task JSON's). F5 serves the step-3 scopes alone
+    (:data:`WRITE_SCOPES_BY_CONSENT`), so the render and the executor's
+    backstop both refuse a consent whose scope is missing or ``repo-wide`` —
+    the refusal holds there even if a gate upstream let such a dispatch
+    through."""
 
     posture: str
     source: str = HOST_SANDBOX_POSTURE_ENV
@@ -243,16 +243,20 @@ def write_consent_allows(
 #: rung"). ``plan-file`` is ``apply-suggestions`` (one file rule on the plan),
 #: ``tasks`` is ``apply-task-suggestions`` (a dir rule on the default tasks
 #: directory, else a file rule on the tasks file), ``repo-wide`` is
-#: ``apply-code-fixes``/``implement`` — refused on the rung until step 3b.
+#: ``apply-code-fixes``/``implement`` (one rule per enumerated repository
+#: entry outside ``.git``, ``.codex``, ``.multi-llm`` and the run's output
+#: folder; step 3b).
 WRITE_SCOPE_PLAN_FILE = "plan-file"
 WRITE_SCOPE_TASKS = "tasks"
 WRITE_SCOPE_REPO_WIDE = "repo-wide"
 WRITE_SCOPES: Tuple[str, ...] = (
     WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS, WRITE_SCOPE_REPO_WIDE,
 )
-#: The scopes the rung serves today. ``repo-wide`` stays refused until step 3b
-#: (protected-path enumeration and the toolchain decision of step 1b).
-WRITE_SCOPES_ON_RUNG: Tuple[str, ...] = (WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS)
+#: The scopes the rung serves: ``plan-file`` and ``tasks`` since step 3
+#: (2026-09-30), ``repo-wide`` since step 3b (2026-10-02, a user decision:
+#: the protected-path enumeration and step 1b's toolchain decision landed
+#: first, and the denied-write cases pass on the real jail).
+WRITE_SCOPES_ON_RUNG: Tuple[str, ...] = WRITE_SCOPES
 #: The scopes F5's consent (plan step 6) may take to the uncontained rung when
 #: the jail could not take the dispatch: the step-3 scopes alone. ``repo-wide``
 #: never reaches the uncontained rung by consent (2026-10-02, step 3b: the
@@ -834,7 +838,15 @@ def sandbox_incidental_notice_text(
         text += f" ({said})"
     if walk_clause:
         text += f"; {walk_clause}"
-    if write_scope:
+    if write_scope == WRITE_SCOPE_REPO_WIDE:
+        phase = (
+            f"write phase, scope repo-wide: the repository {target or ''} "
+            f"outside .git, .codex, .multi-llm and the run's output folder is "
+            f"what it may write (enumerated per dispatch; the root itself and "
+            f"the policy's denied entries excluded), and network access is "
+            f"not confined"
+        )
+    elif write_scope:
         phase = (
             f"write phase, scope {write_scope}: {target or '(no target)'} is the "
             f"one repository path it may write, and network access is not "

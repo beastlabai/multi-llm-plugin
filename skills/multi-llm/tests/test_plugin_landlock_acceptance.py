@@ -75,10 +75,12 @@ SESSION_ENV = registry.HOST_SESSION_MODEL_ENV
 REFUSED_BEFORE_CHILD = "refused before any child started"
 CONTRACT_MARK = "## Result (required"
 
-#: The two kinds step 3 option (b) puts on the rung, and their scopes.
-ENABLED = [("apply-suggestions", "plan-file"), ("apply-task-suggestions", "tasks")]
-#: The two kinds that stay refused on it until step 3b.
+#: The two kinds step 3 option (b) put on the rung, and their scopes.
+STEP_3 = [("apply-suggestions", "plan-file"), ("apply-task-suggestions", "tasks")]
+#: The two kinds step 3b (2026-10-02) added, under the repo-wide scope.
 REPO_WIDE = ["apply-code-fixes", "implement"]
+#: Every editing kind and its scope: all four run on the rung since step 3b.
+ENABLED = STEP_3 + [(mode, "repo-wide") for mode in REPO_WIDE]
 PHASE_DIRS = {
     "apply-suggestions": "apply-suggestions",
     "apply-task-suggestions": "apply-task-suggestions",
@@ -90,8 +92,11 @@ PHASE_DIRS = {
 BATCH_TEXT = {
     "apply-suggestions": ("Name the upload size limit", "Say where the config file lives"),
     "apply-task-suggestions": ("Name the upload size limit", "Say where the config file lives"),
-    "apply-code-fixes": ("Guard the division", "Guard the division"),
-    "implement": ("Create the module", "Implement the core"),
+    "apply-code-fixes": ("Guard the division", "Check the input"),
+    # implement's T002 prompt names T001 (its dependency) by title and
+    # description, so the id line of the result contract is what tells the
+    # two batches apart.
+    "implement": ("this task's id, `T001`", "this task's id, `T002`"),
 }
 
 #: One sentence per refusal leg (plan §7 "Step 4"; the executor's own tests
@@ -185,16 +190,30 @@ JUDGE_GROUP = {
     }],
 }
 
-FIX_GROUPS = [{
-    "theme": "Guard the division in app.py",
-    "category": "bug",
-    "models": ["model-a"],
-    "suggestions": [{
-        "title": "Guard the division", "desc": "x may be 0 here.",
-        "type": "bug", "importance": "HIGH", "file": "src/app.py",
-        "line_range": "1-1", "source_model": "model-a",
-    }],
-}]
+FIX_GROUPS = [
+    {
+        "theme": "Guard the division in app.py",
+        "category": "bug",
+        "models": ["model-a"],
+        "suggestions": [{
+            "title": "Guard the division", "desc": "x may be 0 here.",
+            "type": "bug", "importance": "HIGH", "file": "src/app.py",
+            "line_range": "1-1", "source_model": "model-a",
+        }],
+    },
+    {
+        # A second, MEDIUM fix on the same file: the HIGH one is batched
+        # alone, so apply-code-fixes has two batches like the other kinds.
+        "theme": "Check the input in app.py",
+        "category": "bug",
+        "models": ["model-b"],
+        "suggestions": [{
+            "title": "Check the input", "desc": "x is never validated.",
+            "type": "bug", "importance": "MEDIUM", "file": "src/app.py",
+            "line_range": "1-1", "source_model": "model-b",
+        }],
+    },
+]
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +264,16 @@ def get_response_content(prompt):
         json.dump(counters, handle)
     step = steps[min(seen, len(steps) - 1)]
     label = ids[0] if ids else "?"
+    shell_log = os.environ.get("LANDLOCK_ACCEPT_SHELL_LOG")
+    for name, command in step.get("shell", {}).items():
+        # The denied-write cases, run by the "model" inside whatever jail this
+        # process is in; the exit code is what the test reads back.
+        import subprocess
+        done = subprocess.run(command, shell=True, capture_output=True, text=True)
+        if shell_log:
+            with open(shell_log, "a", encoding="utf-8") as handle:
+                handle.write(json.dumps({"name": name, "rc": done.returncode,
+                                         "out": (done.stdout + done.stderr)[-400:]}) + "\n")
     for path, text in step.get("append", {}).items():
         # In place, the same inode — the way `apply_patch` writes a file.
         with open(path, "a", encoding="utf-8") as handle:
@@ -301,16 +330,27 @@ def _git(root: Path, *args: str) -> str:
 
 class Scratch:
     """A committed git repo holding a reviewed plan, its tasks, a code review
-    and one source file; mock codex on PATH; the fake wrapper installed."""
+    and one source file; mock codex on PATH; the fake wrapper installed.
 
-    def __init__(self, tmp_path: Path, monkeypatch, *, judge: bool = False) -> None:
+    ``real_jail`` (step 3b's tier-2 leg) installs no fake wrapper, so the
+    production ``landlock_exec.py`` jails the mock for real; the mock's own
+    files (call log, the script counter, the shell log) then live under the
+    throwaway ``$CODEX_HOME``, the one place outside the repository the jail
+    grants, and the mock runs ``danger-full-access`` probes while its
+    ``workspace-write`` probe still dies on the bwrap line.
+    """
+
+    def __init__(self, tmp_path: Path, monkeypatch, *, judge: bool = False,
+                 real_jail: bool = False) -> None:
         self.tmp_path = tmp_path
         self.monkeypatch = monkeypatch
+        self.real_jail = real_jail
         home = tmp_path / "home"
         self.codex_home = home / ".codex"
         self.codex_home.mkdir(parents=True)
         monkeypatch.setenv("HOME", str(home))
         monkeypatch.setenv("CODEX_HOME", str(self.codex_home))
+        mock_files = self.codex_home if real_jail else tmp_path
 
         self.root = (tmp_path / "repo").resolve()
         self.root.mkdir()
@@ -328,6 +368,11 @@ class Scratch:
         self.app.parent.mkdir()
         self.app.write_text("x = 1\n", encoding="utf-8")
         self.main_py = self.root / "src" / "main.py"
+        # The protected set a repo-wide batch must leave alone (step 3b).
+        (self.root / ".codex").mkdir()
+        (self.root / ".codex" / "config.toml").write_text("# project codex config\n", encoding="utf-8")
+        (self.root / ".multi-llm").mkdir()
+        (self.root / ".multi-llm" / "providers.yaml").write_text("# project config\n", encoding="utf-8")
         self._review("review-plan", _suggestion_groups() + ([JUDGE_GROUP] if judge else []),
                      undecided=[2] if judge else [])
         self._review("review-tasks", _suggestion_groups())
@@ -363,18 +408,24 @@ class Scratch:
         assert shutil.which("codex") == str(launcher)
         monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
         monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
-        self.calls = tmp_path / "codex-calls.jsonl"
+        self.calls = mock_files / "codex-calls.jsonl"
         monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(self.calls))
         # The standard probe: bwrap cannot start (the mock's own replay).
         monkeypatch.setenv("MOCK_LLM_SANDBOX_BROKEN", "1")
+        if real_jail:
+            monkeypatch.setenv("MOCK_LLM_SANDBOX_RUNS_FULL_ACCESS", "1")
+        else:
+            monkeypatch.delenv("MOCK_LLM_SANDBOX_RUNS_FULL_ACCESS", raising=False)
         monkeypatch.setenv("MOCK_LLM_ECHO", "human_decision_judge")
         plugin = tmp_path / "mock_plugin.py"
         plugin.write_text(MOCK_PLUGIN, encoding="utf-8")
         monkeypatch.setenv("MOCK_LLM_PLUGIN", str(plugin))
         self.script_path = tmp_path / "write-script.json"
-        self.counter_path = tmp_path / "write-counter.json"
+        self.counter_path = mock_files / "write-counter.json"
+        self.shell_log = mock_files / "write-shell.jsonl"
         monkeypatch.setenv("LANDLOCK_ACCEPT_SCRIPT", str(self.script_path))
         monkeypatch.setenv("LANDLOCK_ACCEPT_COUNTER", str(self.counter_path))
+        monkeypatch.setenv("LANDLOCK_ACCEPT_SHELL_LOG", str(self.shell_log))
         for name in (
             SKIP_RUNG_ENV, HOST_SANDBOX_POSTURE_ENV, LEVER_ENV, SESSION_ENV,
             "MULTI_LLM_HOST", "MOCK_LLM_EDITS", "MOCK_LLM_WRITE_RESULT",
@@ -384,7 +435,7 @@ class Scratch:
         self.configure()
         executor.reset_version_cache()
         monkeypatch.chdir(self.root)
-        self.wrapper = FakeWrapper(tmp_path / "wrapper", monkeypatch)
+        self.wrapper = None if real_jail else FakeWrapper(tmp_path / "wrapper", monkeypatch)
 
     # -- inputs -----------------------------------------------------------
 
@@ -510,11 +561,21 @@ class Scratch:
         """``git status`` paths that are neither the run's output folder nor
         ``mode``'s target."""
         target = str(self.target(mode).relative_to(self.root))
+        # implement's finalization writes the summary back-reference into
+        # the plan: the phase's own write, never the runner's.
+        own = {target} | ({"plans/p.md"} if mode == "implement" else set())
         rows = _git(self.root, "status", "--porcelain", "--untracked-files=all").splitlines()
         return [
             row[3:] for row in rows
-            if not row[3:].startswith("plans/p/") and row[3:] != target
+            if not row[3:].startswith("plans/p/") and row[3:] not in own
         ]
+
+    def shell_results(self) -> Dict[str, int]:
+        """``name -> exit code`` of every ``shell`` step the mock ran."""
+        if not self.shell_log.exists():
+            return {}
+        rows = [json.loads(line) for line in self.shell_log.read_text(encoding="utf-8").splitlines() if line]
+        return {row["name"]: row["rc"] for row in rows}
 
 
 @pytest.fixture
@@ -593,8 +654,16 @@ class TestTheEnabledKindsTakeTheRung:
     @pytest.mark.parametrize("mode, scope", ENABLED)
     def test_each_batch_runs_on_the_rung_and_its_edit_lands(self, scratch, capsys, mode, scope):
         target = scratch.target(mode)
-        others = {p: p.read_bytes() for p in (scratch.plan, scratch.tasks, scratch.app) if p != target}
-        before = target.read_text(encoding="utf-8")
+        # implement's finalization writes the summary back-reference into
+        # the plan: the phase's own write, so the plan is not "another" file.
+        untouched = [scratch.tasks, scratch.app] + ([] if mode == "implement" else [scratch.plan])
+        others = {p: p.read_bytes() for p in untouched if p != target}
+        protected = {p: p.read_bytes() for p in (
+            scratch.root / ".git" / "HEAD", scratch.root / ".git" / "config",
+            scratch.root / ".codex" / "config.toml",
+            scratch.root / ".multi-llm" / "providers.yaml",
+        )}
+        before = target.read_text(encoding="utf-8") if target.exists() else ""
         slots_before = _slot_dirs()
 
         code = scratch.run(mode)
@@ -603,12 +672,14 @@ class TestTheEnabledKindsTakeTheRung:
         assert code == 0, text[-4000:]
         assert REFUSED_BEFORE_CHILD not in text
         _no_uncontained_rung(scratch, text)
+        count = len(scratch.write_tasks(mode))
+        assert count == 2
 
         # The stray-writes-only line, once before each batch, naming the scope.
         lines = cap.out.splitlines()
         notices = [i for i, line in enumerate(lines) if "[SANDBOX_INCIDENTAL]" in line]
         batches = [i for i, line in enumerate(lines) if line.startswith("[write-subagents] batch ")]
-        assert len(notices) == len(batches) == 2, text[-4000:]
+        assert len(notices) == len(batches) == count, text[-4000:]
         assert notices[0] < batches[0] < notices[1] < batches[1]
         for index in notices:
             line = lines[index]
@@ -625,18 +696,19 @@ class TestTheEnabledKindsTakeTheRung:
             marker(key) for key in scratch.keys(mode))
         assert scratch.changed_outside(mode) == []
         assert all(path.read_bytes() == data for path, data in others.items())
+        assert {p: p.read_bytes() for p in protected} == protected
 
         # Completed, exit 0, nothing in flight, the rung on every batch.
         assert scratch.completed(mode)
         assert _in_flight(scratch.status(mode)) == []
         report = scratch.report(mode)
-        assert [row.get("sandbox_rung") for row in report["tasks"]] == ["plugin-landlock"] * 2
-        assert [row["write_outcome"] for row in report["tasks"]] == ["applied"] * 2
+        assert [row.get("sandbox_rung") for row in report["tasks"]] == ["plugin-landlock"] * count
+        assert [row["write_outcome"] for row in report["tasks"]] == ["applied"] * count
 
         # One rung probe, for this scope's grant, then two wrapped dispatches.
         [probe] = scratch.wrapper.records(probe=True)
         rows = scratch.wrapper.records(probe=False)
-        assert len(rows) == len(scratch.exec_calls()) == len(scratch.write_calls()) == 2
+        assert len(rows) == len(scratch.exec_calls()) == len(scratch.write_calls()) == count
         real_target = os.path.realpath(target)
         for row in rows:
             assert row["orig_argv"][:4] == [sys.executable, "-I", "-S", str(scratch.wrapper.path)]
@@ -648,10 +720,28 @@ class TestTheEnabledKindsTakeTheRung:
             if scope == "plan-file":
                 assert f"You may write only {real_target}." in developer
                 assert in_repo == [f"file:{real_target}"]
-            else:
+            elif scope == "tasks":
                 tasks_dir = os.path.realpath(scratch.tasks.parent)
                 assert f"is the directory {tasks_dir}" in developer
                 assert in_repo == [f"dir:{tasks_dir}"]
+            else:
+                # Step 3b: the enumeration — src/ required (it covers the
+                # declared file), plans/p.md a file rule under the descended
+                # ancestor, never the root, plans/ or a protected path.
+                src = os.path.realpath(scratch.app.parent)
+                out_dir = os.path.realpath(scratch.out_dir)
+                assert f"anywhere in the repository {scratch.root}" in developer
+                assert f"this run's output folder {out_dir}" in developer
+                assert "/tmp and /dev/shm are denied" in developer
+                assert ("--allow", f"dir:{src}") in _allow(row)
+                assert f"file:{os.path.realpath(scratch.plan)}" in in_repo
+                for absent in (f"dir:{scratch.root}", f"dir:{os.path.realpath(scratch.plan.parent)}",
+                               f"dir:{out_dir}", f"dir:{scratch.root / '.git'}",
+                               f"dir:{scratch.root / '.codex'}", f"dir:{scratch.root / '.multi-llm'}"):
+                    assert absent not in in_repo, (absent, in_repo)
+                assert row["env"]["UV_CACHE_DIR"] == os.path.join(row["env"]["TMPDIR"], "uv-cache")
+                assert row["env"]["PYTEST_ADDOPTS"].startswith("-o cache_dir=")
+                assert "write phase, scope repo-wide" in lines[notices[0]]
         for call in scratch.write_calls():
             assert call["args"][call["args"].index("--sandbox") + 1] == "danger-full-access"
         # Each attempt's TMPDIR existed for the child and is gone after it.
@@ -740,44 +830,27 @@ class TestTheRefusalLegsStillHold:
             # it; a failed probe is one probe and a refusal.
             assert len(scratch.wrapper.records(probe=True)) == 1
 
-    @pytest.mark.parametrize(
-        "leg", ["auto", "contained", "off", "absent", "lever", "posture",
-                "posture-absent", "session"],
-    )
     @pytest.mark.parametrize("mode", REPO_WIDE)
-    def test_repo_wide_kinds_are_refused_at_batch_0(
-        self, scratch, capsys, monkeypatch, mode, leg,
+    def test_repo_wide_never_takes_the_uncontained_rung_by_consent(
+        self, scratch, capsys, monkeypatch, mode,
     ):
-        """Item 13 "Intended edits", "Policy words" and "No route reaches
-        `unsandboxed`" for the two repo-wide kinds, end to end: the rung is
-        usable and still never takes their edits — under every policy word,
-        with the I8 lever, with the chat's `danger-full-access` posture (F5
-        does not open repo-wide edits on this host either: conductor decision
-        2026-09-30) and for a Codex session model that falls to the floor."""
-        if leg in ("contained", "off"):
-            scratch.configure(fallback=leg)
-        if leg in ("absent", "posture-absent"):
-            scratch.wrapper.set(probe="absent")
-        if leg == "lever":
-            monkeypatch.setenv(LEVER_ENV, "1")
-        if leg.startswith("posture"):
-            monkeypatch.setenv(HOST_SANDBOX_POSTURE_ENV, "danger-full-access")
-        if leg == "session":
-            scratch.configure(driver=False)
-            monkeypatch.setenv("MULTI_LLM_HOST", "codex")
-            monkeypatch.setenv(SESSION_ENV, "gpt-5.5")
+        """Step 3b put repo-wide edits on the jail and nowhere else: with the
+        jail unusable, the chat's `danger-full-access` posture (F5) opens rung
+        3 for the step-3 scopes only — a repo-wide batch is refused, naming
+        the jail's own case, and no `[SANDBOX_BYPASSED]` line appears."""
+        scratch.wrapper.set(probe="absent")
+        monkeypatch.setenv(HOST_SANDBOX_POSTURE_ENV, "danger-full-access")
         before = _bytes(scratch.target(mode))
         code = scratch.run(mode)
         cap = capsys.readouterr()
         text = cap.out + cap.err
         reason = _assert_refused_at_batch_0(scratch, mode, code, text, cap.err, before)
-        assert "repo-wide edits" in reason and "step 3b" in reason and "F6" in reason
-        if leg == "session":
-            _assert_session_refused(cap.out, reason)
-        # Refused before any rung probe: the wrapper never ran.
-        assert scratch.wrapper.records() == []
-        assert scratch.exec_calls() == []
+        assert LEG_SENTENCES["absent"] in reason, reason
+        assert "F6" not in reason or "driver.subagent_runner" in reason
         _no_uncontained_rung(scratch, text)
+        assert executor.SANDBOX_DECISION_WRITE_BY_CONSENT not in executor._SANDBOX_DECISIONS.values()
+        assert len(scratch.wrapper.records(probe=True)) == 1
+        assert scratch.exec_calls() == []
 
 
 # ---------------------------------------------------------------------------
@@ -911,7 +984,7 @@ class TestNoRouteReachesUnsandboxed:
 # ---------------------------------------------------------------------------
 
 class TestF5BelowTheJail:
-    @pytest.mark.parametrize("mode, scope", ENABLED)
+    @pytest.mark.parametrize("mode, scope", STEP_3)
     def test_the_posture_takes_the_uncontained_rung_only_when_the_jail_cannot(
         self, scratch, capsys, monkeypatch, mode, scope,
     ):
@@ -1013,6 +1086,14 @@ class TestADeniedEditFailsTheBatch:
 BATCH1_EDIT = "\n<!-- batch-1 edit -->\n"
 
 
+def _denied_outside(scratch: Scratch, mode: str) -> Path:
+    """The path outside ``mode``'s grant that batch 1 tries: README.md for the
+    step-3 scopes, `.git/config` for the repo-wide kinds (§8.3 "Step 3b is
+    done when": item 14's partial application is an edit in a subdirectory
+    beside a denied write to `.git/config`)."""
+    return scratch.root / ".git" / "config" if mode in REPO_WIDE else scratch.readme
+
+
 def _partial_batch_1(scratch: Scratch, mode: str, resumed: Dict[str, Any]) -> None:
     """Batch 0 applies cleanly. Batch 1's turn edits its target with one
     `apply_patch`, then tries a second on a path outside the scope, which the
@@ -1022,7 +1103,7 @@ def _partial_batch_1(scratch: Scratch, mode: str, resumed: Dict[str, Any]) -> No
         {
             "append": {target: BATCH1_EDIT},
             "events": [file_change("completed", target),
-                       file_change("failed", str(scratch.readme))],
+                       file_change("failed", str(_denied_outside(scratch, mode)))],
             "claim": {"status": "applied"},
         },
         resumed,
@@ -1031,7 +1112,10 @@ def _partial_batch_1(scratch: Scratch, mode: str, resumed: Dict[str, Any]) -> No
 
 def _first_run_stops_at_batch_1(scratch: Scratch, mode: str, capsys) -> Tuple[str, str]:
     """Run the phase; return (the target's bytes before batch 1, batch 1's id)."""
-    original = scratch.target(mode).read_text(encoding="utf-8")
+    target = scratch.target(mode)
+    original = target.read_text(encoding="utf-8") if target.exists() else ""
+    denied = _denied_outside(scratch, mode)
+    denied_before = denied.read_bytes()
     code = scratch.run(mode)
     cap = capsys.readouterr()
     text = cap.out + cap.err
@@ -1044,8 +1128,9 @@ def _first_run_stops_at_batch_1(scratch: Scratch, mode: str, capsys) -> Tuple[st
         executor.WRITE_APPLIED, executor.WRITE_PARTIAL]
     assert rows[1]["status"] == executor.STATUS_PARTIAL
     assert rows[1].get("sandbox_rung") == "plugin-landlock"
-    assert "PARTIAL APPLICATION (jail-denied edit)" in text and "README.md" in text
-    assert scratch.readme.read_text(encoding="utf-8") == "scratch\n"
+    assert "PARTIAL APPLICATION (jail-denied edit)" in text
+    assert str(denied.relative_to(scratch.root)) in text
+    assert denied.read_bytes() == denied_before
     assert not scratch.completed(mode)
     assert _in_flight(scratch.status(mode)) == []
     task_1 = scratch.write_tasks(mode)[1]["task_id"]
@@ -1097,11 +1182,12 @@ class TestAPartialEditStaysRecoverable:
         assert len(rows) == 3
         assert _allow(rows[2]) == _allow(first_rows[1])
         real_target = os.path.realpath(scratch.target(mode))
-        expected = (
-            [f"file:{real_target}"] if scope == "plan-file"
-            else [f"dir:{os.path.realpath(scratch.tasks.parent)}"]
-        )
-        assert _in_repo(rows[2], scratch.root) == expected
+        if scope == "plan-file":
+            assert _in_repo(rows[2], scratch.root) == [f"file:{real_target}"]
+        elif scope == "tasks":
+            assert _in_repo(rows[2], scratch.root) == [f"dir:{os.path.realpath(scratch.tasks.parent)}"]
+        else:
+            assert f"dir:{os.path.realpath(scratch.app.parent)}" in _in_repo(rows[2], scratch.root)
         # Batch 1's edit appears once; the restore's new inode is not read as
         # a replaced target (the identity compared is this dispatch's own).
         assert scratch.target(mode).read_text(encoding="utf-8") == pre_batch_1 + BATCH1_EDIT
@@ -1131,7 +1217,8 @@ class TestAPartialEditStaysRecoverable:
         assert len(resumed) == 1
         prompt = resumed[0]["prompt"]
         assert all(f"`{key}`" in prompt for key in batch_1_ids)
-        assert "found already applied" in prompt
+        already = "already implemented" if mode == "implement" else "found already applied"
+        assert already in prompt
         assert scratch.target(mode).read_text(encoding="utf-8") == pre_batch_1 + BATCH1_EDIT
         assert scratch.completed(mode)
         outcomes = {row["task_id"]: row for row in scratch.report(mode)["tasks"]}
@@ -1149,7 +1236,7 @@ class TestAPartialEditStaysRecoverable:
 # ---------------------------------------------------------------------------
 
 class TestTheStandardSandboxStillWins:
-    @pytest.mark.parametrize("mode", [mode for mode, _ in ENABLED] + REPO_WIDE)
+    @pytest.mark.parametrize("mode", [mode for mode, _ in ENABLED])
     def test_a_passing_standard_probe_dispatches_today_s_argv(
         self, scratch, capsys, monkeypatch, mode,
     ):
@@ -1216,3 +1303,192 @@ class TestTheJudgesRunOnTheRung:
                     for key in task["expected_ids"]]
         assert len(expected) == 3
         _no_uncontained_rung(judged, text)
+
+
+# ---------------------------------------------------------------------------
+# Step 3b (2026-10-02): the repo-wide kinds' own legs — item 13's out-of-scope
+# targets, a declared new top-level entry refused before dispatch, and the
+# denied-write cases through the real scheduler inside the real jail (tier 2)
+# ---------------------------------------------------------------------------
+
+class TestRepoWideDeniedEdits:
+    @pytest.mark.parametrize("edits_target", [False, True], ids=["nothing-moved", "target-moved"])
+    @pytest.mark.parametrize("mode", REPO_WIDE)
+    def test_a_denied_write_to_git_config_and_state_never_reads_applied(
+        self, scratch, capsys, mode, edits_target,
+    ):
+        """Item 13 "Out-of-scope edits are denied" for the repo-wide kinds:
+        the targets outside the grant are `.git/config` and this run's
+        `state.json`. A failed batch when nothing moved, a partial application
+        when the declared file changed — never applied, `.git/config` intact."""
+        config = scratch.root / ".git" / "config"
+        step: Dict[str, Any] = {
+            "events": [file_change("failed", str(config), str(scratch.out_dir / "state.json"))],
+            "claim": {"status": "applied"},
+        }
+        if edits_target:
+            step["append"] = {str(scratch.target(mode)): marker("{id}")}
+        scratch.script(mode, batch0=[step])
+        config_before = config.read_bytes()
+        code = scratch.run(mode)
+        cap = capsys.readouterr()
+        text = cap.out + cap.err
+        assert code == 3, text[-4000:]
+        assert config.read_bytes() == config_before
+        assert not scratch.completed(mode)
+        row = scratch.report(mode)["tasks"][0]
+        assert row["write_outcome"] != "applied"
+        assert row["status"] == (
+            executor.STATUS_PARTIAL if edits_target else executor.STATUS_BATCH_FAILED
+        )
+        assert row.get("sandbox_rung") == "plugin-landlock"
+        assert "plugin-landlock jail refused the runner's write to" in text
+        assert ".git/config" in text and "plans/p/state.json" in text
+        assert "outside this batch's grant" in text
+        assert len(scratch.write_calls()) == 1
+        assert _in_flight(scratch.status(mode)) == []
+        _no_uncontained_rung(scratch, text)
+
+
+class TestADeclaredNewTopLevelEntryIsRefused:
+    def test_implement_declaring_a_new_root_file_is_refused_before_dispatch(
+        self, scratch, capsys,
+    ):
+        """F1 "Protected paths": a declared file that would be a new entry at
+        the repository root is refused before any child starts, naming the
+        path and F6; the rung was measured (one probe) and nothing spawned."""
+        scratch.tasks.write_text(
+            TASKS_BODY.replace("Files to create: src/main.py", "Files to create: newtop.py"),
+            encoding="utf-8",
+        )
+        code = scratch.run("implement")
+        cap = capsys.readouterr()
+        text = cap.out + cap.err
+        assert code == 3, text[-4000:]
+        assert "T001: rejected" in cap.err
+        assert "newtop.py would be a new entry directly in" in cap.err
+        assert "driver.subagent_runner" in cap.err and "(F6)" in cap.err
+        assert "Nothing was spawned." in cap.err
+        assert not (scratch.root / "newtop.py").exists()
+        assert scratch.write_calls() == []
+        assert scratch.wrapper.records(probe=False) == []
+        assert len(scratch.wrapper.records(probe=True)) == 1
+        assert not scratch.completed("implement")
+        assert _in_flight(scratch.status("implement")) == []
+
+    def test_the_same_task_runs_on_codex_s_own_sandbox(self, scratch, capsys, monkeypatch):
+        """The refusal is the jail's: with codex's own `workspace-write`
+        probe ok the new top-level file is codex's to allow, and it lands."""
+        monkeypatch.delenv("MOCK_LLM_SANDBOX_BROKEN")
+        scratch.tasks.write_text(
+            TASKS_BODY.replace("Files to create: src/main.py", "Files to create: newtop.py"),
+            encoding="utf-8",
+        )
+        scratch.script_path.write_text(json.dumps({"rules": [], "default": {
+            "append": {str(scratch.root / "newtop.py"): marker("{id}")},
+        }}), encoding="utf-8")
+        code = scratch.run("implement")
+        cap = capsys.readouterr()
+        assert code == 0, (cap.out + cap.err)[-4000:]
+        assert (scratch.root / "newtop.py").exists()
+        assert scratch.wrapper.records() == []
+
+
+#: The denied-write cases (F1 "Protected paths") as the "model" runs them
+#: from inside its batch, each tagged so the test can grep for a leak.
+DENIED_SHELL = {
+    "commit": "git -c user.email=a@b.invalid -c user.name=a commit -q --allow-empty -m MARK3B",
+    "reset": "git reset -q --hard",
+    "config": "git config user.name MARK3B",
+    "hook": "echo MARK3B > .git/hooks/pre-commit",
+    "gitx": "echo MARK3B > .git/x",
+    "codex": "echo MARK3B > .codex/x",
+    "codexcfg": "echo MARK3B >> .codex/config.toml",
+    "providers": "echo MARK3B >> .multi-llm/providers.yaml",
+    "runs": "mkdir .multi-llm/runs",
+    "mtmp": "echo MARK3B > .multi-llm/tmp/x",
+    "state": "echo MARK3B >> plans/p/state.json",
+    "snapshot": "echo MARK3B > plans/p/implement/pre_batch/x",
+    "rollback": "echo MARK3B > plans/p/implement/rollback_store/x",
+    "audit": "echo MARK3B >> plans/p/implement/subagent_audit.jsonl",
+    "newtop": "echo MARK3B > newtop.txt",
+    "newtopdir": "mkdir newtop",
+    "rm": "rm README.md",
+    "mv": "mv README.md README2.md",
+    "tmp": "echo MARK3B > /tmp/mllm-3b-accept-$$",
+    "shm": "echo MARK3B > /dev/shm/mllm-3b-accept-$$",
+}
+POSITIVE_SHELL = {
+    "tmpdir": 'echo MARK3B-ok > "$TMPDIR/scratch.txt"',
+    "status": "git status --porcelain",
+}
+
+
+@pytest.mark.landlock
+@pytest.mark.sandbox_probe  # the suite's guard would answer the production wrapper 126
+class TestTheRealJailThroughTheScheduler:
+    """Tier 2: the real `landlock_exec.py`, the real scheduler, the mock codex
+    jailed for real (§8.3 "Step 3b is done when": the denied-write cases
+    run through the real scheduler, not the preflight rig)."""
+
+    @pytest.fixture
+    def jailed(self, tmp_path, monkeypatch):
+        from tests.test_landlock_exec import require_landlock
+        require_landlock()
+        yield Scratch(tmp_path, monkeypatch, real_jail=True)
+        registry._config = None
+        registry._config_key = None
+
+    @pytest.mark.parametrize("mode", REPO_WIDE)
+    def test_every_denied_write_holds_while_the_batch_lands(self, jailed, capsys, mode):
+        root = jailed.root
+        head = _git(root, "rev-parse", "HEAD")
+        commits = _git(root, "rev-list", "--count", "HEAD")
+        keep = {
+            p: p.read_bytes() for p in (
+                root / ".git" / "HEAD", root / ".git" / "config",
+                root / ".codex" / "config.toml", root / ".multi-llm" / "providers.yaml",
+                root / "README.md",
+            )
+        }
+        top_before = sorted(os.listdir(root))
+        target = jailed.target(mode)
+        jailed.script(mode)
+        script = json.loads(jailed.script_path.read_text(encoding="utf-8"))
+        script["rules"] = [{
+            "match": BATCH_TEXT[mode][0],
+            "steps": [{"shell": {**DENIED_SHELL, **POSITIVE_SHELL},
+                       "append": {str(target): marker("{id}")}}],
+        }]
+        jailed.script_path.write_text(json.dumps(script), encoding="utf-8")
+
+        code = jailed.run(mode)
+        cap = capsys.readouterr()
+        text = cap.out + cap.err
+        assert code == 0, text[-6000:]
+        assert jailed.completed(mode)
+        report = jailed.report(mode)
+        assert [row.get("sandbox_rung") for row in report["tasks"]] == ["plugin-landlock"] * 2
+        assert [row["write_outcome"] for row in report["tasks"]] == ["applied"] * 2
+        assert "[SANDBOX_INCIDENTAL]" in text and "[SANDBOX_BYPASSED]" not in text
+
+        results = jailed.shell_results()
+        assert set(results) == set(DENIED_SHELL) | set(POSITIVE_SHELL), results
+        leaked = {name for name in DENIED_SHELL if results[name] == 0}
+        assert leaked == set(), leaked
+        assert all(results[name] == 0 for name in POSITIVE_SHELL), results
+        # Byte-identical afterwards, no new commit, no new top-level entry, no
+        # marker anywhere under the protected set.
+        assert {p: p.read_bytes() for p in keep} == keep
+        assert _git(root, "rev-parse", "HEAD") == head
+        assert _git(root, "rev-list", "--count", "HEAD") == commits
+        assert sorted(os.listdir(root)) == top_before
+        for base in (root / ".git", root / ".codex", root / ".multi-llm", jailed.out_dir):
+            for path in base.rglob("*"):
+                if path.is_file():
+                    assert b"MARK3B" not in path.read_bytes(), path
+        assert not list(Path("/tmp").glob("mllm-3b-accept-*"))
+        assert not list(Path("/dev/shm").glob("mllm-3b-accept-*"))
+        # The declared edit landed, once per batch.
+        assert target.read_text(encoding="utf-8").count("<!-- applied ") == 2
+        assert jailed.changed_outside(mode) == []

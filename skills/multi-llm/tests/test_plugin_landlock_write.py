@@ -344,12 +344,19 @@ class TestTheWriteTargetIsCheckedAtConstruction:
         assert scheduler.jail_request.target is None
 
     @pytest.mark.parametrize("kind", ["apply_code_fixes", "implement"])
-    def test_a_repo_wide_kind_carries_no_target(self, repo, kind):
+    def test_a_repo_wide_kind_carries_the_output_folder_and_the_deny_list(self, repo, kind):
+        """Step 3b: no target — the grant is the enumeration — but this run's
+        output folder (protected) and the policy's deny patterns ride the
+        request; the declared set joins per dispatch, never here."""
         scheduler = repo.scheduler([], kind=kind, write_target=None)
         request = scheduler.jail_request
         assert request == JailRequest(
             repo_root=str(repo.root), kind=kind, write_scope="repo-wide",
+            output_dir=os.path.realpath(scheduler.output_dir),
+            deny_patterns=tuple(scheduler.policy.deny),
         )
+        assert request.target is None and request.declared == ()
+        assert ".git/**" in request.deny_patterns
 
 
 class TestTheWriteScopeMap:

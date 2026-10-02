@@ -492,7 +492,11 @@ class TestDoctorReportsTheLadder:
             "read-only walk stopped before it)"
         )
         assert "each write phase probes it at its own preflight" in write_row
-        assert "repo-wide edits (apply-code-fixes, implement) stay refused (step 3b)" in write_row
+        assert (
+            "repo-wide edits (apply-code-fixes, implement) run on it too, with "
+            ".git/, .codex/, .multi-llm/ and the run's output folder kept "
+            "read-only (step 3b)"
+        ) in write_row
         assert write_row.endswith(
             "the row stays BROKEN (exit 3 without --warn-only): codex's own "
             "sandbox cannot start"
