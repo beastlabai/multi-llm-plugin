@@ -27,7 +27,7 @@ names the ``sandbox_fallback`` key in force and the rung *that* probe selected
 — ``→ landlock`` (with its ``deprecated_at``), the unsandboxed sentence, a
 refusal, or ``rung unprobed`` when the budget ran out first. A rung the probe
 found retired from this build (its ``removed_at``/panic text, 2026-09-24) is
-named ``measured unavailable from codex <removed_at>``, beside the read-phase
+named ``removed since codex <removed_at> (measured)``, beside the read-phase
 choice that needs no change to the machine (``sandbox_fallback: contained``
 refuses read phases like writes; ``auto`` runs them under
 ``danger-full-access``); a timeout or any other probe failure is shown as
@@ -937,8 +937,8 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
             # Only the probe's own removal panic (or a skip by version) says
             # this; a timeout or an unrelated failure never does.
             lost_clause = (
-                f"; → {lost['rung']} unavailable: measured unavailable from "
-                f"{provider_name} {removed[0]}"
+                f"; → {lost['rung']} unavailable: removed since "
+                f"{provider_name} {removed[0]} (measured)"
             )
         else:
             dep_version, sentence = (list(lost.get("deprecated_at") or ()) + ["", ""])[:2]
@@ -981,7 +981,7 @@ def _fallback_note(provider_name: str, sandbox: Dict[str, Any]) -> str:
             # Doctor probes whatever `removed_at` says; a pass on a build at or
             # above it is a mismatch to re-measure, never hidden.
             note += (
-                f"; mismatch: removed_at says unavailable from {provider_name} "
+                f"; mismatch: removed_at says unavailable since {provider_name} "
                 f"{removed[0]}, but the probe passed on {sandbox.get('fallback_version') or '?'}"
                 f" — re-measure removed_at"
             )

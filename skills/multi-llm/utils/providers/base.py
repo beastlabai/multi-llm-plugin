@@ -547,7 +547,7 @@ def sandbox_rung_retired_notice(
         said = f" (deprecated at {provider_name} {dep_version}; upstream said {sentence!r})"
     if measured:
         if rung.removed_at:
-            removed = f"is measured unavailable from {provider_name} {rung.removed_at[0]}"
+            removed = f"has been unavailable since {provider_name} {rung.removed_at[0]} (measured)"
             if rung.removed_at[1]:
                 removed += f" ({rung.removed_at[1]})"
         else:
@@ -642,9 +642,15 @@ def sandbox_walk_clause(
             parts.append(said)
             continue
         if outcome == _WALK_OUTCOME_SKIPPED:
+            # "since", not "from": the version named is where the rung was
+            # *removed*, not the one measured. "unavailable from codex 0.156.1,
+            # measured" printed under codex 0.159.3 read as a stale measurement
+            # (2026-10-02); the installed build is named when it differs.
+            since = removed.get(name) or version or "?"
+            installed = f" (installed: {version})" if version and version != since else ""
             parts.append(
-                f"fallback rung {name!r} not tried: unavailable from "
-                f"{provider_name} {removed.get(name) or version or '?'}, measured"
+                f"fallback rung {name!r} not tried: removed since "
+                f"{provider_name} {since}{installed}"
             )
             continue
         if outcome == _WALK_OUTCOME_RETIRED:

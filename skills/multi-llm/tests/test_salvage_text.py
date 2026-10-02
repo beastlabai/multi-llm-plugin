@@ -208,6 +208,9 @@ _CODEX_RIG_DIRS = ("capture", "schemas", "plugin-route")
 CODEX_LABELS: Dict[str, str] = {
     # The stub-driven 0.156.1 captures answer `[]`: an empty review is an answer.
     "0.156.1/collab_spawn_agent.jsonl": "answer",
+    "0.160.0/collab_spawn_agent.jsonl": "answer",
+    "0.160.0/quoting_render.jsonl": "answer",
+    "0.160.0/read_only_clean.jsonl": "answer",
     "0.156.1/exec_session.jsonl": "answer",
     "0.156.1/mcp_tool_call.jsonl": "answer",
     "0.156.1/quoting_render.jsonl": "answer",

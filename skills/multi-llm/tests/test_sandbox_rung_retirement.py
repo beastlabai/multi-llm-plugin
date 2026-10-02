@@ -204,8 +204,8 @@ class TestAtOrAboveRemovedAt:
         assert first.walk == (("landlock", "skipped"), ("unsandboxed", "taken"))
         assert first.bypass and second.reason == first.reason
         assert first.reason.endswith(
-            "; fallback rung 'landlock' not tried: unavailable from fakecodex "
-            "0.156.1, measured"
+            "; fallback rung 'landlock' not tried: removed since fakecodex "
+            "0.156.1" + ("" if version == "0.156.1" else f" (installed: {version})")
         )
         capsys.readouterr()
         served = {SPEC: {"sandbox": "bypassed"}, "fakecodex:n": {"sandbox": "bypassed"}}
@@ -215,7 +215,7 @@ class TestAtOrAboveRemovedAt:
         (line,) = lines
         assert line.startswith(SANDBOX_RUNG_RETIRED_MARKER)
         assert "fakecodex:m, fakecodex:n" in line
-        assert "measured unavailable from fakecodex 0.156.1" in line
+        assert "unavailable since fakecodex 0.156.1 (measured)" in line
         assert f"this is fakecodex {version}" in line
         assert _retired_lines(capsys.readouterr().out) == [line]
 
@@ -225,7 +225,7 @@ class TestAtOrAboveRemovedAt:
         assert lanes.executor("fakecodex:n") == "bypassed"
         assert lanes.rung_probes() == []
         out = capsys.readouterr().out
-        assert "not tried: unavailable from fakecodex 0.156.1, measured" in out
+        assert "not tried: removed since fakecodex 0.156.1" in out
         assert len(_retired_lines(out)) == 1
 
     def test_an_unread_version_probes_and_the_outcome_is_authoritative(
@@ -236,7 +236,7 @@ class TestAtOrAboveRemovedAt:
         assert len(lanes.rung_probes()) == 1
         assert verdict.walk[0] == ("landlock", "retired")
         lines = rob.announce_retired_rungs(None, {SPEC: {"sandbox": "bypassed"}})
-        assert len(lines) == 1 and "measured unavailable from fakecodex 0.156.1" in lines[0]
+        assert len(lines) == 1 and "unavailable since fakecodex 0.156.1 (measured)" in lines[0]
 
 
 class TestUnderContained:
@@ -248,14 +248,14 @@ class TestUnderContained:
         lanes.use(_Codexish(version="0.156.1", landlock=CANARY_DENIED, policy="contained"))
         verdict = lanes.fanout()
         assert verdict.refused
-        clause = "fallback rung 'landlock' not tried: unavailable from fakecodex 0.156.1, measured"
+        clause = "fallback rung 'landlock' not tried: removed since fakecodex 0.156.1"
         assert clause in verdict.reason
         for spec in (SPEC, "fakecodex:n"):
             with pytest.raises(executor.RunnerRejected) as excinfo:
                 lanes.executor(spec)
             assert clause in str(excinfo.value)
         (line,) = _retired_lines(capsys.readouterr().out)
-        assert "measured unavailable from fakecodex 0.156.1" in line
+        assert "unavailable since fakecodex 0.156.1 (measured)" in line
         assert "fell to the uncontained rung" not in line
         assert "this run refused fakecodex:m" in line
 

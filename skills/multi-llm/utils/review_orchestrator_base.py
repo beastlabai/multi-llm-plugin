@@ -2342,7 +2342,7 @@ def announce_retired_rungs(
       cache (``subagent_executor.recorded_rung_retirements``) recorded the rung
       ``skipped`` because the codex version is at or above its ``removed_at``,
       or ``retired`` because its probe printed the rung's removal panic. The
-      line then says the rung is measured unavailable from that version,
+      line then says the rung has been unavailable since that version,
       *whatever the previous run recorded* — a plan's first run included, the
       case the transition below misses. A timeout or any other probe failure
       never triggers it.
@@ -3006,7 +3006,7 @@ def sandbox_bypassed_notice(provider_name: str, probe: Any = None) -> str:
     that stem when ``probe`` — the ``SandboxProbeResult`` — shows the walk
     tried a rung first: each rung with its outcome and, when it was probed,
     its probe tail (``fallback rung 'landlock' unavailable (codex 0.156.1:
-    "…")``), or ``not tried: unavailable from codex 0.156.1, measured`` when
+    "…")``), or ``not tried: removed since codex 0.156.1 (installed: 0.159.3)`` when
     the version skipped it. Without ``probe`` the stem alone is returned. The
     stem says which runner,
     why its own sandbox is not in the path, which config key governs it (and
