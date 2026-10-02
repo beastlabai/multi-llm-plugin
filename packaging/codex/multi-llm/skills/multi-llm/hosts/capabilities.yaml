@@ -487,12 +487,14 @@ hosts:
       version: "0.1.0"
       config_key: plugin
       provides: [command, tool]
-      min_host_version: "1.18.18"   # the lowest version actually RUN, not the
-                                    # lowest that might work: `engines` is a hard
-                                    # gate, and a floor asserted from an
-                                    # assumption either admits a version that
-                                    # then fails somewhere less legible or gets
-                                    # defended by a claim no evidence backs.
+      min_host_version: "1.18.34"   # the one supported opencode release (the
+                                    # newest; `make opencode-bump` moves it with
+                                    # every other pin), never a lower one that
+                                    # might work: `engines` is a hard gate, and
+                                    # a floor asserted from an assumption either
+                                    # admits a version that then fails somewhere
+                                    # less legible or gets defended by a claim no
+                                    # evidence backs.
       update: pinned-spec
       invocation: "as `/multi-llm <the same arguments the Claude Code skill takes>`, or by calling the `multi_llm` tool directly."
     multi_turn: true                 # measured: its agent takes further tool

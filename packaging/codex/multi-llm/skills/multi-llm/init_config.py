@@ -1083,8 +1083,38 @@ def _write_config(
         )
         for notice in notices:
             print(notice)
+        for line in _runner_warning_lines(args, target_dir):
+            print(line)
     _report_gitignore(args, target_dir)
     return 0
+
+
+def _runner_warning_lines(args: argparse.Namespace, target_dir: Path) -> "list[str]":
+    """The ``[RUNNER_WARNING]`` line when ``implement`` / ``apply-code-fixes``
+    would be refused for the runner the config just written resolves to
+    (racing-run issue #1, 2026-10-02): the dispatch's own decision
+    (``subagent_executor.repo_wide_write_refusal``, the model-free probes once),
+    resolved for the host ``init`` ran from, so a Codex user learns at init
+    and not at phase 6. Empty when the runner would run, or for a runner with
+    no sandbox probe. Advisory: any failure prints nothing."""
+    try:
+        from utils import host_capabilities, next_phase
+        from utils import provider_registry
+        from utils.provider_registry import resolve_subagent_runner
+        from utils.subagent_executor import repo_wide_write_refusal
+        import check_workflow_prerequisites as prereq
+
+        host_id = host_capabilities.resolve_host_id(explicit=getattr(args, "host", None))
+        # The config this init just wrote, not whatever an earlier read cached.
+        provider_registry._config = None
+        provider_registry._config_key = None
+        spec, _layer = resolve_subagent_runner("full", anchor=str(target_dir), host_id=host_id)
+        refusal = repo_wide_write_refusal(spec, anchor=str(target_dir))
+    except Exception:  # noqa: BLE001 - advisory, never a failed init
+        return []
+    if refusal is None:
+        return []
+    return [f"{next_phase.RUNNER_WARNING_MARKER} {prereq.render_repo_wide_warning(spec, refusal)}"]
 
 
 #: What `init` suggests the user type to prove the config works; the host's own

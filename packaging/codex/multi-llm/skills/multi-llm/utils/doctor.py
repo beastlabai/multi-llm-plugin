@@ -46,8 +46,8 @@ through beside the installed one (a newer installed codex flagged), the
 resolved base allow-list, and in every state the one switch that skips it
 alone, ``MULTI_LLM_CODEX_SKIP_RUNG=plugin-landlock`` — while that is set the
 row says the rung is skipped and no probe runs for it. A second row says what
-``agent-write`` does: the plan-file and tasks scopes run on that rung under
-``auto`` (repo-wide edits stay refused until step 3b), with the open network
+``agent-write`` does: the plan-file, tasks and (since step 3b, 2026-10-02)
+repo-wide scopes run on that rung under ``auto``, with the open network
 named, and a chat in ``danger-full-access`` posture may run them unsandboxed
 only when the rung fails (F5). The verdict rule is unchanged: the row is BROKEN
 and the exit is 3 because codex's own sandbox cannot start. When the rung
@@ -642,7 +642,7 @@ def _agent_write_row(
         "rung": write_rung.name if write_rung is not None else None,
         "rung_outcome": outcome,
         "scopes": list(WRITE_SCOPES_ON_RUNG) if write_rung is not None else [],
-        "refused_scopes": [WRITE_SCOPE_REPO_WIDE],
+        "refused_scopes": [s for s in (WRITE_SCOPE_REPO_WIDE,) if s not in WRITE_SCOPES_ON_RUNG],
         "status": WRITE_NO_RUNG,
         "runs_on_rung": False,
         "f5": False,
@@ -1088,9 +1088,9 @@ def _incidental_row_text(provider_name: str, rung: Dict[str, Any]) -> str:
 def _agent_write_text(
     provider_name: str, write: Dict[str, Any], incidental: Optional[Dict[str, Any]] = None,
 ) -> str:
-    """The ``agent-write`` row (step 3, option (b); F5). It names the write rung
-    and its probe result, the scopes it serves, that repo-wide edits stay
-    refused (step 3b), the rung's grade and its open network, F5's clause, and
+    """The ``agent-write`` row (step 3, option (b); step 3b; F5). It names the
+    write rung and its probe result, the scopes it serves, what a repo-wide
+    batch keeps read-only, the rung's grade and its open network, F5's clause, and
     restates the verdict rule: BROKEN and exit 3 because codex's own sandbox
     cannot start, whatever the write rung serves."""
     from .providers.base import SANDBOX_FALLBACK_AUTO
@@ -1099,15 +1099,23 @@ def _agent_write_text(
         f"the row stays BROKEN (exit 3 without --warn-only): {provider_name}'s own "
         f"sandbox cannot start"
     )
-    repo_wide = "repo-wide edits (apply-code-fixes, implement) stay refused (step 3b)"
+    repo_wide = (
+        "repo-wide edits (apply-code-fixes, implement) run on it too, with "
+        ".git/, .codex/, .multi-llm/ and the run's output folder kept "
+        "read-only (step 3b)"
+    )
     status = write.get("status")
     rung = write.get("rung")
     if status == WRITE_NO_RUNG or not rung:
         return f"agent-write: refused — no fallback rung serves {provider_name}'s editing jobs; {verdict}"
     if status == WRITE_REFUSED_BY_CONFIG:
         return f"agent-write: refused by config (sandbox_fallback: {write.get('policy')}); {verdict}"
-    scopes = " and ".join(write.get("scopes") or ())
-    served = f"{rung} serves the {scopes} scopes (apply-suggestions, apply-task-suggestions)"
+    listed = list(write.get("scopes") or ())
+    scopes = " and ".join([", ".join(listed[:-1]), listed[-1]]) if len(listed) > 1 else "".join(listed)
+    served = (
+        f"{rung} serves the {scopes} scopes (apply-suggestions, "
+        f"apply-task-suggestions, apply-code-fixes, implement)"
+    )
     if status == WRITE_REFUSED_BY_POLICY:
         return "; ".join([
             f"agent-write: refused — `sandbox_fallback: {write.get('policy')}` never "

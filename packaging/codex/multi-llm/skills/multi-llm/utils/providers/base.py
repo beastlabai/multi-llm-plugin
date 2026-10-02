@@ -196,11 +196,11 @@ class WritePostureConsent:
     ``danger-full-access``; the render raises on anything else.
 
     ``write_scope`` is the scope of the dispatch the consent is handed to (the
-    kind map's, never the task JSON's). F5 serves the scopes the jail serves
-    and no wider (:data:`WRITE_SCOPES_ON_RUNG`), so the render and the
-    executor's backstop both refuse a consent whose scope is missing or
-    ``repo-wide`` — the refusal holds there even if a gate upstream let such a
-    dispatch through."""
+    kind map's, never the task JSON's). F5 serves the step-3 scopes alone
+    (:data:`WRITE_SCOPES_BY_CONSENT`), so the render and the executor's
+    backstop both refuse a consent whose scope is missing or ``repo-wide`` —
+    the refusal holds there even if a gate upstream let such a dispatch
+    through."""
 
     posture: str
     source: str = HOST_SANDBOX_POSTURE_ENV
@@ -243,16 +243,26 @@ def write_consent_allows(
 #: rung"). ``plan-file`` is ``apply-suggestions`` (one file rule on the plan),
 #: ``tasks`` is ``apply-task-suggestions`` (a dir rule on the default tasks
 #: directory, else a file rule on the tasks file), ``repo-wide`` is
-#: ``apply-code-fixes``/``implement`` — refused on the rung until step 3b.
+#: ``apply-code-fixes``/``implement`` (one rule per enumerated repository
+#: entry outside ``.git``, ``.codex``, ``.multi-llm`` and the run's output
+#: folder; step 3b).
 WRITE_SCOPE_PLAN_FILE = "plan-file"
 WRITE_SCOPE_TASKS = "tasks"
 WRITE_SCOPE_REPO_WIDE = "repo-wide"
 WRITE_SCOPES: Tuple[str, ...] = (
     WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS, WRITE_SCOPE_REPO_WIDE,
 )
-#: The scopes the rung serves today. ``repo-wide`` stays refused until step 3b
-#: (protected-path enumeration and the toolchain decision of step 1b).
-WRITE_SCOPES_ON_RUNG: Tuple[str, ...] = (WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS)
+#: The scopes the rung serves: ``plan-file`` and ``tasks`` since step 3
+#: (2026-09-30), ``repo-wide`` since step 3b (2026-10-02, a user decision:
+#: the protected-path enumeration and step 1b's toolchain decision landed
+#: first, and the denied-write cases pass on the real jail).
+WRITE_SCOPES_ON_RUNG: Tuple[str, ...] = WRITE_SCOPES
+#: The scopes F5's consent (plan step 6) may take to the uncontained rung when
+#: the jail could not take the dispatch: the step-3 scopes alone. ``repo-wide``
+#: never reaches the uncontained rung by consent (2026-10-02, step 3b: the
+#: safer reading of "the ``unsandboxed`` rung never reachable" for repo-wide
+#: edits; widening F5 to them is a separate user decision).
+WRITE_SCOPES_BY_CONSENT: Tuple[str, ...] = (WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS)
 
 #: What a contained rung's probe canary prints (on stderr, exit non-zero) when
 #: the write it attempted was **not** denied — the fail-open shape: the flag
@@ -392,6 +402,18 @@ class JailRequest:
     or the output folder) it is ``None`` and the grant is a file rule on
     ``target``, because a dir rule there would grant sibling plans or
     ``state.json`` (``landlock_dispatch.default_tasks_dir`` decides).
+
+    A ``repo-wide`` request (plan step 3b, 2026-10-02) carries no target. Its
+    grant is the enumeration of the repository root at dispatch
+    (``landlock_dispatch.repo_wide_plan``): ``output_dir`` is this run's
+    output folder, protected beside ``.git``, ``.codex`` and ``.multi-llm``;
+    ``deny_patterns`` is ``driver.write_paths.deny``, whose whole-entry
+    matches get no rule; ``declared`` is the batch's declared file set
+    (absolute, resolved), which makes the entries covering it required and
+    is what ``jail_denied_edits`` counts as in scope. The lane fills
+    ``declared`` per task with ``dataclasses.replace``; the phase-level
+    request the preflight probes with carries none, so no per-task path ever
+    reaches a cache key.
     """
 
     repo_root: str
@@ -399,6 +421,9 @@ class JailRequest:
     write_scope: Optional[str] = None
     target: Optional[str] = None
     target_dir: Optional[str] = None
+    output_dir: Optional[str] = None
+    deny_patterns: Tuple[str, ...] = ()
+    declared: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -438,6 +463,14 @@ class JailContext:
     @property
     def target_dir(self) -> Optional[str]:
         return self.request.target_dir
+
+    @property
+    def output_dir(self) -> Optional[str]:
+        return self.request.output_dir
+
+    @property
+    def declared(self) -> Tuple[str, ...]:
+        return self.request.declared
 
 
 def rung_removed_for_version(rung: "SandboxRung", version: Optional[str]) -> bool:
@@ -805,7 +838,15 @@ def sandbox_incidental_notice_text(
         text += f" ({said})"
     if walk_clause:
         text += f"; {walk_clause}"
-    if write_scope:
+    if write_scope == WRITE_SCOPE_REPO_WIDE:
+        phase = (
+            f"write phase, scope repo-wide: the repository {target or ''} "
+            f"outside .git, .codex, .multi-llm and the run's output folder is "
+            f"what it may write (enumerated per dispatch; the root itself and "
+            f"the policy's denied entries excluded), and network access is "
+            f"not confined"
+        )
+    elif write_scope:
         phase = (
             f"write phase, scope {write_scope}: {target or '(no target)'} is the "
             f"one repository path it may write, and network access is not "
@@ -2885,6 +2926,12 @@ VERSION_TOO_NEW = "version-too-new"
 VERSION_ABOVE_VERIFIED = "above-verified"
 
 
+def _upgrade_suffix(provider: Any, minimum: str) -> str:
+    """How a below-floor sentence ends: ``" (run: <upgrade_hint>)."`` or ``"."``."""
+    upgrade = (getattr(provider, "upgrade_hint", "") or "").strip()
+    return f" (run: {upgrade.replace('{version}', minimum)})." if upgrade else "."
+
+
 def version_tuple(text: str) -> Tuple[int, ...]:
     """``text``'s leading integers, component-wise, for **ordering only**.
 
@@ -3047,12 +3094,13 @@ def version_verdict(
     verified = (getattr(provider, "verified_version", "") or "").strip()
 
     if minimum and version_tuple(read) < version_tuple(minimum):
+        how = _upgrade_suffix(provider, minimum)
         return VersionVerdict(
             VERSION_TOO_LOW,
             read,
             f"{label} {read} is older than the minimum this release parses "
             f"({minimum}); its event stream shape is not the one the adapter was "
-            f"written against. Upgrade {label} to >= {minimum}.",
+            f"written against. Upgrade {label} to >= {minimum}{how}",
         )
     if ceiling and version_tuple(read) >= version_tuple(ceiling):
         return VersionVerdict(
@@ -3404,6 +3452,10 @@ class LLMProvider(ABC):
     version_cmd: Tuple[str, ...] = ()
     min_version: str = ""
     verified_version: str = ""
+    #: The command a human runs to reach ``min_version``, with ``{version}``
+    #: standing for it, appended to the below-floor refusal
+    #: (:func:`version_verdict`). Printed, never run; ``""`` names none.
+    upgrade_hint: str = ""
 
     #: M14 (§5.4) — the first build this release **refuses**, exclusive, or ``""``
     #: for "no ceiling". The mirror of ``min_version`` and subject to the same
@@ -4670,7 +4722,7 @@ class LLMProvider(ABC):
             return AvailabilityReport(
                 Availability.VERSION_TOO_LOW,
                 f"{name} {read} is older than the {minimum} this release parses; "
-                f"upgrade {name} to >= {minimum}.",
+                f"upgrade {name} to >= {minimum}{_upgrade_suffix(self, minimum)}",
             )
 
         if auth is False and not credentials_required:

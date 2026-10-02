@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "human_decision_verdicts.schema.json",
   "title": "Human-decision judge verdict file (human_decision_batch_<n>.json)",
-  "description": "The file a human-decision judging subagent's reply is persisted to at output_path. The wrapper object (rather than a bare array) is what lets the ingest distinguish a truncated write from a legitimately empty verdict set. `decision` is a wire vocabulary: the ingest translates approve -> approved, skip -> skipped, salvage -> approved plus the claude_auto_decide_salvage markers.",
+  "description": "The file a human-decision judging subagent's reply is persisted to at output_path. The wrapper object (rather than a bare array) is what lets the ingest distinguish a truncated write from a legitimately empty verdict set. `decision` is a wire vocabulary: the ingest translates approve -> approved, skip -> skipped, salvage -> approved plus the judge_auto_decide_salvage markers.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "verdicts"],

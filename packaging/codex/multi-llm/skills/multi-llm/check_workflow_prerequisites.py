@@ -815,64 +815,25 @@ REPO_WIDE_REMEDY = (
 )
 
 
-def _recorded_sandbox_fallback(plan_dir: Path) -> Optional[Tuple[str, str]]:
-    """``(phase dir, rung)`` of the first recorded sign that codex's own sandbox
-    could not start on this machine, or None.
-
-    A fallback rung is only ever taken after the dispatch-time probe said
-    ``unavailable``, so the record IS the verdict, measured by an earlier phase
-    (2026-10-02: apply-suggestions recorded ``plugin-landlock`` on every batch
-    ~20 minutes before implement was refused). Read from each phase dir's
-    ``.status.json`` — ``progress.sandbox_fallback`` / ``sandbox_bypassed`` for
-    the read fan-outs, ``progress.write_subagents.tasks[].sandbox_rung`` for a
-    write phase — and nothing is probed or spawned.
-    """
-    try:
-        children = sorted(plan_dir.iterdir())
-    except OSError:
-        return None
-    for child in children:
-        if child.name == "ask" or not child.is_dir():
-            continue
-        try:
-            data = json.loads(
-                (child / ".status.json").read_text(encoding="utf-8")
-            )
-        except (OSError, ValueError):
-            continue
-        progress = data.get("progress") if isinstance(data, dict) else None
-        if not isinstance(progress, dict):
-            continue
-        fallback = progress.get("sandbox_fallback")
-        if isinstance(fallback, dict) and fallback:
-            return child.name, str(next(iter(fallback.values())))
-        bypassed = progress.get("sandbox_bypassed")
-        if isinstance(bypassed, list) and bypassed:
-            return child.name, "unsandboxed"
-        mirror = progress.get("write_subagents")
-        tasks = mirror.get("tasks") if isinstance(mirror, dict) else None
-        for task in tasks if isinstance(tasks, list) else ():
-            if isinstance(task, dict) and task.get("sandbox_rung"):
-                return child.name, str(task["sandbox_rung"])
-    return None
-
-
 def repo_wide_sandbox_warning(
     plan_path: Path, plan_dir: Path, *, host_id: Optional[str] = None
 ) -> Optional[str]:
     """The early warning that implement / apply-code-fixes will be refused.
 
-    On a machine where codex's own sandbox cannot start, ``implement`` and
-    ``apply-code-fixes`` refuse at dispatch (``sandbox_unavailable``: repo-wide
-    edits wait for plan step 3b) with codex as the resolved
-    ``driver.subagent_runner``, and the user used to learn that at phase 6,
-    about 20 minutes in (Codex racing run, 2026-10-02). This says so as soon as
-    both facts are on record: an earlier phase's recorded fallback rung
-    (:func:`_recorded_sandbox_fallback`) and a codex runner resolved NOW (a
-    ``driver.subagent_runner`` already switched away from codex draws no
-    warning). Config resolution only; nothing is probed. None when either fact
-    is missing or the config cannot be read, because a warning that may be
-    wrong is worse than none.
+    On a machine where codex's own sandbox cannot start, a repo-wide write
+    dispatch refuses at batch 0 (``sandbox_unavailable``) unless the plugin's
+    Landlock jail takes it (plan step 3b, 2026-10-02) — and the user used to
+    learn that at phase 6, about 20 minutes in (Codex racing run, 2026-10-02).
+    This says so at ``init``, in ``status`` before any phase has run, and on
+    the next-step block, from the SAME decision the dispatch takes
+    (:func:`utils.subagent_executor.repo_wide_write_refusal`: the adapter's
+    model-free probes through the shared probe cache — cheap, no model), never
+    from a guess: with the jail usable the warning stays silent, and it fires
+    whenever Landlock is unavailable, the rung probe fails, the step-3 opt-in
+    is off or the policy word keeps the rung off. The resolved runner is the
+    one the dispatch resolves; a runner that is not codex has no sandbox
+    probe and draws nothing with nothing spawned. None when the config cannot
+    be read, because a warning that may be wrong is worse than none.
 
     *host_id* is the host the runner is resolved for, and it must be the one
     the dispatch resolves: the ladder's ``session`` rung (the codex / opencode
@@ -886,29 +847,42 @@ def repo_wide_sandbox_warning(
     and the warning never fired on either tool route while the dispatch
     refused.)
     """
-    evidence = _recorded_sandbox_fallback(plan_dir)
-    if evidence is None:
-        return None
     try:
         from utils import host_capabilities
         from utils.provider_registry import resolve_subagent_runner
+        from utils.subagent_executor import repo_wide_write_refusal
 
         if host_id is None:
             host_id = host_capabilities.resolve_host_id(sys.argv[1:])
         spec, _layer = resolve_subagent_runner(
             "full", anchor=str(plan_path), host_id=host_id,
         )
+        refusal = repo_wide_write_refusal(
+            spec, anchor=str(plan_path), output_dir=str(plan_dir),
+        )
     except Exception:  # noqa: BLE001 - advisory: status never fails on it
         return None
-    if str(spec).partition(":")[0] != "codex":
+    if refusal is None:
         return None
-    phase_name, rung = evidence
+    return render_repo_wide_warning(spec, refusal)
+
+
+def render_repo_wide_warning(spec: str, refusal: str) -> str:
+    """The warning line: the phases, the runner, the dispatch's own reason
+    (its F6 lead and its closing "Nothing was dispatched." moved aside) and
+    the remedy last, so the line ends with what to do."""
+    body = refusal.strip()
+    if body.startswith(REPO_WIDE_REMEDY):
+        body = body[len(REPO_WIDE_REMEDY):].strip()
+    for prefix in ("Refusing to dispatch: ",):
+        if body.startswith(prefix):
+            body = body[len(prefix):]
+    tail = "Nothing was dispatched."
+    if body.endswith(tail):
+        body = body[: -len(tail)].strip()
     return (
         f"{' and '.join(REPO_WIDE_WRITE_PHASES)} will be refused on this "
-        f"machine: codex's own sandbox cannot start here (the {phase_name} "
-        f"phase recorded fallback rung '{rung}'), the plugin's Landlock jail "
-        f"does not take repo-wide edits until plan step 3b, and "
-        f"driver.subagent_runner is {spec!r}. {REPO_WIDE_REMEDY}"
+        f"machine for driver.subagent_runner {spec!r}: {body} {REPO_WIDE_REMEDY}"
     )
 
 
@@ -1085,8 +1059,9 @@ def get_workflow_status(
             break
 
     # Early warning for the two repo-wide write phases (see
-    # `repo_wide_sandbox_warning`): on each open entry it concerns, and once in
-    # `notices`, which is what `status` and a terminal poll's `notice` carry.
+    # `repo_wide_sandbox_warning`; the dispatch's own decision, probed once
+    # per process): on each open entry it concerns, and once in `notices`,
+    # which is what `status` and a terminal poll's `notice` carry.
     open_write_phases = [
         phase for phase in REPO_WIDE_WRITE_PHASES
         if phases[phase]["status"] not in DONE_STATUSES
