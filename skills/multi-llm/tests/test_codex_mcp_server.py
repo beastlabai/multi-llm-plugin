@@ -161,6 +161,19 @@ if dargv[:2] == ["util", "instructions"]:
     text = open(os.environ["STUB_RUNBOOK"], encoding="utf-8").read()
     sys.stdout.write(text.replace("{{MODE}}", dargv[2]))
     sys.exit(0)
+if dargv[:2] == {resume_argv!r}:
+    # `util next-command <plan> --blocked <mode> --host <id>`: answered from the
+    # environment, never from the script, so it takes no step of the run's own.
+    with open(log + ".resume", "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record) + "\n")
+    if os.environ.get("STUB_RESUME_FAIL"):
+        sys.exit(1)
+    command = os.environ.get("STUB_RESUME_COMMAND") or (
+        "$multi-llm:multi-llm --" + dargv[4] + " " + dargv[2] + " --resume")
+    print({marker!r} + " " + json.dumps({{
+        "mode": "util next-command", "state": "done", "exit": 0, "artifacts": [],
+        "next": None, "user_resume": {{"phase": dargv[4], "command": command}}}}))
+    sys.exit(0)
 with open(log, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
 with open(log, encoding="utf-8") as handle:
@@ -460,7 +473,9 @@ class Harness:
         self.cwd.mkdir()
         self.stub = tmp_path / "uv-stub"
         self.stub.write_text(UV_STUB.format(
-            python=sys.executable, route_env_name=ROUTE_ENV["name"]), encoding="utf-8")
+            python=sys.executable, route_env_name=ROUTE_ENV["name"],
+            resume_argv=list(DISPATCHER["resume"]["argv"]), marker=MARKER),
+            encoding="utf-8")
         self.stub.chmod(0o755)
         self.log = tmp_path / "argv.log"
         self.script = tmp_path / "script.json"
@@ -489,6 +504,7 @@ class Harness:
                initialize=True) -> Client:
         self.log.write_text("", encoding="utf-8")
         Path(str(self.log) + ".instructions").write_text("", encoding="utf-8")
+        Path(str(self.log) + ".resume").write_text("", encoding="utf-8")
         self.script.write_text(json.dumps(list(script) or [{"exit": 0}]), encoding="utf-8")
         client = Client(root or self.root, self.env(extra_env, pwd=pwd), self.cwd,
                         roots=roots)
@@ -510,6 +526,12 @@ class Harness:
 
     def instruction_calls(self) -> list:
         path = Path(str(self.log) + ".instructions")
+        if not path.exists():
+            return []
+        return [json.loads(line) for line in path.read_text().splitlines() if line]
+
+    def resume_calls(self) -> list:
+        path = Path(str(self.log) + ".resume")
         if not path.exists():
             return []
         return [json.loads(line) for line in path.read_text().splitlines() if line]
@@ -689,7 +711,8 @@ class TestNoWordOfItsOwn:
             *SURFACE["uv"]["candidates"], *SURFACE["nested_exec_reasons"],
         ]
         # Routing words, by equality once surface-key reads are set aside.
-        for word in [*DISPATCHER["poll"][:1], *DISPATCHER["instructions"]]:
+        for word in [*DISPATCHER["poll"][:1], *DISPATCHER["instructions"],
+                     *DISPATCHER["resume"]["argv"]]:
             assert word not in literal_set, "{!r} is spelled in the server".format(word)
         for word in owned:
             assert not any(word in lit for lit in literals if word not in EXEMPT_EQUAL), (
@@ -1112,7 +1135,9 @@ class TestArguments:
         _, _, calls, _ = harness.run(
             {"mode": "ask", "plan": "p.md", "question": "why?", "extra_flags": ["--x"]},
             [launch_step(), poll_step(0)])
-        plan = os.path.join(os.path.realpath(harness.workspace), "p.md")
+        # The user's own spelling, not the anchor-resolved path (issue #15): the
+        # child runs in the anchor, so a relative plan names the same file there.
+        plan = "p.md"
         assert dispatcher_argv(calls[0]) == (
             ["ask", plan, "why?"] + SURFACE["baked_flags"] + [SURFACE["detach_flag"],
                                                              "--x"])
@@ -1136,7 +1161,7 @@ class TestArguments:
         args = {"mode": "ask", "plan": nasty + ".md", "question": "q " + nasty,
                 "extra_flags": ["--flag with space", "$(touch PWNED4)"]}
         _, _, calls, _ = harness.run(args, [launch_step(), poll_step(0)])
-        plan = os.path.join(os.path.realpath(harness.workspace), nasty + ".md")
+        plan = nasty + ".md"
         assert dispatcher_argv(calls[0]) == (
             ["ask", plan, "q " + nasty] + SURFACE["baked_flags"]
             + [SURFACE["detach_flag"], "--flag with space", "$(touch PWNED4)"])
@@ -2090,6 +2115,86 @@ class TestUserNextStep:
 
 
 # ===========================================================================
+# A blocked write phase hands the user a command they can type (issue #5)
+# ===========================================================================
+
+IMPLEMENT = {"mode": "implement", "plan": "plans/p.md", "question": "",
+             "extra_flags": []}
+
+
+class TestResumeCommand:
+    """2026-10-02: a needs-human `implement` ended with the tool's JSON arguments
+    and nothing the user could type. The dispatcher builds the host-spelled
+    resume command (`util next-command --blocked`); this server only asks."""
+
+    def _blocked(self, harness, args=IMPLEMENT, **kwargs):
+        kwargs.setdefault("meta", turn_meta(sandbox_mode="workspace-write"))
+        return harness.run(
+            args, [launch_step(), poll_step(CODES["needs_human"], error="batch 0 refused")],
+            **kwargs)
+
+    def test_the_result_carries_it_and_the_message_says_how_to_use_it(self, harness):
+        envelope, _, _, _ = self._blocked(harness)
+        assert envelope["resume_command"] == \
+            "$multi-llm:multi-llm --implement plans/p.md --resume"
+        assert envelope["message"].endswith(SURFACE["needs_human_message"]["resume"])
+        assert envelope.get("next") is None
+
+    def test_it_asks_with_the_users_spelling_the_word_and_the_host(self, harness):
+        _, _, _, _ = self._blocked(harness)
+        (asked,) = harness.resume_calls()
+        assert dispatcher_argv(asked) == list(DISPATCHER["resume"]["argv"]) + [
+            "plans/p.md", DISPATCHER["resume"]["option"], "implement",
+            DISPATCHER["host_option"], SURFACE["host"]]
+        assert asked["env"][ROUTE_ENV["name"]] == ROUTE_ENV["value"]
+        assert asked["cwd"] == os.path.realpath(harness.workspace)
+
+    def test_it_is_never_followed_and_never_a_call(self, harness):
+        envelope, _, calls, _ = self._blocked(harness)
+        assert len(calls) == 2  # the launch and the poll: nothing re-ran
+        assert "uv run" not in envelope["resume_command"]
+        assert RUNNABLE_MARKER not in envelope["resume_command"]
+        assert all("resume_command" not in option for option in envelope["options"])
+
+    def test_the_agent_facing_option_does_not_read_as_a_command(self, harness):
+        envelope, _, _, _ = self._blocked(harness)
+        human = envelope["options"][-1]["human"]
+        assert human == SURFACE["needs_human_option"]
+        assert human.startswith("(a note to you, not a command")
+
+    @pytest.mark.parametrize("code", [CODES["ok"], CODES["error"]])
+    def test_only_an_exit_3_asks(self, harness, code):
+        harness.run(IMPLEMENT, [launch_step(), poll_step(code)],
+                    meta=turn_meta(sandbox_mode="workspace-write"))
+        assert harness.resume_calls() == []
+
+    def test_a_failed_lookup_leaves_the_result_as_it_was(self, harness):
+        envelope, _, _, _ = self._blocked(harness, extra_env={"STUB_RESUME_FAIL": "1"})
+        assert "resume_command" not in envelope
+        assert not envelope["message"].endswith(SURFACE["needs_human_message"]["resume"])
+        assert envelope["state"] == STATES["needs_human"]
+
+    def test_the_server_spells_none_of_the_lookup(self):
+        source = SERVER_SRC.read_text()
+        for word in [*DISPATCHER["resume"]["argv"], DISPATCHER["resume"]["option"]]:
+            assert '"{}"'.format(word) not in source, word
+
+    def test_a_continuation_keeps_the_typed_spelling_of_the_plan(self, harness):
+        """The dispatcher's `next` names the plan absolutely; the continuation of
+        the same plan is launched with the spelling the user typed."""
+        absolute = os.path.join(os.path.realpath(harness.workspace), "plans", "p.md")
+        done = poll_step(0, next="uv run -- python multi_llm.py review-plan {} "
+                                 "--reaggregate --host codex --yes".format(absolute))
+        _, _, calls, _ = harness.run(
+            dict(REVIEW, plan="plans/p.md"),
+            [launch_step(run_id="R1"), done, launch_step(run_id="R2"), poll_step(0)])
+        launches = [c for c in calls if dispatcher_argv(c)[0] != DISPATCHER["poll"][0]]
+        assert [dispatcher_argv(c)[1] for c in launches] == ["plans/p.md", "plans/p.md"]
+        polls = [c for c in calls if dispatcher_argv(c)[0] == DISPATCHER["poll"][0]]
+        assert all(dispatcher_argv(c)[1] == absolute for c in polls)
+
+
+# ===========================================================================
 # The anchor (D3f)
 # ===========================================================================
 
@@ -2140,12 +2245,16 @@ class TestAnchor:
         assert envelope["anchor"] == os.path.realpath(second)
         assert client.close() == 0
 
-    def test_a_relative_plan_normalizes_under_the_anchor(self, harness):
+    def test_a_relative_plan_keeps_the_users_spelling_and_runs_in_the_anchor(self, harness):
+        """Issue #15 (2026-10-02): the dispatcher receives the plan as typed, so the
+        `plan_arg` it records and the next command it prints are the user's
+        spelling; the child's cwd is the anchor, so it names the same file."""
         _, _, calls, _ = harness.run(
             {"mode": "status", "plan": "plans/../plans/x.md", "question": "",
              "extra_flags": []}, [{"exit": 0, "stdout": [result_line()]}])
         anchor = os.path.realpath(harness.workspace)
-        assert dispatcher_argv(calls[0])[1] == os.path.join(anchor, "plans", "x.md")
+        assert dispatcher_argv(calls[0])[1] == "plans/../plans/x.md"
+        assert calls[0]["cwd"] == anchor
         _, _, calls, _ = harness.run(
             {"mode": "status", "plan": "~/x.md", "question": "", "extra_flags": []},
             [{"exit": 0, "stdout": [result_line()]}])
@@ -2199,7 +2308,7 @@ class TestAnchor:
         assert envelope["anchor"] == anchor != os.path.realpath(harness.workspace)
         assert envelope["anchor_source"] == "turn-metadata"
         assert calls[0]["cwd"] == anchor
-        assert dispatcher_argv(calls[0])[1] == os.path.join(anchor, "plans", "x.md")
+        assert dispatcher_argv(calls[0])[1] == "plans/x.md"  # as typed; cwd is the anchor
         assert "anchor from turn-metadata" not in client.stderr  # one key: no choice
 
     def test_roots_still_win_over_turn_metadata(self, harness, tmp_path):

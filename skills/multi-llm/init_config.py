@@ -1079,12 +1079,41 @@ def _write_config(
             "load_config.)\n"
             "  These globals apply only to modes WITHOUT their own "
             "defaults.modes.<mode> list.\n"
-            "  Smoke-test it, e.g.:  /multi-llm:multi-llm --review-plan <plan> --quick"
+            f"  Smoke-test it, e.g.:  {_smoke_test_command(args)}"
         )
         for notice in notices:
             print(notice)
     _report_gitignore(args, target_dir)
     return 0
+
+
+#: What `init` suggests the user type to prove the config works; the host's own
+#: invocation spelling is put in front of it.
+SMOKE_TEST_ARGS = "--review-plan <plan> --quick"
+
+
+def _smoke_test_command(args: argparse.Namespace) -> str:
+    """The smoke-test command in the spelling of the route `init` was invoked from.
+
+    Hard-coded as `/multi-llm:multi-llm ...` until 2026-10-02, which is a command
+    Codex and OpenCode users cannot type (issue #12). The host is the run's
+    ``--host`` (the tool routes bake it in) and the route is
+    ``next_phase.resolve_route``'s, so this is the same string the next-phase
+    block prints for that route (``hosts/capabilities.yaml``, ``next_command``).
+    A host or route the capability data does not know falls back to the
+    reference host's plugin spelling rather than failing a finished init.
+    """
+    from utils import host_capabilities, next_phase
+
+    try:
+        host_id = host_capabilities.resolve_host_id(explicit=getattr(args, "host", None))
+        route = next_phase.resolve_route(host_id)
+        template = host_capabilities.next_command_template(host_id, route)
+    except (KeyError, ValueError):
+        template = host_capabilities.next_command_template(
+            host_capabilities.DEFAULT_HOST, None
+        )
+    return template.replace(next_phase.ARGS_SLOT, SMOKE_TEST_ARGS)
 
 
 def run_auto_init(args: argparse.Namespace, target_dir: Path, config_dir: Path,

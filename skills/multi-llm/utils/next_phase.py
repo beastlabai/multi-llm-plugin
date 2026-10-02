@@ -48,6 +48,10 @@ WORKFLOW_COMPLETE_MARKER = "[WORKFLOW_COMPLETE]"
 #: marker: no consumer of the block reads it as one.
 RUNNER_WARNING_MARKER = "[RUNNER_WARNING]"
 
+#: The one line :func:`emit_resume` prints: the command that resumes a stopped
+#: write phase, and nothing else on the line (same rule as ``[NEXT_COMMAND]``).
+RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
+
 #: The one slot every ``next_command`` template ends with (schema pattern
 #: ``^[^{}]+\{args\}$``). Filled with ``str.replace``, never ``str.format``.
 ARGS_SLOT = "{args}"
@@ -471,6 +475,47 @@ def _optional_why(modes, phase: str, entry: Mapping[str, Any]) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Resuming the SAME phase after a needs-human stop
+# ---------------------------------------------------------------------------
+
+def resume_command(
+    plan_arg: str,
+    host_id: str,
+    route: Optional[str],
+    mode_word: str,
+) -> Optional[str]:
+    """The host-spelled command that resumes *mode_word*'s write phase, or ``None``.
+
+    The next-phase rule prints no command after a failure, and that stays right
+    for the next PHASE. A resume of the phase that just stopped is a different
+    thing: a bare re-invocation of a write phase starts it over, so the user's
+    way forward is ``--<mode> <plan> --resume`` (§2.1, "``--resume`` is built
+    from state"), and 2026-10-02 neither tool route could say it: Codex ended a
+    blocked ``implement`` with the MCP tool's JSON arguments, OpenCode with a
+    raw ``uv run`` argv, and neither is something a user types. Built from the
+    same ``next_command`` template and the same quoting as
+    :func:`next_phase_commands`, so the two spellings cannot drift.
+
+    Only the four write phases answer (the ones whose own exit-3 text says
+    "re-invoke with --resume"); a review's way forward is a ``--reaggregate`` or
+    a ``--force`` the dispatcher already prints as ``next``. *plan_arg* is used
+    verbatim, never resolved. A (host, route) pair with no template raises
+    ``ValueError``, as in :func:`next_phase_commands`.
+    """
+    modes = _skill_module("modes")
+    mode = modes.resolve(mode_word)
+    if mode is None or not mode.is_workflow_phase or not mode.phase:
+        return None
+    from .subagent_tasks import PHASE_BY_WRITE_KIND
+
+    template = _host_capabilities().next_command_template(host_id, route)
+    if mode.phase not in PHASE_BY_WRITE_KIND.values():
+        return None
+    args = f"--{mode.name} {quote_plan_arg(plan_arg)} {RESUME_FLAG}"
+    return template.replace(ARGS_SLOT, args)
+
+
+# ---------------------------------------------------------------------------
 # The block
 # ---------------------------------------------------------------------------
 
@@ -588,12 +633,53 @@ def emit_answer(
     return answer
 
 
+def emit_resume(
+    plan_arg: str,
+    host_id: str,
+    mode_word: str,
+    *,
+    stream=None,
+    stderr=None,
+    strict: bool = False,
+) -> Optional[str]:
+    """Print the ``[RESUME_COMMAND]`` line and set ``user_resume``: all or nothing.
+
+    :func:`emit_answer`'s sibling for ``util next-command --blocked``; the
+    same failure rule (one stderr line, ``None`` or :class:`LookupFailed`).
+    Nothing is printed for a mode that has no resume command.
+    """
+    from . import cli_common
+
+    err = sys.stderr if stderr is None else stderr
+    try:
+        route = resolve_route(host_id, stderr=err)
+        command = resume_command(plan_arg, host_id, route, mode_word)
+        if command is None:
+            return None
+        out = sys.stdout if stream is None else stream
+        print(f"{RESUME_COMMAND_MARKER} {command}", file=out)
+        try:
+            out.flush()
+        except (AttributeError, ValueError):  # pragma: no cover - closed stream
+            pass
+    except Exception as exc:  # noqa: BLE001 - advisory: never fails the caller
+        print(lookup_failure_line(exc), file=err)
+        if strict:
+            raise LookupFailed(str(exc)) from exc
+        return None
+    modes = _skill_module("modes")
+    cli_common.record_user_resume(
+        {"phase": modes.resolve(mode_word).phase, "command": command}
+    )
+    return command
+
+
 # ---------------------------------------------------------------------------
 # `multi_llm.py util next-command` (§2.2(3))
 # ---------------------------------------------------------------------------
 
 def main(argv: Optional[List[str]] = None) -> int:
-    """``util next-command <plan> [--after <mode>] [--host <id>]``.
+    """``util next-command <plan> [--after <mode> | --blocked <mode>] [--host <id>]``.
 
     Read-only: it resolves the plan path only to find ``state.json`` and hands
     the plan string as received to the builder, with no ``finished_mode`` (the
@@ -626,11 +712,34 @@ def main(argv: Optional[List[str]] = None) -> int:
              "(any mode word or alias; `full` reads suggested_next)",
     )
     parser.add_argument(
+        "--blocked", metavar="MODE", default=None, dest="blocked",
+        help="Instead of the next phase, print the command that resumes MODE's "
+             "own stopped write phase (`[RESUME_COMMAND]`, and "
+             "MULTI_LLM_RESULT.user_resume). The tool routes ask this after an "
+             "exit 3. Prints nothing for a mode that has none. Excludes --after.",
+    )
+    parser.add_argument(
         "--host", default=None,
         help="Host whose spelling to print (default: $MULTI_LLM_HOST, else "
              "claude-code)",
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
+
+    if args.blocked is not None:
+        if args.after is not None:
+            print("ERROR: --blocked and --after are mutually exclusive.",
+                  file=sys.stderr)
+            return 3
+        if modes.resolve(args.blocked) is None:
+            print(f"ERROR: unknown --blocked mode '{args.blocked}'.",
+                  file=sys.stderr)
+            return 3
+        host_id = _host_capabilities().resolve_host_id(explicit=args.host)
+        try:
+            emit_resume(args.plan, host_id, args.blocked, strict=True)
+        except LookupFailed:
+            return 3
+        return 0
 
     if args.after is not None and modes.resolve(args.after) is None:
         aliases = ", ".join(f"{a}={t}" for a, t in sorted(modes.ALIASES.items()))
