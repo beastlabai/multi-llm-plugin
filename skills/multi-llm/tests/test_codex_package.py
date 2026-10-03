@@ -696,7 +696,9 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/process_control.py": {
         "/dev/fd", "/dev/null", "/proc", "/proc/self/fd"},
     f"{PAYLOAD}/utils/run_registry.py": {"/proc"},
-    f"{PAYLOAD}/utils/providers/codex.py": {"/dev/null", "/tmp", "/dev/ptmx", "/dev/pts"},
+    # `/dev/shm` beside `/tmp`: step 1b's denied toolchain paths, named in the
+    # repo-wide developer message (plan codex-sandbox-unavailable step 1b).
+    f"{PAYLOAD}/utils/providers/codex.py": {"/dev/null", "/tmp", "/dev/shm", "/dev/ptmx", "/dev/pts"},
     # the shell wrappers codex puts around each command (plan §4.2 step 2) and
     # the ``2>/dev/null`` suffix the read-only classifier admits.
     f"{PAYLOAD}/utils/providers/codex_stream_audit.py": {
@@ -709,9 +711,13 @@ _ALLOWED_ABSOLUTE = {
     # file rule, `/dev/ptmx` and `/dev/pts` the optional tty entries it notes.
     f"{PAYLOAD}/utils/landlock_exec.py": {"/dev/null", "/dev/ptmx", "/dev/pts"},
     # its dispatch half: the same device entries, `/dev/tty` in the step-1c
-    # note, and the scratch directory's name pattern in a docstring.
+    # note, the scratch directory's name pattern in a docstring, `/tmp` and
+    # `/dev/shm` in step 1b's redirect docstring (kept denied), and
+    # `/bin/bash` in the measured denial shape `/bin/bash: line 1: f.txt:
+    # Permission denied` the denied-edit parser documents.
     f"{PAYLOAD}/utils/landlock_dispatch.py": {
-        "/dev/null", "/dev/ptmx", "/dev/pts", "/dev/tty", "/tmp/multi-llm-slot-"},
+        "/dev/null", "/dev/ptmx", "/dev/pts", "/dev/tty", "/tmp/multi-llm-slot-",
+        "/tmp", "/dev/shm", "/bin/bash"},
     f"{PAYLOAD}/utils/providers/base.py": {"/usr/bin/bwrap", "/dev/tty", "/tmp"},
     # (5) the container image's paths, in provider docstrings.
     f"{PAYLOAD}/hosts/capabilities.yaml": {"/opt/mllm/opencode-plugin"},
