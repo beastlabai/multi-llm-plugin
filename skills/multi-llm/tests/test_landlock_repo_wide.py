@@ -569,6 +569,8 @@ class TestJailDeniedEditsRepoWide:
         ("tee: src/app.py: Permission denied", ["src/app.py"]),
         ("Error: EACCES: permission denied, open '/x/src/app.py'", ["/x/src/app.py"]),
         ("[Error: EACCES: permission denied, open '/x/src/app.py'] {", ["/x/src/app.py"]),
+        ("Can't do inplace edit on README.md: Cannot make temp name: Permission denied.",
+         ["README.md"]),
     ])
     def test_every_measured_denial_shape_still_names_its_path(self, line, expected):
         assert ld._denied_paths_in(line + "\n") == expected
