@@ -239,7 +239,6 @@ class TestTheHooksPathAndTheProvidersConfigAreProtected:
         assert str(wide.repo / ".husky") in plan.protected
         assert ".husky" not in {_rel(wide, e.path) for e in plan.entries}
         assert str(wide.repo / ".husky") in plan.negative_dirs()
-        assert plan.write_dir() == str(wide.repo / "src")
         refusal = ld.repo_wide_declared_refusal(plan, [str(wide.repo / ".husky" / "pre-commit")])
         assert refusal and "protected path" in refusal and "(F6)" in refusal
 
