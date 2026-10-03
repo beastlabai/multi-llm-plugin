@@ -462,6 +462,37 @@ class TestGateCProjectConfigIsolation:
         # what closes it.
         assert env[oc.PROJECT_CONFIG_ENV] == "1"
 
+    def test_the_run_env_closes_the_home_opencode_layer(self, provider, user_xdg):
+        """MEASURED on 1.18.34 (scratch HOME, egress closed): `~/.opencode/` is
+        a config directory opencode loads from its own `Global.Path.home` —
+        `opencode.json[c]`, agents, commands — and neither the XDG redirect
+        nor the project switch reaches it: a provider and an agent declared
+        there showed up in a hermetic `debug config`. `OPENCODE_TEST_HOME`
+        moves that home alone; `HOME`, `auth.json` and the caches stay put."""
+        with provider.hermetic_dispatch(PROFILE_AGENT_READONLY, "opencode/sonnet"):
+            env = _child_env(provider, "opencode/sonnet", PROFILE_AGENT_READONLY)
+        assert env["OPENCODE_TEST_HOME"] == env["XDG_CONFIG_HOME"]
+        assert env.get("HOME") == os.environ.get("HOME")
+
+    def test_the_capture_pair_re_measures_the_home_layer_on_every_bump(
+        self, provider, user_xdg
+    ):
+        """`debug_config.<pin>.json`'s `home_opencode_layer` (no hermetic env)
+        loads the scratch HOME's `~/.opencode/opencode.json`; its twin under
+        the hermetic env this adapter emits does not. A release that drops the
+        `OPENCODE_TEST_HOME` hook fails here at its bump, not in a user's run."""
+        from tests import opencode_fixtures as oc_pin
+
+        cases = json.loads(oc_pin.DEBUG_CONFIG.read_text(encoding="utf-8"))["cases"]
+        control, hermetic = cases["home_opencode_layer"], cases["hermetic_home_opencode"]
+        assert set(json.loads(control["stdout"])["provider"]) == {"homeleak", "openrouter"}
+        assert not json.loads(hermetic["stdout"]).get("provider")
+        with provider.hermetic_dispatch(PROFILE_AGENT_READONLY, "opencode/sonnet"):
+            delta = provider.resolve_env("opencode/sonnet", PROFILE_AGENT_READONLY)
+        knobs = set(hermetic["env"]) - {"OPENCODE_DISABLE_MODELS_FETCH"}
+        assert knobs <= set(delta), "the capture's hermetic env is not the one emitted"
+        assert hermetic["env"]["OPENCODE_TEST_HOME"] == hermetic["env"]["XDG_CONFIG_HOME"]
+
     def test_the_config_home_the_child_sees_is_empty_and_ours(
         self, provider, user_xdg
     ):
@@ -1010,6 +1041,7 @@ class TestHermeticScopeAndHatch:
             )
         assert "XDG_CONFIG_HOME" not in delta
         assert oc.PROJECT_CONFIG_ENV not in delta
+        assert "OPENCODE_TEST_HOME" not in delta
         assert oc.PURE_FLAG not in argv
         assert new_hermetic_dirs() == []
 

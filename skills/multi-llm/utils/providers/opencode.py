@@ -136,6 +136,20 @@ STRUCTURAL_MODEL_VERSION = "1.18.18"
 #     stripped from the inherited environment while hermetic, because
 #     `OPENCODE_CONFIG_CONTENT` is a *last-applied deep-merge layer* and an
 #     inherited one would survive — and win over — the redirect.
+#   * (measured 1.18.34, scratch HOME, egress closed) `~/.opencode/` is a config
+#     directory too — `opencode.json[c]`, `agent/`, `command/`, plugins — read
+#     from opencode's own home (`Global.Path.home` = `OPENCODE_TEST_HOME`, else
+#     `os.homedir()`), which neither the redirect nor the project switch
+#     reaches: a provider and an agent declared there showed up in a hermetic
+#     `debug config`. `OPENCODE_TEST_HOME` set to the slot's config home closes
+#     it and moves nothing else that a run needs: `HOME` is untouched, and
+#     `auth.json`, the caches and the state directory derive from `HOME`/XDG,
+#     not from that home (`opencode debug paths`, measured). Its side effects:
+#     the global skill scan (`~/.claude/skills`, `~/.agents/skills`) and a `~/`
+#     in a config's `instructions`/`skills.paths` resolve under the slot, so a
+#     hermetic run sees no user-level skill either. It is opencode's test hook,
+#     the only lever there is; the debug-config capture's `home_opencode_layer`
+#     / `hermetic_home_opencode` pair re-measures it on every bump.
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: `opencode run --pure` — "run without external plugins". Optional, not
@@ -184,6 +198,10 @@ CONFIG_ENV_NAMES = (
 
 #: Closes the workspace-`opencode.json` layer the redirect does not reach.
 PROJECT_CONFIG_ENV = "OPENCODE_DISABLE_PROJECT_CONFIG"
+
+#: opencode's own home (`Global.Path.home`), where it finds `~/.opencode/`. A
+#: hermetic slot points it at its empty config home (see the M4 notes above).
+HOME_DIR_ENV = "OPENCODE_TEST_HOME"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The denied turn (plans/opencode-validator-false-rate-limit-and-denied-turn.md
@@ -1080,7 +1098,8 @@ def _read_declared_providers(
 #      to `cwd`, `opencode.json` then `opencode.jsonc` in each directory;
 #   4. `opencode.json` then `opencode.jsonc` in every `.opencode` directory from
 #      `cwd` UP to the worktree root (so the shallowest one wins), then
-#      `~/.opencode/`, then `$OPENCODE_CONFIG_DIR`;
+#      `~/.opencode/` (`$OPENCODE_TEST_HOME/.opencode/` when set, which is
+#      how a hermetic slot closes it), then `$OPENCODE_CONFIG_DIR`;
 #   5. `$OPENCODE_CONFIG_CONTENT`;
 #   6. the managed directory (`/etc/opencode` on Linux).
 #
@@ -1179,8 +1198,9 @@ def _config_layers(
             os.path.join(d, ".opencode") for d in walk
             if os.path.isdir(os.path.join(d, ".opencode"))
         ]
-    if os.path.isdir(os.path.join(home, ".opencode")):
-        directories.append(os.path.join(home, ".opencode"))
+    opencode_home = env.get(HOME_DIR_ENV) or home
+    if os.path.isdir(os.path.join(opencode_home, ".opencode")):
+        directories.append(os.path.join(opencode_home, ".opencode"))
     if config_dir:
         directories.append(config_dir)
     for directory in dict.fromkeys(directories):
@@ -1617,9 +1637,11 @@ def _user_config_files_conclusive() -> bool:
     variable (an explicit file, dir or inline content opencode layers in), no
     global ``opencode.jsonc`` or ``config.json`` (``json.load`` cannot read the
     first and the file read does not look at the second), every global
-    ``opencode.json`` that exists parses as JSON, and no project config on the
-    walk up from this process's ``cwd`` (unless opencode is told to skip that
-    layer). Anything else is inconclusive and needs ``debug config``.
+    ``opencode.json`` that exists parses as JSON, no ``~/.opencode/`` config
+    (a layer the user's own runs load and a hermetic slot does not), and no
+    project config on the walk up from this process's ``cwd`` (unless opencode
+    is told to skip that layer). Anything else is inconclusive and needs
+    ``debug config``.
     """
     # Literal reads, one per name, so the packaging's env-read walk resolves each.
     if (
@@ -1634,6 +1656,10 @@ def _user_config_files_conclusive() -> bool:
     base = os.path.join(home, "opencode")
     for name in ("opencode.jsonc", "config.json"):
         if os.path.exists(os.path.join(base, name)):
+            return False
+    opencode_home = os.environ.get(HOME_DIR_ENV) or os.path.expanduser("~")
+    for name in ("opencode.json", "opencode.jsonc"):
+        if os.path.exists(os.path.join(opencode_home, ".opencode", name)):
             return False
     plain = os.path.join(base, "opencode.json")
     if os.path.exists(plain):
@@ -2419,6 +2445,8 @@ class OpenCodeProvider(LLMProvider):
         # passed through untouched.
         env["XDG_CONFIG_HOME"] = str(slot["config_home"])
         env[PROJECT_CONFIG_ENV] = "1"
+        # `~/.opencode/` hangs off opencode's own home, not HOME's XDG dirs.
+        env[HOME_DIR_ENV] = str(slot["config_home"])
         content = slot.get("config_content")
         if content:
             env["OPENCODE_CONFIG_CONTENT"] = content

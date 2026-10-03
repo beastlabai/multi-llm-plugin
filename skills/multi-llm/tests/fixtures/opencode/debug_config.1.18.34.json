@@ -5,7 +5,7 @@
     "debug",
     "config"
   ],
-  "captured": "2026-10-02, debug_config_capture.py: host, scratch HOME per case under a cleared env (HOME, PATH=/usr/bin:/bin, OPENCODE_DISABLE_MODELS_FETCH=1 plus the case's own env), stdin /dev/null, no network, no model call; every apiKey a sk-canary-not-a-key-<n> canary; scratch paths rewritten to /rig",
+  "captured": "2026-10-03, debug_config_capture.py: host, scratch HOME per case under a cleared env (HOME, PATH=/usr/bin:/bin, OPENCODE_DISABLE_MODELS_FETCH=1 plus the case's own env), stdin /dev/null, egress closed by a dead HTTP(S)_PROXY, no model call; every apiKey a sk-canary-not-a-key-<n> canary; scratch paths rewritten to /rig",
   "cases": {
     "custom_inline_key": {
       "setup": "global opencode.json: custom `stub` (npm + baseURL) with an inline apiKey",
@@ -496,6 +496,7 @@
         "OPENCODE_DISABLE_MODELS_FETCH": "1",
         "XDG_CONFIG_HOME": "/rig/hermetic-config",
         "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_TEST_HOME": "/rig/hermetic-config",
         "OPENCODE_CONFIG_CONTENT": "{\"$schema\": \"https://opencode.ai/config.json\", \"provider\": {\"stub\": {\"npm\": \"@ai-sdk/openai-compatible\", \"options\": {\"baseURL\": \"http://127.0.0.1:9/v1\"}, \"models\": {\"stub-model\": {}}}}, \"agent\": {\"plan\": {\"permission\": {\"external_directory\": {\"*\": \"deny\"}, \"read\": {\"*.env\": \"deny\", \"*.env.*\": \"deny\", \"*.env.example\": \"allow\"}, \"doom_loop\": \"deny\"}}}}"
       },
       "global_files": {
@@ -532,6 +533,7 @@
         "OPENCODE_DISABLE_MODELS_FETCH": "1",
         "XDG_CONFIG_HOME": "/rig/hermetic-config",
         "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_TEST_HOME": "/rig/hermetic-config",
         "OPENCODE_CONFIG_CONTENT": "{\"$schema\": \"https://opencode.ai/config.json\", \"provider\": {\"stub\": {\"npm\": \"@ai-sdk/openai-compatible\", \"options\": {\"baseURL\": \"http://127.0.0.1:9/v1\"}, \"models\": {\"stub-model\": {}}}}, \"agent\": {\"plan\": {\"permission\": {\"external_directory\": {\"*\": \"deny\"}, \"read\": {\"*.env\": \"deny\", \"*.env.*\": \"deny\", \"*.env.example\": \"allow\"}, \"doom_loop\": \"deny\"}}}}"
       },
       "global_files": {
@@ -556,6 +558,87 @@
       "stdout": "{\n  \"agent\": {\n    \"plan\": {\n      \"permission\": {\n        \"external_directory\": {\n          \"*\": \"deny\"\n        },\n        \"read\": {\n          \"*.env\": \"deny\",\n          \"*.env.*\": \"deny\",\n          \"*.env.example\": \"allow\"\n        },\n        \"doom_loop\": \"deny\"\n      },\n      \"options\": {}\n    }\n  },\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"stub\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\"\n      },\n      \"models\": {\n        \"stub-model\": {}\n      }\n    }\n  },\n  \"username\": \"unknown\"\n}\n",
       "stderr": ""
     },
+    "home_opencode_layer": {
+      "setup": "~/.opencode/opencode.json declaring custom `homeleak` and a built-in `openrouter` key, no hermetic env: the layer is in force",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {},
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"provider\": {\n    \"homeleak\": {\n      \"npm\": \"@ai-sdk/openai-compatible\",\n      \"options\": {\n        \"baseURL\": \"http://127.0.0.1:9/v1\",\n        \"apiKey\": \"***\"\n      },\n      \"models\": {\n        \"stub-model\": {}\n      }\n    },\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"username\": \"unknown\"\n}\n",
+      "stderr": "",
+      "home_files": {
+        ".opencode/opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "homeleak": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            },
+            "openrouter": {
+              "options": {
+                "apiKey": "sk-canary-not-a-key-12"
+              }
+            }
+          }
+        }
+      }
+    },
+    "hermetic_home_opencode": {
+      "setup": "as home_opencode_layer, under the hermetic env (OPENCODE_TEST_HOME = the empty config home) with --pure: `homeleak` and the key must vanish",
+      "argv": [
+        "opencode",
+        "--pure",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "XDG_CONFIG_HOME": "/rig/hermetic-config",
+        "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_TEST_HOME": "/rig/hermetic-config",
+        "OPENCODE_CONFIG_CONTENT": "{\"$schema\": \"https://opencode.ai/config.json\", \"agent\": {\"plan\": {\"permission\": {\"external_directory\": {\"*\": \"deny\"}, \"read\": {\"*.env\": \"deny\", \"*.env.*\": \"deny\", \"*.env.example\": \"allow\"}, \"doom_loop\": \"deny\"}}}}"
+      },
+      "global_files": {},
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"agent\": {\n    \"plan\": {\n      \"permission\": {\n        \"external_directory\": {\n          \"*\": \"deny\"\n        },\n        \"read\": {\n          \"*.env\": \"deny\",\n          \"*.env.*\": \"deny\",\n          \"*.env.example\": \"allow\"\n        },\n        \"doom_loop\": \"deny\"\n      },\n      \"options\": {}\n    }\n  },\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"username\": \"unknown\"\n}\n",
+      "stderr": "",
+      "home_files": {
+        ".opencode/opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "homeleak": {
+              "npm": "@ai-sdk/openai-compatible",
+              "options": {
+                "baseURL": "http://127.0.0.1:9/v1",
+                "apiKey": "sk-canary-not-a-key-1"
+              },
+              "models": {
+                "stub-model": {}
+              }
+            },
+            "openrouter": {
+              "options": {
+                "apiKey": "sk-canary-not-a-key-12"
+              }
+            }
+          }
+        }
+      }
+    },
     "hermetic_pure_permission_only": {
       "setup": "hermetic --pure with a built-in prefix: OPENCODE_CONFIG_CONTENT holds only the permission block, so no provider is declared",
       "argv": [
@@ -568,6 +651,7 @@
         "OPENCODE_DISABLE_MODELS_FETCH": "1",
         "XDG_CONFIG_HOME": "/rig/hermetic-config",
         "OPENCODE_DISABLE_PROJECT_CONFIG": "1",
+        "OPENCODE_TEST_HOME": "/rig/hermetic-config",
         "OPENCODE_CONFIG_CONTENT": "{\"$schema\": \"https://opencode.ai/config.json\", \"agent\": {\"plan\": {\"permission\": {\"external_directory\": {\"*\": \"deny\"}, \"read\": {\"*.env\": \"deny\", \"*.env.*\": \"deny\", \"*.env.example\": \"allow\"}, \"doom_loop\": \"deny\"}}}}"
       },
       "global_files": {
