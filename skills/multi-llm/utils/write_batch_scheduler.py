@@ -3977,6 +3977,25 @@ class WriteBatchScheduler:
         falls back to the id, as before.
         """
         existing = TaskSnapshot.load(self.phase_dir, task_id)
+        # The same cutoff `_earlier_rows` applies: a snapshot taken before
+        # the review this phase applies completed belongs to the previous
+        # cycle — the bytes before THAT cycle's batch, so restoring from it
+        # would roll that cycle's applied edit back too (follow-up to the
+        # 2026-10-02 adversarial review). Set aside, never deleted.
+        reviewed_at = self._review_completed_at()
+        if reviewed_at is not None:
+            # The manifest is stamped to the second.
+            reviewed_at = reviewed_at.replace(microsecond=0)
+        if existing is not None and existing.taken_before(reviewed_at):
+            moved_to = existing.set_aside()
+            self.log(
+                f"[write-subagents] {task_id}: the pre-batch snapshot under "
+                f"that id was taken at {existing.taken_at or 'an unknown time'}, "
+                f"before this phase's review completed "
+                f"({reviewed_at.isoformat(timespec='seconds')}), so it is a "
+                f"previous review cycle's rollback point; kept at {moved_to}."
+            )
+            existing = None
         recorded_ids = (existing.expected_ids or []) if existing else []
         if existing is not None and recorded_ids and expected_ids and (
             sorted(recorded_ids) != sorted(str(i) for i in expected_ids)
@@ -3995,7 +4014,8 @@ class WriteBatchScheduler:
             # back into the slot rather than a fresh one being taken over
             # every run's edits since.
             existing = TaskSnapshot.reinstate(
-                self.phase_dir, task_id, [str(i) for i in expected_ids]
+                self.phase_dir, task_id, [str(i) for i in expected_ids],
+                not_before=reviewed_at,
             )
             if existing is not None:
                 self.log(

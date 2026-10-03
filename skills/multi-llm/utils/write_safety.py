@@ -58,6 +58,7 @@ import shutil
 import stat
 import subprocess
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -445,6 +446,9 @@ class TaskSnapshot:
     #: under the same positional id for other items. ``None`` for a manifest
     #: written before the key existed.
     expected_ids: Optional[List[str]] = None
+    #: When the snapshot was taken (local, to the second), kept across
+    #: re-saves; ``None`` until the first save or for a manifest without it.
+    taken_at: Optional[str] = None
 
     # -- creation -------------------------------------------------------
 
@@ -570,11 +574,14 @@ class TaskSnapshot:
     def save(self) -> str:
         path = Path(self.directory) / MANIFEST_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Stamped once: a later save (an adopted undeclared write) must not
+        # move the date a review-cycle cutoff reads.
+        self.taken_at = self.taken_at or time.strftime("%Y-%m-%dT%H:%M:%S")
         manifest: Dict[str, Any] = {
             "snapshot_version": 1,
             "task_id": self.task_id,
             "root": self.root,
-            "taken_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "taken_at": self.taken_at,
             "files": [entry.to_dict() for entry in self.entries],
         }
         if self.expected_ids is not None:
@@ -603,7 +610,28 @@ class TaskSnapshot:
                 [str(i) for i in recorded_ids]
                 if isinstance(recorded_ids, list) else None
             ),
+            taken_at=(
+                str(data["taken_at"]) if data.get("taken_at") else None
+            ),
         )
+
+    def taken_before(self, cutoff: Optional[datetime]) -> bool:
+        """Whether this snapshot predates ``cutoff`` (a review's completion).
+
+        A manifest with no parseable date cannot be placed in a cycle and is
+        read as predating any cutoff given: the only such manifests are
+        older than the field, and an unknown-age rollback point is kept
+        aside rather than trusted as this cycle's.
+        """
+        if cutoff is None:
+            return False
+        try:
+            taken = datetime.fromisoformat(self.taken_at or "")
+        except ValueError:
+            return True
+        if taken.tzinfo is not None:
+            taken = taken.astimezone().replace(tzinfo=None)
+        return taken < cutoff
 
     @staticmethod
     def items_digest(expected_ids: Optional[Sequence[str]]) -> str:
@@ -666,6 +694,7 @@ class TaskSnapshot:
     @classmethod
     def reinstate(
         cls, phase_dir: str, task_id: str, expected_ids: Sequence[str],
+        *, not_before: Optional[datetime] = None,
     ) -> Optional["TaskSnapshot"]:
         """Move the newest set-aside snapshot for these items back into the slot.
 
@@ -673,16 +702,20 @@ class TaskSnapshot:
         was there). The items that come back to a positional id after a
         selection change get their pre-FIRST-dispatch bytes back as the
         rollback point, instead of a fresh snapshot of the edits every run
-        since left on disk (adversarial review, 2026-10-02).
+        since left on disk (adversarial review, 2026-10-02). A copy taken
+        before ``not_before`` (the current review cycle's completion) is a
+        previous cycle's and stays aside.
         """
         slot = Path(phase_dir) / PRE_BATCH_DIRNAME / _safe_component(task_id)
         if slot.exists():
             return None
-        aside = cls.set_aside_dirs(phase_dir, task_id, expected_ids)
-        if not aside:
-            return None
-        os.replace(str(aside[0]), str(slot))
-        return cls.load(phase_dir, task_id)
+        for candidate in cls.set_aside_dirs(phase_dir, task_id, expected_ids):
+            loaded = cls.load(phase_dir, candidate.name)
+            if loaded is None or loaded.taken_before(not_before):
+                continue
+            os.replace(str(candidate), str(slot))
+            return cls.load(phase_dir, task_id)
+        return None
 
     @classmethod
     def locate(

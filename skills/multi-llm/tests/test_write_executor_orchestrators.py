@@ -1643,6 +1643,52 @@ class TestARenumberedApplyBatchKeepsItsOwnRollbackPoint(_ApplyRig):
             "--phase-dir", str(phase_dir), "--all-failed", "--force"]) == 0
         assert plan.read_text(encoding="utf-8") == before_run + "run1\n"
 
+    def test_a_new_review_cycle_never_reuses_the_previous_cycles_snapshot(
+        self, repo
+    ):
+        """Follow-up to the round-3 review: a batch re-dispatched in a NEW
+        review cycle (same item ids — a reworded title keeps the content hash
+        and moves the inputs fingerprint) reused cycle 1's slot snapshot, so
+        `restore-batch` rolled cycle 1's applied edit back as well. Cycle 2
+        takes its own snapshot and keeps cycle 1's aside; the cutoff is the
+        review completion, the one `earlier_rows` uses."""
+        from utils import restore_batch
+
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        original = plan.read_text(encoding="utf-8")
+        assert self._run(repo, plan, sum(ids, []), content="run1\n") == 0
+        applied1 = plan.read_text(encoding="utf-8")
+        pre_batch = self._phase_dir(plan) / "pre_batch"
+        # Cycle 1 happened a while ago: the manifests are stamped to the
+        # second, the test runs inside one.
+        for manifest in pre_batch.glob("*/manifest.json"):
+            data = json.loads(manifest.read_text())
+            data["taken_at"] = "2026-10-02T10:00:00"
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+
+        # Cycle 2: the same findings again, titles reworded.
+        self._review(repo, "one")
+        review = repo.root / "plans" / "apply" / "review-plan"
+        groups = _groups("one")
+        for group in groups:
+            group["suggestions"][0]["title"] += " (revised)"
+        (review / "grouped.json").write_text(json.dumps(groups), encoding="utf-8")
+        assert self._ids(plan) == ids
+        assert self._run(repo, plan, sum(ids, []), content="run2\n") == 0
+        assert plan.read_text(encoding="utf-8") == applied1 + "run2\n" * 3
+
+        slot = next((pre_batch / "apply-batch-2" / "files").iterdir())
+        assert slot.read_text(encoding="utf-8") == applied1 + "run2\n" * 2
+        aside = list(pre_batch.glob("apply-batch-2.items-*"))
+        assert len(aside) == 1
+        assert next((aside[0] / "files").iterdir()).read_text(
+            encoding="utf-8") == original + "run1\n" * 2
+        assert restore_batch.main([
+            "--phase-dir", str(self._phase_dir(plan)), "--task-id", "apply-batch-2",
+        ]) == 0
+        assert plan.read_text(encoding="utf-8") == applied1 + "run2\n" * 2
+
     def test_a_resumed_batch_with_the_same_items_still_reuses_its_snapshot(
         self, repo
     ):
