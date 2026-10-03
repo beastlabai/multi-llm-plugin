@@ -2500,6 +2500,54 @@ def _remove_created_dirs(created: Optional[Sequence[str]]) -> None:
             pass
 
 
+#: The interprocess mutex a rung probe holds while its canary directory
+#: exists, one file per repository under the system temp dir (never unlinked,
+#: like every lock file of ``process_control``).
+PROBE_WORKDIR_LOCK_PREFIX = "multi-llm-probe-"
+
+
+def _probe_workdir_lock_path(cwd: Optional[str]) -> str:
+    base = os.path.realpath(cwd or os.getcwd())
+    digest = hashlib.sha256(base.encode("utf-8", "surrogateescape")).hexdigest()[:16]
+    return os.path.join(tempfile.gettempdir(), f"{PROBE_WORKDIR_LOCK_PREFIX}{digest}.lock")
+
+
+@contextlib.contextmanager
+def _probe_workdir(
+    cwd: Optional[str], workdir: Optional[str], deadline: float,
+) -> Iterator[Optional[List[str]]]:
+    """Prepare a rung probe's canary directory, serialized across processes,
+    and remove what was created once the probe has run.
+
+    Yields what :func:`_prepare_probe_workdir` created (``[]`` for a rung with
+    no ``probe_workdir``), ``None`` when it could not be prepared — or when the
+    mutex could not be taken before ``deadline`` (the caller reads the clock
+    and records ``unprobed``). Each probe only ever removes the directories
+    it created, so two probes of one repository at once — twelve concurrent
+    ``status`` polls, measured 2026-10-02 — used to leave an empty
+    ``.multi-llm/`` and ``.multi-llm/tmp/`` behind: the first one's ``rmdir``
+    failed on the second one's seed, and the second one had created nothing.
+    Under the mutex the second waits its turn and creates and removes its own.
+    A mutex file that cannot be opened proceeds unserialized, as before.
+    """
+    if not workdir:
+        yield []
+        return
+    mutex = process_control.FileMutex(_probe_workdir_lock_path(cwd))
+    acquired = mutex.acquire(timeout_s=max(0.0, deadline - time.monotonic()))
+    try:
+        if not acquired and time.monotonic() >= deadline:
+            yield None
+            return
+        created = _prepare_probe_workdir(cwd, workdir)
+        try:
+            yield created
+        finally:
+            _remove_created_dirs(created)
+    finally:
+        mutex.release()
+
+
 def _rung_probe_tail(rung: SandboxRung, completed: Any) -> str:
     """The redacted line a rung's probe is remembered by: the line carrying
     its ``removed_signature`` when present, else the last non-empty line of
@@ -2573,40 +2621,39 @@ def _walk_wrapped_rung(
         return RUNG_SKIPPED_BY_SWITCH, False
     if deadline - time.monotonic() <= 0:
         return RUNG_UNPROBED, True
-    created = _prepare_probe_workdir(cwd, rung.probe_workdir) if rung.probe_workdir else []
-    if created is None:
-        return RUNG_UNKNOWN, True
-    if request is None:
-        request = JailRequest(
-            repo_root=os.path.realpath(cwd or os.getcwd()), kind=PROFILE_AGENT_READONLY,
-        )
-    launcher, _ = _resolve_executable(str(rung.probe_argv[0]))
-    resolved = [*launcher, *(str(a) for a in rung.probe_argv[1:])]
-    completed = None
-    seed_intact = True
-    scrub: Tuple[Optional[str], ...] = ()
-    try:
-        with landlock_dispatch.rung_probe(rung, request, resolved, cwd=cwd) as probe:
-            scrub = (probe.env.get("TMPDIR"), probe.seeded)
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return RUNG_UNPROBED, True
-            completed = _run_sandbox_probe(
-                probe.argv, cwd=cwd, timeout=remaining, env=probe.env,
+    with _probe_workdir(cwd, rung.probe_workdir, deadline) as created:
+        if created is None:
+            ran_out = time.monotonic() >= deadline
+            return (RUNG_UNPROBED if ran_out else RUNG_UNKNOWN), True
+        if request is None:
+            request = JailRequest(
+                repo_root=os.path.realpath(cwd or os.getcwd()), kind=PROFILE_AGENT_READONLY,
             )
-            seed_intact = probe.seed_intact()
-    except landlock_dispatch.ProbeSetupFailed as exc:
-        if tails is not None:
-            tails.append((rung.name, _redact_probe_tail(str(exc), 500)))
-        return RUNG_UNKNOWN, True
-    except landlock_dispatch.JailRefused as exc:
-        # A required entry the probe (and so every dispatch it gates) cannot
-        # be granted: the rung is not usable here, measured before any spawn.
-        if tails is not None:
-            tails.append((rung.name, _redact_probe_tail(exc.message, 500)))
-        return RUNG_ABSENT, False
-    finally:
-        _remove_created_dirs(created)
+        launcher, _ = _resolve_executable(str(rung.probe_argv[0]))
+        resolved = [*launcher, *(str(a) for a in rung.probe_argv[1:])]
+        completed = None
+        seed_intact = True
+        scrub: Tuple[Optional[str], ...] = ()
+        try:
+            with landlock_dispatch.rung_probe(rung, request, resolved, cwd=cwd) as probe:
+                scrub = (probe.env.get("TMPDIR"), probe.seeded)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return RUNG_UNPROBED, True
+                completed = _run_sandbox_probe(
+                    probe.argv, cwd=cwd, timeout=remaining, env=probe.env,
+                )
+                seed_intact = probe.seed_intact()
+        except landlock_dispatch.ProbeSetupFailed as exc:
+            if tails is not None:
+                tails.append((rung.name, _redact_probe_tail(str(exc), 500)))
+            return RUNG_UNKNOWN, True
+        except landlock_dispatch.JailRefused as exc:
+            # A required entry the probe (and so every dispatch it gates) cannot
+            # be granted: the rung is not usable here, measured before any spawn.
+            if tails is not None:
+                tails.append((rung.name, _redact_probe_tail(exc.message, 500)))
+            return RUNG_ABSENT, False
     if completed is None:
         ran_out = time.monotonic() >= deadline
         return (RUNG_UNPROBED if ran_out else RUNG_UNKNOWN), True
@@ -2712,21 +2759,19 @@ def _walk_fallback_rungs(
             walk.append((rung.name, RUNG_UNPROBED))
             return None, tuple(walk)
         workdir = getattr(rung, "probe_workdir", None)
-        created: Optional[List[str]] = []
-        if workdir:
-            created = _prepare_probe_workdir(cwd, workdir)
+        with _probe_workdir(cwd, workdir, deadline) as created:
             if created is None:
                 # The canary's directory could not be made writable *outside*
                 # the sandbox, so a denied write inside it would prove nothing
-                # about the boundary: nothing was measured, never a widening.
-                walk.append((rung.name, RUNG_UNKNOWN))
+                # about the boundary: nothing was measured, never a widening —
+                # or the deadline went while waiting for the workdir's turn.
+                ran_out = time.monotonic() >= deadline
+                walk.append((rung.name, RUNG_UNPROBED if ran_out else RUNG_UNKNOWN))
                 return None, tuple(walk)
-        try:
             completed = _run_sandbox_probe(
-                list(rung.probe_argv), cwd=cwd, timeout=max(remaining, 0.0)
+                list(rung.probe_argv), cwd=cwd,
+                timeout=max(deadline - time.monotonic(), 0.0),
             )
-        finally:
-            _remove_created_dirs(created)
         if completed is None:
             ran_out = time.monotonic() >= deadline
             walk.append((rung.name, RUNG_UNPROBED if ran_out else RUNG_UNKNOWN))
