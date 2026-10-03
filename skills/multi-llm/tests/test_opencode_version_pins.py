@@ -238,6 +238,9 @@ class TestTheLatestCheck:
 
         def fake_run(argv, **kwargs):
             assert argv[:3] == ["npm", "view", bump.NPM_PACKAGE]
+            answer["argv"], answer["timeout"] = list(argv), kwargs.get("timeout")
+            if answer.get("raise"):
+                raise answer["raise"]
             return subprocess.CompletedProcess(
                 argv, answer.get("code", 0), answer.get("stdout", ""), answer.get("stderr", "")
             )
@@ -257,3 +260,20 @@ class TestTheLatestCheck:
     def test_an_unanswered_npm_is_neither(self, npm, capsys):
         npm.update(code=1, stdout="", stderr="npm ERR! network")
         assert bump.cmd_check(REPO) == 2
+
+    def test_npm_fails_fast_offline(self, npm, capsys):
+        """Offline, a bare `npm view` retries for ~70 s (measured against a
+        refused registry: 2 retries with backoff), and a blackholed one never
+        answers at all. npm's own fast-fail options end the refused case at
+        once; the overall budget ends the blackholed one."""
+        npm["stdout"] = OpenCodeProvider.verified_version + "\n"
+        bump.cmd_check(REPO)
+        assert "--fetch-retries=0" in npm["argv"]
+        fetch_timeout = [a for a in npm["argv"] if a.startswith("--fetch-timeout=")]
+        assert fetch_timeout and int(fetch_timeout[0].split("=", 1)[1]) <= 15000
+        assert npm["timeout"] is not None and npm["timeout"] <= 20
+
+    def test_a_budget_expiry_is_could_not_ask(self, npm, capsys):
+        npm["raise"] = subprocess.TimeoutExpired(["npm"], 20)
+        assert bump.cmd_check(REPO) == 2
+        assert "could not ask npm" in capsys.readouterr().err

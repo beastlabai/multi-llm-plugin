@@ -90,6 +90,15 @@ PINS: Tuple[Tuple[str, Path, str], ...] = (
 
 LOCKFILE = CONTAINER / "package-lock.json"
 
+#: ``check``'s question to npm. Offline, a bare ``npm view`` retries for ~70 s
+#: (measured 2026-10-03 against a refused registry: two retries with backoff)
+#: and a blackholed registry never answers; ``--fetch-retries=0`` ends the first
+#: at once, ``--fetch-timeout`` bounds a slow response, and the overall budget
+#: is the backstop for a connect that hangs (npm's timeout does not cover it).
+NPM_VIEW_ARGV = ("npm", "view", NPM_PACKAGE, "version",
+                 "--fetch-retries=0", "--fetch-timeout=10000")
+NPM_VIEW_BUDGET_S = 20
+
 
 class BumpError(RuntimeError):
     """A step refused; nothing after it ran."""
@@ -277,8 +286,8 @@ def cmd_check(root: Path = REPO) -> int:
     pin = read_pins(root)["adapter verified_version"]
     try:
         done = subprocess.run(
-            ["npm", "view", NPM_PACKAGE, "version"], capture_output=True, text=True,
-            stdin=subprocess.DEVNULL, timeout=60,
+            list(NPM_VIEW_ARGV), capture_output=True, text=True,
+            stdin=subprocess.DEVNULL, timeout=NPM_VIEW_BUDGET_S,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         print(f"opencode-latest-check: could not ask npm: {exc}", file=sys.stderr)
