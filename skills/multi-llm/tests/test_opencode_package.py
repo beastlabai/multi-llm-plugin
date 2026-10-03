@@ -246,7 +246,7 @@ class TestManifest:
         )
 
     def test_engines_floor_matches_the_container_pin(self):
-        """A4 item 6: the ``engines`` floor is the lowest version actually run.
+        """A4 item 6: the ``engines`` floor is the one supported release.
 
         This is the one field in the manifest whose correct value lives in
         *other* files, so it is the field most likely to go stale while still

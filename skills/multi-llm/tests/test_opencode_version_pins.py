@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -88,6 +89,30 @@ class TestEveryPinNamesOneRelease:
             assert json.loads(path.read_text("utf-8"))["opencode_version"] == pin, path.name
         probes = sorted(p.name for p in oc_pin.ROOT.glob("*.json"))
         assert probes == sorted([oc_pin.AUTH_LIST.name, oc_pin.DEBUG_CONFIG.name])
+
+
+class TestNoDocumentKeepsTheOldFloorPolicy:
+    """Before 2026-10-02 the floor was "the lowest version ever run", lowered
+    only on a recorded run. Prose still saying so contradicts the policy this
+    file enforces, and a reader acting on it would argue a floor back down."""
+
+    STALE = re.compile(
+        r"lowest version (?:ever|actually) run|lowering a floor needs", re.IGNORECASE
+    )
+
+    def test_no_shipped_or_test_text_states_it(self):
+        roots = [REPO / "skills" / "multi-llm", REPO / "packaging" / "opencode"]
+        stale = []
+        for root in roots:
+            for path in root.rglob("*"):
+                if path.suffix not in {".py", ".yaml", ".md", ".json", ".ts", ".js"}:
+                    continue
+                if path == Path(__file__) or "node_modules" in path.parts:
+                    continue
+                text = path.read_text(encoding="utf-8", errors="replace")
+                stale += [f"{path.relative_to(REPO)}: {m.group(0)}"
+                          for m in self.STALE.finditer(text)]
+        assert not stale, "\n".join(stale)
 
 
 class TestTheRuntimeVerdictAroundThePin:
