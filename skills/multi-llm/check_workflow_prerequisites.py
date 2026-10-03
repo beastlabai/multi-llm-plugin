@@ -801,8 +801,9 @@ def ensure_prerequisites(
 
 #: The write phases codex's own sandbox cannot serve once it fails to start on
 #: this machine: their scope is ``repo-wide``, which the plugin's Landlock jail
-#: does not take until plan step 3b (``subagent_executor`` refuses them as
-#: ``sandbox_unavailable`` at dispatch).
+#: takes since plan step 3b (2026-10-02) — so they are refused at dispatch
+#: (``sandbox_unavailable``) only where that rung is unusable too, which is
+#: what :func:`repo_wide_sandbox_warning` asks the dispatch's own decision.
 REPO_WIDE_WRITE_PHASES = ("implement", "apply-code-fixes")
 
 #: The remedy sentence of that refusal. ``subagent_executor.F6_LEAD`` is the

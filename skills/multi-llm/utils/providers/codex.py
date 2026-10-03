@@ -371,8 +371,8 @@ CANARY_ENV_WRITE_DIR = "MULTI_LLM_CANARY_WRITE_DIR"
 #: output folder and the other protected roots that exist. Newline, never
 #: `os.pathsep` or a space: the script splits on it alone (`IFS`, globbing
 #: off), so a repository path holding a space or a colon stays one target —
-#: `os.pathsep`-joined and word-split, `/home/me/my repo/.git` became two
-#: nonexistent targets that read as denied (adversarial review, 2026-10-02).
+#: `os.pathsep`-joined and word-split, a `my repo/.git` became two nonexistent
+#: targets that read as denied (adversarial review, 2026-10-02).
 #: A target the script cannot stat as a directory is a setup failure
 #: (`LANDLOCK_CANARY_TARGET_FAILED`), never a pass; a path holding a newline
 #: cannot be handed over at all and `landlock_dispatch.canary_env` refuses it.
