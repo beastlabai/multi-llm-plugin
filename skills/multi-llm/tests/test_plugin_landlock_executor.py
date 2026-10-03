@@ -408,7 +408,9 @@ class TestTheWalk:
         assert (rung, walk) == (None, (("plugin-landlock", "unknown"),))
         assert "could not make the probe's TMPDIR" in tails["plugin-landlock"]
         assert wrapper.records() == []
-        assert os.listdir(inside) == []
+        # Only the probe's mutex file, never unlinked by design, may remain.
+        assert [n for n in os.listdir(inside)
+                if not n.startswith(executor.PROBE_WORKDIR_LOCK_PREFIX)] == []
 
     def test_an_unwritable_negative_target_stops_the_walk(self, repo, wrapper):
         (repo / ".multi-llm").mkdir()
