@@ -62,7 +62,12 @@ VERSION_RE = re.compile(r"\d+\.\d+\.\d+")
 #: Every text pin of the supported opencode release: (name, file relative to
 #: the repo root, a pattern whose one group is the version). Each pattern must
 #: match exactly once. The lockfile is read as JSON and written by npm
-#: (:func:`resolve_lock`), never by a pattern.
+#: (:func:`resolve_lock`), never by a pattern. NOT a pin: the opencode row's
+#: ``version`` in ``tests/container/cli-surface.yaml``. It names the release its
+#: ``help_sha256`` was captured from, and the drift report reads it against the
+#: installed version to tell "the help moved with this bump" from "it moved
+#: under a fixed version", so it moves with its digest at the re-seed (step 3
+#: below), never alone here (``tests/container/lock_update.py`` says the same).
 PINS: Tuple[Tuple[str, Path, str], ...] = (
     ("adapter min_version", SKILL / "utils" / "providers" / "opencode.py",
      r'^    min_version = "(\d+\.\d+\.\d+)"$'),

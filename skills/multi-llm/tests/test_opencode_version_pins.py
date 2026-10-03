@@ -8,7 +8,9 @@ CLI's ``--version`` and the name of every committed opencode capture.
 ``make opencode-bump VERSION=<x.y.z>`` (``packaging/opencode/bump.py``) moves
 them all at once; this file fails the build when any one did not move, so a
 bump cannot half-land. ``host_matrix.yaml`` carries no opencode pin (its
-``measured.cli_version`` cells record what past runs ran), so it is not a site.
+``measured.cli_version`` cells record what past runs ran), so it is not a site;
+nor is ``cli-surface.yaml``'s opencode ``version``, which names the release its
+``help_sha256`` was captured from and moves with it at the re-seed.
 
 Runtime, after a bump: on the pin no version line; above it (a release newer
 than the commit) the one ``above-verified`` warning; below it the exit-3
@@ -223,6 +225,20 @@ class TestTheBumpMovesEveryPin:
     def test_a_malformed_version_is_refused(self, tmp_path):
         with pytest.raises(bump.BumpError):
             bump.cmd_set("1.18", None, root=_scratch_repo(tmp_path))
+
+    def test_the_cli_surface_row_moves_at_the_re_seed_not_here(self, tmp_path, capsys):
+        """Its `version` is half of a (version, help_sha256) pair the drift
+        report reads against the installed release; moving it alone would
+        file the next help change as drift under an unchanged version."""
+        assert not [rel for _name, rel, _p in bump.PINS if rel.name == "cli-surface.yaml"]
+        bump.cmd_set(
+            OpenCodeProvider.verified_version, None, root=_scratch_repo(tmp_path),
+            lock_resolver=_fake_lock, capture=lambda *a: None,
+            finder=lambda *a: "/fake/opencode", render=lambda root: None,
+        )
+        assert "re-seed the opencode row of tests/container/cli-surface.yaml" in (
+            capsys.readouterr().out
+        )
 
     def test_the_lock_resolution_refuses_a_foreign_move(self):
         assert bump._own_package("node_modules/opencode-ai")
