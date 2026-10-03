@@ -4382,32 +4382,6 @@ class WriteBatchScheduler:
                     "trusting its result."
                 )
                 return False
-            recorded = latest
-        # A new review cycle supersedes the old one (the rule #28's rows, #26's
-        # staleness and the snapshots follow): evidence of "done" written
-        # before the review this phase applies completed is the previous
-        # cycle's, and the batch runs again in this one. Dated by the
-        # completion record, else by the result file itself; `implement` has
-        # no review cutoff and a resume within one cycle is unchanged.
-        reviewed_at = self._review_completed_at()
-        if reviewed_at is not None:
-            reviewed_at = reviewed_at.replace(microsecond=0)
-            stamped = _parse_local_timestamp((recorded or {}).get("timestamp"))
-            if stamped is None:
-                try:
-                    stamped = datetime.fromtimestamp(target.stat().st_mtime)
-                except OSError:
-                    stamped = None
-            if stamped is not None and stamped < reviewed_at:
-                self.log(
-                    f"[write-subagents] {task_id}: {target.name} was written "
-                    f"at {stamped.isoformat(timespec='seconds')}, before this "
-                    f"phase's review completed "
-                    f"({reviewed_at.isoformat(timespec='seconds')}); it is the "
-                    f"previous review cycle's result, so the batch is "
-                    f"dispatched again in this one."
-                )
-                return False
         returned = [
             str(item) for item in (data.get("ids") or [])
             if isinstance(data.get("ids"), list)
