@@ -7,6 +7,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -24,7 +25,7 @@ from typing import (
     Tuple,
 )
 
-from ..json_extractor import extract_json_from_text
+from ..json_extractor import extract_json_from_text, strip_jsonc
 from .base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
@@ -135,6 +136,20 @@ STRUCTURAL_MODEL_VERSION = "1.18.18"
 #     stripped from the inherited environment while hermetic, because
 #     `OPENCODE_CONFIG_CONTENT` is a *last-applied deep-merge layer* and an
 #     inherited one would survive — and win over — the redirect.
+#   * (measured 1.18.34, scratch HOME, egress closed) `~/.opencode/` is a config
+#     directory too — `opencode.json[c]`, `agent/`, `command/`, plugins — read
+#     from opencode's own home (`Global.Path.home` = `OPENCODE_TEST_HOME`, else
+#     `os.homedir()`), which neither the redirect nor the project switch
+#     reaches: a provider and an agent declared there showed up in a hermetic
+#     `debug config`. `OPENCODE_TEST_HOME` set to the slot's config home closes
+#     it and moves nothing else that a run needs: `HOME` is untouched, and
+#     `auth.json`, the caches and the state directory derive from `HOME`/XDG,
+#     not from that home (`opencode debug paths`, measured). Its side effects:
+#     the global skill scan (`~/.claude/skills`, `~/.agents/skills`) and a `~/`
+#     in a config's `instructions`/`skills.paths` resolve under the slot, so a
+#     hermetic run sees no user-level skill either. It is opencode's test hook,
+#     the only lever there is; the debug-config capture's `home_opencode_layer`
+#     / `hermetic_home_opencode` pair re-measures it on every bump.
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: `opencode run --pure` — "run without external plugins". Optional, not
@@ -183,6 +198,10 @@ CONFIG_ENV_NAMES = (
 
 #: Closes the workspace-`opencode.json` layer the redirect does not reach.
 PROJECT_CONFIG_ENV = "OPENCODE_DISABLE_PROJECT_CONFIG"
+
+#: opencode's own home (`Global.Path.home`), where it finds `~/.opencode/`. A
+#: hermetic slot points it at its empty config home (see the M4 notes above).
+HOME_DIR_ENV = "OPENCODE_TEST_HOME"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # The denied turn (plans/opencode-validator-false-rate-limit-and-denied-turn.md
@@ -810,9 +829,10 @@ def _user_config_paths() -> List[str]:
 # memory, inside :func:`_read_declared_providers`, to booleans and rule lists,
 # and the raw text never leaves that function — not in a return value, not in
 # a log line, not in an exception message: the reducer does not rely on the
-# mask. What the mask costs: ``has_key`` now reads "a key is declared", so a
-# built-in override whose `{env:}` key the child never gets passes the auth
-# preflight and fails at dispatch as `auth_failed`, where 1.18.32 refused it.
+# mask. What the mask costs: the printed value says only that a key is
+# *declared* (``key_declared``), never that it *resolves*, so whether a
+# built-in override's key reaches the child is read from the config sources
+# themselves (:func:`_config_key_resolves`, below).
 # ─────────────────────────────────────────────────────────────────────────────
 
 #: `opencode [--pure] debug config` — "show resolved configuration". A `debug`
@@ -842,14 +862,15 @@ class ProviderDecl(NamedTuple):
     """One ``provider.<id>`` block, reduced to what the auth verdict reads.
 
     ``custom`` is :func:`_defines_an_implementation` (an ``npm`` package or an
-    ``options.baseURL``); ``has_key`` is a non-empty string ``options.apiKey``
-    as ``debug config`` prints it — after opencode's own ``{env:}``
-    substitution up to 1.18.32, ``"***"`` for any declared key on 1.18.34,
-    which masks them. Never the key itself.
+    ``options.baseURL``); ``key_declared`` is a non-empty string
+    ``options.apiKey`` as ``debug config`` prints it. On the pin that is
+    ``"***"`` for every declared key — a literal, ``""``, an unset ``{env:}``
+    reference alike — so it means "declared", never "resolves": the auth leg
+    asks :func:`_config_key_resolves` for that. Never the key itself.
     """
 
     custom: bool
-    has_key: bool
+    key_declared: bool
 
 
 class ExternalDirLayer(NamedTuple):
@@ -929,7 +950,7 @@ def _provider_decl(block: Dict[str, Any]) -> ProviderDecl:
     key = options.get("apiKey") if isinstance(options, dict) else None
     return ProviderDecl(
         custom=_defines_an_implementation(block),
-        has_key=isinstance(key, str) and bool(key.strip()),
+        key_declared=isinstance(key, str) and bool(key.strip()),
     )
 
 
@@ -1050,6 +1071,244 @@ def _read_declared_providers(
     if completed is None or completed.returncode != 0:
         return None
     return _reduce_debug_config(completed.stdout or "")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# T8.3 — where a masked `apiKey` comes from, and whether the child resolves it.
+#
+# `debug config` prints every string under an `apiKey` key as `"***"` on the
+# pin (the bundle's `debug config` handler masks any key matching
+# /api.?key|secret|password|…/i), so it can say a built-in override declares a
+# key but not whether that key reaches the dispatch: `{env:VAR}` with VAR
+# unset, or dropped by `env_allowlist`/a host guard, prints exactly like a live
+# literal. The reference is therefore read from the config sources the child
+# loads, located through the **child's** env, and evaluated the way opencode's
+# own `ConfigVariable.substitute` evaluates it: `{env:VAR}` → that variable or
+# `""`; `{file:PATH}` → the trimmed file, PATH relative to the layer's own
+# directory (`cwd` for `OPENCODE_CONFIG_CONTENT`), `~/` → `$HOME`.
+#
+# The layer order is MEASURED on 1.18.34 (2026-10-02: the real binary from a
+# scratch HOME, every layer setting its own `provider.openrouter.options.timeout`,
+# the printed winner removed until none was left), lowest precedence first:
+#
+#   1. the global directory, `$XDG_CONFIG_HOME/opencode/` (else
+#      `~/.config/opencode/`): `config.json`, `opencode.json`, `opencode.jsonc`;
+#   2. `$OPENCODE_CONFIG`;
+#   3. project files, from the worktree root (the nearest `.git`, else `/`) down
+#      to `cwd`, `opencode.json` then `opencode.jsonc` in each directory;
+#   4. `opencode.json` then `opencode.jsonc` in every `.opencode` directory from
+#      `cwd` UP to the worktree root (so the shallowest one wins), then
+#      `~/.opencode/` (`$OPENCODE_TEST_HOME/.opencode/` when set, which is
+#      how a hermetic slot closes it), then `$OPENCODE_CONFIG_DIR`;
+#   5. `$OPENCODE_CONFIG_CONTENT`;
+#   6. the managed directory (`/etc/opencode` on Linux).
+#
+# `OPENCODE_DISABLE_PROJECT_CONFIG` (`1`/`true`, case-folded) drops 3 and the
+# `.opencode` walk of 4, and keeps `~/.opencode/` and `$OPENCODE_CONFIG_DIR`.
+# Merging is deep, so a later layer that names the provider without `apiKey`
+# hides nothing. Two remote layers (a `.well-known` org config, an account's
+# console config) cannot be read from here: a key only they supply finds no
+# reference and keeps the `not_authenticated` refusal. A `{file:}` is stat'ed,
+# never read, and an `{env:}` value is only tested for emptiness: no key value
+# is returned, logged or raised.
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: opencode's own substitution syntax (`ConfigVariable.substitute`, 1.18.34).
+_ENV_REFERENCE = re.compile(r"\{env:([^}]+)\}")
+_FILE_REFERENCE = re.compile(r"\{file:([^}]+)\}")
+
+#: opencode reads the managed directory from this variable before the platform
+#: default (its own test seam, honoured because the binary honours it).
+MANAGED_CONFIG_DIR_ENV = "OPENCODE_TEST_MANAGED_CONFIG_DIR"
+
+
+class _LayerUnreadable(Exception):
+    """A config layer exists but this read cannot parse it."""
+
+
+def _flag_on(value: Optional[str]) -> bool:
+    """opencode's boolean flag reader: ``"1"`` or ``"true"``, case-folded."""
+    return (value or "").strip().lower() in ("1", "true")
+
+
+def _managed_config_dir(env: Mapping[str, str]) -> str:
+    override = env.get(MANAGED_CONFIG_DIR_ENV)
+    if override:
+        return override
+    if sys.platform == "darwin":
+        return "/Library/Application Support/opencode"
+    if sys.platform == "win32":
+        return os.path.join(env.get("ProgramData") or "C:\\ProgramData", "opencode")
+    return "/etc/opencode"
+
+
+def _walk_up(start: str, stop: Optional[str]) -> List[str]:
+    """``start`` and each parent, deepest first, ending at ``stop`` (or ``/``)."""
+    chain: List[str] = []
+    here = start
+    while True:
+        chain.append(here)
+        if here == stop:
+            return chain
+        parent = os.path.dirname(here)
+        if parent == here:
+            return chain
+        here = parent
+
+
+def _worktree_root(start: str) -> Optional[str]:
+    """The nearest directory at or above ``start`` holding ``.git``, else None."""
+    for here in _walk_up(start, None):
+        if os.path.exists(os.path.join(here, ".git")):
+            return here
+    return None
+
+
+def _config_layers(
+    env: Mapping[str, str], cwd: str
+) -> List[Tuple[Optional[str], Optional[str], str]]:
+    """``(path, inline text, base dir)`` per local layer, lowest precedence first.
+
+    Exactly one of ``path``/``inline text`` is set; ``base dir`` is where a
+    relative ``{file:}`` in that layer resolves.
+    """
+    home = env.get("HOME") or os.path.expanduser("~")
+    xdg_config = env.get("XDG_CONFIG_HOME") or os.path.join(home, ".config")
+    global_dir = os.path.join(xdg_config, "opencode")
+    layers: List[Tuple[Optional[str], Optional[str], str]] = []
+
+    def add(path: str) -> None:
+        layers.append((path, None, os.path.dirname(path)))
+
+    for name in ("config.json", "opencode.json", "opencode.jsonc"):
+        add(os.path.join(global_dir, name))
+    explicit = env.get("OPENCODE_CONFIG")
+    if explicit:
+        add(os.path.join(cwd, explicit))
+    project = not _flag_on(env.get(PROJECT_CONFIG_ENV))
+    walk = _walk_up(cwd, _worktree_root(cwd))
+    if project:
+        for directory in reversed(walk):
+            for name in ("opencode.json", "opencode.jsonc"):
+                add(os.path.join(directory, name))
+    config_dir = env.get("OPENCODE_CONFIG_DIR") or None
+    directories = [global_dir]
+    if project:
+        directories += [
+            os.path.join(d, ".opencode") for d in walk
+            if os.path.isdir(os.path.join(d, ".opencode"))
+        ]
+    opencode_home = env.get(HOME_DIR_ENV) or home
+    if os.path.isdir(os.path.join(opencode_home, ".opencode")):
+        directories.append(os.path.join(opencode_home, ".opencode"))
+    if config_dir:
+        directories.append(config_dir)
+    for directory in dict.fromkeys(directories):
+        if directory.endswith(".opencode") or directory == config_dir:
+            for name in ("opencode.json", "opencode.jsonc"):
+                add(os.path.join(directory, name))
+    content = env.get("OPENCODE_CONFIG_CONTENT")
+    if content:
+        layers.append((None, content, cwd))
+    for name in ("opencode.json", "opencode.jsonc"):
+        add(os.path.join(_managed_config_dir(env), name))
+    return layers
+
+
+def _read_layer(path: Optional[str], inline: Optional[str]) -> Optional[Dict[str, Any]]:
+    """One layer's document; ``None`` when the file does not exist.
+
+    Raises :class:`_LayerUnreadable` for a layer that exists but cannot be
+    parsed here. The text is never quoted: a ``ValueError`` from ``json``
+    carries the document it failed on, and this document may carry a key.
+    """
+    text = inline
+    if path is not None:
+        if not os.path.isfile(path):
+            return None
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except (OSError, ValueError):
+            raise _LayerUnreadable() from None
+    if not (text or "").strip():
+        return {}
+    try:
+        document = json.loads(strip_jsonc(text or ""))
+    except (ValueError, RecursionError):
+        raise _LayerUnreadable() from None
+    if not isinstance(document, dict):
+        raise _LayerUnreadable()
+    return document
+
+
+def _api_key_reference(
+    prefix: str, env: Mapping[str, str], cwd: str
+) -> Optional[Tuple[str, str]]:
+    """``(raw apiKey, base dir)`` from the winning local layer, or ``None``.
+
+    The winner is the highest-precedence layer that sets
+    ``provider.<prefix>.options.apiKey``. ``None`` when no local layer sets
+    it, when it is not a string, or when a layer above it cannot be read.
+    """
+    try:
+        for path, inline, base in reversed(_config_layers(env, cwd)):
+            document = _read_layer(path, inline)
+            if not document:
+                continue
+            providers = document.get("provider")
+            block = providers.get(prefix) if isinstance(providers, dict) else None
+            options = block.get("options") if isinstance(block, dict) else None
+            if isinstance(options, dict) and "apiKey" in options:
+                key = options["apiKey"]
+                return (key, base) if isinstance(key, str) else None
+    except _LayerUnreadable:
+        return None
+    return None
+
+
+def _api_key_resolves(raw: str, base: str, env: Mapping[str, str]) -> bool:
+    """Whether ``raw`` is a non-empty key once opencode substitutes it in ``env``.
+
+    A ``{file:}`` counts when it names a readable, non-empty regular file; it
+    is never opened (a whitespace-only file, which opencode trims to empty,
+    therefore counts — the one shape this over-admits).
+    """
+    home = env.get("HOME") or os.path.expanduser("~")
+    text = _ENV_REFERENCE.sub(lambda match: env.get(match.group(1)) or "", raw)
+
+    def file_reference(match: "re.Match[str]") -> str:
+        target = match.group(1)
+        if target.startswith("~/"):
+            target = os.path.join(home, target[2:])
+        target = os.path.normpath(os.path.join(base, target))
+        try:
+            info = os.stat(target)
+        except (OSError, ValueError):
+            return ""
+        if not stat.S_ISREG(info.st_mode) or info.st_size == 0:
+            return ""
+        return "x" if os.access(target, os.R_OK) else ""
+
+    return bool(_FILE_REFERENCE.sub(file_reference, text).strip())
+
+
+def _config_key_resolves(
+    prefix: str, env: Optional[Mapping[str, str]], cwd: Optional[str]
+) -> bool:
+    """T8.3: the config's ``apiKey`` for ``prefix`` resolves in the child's env.
+
+    ``env`` is the child's whole environment (``None`` = this process's, which
+    the child then inherits); ``cwd`` the dispatch's (``None`` = this
+    process's). ``False`` whenever the reference cannot be found or read.
+    """
+    source: Mapping[str, str] = os.environ if env is None else env
+    try:
+        where = os.path.abspath(cwd or os.getcwd())
+    except OSError:
+        return False
+    found = _api_key_reference(prefix, source, where)
+    return found is not None and _api_key_resolves(found[0], found[1], source)
 
 
 _USER_CONFIG_LOCK = threading.Lock()
@@ -1378,9 +1637,11 @@ def _user_config_files_conclusive() -> bool:
     variable (an explicit file, dir or inline content opencode layers in), no
     global ``opencode.jsonc`` or ``config.json`` (``json.load`` cannot read the
     first and the file read does not look at the second), every global
-    ``opencode.json`` that exists parses as JSON, and no project config on the
-    walk up from this process's ``cwd`` (unless opencode is told to skip that
-    layer). Anything else is inconclusive and needs ``debug config``.
+    ``opencode.json`` that exists parses as JSON, no ``~/.opencode/`` config
+    (a layer the user's own runs load and a hermetic slot does not), and no
+    project config on the walk up from this process's ``cwd`` (unless opencode
+    is told to skip that layer). Anything else is inconclusive and needs
+    ``debug config``.
     """
     # Literal reads, one per name, so the packaging's env-read walk resolves each.
     if (
@@ -1395,6 +1656,10 @@ def _user_config_files_conclusive() -> bool:
     base = os.path.join(home, "opencode")
     for name in ("opencode.jsonc", "config.json"):
         if os.path.exists(os.path.join(base, name)):
+            return False
+    opencode_home = os.environ.get(HOME_DIR_ENV) or os.path.expanduser("~")
+    for name in ("opencode.json", "opencode.jsonc"):
+        if os.path.exists(os.path.join(opencode_home, ".opencode", name)):
             return False
     plain = os.path.join(base, "opencode.json")
     if os.path.exists(plain):
@@ -1529,10 +1794,11 @@ class OpenCodeProvider(LLMProvider):
     # the once-per-run auth preflight needs (D3c). It is blind to a provider
     # declared only in config (measured 1.18.32: `0 credentials`), so on its
     # `False` the preflight asks `config_credential_source`, which reads the
-    # dispatch's own resolved config: a provider declared there (custom, or a
-    # built-in override carrying a key) passes whether its key is in auth.json
-    # under the custom id, in an `{env:}` reference, or absent (keyless). A
-    # built-in with no key anywhere is still refused (plan §8).
+    # dispatch's own resolved config: a custom provider declared there passes
+    # whether its key is in auth.json under the custom id, in an `{env:}`
+    # reference, or absent (keyless); a built-in override passes only when its
+    # config key resolves in the dispatch's env. A built-in with no key
+    # anywhere, or one that does not resolve, is still refused (plan §8).
     auth_check = ("opencode", "auth", "list")
     login_cmd = "opencode auth login"
     #: D3 step 2 — the model tokens opencode serves with NO credential present,
@@ -1805,8 +2071,13 @@ class OpenCodeProvider(LLMProvider):
         * the prefix is declared **custom** (``npm``/``baseURL``) → ``declared``,
           with or without a key: ``auth list`` is blind to it and a keyless
           local server is a legitimate shape;
-        * a declared **built-in override** with a non-empty ``options.apiKey``
-          (after ``{env:}`` substitution in the child's env) → ``declared``;
+        * a declared **built-in override** whose ``options.apiKey`` resolves to
+          a non-empty value in the child's env → ``declared``. The pinned
+          build prints every declared key as ``"***"``, so ``debug config``
+          only says a key is declared; the reference itself (a literal,
+          ``{env:VAR}``, ``{file:PATH}``) is read from the config sources the
+          child loads and substituted in the child's env
+          (:func:`_config_key_resolves`);
         * anything else — a keyless built-in override, an undeclared prefix, a
           refused hermetic slot, a reader failure, a builder that raises or
           yields ``None`` inside a hermetic slot → ``unknown``, which keeps
@@ -1844,13 +2115,17 @@ class OpenCodeProvider(LLMProvider):
                     env = self._plain_child_env(token, profile, anchor=anchor, cwd=cwd)
                 pure = PURE_FLAG in self._hermetic_argv()
                 declared = _read_declared_providers(env, cwd, pure)
+                if declared is None or declared.providers is None:
+                    return CONFIG_AUTH_UNKNOWN
+                decl = declared.providers.get(prefix)
+                if decl is not None and decl.custom:
+                    return CONFIG_AUTH_DECLARED
+                if decl is not None and decl.key_declared and _config_key_resolves(
+                    prefix, env, cwd
+                ):
+                    return CONFIG_AUTH_DECLARED
         except Exception:  # noqa: BLE001 - a diagnostic read may never end a preflight
             return CONFIG_AUTH_UNKNOWN
-        if declared is None or declared.providers is None:
-            return CONFIG_AUTH_UNKNOWN
-        decl = declared.providers.get(prefix)
-        if decl is not None and (decl.custom or decl.has_key):
-            return CONFIG_AUTH_DECLARED
         return CONFIG_AUTH_UNKNOWN
 
     def _plain_child_env(
@@ -1882,7 +2157,8 @@ class OpenCodeProvider(LLMProvider):
         """The ids the **user's own** resolved config declares, for ``doctor``.
 
         A provider counts when it is custom (``npm``/``baseURL``) or a built-in
-        override carrying a key, the two shapes the auth leg admits. Read with
+        override declaring a key (whether that key resolves is the auth leg's
+        question, asked per dispatch env; this row is never a clearance). Read with
         no hermetic delta (:func:`read_user_declared_config`) under ``timeout``
         (``doctor``'s remaining budget). ``None`` when the read failed or ran
         out of budget. Ids only, never a key.
@@ -1893,7 +2169,7 @@ class OpenCodeProvider(LLMProvider):
         return tuple(
             provider_id
             for provider_id, decl in declared.providers.items()
-            if decl.custom or decl.has_key
+            if decl.custom or decl.key_declared
         )
 
     def hermetic_config_providers(self, anchor: Optional[str] = None) -> Tuple[str, ...]:
@@ -2169,6 +2445,8 @@ class OpenCodeProvider(LLMProvider):
         # passed through untouched.
         env["XDG_CONFIG_HOME"] = str(slot["config_home"])
         env[PROJECT_CONFIG_ENV] = "1"
+        # `~/.opencode/` hangs off opencode's own home, not HOME's XDG dirs.
+        env[HOME_DIR_ENV] = str(slot["config_home"])
         content = slot.get("config_content")
         if content:
             env["OPENCODE_CONFIG_CONTENT"] = content

@@ -354,7 +354,15 @@ def build_common_arg_parser(
     parser.add_argument(
         "--fresh",
         action="store_true",
-        help="Clear previous progress and start fresh",
+        help=(
+            "Discard this phase's recorded progress (decisions, processed "
+            "items, prior-changes log) and dispatch every batch again. The "
+            "target file must already be back at its pre-run bytes (copy it "
+            "from {phase}/backup.md, or roll the batches back with `util "
+            "restore-batch`): a target still carrying the previous run's "
+            "edits is refused (exit 3), since every batch would land twice. "
+            "Earlier rollback points are kept aside, never overwritten."
+        ),
     )
 
     # --- Batch Review Mode ---
@@ -960,6 +968,21 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         # Step 10: Initialize StateManager + handle --fresh
         self.state = StateManager(Path(self.plan_path))
+
+        if getattr(self.args, "fresh", False) and not getattr(
+            self.args, "resume", False
+        ):
+            # Before anything is cleared: a target still carrying the previous
+            # run's edits would take every batch a second time, and the clear
+            # below is what a plain re-run needs to skip them.
+            refusal = self._fresh_target_refusal()
+            if refusal:
+                print(refusal, file=sys.stderr)
+                raise OrchestratorError(
+                    "Phase _setup, step 10: --fresh refused, the target still "
+                    "carries the previous run's edits",
+                    exit_code=3,
+                )
 
         if getattr(self.args, "fresh", False):
             print(
@@ -2043,6 +2066,119 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return None
         return self.write_phase_artifact() or None
 
+    def _fresh_target_refusal(self) -> Optional[str]:
+        """Why ``--fresh`` must not run against the target as it is, or ``None``.
+
+        ``--fresh`` dispatches every batch again, so it presumes the target
+        file is back at its pre-run bytes. Measured otherwise (adversarial
+        review, 2026-10-02): a completed run, then ``--fresh`` on the plan as
+        the run left it — every batch landed a second time at exit 0, and
+        ``backup.md`` and every ``pre_batch/`` slot were re-stamped with the
+        already-applied bytes, so nothing under the plan dir held the
+        pre-run file any more (the plan is often untracked; git does not
+        save the user). The evidence is the audit log: every completion of
+        this review cycle whose bytes moved recorded the target's
+        ``sha256_after``, and a target whose hash is one of those still
+        carries that run's edits. Records from before the review this phase
+        applies belong to an earlier cycle, whose edits are the legitimate
+        starting point, and are not counted.
+        """
+        target = self.write_target_file()
+        if not target or not os.path.isfile(target):
+            return None
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        from .write_safety import (
+            AuditLog, file_sha256, relative_to_root, resolve_repo_root,
+        )
+        from .write_batch_scheduler import (
+            REVIEW_PHASE_BY_WRITE_KIND, _parse_local_timestamp,
+        )
+        records = AuditLog(phase_dir).records()
+        if not records:
+            return None
+        current = file_sha256(target)
+        if not current:
+            return None
+        try:
+            root = resolve_repo_root(self.plan_path)
+            target_key = relative_to_root(target, root)
+        except Exception:  # noqa: BLE001 - fall back to matching by hash alone
+            target_key = None
+        reviewed_at = None
+        recorded_state = getattr(self.state, "state", None)
+        if isinstance(recorded_state, dict):
+            completed = recorded_state.get("phases_completed")
+            review = REVIEW_PHASE_BY_WRITE_KIND.get(
+                getattr(self, "write_kind", "") or ""
+            )
+            if isinstance(completed, dict) and review:
+                reviewed_at = _parse_local_timestamp(completed.get(review))
+                if reviewed_at is not None:
+                    # The audit stamps whole seconds; a completion in the
+                    # review's own second is this cycle's.
+                    reviewed_at = reviewed_at.replace(microsecond=0)
+        hits: List[Tuple[str, str]] = []
+        for record in records:
+            if record.get("event") != "completed":
+                continue
+            if reviewed_at is not None:
+                stamped = _parse_local_timestamp(record.get("timestamp"))
+                if stamped is not None and stamped < reviewed_at:
+                    continue
+            for path, info in (record.get("observed") or {}).items():
+                if target_key is not None and str(path) != target_key:
+                    continue
+                before = (info or {}).get("sha256_before")
+                after = (info or {}).get("sha256_after")
+                if after and after != before and after == current:
+                    hits.append((str(record.get("task_id")), str(record.get("timestamp"))))
+        if not hits:
+            return None
+        task_id, stamped = hits[-1]
+        backup = os.path.join(phase_dir, "backup.md")
+        backup_hint = (
+            f"copy the pre-run file back from {backup}"
+            if os.path.isfile(backup)
+            else f"there is no {backup} to copy back from"
+        )
+        return (
+            f"ERROR: --fresh would dispatch every batch again, and {target} "
+            f"still carries the edits the previous run applied (its sha256 is "
+            f"what {task_id} left behind at {stamped}), so each batch would "
+            f"land a second time. Put the pre-run file back first — "
+            f"{backup_hint}, or roll the batches back newest-first with "
+            f"`multi_llm.py util restore-batch --phase-dir \"{phase_dir}\" "
+            f"--task-id {task_id}` — or re-invoke with --resume to continue "
+            f"from the recorded progress instead. Nothing was dispatched, "
+            f"nothing was cleared and no file was modified."
+        )
+
+    @staticmethod
+    def keep_backup_aside(backup_path: str, target: str) -> Optional[str]:
+        """Rename an existing backup whose bytes differ from ``target``'s.
+
+        For ``--fresh``, which re-stamps the backup: the bytes it finds there
+        are a rollback point someone may still need, so they move to
+        ``<stem>.<sha8 of the bytes>.md`` beside the new backup rather than
+        being overwritten (adversarial review, 2026-10-02). A backup already
+        holding the target's bytes is left for the re-stamp — nothing is
+        lost by overwriting it. Returns the path kept, or ``None``.
+        """
+        if not os.path.isfile(backup_path) or not os.path.isfile(target):
+            return None
+        from .write_safety import file_sha256
+        kept_sha = file_sha256(backup_path)
+        if not kept_sha or kept_sha == file_sha256(target):
+            return None
+        stem, ext = os.path.splitext(backup_path)
+        kept = f"{stem}.{kept_sha[:8]}{ext}"
+        try:
+            os.replace(backup_path, kept)
+        except OSError as exc:  # noqa: BLE001 - a backup must not fail the phase
+            print(f"Warning: could not keep {backup_path} aside: {exc}", file=sys.stderr)
+            return None
+        return kept
+
     def write_target_backup(self) -> Optional[str]:
         """Snapshot the file this phase overwrites as ``{phase}/backup.md``.
 
@@ -2060,7 +2196,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         progress in it, and keeping cycle 1's snapshot there would leave the
         cycle-2 bytes the phase is about to overwrite saved nowhere while the
         line below told the user they were backed up. ``--fresh`` declares prior
-        progress void and re-stamps for the same reason.
+        progress void and re-stamps for the same reason — keeping a differing
+        earlier backup aside first (:meth:`keep_backup_aside`), never
+        overwriting a rollback point.
         Returns the path written, or ``None`` when nothing was.
 
         Neither dry run writes one: ``--dry-run`` reports and stops, and
@@ -2088,6 +2226,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 file=sys.stderr,
             )
             return None
+        if getattr(self.args, "fresh", False):
+            kept = self.keep_backup_aside(backup_path, target)
+            if kept:
+                print(
+                    f"Earlier backup kept at {kept} (its bytes differ from the "
+                    f"file --fresh is about to back up)",
+                    file=sys.stderr,
+                )
         try:
             shutil.copy2(target, backup_path)
         except OSError as exc:  # noqa: BLE001 - a backup must not fail the phase

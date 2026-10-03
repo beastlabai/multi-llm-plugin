@@ -282,7 +282,9 @@ providers:
     #
     # `on`/`auto` run opencode under an empty, run-scoped XDG_CONFIG_HOME plus
     # `--pure`, so YOUR ~/.config/opencode/opencode.json cannot silently change
-    # the model, agent or permission set a multi-llm dispatch uses. XDG_DATA_HOME
+    # the model, agent or permission set a multi-llm dispatch uses; opencode's
+    # own home (OPENCODE_TEST_HOME) moves there too, so ~/.opencode/ (and the
+    # user-level skills under ~/.claude/skills) stay out as well. XDG_DATA_HOME
     # is kept, so stored auth (auth.json) and `opencode auth list` are unaffected,
     # and XDG_CACHE_HOME is kept so the model catalog is not re-fetched cold.
     # Applies to fan-out/`ask` and `agent-readonly` slots; `agent-write` keeps
@@ -305,7 +307,8 @@ providers:
     # all (a keyless local server). `opencode auth list` cannot see a provider
     # declared only in config, so the preflight reads the dispatch's resolved
     # config (`opencode debug config`) before refusing. A built-in provider
-    # overridden without a key is still refused.
+    # overridden without a key, or with one that does not resolve in the
+    # dispatch's environment (an unset {env:VAR}), is still refused.
     #
     # config_providers:
     #   my-gateway:

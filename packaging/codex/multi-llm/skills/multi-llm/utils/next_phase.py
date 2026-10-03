@@ -281,7 +281,8 @@ def _workflow_payload(plan_path: Path, host_id: str) -> Dict[str, Any]:
 
     prereq = _skill_module("check_workflow_prerequisites")
     return prereq.get_workflow_status(
-        StateManager(plan_path), plan_path, output_dir_path(plan_path),
+        StateManager(plan_path, read_only=True), plan_path,
+        output_dir_path(plan_path),
         host_id=host_id,
     )
 

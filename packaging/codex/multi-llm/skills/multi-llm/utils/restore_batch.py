@@ -12,7 +12,10 @@ properties are the whole design:
   lists as touched, and **refuses** a file whose current sha256 no longer matches
   what the audit recorded at completion — someone edited it since the run, and
   reverting their edit would be a second data-loss bug. ``--force`` overrides,
-  deliberately explicitly.
+  deliberately explicitly. The record is the batch's own, found by the items
+  its snapshot manifest names (an apply id is positional, and a set-aside
+  snapshot's record sits under an id another batch now owns); a snapshot with
+  no record at all is UNVERIFIED and restored only under ``--force``.
 * **Auditable.** It appends its own ``restored`` line to
   ``{phase}/subagent_audit.jsonl``, so a rollback is an event in the same log the
   dispatch is.
@@ -45,11 +48,25 @@ EXIT_NEEDS_HUMAN = 3
 
 
 def _task_ids(phase_dir: str, args: argparse.Namespace) -> List[str]:
+    """The snapshot directory names to restore.
+
+    ``--all-failed`` resolves each failed completion to the snapshot holding
+    its items (``TaskSnapshot.locate``): the slot, or the set-aside copy a
+    later resume moved it to when the slot's positional id went to other
+    items. A failure with no snapshot on disk keeps its id, so the restore
+    reports the missing snapshot by name rather than dropping it silently.
+    """
     if args.task_id:
         return list(args.task_id)
     audit = AuditLog(phase_dir)
-    failed = audit.failed_task_ids()
-    return failed
+    names: List[str] = []
+    for record in audit.failed_completions():
+        task_id = str(record.get("task_id"))
+        name = TaskSnapshot.locate(phase_dir, task_id, record.get("expected_ids"))
+        name = name or task_id
+        if name not in names:
+            names.append(name)
+    return names
 
 
 def restore(
@@ -76,25 +93,50 @@ def restore(
                 )
             }
             continue
-        recorded = audit.completion_for(task_id)
+        # The completion record is the batch's, found by the items the
+        # manifest names rather than by the directory name: a set-aside
+        # snapshot (`<id>.items-<sha8>`) has its record under the id another
+        # batch now owns, and the slot's record may be that other batch's.
+        recorded = audit.completion_for(
+            snapshot.task_id, expected_ids=snapshot.expected_ids,
+        )
         touched = list((recorded or {}).get("files_touched") or [])
-        expected = audit.touched_with_hashes(task_id)
+        expected = AuditLog.hashes_from(recorded)
+        verified = recorded is not None
         if recorded is None:
-            # No completion record: the run died before classifying. Restore
-            # everything the snapshot covers, with no hash expectation to verify
-            # against — and say so rather than implying verification happened.
+            # No completion record: the run died before classifying. Nothing
+            # says what the batch touched or what the files looked like after
+            # it, so a restore here is UNVERIFIED — every snapshotted file,
+            # whatever its bytes are now — and only `--force` may take it
+            # (adversarial review, 2026-10-02: this branch used to restore at
+            # exit 0 and wiped a later batch's edit and the user's own).
             touched = [entry.relative for entry in snapshot.entries]
             expected = {}
+            if not force:
+                results[task_id] = {
+                    "*": (
+                        "skipped: UNVERIFIED — the audit log records no "
+                        "completion for these items, so nothing says what "
+                        "the batch touched or whether the files changed "
+                        "since; pass --force to restore every snapshotted "
+                        "file anyway ("
+                        + ", ".join(touched) + ")"
+                    )
+                }
+                continue
         if not touched:
             results[task_id] = {
                 "*": "skipped: the audit record lists no touched files for this task"
             }
             continue
         if dry_run:
-            results[task_id] = {path: "would restore" for path in touched}
+            word = "would restore" if verified else "would restore (UNVERIFIED)"
+            results[task_id] = {path: word for path in touched}
             continue
         report = snapshot.restore(touched, expected=expected or None, force=force)
-        audit.restored(task_id=task_id, report=report, force=force)
+        audit.restored(
+            task_id=task_id, report=report, force=force, verified=verified,
+        )
         results[task_id] = report
     return results
 
