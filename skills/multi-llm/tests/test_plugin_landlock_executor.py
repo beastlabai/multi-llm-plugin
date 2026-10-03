@@ -34,6 +34,7 @@ import json
 import os
 import sys
 import tempfile
+import threading
 import time
 from pathlib import Path
 
@@ -1383,3 +1384,80 @@ def test_a_changed_seed_is_named_as_the_truncation_control(repo, wrapper, gate):
     message = excinfo.value.message
     assert "the truncation control changed the seeded file" in message
     assert "the write was denied" not in message
+
+
+class TestTheProbeWorkdirIsSerialized:
+    """Adversarial review, 2026-10-02 (`repro_edge.py`, twelve `status` polls
+    at once): each rung probe removed only the directories it created, so two
+    probes of one repository left an empty `.multi-llm/` and
+    `.multi-llm/tmp/` behind — the first one's `rmdir` failed on the second
+    one's seed, and the second had created nothing. The canary directory is
+    now held under an interprocess mutex for the probe's duration."""
+
+    @pytest.fixture(autouse=True)
+    def _temp_base(self, tmp_path, monkeypatch):
+        base = tmp_path / "tmpbase"
+        base.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(base))
+
+    def test_a_second_probe_waits_its_turn_and_the_last_one_out_removes_the_dirs(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        events: list = []
+        a_inside = threading.Event()
+        a_release = threading.Event()
+
+        def first():
+            with executor._probe_workdir(str(repo), ".multi-llm/tmp", time.monotonic() + 10) as created:
+                events.append(("a-in", list(created)))
+                seed = repo / ".multi-llm" / "tmp" / "seed"
+                seed.write_text("x")
+                a_inside.set()
+                a_release.wait(10)
+                seed.unlink()
+                events.append("a-out")
+
+        def second():
+            a_inside.wait(10)
+            with executor._probe_workdir(str(repo), ".multi-llm/tmp", time.monotonic() + 10) as created:
+                events.append(("b-in", list(created)))
+            events.append("b-out")
+
+        ta, tb = threading.Thread(target=first), threading.Thread(target=second)
+        ta.start(); tb.start()
+        assert a_inside.wait(10)
+        time.sleep(0.3)
+        assert not any(e[0] == "b-in" for e in events if isinstance(e, tuple)), events
+        a_release.set()
+        ta.join(10); tb.join(10)
+        assert [e if isinstance(e, str) else e[0] for e in events] == ["a-in", "a-out", "b-in", "b-out"]
+        # Each took the lock in turn, created both directories afresh, and
+        # removed them: nothing is left in the repository.
+        for _label, created in (e for e in events if isinstance(e, tuple)):
+            assert [os.path.basename(p) for p in created] == ["tmp", ".multi-llm"]
+        assert not (repo / ".multi-llm").exists()
+        assert os.path.exists(executor._probe_workdir_lock_path(str(repo)))
+
+    def test_a_held_mutex_past_the_deadline_reads_as_unprobed(self, tmp_path):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        inside = threading.Event()
+        release = threading.Event()
+
+        def holder():
+            with executor._probe_workdir(str(repo), ".multi-llm/tmp", time.monotonic() + 10):
+                inside.set()
+                release.wait(10)
+
+        thread = threading.Thread(target=holder)
+        thread.start()
+        assert inside.wait(10)
+        try:
+            started = time.monotonic()
+            with executor._probe_workdir(str(repo), ".multi-llm/tmp", time.monotonic() + 0.3) as created:
+                assert created is None
+            assert time.monotonic() - started < 5
+        finally:
+            release.set()
+            thread.join(10)
+        assert not (repo / ".multi-llm").exists()
