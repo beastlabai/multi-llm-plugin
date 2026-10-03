@@ -664,6 +664,27 @@ class TaskSnapshot:
         return [path for _, path in sorted(found, key=lambda item: -item[0])]
 
     @classmethod
+    def reinstate(
+        cls, phase_dir: str, task_id: str, expected_ids: Sequence[str],
+    ) -> Optional["TaskSnapshot"]:
+        """Move the newest set-aside snapshot for these items back into the slot.
+
+        Only into a free slot (the caller set the holder aside first, or none
+        was there). The items that come back to a positional id after a
+        selection change get their pre-FIRST-dispatch bytes back as the
+        rollback point, instead of a fresh snapshot of the edits every run
+        since left on disk (adversarial review, 2026-10-02).
+        """
+        slot = Path(phase_dir) / PRE_BATCH_DIRNAME / _safe_component(task_id)
+        if slot.exists():
+            return None
+        aside = cls.set_aside_dirs(phase_dir, task_id, expected_ids)
+        if not aside:
+            return None
+        os.replace(str(aside[0]), str(slot))
+        return cls.load(phase_dir, task_id)
+
+    @classmethod
     def locate(
         cls, phase_dir: str, task_id: str, expected_ids: Optional[Sequence[str]],
     ) -> Optional[str]:
