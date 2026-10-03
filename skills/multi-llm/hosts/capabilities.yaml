@@ -571,13 +571,13 @@ hosts:
     # none does, opencode has no credential-free default — drop the entry from
     # `OpenCodeProvider.credential_free_models` in the same commit and let the
     # out-of-the-box run refuse `not_authenticated` with its login hint.
-    # The floor (1.18.18) is the LOWEST VERSION EVER RUN, not what the lane
-    # pins: the container moved to 1.18.31 on 2026-09-19, so nothing exercises
-    # the floor itself any more. It stays where it is because lowering a floor
-    # needs a recorded run at the lower version and raising one needs a reason;
-    # `test_engines_floor_matches_the_container_pin` asserts floor <= pin, which
-    # is the direction that matters -- the container must be able to load what
-    # the package declares it supports.
+    # THE FLOOR IS THE NEWEST RELEASE (policy since 2026-10-02): opencode is
+    # supported on its newest release only, so `min_host_version` above,
+    # `engines.opencode`, the adapter's `min_version`/`verified_version` and the
+    # container's pin are one version, the one the parser fixtures were
+    # captured from. `make opencode-bump VERSION=<x.y.z>` moves them together
+    # (never below the current pin without ALLOW_DOWNGRADE=1), and
+    # `tests/test_opencode_version_pins.py` fails the build when one did not.
     # THE SESSION RUNG (`resolve_subagent_runner`, layer `session`). Names the
     # CLI of this host's own that can be pointed at whatever model the *session*
     # is currently running on, which the plugin exports as
