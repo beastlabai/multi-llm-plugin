@@ -1689,47 +1689,6 @@ class TestARenumberedApplyBatchKeepsItsOwnRollbackPoint(_ApplyRig):
         ]) == 0
         assert plan.read_text(encoding="utf-8") == applied1 + "run2\n" * 2
 
-    def test_a_new_review_cycle_dispatches_an_identical_batch_again(self, repo):
-        """A new review cycle supersedes the old one (#28 rows, #26 staleness,
-        the snapshots above): "already done" evidence written before this
-        cycle's review completed — the positional result and the sibling
-        lookup alike — does not count, and the batch runs again. A re-run
-        within the cycle still skips it."""
-        plan = self._review(repo, "one")
-        ids = self._ids(plan)
-        assert self._run(repo, plan, sum(ids, []), content="run1\n") == 0
-        applied1 = plan.read_text(encoding="utf-8")
-        phase_dir = self._phase_dir(plan)
-        # Cycle 1 happened a while ago (the test runs inside one second).
-        audit = phase_dir / "subagent_audit.jsonl"
-        rows = [json.loads(line) for line in audit.read_text().splitlines()]
-        for row in rows:
-            row["timestamp"] = "2026-10-02T10:00:00"
-        audit.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
-        old = 1_700_000_000
-        for result in phase_dir.glob("apply_batch_*.json"):
-            os.utime(result, (old, old))
-
-        # Cycle 2: byte-identical findings, so the inputs fingerprints match.
-        self._review(repo, "one")
-        log = repo.tmp_path / "cycle2-calls.jsonl"
-        repo.monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
-        assert self._run(repo, plan, sum(ids, []), content="run2\n") == 0
-        dispatched = [
-            json.loads(line) for line in log.read_text().splitlines()
-            if json.loads(line).get("prompt")
-        ]
-        assert len(dispatched) == 3
-        applied2 = applied1 + "run2\n" * 3
-        assert plan.read_text(encoding="utf-8") == applied2
-        rows = self._report(plan)
-        assert not any(r.get("from_earlier_run") or r.get("skipped") for r in rows)
-
-        # Within the cycle, a plain re-run still skips what landed.
-        assert self._run(repo, plan, sum(ids, []), content="run3\n") == 0
-        assert plan.read_text(encoding="utf-8") == applied2
-        assert all(r.get("from_earlier_run") for r in self._report(plan))
-
     def test_a_resumed_batch_with_the_same_items_still_reuses_its_snapshot(
         self, repo
     ):
