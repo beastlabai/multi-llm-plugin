@@ -1324,6 +1324,11 @@ _PATH_TOKEN = re.compile(r"([^\s'\"`:,;()\[\]{}<>|]+)")
 #: ``[Errno 13]`` (fix round 4, 2026-10-02: such a line used to resolve to a
 #: declared path or a new root name, and a nothing-moved batch read FAILED).
 _DENIAL_TOOL_PREFIX = re.compile(r"^\[?[\w./+-]+: ")
+#: perl's ``-i`` denial names no tool: ``Can't do inplace edit on f.txt:
+#: Cannot make temp name: Permission denied.`` (measured 2026-10-02, perl
+#: 5.38 against an unwritable directory), the temp-file-and-rename shape
+#: the plan-file grant denies, so it is read by its own shape.
+_PERL_INPLACE_DENIAL = re.compile(r"^Can't do inplace edit on (?P<path>.+?): .*permission denied", re.IGNORECASE)
 
 
 def _denied_paths_in(output: str) -> List[str]:
@@ -1335,6 +1340,11 @@ def _denied_paths_in(output: str) -> List[str]:
     error names nothing."""
     found: List[str] = []
     for line in (output or "").splitlines():
+        perl = _PERL_INPLACE_DENIAL.match(line)
+        if perl is not None:
+            if perl.group("path") not in found:
+                found.append(perl.group("path"))
+            continue
         if not _DENIAL_TOOL_PREFIX.match(line) or not _DENIAL_LINE.search(line):
             continue
         quoted = re.findall(r"'([^']+)'|\"([^\"]+)\"", line)
