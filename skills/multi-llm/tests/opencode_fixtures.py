@@ -15,6 +15,7 @@ every consumer here follows with no edit:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from utils.providers.opencode import OpenCodeProvider
@@ -33,3 +34,16 @@ def capture(case: str, suffix: str = ".jsonl") -> Path:
 
 def read(case: str, suffix: str = ".jsonl") -> str:
     return capture(case, suffix).read_bytes().decode("utf-8")
+
+
+def did_you_mean(stderr: str) -> str:
+    """The ``Did you mean: …?`` suggestion a captured model-not-found printed.
+
+    Read from the capture, never written down: the list and its order come
+    from the model catalog bundled with the release (it changed between 1.18.32
+    and 1.18.34), so a test that spelled it would go red on a bump for a reason
+    that is not a parser change.
+    """
+    found = re.search(r"Did you mean: [^?\"]+\?", stderr)
+    assert found, "the capture carries no `Did you mean` suggestion"
+    return found.group(0)
