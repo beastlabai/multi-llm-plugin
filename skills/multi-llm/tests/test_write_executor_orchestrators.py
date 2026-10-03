@@ -1521,6 +1521,66 @@ class TestARenumberedApplyBatchKeepsItsOwnRollbackPoint(_ApplyRig):
         ]) == 0
         assert plan.read_text(encoding="utf-8") == before_run + "run1\n"
 
+    def test_a_reselected_item_gets_its_pre_first_dispatch_snapshot_back(self, repo):
+        """Adversarial review of round 3: run 1 stops with B partial; B is
+        deselected and a resume hands `apply-batch-1` to C (B's snapshot set
+        aside); the user re-selects B and resumes. B is `apply-batch-1` again
+        and used to take a FRESH snapshot of the post-edit bytes while its
+        pre-first-dispatch snapshot sat set aside — the 2026-09-15 defect
+        back — and C, now `apply-batch-2` with no `apply_batch_2.json`, was
+        applied a second time."""
+        from utils import restore_batch
+
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        before_run = plan.read_text(encoding="utf-8")
+        assert self._run(repo, plan, ids[0], content="run1\n") == 3
+        self._deselect(repo, 1)
+        assert self._run(repo, plan, sum(ids, []), "--resume", content="run2\n") == 0
+        after_run2 = plan.read_text(encoding="utf-8")
+        assert after_run2 == before_run + "run1\n" * 2 + "run2\n"
+
+        review = repo.root / "plans" / "apply" / "review-plan"
+        (review / "validation.json").write_text(
+            json.dumps(_validation(["valid"] * 3)), encoding="utf-8")
+        log = repo.tmp_path / "reselect-calls.jsonl"
+        repo.monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
+        assert self._run(repo, plan, sum(ids, []), "--resume", content="run3\n") == 0
+        dispatched = [
+            json.loads(line) for line in log.read_text().splitlines()
+            if json.loads(line).get("prompt")
+        ]
+        # Only B ran: C's items already landed, under the id B now holds.
+        assert len(dispatched) == 1
+        assert plan.read_text(encoding="utf-8") == after_run2 + "run3\n"
+
+        pre_batch = self._phase_dir(plan) / "pre_batch"
+        slot = json.loads((pre_batch / "apply-batch-1" / "manifest.json").read_text())
+        assert slot["expected_ids"] == ids[1]
+        payload = next((pre_batch / "apply-batch-1" / "files").iterdir())
+        assert payload.read_text(encoding="utf-8") == before_run + "run1\n"
+        by_items = {
+            tuple(json.loads(m.read_text())["expected_ids"]): m.parent.name
+            for m in pre_batch.glob("*/manifest.json")
+        }
+        assert by_items[tuple(ids[2])].startswith("apply-batch-1.items-")
+        assert not (pre_batch / "apply-batch-2").exists()
+
+        rows = self._report(plan)
+        assert sorted(
+            (tuple(r["expected_ids"]), r["write_outcome"], bool(r.get("from_earlier_run")))
+            for r in rows
+        ) == sorted([
+            (tuple(ids[0]), "applied", True),
+            (tuple(ids[1]), "applied", False),
+            (tuple(ids[2]), "applied", True),
+        ])
+        # And the slot restores B to before its FIRST dispatch.
+        assert restore_batch.main([
+            "--phase-dir", str(self._phase_dir(plan)), "--task-id", "apply-batch-1",
+        ]) == 0
+        assert plan.read_text(encoding="utf-8") == before_run + "run1\n"
+
     def test_restoring_the_set_aside_snapshot_never_drops_a_users_later_edit(
         self, repo, capsys
     ):
