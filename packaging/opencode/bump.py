@@ -8,7 +8,10 @@ This script is the one way to move them, so a bump cannot half-land:
     make opencode-bump VERSION=<x.y.z>   # bump.py set <x.y.z>
     make opencode-latest-check           # bump.py check
 
-``set`` does, in order, and writes nothing until the network steps succeeded:
+``set`` refuses a release older than the current pin unless
+``--allow-downgrade`` (``make opencode-bump VERSION=<x.y.z> ALLOW_DOWNGRADE=1``):
+the newest release is the floor, so moving below it is a deliberate act. It
+does, in order, and writes nothing until the network steps succeeded:
 
 1. finds an ``opencode`` binary of that version: the installed one when it
    already is that version, else ``npm install opencode-ai@<v>`` under a
@@ -224,15 +227,27 @@ def render_capabilities(root: Path) -> None:
     )
 
 
+def _version_key(version: str) -> Tuple[int, ...]:
+    return tuple(int(part) for part in version.split("."))
+
+
 def cmd_set(version: str, binary: Optional[str], root: Path = REPO,
             lock_resolver: Callable[[Path, str], Tuple[str, str]] = resolve_lock,
             capture: Callable[[Path, str, str, Path], None] = recapture,
             finder: Callable[[str, Path, Optional[str]], str] = find_binary,
-            render: Callable[[Path], None] = None) -> int:
+            render: Callable[[Path], None] = None,
+            allow_downgrade: bool = False) -> int:
     render = render or render_capabilities
     if not VERSION_RE.fullmatch(version):
         raise BumpError(f"{version!r} is not an x.y.z release")
     old = read_pins(root)
+    current = old["adapter verified_version"]
+    if _version_key(version) < _version_key(current) and not allow_downgrade:
+        raise BumpError(
+            f"{version} is older than the current pin {current}; opencode supports "
+            f"its newest release only. Pass --allow-downgrade (make opencode-bump "
+            f"VERSION={version} ALLOW_DOWNGRADE=1) if that is really the intent."
+        )
     with tempfile.TemporaryDirectory(prefix="opencode-bump-") as tmp:
         scratch = Path(tmp)
         found = finder(version, scratch, binary)
@@ -273,9 +288,7 @@ def cmd_check(root: Path = REPO) -> int:
         print(f"opencode-latest-check: npm answered {done.returncode}: "
               f"{(done.stderr or done.stdout).strip()[:300]}", file=sys.stderr)
         return 2
-    def key(v: str) -> Tuple[int, ...]:
-        return tuple(int(part) for part in v.split("."))
-    if key(latest) > key(pin):
+    if _version_key(latest) > _version_key(pin):
         print(f"opencode-latest-check: npm's latest {NPM_PACKAGE} is {latest}, newer than the "
               f"pin {pin}. Run: make opencode-bump VERSION={latest}")
         return 1
@@ -289,12 +302,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     set_parser = sub.add_parser("set", help="move every pin to VERSION and re-capture")
     set_parser.add_argument("version")
     set_parser.add_argument("--bin", help="an opencode binary of that version")
+    set_parser.add_argument("--allow-downgrade", action="store_true",
+                            help="accept a VERSION older than the current pin")
     sub.add_parser("check", help="exit 1 when npm has a newer opencode than the pin")
     args = parser.parse_args(argv)
     try:
         if args.command == "check":
             return cmd_check()
-        return cmd_set(args.version, args.bin)
+        return cmd_set(args.version, args.bin, allow_downgrade=args.allow_downgrade)
     except (BumpError, subprocess.CalledProcessError) as exc:
         print(f"opencode-bump: {exc}", file=sys.stderr)
         return 1

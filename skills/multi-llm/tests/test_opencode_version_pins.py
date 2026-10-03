@@ -174,6 +174,52 @@ class TestTheBumpMovesEveryPin:
             )
         assert bump.read_pins(root) == before
 
+    def _set(self, root, version, **kwargs):
+        return bump.cmd_set(
+            version, None, root=root, lock_resolver=_fake_lock,
+            capture=lambda *a: None,
+            finder=lambda version, scratch, given: "/fake/opencode",
+            render=lambda root: None, **kwargs,
+        )
+
+    def test_a_downgrade_is_refused_before_anything_runs(self, tmp_path):
+        """The newest release is the floor: moving every pin BELOW the current
+        one would make the floor an older release than the one supported."""
+        root = _scratch_repo(tmp_path)
+        before = bump.read_pins(root)
+        older = TestTheRuntimeVerdictAroundThePin()._bumped(-1)
+        with pytest.raises(bump.BumpError) as excinfo:
+            bump.cmd_set(
+                older, None, root=root,
+                lock_resolver=lambda *a: pytest.fail("resolved a downgrade"),
+                capture=lambda *a: pytest.fail("captured a downgrade"),
+                finder=lambda *a: pytest.fail("installed a downgrade"),
+                render=lambda root: pytest.fail("rendered a downgrade"),
+            )
+        assert "--allow-downgrade" in str(excinfo.value)
+        assert bump.read_pins(root) == before
+
+    def test_a_downgrade_moves_with_the_explicit_flag(self, tmp_path):
+        root = _scratch_repo(tmp_path)
+        older = TestTheRuntimeVerdictAroundThePin()._bumped(-1)
+        assert self._set(root, older, allow_downgrade=True) == 0
+        assert set(bump.read_pins(root).values()) == {older}
+
+    def test_the_same_release_is_a_recapture_not_a_downgrade(self, tmp_path):
+        root = _scratch_repo(tmp_path)
+        assert self._set(root, OpenCodeProvider.verified_version) == 0
+
+    def test_the_cli_spells_the_flag(self, monkeypatch):
+        seen = {}
+        monkeypatch.setattr(
+            bump, "cmd_set",
+            lambda version, binary, **kwargs: seen.update(version=version, **kwargs) or 0,
+        )
+        assert bump.main(["set", "1.0.0", "--allow-downgrade"]) == 0
+        assert seen == {"version": "1.0.0", "allow_downgrade": True}
+        assert bump.main(["set", "1.0.0"]) == 0
+        assert seen["allow_downgrade"] is False
+
     def test_a_malformed_version_is_refused(self, tmp_path):
         with pytest.raises(bump.BumpError):
             bump.cmd_set("1.18", None, root=_scratch_repo(tmp_path))

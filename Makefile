@@ -140,6 +140,7 @@ help:
 	@echo "  make opencode-package-check       the FULL gate: rows 7-9 too; stamps only if all ran"
 	@echo "  make opencode-publish             refuses unless the full gate passed on these exact bytes"
 	@echo "  make opencode-bump VERSION=x.y.z  move every opencode pin to one release; re-capture its fixtures (\$$0)"
+	@echo "                                    (a release older than the pin also needs ALLOW_DOWNGRADE=1)"
 	@echo "  make opencode-latest-check        exit 1 when npm has a newer opencode than the pin"
 	@echo
 	@echo "Codex plugin, checked in at $(CODEX_PKG)/multi-llm (see $(CODEX_PKG)/README.md)"
@@ -759,7 +760,7 @@ opencode-publish:
 # scheduled workflow, like the container lane's own drift probes.
 opencode-bump:
 	@test -n "$(VERSION)" || { echo "usage: make opencode-bump VERSION=<x.y.z>   (make opencode-latest-check names the newest)"; exit 1; }
-	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/bump.py set "$(VERSION)"
+	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/bump.py set "$(VERSION)" $(if $(ALLOW_DOWNGRADE),--allow-downgrade)
 
 opencode-latest-check:
 	uv run --project skills/multi-llm -- python $(OPENCODE_PKG)/bump.py check
