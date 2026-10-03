@@ -2438,10 +2438,11 @@ class TestOpenCodeRealSchema:
         stdout = oc_pin.read("invalid_model")
         stderr = oc_pin.read("invalid_model", ".stderr.txt")
 
+        # The suggestion list is the bundled catalog's, read from the capture.
         assert provider.describe_failure(stdout, stderr) == (
             "UnknownError: Unexpected server error. Check server logs for details. "
-            "(ProviderModelNotFoundError: Model not found: opencode/sonnet. Did you "
-            "mean: claude-sonnet-5, claude-sonnet-4, claude-sonnet-4-5?)"
+            "(ProviderModelNotFoundError: Model not found: opencode/sonnet. "
+            f"{oc_pin.did_you_mean(stderr)})"
         )
         # The stdout-only behaviour is kept when stderr has no such line.
         assert provider.describe_failure(stdout, "") == (

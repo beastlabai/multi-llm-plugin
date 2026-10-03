@@ -115,6 +115,26 @@ class TestNoDocumentKeepsTheOldFloorPolicy:
         assert not stale, "\n".join(stale)
 
 
+class TestARecaptureNeedsNoTestEdit:
+    """A bump re-captures every stream; a test that spells catalog-derived
+    text out of one turns the next release's catalog change into a red test
+    that is not a parser change."""
+
+    def test_no_test_spells_the_catalogs_suggestion_list(self):
+        """`opencode/sonnet`'s "Did you mean" list comes from the bundled model
+        catalog, and its members and order moved between 1.18.32 and 1.18.34."""
+        stderr = oc_pin.read("invalid_model", ".stderr.txt")
+        suggestion = re.search(r"Did you mean: ([^?\"]+)\?", stderr).group(1)
+        spelled = [
+            path.name for path in Path(__file__).parent.glob("test_*.py")
+            if suggestion in path.read_text(encoding="utf-8")
+        ]
+        assert not spelled, (
+            f"{spelled} spell {suggestion!r}; read it with "
+            "`opencode_fixtures.did_you_mean(stderr)` instead"
+        )
+
+
 class TestTheRuntimeVerdictAroundThePin:
     PIN = OpenCodeProvider.verified_version
 

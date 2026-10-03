@@ -3548,8 +3548,9 @@ _OPENCODE_FIXTURES = _oc_pin.ROOT
 #: shape of the incident's `failed/validation-batch-0.attempt1.json` (D5).
 _INVALID_MODEL_STDOUT = _oc_pin.read("invalid_model")
 _INVALID_MODEL_STDERR = _oc_pin.read("invalid_model", ".stderr.txt")
-#: The suggestion list the pinned catalog prints for `opencode/sonnet`.
-_DID_YOU_MEAN = "Did you mean: claude-sonnet-5, claude-sonnet-4, claude-sonnet-4-5?"
+#: The suggestion list the pinned catalog prints for `opencode/sonnet`, read
+#: from the capture: the catalog decides it, so a bump must not need an edit.
+_DID_YOU_MEAN = _oc_pin.did_you_mean(_INVALID_MODEL_STDERR)
 _REJECTED_SPEC = "opencode:opencode/sonnet"
 
 #: The same wrapper on stdout, but a stderr whose `error=` is a genuine server
