@@ -582,6 +582,16 @@ class TestTheKeyReference:
         expected.insert(expected.index("OC"), "outer_json")
         assert self._ranking(paths, env, cwd, [*self.MEASURED, "outer_json"]) == expected
 
+    def test_the_home_layer_follows_opencode_test_home(self, tmp_path):
+        """opencode's home is `OPENCODE_TEST_HOME` when set, else `HOME` (the
+        bundle's `Global.Path.home`): a hermetic slot points it at its empty
+        config home, so the user's `~/.opencode/` is not a layer there."""
+        paths, env, cwd = self._tree(tmp_path)
+        empty = tmp_path / "slot"
+        empty.mkdir()
+        env["OPENCODE_TEST_HOME"] = str(empty)
+        assert self._ranking(paths, env, cwd, ["D_home", "G_json"]) == ["G_json"]
+
     @pytest.mark.parametrize("value", ["1", "true", "TRUE"])
     def test_disabling_the_project_layer_keeps_home_and_config_dir(self, tmp_path, value):
         paths, env, cwd = self._tree(tmp_path)
@@ -679,6 +689,27 @@ class TestTheStructuralLeg:
             }},
         }), encoding="utf-8")
         return user_xdg
+
+    def test_a_provider_only_in_home_opencode_is_refused_not_lost(
+        self, provider, user_xdg, monkeypatch
+    ):
+        """A hermetic slot no longer loads `~/.opencode/`, so a provider the
+        user defines only there is unreconstructible like any other user-only
+        provider: the file read cannot see that layer, so `debug config` is
+        asked, and the slot is refused instead of resolving nothing."""
+        home_layer = Path(os.environ["HOME"]) / ".opencode"
+        home_layer.mkdir(parents=True)
+        block = {"npm": "@ai-sdk/openai-compatible",
+                 "options": {"baseURL": "http://127.0.0.1:9/v1"}, "models": {"m": {}}}
+        (home_layer / "opencode.json").write_text(
+            json.dumps({"provider": {"home-only": block}}), encoding="utf-8"
+        )
+        resolved = json.dumps({"provider": {"home-only": block}})
+        monkeypatch.setattr(oc, "_spawn_debug_config", _DebugConfig(resolved))
+        text = provider.describe_unresolvable_model(
+            "home-only/m", profile=PROFILE_AGENT_READONLY
+        )
+        assert text and "config_providers" in text
 
     def test_describe_unresolvable_model_answers_with_profile(self, provider, user_only):
         text = provider.describe_unresolvable_model(
@@ -946,6 +977,29 @@ class TestTheProbeRunsUnderTheDispatchEnv:
         with pytest.raises(executor.RunnerRejected) as excinfo:
             _detect("openrouter/x/y", cwd=str(tmp_path))
         assert excinfo.value.reason_code == "not_authenticated"
+
+    def test_a_hermetic_slot_never_sees_the_users_home_opencode_key(
+        self, user_xdg, tmp_path, monkeypatch
+    ):
+        """The user's `~/.opencode/opencode.json` declares a key: a hermetic
+        slot does not load that layer, so the key is not evidence there — while
+        on a non-hermetic write slot it is the user's config in force."""
+        home_layer = Path(os.environ["HOME"]) / ".opencode"
+        home_layer.mkdir(parents=True)
+        (home_layer / "opencode.json").write_text(json.dumps(
+            DEBUG_CONFIG["cases"]["builtin_override_keyed"]["global_files"]["opencode.json"]
+        ), encoding="utf-8")
+        fake = _DebugConfig(None, dispatch=_stdout("builtin_override_keyed"))
+        monkeypatch.setattr(oc, "_spawn_debug_config", fake)
+        monkeypatch.setattr(executor, "_run_probe", _Probe(lambda env: _auth_run("empty")))
+        with pytest.raises(executor.RunnerRejected) as excinfo:
+            _detect("openrouter/x/y", PROFILE_AGENT_READONLY, cwd=str(tmp_path))
+        assert excinfo.value.reason_code == "not_authenticated"
+        child = fake.calls[-1]["env"]
+        assert child["OPENCODE_TEST_HOME"] == child["XDG_CONFIG_HOME"]
+        executor.reset_auth_cache()
+        fake.stdout, fake.dispatch = _stdout("builtin_override_keyed"), None
+        assert _detect("openrouter/x/y", PROFILE_AGENT_WRITE, cwd=str(tmp_path)) == "config"
 
     def test_a_hermetic_slot_resolves_the_key_its_own_content_carries(
         self, user_xdg, tmp_path, monkeypatch

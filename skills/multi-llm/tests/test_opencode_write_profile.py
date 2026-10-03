@@ -197,6 +197,7 @@ class TestTheWriteProfileCarriesTheRows:
         assert argv[:4] == ["opencode", "run", "--agent", "build"]
         assert "XDG_CONFIG_HOME" not in delta
         assert oc.PROJECT_CONFIG_ENV not in delta
+        assert "OPENCODE_TEST_HOME" not in delta
         assert not set(oc.CONFIG_ENV_NAMES) & set(removed)
         assert oc._CONFIG_HOME is None
 

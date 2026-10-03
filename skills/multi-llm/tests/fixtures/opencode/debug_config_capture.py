@@ -211,6 +211,22 @@ CASES = {
             agent={"plan": {"permission": PERMISSION_BLOCK}},
         ))}, True,
     ),
+    # `~/.opencode/` is a config directory opencode reads from its own home: a
+    # control without the hermetic env, and the hermetic env, whose
+    # OPENCODE_TEST_HOME must hide it (files: HOME_FILES).
+    "home_opencode_layer": (
+        "~/.opencode/opencode.json declaring custom `homeleak` and a built-in "
+        "`openrouter` key, no hermetic env: the layer is in force",
+        ["debug", "config"], {}, {}, {}, False,
+    ),
+    "hermetic_home_opencode": (
+        "as home_opencode_layer, under the hermetic env (OPENCODE_TEST_HOME = the "
+        "empty config home) with --pure: `homeleak` and the key must vanish",
+        ["--pure", "debug", "config"], {}, {},
+        {"OPENCODE_CONFIG_CONTENT": json.dumps(doc(
+            agent={"plan": {"permission": PERMISSION_BLOCK}},
+        ))}, True,
+    ),
     "hermetic_pure_permission_only": (
         "hermetic --pure with a built-in prefix: OPENCODE_CONFIG_CONTENT holds "
         "only the permission block, so no provider is declared",
@@ -223,11 +239,32 @@ CASES = {
 }
 
 
+#: Files under the case's HOME (paths relative to it), for the cases that need
+#: them; recorded as ``home_files``.
+HOME_FILES = {
+    case: {".opencode/opencode.json": doc(provider={
+        "homeleak": STUB_INLINE,
+        "openrouter": {"options": {"apiKey": "sk-canary-not-a-key-12"}},
+    })}
+    for case in ("home_opencode_layer", "hermetic_home_opencode")
+}
+
+#: A dead proxy closes egress for every case: a `.opencode` directory makes
+#: opencode start a background `@opencode-ai/plugin` install, and nothing here
+#: may reach a registry. Not recorded per case (it changes no output).
+DEAD_PROXY = {
+    name: "http://127.0.0.1:9"
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy")
+}
+
+
 def write_files(root, files):
     os.makedirs(root, exist_ok=True)
     for name, body in files.items():
         text = body if isinstance(body, str) else json.dumps(body, indent=2)
-        with open(os.path.join(root, name), "w", encoding="utf-8") as handle:
+        path = os.path.join(root, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as handle:
             handle.write(text)
 
 
@@ -238,6 +275,7 @@ def run_case(binary, name, spec, scratch):
     workspace = os.path.join(rig, "ws")
     write_files(os.path.join(home, ".config", "opencode"), global_files)
     write_files(workspace, project_files)
+    write_files(home, HOME_FILES.get(name, {}))
     env = {
         "HOME": home,
         "PATH": "/usr/bin:/bin",
@@ -248,13 +286,15 @@ def run_case(binary, name, spec, scratch):
         os.makedirs(empty)
         env["XDG_CONFIG_HOME"] = empty
         env["OPENCODE_DISABLE_PROJECT_CONFIG"] = "1"
+        # The plugin's hermetic env points opencode's own home there too.
+        env["OPENCODE_TEST_HOME"] = empty
     for key, value in env_extra.items():
         env[key] = value.replace("@rig", rig)
     if "OPENCODE_CONFIG" in env_extra:
         write_files(rig, {"explicit.json": doc(provider={"stub": STUB_INLINE})})
     with open(os.devnull, "rb") as devnull:
         done = subprocess.run(
-            [binary, *tail], cwd=workspace, env=env, stdin=devnull,
+            [binary, *tail], cwd=workspace, env={**env, **DEAD_PROXY}, stdin=devnull,
             capture_output=True, text=True, timeout=60,
         )
 
@@ -264,7 +304,7 @@ def run_case(binary, name, spec, scratch):
     shown_env = {
         k: scrub(v) for k, v in env.items() if k not in ("HOME", "PATH")
     }
-    return {
+    recorded = {
         "setup": _desc,
         "argv": ["opencode", *tail],
         "env": shown_env,
@@ -274,6 +314,9 @@ def run_case(binary, name, spec, scratch):
         "stdout": scrub(done.stdout),
         "stderr": scrub(done.stderr),
     }
+    if name in HOME_FILES:
+        recorded["home_files"] = HOME_FILES[name]
+    return recorded
 
 
 def main():
@@ -299,7 +342,8 @@ def main():
         "captured": (
             f"{datetime.date.today().isoformat()}, debug_config_capture.py: host, scratch HOME per case under a cleared env "
             "(HOME, PATH=/usr/bin:/bin, OPENCODE_DISABLE_MODELS_FETCH=1 plus the "
-            "case's own env), stdin /dev/null, no network, no model call; every "
+            "case's own env), stdin /dev/null, egress closed by a dead HTTP(S)_PROXY, "
+            "no model call; every "
             "apiKey a sk-canary-not-a-key-<n> canary; scratch paths rewritten to /rig"
         ),
         "cases": cases,
