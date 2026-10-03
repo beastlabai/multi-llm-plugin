@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import tempfile
 from pathlib import Path
 
@@ -1651,24 +1652,50 @@ class TestEarlySandboxWarning:
         anyway …", which is wrong for a reader that dispatches nothing — so
         the warning's probe swallows both streams. An unreadable standard
         probe draws no warning (a warning that may be wrong is worse than
-        none); a rung probe that gave no answer is a refusal for a write, and
-        warns. Measured 2026-10-02: the next-command emitters' stderr had to
-        stay empty on the codex routes."""
+        none), and so does a rung probe that hangs: the advisory reader runs
+        its probes under `ADVISORY_PROBE_BUDGET_S`, not the dispatch's
+        `SANDBOX_PROBE_TIMEOUT_S` (10 s), so `status` stays sub-second and
+        says nothing it did not measure (adversarial review, 2026-10-02).
+        Measured 2026-10-02: the next-command emitters' stderr had to stay
+        empty on the codex routes."""
         from utils import subagent_executor as executor
         jailhost.configure(runner="codex:gpt-5.5")
         if leg == "standard-unreadable":
             monkeypatch.setattr(executor, "_run_sandbox_probe", lambda *a, **k: None)
         else:
             jailhost.wrapper.set(probe="hang")
-            monkeypatch.setattr(executor, "SANDBOX_PROBE_TIMEOUT_S", 0.8)
+            monkeypatch.setattr(executor, "ADVISORY_PROBE_BUDGET_S", 0.5)
         capsys.readouterr()
+        started = time.monotonic()
         payload = jailhost.status(host_id="claude-code")
+        elapsed = time.monotonic() - started
         captured = capsys.readouterr()
         assert captured.out == "" and captured.err == "", captured
-        if leg == "standard-unreadable":
-            assert "warning" not in payload["phases"]["implement"]
-        else:
-            assert "its probe gave no answer" in payload["phases"]["implement"]["warning"]
+        assert "warning" not in payload["phases"]["implement"]
+        if leg == "rung-hang":
+            assert elapsed < 4, elapsed  # the budget, never the dispatch's 10 s
+
+    def test_a_budget_cut_read_leaves_nothing_for_the_dispatch_to_inherit(self, jailhost, monkeypatch):
+        """The reader's cut-short measurement is cached nowhere: a dispatch
+        decision in the same process probes for itself, under its own
+        timeout, and takes the rung the wrapper now grants."""
+        from utils import subagent_executor as executor
+        from utils.providers.base import PROFILE_AGENT_WRITE, WRITE_SCOPE_REPO_WIDE, JailRequest
+        jailhost.configure(runner="codex:gpt-5.5")
+        jailhost.wrapper.set(probe="hang")
+        monkeypatch.setattr(executor, "ADVISORY_PROBE_BUDGET_S", 0.5)
+        assert "warning" not in jailhost.status(host_id="claude-code")["phases"]["implement"]
+        assert executor._SANDBOX_PROBE_CACHE == {} and executor._SANDBOX_DECISIONS == {}
+        jailhost.wrapper.set(probe="deny")
+        request = JailRequest(
+            repo_root=str(jailhost.repo), kind="implement", write_scope=WRITE_SCOPE_REPO_WIDE,
+            output_dir=str(jailhost.plan.parent / "x"),
+        )
+        assert executor._detect_sandbox(
+            "codex", key="driver.subagent_runner", spec="codex:gpt-5.5",
+            profile=PROFILE_AGENT_WRITE, anchor=str(jailhost.plan), jail_request=request,
+        ) == "plugin-landlock"
+        assert len(jailhost.wrapper.records(probe=True)) == 2
 
     def test_the_advisory_probe_hands_the_canary_no_target_in_the_source_tree(self, jailhost):
         """`status` and `init` are advisory readers: their probe must create

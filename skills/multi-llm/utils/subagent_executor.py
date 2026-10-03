@@ -1181,6 +1181,16 @@ NESTED_PROBE_TIMEOUT_S = 30.0
 #: exactly like the nested-exec probe's inconclusive branch.
 SANDBOX_PROBE_TIMEOUT_S = 10.0
 
+#: The advisory readers' probe budget (`status`, `init`, the next-step block:
+#: `repo_wide_write_refusal`), for the standard probe and the rung walk
+#: together. `status` has a sub-second contract and dispatches nothing, so a
+#: probe that hangs or is slow must cost it this much at most and draw no
+#: warning (a warning that may be wrong is worse than none) — and a
+#: measurement this budget cut short is never cached, so a dispatch later in
+#: the same process probes afresh under `SANDBOX_PROBE_TIMEOUT_S`, which
+#: does not move (adversarial review, 2026-10-02).
+ADVISORY_PROBE_BUDGET_S = 1.0
+
 
 def _availability_detail(spec: str) -> str:
     """The typed availability sentence for ``spec``'s adapter, or ``""`` (M10, §5.1).
@@ -3064,14 +3074,18 @@ def _ladder_has_removed_at(provider: Any, profile: str) -> bool:
     return any(getattr(rung, "removed_at", None) for rung in _fallback_rungs(provider, profile))
 
 
-def _sandbox_cli_version(provider_name: str, provider: Any) -> str:
+def _sandbox_cli_version(
+    provider_name: str, provider: Any, *, timeout: Optional[float] = None,
+) -> str:
     """The CLI version the sandbox probe is keyed and judged on, or ``""``.
 
     The version preflight's own read (:data:`_VERSION_CACHE`) when it ran;
     otherwise one ``version_cmd`` spawn per provider per process, through the
     sandbox probe's runner (so the suite's guard on real CLIs covers it) and
     cached in :data:`_PROBE_VERSION_CACHE`. ``""`` when nothing could be read —
-    and an unread version never skips a rung.
+    and an unread version never skips a rung. ``timeout`` is an advisory
+    reader's budget in place of :data:`SANDBOX_PROBE_TIMEOUT_S`; an empty
+    read under it is not cached, so a dispatch reads the version itself.
     """
     if provider_name in _VERSION_CACHE:
         # The preflight's read is settled either way: a recorded "unknown"
@@ -3094,14 +3108,18 @@ def _sandbox_cli_version(provider_name: str, provider: Any) -> str:
         version = ""
         argv = list(getattr(provider, "version_cmd", ()) or ())
         if argv:
-            completed = _run_sandbox_probe(argv, cwd=None, timeout=SANDBOX_PROBE_TIMEOUT_S)
+            completed = _run_sandbox_probe(
+                argv, cwd=None,
+                timeout=SANDBOX_PROBE_TIMEOUT_S if timeout is None else timeout,
+            )
             if completed is not None:
                 try:
                     version = provider.parse_version(completed.stdout, completed.stderr) or ""
                 except Exception:  # noqa: BLE001 - a diagnostic may not break a preflight
                     version = ""
-        with _SANDBOX_PROBE_LOCK:
-            _PROBE_VERSION_CACHE[provider_name] = version
+        if version or timeout is None:
+            with _SANDBOX_PROBE_LOCK:
+                _PROBE_VERSION_CACHE[provider_name] = version
         return version
 
 
@@ -3113,9 +3131,17 @@ def cached_sandbox_verdict(
     cwd: Optional[str],
     policy: Optional[str],
     jail_request: Optional[JailRequest] = None,
+    timeout: Optional[float] = None,
 ) -> SandboxProbeResult:
     """Run — or recall — ``provider``'s sandbox self-test for ``profile``: the
     one per-process probe cache both lanes share (plan §3.6, 2026-09-24).
+
+    ``timeout`` is an advisory reader's budget (:data:`ADVISORY_PROBE_BUDGET_S`,
+    2026-10-02) for the version read, the standard probe and the walk
+    together; a verdict it cut short (:func:`probe_budget_cut`) is returned
+    but **not** cached, so the dispatch's own probe, under its own timeout,
+    never inherits a reader's `unprobed`. A cached verdict is recalled
+    whatever the budget: it was settled.
 
     Keyed by host, provider, profile, ``cwd``, the CLI version and the
     ``sandbox_fallback`` policy, and holding the whole
@@ -3147,7 +3173,7 @@ def cached_sandbox_verdict(
     """
     host = _current_host_id()
     version = (
-        _sandbox_cli_version(provider_name, provider)
+        _sandbox_cli_version(provider_name, provider, timeout=timeout)
         if _ladder_has_removed_at(provider, profile) else ""
     )
     write = profile in SANDBOX_WRITE_FALLBACK_PROFILES
@@ -3191,6 +3217,8 @@ def cached_sandbox_verdict(
             kwargs["jail_request"] = jail_request
         if not walk:
             kwargs["walk"] = False
+        if timeout is not None:
+            kwargs["timeout"] = timeout
         try:
             if walk_key is not None or version:
                 verdict = sandbox_verdict(
@@ -3201,9 +3229,20 @@ def cached_sandbox_verdict(
                 verdict = sandbox_verdict(provider, profile, cwd=cwd, **kwargs)
         except Exception:  # noqa: BLE001 - a diagnostic may never end a run
             verdict = SandboxProbeResult("unknown", "")
-        with _SANDBOX_PROBE_LOCK:
-            _SANDBOX_PROBE_CACHE[key] = verdict
+        if timeout is None or not probe_budget_cut(verdict):
+            with _SANDBOX_PROBE_LOCK:
+                _SANDBOX_PROBE_CACHE[key] = verdict
         return verdict
+
+
+def probe_budget_cut(verdict: SandboxProbeResult) -> bool:
+    """Whether ``verdict`` measured nothing for want of time: the standard
+    probe did not finish (``unknown``), or the walk ran out of deadline
+    (``unprobed``). Not a rung's ``unknown`` — a canary directory or seed
+    that could not be prepared is a fact about the machine, not the clock."""
+    if verdict.state == "unknown":
+        return True
+    return any(outcome == RUNG_UNPROBED for _, outcome in (verdict.walk or ()))
 
 
 def rung_retirements(verdict: SandboxProbeResult) -> List[str]:
@@ -3535,6 +3574,7 @@ def repo_wide_write_refusal(
     anchor: Optional[str],
     output_dir: Optional[str] = None,
     key: str = "driver.subagent_runner",
+    budget_s: Optional[float] = ADVISORY_PROBE_BUDGET_S,
 ) -> Optional[str]:
     """Why a ``repo-wide`` write dispatch of ``spec`` (``implement``,
     ``apply-code-fixes``) would be refused on this host right now, or ``None``
@@ -3557,6 +3597,11 @@ def repo_wide_write_refusal(
     decision is cached under the repo-wide scope key, so a read-only phase or
     a step-3 write phase that ends with the next-step block costs one rung
     probe for this scope on top of its own.
+
+    ``budget_s`` (:data:`ADVISORY_PROBE_BUDGET_S`, 2026-10-02) bounds the
+    probes: a hung or slow probe draws no warning, costs the reader at most
+    the budget, and leaves nothing in the caches for a dispatch to inherit.
+    ``None`` probes under the dispatch's own timeout.
     """
     import contextlib
     import io
@@ -3575,7 +3620,7 @@ def repo_wide_write_refusal(
         with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
             _detect_sandbox(
                 provider_name, key=key, spec=str(spec), profile=PROFILE_AGENT_WRITE,
-                anchor=anchor, jail_request=request,
+                anchor=anchor, jail_request=request, probe_budget_s=budget_s,
             )
     except RunnerRejected as exc:
         return exc.message
@@ -3600,9 +3645,18 @@ def _detect_sandbox(
     profile: str,
     anchor: Optional[str] = None,
     jail_request: Optional[JailRequest] = None,
+    probe_budget_s: Optional[float] = None,
 ) -> str:
     """Run the adapter's model-free sandbox self-test once per host/spec/profile
     and refuse a runner whose own sandbox cannot run (D6 step 3).
+
+    ``probe_budget_s`` marks an advisory read (``repo_wide_write_refusal``,
+    2026-10-02): the probes run under that budget instead of
+    :data:`SANDBOX_PROBE_TIMEOUT_S`, and a measurement the budget cut short
+    answers ``unknown`` with nothing printed and nothing recorded — neither
+    in the probe cache nor in the decision table — so the reader stays fast
+    and silent while the dispatch, later or elsewhere, measures for itself.
+    A settled measurement is cached and recorded as any other.
 
     Returns ``ok`` | ``unknown`` | ``not-required`` | ``bypassed`` | a rung id
     (``landlock``, ``plugin-landlock``); a non-zero exit with no permitted
@@ -3681,9 +3735,12 @@ def _detect_sandbox(
     )
     verdict = cached_sandbox_verdict(
         provider_name, provider, profile, cwd=_probe_cwd(anchor), policy=policy,
+        timeout=probe_budget_s,
         **({"jail_request": jail_request} if write and jail_request is not None else {}),
     )
     state, tail = verdict.state, verdict.tail
+    if probe_budget_s is not None and probe_budget_cut(verdict):
+        return "unknown"
     if state == "unavailable":
         rung = None
         if not write or scope in WRITE_SCOPES_ON_RUNG:
