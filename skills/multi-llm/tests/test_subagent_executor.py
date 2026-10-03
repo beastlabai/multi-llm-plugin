@@ -3992,27 +3992,36 @@ class TestInvalidModelIsFatal:
     def test_a_recorded_runner_pins_only_the_round_it_was_recorded_for(self, tmp_path):
         """#29: a forced re-review is a new round with new inputs; the previous
         run's runner (the session model, recorded before the project set
-        `driver.subagent_runner`) must not pin it. Same key, or no key at all
+        `driver.subagent_runner`) must not pin it. Same digest, or none at all
         (an older report), still pins."""
         report = {"tasks": [{"task_id": "a", "runner": "codex:gpt-6-astra", "status": "ok"}],
-                  "pin_key": "old-round"}
+                  "pin_sha256": "old-round"}
         path = tmp_path / executor.BATCH_REPORT_FILENAME
         path.write_text(json.dumps(report), encoding="utf-8")
-        assert executor._recorded_runners(str(tmp_path), pin_key="new-round") == {}
-        assert executor._recorded_runners(str(tmp_path), pin_key="old-round") == {
+        assert executor._recorded_runners(str(tmp_path), pin_sha256="new-round") == {}
+        assert executor._recorded_runners(str(tmp_path), pin_sha256="old-round") == {
             "a": "codex:gpt-6-astra"}
-        del report["pin_key"]
+        del report["pin_sha256"]
         path.write_text(json.dumps(report), encoding="utf-8")
-        assert executor._recorded_runners(str(tmp_path), pin_key="new-round") == {
+        assert executor._recorded_runners(str(tmp_path), pin_sha256="new-round") == {
             "a": "codex:gpt-6-astra"}
 
-    def test_the_pin_key_follows_the_round_and_the_inputs(self, tmp_path):
+    def test_the_pin_sha256_follows_the_round_and_the_inputs(self, tmp_path):
         one = [_validation_batch(tmp_path, hashes=("aaaa000000000000",))]
         two = [_validation_batch(tmp_path, hashes=("bbbb111111111111",))]
-        assert executor._pin_key(one) == executor._pin_key(list(one))
-        assert executor._pin_key(one) != executor._pin_key(two)
+        assert executor._pin_sha256(one) == executor._pin_sha256(list(one))
+        assert executor._pin_sha256(one) != executor._pin_sha256(two)
         changed = [dict(one[0], inputs={**one[0]["inputs"], "reviewed_code_sha256": "zz"})]
-        assert executor._pin_key(one) != executor._pin_key(changed)
+        assert executor._pin_sha256(one) != executor._pin_sha256(changed)
+
+    def test_the_report_writes_the_digest_as_pin_sha256(self):
+        """The member is named for what it holds, a sha256: `pin_key` read as a
+        credential to gitleaks' generic-api-key rule in every container golden."""
+        digest = "ab" * 32
+        written = executor.BatchReport(phase="review-plan", pin_sha256=digest).to_dict()
+        assert written["pin_sha256"] == digest
+        assert "pin_key" not in written
+        assert "pin_sha256" not in executor.BatchReport(phase="review-plan").to_dict()
 
     def test_a_config_repair_replaces_the_rejected_runner_on_re_invocation(
         self, tmp_path, runner_env

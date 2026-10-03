@@ -889,11 +889,11 @@ class BatchReport:
     #: by another host since — by content, never by mtime. Empty (and absent
     #: from the report) when nothing was persisted.
     batch_provenance: Dict[str, Dict[str, Any]] = field(default_factory=dict)
-    #: :func:`_pin_key` of the task list this report dispatched. A recorded
+    #: :func:`_pin_sha256` of the task list this report dispatched. A recorded
     #: runner is a pin only for a re-dispatch of the *same* round and inputs
-    #: (:func:`_recorded_runners`); a report that carries no key (written before
+    #: (:func:`_recorded_runners`); a report that carries no digest (written before
     #: it existed) pins as it always did. Empty means "not recorded".
-    pin_key: str = ""
+    pin_sha256: str = ""
     invoker: str = "executor"
 
     @property
@@ -948,7 +948,7 @@ class BatchReport:
             "batch_provenance": {
                 task_id: dict(row) for task_id, row in self.batch_provenance.items()
             },
-            **({"pin_key": self.pin_key} if self.pin_key else {}),
+            **({"pin_sha256": self.pin_sha256} if self.pin_sha256 else {}),
             "counts": self.counts(),
             "usage": self.usage_totals(),
             "tasks": [o.to_dict() for o in self.outcomes],
@@ -7651,9 +7651,9 @@ def run_tasks(
             report.write()
         return report
 
-    pin_key = _pin_key(tasks)
-    report.pin_key = pin_key
-    recorded = _recorded_runners(phase_dir, kind, pin_key=pin_key)
+    pin_sha256 = _pin_sha256(tasks)
+    report.pin_sha256 = pin_sha256
+    recorded = _recorded_runners(phase_dir, kind, pin_sha256=pin_sha256)
     # §7.3a: read before this dispatch overwrites the report, so a resumed
     # (skipped) task keeps the provenance its original dispatch recorded.
     previous_provenance = _recorded_provenance(phase_dir, kind) or {}
@@ -8267,7 +8267,7 @@ async def _gather(
     )
 
 
-def _pin_key(tasks: Sequence[Dict[str, Any]]) -> str:
+def _pin_sha256(tasks: Sequence[Dict[str, Any]]) -> str:
     """What a recorded runner is a pin *for*: the round plus the batch inputs.
 
     :func:`subagent_tasks.task_round` fingerprints which groups each output
@@ -8290,7 +8290,7 @@ def _pin_key(tasks: Sequence[Dict[str, Any]]) -> str:
 
 
 def _recorded_runners(
-    phase_dir: str, kind: str = "", *, pin_key: str = ""
+    phase_dir: str, kind: str = "", *, pin_sha256: str = ""
 ) -> Dict[str, str]:
     """Runners pinned by a previous batch report, for a re-dispatch (D3o).
 
@@ -8314,13 +8314,13 @@ def _recorded_runners(
     collide (``_authoritative_validator_runner``, always a validation-family
     kind), where it defaults to the bare name exactly as before.
 
-    ``pin_key`` (2026-10-02, #29): the current batch's :func:`_pin_key`. A report
-    that recorded a *different* key was written for another round or other
+    ``pin_sha256`` (2026-10-02, #29): the current batch's :func:`_pin_sha256`. A
+    report that recorded a *different* digest was written for another round or other
     inputs, and its runners are not pins for this batch. Measured on a Codex
     ``review-code --force``: the previous day's validation report recorded the
     session model (``codex:gpt-6-astra``, before the project set
     ``driver.subagent_runner: claude-code:sonnet``), and the forced re-review
-    re-used that pin instead of the configured runner. A report with no key, or a
+    re-used that pin instead of the configured runner. A report with no digest, or a
     caller that passes none, pins exactly as before.
     """
     path = Path(phase_dir) / _batch_report_filename(kind)
@@ -8330,8 +8330,8 @@ def _recorded_runners(
         document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return {}
-    recorded_key = document.get("pin_key") if isinstance(document, dict) else None
-    if pin_key and recorded_key and recorded_key != pin_key:
+    recorded_sha256 = document.get("pin_sha256") if isinstance(document, dict) else None
+    if pin_sha256 and recorded_sha256 and recorded_sha256 != pin_sha256:
         return {}
     rows = [
         row for row in document.get("tasks", [])
