@@ -2198,7 +2198,8 @@ def _detect_auth(
     **The config leg (T8.4).** When the verdict is ``False`` for a model that
     needs a credential, the adapter's ``config_credential_source`` is asked
     whether the dispatch's own resolved config declares the provider (opencode:
-    a custom provider, or a built-in override carrying a key). ``declared``
+    a custom provider, or a built-in override whose key resolves in the
+    dispatch env). ``declared``
     records ``config`` and refuses nothing; ``unknown`` is today's refusal.
     Lazy: a ``True`` verdict never spawns it.
     """

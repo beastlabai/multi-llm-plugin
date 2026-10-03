@@ -535,8 +535,13 @@ class TestConfigDeclaredProvidersOnThePin:
         self.oc = oc
         home = tmp_path / "user-config"
         (home / "opencode").mkdir(parents=True)
+        self.user_config = home / "opencode"
+        self.monkeypatch = monkeypatch
         monkeypatch.setenv("XDG_CONFIG_HOME", str(home))
+        monkeypatch.setenv("HOME", str(tmp_path / "user-home"))
+        monkeypatch.setenv("OPENCODE_TEST_MANAGED_CONFIG_DIR", str(tmp_path / "no-managed"))
         monkeypatch.delenv("OPENCODE_CONFIG", raising=False)
+        monkeypatch.delenv("OPENCODE_CONFIG_DIR", raising=False)
         monkeypatch.delenv("OPENCODE_CONFIG_CONTENT", raising=False)
         monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
         monkeypatch.setattr(
@@ -578,7 +583,18 @@ class TestConfigDeclaredProvidersOnThePin:
         )
 
     def _use(self, case):
-        self.debug_stdout = self.DEBUG[case]["stdout"]
+        """Serve the capture's stdout over the global files it was captured
+        from: the pin masks every `apiKey` as `"***"`, so a built-in
+        override's key is resolved from the file, in the child's env."""
+        run = self.DEBUG[case]
+        self.debug_stdout = run["stdout"]
+        self.debug_code = run["exit"]
+        for name, body in run["global_files"].items():
+            text = body if isinstance(body, str) else json.dumps(body)
+            (self.user_config / name).write_text(text, encoding="utf-8")
+        for key, value in run["env"].items():
+            if key.startswith("MY_TEST_"):
+                self.monkeypatch.setenv(key, value)
 
     @pytest.mark.parametrize(
         "case, model",
@@ -588,6 +604,8 @@ class TestConfigDeclaredProvidersOnThePin:
             ("custom_envkey_unset", "envkey/m2"),
             ("custom_envkey_set", "envkey/m2"),
             ("builtin_override_keyed", "openrouter/some/model"),
+            ("builtin_override_envkey_set", "openrouter/some/model"),
+            ("builtin_override_filekey", "openrouter/some/model"),
             ("jsonc_commented", "stub/stub-model"),
             ("project_layer", "stub/stub-model"),
             ("opencode_config_file", "stub/stub-model"),
@@ -598,7 +616,12 @@ class TestConfigDeclaredProvidersOnThePin:
         assert self._detect(model) == "config"
 
     @pytest.mark.parametrize(
-        "case", ["builtin_override_keyless", "nothing_declared", "project_layer_disabled"]
+        "case", [
+            "builtin_override_keyless", "nothing_declared", "project_layer_disabled",
+            # T8.3 on the pin: declared (`"***"`), but the key does not resolve.
+            "builtin_override_envkey_unset", "builtin_override_empty_key",
+            "builtin_override_filekey_missing",
+        ]
     )
     def test_a_keyless_or_absent_builtin_is_still_refused(self, case):
         self._use(case)

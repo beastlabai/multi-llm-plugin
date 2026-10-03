@@ -305,7 +305,8 @@ providers:
     # all (a keyless local server). `opencode auth list` cannot see a provider
     # declared only in config, so the preflight reads the dispatch's resolved
     # config (`opencode debug config`) before refusing. A built-in provider
-    # overridden without a key is still refused.
+    # overridden without a key, or with one that does not resolve in the
+    # dispatch's environment (an unset {env:VAR}), is still refused.
     #
     # config_providers:
     #   my-gateway:
