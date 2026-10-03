@@ -68,7 +68,15 @@ options:
                         (otherwise blocked)
   --resume              Resume from last checkpoint, skipping already-
                         processed items
-  --fresh               Clear previous progress and start fresh
+  --fresh               Discard this phase's recorded progress (decisions,
+                        processed items, prior-changes log) and dispatch every
+                        batch again. The target file must already be back at
+                        its pre-run bytes (copy it from {phase}/backup.md, or
+                        roll the batches back with `util restore-batch`): a
+                        target still carrying the previous run's edits is
+                        refused (exit 3), since every batch would land twice.
+                        Earlier rollback points are kept aside, never
+                        overwritten.
   --batch-review-mode {individual,by-importance,summary-only}
                         How to present items for human review (default: by-
                         importance)

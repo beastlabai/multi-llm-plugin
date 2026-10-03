@@ -126,7 +126,7 @@ When validation failed due to parsing errors or timeouts, you can retry:
 ### Resume/State Options
 
 - `--resume`: Resume from last checkpoint, skip already-processed items
-- `--fresh`: Clear previous progress and start fresh
+- `--fresh`: Discard this phase's recorded progress (decisions, processed items, prior-changes log) and dispatch every batch again. The target file must already be back at its pre-run bytes (copy it from the phase's backup, or roll the batches back with `util restore-batch`): a target still carrying the previous run's edits is refused (exit 3), since every batch would land twice. Earlier rollback points are kept aside, never overwritten.
 - `--skip-human-review`: [DEPRECATED] Use `--skip-all-human` instead
 
 ### Batch Review Mode

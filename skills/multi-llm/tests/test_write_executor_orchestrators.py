@@ -1694,6 +1694,68 @@ class TestFreshDispatchesEveryApplyBatchAgain(_ApplyRig):
         assert "(earlier" not in summary
         assert "- Batches processed: 3/3\n" in summary
 
+    def test_fresh_on_an_unreverted_target_is_refused_and_keeps_every_rollback_point(
+        self, repo, capsys
+    ):
+        """Adversarial review of round 3: a completed run, then `--fresh` on
+        the plan as the run left it. Every batch landed a second time at
+        exit 0, `backup.md` and every `pre_batch/` slot were re-stamped with
+        the already-applied bytes, and nothing under the plan dir held the
+        pre-run file any more (the plan is often untracked, so git cannot
+        help). Refused now, naming both ways back, with nothing touched."""
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        original = plan.read_text(encoding="utf-8")
+        assert self._run(repo, plan, sum(ids, []), content="run1\n") == 0
+        applied = plan.read_text(encoding="utf-8")
+        phase_dir = self._phase_dir(plan)
+        payload0 = next((phase_dir / "pre_batch" / "apply-batch-0" / "files").iterdir())
+        log = repo.tmp_path / "fresh-refused-calls.jsonl"
+        repo.monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
+        capsys.readouterr()
+
+        assert self._run(repo, plan, sum(ids, []), "--fresh", content="run2\n") == 3
+        err = capsys.readouterr().err
+        assert "backup.md" in err and "restore-batch" in err
+        assert plan.read_text(encoding="utf-8") == applied
+        assert (phase_dir / "backup.md").read_text(encoding="utf-8") == original
+        assert payload0.read_text(encoding="utf-8") == original
+        assert not log.exists() or not [
+            line for line in log.read_text().splitlines()
+            if json.loads(line).get("prompt")
+        ]
+        # The recorded progress survived the refusal: a plain re-run still
+        # skips every landed batch.
+        assert self._run(repo, plan, sum(ids, []), content="run3\n") == 0
+        assert plan.read_text(encoding="utf-8") == applied
+
+    def test_fresh_after_a_hand_revert_sets_the_earlier_rollback_points_aside(
+        self, repo
+    ):
+        """A legitimate `--fresh` (the target reverted by hand to bytes that
+        differ from the backup) re-stamps `backup.md` and takes new snapshots,
+        but destroys neither the earlier backup nor the earlier slots."""
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        original = plan.read_text(encoding="utf-8")
+        assert self._run(repo, plan, sum(ids, []), content="run1\n") == 0
+        tweaked = original + "tweak\n"
+        plan.write_text(tweaked, encoding="utf-8")
+
+        assert self._run(repo, plan, sum(ids, []), "--fresh", content="run2\n") == 0
+        assert plan.read_text(encoding="utf-8") == tweaked + "run2\n" * 3
+        phase_dir = self._phase_dir(plan)
+        assert (phase_dir / "backup.md").read_text(encoding="utf-8") == tweaked
+        kept = list(phase_dir.glob("backup.*.md"))
+        assert len(kept) == 1
+        assert kept[0].read_text(encoding="utf-8") == original
+        pre_batch = phase_dir / "pre_batch"
+        slot = next((pre_batch / "apply-batch-0" / "files").iterdir())
+        assert slot.read_text(encoding="utf-8") == tweaked
+        aside = list(pre_batch.glob("apply-batch-0.items-*"))
+        assert len(aside) == 1
+        assert next((aside[0] / "files").iterdir()).read_text(encoding="utf-8") == original
+
     def test_without_fresh_a_re_run_still_skips_what_already_landed(self, repo):
         """The guard against applying a batch twice is untouched."""
         plan = self._review(repo, "one")

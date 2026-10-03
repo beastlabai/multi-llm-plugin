@@ -1464,6 +1464,20 @@ class TestTasksBackupSurvivesAResume:
         orch.build_output_json([], resume_info=None)
         assert backup.read_text(encoding="utf-8") == "current\n"
 
+    def test_a_fresh_run_keeps_a_differing_earlier_backup_aside(self, tmp_path):
+        """`--fresh` re-stamps the backup but never destroys the one it finds:
+        an earlier backup whose bytes differ is kept beside it (2026-10-02)."""
+        orch, tasks, backup = self._orchestrator(tmp_path, resume=False)
+        orch.args.fresh = True
+        backup.parent.mkdir(parents=True)
+        backup.write_text("pre-run\n", encoding="utf-8")
+        tasks.write_text("current\n", encoding="utf-8")
+        orch.build_output_json([], resume_info=None)
+        assert backup.read_text(encoding="utf-8") == "current\n"
+        kept = list(backup.parent.glob("tasks-backup.*.md"))
+        assert len(kept) == 1
+        assert kept[0].read_text(encoding="utf-8") == "pre-run\n"
+
     def test_a_resume_with_no_backup_yet_takes_one(self, tmp_path):
         orch, tasks, backup = self._orchestrator(tmp_path, resume=True)
         tasks.write_text("current\n", encoding="utf-8")

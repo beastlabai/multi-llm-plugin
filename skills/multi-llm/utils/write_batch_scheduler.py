@@ -3925,6 +3925,20 @@ class WriteBatchScheduler:
             self.snapshots[task_id] = reused
             self._snapshot_reused.add(task_id)
             return reused
+        if not self.resume:
+            # `--fresh` (and implement's plain run) reuses no snapshot — but a
+            # slot an earlier run filled is that run's rollback point, and
+            # `take` would copy today's bytes over it (adversarial review,
+            # 2026-10-02: a `--fresh` on an un-reverted target left every
+            # slot holding already-applied bytes). Set aside, never deleted.
+            existing = TaskSnapshot.load(self.phase_dir, task_id)
+            if existing is not None:
+                moved_to = existing.set_aside()
+                self.log(
+                    f"[write-subagents] {task_id}: an earlier run's pre-batch "
+                    f"snapshot under that id is kept at {moved_to}; this run "
+                    f"takes its own."
+                )
         snapshot = TaskSnapshot.take(
             phase_dir=self.phase_dir, task_id=task_id, files=files,
             root=self.repo_root, expected_ids=expected_ids,
