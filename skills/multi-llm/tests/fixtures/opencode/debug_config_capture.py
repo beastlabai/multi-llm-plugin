@@ -9,8 +9,9 @@ environment (``env -i`` equivalent: only the variables the case names, plus
 ``/dev/null``. Nothing reads or writes the invoking user's own opencode config
 or data. ``debug config`` makes no model call and needs no network.
 
-**Every ``apiKey`` value is a canary** (``sk-canary-not-a-key-<n>``): the
-command prints secrets in plaintext, which is exactly what the reducer in
+**Every ``apiKey`` value is a canary** (``sk-canary-not-a-key-<n>``): up to
+1.18.32 the command printed secrets in plaintext (1.18.34 masks every
+``apiKey`` as ``"***"``, and the reducer does not rely on it), which is what the reducer in
 ``utils/providers/opencode.py`` (``_reduce_debug_config``) must never let out,
 and the secret-hygiene tests assert the canaries appear in no refusal, doctor
 detail or log line built from these captures.
@@ -103,6 +104,41 @@ CASES = {
         ["debug", "config"],
         {"opencode.json": doc(provider={"openrouter": {"options": {"timeout": 30000}}})},
         {}, {}, False,
+    ),
+    # The T8.3 shapes: a built-in override whose key is a reference. The mask
+    # prints all of them as "***", so the auth leg resolves the reference itself
+    # (`opencode._api_key_resolves`) and these rows are what it is replayed on.
+    "builtin_override_envkey_unset": (
+        "built-in `openrouter`, apiKey `{env:MY_TEST_KEY}`, variable unset",
+        ["debug", "config"],
+        {"opencode.json": doc(provider={"openrouter": {
+            "options": {"apiKey": "{env:MY_TEST_KEY}"}}})}, {}, {}, False,
+    ),
+    "builtin_override_envkey_set": (
+        "built-in `openrouter`, apiKey `{env:MY_TEST_KEY}`, variable set",
+        ["debug", "config"],
+        {"opencode.json": doc(provider={"openrouter": {
+            "options": {"apiKey": "{env:MY_TEST_KEY}"}}})}, {},
+        {"MY_TEST_KEY": "sk-canary-not-a-key-10"}, False,
+    ),
+    "builtin_override_empty_key": (
+        "built-in `openrouter`, apiKey an empty string",
+        ["debug", "config"],
+        {"opencode.json": doc(provider={"openrouter": {"options": {"apiKey": ""}}})},
+        {}, {}, False,
+    ),
+    "builtin_override_filekey": (
+        "built-in `openrouter`, apiKey `{file:openrouter.key}`, a file beside the config",
+        ["debug", "config"],
+        {"opencode.json": doc(provider={"openrouter": {
+            "options": {"apiKey": "{file:openrouter.key}"}}}),
+         "openrouter.key": "sk-canary-not-a-key-11\n"}, {}, {}, False,
+    ),
+    "builtin_override_filekey_missing": (
+        "built-in `openrouter`, apiKey `{file:missing.key}`, no such file",
+        ["debug", "config"],
+        {"opencode.json": doc(provider={"openrouter": {
+            "options": {"apiKey": "{file:missing.key}"}}})}, {}, {}, False,
     ),
     "nothing_declared": (
         "no config anywhere (built-in `openrouter` with nothing is not declared)",

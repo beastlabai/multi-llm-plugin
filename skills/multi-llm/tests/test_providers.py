@@ -10688,7 +10688,10 @@ class TestOpenCodeCapturesKeepTheirVerdict:
     def test_the_debug_config_capture_is_not_a_failure_either_way(self, case):
         """`debug_config.<pin>.json` (plan §8 T8.1) is a config read, not a
         run, and nothing hands its stdout to `classify_failure` (the reader
-        reduces it in memory). Graded anyway, every case exit 0. One case reads
+        reduces it in memory). Graded anyway, every case exit 0 but
+        `builtin_override_filekey_missing`, whose `{file:}` names no file:
+        opencode refuses the whole config (exit 1, `bad file reference` on
+        stderr), which nothing classifies either. One case reads
         as a failure both before and after T2.1: `builtin_override_keyless`
         carries an `"options": {"timeout": 30000}` and is one pretty-printed
         JSON document, not NDJSON events, so `vendor_text` keeps its lines as
@@ -10697,10 +10700,11 @@ class TestOpenCodeCapturesKeepTheirVerdict:
         classified."""
         data = json.loads(oc_pin.DEBUG_CONFIG.read_text("utf-8"))["cases"][case]
         out, err = data["stdout"], data["stderr"]
-        assert data["exit"] == 0
+        code = data["exit"]
+        assert code == (1 if case == "builtin_override_filekey_missing" else 0)
         expected = "timeout" if case == "builtin_override_keyless" else None
-        assert _OpenCodeBeforeT21().classify_failure(out, err, 0) == expected
-        assert OpenCodeProvider().classify_failure(out, err, 0) == expected
+        assert _OpenCodeBeforeT21().classify_failure(out, err, code) == expected
+        assert OpenCodeProvider().classify_failure(out, err, code) == expected
 
     def test_every_committed_capture_is_graded(self):
         """Every stream case of the rig joins the table, and nothing but the

@@ -572,7 +572,7 @@ class TestGateCProjectConfigIsolation:
         }
         declared = oc._read_declared_providers(env, str(workspace), False)
         assert declared is not None
-        assert declared.providers["stub"] == oc.ProviderDecl(custom=True, has_key=True)
+        assert declared.providers["stub"] == oc.ProviderDecl(custom=True, key_declared=True)
         assert "sk-canary" not in repr(declared)
 
 

@@ -189,6 +189,143 @@
       "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"timeout\": 30000\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
       "stderr": ""
     },
+    "builtin_override_envkey_unset": {
+      "setup": "built-in `openrouter`, apiKey `{env:MY_TEST_KEY}`, variable unset",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": "{env:MY_TEST_KEY}"
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_envkey_set": {
+      "setup": "built-in `openrouter`, apiKey `{env:MY_TEST_KEY}`, variable set",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1",
+        "MY_TEST_KEY": "sk-canary-not-a-key-10"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": "{env:MY_TEST_KEY}"
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_empty_key": {
+      "setup": "built-in `openrouter`, apiKey an empty string",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": ""
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_filekey": {
+      "setup": "built-in `openrouter`, apiKey `{file:openrouter.key}`, a file beside the config",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": "{file:openrouter.key}"
+              }
+            }
+          }
+        },
+        "openrouter.key": "sk-canary-not-a-key-11\n"
+      },
+      "project_files": {},
+      "exit": 0,
+      "stdout": "{\n  \"$schema\": \"https://opencode.ai/config.json\",\n  \"provider\": {\n    \"openrouter\": {\n      \"options\": {\n        \"apiKey\": \"***\"\n      }\n    }\n  },\n  \"agent\": {},\n  \"mode\": {},\n  \"plugin\": [],\n  \"command\": {},\n  \"username\": \"unknown\"\n}\n",
+      "stderr": ""
+    },
+    "builtin_override_filekey_missing": {
+      "setup": "built-in `openrouter`, apiKey `{file:missing.key}`, no such file",
+      "argv": [
+        "opencode",
+        "debug",
+        "config"
+      ],
+      "env": {
+        "OPENCODE_DISABLE_MODELS_FETCH": "1"
+      },
+      "global_files": {
+        "opencode.json": {
+          "$schema": "https://opencode.ai/config.json",
+          "provider": {
+            "openrouter": {
+              "options": {
+                "apiKey": "{file:missing.key}"
+              }
+            }
+          }
+        }
+      },
+      "project_files": {},
+      "exit": 1,
+      "stdout": "",
+      "stderr": "\u001b[91m\u001b[1mError: \u001b[0mConfiguration is invalid at /rig/home/.config/opencode/opencode.json: bad file reference: \"{file:missing.key}\" /rig/home/.config/opencode/missing.key does not exist\n"
+    },
     "nothing_declared": {
       "setup": "no config anywhere (built-in `openrouter` with nothing is not declared)",
       "argv": [
