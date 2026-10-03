@@ -737,6 +737,9 @@ _ALLOWED_ABSOLUTE = {
     f"{PAYLOAD}/utils/providers/gemini.py": {"/tmp/mllm-inv", "/tmp/mllm-inv/gemini-"},
     f"{PAYLOAD}/utils/providers/kilocode.py": {"/tmp/mllm-inv"},
     f"{PAYLOAD}/utils/provider_registry.py": {"/home/me/repo/.git"},
+    # (7) opencode's managed config directory per platform, the last local
+    # layer the T8.3 key read walks (`opencode._managed_config_dir`).
+    f"{PAYLOAD}/utils/providers/opencode.py": {"/etc/opencode", "/Library/Application"},
 }
 
 
