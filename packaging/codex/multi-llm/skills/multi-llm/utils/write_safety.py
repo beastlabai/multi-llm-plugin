@@ -58,6 +58,7 @@ import shutil
 import stat
 import subprocess
 import time
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
@@ -445,6 +446,9 @@ class TaskSnapshot:
     #: under the same positional id for other items. ``None`` for a manifest
     #: written before the key existed.
     expected_ids: Optional[List[str]] = None
+    #: When the snapshot was taken (local, to the second), kept across
+    #: re-saves; ``None`` until the first save or for a manifest without it.
+    taken_at: Optional[str] = None
 
     # -- creation -------------------------------------------------------
 
@@ -570,11 +574,14 @@ class TaskSnapshot:
     def save(self) -> str:
         path = Path(self.directory) / MANIFEST_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
+        # Stamped once: a later save (an adopted undeclared write) must not
+        # move the date a review-cycle cutoff reads.
+        self.taken_at = self.taken_at or time.strftime("%Y-%m-%dT%H:%M:%S")
         manifest: Dict[str, Any] = {
             "snapshot_version": 1,
             "task_id": self.task_id,
             "root": self.root,
-            "taken_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "taken_at": self.taken_at,
             "files": [entry.to_dict() for entry in self.entries],
         }
         if self.expected_ids is not None:
@@ -603,24 +610,53 @@ class TaskSnapshot:
                 [str(i) for i in recorded_ids]
                 if isinstance(recorded_ids, list) else None
             ),
+            taken_at=(
+                str(data["taken_at"]) if data.get("taken_at") else None
+            ),
         )
+
+    def taken_before(self, cutoff: Optional[datetime]) -> bool:
+        """Whether this snapshot predates ``cutoff`` (a review's completion).
+
+        A manifest with no parseable date cannot be placed in a cycle and is
+        read as predating any cutoff given: the only such manifests are
+        older than the field, and an unknown-age rollback point is kept
+        aside rather than trusted as this cycle's.
+        """
+        if cutoff is None:
+            return False
+        try:
+            taken = datetime.fromisoformat(self.taken_at or "")
+        except ValueError:
+            return True
+        if taken.tzinfo is not None:
+            taken = taken.astimezone().replace(tzinfo=None)
+        return taken < cutoff
+
+    @staticmethod
+    def items_digest(expected_ids: Optional[Sequence[str]]) -> str:
+        """The eight hex chars a set-aside name carries for a batch's items."""
+        return hashlib.sha256(
+            "\n".join(sorted(str(i) for i in (expected_ids or []))).encode("utf-8")
+        ).hexdigest()[:8]
 
     def set_aside(self) -> Optional[str]:
         """Move this snapshot out of its task id's slot; return where it went.
 
         For a snapshot that belongs to another batch than the one about to
-        take the slot (an apply id reused for other items on a resume): its
-        rollback point must survive, so it is renamed beside the slot, never
-        deleted. ``util restore-batch --task-id <new name>`` restores it
-        (unverified: the audit's records are keyed by the old id).
+        take the slot (an apply id reused for other items on a resume, or
+        every slot under ``--fresh``): its rollback point must survive, so it
+        is renamed ``<id>.items-<sha8 of its items>`` beside the slot (``-2``,
+        ``-3`` … when that name is taken), never deleted. ``util restore-batch
+        --task-id <new name>`` restores it, verified against the completion
+        record that names the same items (``AuditLog.completion_for``), and
+        :meth:`set_aside_dirs` finds it again when those items come back to
+        the slot.
         """
         source = Path(self.directory)
         if not source.is_dir():
             return None
-        digest = hashlib.sha256(
-            "\n".join(sorted(self.expected_ids or [])).encode("utf-8")
-        ).hexdigest()[:8]
-        base = f"{source.name}.items-{digest}"
+        base = f"{source.name}.items-{self.items_digest(self.expected_ids)}"
         target = source.with_name(base)
         counter = 2
         while target.exists():
@@ -629,6 +665,79 @@ class TaskSnapshot:
         os.replace(str(source), str(target))
         self.directory = str(target)
         return str(target)
+
+    @classmethod
+    def set_aside_dirs(
+        cls, phase_dir: str, task_id: str, expected_ids: Sequence[str],
+    ) -> List[Path]:
+        """The set-aside snapshots of ``task_id`` taken for these items, newest first.
+
+        Newest is the highest ``-N`` suffix: a name is reused once its holder
+        moves back into the slot, so within one review cycle there is one,
+        and a second one only ever appears when ``--fresh`` set a slot aside
+        beside an older cycle's copy — the newest is then the current
+        cycle's pre-first-dispatch bytes.
+        """
+        base = f"{_safe_component(task_id)}.items-{cls.items_digest(expected_ids)}"
+        parent = Path(phase_dir) / PRE_BATCH_DIRNAME
+        found: List[Tuple[int, Path]] = []
+        for candidate in parent.glob(f"{base}*"):
+            if not (candidate / MANIFEST_NAME).is_file():
+                continue
+            suffix = candidate.name[len(base):]
+            if suffix == "":
+                found.append((1, candidate))
+            elif suffix.startswith("-") and suffix[1:].isdigit():
+                found.append((int(suffix[1:]), candidate))
+        return [path for _, path in sorted(found, key=lambda item: -item[0])]
+
+    @classmethod
+    def reinstate(
+        cls, phase_dir: str, task_id: str, expected_ids: Sequence[str],
+        *, not_before: Optional[datetime] = None,
+    ) -> Optional["TaskSnapshot"]:
+        """Move the newest set-aside snapshot for these items back into the slot.
+
+        Only into a free slot (the caller set the holder aside first, or none
+        was there). The items that come back to a positional id after a
+        selection change get their pre-FIRST-dispatch bytes back as the
+        rollback point, instead of a fresh snapshot of the edits every run
+        since left on disk (adversarial review, 2026-10-02). A copy taken
+        before ``not_before`` (the current review cycle's completion) is a
+        previous cycle's and stays aside.
+        """
+        slot = Path(phase_dir) / PRE_BATCH_DIRNAME / _safe_component(task_id)
+        if slot.exists():
+            return None
+        for candidate in cls.set_aside_dirs(phase_dir, task_id, expected_ids):
+            loaded = cls.load(phase_dir, candidate.name)
+            if loaded is None or loaded.taken_before(not_before):
+                continue
+            os.replace(str(candidate), str(slot))
+            return cls.load(phase_dir, task_id)
+        return None
+
+    @classmethod
+    def locate(
+        cls, phase_dir: str, task_id: str, expected_ids: Optional[Sequence[str]],
+    ) -> Optional[str]:
+        """The directory name holding this batch's snapshot, slot or set-aside.
+
+        The slot when its manifest names the same items (or none); else the
+        newest set-aside copy for them; else ``None``. A completion record
+        naming no items resolves to the slot alone, as before.
+        """
+        slot = cls.load(phase_dir, task_id)
+        wanted = sorted(str(i) for i in expected_ids) if expected_ids else None
+        if slot is not None and (
+            wanted is None or not slot.expected_ids
+            or sorted(slot.expected_ids) == wanted
+        ):
+            return Path(slot.directory).name
+        if wanted is None:
+            return None
+        aside = cls.set_aside_dirs(phase_dir, task_id, wanted)
+        return aside[0].name if aside else None
 
     # -- the verdict ----------------------------------------------------
 
@@ -1075,6 +1184,7 @@ class AuditLog:
         duration_seconds: float,
         reason: Optional[str] = None,
         usage: Optional[Dict[str, Any]] = None,
+        expected_ids: Optional[Sequence[str]] = None,
     ) -> None:
         """The post-classification line. The evidence behind D3g's verdict.
 
@@ -1083,6 +1193,12 @@ class AuditLog:
         byte-identical record to before. The read path's judging dispatch is
         the first caller to pass it, since that record is its only durable
         home for what the dispatch cost.
+
+        ``expected_ids`` (2026-10-02): the items the batch was materialized
+        for, omitted when ``None`` (the judging dispatch has none). An apply
+        batch's id is positional, so after a selection change the record a
+        set-aside snapshot has to be verified against sits under an id another
+        batch now owns; the items are what :meth:`completion_for` finds it by.
         """
         record: Dict[str, Any] = {
             "event": "completed",
@@ -1102,6 +1218,8 @@ class AuditLog:
         }
         if usage is not None:
             record["usage"] = usage
+        if expected_ids is not None:
+            record["expected_ids"] = [str(i) for i in expected_ids]
         self._append(record)
 
     def skipped(
@@ -1135,15 +1253,26 @@ class AuditLog:
             "files_touched": list(files_touched),
         })
 
-    def restored(self, *, task_id: str, report: Dict[str, str], force: bool) -> None:
-        """``util restore-batch``'s own line — a rollback is an auditable event."""
-        self._append({
+    def restored(
+        self, *, task_id: str, report: Dict[str, str], force: bool,
+        verified: Optional[bool] = None,
+    ) -> None:
+        """``util restore-batch``'s own line — a rollback is an auditable event.
+
+        ``verified`` says whether a completion record checked the files'
+        hashes first; ``False`` is the ``--force``d restore of a snapshot no
+        completion record describes. Omitted when the caller did not say.
+        """
+        record: Dict[str, Any] = {
             "event": "restored",
             "timestamp": _now(),
             "task_id": task_id,
             "force": bool(force),
             "result": dict(report),
-        })
+        }
+        if verified is not None:
+            record["verified"] = bool(verified)
+        self._append(record)
 
     # -- reading --------------------------------------------------------
 
@@ -1164,17 +1293,37 @@ class AuditLog:
                 continue
         return out
 
-    def completion_for(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """The last ``completed`` record for ``task_id``, if any."""
-        found = None
-        for record in self.records():
-            if record.get("event") == "completed" and record.get("task_id") == task_id:
-                found = record
-        return found
+    def completion_for(
+        self, task_id: str, *, expected_ids: Optional[Sequence[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """The last ``completed`` record for this batch, if any.
 
-    def touched_with_hashes(self, task_id: str) -> Dict[str, Optional[str]]:
-        """``relative -> sha256_after`` from the completion record (restore input)."""
-        record = self.completion_for(task_id)
+        With ``expected_ids``, the batch is the one materialized for those
+        items, whatever id it ran under: the last record naming the same items
+        wins, and a record under ``task_id`` counts only when it names no
+        items at all (written before the key existed). A record under the id
+        that names *other* items is another batch's — an apply id is
+        positional — and is never returned. Without ``expected_ids`` the id
+        alone decides, as before.
+        """
+        wanted = sorted(str(i) for i in expected_ids) if expected_ids else None
+        by_items = None
+        by_id = None
+        for record in self.records():
+            if record.get("event") != "completed":
+                continue
+            recorded = record.get("expected_ids")
+            if wanted is not None and isinstance(recorded, list):
+                if sorted(str(i) for i in recorded) == wanted:
+                    by_items = record
+                continue
+            if record.get("task_id") == task_id:
+                by_id = record
+        return by_items if by_items is not None else by_id
+
+    @staticmethod
+    def hashes_from(record: Optional[Dict[str, Any]]) -> Dict[str, Optional[str]]:
+        """``relative -> sha256_after`` from one completion record."""
         if not record:
             return {}
         observed = record.get("observed") or {}
@@ -1184,17 +1333,43 @@ class AuditLog:
             if str(path) in set(record.get("files_touched") or [])
         }
 
-    def failed_task_ids(self) -> List[str]:
-        """Task ids whose last completion was not a clean apply."""
-        latest: Dict[str, Dict[str, Any]] = {}
-        for record in self.records():
-            if record.get("event") == "completed":
-                latest[str(record.get("task_id"))] = record
-        return sorted(
-            task_id for task_id, record in latest.items()
-            if record.get("status") != "ok"
+    def touched_with_hashes(
+        self, task_id: str, *, expected_ids: Optional[Sequence[str]] = None,
+    ) -> Dict[str, Optional[str]]:
+        """``relative -> sha256_after`` from the completion record (restore input)."""
+        return self.hashes_from(self.completion_for(task_id, expected_ids=expected_ids))
+
+    @staticmethod
+    def _is_failed(record: Dict[str, Any]) -> bool:
+        return (
+            record.get("status") != "ok"
             or record.get("write_outcome") in ("partial-application", "policy-violation")
         )
+
+    def failed_completions(self) -> List[Dict[str, Any]]:
+        """The last completion of every batch that was not a clean apply.
+
+        A batch is its id plus the items it was materialized for, so the
+        resumed batch's clean completion under ``apply-batch-1`` does not
+        hide the stopped batch's failure under the same positional id
+        (adversarial review, 2026-10-02); a record naming no items is keyed
+        by its id alone. In first-seen order.
+        """
+        latest: Dict[Tuple[str, Optional[Tuple[str, ...]]], Dict[str, Any]] = {}
+        for record in self.records():
+            if record.get("event") != "completed":
+                continue
+            recorded = record.get("expected_ids")
+            items = (
+                tuple(sorted(str(i) for i in recorded))
+                if isinstance(recorded, list) else None
+            )
+            latest[(str(record.get("task_id")), items)] = record
+        return [record for record in latest.values() if self._is_failed(record)]
+
+    def failed_task_ids(self) -> List[str]:
+        """Task ids whose last completion was not a clean apply."""
+        return sorted({str(r.get("task_id")) for r in self.failed_completions()})
 
 
 # ---------------------------------------------------------------------------

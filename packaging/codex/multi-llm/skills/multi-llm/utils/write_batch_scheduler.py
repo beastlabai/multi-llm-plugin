@@ -108,6 +108,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         WRITE_KINDS,
         declared_file_set,
         snapshot_file_set,
+        write_output_name,
     )
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
@@ -186,6 +187,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         WRITE_KINDS,
         declared_file_set,
         snapshot_file_set,
+        write_output_name,
     )
     from utils.write_phase_bridge import WRITE_TASK_FILENAME
     from utils.write_safety import (
@@ -325,6 +327,12 @@ REVIEW_PHASE_BY_WRITE_KIND: Dict[str, str] = {
     "apply_task_suggestions": "review-tasks",
     "apply_code_fixes": "code-review",
 }
+
+
+#: The index token of a positional write result's filename — bare
+#: (``apply_batch_1.json``) or retired beside the slot by
+#: ``_retire_foreign_result`` (``apply_batch_1.items-<sha8>[-N].json``).
+_RESULT_TOKEN = re.compile(r"^(\d+)(?:\.items-[0-9a-f]{8}(?:-\d+)?)?$")
 
 
 def _same_batch_row(left: Dict[str, Any], right: Dict[str, Any]) -> bool:
@@ -1115,6 +1123,97 @@ class WriteBatchScheduler:
             f"plugin's Landlock jail: {reason} Nothing was spawned."
         )
 
+    def _refuse_declared_sets_before_batch_one(
+        self,
+        ordered: Sequence[Tuple[int, List[Dict[str, Any]]]],
+        result: SchedulerResult,
+    ) -> bool:
+        """Ask :meth:`_repo_wide_refusal` of EVERY task the run will dispatch
+        before the first dispatch; ``True`` when the run is refused.
+
+        Every declared set is known at materialization (``write_tasks.json``),
+        and the per-task check in :meth:`_dispatch_executor` used to be the
+        only one: an implement run whose seventh task declared a new
+        top-level ``Makefile`` paid for batches 1–6 and then exited 3 naming
+        F6, whose remedy (switch ``driver.subagent_runner``) then had to be
+        applied to a half-done phase (fix round 4, 2026-10-02). Checked here
+        under the rung the preflight records for each task's runner, and only
+        for a dispatch that will run on the plugin-landlock rung: on codex's
+        own sandbox the same write is codex's to allow. A task ``--resume``
+        skips as already done is never dispatched, so its declared set — which
+        may have landed on another rung — is not asked. A refused runner is
+        left for the batch loop, which reports it in its own words (D3k rung
+        1). The per-task check stays as the backstop.
+        """
+        if (
+            self.respond is not None
+            or self.jail_request is None
+            or self.write_scope != WRITE_SCOPE_REPO_WIDE
+        ):
+            return False
+        profile = profile_for_kind(self.kind)
+        refused: List[TaskOutcome] = []
+        first_index: Optional[int] = None
+        for batch_index, batch_tasks in ordered:
+            for task in batch_tasks:
+                task_id = str(task.get("task_id", ""))
+                if (
+                    result.human_plan.is_skipped(task_id)
+                    or task.get("executor_role") == "human"
+                    or (self.resume and self._already_done(task))
+                ):
+                    continue
+                runner = self.forced_runner or resolve_task_runner(
+                    task, anchor=self.anchor
+                )
+                try:
+                    self._preflight(runner, profile)
+                except ExecutorError:
+                    return False
+                if self._recorded_rung(runner, profile) != SANDBOX_RUNG_PLUGIN_LANDLOCK:
+                    continue
+                request = self._task_request(task)
+                if request is None:
+                    continue
+                refusal = self._repo_wide_refusal(task, request)
+                if refusal is None:
+                    continue
+                refused.append(TaskOutcome(
+                    task_id=task_id, kind=self.kind, runner=self.invoker,
+                    status=STATUS_REJECTED, profile=profile, reason=refusal,
+                ))
+                if first_index is None:
+                    first_index = batch_index
+        if not refused:
+            return False
+        result.outcomes.extend(refused)
+        result.stopped_at_batch = first_index
+        result.exit_code = EXIT_NEEDS_HUMAN
+        if self.state is not None:
+            with self._effects_lock:
+                for outcome in refused:
+                    self.state.update_task_status(
+                        outcome.task_id, "failed", reason=outcome.reason
+                    )
+                self.state.save()
+        lines = [
+            "",
+            f"ERROR: {len(refused)} of this run's write task(s) declare a path "
+            f"the plugin's Landlock jail cannot grant, so the run was refused "
+            f"before its first batch. Nothing was dispatched, no file was "
+            f"modified, and the {self.phase} phase is NOT marked completed.",
+        ]
+        for outcome in refused:
+            # The same row shape as `_stop_message`'s, so a reader (and the
+            # acceptance test) finds `<task>: rejected — <why>` either way.
+            lines.append(f"  - {outcome.task_id}: {outcome.status} — {outcome.reason}")
+        result.messages.extend(lines)
+        for line in lines[1:]:
+            self.log(f"[write-subagents] {line.strip()}")
+        result.report_path = self._write_report(result)
+        self._mirror_status(result)
+        return True
+
     def _grant_mismatch(self, task: Dict[str, Any]) -> Optional[str]:
         """Why ``task``'s declared set is not this phase's grant, or ``None``.
 
@@ -1603,7 +1702,13 @@ class WriteBatchScheduler:
             # run's `write_batch_report.json` / `subagent_batch_report.json`.
             return result
 
-        # 3. The batches, in order, each verified before the next is dispatched.
+        # 3. Every declared set under the recorded rung, before the first
+        # dispatch: a repo-wide refusal that waits for its own batch costs
+        # every batch ahead of it (fix round 4, 2026-10-02).
+        if self._refuse_declared_sets_before_batch_one(ordered, result):
+            return result
+
+        # 4. The batches, in order, each verified before the next is dispatched.
         # Mirrored once before the first dispatch so `progress.step` reads
         # `applying` for the whole stretch rather than only from the first
         # *finished* task — the in-batch mirror runs after a dispatch returns,
@@ -1673,7 +1778,7 @@ class WriteBatchScheduler:
                 self._mirror_status(result)
                 return result
 
-        # 4. Finalization is part of the contract, not the caller's courtesy.
+        # 5. Finalization is part of the contract, not the caller's courtesy.
         if self.finalize:
             self._finalize(result)
         result.report_path = self._write_report(result)
@@ -1749,14 +1854,18 @@ class WriteBatchScheduler:
         # Resume: a batch counts as done when its result file exists, parses and
         # validates (D3i). Its summary is already in the prior-changes log on
         # disk, so a resumed run replays rather than reconstructs.
-        if self.resume and self._already_done(task):
+        evidence = self._done_evidence(task) if self.resume else None
+        if evidence is not None:
+            output_path, recorded_id = evidence
             self.log(f"[write-subagents] {task_id} already complete — skipping")
-            output_path = str(resolve_output_target(task, self.phase_dir))
             data = json.loads(Path(output_path).read_text(encoding="utf-8"))
             verdict = data.get("verdict")
             if not isinstance(verdict, dict):
                 verdict = {}
-            recorded = self.audit.completion_for(task_id) or {}
+            recorded = self.audit.completion_for(
+                recorded_id,
+                expected_ids=[str(i) for i in (task.get("expected_ids") or [])],
+            ) or {}
             outcome = TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_OK, profile=profile, skipped=True,
@@ -1814,6 +1923,7 @@ class WriteBatchScheduler:
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=exc.status, profile=profile, reason=exc.message,
             )
+        self._retire_foreign_result(task)
 
         # D3l pre-dispatch: a batch whose DECLARED set is not wholly inside the
         # policy never starts a runner — and the check runs BEFORE the snapshot,
@@ -3507,12 +3617,20 @@ class WriteBatchScheduler:
         # Every branch of `_classify` ends here, so this is the one place the
         # verdict reaches the result file that resume reads (F1).
         self._stamp_verdict(outcome)
+        # The items, so a set-aside snapshot's record is findable by them
+        # once its positional id belongs to another batch; a terminal record
+        # (no `_classify`) reads them off the snapshot the dispatch took.
+        expected_ids = outcome.expected_ids or (
+            (self.snapshots.get(outcome.task_id).expected_ids or [])
+            if self.snapshots.get(outcome.task_id) is not None else []
+        )
         self.audit.completed(
             task_id=outcome.task_id, kind=self.kind, attempt=attempt,
             runner=runner, profile=profile, status=outcome.status,
             write_outcome=outcome.write_outcome, exit_code=exit_code,
             files_touched=outcome.files_touched, observed=observed,
             duration_seconds=duration, reason=outcome.reason,
+            expected_ids=[str(i) for i in expected_ids],
         )
 
     def _stamp_verdict(self, outcome: TaskOutcome) -> None:
@@ -3548,6 +3666,19 @@ class WriteBatchScheduler:
                 "sha256_after": outcome.sha256_after,
                 "reason": outcome.reason,
             }
+            # The batch's identity beyond its positional name (2026-10-02):
+            # the items it was materialized for and the inputs binding they
+            # were materialized from, so a resume whose selection renumbered
+            # the batch finds this result by its items (`_done_evidence`)
+            # and still compares the inputs — the fingerprint file is keyed
+            # by the positional id, which the renumbering reassigns.
+            task = self._task_by_id(outcome.task_id)
+            if task is not None:
+                data["verdict"]["task_id"] = outcome.task_id
+                data["verdict"]["expected_ids"] = [
+                    str(i) for i in (task.get("expected_ids") or [])
+                ]
+                data["verdict"]["inputs_fingerprint"] = self._task_fingerprint(task)
             # Plan step 3 (2026-09-30): the verdict names the rung it was
             # reached on — additive, and only when there was one.
             rung = self._dispatch_rungs.get(outcome.task_id)
@@ -3794,6 +3925,20 @@ class WriteBatchScheduler:
             self.snapshots[task_id] = reused
             self._snapshot_reused.add(task_id)
             return reused
+        if not self.resume:
+            # `--fresh` (and implement's plain run) reuses no snapshot — but a
+            # slot an earlier run filled is that run's rollback point, and
+            # `take` would copy today's bytes over it (adversarial review,
+            # 2026-10-02: a `--fresh` on an un-reverted target left every
+            # slot holding already-applied bytes). Set aside, never deleted.
+            existing = TaskSnapshot.load(self.phase_dir, task_id)
+            if existing is not None:
+                moved_to = existing.set_aside()
+                self.log(
+                    f"[write-subagents] {task_id}: an earlier run's pre-batch "
+                    f"snapshot under that id is kept at {moved_to}; this run "
+                    f"takes its own."
+                )
         snapshot = TaskSnapshot.take(
             phase_dir=self.phase_dir, task_id=task_id, files=files,
             root=self.repo_root, expected_ids=expected_ids,
@@ -3832,18 +3977,53 @@ class WriteBatchScheduler:
         falls back to the id, as before.
         """
         existing = TaskSnapshot.load(self.phase_dir, task_id)
-        if existing is None:
-            return None
-        recorded_ids = existing.expected_ids or []
-        if recorded_ids and expected_ids and (
+        # The same cutoff `_earlier_rows` applies: a snapshot taken before
+        # the review this phase applies completed belongs to the previous
+        # cycle — the bytes before THAT cycle's batch, so restoring from it
+        # would roll that cycle's applied edit back too (follow-up to the
+        # 2026-10-02 adversarial review). Set aside, never deleted.
+        reviewed_at = self._review_completed_at()
+        if reviewed_at is not None:
+            # The manifest is stamped to the second.
+            reviewed_at = reviewed_at.replace(microsecond=0)
+        if existing is not None and existing.taken_before(reviewed_at):
+            moved_to = existing.set_aside()
+            self.log(
+                f"[write-subagents] {task_id}: the pre-batch snapshot under "
+                f"that id was taken at {existing.taken_at or 'an unknown time'}, "
+                f"before this phase's review completed "
+                f"({reviewed_at.isoformat(timespec='seconds')}), so it is a "
+                f"previous review cycle's rollback point; kept at {moved_to}."
+            )
+            existing = None
+        recorded_ids = (existing.expected_ids or []) if existing else []
+        if existing is not None and recorded_ids and expected_ids and (
             sorted(recorded_ids) != sorted(str(i) for i in expected_ids)
         ):
             moved_to = existing.set_aside()
             self.log(
                 f"[write-subagents] {task_id}: the pre-batch snapshot under "
                 f"that id was taken for other items (an earlier run's batch); "
-                f"kept at {moved_to} and a fresh snapshot taken for this batch."
+                f"kept at {moved_to}."
             )
+            existing = None
+        if existing is None and expected_ids:
+            # The items may have held this id before and been set aside when
+            # the id went to others (B deselected, C takes `apply-batch-1`,
+            # B re-selected): their own pre-first-dispatch snapshot comes
+            # back into the slot rather than a fresh one being taken over
+            # every run's edits since.
+            existing = TaskSnapshot.reinstate(
+                self.phase_dir, task_id, [str(i) for i in expected_ids],
+                not_before=reviewed_at,
+            )
+            if existing is not None:
+                self.log(
+                    f"[write-subagents] {task_id}: the snapshot an earlier run "
+                    f"took for these same items was set aside when the id "
+                    f"went to other items; moved back to {existing.directory}."
+                )
+        if existing is None:
             return None
         try:
             wanted = sorted(
@@ -3944,8 +4124,161 @@ class WriteBatchScheduler:
                 seen.append(text)
         return seen
 
+    def _task_by_id(self, task_id: str) -> Optional[Dict[str, Any]]:
+        for task in self.tasks:
+            if str(task.get("task_id", "")) == task_id:
+                return task
+        return None
+
+    def _sibling_results(
+        self, task: Dict[str, Any]
+    ) -> List[Tuple[Path, str, int]]:
+        """Other result files of this kind that attest to this task's items.
+
+        An apply kind's ids and result names are positional, so a resume
+        whose selection changed can hand a batch that already landed as
+        ``apply-batch-1`` the id ``apply-batch-2``, with no
+        ``apply_batch_2.json`` to find — and re-apply it (adversarial review,
+        2026-10-02). The verdict stamp names the items a result was produced
+        for; a file naming exactly this task's items is this batch's, under
+        the id and index it ran as. ``implement`` keys results by the plan
+        task's own id and has no such case.
+        """
+        if self.kind == "implement":
+            return []
+        expected = sorted(str(i) for i in (task.get("expected_ids") or []))
+        if not expected:
+            return []
+        try:
+            own = resolve_output_target(task, self.phase_dir)
+        except ResultRejected:
+            own = None
+        template = write_output_name(self.kind, 0)
+        prefix, suffix = template.split("0", 1)
+        found: List[Tuple[Path, str, int]] = []
+        for path in sorted(Path(self.phase_dir).glob(f"{prefix}*{suffix}")):
+            token = path.name[len(prefix):len(path.name) - len(suffix)]
+            index = _RESULT_TOKEN.match(token)
+            if index is None or (own is not None and path == own):
+                continue
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            verdict = data.get("verdict") if isinstance(data, dict) else None
+            if not isinstance(verdict, dict):
+                continue
+            recorded = verdict.get("expected_ids")
+            if not isinstance(recorded, list) or sorted(map(str, recorded)) != expected:
+                continue
+            recorded_id = str(verdict.get("task_id") or "")
+            if not recorded_id:
+                continue
+            found.append((path, recorded_id, int(index.group(1))))
+        return found
+
+    def _retire_foreign_result(self, task: Dict[str, Any]) -> None:
+        """Move another batch's result out from under this task's positional name.
+
+        A result file is named by batch index, so a resume whose selection
+        renumbered the batches dispatches B as ``apply-batch-1`` over the
+        ``apply_batch_1.json`` C landed under that id in the earlier run —
+        and C's only evidence of being done was gone before its own turn
+        came (adversarial review, 2026-10-02). A result whose verdict names
+        other items is kept beside the slot as ``<stem>.items-<sha8>.json``
+        (``-2``, ``-3`` … when taken), where :meth:`_sibling_results` reads
+        it; a result for the same items is overwritten as before.
+        """
+        if self.kind == "implement":
+            return
+        try:
+            target = resolve_output_target(task, self.phase_dir)
+        except ResultRejected:
+            return
+        if not target.is_file():
+            return
+        try:
+            data = json.loads(target.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        verdict = data.get("verdict") if isinstance(data, dict) else None
+        recorded = verdict.get("expected_ids") if isinstance(verdict, dict) else None
+        if not isinstance(recorded, list):
+            return
+        expected = sorted(str(i) for i in (task.get("expected_ids") or []))
+        if sorted(map(str, recorded)) == expected:
+            return
+        stem = target.name[:-len(".json")]
+        base = f"{stem}.items-{TaskSnapshot.items_digest(recorded)}"
+        kept = target.with_name(f"{base}.json")
+        counter = 2
+        while kept.exists():
+            kept = target.with_name(f"{base}-{counter}.json")
+            counter += 1
+        try:
+            os.replace(str(target), str(kept))
+        except OSError as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
+            self.log(
+                f"[write-subagents] warning: could not keep {target.name} "
+                f"(another batch's result) aside before {task.get('task_id')} "
+                f"reuses the name: {exc}"
+            )
+            return
+        self.log(
+            f"[write-subagents] {task.get('task_id')}: {target.name} holds the "
+            f"result of other items (an earlier run's batch under this id); "
+            f"kept at {kept.name}."
+        )
+
     def _already_done(self, task: Dict[str, Any]) -> bool:
+        """Whether :meth:`_done_evidence` finds a result to resume from."""
+        return self._done_evidence(task) is not None
+
+    def _done_evidence(
+        self, task: Dict[str, Any]
+    ) -> Optional[Tuple[str, str]]:
+        """The result file and the id it was produced under, when the task is done.
+
+        The task's own positional result first; for an apply kind, a sibling
+        result naming the same items next (:meth:`_sibling_results`), judged
+        by the same clauses with the id and batch index it ran as — the
+        audit, the verdict and the inputs binding are read for THAT batch,
+        never for whatever this run put under the renumbered id.
+        """
+        task_id = str(task.get("task_id", ""))
+        try:
+            own = resolve_output_target(task, self.phase_dir)
+        except ResultRejected:
+            own = None
+        if own is not None and self._result_counts_as_done(
+            task, own, task_id, int(task.get("batch_index", 0)), sibling=False,
+        ):
+            return str(own), task_id
+        for path, recorded_id, index in self._sibling_results(task):
+            if self._result_counts_as_done(
+                task, path, recorded_id, index, sibling=True,
+            ):
+                self.log(
+                    f"[write-subagents] {task_id}: its items already landed as "
+                    f"{recorded_id} ({path.name}) in an earlier run of this "
+                    f"phase — the batch was renumbered by a selection change, "
+                    f"not re-applied."
+                )
+                return str(path), recorded_id
+        return None
+
+    def _result_counts_as_done(
+        self, task: Dict[str, Any], target: Path, task_id: str,
+        batch_index: int, *, sibling: bool,
+    ) -> bool:
         """Resume's definition of done (D3i), all five clauses of it.
+
+        ``task_id``/``batch_index`` are the ones the result was produced
+        under (the task's own, or a renumbered sibling's); ``sibling`` says
+        the file was found by its items, in which case the clauses keyed by
+        positional id alone (``state.json``'s task status, the fingerprint
+        file) are read from the verdict stamp instead, since this run may
+        already have put another batch under that id.
 
         The result file must exist, parse and validate — **and** the task it was
         produced from must not have moved (D2g). The bridge rewrites
@@ -3972,10 +4305,6 @@ class WriteBatchScheduler:
         in ``subagent_tasks.implement_output_name``: neither alone is why the
         skip is safe.
         """
-        try:
-            target = resolve_output_target(task, self.phase_dir)
-        except ResultRejected:
-            return False
         if not target.is_file() or target.stat().st_size == 0:
             return False
         try:
@@ -3989,7 +4318,6 @@ class WriteBatchScheduler:
             # recorded as NOT done; resuming past it on the strength of the
             # file existing would skip exactly the batch --resume is for.
             return False
-        task_id = str(task.get("task_id", ""))
         verdict = data.get("verdict")
         if isinstance(verdict, dict) and not verdict.get("ok", True):
             # The scheduler's own classification, stamped by `_stamp_verdict`
@@ -4003,7 +4331,13 @@ class WriteBatchScheduler:
                 f"than resuming it (F1)."
             )
             return False
-        if self.state is not None and hasattr(self.state, "get_task_status"):
+        if sibling and not isinstance(verdict, dict):
+            return False
+        if (
+            not sibling
+            and self.state is not None
+            and hasattr(self.state, "get_task_status")
+        ):
             # The same fact from `state.json`, for a result file that predates
             # the verdict stamp: `_record_batch_effects` wrote `failed` for
             # every outcome that was not ok, and that record outlives the
@@ -4024,21 +4358,56 @@ class WriteBatchScheduler:
         # before a new result replaces an older successful one). The last
         # dispatch then has no completion: neither file is evidence of success.
         # Un-audited legacy/native results retain their compatibility behavior.
-        latest = next((
-            row for row in reversed(self.audit.records())
-            if row.get("task_id") == task_id
-            and row.get("event") in ("dispatched", "completed")
-        ), None)
-        if latest and (
-            latest.get("event") == "dispatched"
-            or latest.get("status") != STATUS_OK
-        ):
-            self.log(
-                f"[write-subagents] {task_id}: the last dispatch has no successful "
-                "classification — re-dispatching rather than trusting its result."
-            )
-            return False
         expected = [str(item) for item in (task.get("expected_ids") or [])]
+        if sibling:
+            # Found by its verdict stamp, which only `_classify` writes, so
+            # the crash-before-classification shape cannot apply; the audit's
+            # own record for these items has to agree it succeeded.
+            recorded = self.audit.completion_for(task_id, expected_ids=expected)
+            if not recorded or recorded.get("status") != STATUS_OK:
+                return False
+        else:
+            latest = next((
+                row for row in reversed(self.audit.records())
+                if row.get("task_id") == task_id
+                and row.get("event") in ("dispatched", "completed")
+            ), None)
+            if latest and (
+                latest.get("event") == "dispatched"
+                or latest.get("status") != STATUS_OK
+            ):
+                self.log(
+                    f"[write-subagents] {task_id}: the last dispatch has no "
+                    "successful classification — re-dispatching rather than "
+                    "trusting its result."
+                )
+                return False
+            recorded = latest
+        # A new review cycle supersedes the old one (the rule #28's rows, #26's
+        # staleness and the snapshots follow): evidence of "done" written
+        # before the review this phase applies completed is the previous
+        # cycle's, and the batch runs again in this one. Dated by the
+        # completion record, else by the result file itself; `implement` has
+        # no review cutoff and a resume within one cycle is unchanged.
+        reviewed_at = self._review_completed_at()
+        if reviewed_at is not None:
+            reviewed_at = reviewed_at.replace(microsecond=0)
+            stamped = _parse_local_timestamp((recorded or {}).get("timestamp"))
+            if stamped is None:
+                try:
+                    stamped = datetime.fromtimestamp(target.stat().st_mtime)
+                except OSError:
+                    stamped = None
+            if stamped is not None and stamped < reviewed_at:
+                self.log(
+                    f"[write-subagents] {task_id}: {target.name} was written "
+                    f"at {stamped.isoformat(timespec='seconds')}, before this "
+                    f"phase's review completed "
+                    f"({reviewed_at.isoformat(timespec='seconds')}); it is the "
+                    f"previous review cycle's result, so the batch is "
+                    f"dispatched again in this one."
+                )
+                return False
         returned = [
             str(item) for item in (data.get("ids") or [])
             if isinstance(data.get("ids"), list)
@@ -4051,8 +4420,13 @@ class WriteBatchScheduler:
                 f"one is re-dispatched rather than resumed (D3i)."
             )
             return False
-        recorded = self._load_fingerprints().get(task_id)
-        if recorded and recorded != self._task_fingerprint(task):
+        if sibling:
+            recorded_fp = str(verdict.get("inputs_fingerprint") or "")
+            current_fp = self._task_fingerprint({**task, "batch_index": batch_index})
+        else:
+            recorded_fp = self._load_fingerprints().get(task_id)
+            current_fp = self._task_fingerprint(task)
+        if recorded_fp and recorded_fp != current_fp:
             self.log(
                 f"[write-subagents] {task_id}: the inputs it was materialized "
                 f"from have changed since {target.name} was written — "

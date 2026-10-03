@@ -383,6 +383,16 @@ Bulk Approval Examples:
                 file=sys.stderr,
             )
         else:
+            if getattr(self.args, "fresh", False):
+                # `--fresh` re-stamps, but never over a rollback point: an
+                # earlier backup with other bytes is kept beside the new one.
+                kept = self.keep_backup_aside(tasks_backup_path, self.tasks_file)
+                if kept:
+                    print(
+                        f"Earlier tasks file backup kept at {kept} (its bytes "
+                        f"differ from the file --fresh is about to back up)",
+                        file=sys.stderr,
+                    )
             shutil.copy2(self.tasks_file, tasks_backup_path)
             print(f"Tasks file backup: {tasks_backup_path}", file=sys.stderr)
 

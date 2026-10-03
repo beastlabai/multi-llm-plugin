@@ -73,6 +73,7 @@ try:  # normal import (utils is a package)
         render_instruction_text,
         skill_dir,
     )
+    from .json_extractor import strip_jsonc as _strip_jsonc
     from .stream_bootstrap import bootstrap_streams
     from .unattended import find_uv, uv_missing_text
 except ImportError:  # pragma: no cover - direct script runs with utils/ on path
@@ -86,6 +87,7 @@ except ImportError:  # pragma: no cover - direct script runs with utils/ on path
         render_instruction_text,
         skill_dir,
     )
+    from json_extractor import strip_jsonc as _strip_jsonc  # type: ignore
     from stream_bootstrap import bootstrap_streams  # type: ignore
     from unattended import find_uv, uv_missing_text  # type: ignore
 
@@ -836,77 +838,6 @@ def _declared_spec(config: Path, key: str, wanted: str) -> Optional[str]:
         if isinstance(item, str) and _package_name(item) == wanted:
             return item
     return None
-
-
-def _strip_jsonc(text: str) -> str:
-    """Enough of JSONC to parse a config: comments and trailing commas.
-
-    Deliberately not a full parser, but **string-aware**, which the pair of
-    regexes it replaces was not. Those matched a comment only when it occupied a
-    whole line, so the two forms every hand-written config actually uses — the
-    `//` trailing a value and the `/* … */` fencing a block — survived the strip,
-    failed ``json.loads``, and were reported as "no route declared". That is the
-    quiet-but-wrong answer: the package route really is declared, the shadowing
-    warning really is owed, and the user is told nothing. The regexes could not
-    be widened either, since an unanchored `//` matches inside a string — a URL,
-    a Windows path — and would corrupt a config that parsed fine before.
-
-    So: one scan that knows when it is inside a string literal, dropping comments
-    and any comma that a `}` or `]` follows. Its failure mode is unchanged — a
-    file this cannot make parseable is still "no route detected", never a wrong
-    answer.
-    """
-    out: List[str] = []
-    index = 0
-    length = len(text)
-    in_string = False
-    while index < length:
-        char = text[index]
-        if in_string:
-            out.append(char)
-            if char == "\\" and index + 1 < length:
-                # An escape consumes its pair whole, so an escaped quote does not
-                # end the string and `"C:\\"` does not start one.
-                out.append(text[index + 1])
-                index += 2
-                continue
-            if char == '"':
-                in_string = False
-            index += 1
-            continue
-        if char == '"':
-            in_string = True
-            out.append(char)
-            index += 1
-            continue
-        if char == "/" and index + 1 < length:
-            following = text[index + 1]
-            if following == "/":
-                # To end of line, keeping the newline: line numbers stay put and
-                # two tokens either side of it cannot be glued together.
-                index += 2
-                while index < length and text[index] not in "\r\n":
-                    index += 1
-                continue
-            if following == "*":
-                closer = text.find("*/", index + 2)
-                # An unterminated block comment is a broken file; swallowing the
-                # rest lets ``json.loads`` say so instead of this scanner.
-                index = length if closer < 0 else closer + 2
-                out.append(" ")
-                continue
-        if char in "}]":
-            # The only comma a closer can follow, outside a string, is a trailing
-            # one — and with comments already gone, whitespace is all that can
-            # separate them.
-            back = len(out) - 1
-            while back >= 0 and out[back].isspace():
-                back -= 1
-            if back >= 0 and out[back] == ",":
-                del out[back]
-        out.append(char)
-        index += 1
-    return "".join(out)
 
 
 # ---------------------------------------------------------------------------

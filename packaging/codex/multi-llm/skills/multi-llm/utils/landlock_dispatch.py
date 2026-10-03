@@ -42,6 +42,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import sys
 import tempfile
 import threading
@@ -347,7 +348,12 @@ VCS_DIR_NAMES: Tuple[str, ...] = (".git", ".hg", ".svn")
 #: ``workspace-write`` keeps it and ``.git`` read-only too) and ``.multi-llm``
 #: (``providers.yaml``, the ``runs/`` registry, ``tmp/``). The run's output
 #: folder (``state.json``, the snapshots, the rollback store, the audit log)
-#: joins them from the request's ``output_dir``.
+#: joins them from the request's ``output_dir``, and two more join when they
+#: resolve inside the repository (:func:`extra_protected_paths`, fix round 4,
+#: 2026-10-02): the repository's ``core.hooksPath`` (``.husky/`` and the
+#: like — hooks git runs unconfined on the user's next commit, which outside
+#: ``.git/`` were an ordinary ruled entry) and the ``MULTI_LLM_PROVIDERS_CONFIG``
+#: file (the config whose ``verify_command`` the next run executes unjailed).
 PROTECTED_ROOT_NAMES: Tuple[str, ...] = VCS_DIR_NAMES + (".codex", ".multi-llm")
 
 #: The non-Codex runner, named by every refusal of a declared path the grant
@@ -398,16 +404,6 @@ class RepoWidePlan:
             for entry in self.entries
         ]
 
-    def write_dir(self) -> Optional[str]:
-        """The directory the rung probe's positive control writes into: the
-        first enumerated directory entry, in sorted order (deterministic for a
-        tree, never a batch's declared path), or ``None`` when the tree has no
-        directory entry outside the protected set."""
-        for entry in self.entries:
-            if entry.kind == KIND_DIR:
-                return entry.path
-        return None
-
     def negative_dirs(self) -> List[str]:
         """The protected directories that exist, for the probe's negative
         controls (``.git/`` and the output folder among them)."""
@@ -451,6 +447,61 @@ def _denies_entry(rel: str, is_dir: bool, patterns: Sequence[Any]) -> Optional[s
     return None
 
 
+def git_hooks_path(root: str) -> Optional[str]:
+    """The repository's effective ``core.hooksPath``, resolved (``~`` and a
+    relative value against ``root``, where git runs hooks; symlinks
+    followed), or ``None`` when unset, unreadable, or ``root`` holds no
+    ``.git``. Read through ``git config`` itself so the global and system
+    layers count as they do for git."""
+    if not os.path.lexists(os.path.join(root, ".git")):
+        return None
+    try:
+        proc = subprocess.run(
+            ["git", "-C", root, "config", "--get", "core.hooksPath"],
+            capture_output=True, text=True, timeout=10,
+            env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"),
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    value = proc.stdout.strip() if proc.returncode == 0 else ""
+    if not value:
+        return None
+    value = os.path.expanduser(value)
+    if not os.path.isabs(value):
+        value = os.path.join(root, value)
+    return os.path.realpath(value)
+
+
+def providers_config_path() -> Optional[str]:
+    """The ``MULTI_LLM_PROVIDERS_CONFIG`` file as the registry resolves it
+    (CWD-anchored when relative), ``realpath``'d, or ``None`` when unset."""
+    try:
+        from .provider_registry import _resolve_env_path
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.provider_registry import _resolve_env_path  # type: ignore[no-redef]
+    try:
+        path = _resolve_env_path()
+    except Exception:  # noqa: BLE001 - a bad value is the loader's to report
+        return None
+    return os.path.realpath(str(path)) if path else None
+
+
+def extra_protected_paths(root: str, protected: Sequence[str]) -> List[str]:
+    """The paths that join the protected set beyond :data:`PROTECTED_ROOT_NAMES`
+    and the output folder (fix round 4, 2026-10-02): the hooks directory and
+    the providers config, each only when it resolves inside ``root``, is not
+    the root, and is not already under a protected path (a ``core.hooksPath``
+    of ``.git/hooks``, a config at ``.multi-llm/providers.yaml``)."""
+    extra: List[str] = []
+    for path in (git_hooks_path(root), providers_config_path()):
+        if not path or path == root or not _inside(path, root):
+            continue
+        if any(_inside(path, guarded) for guarded in [*protected, *extra]):
+            continue
+        extra.append(path)
+    return extra
+
+
 def repo_wide_plan(request: JailRequest) -> RepoWidePlan:
     """Enumerate the repository root for a ``repo-wide`` grant (F1 "Protected
     paths": prevention by enumeration, never a repo-root rule).
@@ -458,8 +509,10 @@ def repo_wide_plan(request: JailRequest) -> RepoWidePlan:
     Symlinks are resolved first: a top-level link gets no rule of its own
     (the wrapper refuses a symlink entry; a link into the tree is covered by
     its target's own entry, a link into the protected set or out of the
-    repository by nothing). A protected path gets no rule. An ancestor of a
-    protected path is descended and enumerated the same way. Every other
+    repository by nothing). A protected path — the fixed names, the output
+    folder, the hooks directory and the providers config when they lie
+    inside the repository (:func:`extra_protected_paths`) — gets no rule. An
+    ancestor of a protected path is descended and enumerated the same way. Every other
     entry gets a dir rule (directory) or a file rule (anything else), unless
     ``driver.write_paths`` denies it as a whole. The enumeration is a snapshot
     taken now: an entry made mid-dispatch is not writable by that child.
@@ -476,6 +529,7 @@ def repo_wide_plan(request: JailRequest) -> RepoWidePlan:
         out = os.path.realpath(request.output_dir)
         if _inside(out, root) and out != root:
             protected.append(out)
+    protected.extend(extra_protected_paths(root, protected))
     protected_set = set(protected)
     ancestors: set = set()
     for path in protected:
@@ -551,7 +605,8 @@ def repo_wide_declared_refusal(plan: RepoWidePlan, declared: Sequence[str]) -> O
                     f"{shown} lies under the protected path "
                     f"{render_home(guarded)}, which the plugin's Landlock jail "
                     f"keeps read-only on every repo-wide batch (.git, .codex, "
-                    f".multi-llm and this run's output folder). {REPO_WIDE_F6}"
+                    f".multi-llm, this run's output folder, the git hooks "
+                    f"directory and the providers config). {REPO_WIDE_F6}"
                 )
         for denied_path, pattern in plan.denied:
             if _inside(path, denied_path):
@@ -691,8 +746,35 @@ def wrap_argv(
     argv.extend(str(a) for a in resolved_argv)
     child_env = dict(env)
     child_env["TMPDIR"] = context.tmpdir
-    child_env.update(child_env_redirects(context))
+    child_env.update(merge_env_redirects(env, child_env_redirects(context)))
     return argv, child_env
+
+
+#: The redirects that are option *lists* rather than paths: the redirect is
+#: prepended to an inherited value instead of replacing it.
+_PREPENDED_REDIRECTS: Tuple[str, ...] = ("PYTEST_ADDOPTS",)
+
+
+def merge_env_redirects(
+    env: Mapping[str, str], redirects: Mapping[str, str]
+) -> Dict[str, str]:
+    """``redirects`` with each option-list variable prepended to the value
+    ``env`` already carries (fix round 4, 2026-10-02).
+
+    ``PYTEST_ADDOPTS`` is a list of options pytest reads ahead of argv, and
+    the parent's value (``-p no:cacheprovider --import-mode=importlib`` in a
+    CI job, say) used to be clobbered by the ``-o cache_dir=…`` redirect, so
+    the jailed pytest ran without the options the project relies on. The
+    redirect goes first and the inherited value keeps the last word, exactly
+    as a ``-o cache_dir`` the runner passes on argv does. A path redirect
+    (``UV_CACHE_DIR`` and the rest) replaces, as before.
+    """
+    merged = dict(redirects)
+    for name in _PREPENDED_REDIRECTS:
+        inherited = (env.get(name) or "").strip()
+        if name in merged and inherited:
+            merged[name] = f"{merged[name]} {inherited}"
+    return merged
 
 
 #: Placeholders a preview renders in place of per-attempt paths.
@@ -1219,15 +1301,41 @@ class JailDenials:
 
 _DENIAL_LINE = re.compile(r"permission denied|\[errno 13\]|os error 13|eacces", re.IGNORECASE)
 _PATH_TOKEN = re.compile(r"([^\s'\"`:,;()\[\]{}<>|]+)")
+#: The one shape every measured denial takes: the tool that was denied names
+#: itself at column 0, then a colon (``/bin/bash: line 1: f.txt: Permission
+#: denied``, ``sh: 1: cannot create f.txt: …``, ``rm: cannot remove 'x': …``,
+#: ``fatal: Unable to create '.git/index.lock': …``, ``sed: couldn't open
+#: temporary file ./sedAbC: …``, ``tee: x: …``, Python's terminal
+#: ``PermissionError: [Errno 13] …`` and node's ``Error: EACCES: permission
+#: denied, open 'x'``, bracketed when logged). A test suite's own report of
+#: a ``PermissionError`` has none of it: pytest indents the exception with
+#: ``E   ``, the short summary starts ``FAILED <id> - ``, a test id carries
+#: the words inside brackets, and a printed ``str(exc)`` starts with
+#: ``[Errno 13]`` (fix round 4, 2026-10-02: such a line used to resolve to a
+#: declared path or a new root name, and a nothing-moved batch read FAILED).
+_DENIAL_TOOL_PREFIX = re.compile(r"^\[?[\w./+-]+: ")
+#: perl's ``-i`` denial names no tool: ``Can't do inplace edit on f.txt:
+#: Cannot make temp name: Permission denied.`` (measured 2026-10-02, perl
+#: 5.38 against an unwritable directory), the temp-file-and-rename shape
+#: the plan-file grant denies, so it is read by its own shape.
+_PERL_INPLACE_DENIAL = re.compile(r"^Can't do inplace edit on (?P<path>.+?): .*permission denied", re.IGNORECASE)
 
 
 def _denied_paths_in(output: str) -> List[str]:
     """The paths named on ``Permission denied`` / ``[Errno 13]`` lines of one
-    command's output (``sh: 1: cannot create f.txt: Permission denied``,
-    ``PermissionError: [Errno 13] Permission denied: 'p.txt'``)."""
+    command's output, in the shapes the measured denials take (a tool naming
+    itself at column 0, :data:`_DENIAL_TOOL_PREFIX`): ``sh: 1: cannot create
+    f.txt: Permission denied``, ``PermissionError: [Errno 13] Permission
+    denied: 'p.txt'``. A line of test output that merely quotes such an
+    error names nothing."""
     found: List[str] = []
     for line in (output or "").splitlines():
-        if not _DENIAL_LINE.search(line):
+        perl = _PERL_INPLACE_DENIAL.match(line)
+        if perl is not None:
+            if perl.group("path") not in found:
+                found.append(perl.group("path"))
+            continue
+        if not _DENIAL_TOOL_PREFIX.match(line) or not _DENIAL_LINE.search(line):
             continue
         quoted = re.findall(r"'([^']+)'|\"([^\"]+)\"", line)
         candidates = [a or b for a, b in quoted]
@@ -1804,10 +1912,21 @@ class RungProbe:
 
 def canary_env(context: JailContext) -> Dict[str, str]:
     """The env keys the rung's canary reads for a write profile's controls:
-    the plan or tasks file under a file rule, the tasks dir under a dir rule;
-    for ``repo-wide`` (step 3b) the enumeration's first directory entry as the
-    positive control and the protected directories that exist (``.git/``, the
-    output folder, …) as extra negative targets. Empty for a read-only probe."""
+    the plan or tasks file under a file rule, the tasks dir under a dir rule
+    — each the dispatch's own declared target; for ``repo-wide`` (step 3b)
+    the protected directories that exist (``.git/``, the output folder, …) as
+    extra negative targets, and **no positive target in the tree**. The
+    canary's ``$TMPDIR`` write is the repo-wide grant's one positive control:
+    every enumerated entry is the same kind of rule, rendered by the same
+    :func:`allow_entries` and taken by the same wrapper, a required entry it
+    cannot grant is the wrapper's own refusal before anything runs, and a
+    write the jail wrongly denies at dispatch is a ``[JAIL_DENIED]`` failure
+    naming the path. A control on the enumeration's first sorted directory
+    (``.github``, ``.husky``, a root-owned volume dir — a path nobody proved
+    writable) failed on plain permissions where the jail was fine, refused
+    every implement on a working jail through the shared decision, and
+    created a file in the user's source tree on every ``status`` poll
+    (adversarial review, 2026-10-02). Empty for a read-only probe."""
     try:
         from .providers.codex import (
             CANARY_ENV_DENY_DIRS, CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE,
@@ -1819,12 +1938,18 @@ def canary_env(context: JailContext) -> Dict[str, str]:
     if context.write_scope == WRITE_SCOPE_REPO_WIDE:
         plan = repo_wide_plan(context.request)
         env: Dict[str, str] = {}
-        write_dir = plan.write_dir()
-        if write_dir:
-            env[CANARY_ENV_WRITE_DIR] = write_dir
         negatives = plan.negative_dirs()
+        for path in negatives:
+            if "\n" in path:
+                # The one byte the newline-separated hand-over cannot carry:
+                # a setup failure (the walk's ``unknown``), never a target
+                # split in two that the canary would read as denied.
+                raise ProbeSetupFailed(
+                    f"a negative target of the rung probe holds a newline and "
+                    f"cannot be handed to the canary: {render_home(path)!r}"
+                )
         if negatives:
-            env[CANARY_ENV_DENY_DIRS] = os.pathsep.join(negatives)
+            env[CANARY_ENV_DENY_DIRS] = "\n".join(negatives)
         return env
     if not context.write_scope or not context.target:
         return {}
@@ -1920,8 +2045,12 @@ __all__ = [
     "allow_entries",
     "canary_env",
     "child_env_redirects",
+    "merge_env_redirects",
     "repo_wide_declared_refusal",
     "repo_wide_env_redirects",
+    "extra_protected_paths",
+    "git_hooks_path",
+    "providers_config_path",
     "repo_wide_plan",
     "classify_denied_path",
     "compare_home",

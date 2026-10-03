@@ -170,7 +170,67 @@ DEPENDENCIES_LINE = re.compile(
 )
 
 
-def declared_dependencies(text: str) -> List[str]:
+#: Where the ids on a dependency line end and prose begins: the first ``(``,
+#: ``—``, ``;`` or ``:`` after the label. ``T001 (see Step 2)``, ``T001 — must
+#: land before 3 PM`` and ``T003 at runtime (0 otherwise)`` each declared the
+#: number in their prose as a task (adversarial review, 2026-10-02).
+_DEPENDENCY_PROSE = re.compile(r"[(—;:]")
+#: A line that declares no dependency at all, however it goes on: ``None``,
+#: ``N/A``, ``-`` — ``None (T001 is optional)`` declared ``T001``.
+_NO_DEPENDENCY = re.compile(r"^\s*(?:none|n/?a|-|—|–)(?![\w/])", re.IGNORECASE)
+#: One id, or a range of ids (``T001-T003`` names every id in it).
+_DEPENDENCY_ID = re.compile(r"\b(T?\d+)(?:\s*-\s*(T?\d+))?\b")
+#: A bullet under an empty label line (``**Dependencies**:`` then ``- T001``).
+_DEPENDENCY_BULLET = re.compile(r"^\s*[-*]\s+(?P<ids>.*)$")
+#: The most ids one range may expand to; a wider one is a typo, not a graph.
+_MAX_RANGE = 50
+
+
+def _ids_in(chunk: str, *, bare_numbers: bool) -> List[str]:
+    """The ids one dependency chunk (a line, or one bullet of a list) names."""
+    if _NO_DEPENDENCY.match(chunk):
+        return []
+    ids_only = _DEPENDENCY_PROSE.split(chunk, maxsplit=1)[0]
+    found: List[str] = []
+    for start, end in _DEPENDENCY_ID.findall(ids_only):
+        if not start.startswith("T") and not bare_numbers:
+            continue
+        if end and not end.startswith("T") and not bare_numbers:
+            end = None
+        digits_from, digits_to = start.lstrip("T"), (end or start).lstrip("T")
+        low, high = int(digits_from), int(digits_to)
+        if high < low or high - low >= _MAX_RANGE:
+            high = low
+        width = len(digits_from)
+        for number in range(low, high + 1):
+            found.append(f"T{number:0{width}d}")
+    return found
+
+
+def _bullets_after(text: str, position: int) -> List[str]:
+    """The id-only bullets right under an empty label line, as chunks.
+
+    Stops at the first line that is neither blank nor a bullet made of ids
+    (``- Files to modify: a.py`` ends the list; ``- T002 (optional)`` is in
+    it, its prose cut like a line's).
+    """
+    chunks: List[str] = []
+    for line in text[position:].split("\n")[1:]:
+        if not line.strip():
+            if chunks:
+                break
+            continue
+        bullet = _DEPENDENCY_BULLET.match(line)
+        if bullet is None:
+            break
+        ids_only = _DEPENDENCY_PROSE.split(bullet.group("ids"), maxsplit=1)[0]
+        if not re.fullmatch(r"\s*T?\d+(?:\s*-\s*T?\d+)?(?:\s*,\s*T?\d+(?:\s*-\s*T?\d+)?)*\s*,?\s*", ids_only):
+            break
+        chunks.append(bullet.group("ids"))
+    return chunks
+
+
+def declared_dependencies(text: str, *, bare_numbers: bool = False) -> List[str]:
     """The task ids a task's dependency lines declare, in order, no repeats.
 
     The one dependency reader: ``implement`` (``TaskDecomposer.parse_plan``)
@@ -179,16 +239,25 @@ def declared_dependencies(text: str) -> List[str]:
     "after", "requires" and "depends on" anywhere in the narrative, so
     "ticks after 3 frames" declared ``T3`` and "run it after T002 has warmed
     the cache" an edge to ``T002`` that implement batches by and
-    ``skip-dependents`` walks (three-host racing run, 2026-10-01). On the
-    line, ``T001`` and a bare ``1`` (a ``### Step 1`` plan's ``T1``) are both
-    ids.
+    ``skip-dependents`` walks (three-host racing run, 2026-10-01).
+
+    On the line, the ids end at the first ``(``, ``—``, ``;`` or ``:``
+    (:data:`_DEPENDENCY_PROSE`), a leading ``None``/``N/A``/``-`` declares
+    none whatever follows it, ``T001-T003`` is every id in the range, and a
+    label with nothing after it reads the id-only bullets right under it. A
+    bare ``1`` is an id only when ``bare_numbers`` says the document's own
+    ids are bare (a ``### Step 1`` plan, whose ``T1`` is how ``parse_plan``
+    names that step); in a ``T001``-numbered document it is prose — ``T001,
+    2 passes`` used to declare ``T2``.
     """
     deps: List[str] = []
     for line in DEPENDENCIES_LINE.finditer(text):
-        for token in re.findall(r"\bT?\d+\b", line.group("ids")):
-            normalized = token if token.startswith("T") else f"T{token}"
-            if normalized not in deps:
-                deps.append(normalized)
+        rest = line.group("ids")
+        chunks = [rest] if rest.strip() else _bullets_after(text, line.end())
+        for chunk in chunks:
+            for normalized in _ids_in(chunk, bare_numbers=bare_numbers):
+                if normalized not in deps:
+                    deps.append(normalized)
     return deps
 
 
@@ -217,6 +286,11 @@ class TaskDecomposer:
         # - "### T1: Title" or "## 1: Title"
         task_pattern = r'(?:#{2,3})\s*(?:Step|Task)?\s*([T]?\d+):?\s*(.+?)(?=\n#{2,3}\s*(?:Step|Task)?\s*[T]?\d|\n## |\Z)'
         matches = re.findall(task_pattern, plan_content, re.DOTALL | re.IGNORECASE)
+        # A bare number names a task only in a document whose own ids are
+        # bare (`### Step 1`); in a `T001`-numbered one it is prose.
+        bare_numbers = any(
+            not raw.strip().upper().startswith("T") for raw, _ in matches
+        )
 
         for task_id, content in matches:
             task_id = task_id.strip()
@@ -238,7 +312,9 @@ class TaskDecomposer:
             acceptance_criteria = self._extract_acceptance_criteria(description)
 
             # Extract structured metadata before stripping
-            depends_on = self._extract_dependencies(description)
+            depends_on = self._extract_dependencies(
+                description, bare_numbers=bare_numbers
+            )
             files_to_modify = self._extract_files(description, "modify")
             files_to_create = self._extract_files(description, "create")
             estimated_complexity = self._extract_complexity(description)
@@ -285,9 +361,11 @@ class TaskDecomposer:
         self._compute_execution_order()
         return tasks
 
-    def _extract_dependencies(self, description: str) -> List[str]:
+    def _extract_dependencies(
+        self, description: str, *, bare_numbers: bool = False
+    ) -> List[str]:
         """The task's declared dependencies: :func:`declared_dependencies`."""
-        return declared_dependencies(description)
+        return declared_dependencies(description, bare_numbers=bare_numbers)
 
     #: The metadata lines ``plan_updater`` renders for every generated task.
     _FILES_LINE = re.compile(
