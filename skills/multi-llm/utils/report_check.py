@@ -10,9 +10,11 @@ prints the next step as a block of marker lines above its result line::
     [NEXT_COMMAND_OPTIONAL_WHY] <why>
     [NEXT_COMMAND_OPTIONAL] <command>
 
-or ``[WORKFLOW_COMPLETE]`` alone. The model is told to end its report with each
-command in a fenced block, copied character for character, or with "Workflow
-complete.". This checks the copy, and only the copy:
+or ``[WORKFLOW_COMPLETE]``, followed by one ``[MANUAL_TASK] <id> <title>`` line per
+implement task the run deferred to the user. The model is told to end its report
+with each command in a fenced block, copied character for character, or with
+"Workflow complete." and those tasks listed. This checks the copy, and only the
+copy:
 
 * It reads the transcript entries since the last **real** user prompt: a user
   entry whose content is a string or carries a text block. A user entry that
@@ -28,8 +30,9 @@ complete.". This checks the copy, and only the copy:
   each ``[NEXT_COMMAND_OPTIONAL]`` one) is, byte for byte, a line inside a
   fenced code block of the final assistant message. Only the whitespace around
   a line is ignored, so a fence nested in a list item still counts. For
-  ``[WORKFLOW_COMPLETE]`` it passes when the message says "Workflow complete.".
-  A why line is never a command.
+  ``[WORKFLOW_COMPLETE]`` it passes when the message says "Workflow complete."
+  and names each ``[MANUAL_TASK]`` id as a word of its own. A why line is
+  never a command.
 * The final message is the text of the turn's trailing assistant entries. The
   ``Stop`` hook input's ``last_assistant_message`` is read too, when present,
   and the turn passes when either carries the copy: the hook can fire before
@@ -80,6 +83,9 @@ NEXT_COMMAND = "[NEXT_COMMAND] "
 NEXT_COMMAND_OPTIONAL = "[NEXT_COMMAND_OPTIONAL] "
 NEXT_COMMAND_OPTIONAL_WHY = "[NEXT_COMMAND_OPTIONAL_WHY] "
 WORKFLOW_COMPLETE = "[WORKFLOW_COMPLETE]"
+#: One per implement task the run deferred, under ``[WORKFLOW_COMPLETE]``:
+#: ``<id> <title>`` (``next_phase.MANUAL_TASK_MARKER``).
+MANUAL_TASK = "[MANUAL_TASK] "
 
 #: What the report says when the block is ``[WORKFLOW_COMPLETE]`` (§2.3).
 COMPLETE_SENTENCE = "Workflow complete."
@@ -125,6 +131,9 @@ class Block:
         self.command = command
         #: ``(why, command)`` pairs, in the order the block printed them.
         self.optional: List[tuple] = []
+        #: ``(id, title)`` pairs a ``[WORKFLOW_COMPLETE]`` block names: the
+        #: manual tasks the user still owes (``title`` may be ``""``).
+        self.manual: List[tuple] = []
 
     def commands(self) -> List[str]:
         """Every command the report has to carry: the primary one first."""
@@ -164,6 +173,10 @@ def find_blocks(text: str) -> List[Block]:
             if current is not None and not current.complete and command:
                 current.optional.append((pending_why, command))
             pending_why = None
+        elif line.startswith(MANUAL_TASK):
+            task_id, _, title = line[len(MANUAL_TASK):].strip().partition(" ")
+            if current is not None and current.complete and task_id:
+                current.manual.append((task_id, title.strip()))
     return blocks
 
 
@@ -207,11 +220,19 @@ def fenced_lines(text: str) -> Set[str]:
 def missing_commands(block: Block, message: str) -> List[str]:
     """The block's commands that *message* does not carry, in block order.
 
-    For a ``[WORKFLOW_COMPLETE]`` block the one "command" is the sentence, and
-    it is missing when the message does not contain it.
+    For a ``[WORKFLOW_COMPLETE]`` block the "commands" are the sentence, missing
+    when the message does not contain it, and the id of each manual task the
+    block names, missing when the message does not name it as a word of its
+    own (``T011``, not ``T0110``): a final message that lists them passes, and
+    one that says "Workflow complete." and drops them does not.
     """
     if block.complete:
-        return [] if COMPLETE_SENTENCE in message else [COMPLETE_SENTENCE]
+        missing = [] if COMPLETE_SENTENCE in message else [COMPLETE_SENTENCE]
+        for task_id, _title in block.manual:
+            named = re.search(rf"(?<![\w]){re.escape(task_id)}(?![\w])", message)
+            if named is None and task_id not in missing:
+                missing.append(task_id)
+        return missing
     carried = fenced_lines(message)
     missing: List[str] = []
     for command in block.commands():
@@ -223,12 +244,37 @@ def missing_commands(block: Block, message: str) -> List[str]:
 def block_reason(block: Block, missing: Sequence[str]) -> str:
     """The text the model reads when the hook blocks its stop."""
     if block.complete:
+        if not block.manual:
+            return (
+                "multi-llm report check: the last phase result in this turn printed "
+                f"{WORKFLOW_COMPLETE}, and your final message does not say "
+                f'"{COMPLETE_SENTENCE}". Reply now with your report\'s '
+                f'`### Next Steps` section, saying "{COMPLETE_SENTENCE}" and '
+                "carrying no multi-llm command."
+            )
+        # The reply replaces the final message, so it is told the whole
+        # section again, the tasks it already named included.
+        lacks = []
+        if COMPLETE_SENTENCE in missing:
+            lacks.append(f'does not say "{COMPLETE_SENTENCE}"')
+        dropped = [item for item in missing if item != COMPLETE_SENTENCE]
+        if dropped:
+            lacks.append(
+                "does not name the manual "
+                + ("task" if len(dropped) == 1 else "tasks")
+                + f" {', '.join(dropped)}"
+            )
+        listed = "\n".join(
+            f"- {task_id} {title}".rstrip() for task_id, title in block.manual
+        )
         return (
             "multi-llm report check: the last phase result in this turn printed "
-            f"{WORKFLOW_COMPLETE}, and your final message does not say "
-            f'"{COMPLETE_SENTENCE}". Reply now with your report\'s '
-            f'`### Next Steps` section, saying "{COMPLETE_SENTENCE}" and '
-            "carrying no multi-llm command."
+            f"{WORKFLOW_COMPLETE} with the manual tasks the run deferred to the "
+            f"user, and your final message {' and '.join(lacks)}. Reply now "
+            f"with your report's `### Next Steps` section, saying "
+            f'"{COMPLETE_SENTENCE}" and then listing each of these manual '
+            "tasks, its id and title, as the user's to do (the plugin will not "
+            "run them), carrying no multi-llm command:\n\n" + listed
         )
     noun = "command" if len(missing) == 1 else "commands"
     parts = [

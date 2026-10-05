@@ -44,6 +44,11 @@
       "description": "Per-task reason for current status (e.g., why a task was skipped)",
       "additionalProperties": { "type": ["string", "null"] }
     },
+    "task_titles": {
+      "type": "object",
+      "description": "Implement task titles by task id, recorded when implement decomposes the task list (names a deferred task on completion)",
+      "additionalProperties": { "type": "string" }
+    },
     "human_task_strategy": {
       "type": "string",
       "description": "Chosen strategy for handling human tasks during implementation",

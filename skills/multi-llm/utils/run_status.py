@@ -530,6 +530,19 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
         lines.append(f"{prefix}suggested next: {payload['suggested_next']}{suffix}")
     for notice in payload.get("notices", []) or []:
         lines.append(f"{prefix}notice: {notice}")
+    # The implement tasks the run deferred (`phases.implement.manual_tasks`,
+    # read from state.json). A workflow with nothing left to suggest printed
+    # no trailer at all, so a finished plan with two manual playthroughs still
+    # owed read as done (2026-10-04, OpenCode racing re-run).
+    manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
+    if isinstance(manual, list) and manual:
+        named = "; ".join(
+            f"{entry['id']} {entry['title']}" if entry.get("title") else str(entry["id"])
+            for entry in manual
+            if isinstance(entry, dict) and entry.get("id")
+        )
+        if named:
+            lines.append(f"{prefix}manual tasks left for you: {named}")
     return lines
 
 

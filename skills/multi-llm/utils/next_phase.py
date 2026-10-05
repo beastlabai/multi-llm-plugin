@@ -43,6 +43,9 @@ NEXT_COMMAND_MARKER = "[NEXT_COMMAND]"
 NEXT_COMMAND_OPTIONAL_WHY_MARKER = "[NEXT_COMMAND_OPTIONAL_WHY]"
 NEXT_COMMAND_OPTIONAL_MARKER = "[NEXT_COMMAND_OPTIONAL]"
 WORKFLOW_COMPLETE_MARKER = "[WORKFLOW_COMPLETE]"
+#: One line per deferred implement task under ``[WORKFLOW_COMPLETE]``: the id,
+#: then the title when ``state.json`` recorded one. Not a command marker.
+MANUAL_TASK_MARKER = "[MANUAL_TASK]"
 #: One line above the block when the command it names is certain to be refused
 #: (``check_workflow_prerequisites.repo_wide_sandbox_warning``). Not a command
 #: marker: no consumer of the block reads it as one.
@@ -88,6 +91,21 @@ class OptionalStep:
 
 
 @dataclass(frozen=True)
+class ManualTask:
+    """One implement task the run deferred to the user (``state.json``: ``skipped``)."""
+
+    id: str
+    title: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"id": self.id, "title": self.title}
+
+    def line(self) -> str:
+        """``<id> <title>``, or the id alone when no title was recorded."""
+        return f"{self.id} {self.title}" if self.title else self.id
+
+
+@dataclass(frozen=True)
 class NextPhase:
     """The builder's answer: a command to run next, or ``complete``.
 
@@ -103,15 +121,25 @@ class NextPhase:
     #: command is certain to hit), rendered above the block and never part of
     #: ``user_next_step``.
     warning: Optional[str] = None
+    #: On a ``complete`` answer only: the implement tasks the run deferred,
+    #: which the plugin will never run and the user still owes (2026-10-04,
+    #: OpenCode: `[WORKFLOW_COMPLETE]` beside two deferred manual playthroughs
+    #: said nothing about them).
+    manual_tasks: Tuple[ManualTask, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
 
-        Complete is exactly ``{"phase": null, "command": null, "complete":
-        true}``; otherwise ``optional_before`` is present only when non-empty.
+        Complete is ``{"phase": null, "command": null, "complete": true}``,
+        plus ``manual_tasks`` (``[{id, title}]``) when the run deferred any —
+        additive, so a reader that knows only the three keys reads the same
+        completion; otherwise ``optional_before`` is present only when non-empty.
         """
         if self.complete:
-            return {"phase": None, "command": None, "complete": True}
+            payload = {"phase": None, "command": None, "complete": True}
+            if self.manual_tasks:
+                payload["manual_tasks"] = [task.to_dict() for task in self.manual_tasks]
+            return payload
         payload: Dict[str, Any] = {"phase": self.phase, "command": self.command}
         if self.optional_before:
             payload["optional_before"] = [step.to_dict() for step in self.optional_before]
@@ -119,7 +147,22 @@ class NextPhase:
         return payload
 
 
-_COMPLETE = NextPhase(phase=None, command=None, complete=True)
+def _complete(phases: Mapping[str, Mapping[str, Any]]) -> NextPhase:
+    """The ``complete`` answer, naming the implement tasks the run deferred.
+
+    Read off the workflow payload's ``implement`` entry
+    (``check_workflow_prerequisites.get_workflow_status``), which reads them
+    from ``state.json``: no status logic of this module's own.
+    """
+    entries = (phases.get("implement") or {}).get("manual_tasks") or ()
+    return NextPhase(
+        phase=None, command=None, complete=True,
+        manual_tasks=tuple(
+            ManualTask(str(entry.get("id")), entry.get("title") or None)
+            for entry in entries
+            if isinstance(entry, Mapping) and entry.get("id")
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +436,7 @@ def next_phase_commands(
     if start is None:
         primary = workflow.get("suggested_next")
         if primary is None:
-            return _COMPLETE
+            return _complete(phases)
         return NextPhase(
             phase=primary,
             command=command_for(primary),
@@ -469,7 +512,7 @@ def next_phase_commands(
     if primary is None:
         # An optional phase never keeps a workflow open, and one the walk did
         # not reach is never suggested: no `optional_before` on completion.
-        return _COMPLETE
+        return _complete(phases)
     return NextPhase(
         phase=primary,
         command=command_for(primary),
@@ -630,13 +673,17 @@ def resume_command(
 def render_next_phase_lines(answer: NextPhase) -> List[str]:
     """The block's lines, primary first (§2.2(2), §2.1 "Primary first").
 
-    Complete renders only ``[WORKFLOW_COMPLETE]``. Otherwise the
-    ``[NEXT_COMMAND]`` line comes first, then each ``optional_before`` entry's
-    ``[NEXT_COMMAND_OPTIONAL_WHY]`` / ``[NEXT_COMMAND_OPTIONAL]`` pair in the
-    answer's order. A command line holds the command and nothing else.
+    Complete renders ``[WORKFLOW_COMPLETE]``, then one ``[MANUAL_TASK]`` line
+    per task the run deferred to the user (none when it deferred nothing).
+    Otherwise the ``[NEXT_COMMAND]`` line comes first, then each
+    ``optional_before`` entry's ``[NEXT_COMMAND_OPTIONAL_WHY]`` /
+    ``[NEXT_COMMAND_OPTIONAL]`` pair in the answer's order. A command line holds
+    the command and nothing else.
     """
     if answer.complete:
-        return [WORKFLOW_COMPLETE_MARKER]
+        return [WORKFLOW_COMPLETE_MARKER] + [
+            f"{MANUAL_TASK_MARKER} {task.line()}" for task in answer.manual_tasks
+        ]
     lines = []
     if answer.warning:
         lines.append(f"{RUNNER_WARNING_MARKER} {answer.warning}")

@@ -1210,6 +1210,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     decomposer = TaskDecomposer()
     tasks = decomposer.parse_plan(tasks_content)
     print(f"Found {len(tasks)} tasks")
+    # Both legs pass here, so a task the run defers (a human task, or a
+    # dependent `skip-dependents` skips with it) can be named by its title
+    # once the workflow completes, not only by its id — the native leg's host
+    # records `skipped` itself and never writes a title (2026-10-04).
+    if state.record_task_titles({task.id: task.title for task in tasks}):
+        state.save()
 
     # Restore previous statuses if resuming
     if args.resume:
