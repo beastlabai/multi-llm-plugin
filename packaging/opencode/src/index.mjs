@@ -742,7 +742,7 @@ function normalizePlan(plan, anchor) {
  * /tmp/…/plans/racing-game.md`). The child runs in the anchor, so a relative
  * spelling resolves to the same file there, and the launch passes this one.
  * Everything this server composes for itself (the polls, the abort) keeps the
- * absolute path.
+ * absolute path; the tool calls it hands back carry this one (`handBackTyped`).
  */
 function planSpelling(plan) {
   if (!plan) return ""
@@ -2322,6 +2322,34 @@ function typedPlan(plan, values) {
     : plan
 }
 
+/** The result keys that hand the model a tool call to send back. */
+const HANDED_BACK_CALLS = ["next", "abort_command"]
+
+/**
+ * Every tool call *outcome* hands back names the plan as this call typed it.
+ *
+ * This plugin names the plan absolutely inside its own loop (the polls, the
+ * abort dispatch, a mechanical continuation), and those spellings used to leave
+ * in a returned `next` and `abort_command`. The call the model sent back then
+ * *typed* the absolute path, so its resume command and its re-spelled output
+ * lines carried it too (racing re-run 3, 2026-10-05, on the codex route). The
+ * call runs in the same anchor, so the typed spelling names the same file.
+ * The port of `hand_back_typed`.
+ */
+function handBackTyped(outcome, values, surface) {
+  for (const key of HANDED_BACK_CALLS) {
+    const call = outcome?.[key]
+    if (!call?.args || typeof call.args.plan !== "string") continue
+    const plan = typedPlan(call.args.plan, values)
+    if (plan === call.args.plan) continue
+    const args = { ...call.args, plan }
+    outcome[key] = { ...call, args }
+    if (typeof call.human === "string") {
+      outcome[key].human = describeCall(args, surface)
+    }
+  }
+}
+
 /**
  * Whether two plan paths name one file, symlinks followed on both sides.
  *
@@ -3024,6 +3052,7 @@ async function execute(args, ctx, surface, client) {
     const outcome = await runWorkflow({
       row, values, surface, ctx, client, env, uv, anchor, relayState,
     })
+    handBackTyped(outcome, values, surface)
     // Numbers, not a sentence (`relayCounts`): what the mid-run channel was
     // asked to do, on the one surface a user can hand back.
     const relays = relayCounts(relayState)
@@ -3170,6 +3199,7 @@ const __testing = {
   composeSpawnArgv,
   expandHome,
   findUv,
+  handBackTyped,
   flagMatches,
   injectCommand,
   isMechanical,

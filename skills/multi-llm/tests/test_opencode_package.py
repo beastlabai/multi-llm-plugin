@@ -4833,6 +4833,84 @@ class TestResumeCommand:
             assert f'"{word}"' not in source, word
 
 
+#: Every phase the surface knows, read from the surface (never retyped), so a
+#: phase added later is covered the day it lands.
+PHASE_ROWS = [row for row in pkg_build.cli_surface()["modes"] if row.get("phase")]
+
+
+class TestTheTypedPlanSurvivesEveryFailure:
+    """Racing re-run 3 (2026-10-05, codex 06): a tool call the route handed back
+    named the plan absolutely, the model sent it back as given, and the run's
+    failure came back with a `resume_command` carrying the absolute path for a
+    plan the user typed relative. Every phase, and every tool call this route
+    hands back (`next`, `abort_command`, `options`), keeps the plan as typed."""
+
+    PLAN = "plans/p.md"
+    LAUNCH = {"exit": 0, "stdout": [
+        "run_id: R", "log: /l", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+
+    def _args(self, row):
+        takes_question = "<question>" in row["positionals"]
+        return {"mode": row["name"], "plan": self.PLAN,
+                "question": "why?" if takes_question else "", "extra_flags": []}
+
+    def _failed(self, row, absolute):
+        prefix = "uv run --frozen --no-dev --project /skill -- python /skill/multi_llm.py"
+        body = {"mode": row["name"], "phase": row["phase"], "state": "needs-human",
+                "exit": 3, "artifacts": [], "next": None}
+        return {"exit": 3, "stdout": [
+            f"      resume with: {prefix} {row['name']} {absolute} --host opencode "
+            "--detach --yes --resume",
+            "MULTI_LLM_RESULT: " + json.dumps(body)]}
+
+    @pytest.mark.parametrize("row", PHASE_ROWS, ids=[row["name"] for row in PHASE_ROWS])
+    def test_a_failed_phase_resumes_with_the_plan_as_typed(
+        self, built_package, uv_stub, tmp_path, row
+    ):
+        absolute = str(tmp_path / "plans" / "p.md")
+        result, _ = uv_stub.run(built_package, self._args(row),
+                                [self.LAUNCH, self._failed(row, absolute)])
+        assert self.PLAN in result["resume_command"]
+        assert absolute not in result["resume_command"]
+        assert result["user_next_step"] is None
+        for option in result["options"]:
+            if "args" in option:
+                assert option["args"]["plan"] == self.PLAN, option
+        assert absolute not in result["output"]
+
+    @pytest.mark.parametrize("row", PHASE_ROWS, ids=[row["name"] for row in PHASE_ROWS])
+    def test_a_stopped_run_hands_back_its_abort_with_the_plan_as_typed(
+        self, built_package, uv_stub, tmp_path, row
+    ):
+        live = {"exit": 2, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"running","exit":2,"artifacts":[],"next":null}']}
+        aborted = {"exit": 0, "stdout": [
+            "aborted", 'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+            '"artifacts":[],"next":null}']}
+        result, calls = uv_stub.run(
+            built_package, self._args(row), [self.LAUNCH, live, aborted],
+            extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1"})
+        assert result["ok"] is False and result["run_id"] == "R"
+        assert result["abort_command"]["args"]["plan"] == self.PLAN
+        # Inside the plugin the abort it dispatched still names the file absolutely.
+        abort = [_dispatcher_argv(c) for c in calls if "--abort" in _dispatcher_argv(c)]
+        assert abort and abort[0][1] == str(tmp_path / "plans" / "p.md")
+
+    def test_an_unfollowed_next_names_the_plan_as_typed(
+        self, built_package, uv_stub, tmp_path
+    ):
+        absolute = str(tmp_path / "plans" / "p.md")
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":'
+            + json.dumps(f"uv run -- python multi_llm.py generate-tasks {absolute}")
+            + "}"]}
+        result, _ = uv_stub.run(
+            built_package, {"mode": "review-plan", "plan": self.PLAN, "question": "",
+                            "extra_flags": []}, [self.LAUNCH, done])
+        assert result["next"]["args"]["plan"] == self.PLAN
+        assert absolute not in result["next"]["human"]
+
+
 class TestAFailedResultSaysWhatTheUserCanRun:
     """Racing re-run 2026-10-04 (opencode #3/#4): a failed generate-tasks came
     back with the same re-invoke option twice, its plan absolute, the
