@@ -558,7 +558,11 @@ def render_run_text(
     plan_path: Path,
     workflow: Optional[Dict[str, Any]],
     scope: Optional[str] = None,
+    resume_workflow: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
+    # The workflow payload the resume block may consult without rendering the
+    # workflow lines above it (`--view run`'s terminal read); see `_resume_lines`.
+    resume_workflow = workflow if workflow is not None else resume_workflow
     lines = ["runs ({phase}/.status.json) — is a launched run still alive:"]
     if not views:
         lines.append(f"  no run recorded for {scope or 'this plan'}")
@@ -712,7 +716,7 @@ def render_run_text(
             # so the resume command is handed over now rather than after the
             # close-out. `reason` carries what the probe saw.
             lines.append(f"      {view.get('reason')}")
-            lines.extend(_resume_lines(view, plan_path))
+            lines.extend(_resume_lines(view, plan_path, resume_workflow))
         if view["verdict"] in (detach.VERDICT_FAILED, detach.VERDICT_ABORTED):
             lines.append(f"      exit_code: {run.get('exit_code')}")
             lines.append(f"      error:     {run.get('error')}")
@@ -720,7 +724,7 @@ def render_run_text(
             if tail:
                 lines.append("      last log lines:")
                 lines.append(tail)
-            lines.extend(_resume_lines(view, plan_path))
+            lines.extend(_resume_lines(view, plan_path, resume_workflow))
     return lines
 
 
@@ -1968,9 +1972,74 @@ def _reason_explanation(reason_code: Optional[str]) -> Optional[str]:
     return _REASON_EXPLANATION.get(reason_code)
 
 
-def _resume_lines(view: Dict[str, Any], plan_path: Path) -> List[str]:
+#: What a write run refused before its first batch gets in place of a
+#: ``resume with:`` command (racing re-run 2026-10-04, codex #5: implement
+#: refused on the jail before batch 1 offered ``--resume``, which repeats the
+#: refusal). No command: the way forward is the remedy the refusal names.
+NO_RESUME_BEFORE_DISPATCH = (
+    "no resume: nothing was dispatched and the phase has no progress on record, "
+    "so a resume would only repeat this stop; fix what the error above names "
+    "first, then run the phase again"
+)
+
+
+def _dispatched_nothing(view: Dict[str, Any]) -> bool:
+    """A write run whose own mirror records no dispatched and no ``ok`` batch.
+
+    ``progress.write_subagents.batches_dispatched`` is appended per dispatched
+    batch (``write_batch_scheduler``), and ``claim_run`` drops a predecessor's
+    ``progress`` with its ``run``, so an empty list beside this run record
+    means this run sent nothing. A mirror without the key says nothing.
+    """
+    progress = view.get("progress") or {}
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    if not isinstance(mirror, dict):
+        return False
+    dispatched = mirror.get("batches_dispatched")
+    if not isinstance(dispatched, list) or dispatched:
+        return False
+    rows = mirror.get("tasks") if isinstance(mirror.get("tasks"), list) else []
+    return not any((row or {}).get("status") == "ok" for row in rows)
+
+
+def _phase_in_progress(
+    view: Dict[str, Any], plan_path: Path, workflow: Optional[Dict[str, Any]],
+) -> bool:
+    """Whether the workflow view shows *view*'s phase ``in_progress``.
+
+    Read from *workflow* when the caller has it, else from ``state.json`` once
+    (this is the failure path only). A read that fails answers ``True``, which
+    keeps the ``resume with:`` line this predicate would otherwise remove.
+    """
+    if workflow is None:
+        try:
+            workflow = _workflow_payload(plan_path)
+        except Exception:  # noqa: BLE001 - advisory: keep the old line
+            return True
+    phase = view.get("phase") or cli_common._modes().phase_for(
+        str((view.get("run") or {}).get("mode") or ""))
+    entry = (workflow.get("phases") or {}).get(phase) or {}
+    return entry.get("status") == "in_progress"
+
+
+def _resume_lines(
+    view: Dict[str, Any], plan_path: Path,
+    workflow: Optional[Dict[str, Any]] = None,
+) -> List[str]:
     """The shaped resume block: the repair first when there is one, then the
-    single ``resume with:`` command, then what it costs."""
+    single ``resume with:`` command, then what it costs.
+
+    A write run that dispatched nothing, under a phase with no progress on
+    record, gets :data:`NO_RESUME_BEFORE_DISPATCH` instead: its ``--resume``
+    would repeat the refusal, and a tool route scrapes every command printed
+    here into an option.
+    """
+    mode = str(view["run"].get("mode") or view.get("phase") or "")
+    if (
+        mode in _WRITE_MODES and _dispatched_nothing(view)
+        and not _phase_in_progress(view, plan_path, workflow)
+    ):
+        return [f"      {NO_RESUME_BEFORE_DISPATCH}"]
     shape, repair, redispatch, kept = _resume_shape(view)
     lines: List[str] = []
     if shape == cli_common.SHAPE_REPAIR:
@@ -2493,7 +2562,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lines.append("")
         lines += render_run_text(
             views, plan_path=plan_path, workflow=workflow,
-            scope=_scope_label(args),
+            scope=_scope_label(args), resume_workflow=terminal_workflow,
         )
         # Plan §7.4a2: after the phase views, never silently dropped.
         lines += _ignored_text(
