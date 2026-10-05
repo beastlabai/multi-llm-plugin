@@ -220,8 +220,10 @@ class TestDoctorWithAPassingJail:
             "it stops stray writes, not the model",
             "network access is not confined on this rung, unlike codex's own workspace-write",
             "repo-wide edits (apply-code-fixes, implement) run on it too, with "
-            ".git/, .codex/, .multi-llm/ and the run's output folder kept "
-            "read-only (step 3b)",
+            "the whole repository writable — .git/, .codex/, .multi-llm/ and the "
+            "run's output folder included; the model is told to leave them alone "
+            "and the batch is checked afterwards, nothing is backed up (root "
+            "grant, 2026-10-05)",
             "a chat in danger-full-access posture may run writes unsandboxed only when this rung fails",
         ):
             assert clause in write_row, clause

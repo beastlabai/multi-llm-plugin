@@ -97,7 +97,7 @@ record = {{
     "pid": os.getpid(), "pgid": os.getpgid(0),
     "env": {{k: os.environ.get(k) for k in (
         "TMPDIR", "MULTI_LLM_CANARY_SEEDED", "MULTI_LLM_CANARY_WRITE_FILE",
-        "MULTI_LLM_CANARY_WRITE_DIR", "MULTI_LLM_CANARY_DENY_DIRS", "CODEX_HOME",
+        "MULTI_LLM_CANARY_WRITE_DIR", "MULTI_LLM_CANARY_WORKDIR", "CODEX_HOME",
         "GIT_OPTIONAL_LOCKS", "UV_CACHE_DIR", "PYTEST_ADDOPTS")}},
     "tmpdir_exists": os.path.isdir(os.environ.get("TMPDIR") or "/nonexistent"),
 }}
@@ -578,12 +578,13 @@ class TestTheWriteGate:
         assert "its probe gave no answer" in str(excinfo.value)
         assert executor._SANDBOX_DECISIONS == {}
 
-    def test_repo_wide_takes_the_rung_with_the_enumerations_controls(self, repo, wrapper, gate):
-        """Step 3b: a repo-wide grant walks the rung like the step-3 scopes.
-        Its probe hands the canary no positive target in the tree (the
-        $TMPDIR write is the control, 2026-10-02) and its extra negative
-        targets are the protected directories that exist (`.multi-llm/`
-        here: the probe's own workdir makes it)."""
+    def test_repo_wide_takes_the_rung_with_the_root_rule(self, repo, wrapper, gate):
+        """Step 3b, revised 2026-10-05: a repo-wide grant walks the rung like
+        the step-3 scopes, with one dir rule on the repository root. Its
+        probe hands the canary no positive target in the tree (the $TMPDIR
+        write is the control) and moves the canary's negative controls to a
+        directory outside the repository (the root rule makes the in-repo
+        `.multi-llm/tmp` writable)."""
         (repo / "src").mkdir()
         request = _plan_request(repo, scope="repo-wide", kind="implement")
         assert gate(_JailLadder(), PROFILE_AGENT_WRITE, request) == "plugin-landlock"
@@ -593,17 +594,16 @@ class TestTheWriteGate:
         assert executor.sandbox_rung("fakecodex:m", PROFILE_AGENT_WRITE, write_scope="plan-file") is None
         [probe] = wrapper.records(probe=True)
         assert probe["env"]["MULTI_LLM_CANARY_WRITE_DIR"] is None
-        assert os.path.realpath(repo / ".multi-llm") in probe["env"]["MULTI_LLM_CANARY_DENY_DIRS"]
         assert probe["env"]["MULTI_LLM_CANARY_WRITE_FILE"] is None
+        workdir = probe["env"]["MULTI_LLM_CANARY_WORKDIR"]
+        assert workdir and not workdir.startswith(os.path.realpath(repo) + os.sep)
+        assert not os.path.exists(workdir)  # removed with the probe
         assert probe["env"]["UV_CACHE_DIR"] == os.path.join(probe["env"]["TMPDIR"], "uv-cache")
-        assert f"dir:{os.path.realpath(repo / 'src')}" in probe["allow"]
-        # `plans/` holds the output folder: descended, never ruled; the root never.
-        assert f"dir:{os.path.realpath(repo / 'plans')}" not in probe["allow"]
-        assert f"file:{os.path.realpath(repo / 'plans' / 'plan.md')}" in probe["allow"]
-        assert f"dir:{os.path.realpath(repo)}" not in probe["allow"]
+        in_repo = [a for a in probe["allow"] if os.path.realpath(repo) in a]
+        assert in_repo == [f"dir:{os.path.realpath(repo)}"]
         line = executor.write_rung_notice("fakecodex:m", request)
         assert "write phase, scope repo-wide" in line and "read-only" not in line
-        assert ".git, .codex, .multi-llm and the run's output folder" in line
+        assert ".git, .codex, .multi-llm and the run's output folder included" in line
 
     def test_plan_file_and_repo_wide_are_decided_separately(self, repo, wrapper, gate):
         assert gate(_JailLadder(), PROFILE_AGENT_WRITE, _plan_request(repo)) == "plugin-landlock"

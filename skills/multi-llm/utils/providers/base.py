@@ -243,9 +243,9 @@ def write_consent_allows(
 #: rung"). ``plan-file`` is ``apply-suggestions`` (one file rule on the plan),
 #: ``tasks`` is ``apply-task-suggestions`` (a dir rule on the default tasks
 #: directory, else a file rule on the tasks file), ``repo-wide`` is
-#: ``apply-code-fixes``/``implement`` (one rule per enumerated repository
-#: entry outside ``.git``, ``.codex``, ``.multi-llm`` and the run's output
-#: folder; step 3b).
+#: ``apply-code-fixes``/``implement`` (one dir rule on the repository root —
+#: ``.git``, ``.codex``, ``.multi-llm`` and the run's output folder included,
+#: instruction-level hands-off; step 3b, revised 2026-10-05).
 WRITE_SCOPE_PLAN_FILE = "plan-file"
 WRITE_SCOPE_TASKS = "tasks"
 WRITE_SCOPE_REPO_WIDE = "repo-wide"
@@ -253,9 +253,10 @@ WRITE_SCOPES: Tuple[str, ...] = (
     WRITE_SCOPE_PLAN_FILE, WRITE_SCOPE_TASKS, WRITE_SCOPE_REPO_WIDE,
 )
 #: The scopes the rung serves: ``plan-file`` and ``tasks`` since step 3
-#: (2026-09-30), ``repo-wide`` since step 3b (2026-10-02, a user decision:
-#: the protected-path enumeration and step 1b's toolchain decision landed
-#: first, and the denied-write cases pass on the real jail).
+#: (2026-09-30), ``repo-wide`` since step 3b (2026-10-02, a user decision;
+#: since 2026-10-05 as one dir rule on the repository root, another user
+#: decision — the per-entry enumeration refused the racing re-run's
+#: root-level ``index.html`` before any dispatch).
 WRITE_SCOPES_ON_RUNG: Tuple[str, ...] = WRITE_SCOPES
 #: The scopes F5's consent (plan step 6) may take to the uncontained rung when
 #: the jail could not take the dispatch: the step-3 scopes alone. ``repo-wide``
@@ -403,17 +404,14 @@ class JailRequest:
     ``target``, because a dir rule there would grant sibling plans or
     ``state.json`` (``landlock_dispatch.default_tasks_dir`` decides).
 
-    A ``repo-wide`` request (plan step 3b, 2026-10-02) carries no target. Its
-    grant is the enumeration of the repository root at dispatch
-    (``landlock_dispatch.repo_wide_plan``): ``output_dir`` is this run's
-    output folder, protected beside ``.git``, ``.codex`` and ``.multi-llm``;
-    ``deny_patterns`` is ``driver.write_paths.deny``, whose whole-entry
-    matches get no rule; ``declared`` is the batch's declared file set
-    (absolute, resolved), which makes the entries covering it required and
-    is what ``jail_denied_edits`` counts as in scope. The lane fills
-    ``declared`` per task with ``dataclasses.replace``; the phase-level
-    request the preflight probes with carries none, so no per-task path ever
-    reaches a cache key.
+    A ``repo-wide`` request (plan step 3b, 2026-10-02; revised 2026-10-05)
+    carries no target. Its grant is one dir rule on ``repo_root``
+    (``landlock_dispatch.repo_wide_entry``), so the whole repository is
+    writable inside the jail; ``output_dir`` is this run's output folder,
+    which the developer message tells the model to leave alone beside
+    ``.git``, ``.codex`` and ``.multi-llm`` (instruction-level: nothing is
+    backed up around a batch, a user decision). No per-task path rides the
+    request, so none reaches a cache key.
     """
 
     repo_root: str
@@ -422,8 +420,6 @@ class JailRequest:
     target: Optional[str] = None
     target_dir: Optional[str] = None
     output_dir: Optional[str] = None
-    deny_patterns: Tuple[str, ...] = ()
-    declared: Tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -467,10 +463,6 @@ class JailContext:
     @property
     def output_dir(self) -> Optional[str]:
         return self.request.output_dir
-
-    @property
-    def declared(self) -> Tuple[str, ...]:
-        return self.request.declared
 
 
 def rung_removed_for_version(rung: "SandboxRung", version: Optional[str]) -> bool:
@@ -840,11 +832,11 @@ def sandbox_incidental_notice_text(
         text += f"; {walk_clause}"
     if write_scope == WRITE_SCOPE_REPO_WIDE:
         phase = (
-            f"write phase, scope repo-wide: the repository {target or ''} "
-            f"outside .git, .codex, .multi-llm and the run's output folder is "
-            f"what it may write (enumerated per dispatch; the root itself and "
-            f"the policy's denied entries excluded), and network access is "
-            f"not confined"
+            f"write phase, scope repo-wide: the whole repository {target or ''} "
+            f"is what it may write (one rule on the root — .git, .codex, "
+            f".multi-llm and the run's output folder included; the model is "
+            f"told to leave them alone and the sweep checks afterwards), and "
+            f"network access is not confined"
         )
     elif write_scope:
         phase = (

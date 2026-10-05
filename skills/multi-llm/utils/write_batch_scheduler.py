@@ -42,7 +42,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, field, replace as _dc_replace
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
@@ -811,10 +811,10 @@ class WriteBatchScheduler:
             lie under the repo root, or nothing runs. For the ``plan-file`` and
             ``tasks`` scopes it is the grant's target, and every task's declared
             set must resolve to exactly it, on every rung, before its snapshot.
-            ``None`` for implement and apply-code-fixes (``repo-wide`` takes its
-            entries from the step-3b enumeration of the repository root, with
-            this run's output folder and ``driver.write_paths.deny`` on the
-            request, never from a target); a ``plan-file``/``tasks`` phase
+            ``None`` for implement and apply-code-fixes (``repo-wide`` is one
+            dir rule on the repository root, with this run's output folder on
+            the request for the developer message, never a target); a
+            ``plan-file``/``tasks`` phase
             built without one carries no grant, and the executor refuses it on
             the rung.
     """
@@ -885,8 +885,6 @@ class WriteBatchScheduler:
         # never a per-task path, so nothing a task file says can widen it.
         self.write_scope = write_scope_for_kind(kind)
         self.write_target = self._checked_write_target(write_target)
-        # The policy first: a repo-wide request carries its deny list (an
-        # entry the policy denies as a whole gets no jail rule, step 3b).
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
         self.jail_request = self._build_jail_request()
         self.audit = AuditLog(self.phase_dir)
@@ -1007,10 +1005,10 @@ class WriteBatchScheduler:
         self._jail_notes: Dict[str, str] = {}
         #: The denials themselves, for the report row.
         self._jail_denials: Dict[str, Dict[str, Any]] = {}
-        #: Step 3b: ``task_id -> JailRequest`` as handed to the executor (the
-        #: phase's request plus the task's declared set under ``repo-wide``),
-        #: for the jail verdict's in-grant reading.
-        self._dispatch_requests: Dict[str, JailRequest] = {}
+        #: Root grant (2026-10-05): ``task_id -> git_utils.git_metadata_fingerprint``
+        #: taken right before a repo-wide dispatch, compared after it for the
+        #: warn-only ``[GIT_CONFIG_CHANGED]`` line (never a copy, never a revert).
+        self._git_meta_before: Dict[str, Optional[Dict[str, Any]]] = {}
         #: Tasks whose verdict came from the jail (a denied edit or a replaced
         #: target) and failed the batch: no prior-changes entry is appended for
         #: them. ``prior_changes.append`` is idempotent on ``(id, phase)``, so
@@ -1059,10 +1057,9 @@ class WriteBatchScheduler:
         ``plan-file`` and ``tasks`` carry the target; ``tasks`` also carries a
         ``target_dir`` — a dir rule — only when the tasks file sits in the
         plan's default ``plans/<stem>/tasks/`` (``default_tasks_dir``), and a
-        file rule on the tasks file anywhere else. ``repo-wide`` (step 3b)
-        carries no target but this run's output folder (protected) and the
-        policy's deny patterns; each dispatch adds its own declared set
-        (:meth:`_task_request`), which never reaches a cache key.
+        file rule on the tasks file anywhere else. ``repo-wide`` (step 3b;
+        one dir rule on the root since 2026-10-05) carries no target but this
+        run's output folder, which the developer message names as hands-off.
         """
         if not self.write_scope:
             return None
@@ -1071,7 +1068,6 @@ class WriteBatchScheduler:
             return JailRequest(
                 repo_root=repo_root, kind=self.kind, write_scope=self.write_scope,
                 output_dir=os.path.realpath(self.output_dir),
-                deny_patterns=tuple(self.policy.deny),
             )
         if self.write_scope not in WRITE_SCOPES_ON_RUNG:
             return JailRequest(
@@ -1090,129 +1086,45 @@ class WriteBatchScheduler:
             target=self.write_target, target_dir=target_dir,
         )
 
-    def _task_request(self, task: Dict[str, Any]) -> Optional[JailRequest]:
-        """The request one dispatch hands the executor: the phase's, plus —
-        under ``repo-wide`` — this task's declared set (absolute, resolved
-        against the repo root), so the entries covering it are required and
-        ``jail_denied_edits`` counts denials on it as in scope (step 3b)."""
-        request = self.jail_request
-        if request is None or self.write_scope != WRITE_SCOPE_REPO_WIDE:
-            return request
-        declared = []
-        for path in declared_file_set(task):
-            candidate = path if os.path.isabs(path) else os.path.join(self.repo_root, path)
-            declared.append(os.path.abspath(candidate))
-        return _dc_replace(request, declared=tuple(declared))
 
-    def _repo_wide_refusal(self, task: Dict[str, Any], request: JailRequest) -> Optional[str]:
-        """Why this batch's declared set cannot be granted on the jail, or
-        ``None`` (F1 "Protected paths": a declared new entry at the repository
-        root or directly under an enumerated ancestor, a protected path, a
-        path the policy denies as a whole — refused before dispatch, naming
-        F6). Only asked when the dispatch will run on the plugin-landlock
-        rung: on codex's own sandbox such a write is codex's to allow."""
-        try:
-            plan = _landlock.repo_wide_plan(request)
-            reason = _landlock.repo_wide_declared_refusal(plan, request.declared)
-        except _landlock.JailRefused as exc:
-            reason = exc.message
-        if reason is None:
+    # -- the repository metadata a repo-wide batch can write (root grant) ----
+
+    def _git_metadata_fingerprint(self) -> Optional[Dict[str, Any]]:
+        """``git_utils.git_metadata_fingerprint`` of the pinned root for a
+        ``repo-wide`` batch (a hash and a listing, never bytes); ``None`` for
+        the narrower scopes, whose grant never reaches ``.git/``, and on any
+        failure — a warning line may not fail a dispatch."""
+        if self.write_scope != WRITE_SCOPE_REPO_WIDE:
             return None
-        return (
-            f"Refusing to dispatch write task {task.get('task_id')} on the "
-            f"plugin's Landlock jail: {reason} Nothing was spawned."
-        )
+        try:
+            return _git_utils.git_metadata_fingerprint(self.repo_root)
+        except Exception:  # noqa: BLE001 - observability must not fail a phase
+            return None
 
-    def _refuse_declared_sets_before_batch_one(
-        self,
-        ordered: Sequence[Tuple[int, List[Dict[str, Any]]]],
-        result: SchedulerResult,
-    ) -> bool:
-        """Ask :meth:`_repo_wide_refusal` of EVERY task the run will dispatch
-        before the first dispatch; ``True`` when the run is refused.
-
-        Every declared set is known at materialization (``write_tasks.json``),
-        and the per-task check in :meth:`_dispatch_executor` used to be the
-        only one: an implement run whose seventh task declared a new
-        top-level ``Makefile`` paid for batches 1–6 and then exited 3 naming
-        F6, whose remedy (switch ``driver.subagent_runner``) then had to be
-        applied to a half-done phase (fix round 4, 2026-10-02). Checked here
-        under the rung the preflight records for each task's runner, and only
-        for a dispatch that will run on the plugin-landlock rung: on codex's
-        own sandbox the same write is codex's to allow. A task ``--resume``
-        skips as already done is never dispatched, so its declared set — which
-        may have landed on another rung — is not asked. A refused runner is
-        left for the batch loop, which reports it in its own words (D3k rung
-        1). The per-task check stays as the backstop.
-        """
-        if (
-            self.respond is not None
-            or self.jail_request is None
-            or self.write_scope != WRITE_SCOPE_REPO_WIDE
-        ):
-            return False
-        profile = profile_for_kind(self.kind)
-        refused: List[TaskOutcome] = []
-        first_index: Optional[int] = None
-        for batch_index, batch_tasks in ordered:
-            for task in batch_tasks:
-                task_id = str(task.get("task_id", ""))
-                if (
-                    result.human_plan.is_skipped(task_id)
-                    or task.get("executor_role") == "human"
-                    or (self.resume and self._already_done(task))
-                ):
-                    continue
-                runner = self.forced_runner or resolve_task_runner(
-                    task, anchor=self.anchor
-                )
-                try:
-                    self._preflight(runner, profile)
-                except ExecutorError:
-                    return False
-                if self._recorded_rung(runner, profile) != SANDBOX_RUNG_PLUGIN_LANDLOCK:
-                    continue
-                request = self._task_request(task)
-                if request is None:
-                    continue
-                refusal = self._repo_wide_refusal(task, request)
-                if refusal is None:
-                    continue
-                refused.append(TaskOutcome(
-                    task_id=task_id, kind=self.kind, runner=self.invoker,
-                    status=STATUS_REJECTED, profile=profile, reason=refusal,
-                ))
-                if first_index is None:
-                    first_index = batch_index
-        if not refused:
-            return False
-        result.outcomes.extend(refused)
-        result.stopped_at_batch = first_index
-        result.exit_code = EXIT_NEEDS_HUMAN
-        if self.state is not None:
-            with self._effects_lock:
-                for outcome in refused:
-                    self.state.update_task_status(
-                        outcome.task_id, "failed", reason=outcome.reason
-                    )
-                self.state.save()
-        lines = [
-            "",
-            f"ERROR: {len(refused)} of this run's write task(s) declare a path "
-            f"the plugin's Landlock jail cannot grant, so the run was refused "
-            f"before its first batch. Nothing was dispatched, no file was "
-            f"modified, and the {self.phase} phase is NOT marked completed.",
-        ]
-        for outcome in refused:
-            # The same row shape as `_stop_message`'s, so a reader (and the
-            # acceptance test) finds `<task>: rejected — <why>` either way.
-            lines.append(f"  - {outcome.task_id}: {outcome.status} — {outcome.reason}")
-        result.messages.extend(lines)
-        for line in lines[1:]:
-            self.log(f"[write-subagents] {line.strip()}")
-        result.report_path = self._write_report(result)
-        self._mirror_status(result)
-        return True
+    def _warn_git_metadata_changed(self, task_id: str) -> None:
+        """One warn-only ``[GIT_CONFIG_CHANGED]`` line when ``.git/config`` or
+        the ``.git/hooks/`` listing moved across this dispatch (root grant,
+        2026-10-05: the sweep prunes ``.git/`` and nothing is backed up, so
+        this line is the one place a planted hook or config key is named).
+        The user's own git honours what was planted; the plugin's calls carry
+        ``git_utils.GIT_HARDENING_ARGS``. Never a failed batch."""
+        before = self._git_meta_before.pop(task_id, None)
+        if before is None:
+            return
+        try:
+            change = _git_utils.describe_git_metadata_change(
+                before, self._git_metadata_fingerprint()
+            )
+        except Exception:  # noqa: BLE001 - observability must not fail a phase
+            return
+        if change:
+            self.log(
+                f"{_git_utils.GIT_CONFIG_CHANGED_MARKER} {task_id}: the repository's "
+                f"git metadata changed during this batch ({change}). The jail "
+                f"grants the whole repository and nothing was backed up; "
+                f"inspect .git/config and .git/hooks/ before your next git "
+                f"command runs what a batch may have planted (warn-only)."
+            )
 
     def _grant_mismatch(self, task: Dict[str, Any]) -> Optional[str]:
         """Why ``task``'s declared set is not this phase's grant, or ``None``.
@@ -1702,13 +1614,7 @@ class WriteBatchScheduler:
             # run's `write_batch_report.json` / `subagent_batch_report.json`.
             return result
 
-        # 3. Every declared set under the recorded rung, before the first
-        # dispatch: a repo-wide refusal that waits for its own batch costs
-        # every batch ahead of it (fix round 4, 2026-10-02).
-        if self._refuse_declared_sets_before_batch_one(ordered, result):
-            return result
-
-        # 4. The batches, in order, each verified before the next is dispatched.
+        # 3. The batches, in order, each verified before the next is dispatched.
         # Mirrored once before the first dispatch so `progress.step` reads
         # `applying` for the whole stretch rather than only from the first
         # *finished* task — the in-batch mirror runs after a dispatch returns,
@@ -1984,6 +1890,7 @@ class WriteBatchScheduler:
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
             )
         started = time.time()
+        self._git_meta_before[task_id] = self._git_metadata_fingerprint()
         try:
             if self.respond is not None:
                 outcome = self._dispatch_native(task, prompt, snapshot, profile)
@@ -1992,6 +1899,7 @@ class WriteBatchScheduler:
                     task, prompt, snapshot, profile, declared,
                     batch_index=batch_index,
                 )
+            self._warn_git_metadata_changed(task_id)
             outcome.snapshot_dir = snapshot.directory
             if not outcome.duration_seconds:
                 outcome.duration_seconds = time.time() - started
@@ -2701,20 +2609,7 @@ class WriteBatchScheduler:
         self._runner_versions[runner] = str(info.get("version") or "unknown")
         rung = self._recorded_rung(runner, profile)
         self._dispatch_rungs[task_id] = rung
-        request = self._task_request(task)
-        if request is not None:
-            self._dispatch_requests[task_id] = request
-        if (
-            request is not None
-            and request.write_scope == WRITE_SCOPE_REPO_WIDE
-            and rung == SANDBOX_RUNG_PLUGIN_LANDLOCK
-        ):
-            refusal = self._repo_wide_refusal(task, request)
-            if refusal is not None:
-                return TaskOutcome(
-                    task_id=task_id, kind=self.kind, runner=self.invoker,
-                    status=STATUS_REJECTED, profile=profile, reason=refusal,
-                )
+        request = self.jail_request
         self._announce_rung(runner, batch_index)
 
         def before_attempt(context: Dict[str, Any]) -> None:
@@ -3364,12 +3259,13 @@ class WriteBatchScheduler:
 
     def _in_grant(self, path: str, task_id: Optional[str] = None) -> bool:
         """Whether the resolved ``path`` is inside this phase's write grant —
-        under ``repo-wide``, inside the dispatch's declared set."""
+        under ``repo-wide`` (one dir rule on the root, 2026-10-05), inside
+        the repository."""
         request = self.jail_request
         if request is not None and request.write_scope == WRITE_SCOPE_REPO_WIDE:
-            handed = self._dispatch_requests.get(task_id or "")
-            declared = {os.path.realpath(p) for p in (handed.declared if handed else ())}
-            return os.path.realpath(path) in declared
+            root = os.path.realpath(request.repo_root)
+            resolved = os.path.realpath(path)
+            return resolved == root or resolved.startswith(root.rstrip(os.sep) + os.sep)
         if request is None or not request.target:
             return False
         resolved = os.path.realpath(path)
@@ -3556,12 +3452,10 @@ class WriteBatchScheduler:
 
         if in_grant and request is not None and request.write_scope == WRITE_SCOPE_REPO_WIDE:
             parts.append(
-                f"{', '.join(in_grant)} {verb(in_grant, 'is', 'are')} in this "
-                f"batch's declared set, which the jail granted: the allow-list "
-                f"may not grant the write shape the runner used (a top-level "
-                f"file can only be edited in place with apply_patch or a "
-                f"shell redirect, never replaced through a temp file or mv; "
-                f"nothing can be created directly in the repository root)."
+                f"{', '.join(in_grant)} {verb(in_grant, 'lies', 'lie')} inside "
+                f"the repository, which the jail granted whole (one rule on "
+                f"its root, 2026-10-05): a denial there is the jail's own "
+                f"failure, not a write shape the grant withholds."
             )
         elif in_grant:
             target = self._relative(request.target) if request and request.target else "the target"

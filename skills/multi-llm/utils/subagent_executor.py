@@ -505,9 +505,9 @@ PROFILE_BY_KIND = {
 #: and derived the same way — never read from the task JSON (plan
 #: codex-sandbox-unavailable §6 F1 "How a dispatch receives its grant",
 #: 2026-09-30). ``plan-file`` is one file rule on the plan, ``tasks`` the tasks
-#: directory (or file); ``repo-wide`` (step 3b, 2026-10-02) the enumerated
-#: repository entries outside the protected set, and is refused on
-#: the rung. A write kind missing from this map is refused, never widened.
+#: directory (or file); ``repo-wide`` (step 3b, 2026-10-02; one dir rule on
+#: the repository root since 2026-10-05) the whole repository. A write kind
+#: missing from this map is refused, never widened.
 WRITE_SCOPE_BY_KIND = {
     "apply_suggestions": WRITE_SCOPE_PLAN_FILE,
     "apply_task_suggestions": WRITE_SCOPE_TASKS,
@@ -6095,12 +6095,13 @@ def _missing_write_grant(
             f"{scope!r} (the scope of kind {kind!r})"
         )
     if scope == WRITE_SCOPE_REPO_WIDE:
-        # The grant is the enumeration of the repository root (step 3b):
-        # no single target, but the root and the run's output folder.
+        # The grant is one dir rule on the repository root (step 3b, revised
+        # 2026-10-05): no single target, but the root and the run's output
+        # folder, which the developer message names as hands-off.
         if not request.repo_root:
             return "its repo-wide grant names no repository root"
         if not request.output_dir:
-            return "its repo-wide grant names no output folder to protect"
+            return "its repo-wide grant names no output folder for the developer message"
         return None
     if not request.target:
         return f"its {scope} grant names no target"

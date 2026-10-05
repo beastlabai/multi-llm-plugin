@@ -344,19 +344,18 @@ class TestTheWriteTargetIsCheckedAtConstruction:
         assert scheduler.jail_request.target is None
 
     @pytest.mark.parametrize("kind", ["apply_code_fixes", "implement"])
-    def test_a_repo_wide_kind_carries_the_output_folder_and_the_deny_list(self, repo, kind):
-        """Step 3b: no target — the grant is the enumeration — but this run's
-        output folder (protected) and the policy's deny patterns ride the
-        request; the declared set joins per dispatch, never here."""
+    def test_a_repo_wide_kind_carries_the_output_folder_and_no_target(self, repo, kind):
+        """Step 3b (revised 2026-10-05): no target — the grant is one dir
+        rule on the root — but this run's output folder rides the request
+        for the developer message; no per-task path ever does."""
         scheduler = repo.scheduler([], kind=kind, write_target=None)
         request = scheduler.jail_request
         assert request == JailRequest(
             repo_root=str(repo.root), kind=kind, write_scope="repo-wide",
             output_dir=os.path.realpath(scheduler.output_dir),
-            deny_patterns=tuple(scheduler.policy.deny),
         )
-        assert request.target is None and request.declared == ()
-        assert ".git/**" in request.deny_patterns
+        assert request.target is None
+        assert not hasattr(request, "deny_patterns") and not hasattr(request, "declared")
 
 
 class TestTheWriteScopeMap:
@@ -1094,25 +1093,24 @@ class TestTheJailLinesAreRepeatedAtThePhasesClose:
 
 
 # ===========================================================================
-# Every declared set is checked before batch 1 (fix round 4, 2026-10-02)
+# A declared new root entry is dispatched on the jail (root grant, 2026-10-05)
 # ===========================================================================
 
-class TestEveryDeclaredSetIsCheckedBeforeBatchOne:
-    """The repo-wide refusal (F1 "Protected paths": a declared new top-level
-    entry, a protected path, a denied entry) used to be asked per task, right
-    before that task's own dispatch, so an implement run paid for every batch
-    ahead of the refused one and then exited 3 naming F6 — a remedy (switch
-    ``driver.subagent_runner``) that then had to be applied to a half-done
-    phase. Every declared set is known at materialization, so they are all
-    checked under the recorded rung before the first dispatch."""
+class TestADeclaredNewRootEntryIsDispatchedOnTheJail:
+    """Until 2026-10-05 the repo-wide grant refused a declared new top-level
+    entry before dispatch (fix round 4 checked every declared set before
+    batch 1, naming F6): an implement whose task created a root-level
+    ``Makefile`` — or the racing re-run's ``index.html`` — never ran on
+    Codex. With one dir rule on the root there is nothing to refuse: every
+    task dispatches and the root-level file lands."""
 
-    def _tasks(self, repo: Repo, *, bad_index: int = 2, count: int = 3):
+    def _tasks(self, repo: Repo, *, top_index: int = 2, count: int = 3):
         (repo.root / "src").mkdir(exist_ok=True)
         tasks = []
         for index in range(count):
             path = repo.root / "src" / f"t{index}.py"
             path.write_text(f"x = {index}\n", encoding="utf-8")
-            declared = [repo.root / "Makefile"] if index == bad_index else [path]
+            declared = [repo.root / "Makefile"] if index == top_index else [path]
             tasks.append(repo.task(
                 index, kind="implement", task_id=f"T00{index + 1}",
                 declared=declared, expected_ids=[f"T00{index + 1}"],
@@ -1127,59 +1125,32 @@ class TestEveryDeclaredSetIsCheckedBeforeBatchOne:
             return claim("applied"), stream()
         return step
 
-    def test_a_late_task_declaring_a_new_root_entry_refuses_the_run_before_batch_one(
-        self, repo, monkeypatch,
-    ):
-        fake = FakeExecutor(repo, monkeypatch).script(self._edit(0), self._edit(1))
+    @staticmethod
+    def _make_top(repo: Repo):
+        (repo.root / "Makefile").write_text("all:\n", encoding="utf-8")
+        return claim("applied"), stream()
+
+    @pytest.mark.parametrize("rung", [RUNG, None], ids=["plugin-landlock", "codex-own-sandbox"])
+    def test_every_task_dispatches_and_the_root_level_file_lands(self, repo, monkeypatch, rung):
+        fake = FakeExecutor(repo, monkeypatch, rung=rung).script(
+            self._edit(0), self._edit(1), self._make_top,
+        )
         lines: list = []
         tasks = self._tasks(repo)
         result = repo.scheduler(tasks, kind="implement", write_target=None,
                                 lines=lines, finalize=False).run()
-        assert result.exit_code == 3
-        assert fake.dispatches == [], [d["task_id"] for d in fake.dispatches]
-        assert result.batches_dispatched == []
-        assert (repo.root / "src" / "t0.py").read_text() == "x = 0\n"
-        text = "\n".join(result.messages)
-        assert "T003" in text and "Makefile would be a new entry directly in" in text
-        assert "driver.subagent_runner" in text and "(F6)" in text
-        assert "Nothing was dispatched" in text
-        report = repo.report()
-        rejected = [row for row in report["tasks"] if row["task_id"] == "T003"]
-        assert rejected and rejected[0]["status"] == executor.STATUS_REJECTED
-
-    def test_a_task_already_done_on_resume_is_not_checked(self, repo, monkeypatch):
-        """A finished task is never dispatched again, so its declared set —
-        which may have landed on codex's own sandbox — does not refuse the
-        resumed run."""
-        fake = FakeExecutor(repo, monkeypatch).script(self._edit(1), self._edit(2))
-        tasks = self._tasks(repo, bad_index=0)
-        executor.persist_result(tasks[0], str(repo.phase_dir), {
-            "status": "applied", "ids": ["T001"], "files_touched": [],
-            "summary": "done earlier",
-            "verdict": {"write_outcome": "applied", "status": "ok", "ok": True},
-        })
-        result = repo.scheduler(tasks, kind="implement", write_target=None,
-                                resume=True, finalize=False).run()
-        assert result.exit_code == 0, result.messages
-        assert [d["task_id"] for d in fake.dispatches] == ["T002", "T003"]
-
-    def test_on_codex_s_own_sandbox_nothing_is_checked_and_every_batch_runs(
-        self, repo, monkeypatch,
-    ):
-        """The refusal is the jail's: with codex's own ``workspace-write`` the
-        declared set is codex's to allow, so the pre-batch check asks nothing."""
-        def make_top(repo: Repo):
-            (repo.root / "Makefile").write_text("all:\n", encoding="utf-8")
-            return claim("applied"), stream()
-
-        fake = FakeExecutor(repo, monkeypatch, rung=None).script(
-            self._edit(0), self._edit(1), make_top,
-        )
-        tasks = self._tasks(repo)
-        result = repo.scheduler(tasks, kind="implement", write_target=None,
-                                finalize=False).run()
         assert result.exit_code == 0, result.messages
         assert [d["task_id"] for d in fake.dispatches] == ["T001", "T002", "T003"]
+        assert (repo.root / "Makefile").read_text() == "all:\n"
+        assert (repo.root / "src" / "t0.py").read_text() == "x = 0\nedited\n"
+        text = "\n".join(result.messages + lines)
+        assert "would be a new entry directly in" not in text
+        assert "(F6)" not in text
+        assert all(row["status"] == executor.STATUS_OK for row in repo.report()["tasks"])
+
+    def test_the_scheduler_no_longer_carries_the_refusal(self):
+        assert not hasattr(WriteBatchScheduler, "_refuse_declared_sets_before_batch_one")
+        assert not hasattr(WriteBatchScheduler, "_repo_wide_refusal")
 
 
 class TestATestSuitesOwnPermissionDeniedTextIsNotADenial:
@@ -1226,3 +1197,58 @@ class TestATestSuitesOwnPermissionDeniedTextIsNotADenial:
         outcome = result.outcomes[0]
         assert not outcome.ok and "jail-denied edit" in (outcome.reason or "")
         assert result.exit_code == 3
+
+
+# ===========================================================================
+# The root grant (2026-10-05): a changed `.git/config` or `.git/hooks/` after a
+# repo-wide batch is reported, warn-only
+# ===========================================================================
+
+class TestAChangedGitConfigIsReportedWarnOnly:
+    """With the repository root granted, a repo-wide batch can write
+    ``.git/config`` and ``.git/hooks/`` (the sweep prunes ``.git/``). Nothing
+    is backed up (a user decision): one cheap line after the batch says the
+    metadata changed, from a hash and a listing taken before dispatch, and
+    the batch's verdict does not move."""
+
+    def _task(self, repo: Repo):
+        (repo.root / "src").mkdir(exist_ok=True)
+        (repo.root / "src" / "t0.py").write_text("x = 0\n", encoding="utf-8")
+        return repo.task(0, kind="implement", task_id="T001",
+                         declared=[repo.root / "src" / "t0.py"],
+                         expected_ids=["T001"], prior_changes_id="T001")
+
+    def test_a_planted_config_key_and_hook_are_named_after_the_batch(self, repo, monkeypatch):
+        def plant(repo: Repo):
+            path = repo.root / "src" / "t0.py"
+            path.write_text(path.read_text() + "edited\n", encoding="utf-8")
+            with open(repo.root / ".git" / "config", "a", encoding="utf-8") as handle:
+                handle.write("[core]\n\tfsmonitor = /tmp/evil\n")
+            hook = repo.root / ".git" / "hooks" / "pre-commit"
+            hook.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+            return claim("applied"), stream()
+
+        FakeExecutor(repo, monkeypatch).script(plant)
+        lines: list = []
+        result = repo.scheduler([self._task(repo)], kind="implement",
+                                write_target=None, lines=lines, finalize=False).run()
+        assert result.exit_code == 0, result.messages
+        assert result.outcomes[0].ok and result.outcomes[0].write_outcome == "applied"
+        warned = [line for line in lines if "[GIT_CONFIG_CHANGED]" in line]
+        assert len(warned) == 1, lines
+        assert "T001" in warned[0]
+        assert ".git/config" in warned[0]
+        assert ".git/hooks/pre-commit" in warned[0] and "added" in warned[0]
+
+    def test_an_untouched_metadata_set_draws_no_line(self, repo, monkeypatch):
+        def edit(repo: Repo):
+            path = repo.root / "src" / "t0.py"
+            path.write_text(path.read_text() + "edited\n", encoding="utf-8")
+            return claim("applied"), stream()
+
+        FakeExecutor(repo, monkeypatch).script(edit)
+        lines: list = []
+        result = repo.scheduler([self._task(repo)], kind="implement",
+                                write_target=None, lines=lines, finalize=False).run()
+        assert result.exit_code == 0, result.messages
+        assert not [line for line in lines if "[GIT_CONFIG_CHANGED]" in line]

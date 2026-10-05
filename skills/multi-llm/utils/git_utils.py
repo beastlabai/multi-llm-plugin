@@ -657,6 +657,89 @@ def validate_git_ref(ref: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# The repository metadata a repo-wide batch can now write (root grant,
+# 2026-10-05): a fingerprint, never a copy
+# ---------------------------------------------------------------------------
+
+#: The name a changed-metadata line carries.
+GIT_CONFIG_CHANGED_MARKER = "[GIT_CONFIG_CHANGED]"
+
+
+def git_common_dir(repo_root: str) -> Optional[str]:
+    """The repository's common git directory (``.git``, or the main
+    repository's for a linked worktree), absolute; ``None`` when git cannot
+    say. ``config`` and ``hooks/`` live there."""
+    stdout, _, rc = _run_git("rev-parse", "--git-common-dir", check=False, cwd=repo_root)
+    if rc != 0 or not stdout.strip():
+        return None
+    path = stdout.strip()
+    if not os.path.isabs(path):
+        path = os.path.join(repo_root, path)
+    return os.path.realpath(path)
+
+
+def git_metadata_fingerprint(repo_root: str) -> Optional[Dict[str, Any]]:
+    """A fingerprint of what a batch could plant for the user's next git
+    command to run: the sha256 of ``<git-dir>/config`` and a listing of
+    ``<git-dir>/hooks/`` (name → size, mode, mtime_ns; a symlink's
+    destination). No bytes are kept; ``None`` when there is no git directory.
+    Taken before a repo-wide dispatch and compared after it by
+    :func:`describe_git_metadata_change` — detective, never a rollback."""
+    common = git_common_dir(repo_root)
+    if common is None:
+        return None
+    config = os.path.join(common, "config")
+    try:
+        with open(config, "rb") as handle:
+            config_sha: Optional[str] = hashlib.sha256(handle.read()).hexdigest()
+    except OSError:
+        config_sha = None
+    hooks: Dict[str, Tuple[Any, ...]] = {}
+    hooks_dir = os.path.join(common, "hooks")
+    try:
+        names = sorted(os.listdir(hooks_dir))
+    except OSError:
+        names = []
+    for name in names:
+        path = os.path.join(hooks_dir, name)
+        try:
+            info = os.lstat(path)
+        except OSError:
+            continue
+        if os.path.islink(path):
+            try:
+                hooks[name] = ("link", os.readlink(path))
+            except OSError:
+                hooks[name] = ("link", "unreadable")
+        else:
+            hooks[name] = ("file", info.st_size, info.st_mode, info.st_mtime_ns)
+    return {"git_dir": common, "config_sha256": config_sha, "hooks": hooks}
+
+
+def describe_git_metadata_change(
+    before: Optional[Mapping[str, Any]], after: Optional[Mapping[str, Any]]
+) -> Optional[str]:
+    """What moved between two fingerprints, as ``.git``-relative names
+    (``.git/config changed; .git/hooks/pre-commit added``), or ``None`` when
+    nothing did or either side is missing."""
+    if not before or not after:
+        return None
+    parts: List[str] = []
+    if before.get("config_sha256") != after.get("config_sha256"):
+        parts.append(".git/config changed")
+    old = before.get("hooks") or {}
+    new = after.get("hooks") or {}
+    for name in sorted(set(old) | set(new)):
+        if name not in old:
+            parts.append(f".git/hooks/{name} added")
+        elif name not in new:
+            parts.append(f".git/hooks/{name} removed")
+        elif old[name] != new[name]:
+            parts.append(f".git/hooks/{name} changed")
+    return "; ".join(parts) if parts else None
+
+
+# ---------------------------------------------------------------------------
 # Diff hunk capture and file content capture utilities
 # ---------------------------------------------------------------------------
 
