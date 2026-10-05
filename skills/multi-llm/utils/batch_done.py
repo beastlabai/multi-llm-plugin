@@ -24,7 +24,10 @@ executor leg's ``WriteBatchScheduler`` writes for the same batch:
   every id in the task's ``expected_ids`` (``applied`` | ``failed``) — the
   map ``ApplyOrchestratorBase`` step 23 drops groups on under ``--resume``.
   A ``failed`` record keeps the batch eligible for re-dispatch, as the
-  executor leg re-dispatches a failed batch.
+  executor leg re-dispatches a failed batch;
+* for the two code kinds (``implement``, ``apply_code_fixes``),
+  ``tracked_files`` from the dirty-tree census, as the scheduler records it
+  after each batch (:func:`_tracked_after_batch`).
 
 It edits ``state.json`` as a file (read, mutate through the state manager's
 module-level helpers, atomic replace), never through a ``StateManager`` —
@@ -118,6 +121,41 @@ def _processed_phase_word(phase_dir: Path) -> str:
     return phase_dir.name
 
 
+def _tracked_after_batch(
+    state: Dict[str, Any], target: Path, kind: str,
+) -> Optional[List[Dict[str, str]]]:
+    """``tracked_files`` after a code phase's batch, or ``None`` to leave it.
+
+    The native leg's counterpart of the scheduler's per-batch record: a host
+    that stops part-way, before the closing ``util finalize-tracking``, has
+    still recorded what its finished batches changed, so review-code does
+    not review what an earlier phase left there (2026-10-05, Codex racing
+    run 3). The census alone — this command is given no file list; the
+    closing ``finalize-tracking --touched …`` adds the verified files — and
+    only for the two code kinds: the plan and the task list the planning
+    phases edit are never tracked. Never fatal: the batch record is this
+    command's job.
+    """
+    try:
+        from .write_batch_scheduler import CODE_WRITE_KINDS, load_finalize_tracking
+    except ImportError:  # pragma: no cover - direct script invocation
+        from utils.write_batch_scheduler import (  # type: ignore
+            CODE_WRITE_KINDS, load_finalize_tracking,
+        )
+    if kind not in CODE_WRITE_KINDS:
+        return None
+    finalize_tracking = load_finalize_tracking()
+    if finalize_tracking is None:
+        return None
+    try:
+        return finalize_tracking.phase_tracked_files(
+            state, [], state_path=target, phase=PHASE_BY_WRITE_KIND[kind],
+            say=lambda line: None,
+        )
+    except Exception:  # noqa: BLE001 - bookkeeping must not fail the record
+        return None
+
+
 def record_batch(
     phase_dir: Path,
     task_id: str,
@@ -160,6 +198,9 @@ def record_batch(
         raise WritePromptError(f"{target} is not a JSON object.")
 
     update_task_status_in_state(state, task_id, status, reason)
+    tracked = _tracked_after_batch(state, target, kind)
+    if tracked is not None:
+        state["tracked_files"] = tracked
     items: List[str] = []
     if kind != "implement":
         phase_word = _processed_phase_word(phase_dir)
