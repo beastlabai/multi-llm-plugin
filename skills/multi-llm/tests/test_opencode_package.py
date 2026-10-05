@@ -4963,6 +4963,63 @@ class TestAFailedResultSaysWhatTheUserCanRun:
 UV_PREFIX = "uv run --frozen --no-dev --project /skill -- python /skill/multi_llm.py"
 
 
+class TestARunStillAliveIsNoFinishedStop:
+    """Adversarial review 2026-10-05: `abortAndReport` / `orphanReport` are
+    `ok: false` with no `exit` — the run outlived the call (or its abort is
+    unconfirmed) — and still got "this phase did not finish … nothing names a
+    re-run" as their `no_command_reason`."""
+
+    def test_the_continuation_cap_stop_carries_no_reason(self, built_package, uv_stub):
+        payload = ('MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+                   '"artifacts":["a"],"next":"uv run -- python multi_llm.py '
+                   'review-plan p.md --reaggregate"}')
+        launch = lambda rid: {"exit": 0, "stdout": [  # noqa: E731
+            f"run_id: {rid}", "log: /tmp/l.log", payload]}
+        aborted = {"exit": 0, "stdout": [
+            "aborted", 'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+            '"artifacts":[],"next":null}']}
+        result, _ = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch("RID-1"), {"exit": 0, "stdout": [payload]},
+             launch("RID-2"), {"exit": 0, "stdout": [payload]}, aborted],
+            extra_env={"MLLM_TEST_NEXT_CAP": "1"})
+        assert result["ok"] is False and result["run_id"] == "RID-2"
+        assert result.get("exit") is None
+        assert "no_command_reason" not in result
+
+    def test_an_abandoned_watch_carries_no_reason(self, built_package, uv_stub):
+        live = {"exit": 2, "stdout": [
+            "log: /tmp/r.log",
+            'MULTI_LLM_RESULT: {"state":"running","exit":2,"artifacts":[],'
+            '"next":"uv run -- python /s/multi_llm.py status p.md --view run '
+            '--wait --run-id RID-77"}']}
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":null}']}
+        result, _ = uv_stub.run(
+            built_package,
+            {"mode": "status", "plan": "p.md", "question": "",
+             "extra_flags": ["--view", "run", "--wait", "--run-id", "RID"]},
+            [live, done], extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1"})
+        assert result["ok"] is False and result["run_id"] == "RID-77"
+        assert "no_command_reason" not in result
+
+    def test_a_refusal_before_any_run_keeps_it(self, built_package):
+        out = node_json(
+            """
+            const alive = T.finishOutcome(
+              { state: "needs-human", ok: false, run_id: "R", message: "m" }, {}, surface)
+            const refused = T.finishOutcome(
+              { state: "needs-human", ok: false, message: "m" }, {}, surface)
+            emit({ alive, refused })
+            """,
+            built_package,
+        )
+        assert "no_command_reason" not in out["alive"]
+        assert out["alive"]["user_next_step"] is None
+        assert out["refused"]["no_command_reason"]
+
+
 class TestARedactedCommandCutAtAQuote:
     """Adversarial review 2026-10-05: the runnable pattern stops at a `"`, and
     `shlex.quote` spells an apostrophe `'"'"'`, so an `ask` retry whose question
