@@ -602,6 +602,17 @@ class TestBuildArtifacts:
             assert flag not in built, f"baked flag {flag!r} is spelled in prose"
         assert "multi_llm" in built, "the body must name the tool it delegates to"
 
+    def test_validation_counts_are_reported_only_when_the_result_has_them(self):
+        """OpenCode racing run 4 (06): "On exit 0, report `validation_counts`"
+        held for every mode, and the host wrote "`validation_counts`: not
+        present in this result" after implement, which never carries them."""
+        flat = " ".join(pkg_build.command_body().split())
+        assert "On exit 0, report `validation_counts`" not in flat
+        assert ("When the result carries `validation_counts` (a review phase's "
+                "does), report them") in flat
+        assert ("A result without that key has no counts to report, so do not "
+                "mention them.") in flat
+
     def test_needs_human_rule_reaches_the_command_body(self):
         """The exit-3 decision rule is rendered into ``dist/command.md``.
 
