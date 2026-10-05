@@ -107,6 +107,12 @@ def update_task_status_in_state(
         if "task_status_reasons" not in state:
             state["task_status_reasons"] = {}
         state["task_status_reasons"][task_id] = reason
+    elif isinstance(state.get("task_status_reasons"), dict):
+        # A reason describes the status it was written with: a status written
+        # without one drops it. A task accepted after failing (`accepted —`)
+        # and later run to completion kept the old reason, and a resume read
+        # it back as an accepted failure (fix round 9).
+        state["task_status_reasons"].pop(task_id, None)
 
 
 def mark_item_processed_in_state(

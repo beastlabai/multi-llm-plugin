@@ -26,7 +26,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -484,7 +484,12 @@ def phase_tracked_files(
     and later removed leaves no change behind, so there is nothing of it to
     review. The drop is said once, naming each file and the phase that
     recorded it. A path git's own census names is kept: git sees a change
-    there.
+    there. Not on disk, it reads ``deleted`` and carries *phase*'s label,
+    even when the other phase recorded it: implement created
+    ``index.html``, the user committed it and apply-code-fixes deleted it,
+    so the change left in the tree is this phase's deletion, and the
+    kept entry used to be dropped before the census could keep it (fix
+    round 9).
 
     The write executor calls this after every batch with ``say`` silenced,
     so a run that stops part-way has still recorded what its finished
@@ -494,7 +499,7 @@ def phase_tracked_files(
     if drop_ignored:
         touched = _drop_ignored(touched, say)
     workflow = _workflow_entries(state, state_path)
-    own = _census_paths(state, touched, workflow=workflow, say=say)
+    own, census = _census_paths(state, touched, workflow=workflow, say=say)
     others = set(TRACKING_LABELS.values()) - {label}
     kept = [
         dict(entry) for entry in (state.get("tracked_files") or [])
@@ -503,31 +508,41 @@ def phase_tracked_files(
         and not (workflow and baseline_covers(entry["path"], workflow))
     ]
     held = {entry["path"] for entry in kept}
-    own = [path for path in own if path not in held]
     states = _path_states(
         sorted(held | set(own)),
         base_ref=state.get("head_before_implement"),
         baseline=state.get("pre_existing_changes") or [],
-    )
+    ) or {}
+    # A held path the other phase's record would leave out as gone, but that
+    # git's census names, is this phase's: the change git sees there is the
+    # deletion made since the file was committed, not the other phase's
+    # creation (which is in that commit). Read before `own` is filtered by
+    # `held`, or the kept entry's verdict drops it (fix round 9).
+    reclaimed = {
+        path for path in held if states.get(path) == GONE and path in census
+    }
+    own = [path for path in own if path not in held or path in reclaimed]
 
     merged: List[Dict[str, str]] = []
     gone: List[Dict[str, str]] = []
     for entry in kept:
-        action = (states or {}).get(entry["path"])
+        if entry["path"] in reclaimed:
+            continue
+        action = states.get(entry["path"])
         if action == GONE:
             gone.append(entry)
             continue
         if action:
             entry["action"] = action
         merged.append(entry)
-    recorded = {path.strip() for path in touched if path and path.strip()}
     for path in own:
-        action = (states or {}).get(path, "modified")
-        if action == GONE and path not in recorded:
-            # Git's own census named it, so git sees a change there: kept as
-            # it always read. Only a record (`--touched`, a kept entry) can
-            # name a file that has since gone.
-            action = "modified"
+        action = states.get(path, "modified")
+        if action == GONE and path in census:
+            # Git's own census named it, so git sees a change there: a file
+            # committed after the base and now on no disk. Only a record
+            # (`--touched`, a kept entry) can name a file that has since gone
+            # and left nothing for git to see.
+            action = "deleted"
         entry = {"path": path, "action": action, "task_id": label}
         (gone if action == GONE else merged).append(entry)
 
@@ -623,13 +638,15 @@ def _census_paths(
     *,
     workflow: List[str] = (),
     say=print,
-) -> List[str]:
+) -> Tuple[List[str], Set[str]]:
     """The default scope's paths: the dirty census, minus the baseline, plus ``--touched``.
 
     The workflow's own files (*workflow*, :func:`_workflow_entries`) are left
     out of both halves. Prints the census counts through *say*. May rewrite a
     malformed ``pre_existing_changes`` on *state* to ``[]`` (warned), which
     the caller then persists. Sorted; the caller reads each path's action.
+    The second value is the set of those paths git's own census named (the
+    rest came from ``--touched`` alone).
     """
     # Ensure pre_existing_changes is a list
     pre_existing_raw = state.get("pre_existing_changes")
@@ -657,6 +674,7 @@ def _census_paths(
     # A directory that survived the subtraction is one this phase created:
     # expand it to the files inside it, which is what every consumer needs.
     implementation_changes = _expand_uncovered_directories(implementation_changes)
+    census = set(implementation_changes)
 
     # ...except for the files the executor verified it changed: those are
     # implementation changes whether or not they were dirty at the start.
@@ -685,7 +703,7 @@ def _census_paths(
             )
         )
     say(f"Implementation changes: {len(implementation_changes)}")
-    return sorted(implementation_changes)
+    return sorted(implementation_changes), census & implementation_changes
 
 
 def _insert_summary_reference(plan_file: str, summary_relative: str) -> int:

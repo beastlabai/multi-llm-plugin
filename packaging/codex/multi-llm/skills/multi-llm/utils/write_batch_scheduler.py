@@ -225,7 +225,9 @@ __all__ = [
     "SchedulerResult",
     "HumanTaskPlan",
     "WriteBatchScheduler",
+    "answered_done_on_record",
     "bind_prior_changes",
+    "mark_no_longer_skipped",
     "persist_human_task_plan",
     "resolve_human_task_plan",
     "run_write_phase",
@@ -496,6 +498,11 @@ class HumanTaskPlan:
     #: Failed tasks answered ``--human-task <id>=retry``: dispatched again even
     #: when nothing in the repository changed since the failure.
     retry: List[str] = field(default_factory=list)
+    #: Tasks an earlier run recorded ``skipped`` that this plan no longer
+    #: skips (``--resume --force-strategy skip-continue`` after a
+    #: ``skip-dependents`` run): :func:`persist_human_task_plan` records them
+    #: ``pending`` again, dropping the old reason (:func:`mark_no_longer_skipped`).
+    unskipped: List[str] = field(default_factory=list)
 
     def is_skipped(self, task_id: str) -> bool:
         return task_id in self.skipped
@@ -543,6 +550,59 @@ USER_DECLINED_REASON = "skipped by user during pause-and-ask"
 #: ``--human-task <id>=skip`` (``StateManager._ANSWERED_SKIP_PREFIX`` is its
 #: twin). The sentence ends ``<id>=skip after it failed``.
 ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
+
+#: The prefix of the recorded reason of a failed code task the user answered
+#: ``--human-task <id>=done`` (:func:`resolve_human_task_plan` writes the
+#: whole sentence into ``HumanTaskPlan.accepted``).
+ACCEPTED_REASON_PREFIX = "accepted — "
+
+#: The recorded reason of a manual task answered ``--human-task <id>=done``
+#: (:func:`persist_human_task_plan`; the ``<id>`` is literal).
+COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
+
+
+def answered_done_on_record(
+    state: Any, *, exclude: Sequence[str] = (),
+) -> Tuple[Dict[str, str], List[str]]:
+    """The tasks an earlier run recorded done on the user's answer.
+
+    ``(accepted, completed_manual)``: ``accepted`` maps each failed code task
+    the user answered ``--human-task <id>=done`` to its recorded reason, and
+    ``completed_manual`` lists the manual tasks answered ``done``. Both are
+    ``completed`` in ``state.json`` with the reason the answer wrote, so a
+    later ``--resume`` materializes neither and the answer no longer applies
+    (it applies to a failed task only); read back from that record, they keep
+    their bucket in the resumed account instead of dropping out of it and
+    shrinking its total (fix round 9). Scoped to the decomposition implement
+    recorded last (``implement_task_ids``, else every ``T###`` id), minus
+    *exclude* (the tasks this run materialized, which the run's own plan
+    accounts for).
+    """
+    if state is None or not hasattr(state, "get"):
+        return {}, []
+    try:
+        statuses = dict(state.get("task_status") or {})
+        reasons = dict(state.get("task_status_reasons") or {})
+        current = state.get("implement_task_ids")
+    except Exception:  # noqa: BLE001 - an account read must not fail a phase
+        return {}, []
+    scope = set(current) if isinstance(current, list) else None
+    skip = {str(task_id) for task_id in exclude}
+    accepted: Dict[str, str] = {}
+    completed_manual: List[str] = []
+    for task_id, status in sorted(statuses.items()):
+        if status != "completed" or task_id in skip:
+            continue
+        if not _IMPLEMENT_TASK_ID.match(str(task_id)):
+            continue
+        if scope is not None and task_id not in scope:
+            continue
+        reason = str(reasons.get(task_id) or "")
+        if reason.startswith(ACCEPTED_REASON_PREFIX):
+            accepted[task_id] = reason
+        elif reason == COMPLETED_MANUAL_REASON:
+            completed_manual.append(task_id)
+    return accepted, completed_manual
 
 
 def _deferred_reason(strategy: Optional[str]) -> str:
@@ -703,8 +763,8 @@ def resolve_human_task_plan(
             continue
         if answer == "done":
             plan.accepted[task_id] = (
-                f"accepted — you answered --human-task {task_id}=done after it "
-                f"failed; treated as satisfied and not run again"
+                f"{ACCEPTED_REASON_PREFIX}you answered --human-task {task_id}=done "
+                f"after it failed; treated as satisfied and not run again"
             )
         elif answer == "skip":
             plan.skipped[task_id] = (
@@ -783,13 +843,44 @@ def resolve_human_task_plan(
     return plan
 
 
+def mark_no_longer_skipped(
+    plan: HumanTaskPlan, task_ids: Sequence[str], recorded: Dict[str, Any],
+) -> List[str]:
+    """Record on *plan* the tasks *recorded* says ``skipped`` that it runs.
+
+    A ``--resume`` materializes a skipped task again (fix round 8), and only
+    a skip the new plan makes used to overwrite its status. After a
+    ``skip-dependents`` run, ``--resume --force-strategy skip-continue``
+    (``--force-strategy`` outranks the recorded strategy) left a dependent of
+    the manual task ``skipped`` with its "depends on skipped task" reason: the
+    native host never dispatched it, a stop before it left the record
+    standing, and ``[MANUAL_TASK]`` named it owed for good (fix round 9). A
+    task of *task_ids* the plan neither skips, completes nor accepts goes in
+    ``plan.unskipped``; returns them. A plan with no strategy and manual tasks
+    pending resolved nothing (the walk never ran), so it unskips nothing.
+    """
+    if plan.strategy is None and plan.pending:
+        return []
+    for task_id in task_ids:
+        task_id = str(task_id or "")
+        if (
+            not task_id or recorded.get(task_id) != "skipped"
+            or task_id in plan.skipped or task_id in plan.completed
+            or task_id in plan.accepted or task_id in plan.unskipped
+        ):
+            continue
+        plan.unskipped.append(task_id)
+    return list(plan.unskipped)
+
+
 def persist_human_task_plan(state: Any, plan: HumanTaskPlan) -> None:
     """Write a resolved :class:`HumanTaskPlan` into ``state.json`` and save.
 
     The strategy, a ``skipped`` status (with its reason) for every task the
     walk skipped, ``completed`` for a human task answered ``done`` and for a
-    failed code task accepted with ``done``, and one dependency override per
-    unblocked task. Shared by the scheduler (before
+    failed code task accepted with ``done``, ``pending`` for a task an
+    earlier run skipped that this plan runs (``unskipped``), and one
+    dependency override per unblocked task. Shared by the scheduler (before
     its first batch) and by ``implement``'s native emit, which records the
     same plan before it hands the batches to the host: until 2026-10-05 the
     native leg left these writes to the host, which never made them, so a
@@ -803,10 +894,13 @@ def persist_human_task_plan(state: Any, plan: HumanTaskPlan) -> None:
         state.update_task_status(task_id, "skipped", reason=reason)
     for task_id in plan.completed:
         state.update_task_status(
-            task_id, "completed", reason="answered --human-task <id>=done",
+            task_id, "completed", reason=COMPLETED_MANUAL_REASON,
         )
     for task_id, reason in sorted(plan.accepted.items()):
         state.update_task_status(task_id, "completed", reason=reason)
+    for task_id in plan.unskipped:
+        # No reason: the old skip's reason goes with the old status.
+        state.update_task_status(task_id, "pending")
     for task_id, overridden in sorted(plan.overrides.items()):
         state.record_dependency_override(task_id, list(overridden))
     state.save()
@@ -1878,6 +1972,16 @@ class WriteBatchScheduler:
             strategy=self.human_task_strategy,
             decisions=self.human_task_decisions,
         )
+        if self.kind == "implement" and self.state is not None:
+            try:
+                recorded = dict(self.state.get_all_task_statuses())
+            except Exception:  # noqa: BLE001 - a state fake without the map
+                recorded = {}
+            mark_no_longer_skipped(
+                result.human_plan,
+                [str(task.get("task_id", "")) for task in self.tasks],
+                recorded,
+            )
         if not self.dry_run:
             # A dry run resolves the plan (the report says what *would* be
             # skipped) but never persists it: D3l's contract is "no child
@@ -1885,6 +1989,19 @@ class WriteBatchScheduler:
             # strategy, mark human tasks skipped and record dependency overrides
             # in `state.json` for a run that never dispatched anything.
             self._persist_human_plan(result.human_plan)
+        if self.kind == "implement":
+            # The answers an earlier run recorded for tasks this resume did
+            # not materialize (an accepted failure, a manual task answered
+            # done): in no bucket otherwise, and the account's total shrank.
+            accepted, completed_manual = answered_done_on_record(
+                self.state,
+                exclude=[str(task.get("task_id", "")) for task in self.tasks],
+            )
+            for task_id, reason in accepted.items():
+                result.human_plan.accepted.setdefault(task_id, reason)
+            for task_id in completed_manual:
+                if task_id not in result.human_plan.completed:
+                    result.human_plan.completed.append(task_id)
 
         if result.human_plan.pending:
             # Fail closed: an unanswered human task is exactly the D6 "needs a
@@ -2225,7 +2342,8 @@ class WriteBatchScheduler:
                 # failure to a consumer — so they share the schema-rejection
                 # outcome. Rungs 1-4 (no child, no auth, timeout, runner error) are
                 # transport failures, not write outcomes, and are deliberately left
-                # unlabelled.
+                # unlabelled. Either becomes a partial application in
+                # `_audit_terminal` when the batch moved bytes (fix round 9).
                 if outcome.status in (STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE):
                     outcome.write_outcome = WRITE_SCHEMA_REJECTED
                 elif outcome.status == STATUS_PARTIAL:
@@ -2419,7 +2537,8 @@ class WriteBatchScheduler:
             outcome.files_touched = snapshot.changed()
         # After the fill, never before it: the fill is what would put the
         # replaced target back into the restore set.
-        self._replaced_target_unclassified(outcome, snapshot)
+        if not self._replaced_target_unclassified(outcome, snapshot):
+            self._partial_when_bytes_moved(outcome, snapshot)
         last = outcome.attempts[-1] if outcome.attempts else None
         self._audit_completion(
             outcome,
@@ -2429,6 +2548,46 @@ class WriteBatchScheduler:
             last.exit_code if last is not None else None,
             observed,
             outcome.duration_seconds,
+        )
+
+    def _partial_when_bytes_moved(
+        self, outcome: TaskOutcome, snapshot: TaskSnapshot
+    ) -> None:
+        """A failed dispatch that never reached ``_classify`` and moved bytes
+        is a partial application.
+
+        ``dispatch_task``'s pre-retry check (T4.8, widened in fix round 8)
+        makes one of an attempt that would have re-sent the batch, but not of
+        the report re-ask's own failure (the re-ask is exempt from that check:
+        its retry re-sends the re-ask) nor of a reply rung 6 never retries. So
+        a re-ask that replied in prose again, or timed out on every try,
+        ended ``unparseable_result`` / ``schema-rejection`` or an unlabelled
+        ``timeout`` beside the files the batch had changed. The row read "schema rejected" for work whose
+        bytes moved, and the stop's wording was not the partial's (fix round
+        9, review of round 8). *outcome*'s ``files_touched`` is the byte
+        comparison :meth:`_audit_terminal` just filled; when it names a file,
+        the outcome becomes the same partial application ``_classify``
+        records, with what failed kept in the reason — the stop, the restore
+        command and ``--resume`` then treat it as any partial. A rung-7
+        refusal keeps its own verdict.
+        """
+        if outcome.ok or outcome.status in (STATUS_PARTIAL, STATUS_REJECTED):
+            return
+        if outcome.write_outcome not in (None, WRITE_SCHEMA_REJECTED):
+            return
+        moved = [str(path) for path in (outcome.files_touched or [])]
+        if not moved:
+            return
+        what = outcome.reason or outcome.status
+        outcome.status = STATUS_PARTIAL
+        outcome.write_outcome = WRITE_PARTIAL
+        outcome.reason = (
+            f"PARTIAL APPLICATION: {len(moved)} file(s) changed "
+            f"({', '.join(moved[:5])}{', …' if len(moved) > 5 else ''}) but "
+            f"the batch did not finish: {what}. The batch loop stops here, the "
+            f"pre-batch snapshot is kept at {snapshot.directory}, and the phase "
+            f"is NOT marked completed — an automatic revert would destroy the "
+            f"half-applied state a human needs to inspect."
         )
 
     # -- D3l post-run containment: the OBSERVED set, not the declared one ---
@@ -5045,16 +5204,21 @@ class WriteBatchScheduler:
         no bucket, so a five-task line summed to four); ``deferred`` the human
         tasks the strategy skipped and ``skipped_dependents`` the tasks
         skipped with a skipped one. The buckets add up to ``total``, which is
-        the test ``summary.md``'s accounting line is written to.
+        the test ``summary.md``'s accounting line is written to. ``accepted``
+        and ``completed_manual`` include the answers an earlier run recorded
+        for tasks this resume did not materialize (``answered_done_on_record``,
+        fix round 9).
         """
         rows = result.report_rows()
         plan = result.human_plan
         by_id = {str(t.get("task_id", "")): t for t in self.tasks}
         failed = sorted({o.task_id for o in result.outcomes if not o.ok})
+        answered = set(plan.accepted) | set(plan.completed)
         done = sorted({
             str(row.get("task_id"))
             for row in rows
             if row.get("status") == STATUS_OK and str(row.get("task_id")) not in failed
+            and str(row.get("task_id")) not in answered
         })
         # A skip the user chose (a pause-and-ask "Skip", `--human-task
         # <id>=skip` on a failed task) is its own bucket: the seed is neither
@@ -6101,7 +6265,13 @@ class WriteBatchScheduler:
                 for task in self.tasks
                 if str(task.get("task_id", "")) not in skipped_ids
             }
-            total = len(self.tasks) - len(skipped_ids)
+            # Counted over the materialized tasks: an answered task an
+            # earlier run recorded (`answered_done_on_record`) is in
+            # `accepted` without being one of them.
+            total = sum(
+                1 for task in self.tasks
+                if str(task.get("task_id", "")) not in skipped_ids
+            )
             items_total = sum(len(ids) for ids in expected_ids_by_task.values())
             items_applied = sum(
                 len(expected_ids_by_task.get(o.task_id, []))
