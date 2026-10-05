@@ -10,6 +10,8 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from utils.json_extractor import (
     build_unsanitize_map,
+    describe_syntax_error,
+    enclosing_syntax_error,
     extract_json_from_text,
     generate_output_path,
     has_salvageable_json,
@@ -864,3 +866,43 @@ class TestRawControlCharacters:
         assert parsed["success"]
         assert isinstance(parsed["data"], dict)
         assert parsed["data"]["status"] == "applied"
+
+
+class TestEnclosingSyntaxError:
+    """Say why the document did not parse when only a piece of it was served."""
+
+    #: The 2026-10-05 big-pickle task-generation failure in miniature: right
+    #: keys, one description with unescaped double quotes.
+    BROKEN = (
+        '{\n  "schema_version": "1.0",\n  "plan_preamble": "One page.",\n'
+        '  "tasks": [\n    {\n      "id": "T001",\n'
+        '      "description": "the overlay shows "3", "2", "1" and "GO" in turn",\n'
+        '      "depends_on": []\n    },\n'
+        '    {\n      "id": "T002",\n      "description": "fine",\n'
+        '      "depends_on": ["T001"]\n    }\n  ]\n}'
+    )
+
+    def test_a_fragment_of_a_broken_document_gets_the_documents_error(self):
+        served = extract_json_from_text(self.BROKEN, prefer_arrays=True)["data"]
+        assert "schema_version" not in served  # the extractor served a fragment
+
+        found = enclosing_syntax_error(self.BROKEN, served)
+
+        assert found is not None
+        assert found["line"] == 7
+        assert found["message"] == "Expecting ',' delimiter"
+        assert '"<<HERE>>3", "2"' in found["excerpt"]
+        assert describe_syntax_error(found).startswith(
+            "line 7, column 42: Expecting ',' delimiter — the text there reads:"
+        )
+
+    def test_a_whole_document_has_no_enclosing_error(self):
+        text = 'Here it is: {"a": [1, 2]}'
+        assert enclosing_syntax_error(text, {"a": [1, 2]}) is None
+
+    def test_a_piece_of_a_valid_document_has_none_either(self):
+        assert enclosing_syntax_error('{"a": [{"b": 1}]}', [{"b": 1}]) is None
+
+    def test_data_that_is_not_in_the_text_has_none(self):
+        assert enclosing_syntax_error(self.BROKEN, {"never": "there"}) is None
+        assert enclosing_syntax_error("", None) is None
