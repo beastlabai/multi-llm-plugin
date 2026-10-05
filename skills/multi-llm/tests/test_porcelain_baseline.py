@@ -39,6 +39,15 @@ def _changed(root, mutate, *, ignore=()):
     return rob.unexpected_writes(before, after, ignore_prefixes=ignore)
 
 
+def _subcommand(argv) -> str:
+    """The git subcommand of ``argv`` as ``git_utils.git_argv`` renders it
+    (the hardening ``-c key=value`` pairs come first)."""
+    index = 1
+    while index < len(argv) and str(argv[index]).startswith("-"):
+        index += 2 if argv[index] in ("-c", "-C") else 1
+    return argv[index] if argv[0] == "git" and index < len(argv) else ""
+
+
 class TestOptionA:
 
     def test_a_write_to_a_pre_dirty_file_is_seen(self, repo):
@@ -134,7 +143,7 @@ class TestOptionA:
         real = subprocess.run
 
         def fake(argv, *a, **kw):
-            if argv[:2] == ["git", "hash-object"]:
+            if _subcommand(argv) == "hash-object":
                 return subprocess.CompletedProcess(argv, 128, "", "fatal")
             return real(argv, *a, **kw)
 
@@ -153,7 +162,7 @@ class TestOptionA:
         hashed = []
 
         def spy(argv, *a, **kw):
-            if argv[:2] == ["git", "hash-object"]:
+            if _subcommand(argv) == "hash-object":
                 hashed.append(kw.get("input", ""))
             return real(argv, *a, **kw)
 
@@ -169,12 +178,12 @@ class TestOptionA:
         calls = []
 
         def spy(argv, *a, **kw):
-            calls.append(argv[:2])
+            calls.append(_subcommand(argv))
             return real(argv, *a, **kw)
 
         monkeypatch.setattr(rob.subprocess, "run", spy)
         rob.porcelain_snapshot(str(repo))
-        assert calls.count(["git", "hash-object"]) == 1
+        assert calls.count("hash-object") == 1
 
     def test_no_repository_is_none(self, tmp_path):
         assert rob.porcelain_snapshot(None) is None
