@@ -33,6 +33,7 @@ from utils.git_utils import (
     get_modified_files,
     get_staged_diff,
     get_staged_files,
+    git_argv,
     ignored_paths,
     intent_to_add_untracked,
     is_clean_working_tree,
@@ -86,7 +87,7 @@ class TestRunGit:
         assert stderr == ""
         assert code == 0
         mock_run.assert_called_once_with(
-            ["git", "status"],
+            git_argv("status"),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -105,7 +106,7 @@ class TestRunGit:
         _run_git("diff", "--cached", "--name-only")
 
         mock_run.assert_called_once_with(
-            ["git", "diff", "--cached", "--name-only"],
+            git_argv("diff", "--cached", "--name-only"),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -2427,3 +2428,121 @@ class TestListWorktreeUntrackedFiles:
         monkeypatch.chdir(outside)
         monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
         assert list_worktree_untracked_files() is None
+
+
+# ---------------------------------------------------------------------------
+# The plugin's git calls run nothing a jailed batch could have planted
+# (root grant, 2026-10-05: `.git/` is writable inside a repo-wide batch)
+# ---------------------------------------------------------------------------
+
+def _real_repo(tmp_path):
+    """A committed scratch repo with one tracked file, hooks off."""
+    import subprocess as sp
+    root = Path(os.path.realpath(tmp_path)) / "repo"
+    root.mkdir()
+    env = dict(os.environ, GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null",
+               GIT_AUTHOR_NAME="t", GIT_AUTHOR_EMAIL="t@example.invalid",
+               GIT_COMMITTER_NAME="t", GIT_COMMITTER_EMAIL="t@example.invalid")
+
+    def git(*args):
+        return sp.run(["git", *args], cwd=root, check=True, capture_output=True,
+                      text=True, env=env).stdout
+
+    git("init", "-q")
+    (root / "app.py").write_text("x = 1\n", encoding="utf-8")
+    git("add", "-A")
+    git("commit", "-qm", "init")
+    return root, git
+
+
+def _planted(tmp_path, name: str) -> tuple:
+    """An executable that records that it ran; ``(script, marker)``."""
+    marker = Path(os.path.realpath(tmp_path)) / f"{name}.ran"
+    script = Path(os.path.realpath(tmp_path)) / f"{name}.sh"
+    script.write_text(f"#!/bin/sh\necho ran > {marker}\nexit 0\n", encoding="utf-8")
+    script.chmod(0o755)
+    return script, marker
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executable hooks are a POSIX shape")
+class TestThePluginsGitCallsRunNothingPlanted:
+    """A repo-wide batch can write ``.git/config`` and ``.git/hooks/`` now;
+    the plugin's own git calls after it (the sweep's status, the census,
+    intent-to-add, review-code's diffs) must not execute what it planted."""
+
+    def test_a_planted_fsmonitor_is_not_run_by_status(self, tmp_path, monkeypatch):
+        root, git = _real_repo(tmp_path)
+        script, marker = _planted(tmp_path, "fsmonitor")
+        git("config", "core.fsmonitor", str(script))
+        monkeypatch.chdir(root)
+        (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+        assert get_modified_files() == ["app.py"]
+        assert not marker.exists(), "git status ran the planted core.fsmonitor"
+
+    def test_a_planted_post_index_change_hook_is_not_run_by_intent_to_add(self, tmp_path, monkeypatch):
+        root, git = _real_repo(tmp_path)
+        script, marker = _planted(tmp_path, "hook")
+        hook = root / ".git" / "hooks" / "post-index-change"
+        hook.write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+        hook.chmod(0o755)
+        (root / "new.py").write_text("y = 1\n", encoding="utf-8")
+        monkeypatch.chdir(root)
+        with intent_to_add_untracked(["new.py"], cwd=str(root)) as touched:
+            assert touched == ["new.py"]
+        assert not marker.exists(), "git add -N ran the planted post-index-change hook"
+
+    def test_a_planted_hooks_path_is_not_run_either(self, tmp_path, monkeypatch):
+        root, git = _real_repo(tmp_path)
+        script, marker = _planted(tmp_path, "hookspath")
+        hooks = root / "planted-hooks"
+        hooks.mkdir()
+        (hooks / "post-index-change").write_text(script.read_text(encoding="utf-8"), encoding="utf-8")
+        (hooks / "post-index-change").chmod(0o755)
+        git("config", "core.hooksPath", "planted-hooks")
+        (root / "new.py").write_text("y = 1\n", encoding="utf-8")
+        monkeypatch.chdir(root)
+        with intent_to_add_untracked(["new.py"], cwd=str(root)):
+            pass
+        assert not marker.exists(), "git add -N ran a hook from the planted core.hooksPath"
+
+    def test_a_planted_external_diff_is_not_run_by_a_diff(self, tmp_path, monkeypatch):
+        root, git = _real_repo(tmp_path)
+        script, marker = _planted(tmp_path, "extdiff")
+        git("config", "diff.external", str(script))
+        monkeypatch.chdir(root)
+        (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+        assert "-x = 1" in get_file_diff("app.py")
+        assert "+x = 2" in get_diff_since_ref("HEAD")
+        assert not marker.exists(), "git diff ran the planted diff.external"
+
+    def test_a_planted_textconv_driver_is_not_run_by_a_diff(self, tmp_path, monkeypatch):
+        root, git = _real_repo(tmp_path)
+        script, marker = _planted(tmp_path, "textconv")
+        (root / ".gitattributes").write_text("*.py diff=planted\n", encoding="utf-8")
+        git("config", "diff.planted.textconv", str(script))
+        monkeypatch.chdir(root)
+        (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+        assert "+x = 2" in get_file_diff("app.py")
+        hunks = capture_diff_hunks("HEAD", ["app.py"])
+        assert "app.py" in hunks
+        assert not marker.exists(), "git diff ran the planted textconv driver"
+
+    def test_every_runtime_git_invocation_goes_through_the_one_builder(self):
+        """Every ``["git", …]`` argv a runtime module spawns is built by
+        ``git_utils.git_argv`` (which carries the hardening), never spelled
+        as a list literal: an AST scan over every runtime module but
+        ``git_utils`` itself."""
+        import ast
+        skill_root = Path(__file__).resolve().parent.parent
+        offenders = []
+        for path in sorted(skill_root.rglob("*.py")):
+            rel = path.relative_to(skill_root).as_posix()
+            if rel.startswith(("tests/", ".venv/", "legacy/", "packaging/")) or rel == "utils/git_utils.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
+                    first = node.elts[0]
+                    if isinstance(first, ast.Constant) and first.value == "git":
+                        offenders.append(f"{rel}:{node.lineno}")
+        assert offenders == [], offenders
