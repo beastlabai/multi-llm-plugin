@@ -35,11 +35,15 @@ copy:
   never a command.
 * The final message is the text of the turn's trailing assistant entries. The
   ``Stop`` hook input's ``last_assistant_message`` is read too, when present,
-  and the turn passes when either carries the copy: the hook can fire before
-  the transcript's last line is written, and a stale transcript must never
-  produce a block. (The field, like ``transcript_path`` and
-  ``stop_hook_active``, was read out of the Stop-input builder in the 2.1.285
-  binary the container pins, 2026-10-01; not yet observed on a live hook.)
+  and the turn passes when either carries the copy: a stale transcript must
+  never produce a block. It is stale in practice. Observed on a live headless
+  ``claude -p`` hook (2.1.289, 2026-10-05), the input carries ``session_id``,
+  ``transcript_path``, ``cwd``, ``prompt_id``, ``permission_mode``,
+  ``effort``, ``hook_event_name``, ``stop_hook_active``,
+  ``last_assistant_message``, ``background_tasks`` and ``session_crons``, and
+  the transcript still ends at the turn's last tool result: the reply is
+  written after the hook returns. So the field is what gets checked, and a
+  transcript with no reply text yet, with no field beside it, passes.
 * On a miss it prints exactly one line, ``{"decision": "block", "reason": …}``,
   the one form Claude Code reads as a ``Stop`` decision. The reason names each
   missing command in its own fenced block and asks for it copied exactly (and
@@ -413,27 +417,53 @@ def last_block(turn: Sequence[Dict[str, Any]]) -> Optional[Block]:
     return found
 
 
-def final_message(turn: Sequence[Dict[str, Any]]) -> Optional[str]:
-    """The text of the turn's trailing assistant entries.
+def _trailing_assistant(turn: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The assistant entries after the turn's last user entry, newest first.
 
-    Claude Code writes one transcript entry per content block, so one reply
-    can span several entries (thinking, then text). The final message is every
-    assistant entry after the turn's last user entry. ``None`` when the turn
-    ended on an API error the harness synthesized: the model wrote no report
-    there to check.
+    An ``isMeta`` user entry (a hook's feedback, a loaded skill body) does not
+    end the run: it is not a turn of the conversation.
     """
-    texts: List[str] = []
+    trailing: List[Dict[str, Any]] = []
     for entry in reversed(turn):
         kind = entry.get("type")
         if kind == "user":
             if entry.get("isMeta"):
                 continue
             break
-        if kind != "assistant":
-            continue
-        if entry.get("isApiErrorMessage") and not texts:
-            return None
-        texts = _assistant_text(entry) + texts
+        if kind == "assistant":
+            trailing.append(entry)
+    return trailing
+
+
+def ended_on_api_error(turn: Sequence[Dict[str, Any]]) -> bool:
+    """Whether the turn ended on an API error the harness synthesized.
+
+    True when the newest trailing assistant entry that carries text, or is an
+    API error, is the API error: the model wrote no report there to check.
+    """
+    for entry in _trailing_assistant(turn):
+        if entry.get("isApiErrorMessage"):
+            return True
+        if _assistant_text(entry):
+            return False
+    return False
+
+
+def final_message(turn: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """The text of the turn's trailing assistant entries.
+
+    Claude Code writes one transcript entry per content block, so one reply
+    can span several entries (thinking, then text). The final message is every
+    assistant entry after the turn's last user entry. ``None`` when those
+    entries carry no text: the transcript has not written the reply yet, which
+    is how it stands when the ``Stop`` hook runs (measured on 2.1.289,
+    2026-10-05: it ends at the turn's last tool result).
+    """
+    texts: List[str] = []
+    for entry in reversed(_trailing_assistant(turn)):
+        texts.extend(_assistant_text(entry))
+    if not texts:
+        return None
     return "\n".join(texts)
 
 
@@ -452,14 +482,17 @@ def check(
     """
     turn = read_turn(transcript)
     block = last_block(turn)
-    if block is None:
+    if block is None or ended_on_api_error(turn):
         return None
-    from_transcript = final_message(turn)
-    if from_transcript is None:
+    # A reply this check cannot see is never a miss: with the transcript not
+    # yet holding it and no hook-input copy of it, the turn passes.
+    messages = [
+        message
+        for message in (final_message(turn), last_assistant_message)
+        if message is not None
+    ]
+    if not messages:
         return None
-    messages = [from_transcript]
-    if last_assistant_message is not None:
-        messages.append(last_assistant_message)
     misses = [missing_commands(block, message) for message in messages]
     if any(not missing for missing in misses):
         return None
