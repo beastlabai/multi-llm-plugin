@@ -768,6 +768,47 @@ class TestFailureLadder:
         # retries=0 would have allowed exactly one attempt if the budget applied.
         assert len(outcome.attempts) > 1
 
+    def test_a_grant_taken_back_at_the_next_start_keeps_the_attempts_status(
+        self, tmp_path, runner_env, monkeypatch
+    ):
+        """Fix round 6: a backoff the ladder granted and the lane then overslept
+        leaves less than the declared envelope at the next start. The slot ran
+        an attempt, so it is not `budget_exhausted` ("Nothing was dispatched"):
+        the attempt's own status stands and the reason says what was not
+        started."""
+        from types import SimpleNamespace
+
+        runner_env.use("codex:gpt-5.5")
+        monkeypatch.setenv("MOCK_LLM_CONFIG", json.dumps(
+            {"error": "Error 429: rate limit exceeded, try again"}
+        ))
+        clock = {"t": 0.0}
+        real_ladder = executor.RetryLadder
+
+        class Ladder(real_ladder):
+            def __init__(self, *args, **kwargs):
+                kwargs["now"] = lambda: clock["t"]
+                super().__init__(*args, **kwargs)
+                self.envelope = SimpleNamespace(
+                    max_requests=4, max_wall_s=self.timeout - 10.0,
+                    retries_rate_limit=False,
+                )
+
+        monkeypatch.setattr(executor, "RetryLadder", Ladder)
+
+        def oversleep(_seconds):
+            clock["t"] += 30.0
+
+        outcome = executor.dispatch_task(
+            _validation_batch(tmp_path), phase_dir=str(tmp_path),
+            runner="codex:gpt-5.5", retries=0, sleep=oversleep,
+        )
+        assert outcome.status == executor.STATUS_RATE_LIMITED, outcome.reason
+        assert len(outcome.attempts) == 1
+        assert "Nothing was dispatched" not in outcome.reason
+        assert "(no further attempt: " in outcome.reason
+        assert "1 attempt(s) ran; attempt 2 was not started" in outcome.reason
+
     def test_rung_4_runner_error(self, tmp_path, runner_env, monkeypatch):
         runner_env.use("codex:gpt-5.5")
         monkeypatch.setenv("MOCK_LLM_FAIL", "1")
