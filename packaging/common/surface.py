@@ -41,7 +41,7 @@ if str(SKILL_DIR) not in sys.path:
 import modes as mode_table  # noqa: E402
 import multi_llm  # noqa: E402  (side-effect free at import: main() does the work)
 from utils import (  # noqa: E402
-    cli_common, detach, host_capabilities, provider_registry,
+    cli_common, detach, host_capabilities, next_phase, provider_registry,
     subagent_executor, subagent_tasks, unattended,
 )
 
@@ -127,6 +127,11 @@ def _exposed_modes() -> List[Dict[str, Any]]:
             # from the payload: a poll's result line is `status`'s own and
             # declares no phase, so the payload cannot say which phase died.
             "phase": mode.phase,
+            # How the user names this mode on the host (`--<mode>`), the word
+            # a server re-spells a redacted dispatcher command with
+            # (`dispatcher.user_command`). The same spelling
+            # `next_phase.resume_command` and `render_argument_hint` print.
+            "user_flag": f"--{mode.name}",
             # Whether this mode's `--exec-subagents` dispatch can reach an
             # `agent-write` profile — derived, never typed (D3b).
             "writes_worktree": _writes_worktree(mode),
@@ -289,8 +294,10 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
     the mode block, so a model meets the exit codes in the same glance as the
     modes — and directly under it the ``user_next_step`` line
     (``modes.TOOL_USER_NEXT_STEP_LINE``: a lifted next-phase command is the
-    user's to type, never a call; plans/next-phase-command.md §2.4), then any
-    host-keyed note, then the worked examples. Examples travel inside the
+    user's to type, never a call; plans/next-phase-command.md §2.4) and its
+    sibling ``modes.TOOL_NO_COMPOSED_COMMAND_LINE`` (those keys and
+    ``resume_command`` are the only commands, never one the model composes),
+    then any host-keyed note, then the worked examples. Examples travel inside the
     description because a JSON-Schema fallback has nowhere to put an
     ``examples`` key a host would render.
     """
@@ -303,6 +310,7 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
     lines.append("")
     lines.append(mode_table.TOOL_OUTCOMES_LINE)
     lines.append(mode_table.TOOL_USER_NEXT_STEP_LINE)
+    lines.append(mode_table.TOOL_NO_COMPOSED_COMMAND_LINE)
     note = _DESCRIPTION_NOTE.get(host_id)
     if note:
         writers = ", ".join(row["name"] for row in rows if row["writes_worktree"])
@@ -338,6 +346,11 @@ def _argument_descriptions(
         *reserved["named_exception"],
         *(f"{prefix}*" for prefix in reserved["prefixes"]),
     ]
+    redundant = reserved["redundant"]
+    restated = [
+        *redundant["flags"],
+        *(f"{name} {value}" for name, value in redundant["valued"].items()),
+    ]
     sigil = _PLAN_SIGIL_CLAUSE.get(host_id, "")
     return {
         "mode": (
@@ -366,15 +379,53 @@ def _argument_descriptions(
         "extra_flags": (
             "Additional dispatcher flags, one token per array element — "
             '["--view", "run"], never ["--view run"]. Use [] for none. Passed '
-            "verbatim, in order, never reordered or deduplicated. These are "
-            "rejected because this tool composes them itself: "
-            f"{', '.join(reserved_words)} — including their abbreviations and "
-            '"=" forms.'
+            "verbatim, in order, never reordered or deduplicated. This tool "
+            f"composes these itself: {', '.join(reserved_words)}. Restating one "
+            f"with the same meaning ({', '.join(restated)}) is dropped with a "
+            "note in the result; every other one is rejected — including their "
+            'abbreviations and "=" forms.'
         ),
     }
 
 
-def _reserved_flags() -> Dict[str, Any]:
+def _redundant_flags(host_id: str) -> Dict[str, Any]:
+    """The composed flags a call may restate as a no-op (racing re-run 2026-10-04).
+
+    Derived from ``baked_flags`` and the parent parser, never typed: every
+    spelling of a valueless composed flag (``--yes``/``-y``/
+    ``--non-interactive``, ``--exec-subagents``) is the same action twice, and
+    a valued one (``--host``) is the same only with this host's value, so it is
+    listed with that value. ``--detach`` is composed for some modes only and is
+    a refusal on the rest, ``--interactive`` contradicts ``--yes``, and the
+    detach controls and ``--internal-*`` are never the caller's: none of them is
+    here, so each stays refused. ``note`` is ``modes.REDUNDANT_FLAG_NOTE``.
+    """
+    baked = _baked_flags(host_id)
+    actions = {
+        name: action
+        for action in cli_common.build_parent_parser()._actions
+        for name in action.option_strings
+    }
+    flags: List[str] = []
+    valued: Dict[str, str] = {}
+    index = 0
+    while index < len(baked):
+        action = actions[baked[index]]
+        if action.nargs == 0:
+            flags.extend(action.option_strings)
+            index += 1
+        else:
+            valued[baked[index]] = baked[index + 1]
+            index += 2
+    return {"flags": flags, "valued": valued, "note": mode_table.REDUNDANT_FLAG_NOTE}
+
+
+def _baked_flags(host_id: str) -> List[str]:
+    """The flags ``execute`` appends to every dispatch, in composition order."""
+    return ["--host", host_id, "--yes", "--exec-subagents"]
+
+
+def _reserved_flags(host_id: str) -> Dict[str, Any]:
     """The flags ``extra_flags`` may not carry, generated from their owners.
 
     **The set is closed by construction: it is exactly the flags the plugin
@@ -416,6 +467,10 @@ def _reserved_flags() -> Dict[str, Any]:
         # resolves an exact match before it considers any abbreviation, so
         # these never read as an abbreviation of something longer.
         "exact_options": sorted(cli_common._EXACT_OPTIONS),
+        # Additive within schema v5: the subset of the above a call may
+        # restate as a no-op, dropped with `note`. A server whose surface lacks
+        # the key refuses every one of them, as before.
+        "redundant": _redundant_flags(host_id),
     }
 
 
@@ -465,6 +520,15 @@ def _route_env(host_id: str) -> Dict[str, str]:
     return {"name": mode_table.ROUTE_ENV, "value": members[0]}
 
 
+def _user_command(host_id: str) -> Dict[str, str]:
+    """``dispatcher.user_command``: the route's template and its args slot."""
+    route = _route_env(host_id)["value"]
+    return {
+        "template": host_capabilities.next_command_template(host_id, route),
+        "args_slot": next_phase.ARGS_SLOT,
+    }
+
+
 def cli_surface(host_id: str) -> Dict[str, Any]:
     """Everything a host's plugin needs to know about the CLI, generated.
 
@@ -491,7 +555,7 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
     no environment.
     """
     rows = _exposed_modes()
-    reserved = _reserved_flags()
+    reserved = _reserved_flags(host_id)
     return {
         "schema_version": SURFACE_SCHEMA_VERSION,
         "host": host_id,
@@ -526,6 +590,11 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
         "needs_human_message": dict(mode_table.NEEDS_HUMAN_MESSAGE),
         # The one `options` entry that is not a retry.
         "needs_human_option": mode_table.NEEDS_HUMAN_OPTION,
+        # The sentence a server sets as `no_command_reason` beside
+        # `user_next_step: null` on a failed or needs-human result without a
+        # `resume_command`. Additive within v5: a server whose surface lacks it
+        # still sets the null and omits the sentence.
+        "no_command_reason": mode_table.NO_COMMAND_REASON,
         "modes": rows,
         "positional_kinds": {
             "plan": mode_table.POS_PLAN,
@@ -535,7 +604,7 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
         # The flags ``execute`` appends to every dispatch, in composition order.
         # ``--yes`` is unconditional: the ``--interactive`` substitution is
         # retired and the flag is refused before the spawn.
-        "baked_flags": ["--host", host_id, "--yes", "--exec-subagents"],
+        "baked_flags": _baked_flags(host_id),
         "detach_flag": "--detach",
         "uv": {
             "env": unattended.UV_ENV,
@@ -634,6 +703,14 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
                 "option": "--blocked",
                 "result_key": "user_resume",
             },
+            # How a user types a command on this route: the host's
+            # `next_command` template for `route_env.value`, and the slot the
+            # arguments fill. A needs-human result's redacted dispatcher
+            # commands are re-spelled through it (each row's `user_flag`, the
+            # plan as the call typed it, `next_phase.quote_plan_arg`'s quoting)
+            # instead of being replaced by a removal note. Additive within v5:
+            # a server whose surface lacks it keeps the note.
+            "user_command": _user_command(host_id),
             "host_option": "--host",
             "run_id_option": RUN_ID_OPTION,
             # The variable the plugin sets to the model the host session is

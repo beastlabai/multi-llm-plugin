@@ -346,3 +346,82 @@ def test_the_user_next_step_line_follows_the_outcomes_line(host):
     assert lines.count(mode_table.TOOL_USER_NEXT_STEP_LINE) == 1
     at = lines.index(mode_table.TOOL_OUTCOMES_LINE)
     assert lines[at + 1] == mode_table.TOOL_USER_NEXT_STEP_LINE
+
+
+# ---------------------------------------------------------------------------
+# What a failed result says the user can run (racing re-run 2026-10-04)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_the_no_composed_command_line_follows_the_user_next_step_line(host):
+    """OpenCode #4: after a failed generate-tasks the host model printed a
+    "next phase" it composed itself. The description says, before any result,
+    that the two command keys and `resume_command` are the only commands."""
+    lines = surface.cli_surface(host)["tool_description"].split("\n")
+    at = lines.index(mode_table.TOOL_USER_NEXT_STEP_LINE)
+    assert lines[at + 1] == mode_table.TOOL_NO_COMPOSED_COMMAND_LINE
+    assert lines.count(mode_table.TOOL_NO_COMPOSED_COMMAND_LINE) == 1
+    for key in ("user_next_step", "resume_command", "no_command_reason"):
+        assert f"`{key}" in mode_table.TOOL_NO_COMPOSED_COMMAND_LINE
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_the_no_command_sentences_are_the_tables(host):
+    rendered = surface.cli_surface(host)
+    assert rendered["no_command_reason"] == mode_table.NO_COMMAND_REASON
+    message = rendered["needs_human_message"]
+    assert message["no_command"] == mode_table.NEEDS_HUMAN_MESSAGE["no_command"]
+    assert "no_command_reason" in message["no_command"]
+    # The redaction sentence now says where a redacted command went for the
+    # user (its host spelling), and that only `resume_command` is theirs.
+    assert "re-spelled" in message["template"]
+    assert "only `resume_command` is theirs to type" in message["template"]
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_the_redundant_flags_are_derived_from_the_composed_ones(host):
+    """OpenCode #1: a restated `--yes` was refused four times in one session.
+    The no-op set is every spelling of a valueless composed flag plus `--host`
+    with this host's value — read from `baked_flags` and the parent parser."""
+    from utils import cli_common
+
+    rendered = surface.cli_surface(host)
+    reserved = rendered["reserved_flags"]
+    redundant = reserved["redundant"]
+    by_dest = {a.dest: list(a.option_strings)
+               for a in cli_common.build_parent_parser()._actions}
+    assert redundant["flags"] == by_dest["yes"] + by_dest["exec_subagents"]
+    assert redundant["valued"] == {"--host": host}
+    assert redundant["note"] == mode_table.REDUNDANT_FLAG_NOTE
+    assert "{flags}" in redundant["note"]
+    assert set(redundant["flags"]) | set(redundant["valued"]) <= set(reserved["exact"])
+    # The conflicting ones stay refused.
+    for kept_refused in ("--detach", "--if-not-running", "--max-detached"):
+        assert kept_refused not in redundant["flags"]
+        assert kept_refused not in redundant["valued"]
+    assert not set(reserved["named_exception"]) & set(redundant["flags"])
+    description = rendered["argument_descriptions"]["extra_flags"]
+    assert f"--host {host}" in description and "dropped with a note" in description
+
+
+@pytest.mark.parametrize("host", HOSTS)
+def test_the_user_command_spelling_is_the_resume_commands(host):
+    """`dispatcher.user_command` plus a row's `user_flag` and the plan quoting
+    rule spell exactly what `next_phase.resume_command` prints on this route,
+    so a server's re-spelled command and the dispatcher's cannot drift."""
+    from utils import next_phase
+
+    rendered = surface.cli_surface(host)
+    spell = rendered["dispatcher"]["user_command"]
+    route = rendered["dispatcher"]["route_env"]["value"]
+    assert spell["template"] == host_capabilities.next_command_template(host, route)
+    rows = {row["name"]: row for row in rendered["modes"]}
+    for row in rendered["modes"]:
+        assert row["user_flag"] == f"--{row['name']}"
+    workflow = {"phases": {"implement": {"status": "in_progress"}}}
+    for plan in ("plans/x.md", "plans/my plan.md", 'plans/a"b.md'):
+        expected = next_phase.resume_command(
+            plan, host, route, "implement", workflow=workflow)
+        args = " ".join([rows["implement"]["user_flag"],
+                         next_phase.quote_plan_arg(plan), next_phase.RESUME_FLAG])
+        assert spell["template"].replace(spell["args_slot"], args) == expected
