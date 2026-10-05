@@ -1000,7 +1000,7 @@ class TestResumeCommand:
 
     @pytest.mark.parametrize("status", [
         "timeout", "rate_limited", "runner_error", "unparseable_result",
-        "schema_invalid", "incomplete", "budget_exhausted",
+        "schema_invalid", "incomplete",
     ])
     def test_every_rerunnable_failure_gets_it(self, status):
         assert np_.resume_command(
@@ -1010,11 +1010,16 @@ class TestResumeCommand:
 
     @pytest.mark.parametrize("status", [
         "rejected", "invalid_model", "auth_failed", "spawn_failed",
-        "sandbox_unavailable", "context_length_exceeded",
+        "sandbox_unavailable", "context_length_exceeded", "budget_exhausted",
     ])
     def test_no_command_where_no_re_run_can_help(self, status):
         """Codex #1 (same run): the CLI refused the schema before any request
-        (`rejected`, rung 7, "never retried"); a re-run fails identically."""
+        (`rejected`, rung 7, "never retried"); a re-run fails identically.
+
+        `budget_exhausted` is the same kind of stop (fix round 6): §7.5 rule 4
+        refused the slot before anything was spawned, because the configured
+        timeout cannot hold one declared worst-case attempt. Its own reason says
+        "Raise the slot timeout"; an unchanged re-run is refused identically."""
         assert np_.resume_command(
             P, "codex", "package", "generate-tasks",
             phase_status=self._gt_status({status: 1}),
