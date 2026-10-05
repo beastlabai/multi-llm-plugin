@@ -3234,7 +3234,45 @@ class TestANoOpClaimWithBytesMoved:
 # Finalization hands the verified touched set to finalize_tracking
 # ===========================================================================
 
+def _code_task(env, index: int = 0, path: str = "src/a.py", **over):
+    """An ``implement`` task declaring one code file (a code write kind)."""
+    task_id = f"T00{index + 1}"
+    kwargs = dict(
+        kind="implement", task_id=task_id, expected_ids=[task_id],
+        output_name=f"implement_batch_{task_id}.json",
+        declared_files=[str(env.root / path)],
+    )
+    kwargs.update(over)
+    return env.apply_task(index, **kwargs)
+
+
+def _code_edit(env, path: str = "src/a.py", text: str = "edit\n", task_id="T001"):
+    env.edits([_patch_edit(env.root / path, text)],
+              result={"status": "applied", "ids": [task_id],
+                      "files_touched": [path], "summary": "S"})
+
+
+def _commit_baseline(root: Path) -> str:
+    """Commit what the repo holds, so `created` can be read off a real tree."""
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(root), "-c", "user.email=t@example.com",
+             "-c", "user.name=t", "-c", "commit.gpgsign=false", *args],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    git("add", "plans", "src")
+    git("commit", "-qm", "base")
+    return git("rev-parse", "HEAD")
+
+
 class TestFinalizeTrackingSeesTheVerifiedFiles:
+    """`tracked_files` is a code phase's record (implement, apply-code-fixes).
+
+    These ran on `apply_suggestions` until 2026-10-05; that kind no longer
+    records `tracked_files` at all (see
+    `TestOnlyACodePhaseRecordsTrackedFiles`), so the mechanism is pinned on
+    `implement`, the phase whose record review-code reads.
+    """
 
     def test_every_applied_file_travels_as_touched(self, env, monkeypatch):
         import finalize_tracking
@@ -3242,17 +3280,18 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         seen = []
         monkeypatch.setattr(finalize_tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["s0"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        _code_edit(env)
         state = FakeState(env.tmp_path / "state.json")
-        result = env.scheduler([env.apply_task(0)], state=state).run()
+        result = env.scheduler(
+            [_code_task(env)], kind="implement", state=state,
+        ).run()
         assert result.exit_code == 0, result.messages
         assert len(seen) == 1
         argv = seen[0]
         assert argv[:2] == ["--state-file", state.state_file]
         touched = [argv[i + 1] for i, a in enumerate(argv) if a == "--touched"]
-        assert touched == ["plans/p.md"]
+        assert touched == ["src/a.py"]
+        assert argv[argv.index("--phase") + 1] == "implement"
 
     def test_a_batch_skipped_on_resume_still_contributes_its_files(self, env, monkeypatch):
         """The earlier run's result file records what it changed; a resumed
@@ -3260,19 +3299,46 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         import finalize_tracking
 
         state = FakeState(env.tmp_path / "state.json")
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["s0"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
-        env.scheduler([env.apply_task(0)], state=state, finalize=False).run()
+        _code_edit(env)
+        env.scheduler([_code_task(env)], kind="implement", state=state,
+                      finalize=False).run()
 
         seen = []
         monkeypatch.setattr(finalize_tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
-        result = env.scheduler([env.apply_task(0)], state=state).run()
+        result = env.scheduler([_code_task(env)], kind="implement",
+                               state=state).run()
         assert result.outcomes[0].skipped
-        assert result.outcomes[0].files_touched == ["plans/p.md"]
+        assert result.outcomes[0].files_touched == ["src/a.py"]
         touched = [seen[0][i + 1] for i, a in enumerate(seen[0]) if a == "--touched"]
-        assert touched == ["plans/p.md"]
+        assert touched == ["src/a.py"]
+
+    def test_a_resume_that_no_longer_materializes_a_done_task_keeps_its_files(
+        self, env, monkeypatch
+    ):
+        """A resumed implement materializes only the unfinished tasks, so a
+        task the first run finished is not even skipped — it is absent. Its
+        files come from the earlier run's report rows: without them a file
+        that task edited while it was already dirty (the baseline subtracts
+        it) left `tracked_files` the moment the resumed run recorded its own."""
+        import finalize_tracking
+
+        state = FakeState(env.tmp_path / "state.json")
+        _code_edit(env)
+        env.scheduler([_code_task(env)], kind="implement", state=state,
+                      finalize=False).run()
+
+        seen = []
+        monkeypatch.setattr(finalize_tracking, "main",
+                            lambda argv: seen.append(list(argv)) or 0)
+        _code_edit(env, "src/b.py", task_id="T002")
+        result = env.scheduler(
+            [_code_task(env, 1, "src/b.py", depends_on=["T001"])],
+            kind="implement", state=state, resume=True,
+        ).run()
+        assert result.exit_code == 0, result.messages
+        touched = [seen[0][i + 1] for i, a in enumerate(seen[0]) if a == "--touched"]
+        assert touched == ["src/a.py", "src/b.py"]
 
     def test_a_no_op_batch_contributes_nothing(self, env, monkeypatch):
         import finalize_tracking
@@ -3280,10 +3346,10 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         seen = []
         monkeypatch.setattr(finalize_tracking, "main",
                             lambda argv: seen.append(list(argv)) or 0)
-        env.edits([], result={"status": "no-op", "ids": ["s0"],
+        env.edits([], result={"status": "no-op", "ids": ["T001"],
                               "files_touched": [], "summary": "there"})
         state = FakeState(env.tmp_path / "state.json")
-        env.scheduler([env.apply_task(0)], state=state).run()
+        env.scheduler([_code_task(env)], kind="implement", state=state).run()
         assert seen and "--touched" not in seen[0]
 
     def test_the_finalized_state_keeps_the_tracked_files_and_the_metrics(
@@ -3305,25 +3371,24 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         # `plans/`, which is not what this assertion is about.
         monkeypatch.setattr(finalize_tracking, "ignored_paths",
                             lambda paths, cwd=None: set())
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["s0"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        _code_edit(env)
         state = StateManager(env.plan)
         state.set("tracked_files", [
             {"path": "stale.md", "action": "modified", "task_id": "implementation"}
         ])
         state.save()
 
-        summary = env.out_dir / "apply-suggestions" / "implementation_summary.md"
+        summary = env.out_dir / "implement" / "implementation_summary.md"
         result = env.scheduler(
-            [env.apply_task(0)], state=state, summary_file=str(summary),
+            [_code_task(env)], kind="implement", state=state,
+            summary_file=str(summary),
         ).run()
         assert result.exit_code == 0, result.messages
         assert result.finalized is True
 
         on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
-        assert [f["path"] for f in on_disk["tracked_files"]] == ["plans/p.md"]
-        assert len(on_disk["metrics"]["apply-suggestions"]) == 1
+        assert [f["path"] for f in on_disk["tracked_files"]] == ["src/a.py"]
+        assert len(on_disk["metrics"]["implement"]) == 1
         # ...and the dict this object holds agrees with the file it just wrote.
         assert state.get("tracked_files") == on_disk["tracked_files"]
 
@@ -3339,13 +3404,11 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         import finalize_tracking
 
         monkeypatch.setattr(finalize_tracking, "main", lambda argv: 1)
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "ids": ["s0"],
-                          "files_touched": ["plans/p.md"], "summary": "S"})
+        _code_edit(env)
         lines = []
         result = env.scheduler(
-            [env.apply_task(0)], state=FakeState(env.tmp_path / "state.json"),
-            log=lines.append,
+            [_code_task(env)], kind="implement",
+            state=FakeState(env.tmp_path / "state.json"), log=lines.append,
         ).run()
 
         assert result.exit_code == 0, result.messages
@@ -3354,6 +3417,7 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         assert "tracked_files was NOT updated" in warned[0]
         # ...and it reaches the caller's own messages, not only the phase log.
         assert [m for m in result.messages if "finalize_tracking exited 1" in m]
+
 
     def test_the_scheduler_stamps_an_eta_baseline_before_the_first_dispatch(
         self, env
@@ -3409,6 +3473,79 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
         env.scheduler([env.apply_task(0)]).run()
         status = json.loads((env.phase_dir / ".status.json").read_text())
         assert status["state"] == "subagents_failed"
+
+
+class TestOnlyACodePhaseRecordsTrackedFiles:
+    """2026-10-05, Codex racing run 3: apply-task-suggestions' finalization
+    recorded the plan and `tasks.md` as `tracked_files` (task_id
+    "implementation"), implement then stopped part-way without recording
+    anything, and review-code reviewed `tasks.md` as code while the
+    `index.html` implement created was not in its scope at all."""
+
+    def test_a_planning_phase_leaves_tracked_files_alone(self, env, monkeypatch):
+        import finalize_tracking
+
+        seen = []
+        monkeypatch.setattr(finalize_tracking, "main",
+                            lambda argv: seen.append(list(argv)) or 0)
+        recorded = [{"path": "index.html", "action": "created",
+                     "task_id": "implementation"}]
+        state = FakeState(env.tmp_path / "state.json")
+        state.set("tracked_files", list(recorded))
+        state.save()
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+
+        result = env.scheduler([env.apply_task(0)], state=state).run()
+
+        assert result.exit_code == 0, result.messages
+        assert result.finalized is True
+        assert seen == []
+        on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
+        assert on_disk["tracked_files"] == recorded
+
+    def test_a_stopped_implement_has_recorded_its_finished_batches(
+        self, env, monkeypatch
+    ):
+        """T001 creates `index.html`; T002 then moves bytes without attesting
+        its id (a partial application), which stops the loop before
+        `_finalize`. The file T001 created is in `tracked_files` all the same,
+        recorded `created` when T001's batch finished."""
+        from implement_orchestrator import record_pre_existing_changes
+
+        head = _commit_baseline(env.root)
+        monkeypatch.chdir(env.root)
+        # In the run's output folder, as production keeps it: that folder is
+        # the workflow's own and never a tracked file.
+        state = FakeState(env.out_dir / "state.json")
+        record_pre_existing_changes(state)
+        state.set("head_before_implement", head)
+        state.save()
+        assert state.get("pre_existing_changes") == [".multi-llm/"]
+
+        env.edits([_patch_edit(env.root / "index.html", "<p>x</p>\n")])
+        monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001"]))
+        tasks = [
+            _code_task(env, 0, "index.html"),
+            _code_task(env, 1, "index.html", depends_on=["T001"]),
+        ]
+        lines = []
+        result = env.scheduler(
+            tasks, kind="implement", state=state, log=lines.append,
+        ).run()
+
+        assert result.exit_code == 3, result.messages
+        assert result.finalized is False
+        assert [o.ok for o in result.outcomes] == [True, False]
+        on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
+        assert on_disk["tracked_files"] == [
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+        ]
+        assert any(
+            "tracked_files now names 1 file(s): index.html (created)" in line
+            for line in lines
+        ), lines
 
 
 # ===========================================================================

@@ -1797,6 +1797,7 @@ class WriteBatchScheduler:
                 return result
             result.outcomes.extend(outcomes)
             result.batches_dispatched.append(batch_index)
+            self._record_batch_tracking(result)
             self._mirror_status(result)
             if any(o.stops_the_loop for o in outcomes) or any(
                 not o.ok for o in outcomes
@@ -4920,13 +4921,20 @@ class WriteBatchScheduler:
             # last session" for a change the plugin made.
             self.state.refresh_plan_hash()
             self.state.save()
-            self._finalize_tracking(result)
-            # `finalize_tracking` is a file-level writer: it read the state we
-            # just saved, computed `tracked_files` and wrote it back. Adopt its
-            # file before touching the dict again, or the `save()` below dumps
-            # the pre-finalize dict over it and the phase's only deliverable is
-            # not tracked at all (F3, measured 2026-09-16).
-            self._reload_state()
+            if self.kind in CODE_WRITE_KINDS:
+                # Only a code phase records `tracked_files`: the planning
+                # phases edit the plan and the task list, which are never
+                # code under review (2026-10-05, Codex racing run 3:
+                # apply-task-suggestions' census put both in review-code's
+                # scope).
+                self._finalize_tracking(result)
+                # `finalize_tracking` is a file-level writer: it read the state
+                # we just saved, computed `tracked_files` and wrote it back.
+                # Adopt its file before touching the dict again, or the `save()`
+                # below dumps the pre-finalize dict over it and the phase's
+                # only deliverable is not tracked at all (F3, measured
+                # 2026-09-16).
+                self._reload_state()
         if self.summary_file:
             result.summary_file = self._write_summary(result)
             self._insert_plan_reference(result.summary_file)
@@ -5004,25 +5012,14 @@ class WriteBatchScheduler:
         subtracted along with the rest, ``tracked_files`` ends up naming only
         the noise, and ``review-code`` reviews the noise.
         """
-        touched: List[str] = []
-        for outcome in (result.outcomes if result is not None else []):
-            if not outcome.ok:
-                continue
-            for path in outcome.files_touched:
-                if path not in touched:
-                    touched.append(path)
-        try:
-            import finalize_tracking  # type: ignore
-        except ImportError:  # pragma: no cover - direct-script import shim
-            import sys
-            sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
-            try:
-                import finalize_tracking  # type: ignore
-            except ImportError:
-                return
+        touched = self._touched_files(result)
+        finalize_tracking = load_finalize_tracking()
+        if finalize_tracking is None:
+            return
         argv = ["--state-file", str(self.state.state_file)]
         for path in touched:
             argv += ["--touched", path]
+        argv += ["--phase", PHASE_BY_WRITE_KIND[self.kind]]
         try:
             code = finalize_tracking.main(argv)
         except SystemExit:  # pragma: no cover - argparse-style exit
@@ -5046,6 +5043,78 @@ class WriteBatchScheduler:
             self.log(f"[write-subagents] {message}")
             if result is not None:
                 result.messages.append(message)
+
+    def _touched_files(self, result: Optional[SchedulerResult]) -> List[str]:
+        """Every file an ``ok`` batch of this phase verifiably changed.
+
+        This run's outcomes, and on a ``--resume`` the earlier runs' ``ok``
+        rows too: a resumed implement materializes only the unfinished tasks,
+        so without those rows a file an earlier run edited while it was
+        already dirty (the baseline subtracts it) left ``tracked_files`` the
+        moment the resumed run recorded its own.
+        """
+        touched: List[str] = []
+        sources: List[Sequence[str]] = []
+        for row in (result.earlier_rows if result is not None else []):
+            if row.get("status") == STATUS_OK:
+                sources.append(row.get("files_touched") or [])
+        for outcome in (result.outcomes if result is not None else []):
+            if outcome.ok:
+                sources.append(outcome.files_touched)
+        for paths in sources:
+            for path in paths:
+                if isinstance(path, str) and path and path not in touched:
+                    touched.append(path)
+        return touched
+
+    def _record_batch_tracking(self, result: SchedulerResult) -> None:
+        """Record what this code phase has changed so far, after each batch.
+
+        ``tracked_files`` used to be written only by ``_finalize``, which a
+        run that stops part-way never reaches: the Codex racing run 3
+        (2026-10-05) stopped implement at its ninth task with ``index.html``
+        created and unrecorded, and review-code reviewed the plan and
+        ``tasks.md`` an earlier phase had left there instead. The same census
+        ``_finalize`` runs, in memory through this phase's own
+        ``StateManager`` (the one writer), quietly, and saved only when the
+        list moved.
+        """
+        if (self.dry_run or not self.finalize or self.state is None
+                or self.kind not in CODE_WRITE_KINDS):
+            return
+        recorded = getattr(self.state, "state", None)
+        state_file = getattr(self.state, "state_file", None)
+        if not isinstance(recorded, dict) or not state_file:
+            return
+        finalize_tracking = load_finalize_tracking()
+        if finalize_tracking is None:
+            return
+        try:
+            entries = finalize_tracking.phase_tracked_files(
+                recorded, self._touched_files(result),
+                state_path=Path(str(state_file)),
+                phase=PHASE_BY_WRITE_KIND[self.kind],
+                say=lambda line: None,
+            )
+        except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
+            self.log(
+                f"[write-subagents] warning: could not record the files this "
+                f"batch changed in tracked_files: {exc}"
+            )
+            return
+        if entries == recorded.get("tracked_files"):
+            return
+        with self._effects_lock:
+            self.state.set("tracked_files", entries)
+            self.state.save()
+        named = ", ".join(
+            f"{entry['path']} ({entry['action']})" for entry in entries[:5]
+        )
+        more = f", and {len(entries) - 5} more" if len(entries) > 5 else ""
+        self.log(
+            f"[write-subagents] tracked_files now names {len(entries)} "
+            f"file(s): {named}{more}"
+        )
 
     def _earlier_report_rows(self) -> List[Dict[str, Any]]:
         """The task rows the previous run left in ``write_batch_report.json``.
@@ -5548,6 +5617,20 @@ def _redacted_argv(argv: Sequence[str], prompt: str) -> List[str]:
 # ---------------------------------------------------------------------------
 # The one entry point an orchestrator calls
 # ---------------------------------------------------------------------------
+
+def load_finalize_tracking():
+    """The top-level ``finalize_tracking`` module, or ``None`` if unimportable."""
+    try:
+        import finalize_tracking  # type: ignore
+    except ImportError:  # pragma: no cover - direct-script import shim
+        import sys
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+        try:
+            import finalize_tracking  # type: ignore
+        except ImportError:
+            return None
+    return finalize_tracking
+
 
 def run_write_phase(args: Any, **kwargs: Any) -> Optional[SchedulerResult]:
     """Drive a write phase through the scheduler, or decline (D3b's write twin).

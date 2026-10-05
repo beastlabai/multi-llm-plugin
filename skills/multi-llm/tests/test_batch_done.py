@@ -207,6 +207,46 @@ class TestTheUtilRecordsABatch:
         assert state["task_status"]["T001"] == "completed"
         assert not [k for k in state if k.startswith("processed_")]
 
+    def test_an_implement_batch_records_the_files_it_changed(
+        self, plan_dir, capsys, monkeypatch
+    ):
+        """2026-10-05, Codex racing run 3: a partial implement left
+        `tracked_files` naming the plan and `tasks.md` an earlier phase had
+        recorded, and none of the code it created. On the native leg the
+        closing `util finalize-tracking` is the only other writer, and a host
+        that stops part-way never reaches it, so each code batch's record
+        takes the census too — the output folder and the plan left out."""
+        plan, out = plan_dir
+        root = plan.parent.parent
+        git = ["git", "-C", str(root), "-c", "user.email=t@example.com",
+               "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+        subprocess.run(git + ["init", "-q"], check=True)
+        subprocess.run(git + ["add", "plans/feature.md"], check=True)
+        subprocess.run(git + ["commit", "-qm", "plan"], check=True)
+        head = subprocess.run(git + ["rev-parse", "HEAD"], check=True,
+                              capture_output=True, text=True).stdout.strip()
+        monkeypatch.chdir(root)
+        state = StateManager(plan)
+        state.set("pre_existing_changes", ["plans/feature/"])
+        state.set("head_before_implement", head)
+        state.save()
+        phase_dir, _tasks = _materialize(
+            plan, out, "implement", _implement_batches(), "implement")
+        (root / "src").mkdir()
+        (root / "src" / "a.py").write_text("a = 1\n", encoding="utf-8")
+        plan.write_text(plan.read_text(encoding="utf-8") + "edited\n",
+                        encoding="utf-8")
+
+        code, _out, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "T001", "--status", "completed",
+        ], capsys)
+
+        assert code == 0, err
+        assert _state(out)["tracked_files"] == [
+            {"path": "src/a.py", "action": "created", "task_id": "implementation"},
+        ]
+
     def test_it_preserves_what_the_state_file_already_holds(self, plan_dir, capsys):
         """A raw read-modify-write of the host's file: a `--mark-completed`
         later re-reads it, so nothing recorded between may be lost."""
