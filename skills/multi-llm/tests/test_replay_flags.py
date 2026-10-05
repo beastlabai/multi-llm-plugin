@@ -113,7 +113,8 @@ class TestReplayFlags:
         flags = replay_flags(
             "review-plan", _argv("--quick", "--internal-worker", *spelling)
         )
-        assert flags == ["--quick"]
+        # `--internal-worker` replays as the `--detach` it replaced.
+        assert flags == ["--quick", "--detach"]
         assert "8f2c-uuid" not in " ".join(flags)
 
     @pytest.mark.parametrize("spelling", ["--yes", "-y", "--non-interactive"])
@@ -133,12 +134,14 @@ class TestReplayFlags:
         argv = _argv("--quick", "--detach", spelling, "--exec-subagents")
         assert replay_flags("review-plan", argv) == ["--quick", "--detach"]
         # And the worker's own argv, where `build_worker_argv` replaced
-        # `--detach` with `--internal-worker` and appended the pair.
+        # `--detach` with `--internal-worker` and appended the pair: the
+        # re-entry flag is replayed as the `--detach` it stands for, so the
+        # worker's retry re-implies the pair exactly as the launcher's does.
         worker = _argv(
             "--quick", spelling, "--exec-subagents", "--internal-worker",
             "--internal-run-id", "u",
         )
-        assert replay_flags("review-plan", worker) == ["--quick"]
+        assert replay_flags("review-plan", worker) == ["--quick", "--detach"]
 
     def test_the_drop_set_is_derived_from_the_parser_not_typed(self):
         """Every alias of the dropped dests comes from ``build_parent_parser``."""
@@ -778,6 +781,25 @@ class TestResumeVerbAgreesWithThePhase:
         flags = ["--host", "opencode", "--skip-prerequisites"]
         hint = cli_common.retry_command("generate-tasks", PLAN, "--yes", flags=flags)
         assert self._resume("generate-tasks", flags) == hint.split()
+
+    def test_the_detached_workers_own_hint_matches_it_too(self):
+        """Racing re-run 2026-10-04 (codex #4): the worker's hint read
+        `generate-tasks <plan> --host codex --yes`. Its argv carries
+        `--internal-worker` where the launcher had `--detach`, the replay
+        dropped both and the pair `--detach` implies, and the printed retry —
+        run as printed — stops at TASK_GENERATION_PENDING and exits 0 having
+        dispatched nothing. The worker now replays the `--detach` it was
+        launched with, so its hint is the status line's command."""
+        launcher = _argv("--host", "codex", "--detach", "--yes", "--exec-subagents")
+        record = replay_flags("generate-tasks", launcher)
+        worker = detach.build_worker_argv("generate-tasks", launcher, run_id="u")
+        cli_common.record_invocation("generate-tasks", worker)
+        hint = cli_common.retry_command(
+            "generate-tasks", PLAN, "--yes",
+            flags=cli_common.current_replay_flags(mode="generate-tasks"),
+        )
+        assert self._resume("generate-tasks", record) == hint.split()
+        assert "--detach" in _tokens(hint)
 
 
 class TestTheWritePhasesResumeWithResume:
