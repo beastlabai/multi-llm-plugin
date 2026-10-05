@@ -779,6 +779,38 @@ class StateManager:
             if self._IMPLEMENT_TASK_ID_PATTERN.match(task_id)
         }
 
+    def record_task_titles(self, titles: Dict[str, str]) -> bool:
+        """Remember each implement task's title by id, under ``task_titles``.
+
+        ``implement`` records them when it decomposes the task list, on both
+        legs, so a deferred task can be named later by what it is and not only
+        by its id (2026-10-04: a complete workflow said nothing about the two
+        manual tasks it left the user). Returns whether anything changed; the
+        caller saves.
+        """
+        recorded = dict(self.state.get("task_titles") or {})
+        merged = {**recorded, **{str(k): str(v) for k, v in titles.items() if k}}
+        if merged == recorded:
+            return False
+        self.state["task_titles"] = merged
+        return True
+
+    def deferred_implementation_tasks(self) -> List[Dict[str, Optional[str]]]:
+        """The implement tasks recorded ``skipped``, as ``{id, title}``, by id.
+
+        Read from ``task_status`` alone (both legs record a deferred human task,
+        and a dependent ``skip-dependents`` skipped with it, as ``skipped``),
+        never by re-parsing tasks.md: what the run deferred is what state says
+        it deferred. ``title`` is ``None`` when ``task_titles`` has no entry (a
+        state written before titles were recorded).
+        """
+        titles = self.state.get("task_titles") or {}
+        return [
+            {"id": task_id, "title": titles.get(task_id) or None}
+            for task_id, status in sorted(self.implementation_task_statuses().items())
+            if status == "skipped"
+        ]
+
     def track_file(self, path: str, action: str, task_id: str) -> None:
         """
         Track a file modification.

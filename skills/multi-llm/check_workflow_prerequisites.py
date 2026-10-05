@@ -1004,6 +1004,16 @@ def get_workflow_status(
             if tasks_done > 0:
                 phases["implement"]["status"] = "in_progress"
 
+    # The implement tasks the run deferred (a human task, and the dependents
+    # `skip-dependents` skipped with it): read from `task_status`, never by
+    # re-parsing tasks.md. A workflow that completes with these still owed is
+    # complete for the plugin and not for the user, so the next-step builder
+    # names them on its `complete` answer and `status` on its trailer line
+    # (2026-10-04: `[WORKFLOW_COMPLETE]` said nothing about T011/T012).
+    deferred = state.deferred_implementation_tasks()
+    if deferred:
+        phases["implement"]["manual_tasks"] = deferred
+
     notices = []
 
     # Check for unapplied task suggestions (reuse cached result from above —
