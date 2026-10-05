@@ -380,6 +380,115 @@ class TestAResumeKeepsEverySkippedTask:
         assert applicable == {"T002": "skip", "T005": "done"}
 
 
+# --- a later resume keeps every answered task --------------------------------
+
+class TestALaterResumeKeepsEveryAnsweredTask:
+    """Fix round 9 (review of round 8): an accepted failure is recorded
+    ``completed`` and a manual task answered ``done`` is ``completed`` too, so
+    the NEXT ``--resume`` materialized neither, the answer no longer applied,
+    and the resumed account had them in no bucket: ``total`` shrank, the
+    shape round 8 fixed for skipped tasks. Both are read back from
+    ``state.json``'s recorded reasons."""
+
+    def test_an_accepted_check_stays_in_the_account_after_a_later_stop(
+        self, repo, capsys
+    ):
+        _run_one_that_stops(repo, capsys)
+        # Run 2 accepts the check; T004 fails cleanly (no bytes move).
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", "Title: Edit: add tests")
+        repo.monkeypatch.setenv(
+            "MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", "Title: Edit: wire the fallback",
+        )
+        assert _implement(repo, "--resume", "--human-task", "T002=done") == 3
+        assert "1 accepted after failing (T002)" in _account_line(repo)
+        # Run 3: T004 passes now.
+        from tests.test_implement_stop_account import EDIT_GATE
+
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", EDIT_GATE)
+        _check_passes(repo)
+        repo.log.unlink(missing_ok=True)
+        capsys.readouterr()
+        assert _implement(repo, "--resume") == 0
+        assert _dispatched_titles(repo) == ["Edit: wire the fallback"]
+        line = _account_line(repo)
+        assert line.endswith(
+            "5 — 3 done, 1 accepted after failing (T002), 1 deferred manual (T005)."
+        ), line
+        report = _report(repo)
+        assert list(report["accepted_tasks"]) == ["T002"]
+        assert "| T002 | accepted after failing |" in _summary(repo)
+
+    def test_a_manual_task_answered_done_stays_in_the_account(self, repo, capsys):
+        _check_fails(repo)
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--no-confirm", "--exec-subagents",
+            "--force-strategy", "pause-and-ask", "--human-task", "T005=done",
+        ]) == 3
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "# fixed by hand\n", encoding="utf-8")
+        _check_passes(repo)
+        capsys.readouterr()
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--no-confirm", "--exec-subagents",
+            "--resume",
+        ]) == 0
+        line = _account_line(repo)
+        assert line.endswith("5 — 4 done, 1 completed manual (T005)."), line
+        assert "| T005 | completed by hand |" in _summary(repo)
+
+    def test_the_native_leg_keeps_naming_an_accepted_task(
+        self, repo_nohuman, tmp_path, capsys
+    ):
+        repo = repo_nohuman
+        out_json = tmp_path / "implement_tasks.json"
+        assert _emit(repo, out_json, "--yes") == 0
+        _fail_the_check(repo)
+        assert _emit(repo, out_json, "--yes", "--resume", "--human-task", "T002=done") == 0
+        reason = get_or_create_state(repo.plan).get_task_status_reason("T002")
+        # The host ran T003 and T004; T004 failed.
+        state = get_or_create_state(repo.plan)
+        state.update_task_status("T003", "completed")
+        state.update_task_status("T004", "failed", reason="the fallback broke")
+        state.save()
+        capsys.readouterr()
+        assert _emit(repo, out_json, "--yes", "--resume") == 0
+        out = capsys.readouterr().out
+        assert [tid for tid, _ in _handed(out_json)] == ["T004"]
+        assert json.loads(out_json.read_text())["accepted_tasks"] == {"T002": reason}
+        assert "T002 Check the module: accepted —" in out
+        assert _statuses(repo)["T002"] == "completed"
+
+    def test_the_native_leg_keeps_naming_a_manual_task_answered_done(
+        self, repo, tmp_path, capsys
+    ):
+        out_json = tmp_path / "implement_tasks.json"
+        assert _emit(
+            repo, out_json, "--no-confirm", "--force-strategy", "pause-and-ask",
+            "--human-task", "T005=done",
+        ) == 0
+        out = capsys.readouterr().out
+        assert "T005 Play through by hand: answered --human-task T005=done" in out
+        assert json.loads(out_json.read_text())["completed_manual_tasks"] == ["T005"]
+        _fail_the_check(repo)
+        assert _emit(repo, out_json, "--no-confirm", "--resume") == 0
+        out = capsys.readouterr().out
+        assert "T005" not in [tid for tid, _ in _handed(out_json)]
+        assert json.loads(out_json.read_text())["completed_manual_tasks"] == ["T005"]
+        assert "T005 Play through by hand: answered --human-task T005=done" in out
+
+    def test_a_task_that_ran_again_is_not_read_back_as_accepted(self, tmp_path):
+        """A completed status written without a reason drops the old one: a
+        task accepted once and then run again on a fresh implement must not
+        read back as an accepted failure."""
+        plan = tmp_path / "plans" / "p.md"
+        plan.parent.mkdir()
+        plan.write_text("# p\n", encoding="utf-8")
+        state = StateManager(plan)
+        state.update_task_status("T002", "completed", reason="accepted — you answered")
+        state.update_task_status("T002", "completed")
+        assert state.get_task_status_reason("T002") is None
+
+
 # --- every answer lands in a bucket ------------------------------------------
 
 class TestAManualTaskAnsweredDoneIsCounted:

@@ -225,6 +225,7 @@ __all__ = [
     "SchedulerResult",
     "HumanTaskPlan",
     "WriteBatchScheduler",
+    "answered_done_on_record",
     "bind_prior_changes",
     "persist_human_task_plan",
     "resolve_human_task_plan",
@@ -544,6 +545,59 @@ USER_DECLINED_REASON = "skipped by user during pause-and-ask"
 #: twin). The sentence ends ``<id>=skip after it failed``.
 ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
 
+#: The prefix of the recorded reason of a failed code task the user answered
+#: ``--human-task <id>=done`` (:func:`resolve_human_task_plan` writes the
+#: whole sentence into ``HumanTaskPlan.accepted``).
+ACCEPTED_REASON_PREFIX = "accepted — "
+
+#: The recorded reason of a manual task answered ``--human-task <id>=done``
+#: (:func:`persist_human_task_plan`; the ``<id>`` is literal).
+COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
+
+
+def answered_done_on_record(
+    state: Any, *, exclude: Sequence[str] = (),
+) -> Tuple[Dict[str, str], List[str]]:
+    """The tasks an earlier run recorded done on the user's answer.
+
+    ``(accepted, completed_manual)``: ``accepted`` maps each failed code task
+    the user answered ``--human-task <id>=done`` to its recorded reason, and
+    ``completed_manual`` lists the manual tasks answered ``done``. Both are
+    ``completed`` in ``state.json`` with the reason the answer wrote, so a
+    later ``--resume`` materializes neither and the answer no longer applies
+    (it applies to a failed task only); read back from that record, they keep
+    their bucket in the resumed account instead of dropping out of it and
+    shrinking its total (fix round 9). Scoped to the decomposition implement
+    recorded last (``implement_task_ids``, else every ``T###`` id), minus
+    *exclude* (the tasks this run materialized, which the run's own plan
+    accounts for).
+    """
+    if state is None or not hasattr(state, "get"):
+        return {}, []
+    try:
+        statuses = dict(state.get("task_status") or {})
+        reasons = dict(state.get("task_status_reasons") or {})
+        current = state.get("implement_task_ids")
+    except Exception:  # noqa: BLE001 - an account read must not fail a phase
+        return {}, []
+    scope = set(current) if isinstance(current, list) else None
+    skip = {str(task_id) for task_id in exclude}
+    accepted: Dict[str, str] = {}
+    completed_manual: List[str] = []
+    for task_id, status in sorted(statuses.items()):
+        if status != "completed" or task_id in skip:
+            continue
+        if not _IMPLEMENT_TASK_ID.match(str(task_id)):
+            continue
+        if scope is not None and task_id not in scope:
+            continue
+        reason = str(reasons.get(task_id) or "")
+        if reason.startswith(ACCEPTED_REASON_PREFIX):
+            accepted[task_id] = reason
+        elif reason == COMPLETED_MANUAL_REASON:
+            completed_manual.append(task_id)
+    return accepted, completed_manual
+
 
 def _deferred_reason(strategy: Optional[str]) -> str:
     """Why a manual task did not run, naming the strategy and not a person.
@@ -703,8 +757,8 @@ def resolve_human_task_plan(
             continue
         if answer == "done":
             plan.accepted[task_id] = (
-                f"accepted — you answered --human-task {task_id}=done after it "
-                f"failed; treated as satisfied and not run again"
+                f"{ACCEPTED_REASON_PREFIX}you answered --human-task {task_id}=done "
+                f"after it failed; treated as satisfied and not run again"
             )
         elif answer == "skip":
             plan.skipped[task_id] = (
@@ -803,7 +857,7 @@ def persist_human_task_plan(state: Any, plan: HumanTaskPlan) -> None:
         state.update_task_status(task_id, "skipped", reason=reason)
     for task_id in plan.completed:
         state.update_task_status(
-            task_id, "completed", reason="answered --human-task <id>=done",
+            task_id, "completed", reason=COMPLETED_MANUAL_REASON,
         )
     for task_id, reason in sorted(plan.accepted.items()):
         state.update_task_status(task_id, "completed", reason=reason)
@@ -1885,6 +1939,19 @@ class WriteBatchScheduler:
             # strategy, mark human tasks skipped and record dependency overrides
             # in `state.json` for a run that never dispatched anything.
             self._persist_human_plan(result.human_plan)
+        if self.kind == "implement":
+            # The answers an earlier run recorded for tasks this resume did
+            # not materialize (an accepted failure, a manual task answered
+            # done): in no bucket otherwise, and the account's total shrank.
+            accepted, completed_manual = answered_done_on_record(
+                self.state,
+                exclude=[str(task.get("task_id", "")) for task in self.tasks],
+            )
+            for task_id, reason in accepted.items():
+                result.human_plan.accepted.setdefault(task_id, reason)
+            for task_id in completed_manual:
+                if task_id not in result.human_plan.completed:
+                    result.human_plan.completed.append(task_id)
 
         if result.human_plan.pending:
             # Fail closed: an unanswered human task is exactly the D6 "needs a
@@ -5045,16 +5112,21 @@ class WriteBatchScheduler:
         no bucket, so a five-task line summed to four); ``deferred`` the human
         tasks the strategy skipped and ``skipped_dependents`` the tasks
         skipped with a skipped one. The buckets add up to ``total``, which is
-        the test ``summary.md``'s accounting line is written to.
+        the test ``summary.md``'s accounting line is written to. ``accepted``
+        and ``completed_manual`` include the answers an earlier run recorded
+        for tasks this resume did not materialize (``answered_done_on_record``,
+        fix round 9).
         """
         rows = result.report_rows()
         plan = result.human_plan
         by_id = {str(t.get("task_id", "")): t for t in self.tasks}
         failed = sorted({o.task_id for o in result.outcomes if not o.ok})
+        answered = set(plan.accepted) | set(plan.completed)
         done = sorted({
             str(row.get("task_id"))
             for row in rows
             if row.get("status") == STATUS_OK and str(row.get("task_id")) not in failed
+            and str(row.get("task_id")) not in answered
         })
         # A skip the user chose (a pause-and-ask "Skip", `--human-task
         # <id>=skip` on a failed task) is its own bucket: the seed is neither
@@ -6101,7 +6173,13 @@ class WriteBatchScheduler:
                 for task in self.tasks
                 if str(task.get("task_id", "")) not in skipped_ids
             }
-            total = len(self.tasks) - len(skipped_ids)
+            # Counted over the materialized tasks: an answered task an
+            # earlier run recorded (`answered_done_on_record`) is in
+            # `accepted` without being one of them.
+            total = sum(
+                1 for task in self.tasks
+                if str(task.get("task_id", "")) not in skipped_ids
+            )
             items_total = sum(len(ids) for ids in expected_ids_by_task.values())
             items_applied = sum(
                 len(expected_ids_by_task.get(o.task_id, []))
