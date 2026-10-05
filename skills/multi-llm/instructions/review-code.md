@@ -399,6 +399,8 @@ to bare `python`.
      with a sample) and, above 200 source and test files, `[SCOPE_LARGE]` with
      its remedy. Relay a `[SCOPE_FALLBACK]` or `[SCOPE_LARGE]` line to the user:
      the review is over a guessed scope.
+   - `Left out N of the workflow's own file(s) …` - the plan, its task list and
+     its output folder are never reviewed as code, whichever source named them.
    - `Files to review: N` - the resolved scope every reviewer is given, source
      files first
    - `Review scope written (scope <id>, coverage complete|partial, …)` - the
