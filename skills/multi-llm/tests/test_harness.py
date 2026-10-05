@@ -50,6 +50,21 @@ class TestSkillRunner:
                     == runner.mock_llm_path.read_text(encoding="utf-8")
                 )
 
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX launcher layout")
+    def test_the_mocks_run_on_this_suites_interpreter(self, tmp_path):
+        """A runner's PATH no longer carries the skill environment's bin, so
+        the `#!/usr/bin/env python3` launchers find the suite's interpreter in
+        bin/ instead of whatever python3 the machine has."""
+        import subprocess
+
+        runner = SkillRunner(tmp_path)
+        for name in ("python3", "python"):
+            out = subprocess.run(
+                [str(runner.bin_dir / name), "-c", "import sys, yaml; print(sys.prefix)"],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+            assert out == sys.prefix
+
     @pytest.mark.skipif(os.name != "nt", reason="Windows launcher layout")
     def test_creates_windows_launchers(self, tmp_path):
         """Windows launchers must be npm-style cmd-shims dispatching to node.
