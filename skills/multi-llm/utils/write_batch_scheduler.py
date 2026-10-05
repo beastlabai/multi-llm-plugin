@@ -2342,7 +2342,8 @@ class WriteBatchScheduler:
                 # failure to a consumer — so they share the schema-rejection
                 # outcome. Rungs 1-4 (no child, no auth, timeout, runner error) are
                 # transport failures, not write outcomes, and are deliberately left
-                # unlabelled.
+                # unlabelled. Either becomes a partial application in
+                # `_audit_terminal` when the batch moved bytes (fix round 9).
                 if outcome.status in (STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE):
                     outcome.write_outcome = WRITE_SCHEMA_REJECTED
                 elif outcome.status == STATUS_PARTIAL:
@@ -2536,7 +2537,8 @@ class WriteBatchScheduler:
             outcome.files_touched = snapshot.changed()
         # After the fill, never before it: the fill is what would put the
         # replaced target back into the restore set.
-        self._replaced_target_unclassified(outcome, snapshot)
+        if not self._replaced_target_unclassified(outcome, snapshot):
+            self._partial_when_bytes_moved(outcome, snapshot)
         last = outcome.attempts[-1] if outcome.attempts else None
         self._audit_completion(
             outcome,
@@ -2546,6 +2548,46 @@ class WriteBatchScheduler:
             last.exit_code if last is not None else None,
             observed,
             outcome.duration_seconds,
+        )
+
+    def _partial_when_bytes_moved(
+        self, outcome: TaskOutcome, snapshot: TaskSnapshot
+    ) -> None:
+        """A failed dispatch that never reached ``_classify`` and moved bytes
+        is a partial application.
+
+        ``dispatch_task``'s pre-retry check (T4.8, widened in fix round 8)
+        makes one of an attempt that would have re-sent the batch, but not of
+        the report re-ask's own failure (the re-ask is exempt from that check:
+        its retry re-sends the re-ask) nor of a reply rung 6 never retries. So
+        a re-ask that replied in prose again, or timed out on every try,
+        ended ``unparseable_result`` / ``schema-rejection`` or an unlabelled
+        ``timeout`` beside the files the batch had changed. The row read "schema rejected" for work whose
+        bytes moved, and the stop's wording was not the partial's (fix round
+        9, review of round 8). *outcome*'s ``files_touched`` is the byte
+        comparison :meth:`_audit_terminal` just filled; when it names a file,
+        the outcome becomes the same partial application ``_classify``
+        records, with what failed kept in the reason — the stop, the restore
+        command and ``--resume`` then treat it as any partial. A rung-7
+        refusal keeps its own verdict.
+        """
+        if outcome.ok or outcome.status in (STATUS_PARTIAL, STATUS_REJECTED):
+            return
+        if outcome.write_outcome not in (None, WRITE_SCHEMA_REJECTED):
+            return
+        moved = [str(path) for path in (outcome.files_touched or [])]
+        if not moved:
+            return
+        what = outcome.reason or outcome.status
+        outcome.status = STATUS_PARTIAL
+        outcome.write_outcome = WRITE_PARTIAL
+        outcome.reason = (
+            f"PARTIAL APPLICATION: {len(moved)} file(s) changed "
+            f"({', '.join(moved[:5])}{', …' if len(moved) > 5 else ''}) but "
+            f"the batch did not finish: {what}. The batch loop stops here, the "
+            f"pre-batch snapshot is kept at {snapshot.directory}, and the phase "
+            f"is NOT marked completed — an automatic revert would destroy the "
+            f"half-applied state a human needs to inspect."
         )
 
     # -- D3l post-run containment: the OBSERVED set, not the declared one ---

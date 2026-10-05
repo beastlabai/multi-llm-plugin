@@ -81,6 +81,9 @@ class TestAnApplyBatchThatRepliedInProse:
         assert result.exit_code == 0
 
     def test_a_prose_re_ask_is_retried_as_the_re_ask_never_as_the_batch(self, env):
+        """Fix round 9 (review of round 8): when the granted re-ask fails too,
+        the bytes the batch moved make the outcome a partial application, not
+        a schema rejection: the stop says what landed and names the restore."""
         log = env.enable_call_log()
         env.edits([_patch_edit(env.plan)], prose=True)
         env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", PROSE)
@@ -93,13 +96,64 @@ class TestAnApplyBatchThatRepliedInProse:
         assert all(p.startswith(REASK_MARKER) for p in prompts[1:])
         assert env.plan.read_text(encoding="utf-8").count("edit\n") == 1
         outcome = result.outcomes[0]
-        assert outcome.status == executor.STATUS_UNPARSEABLE
-        assert outcome.write_outcome == executor.WRITE_SCHEMA_REJECTED
-        assert outcome.reason.endswith("(after the one schema-repair re-ask)")
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert outcome.reason.startswith("PARTIAL APPLICATION: 1 file(s) changed (plans/p.md)")
+        assert "(after the one schema-repair re-ask)" in outcome.reason
         assert outcome.files_touched == ["plans/p.md"]
         assert result.exit_code == 3
         assert not (env.phase_dir / "apply_batch_0.json").exists()
         assert not [line for line in lines if VERDICT_WARNING in line], lines
+        _assert_the_stop_reads_partial(env, result)
+
+    def test_a_re_ask_that_times_out_stops_as_a_partial_application(
+        self, env, monkeypatch
+    ):
+        """The re-ask's timeout is retried as the re-ask (never the batch); when
+        every try times out the batch's moved bytes still decide the outcome,
+        which used to be an unlabelled ``timeout``."""
+        env.edits([_patch_edit(env.plan)], prose=True)
+        real = executor._spawn
+        prompts = []
+
+        def spawn(**kwargs):
+            prompts.append(kwargs.get("prompt") or "")
+            if len(prompts) == 1:
+                return real(**kwargs)
+            return executor._Capture(timed_out=True, argv=["codex"], duration=0.01)
+
+        monkeypatch.setattr(executor, "_spawn", spawn)
+        result = env.scheduler([env.apply_task(0)]).run()
+
+        assert sum("Apply batch 0" in p for p in prompts) == 1
+        assert len(prompts) >= 2 and all(p.startswith(REASK_MARKER) for p in prompts[1:])
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert outcome.files_touched == ["plans/p.md"]
+        assert result.exit_code == 3
+        _assert_the_stop_reads_partial(env, result)
+
+    def test_the_partial_resumes_like_any_partial(self, env):
+        """``--resume`` takes the existing partial-application path: the
+        batch is dispatched again against the snapshot taken before its FIRST
+        dispatch (the rollback point stays the original bytes), and what the
+        resumed runner reports is judged against that snapshot."""
+        env.edits([_patch_edit(env.plan)], prose=True)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", PROSE)
+        first = env.scheduler([env.apply_task(0)]).run()
+        assert first.outcomes[0].write_outcome == executor.WRITE_PARTIAL
+        # A runner that finds the change already there and reports it.
+        env.edits([], result=GOOD)
+        lines = []
+        second = env.scheduler(
+            [env.apply_task(0)], resume=True, log=lines.append,
+        ).run()
+        assert any("reusing the pre-batch snapshot" in line for line in lines), lines
+        outcome = second.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_APPLIED, outcome.reason
+        assert second.exit_code == 0
+        assert env.plan.read_text(encoding="utf-8").count("edit\n") == 1
 
     def test_prose_with_nothing_moved_is_retried_as_before(self, env):
         """No edit on disk: re-sending the batch applies nothing twice."""
@@ -116,6 +170,23 @@ class TestAnApplyBatchThatRepliedInProse:
         # No result file was ever persisted, so there is no verdict to stamp
         # and nothing to warn about.
         assert not [line for line in lines if VERDICT_WARNING in line], lines
+
+
+def _assert_the_stop_reads_partial(env, result) -> None:
+    """The stop, the audit record and the report all name the partial."""
+    text = "\n".join(result.messages)
+    assert "partial application (bytes moved, the batch did not finish)" in text, text
+    assert "util restore-batch" in text and "--task-id apply-batch-0" in text
+    from utils.write_safety import AuditLog
+
+    completed = [
+        r for r in AuditLog(str(env.phase_dir)).records()
+        if r.get("event") == "completed"
+    ]
+    assert completed[-1]["write_outcome"] == executor.WRITE_PARTIAL
+    report = json.loads((env.phase_dir / "write_batch_report.json").read_text())
+    row = next(r for r in report["tasks"] if r["task_id"] == "apply-batch-0")
+    assert row["write_outcome"] == executor.WRITE_PARTIAL
 
 
 # ===========================================================================
