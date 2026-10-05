@@ -615,14 +615,21 @@ class TestGeneratedTasksSchemaIsStrictClean:
 
 
 class TestSchemaRepairIsTaskGenerationOnly:
-    """The one schema-repair re-ask (2026-10-05) is granted per kind, and only
-    `task_generation` holds a grant: every other kind's rung 6 is exactly as
-    terminal as it was."""
+    """The one schema-repair re-ask (2026-10-05) is granted per kind:
+    `task_generation` and the three apply kinds (whose re-ask restates a report
+    and is pinned in test_write_executor.py) hold a grant; every other kind's
+    rung 6 is exactly as terminal as it was."""
 
     def test_the_grant_table_is_the_one_kind_it_claims(self):
         from utils.subagent_prompts import SCHEMA_REPAIR_SHAPES
 
-        assert executor.SCHEMA_REPAIRS_BY_KIND == {"task_generation": 1}
+        assert executor.SCHEMA_REPAIRS_BY_KIND == {
+            "task_generation": 1,
+            "apply_suggestions": 1,
+            "apply_task_suggestions": 1,
+            "apply_code_fixes": 1,
+        }
+        assert "implement" not in executor.SCHEMA_REPAIRS_BY_KIND
         # A granted kind must have a reply shape to restate.
         assert set(executor.SCHEMA_REPAIRS_BY_KIND) <= set(SCHEMA_REPAIR_SHAPES)
         assert set(executor.SCHEMA_REPAIRS_BY_KIND) <= set(KINDS)
@@ -650,3 +657,62 @@ class TestSchemaRepairIsTaskGenerationOnly:
             None, executor.REPAIR_SCHEMA_INVALID,
         ]
         assert outcome.reason.endswith("(after the one schema-repair re-ask)")
+
+
+class TestAReplyThatIsNotJson:
+    """2026-10-05, opencode/big-pickle, generate-tasks, twice: the reply had the
+    right keys, but a description held unescaped double quotes, so the extractor
+    served one task object from inside it. The reason and the re-ask said
+    "missing required field 'schema_version'"; they now say what was wrong."""
+
+    BROKEN = (
+        '{\n  "schema_version": "1.0",\n  "plan_preamble": "One page.",\n'
+        '  "tasks": [\n    {\n      "id": "T001",\n      "title": "Countdown",\n'
+        '      "description": "the overlay shows "3", "2", "1" and "GO" in turn",\n'
+        '      "depends_on": [],\n      "files_to_create": ["index.html"],\n'
+        '      "files_to_modify": [],\n      "acceptance_criteria": ["it counts"],\n'
+        '      "estimated_complexity": "low",\n      "executor_role": "agent"\n'
+        '    },\n    {\n      "id": "T002",\n      "title": "Laps",\n'
+        '      "description": "count laps",\n      "depends_on": ["T001"],\n'
+        '      "files_to_create": [],\n      "files_to_modify": ["index.html"],\n'
+        '      "acceptance_criteria": ["laps count"],\n'
+        '      "estimated_complexity": "low",\n      "executor_role": "agent"\n'
+        '    }\n  ]\n}'
+    )
+
+    def test_the_reason_and_the_re_ask_name_the_syntax_error(
+        self, lane, monkeypatch, capsys
+    ):
+        sent = []
+        real = executor.build_schema_repair_prompt
+
+        def spy(kind, original, errors, **kwargs):
+            sent.append(kwargs)
+            return real(kind, original, errors, **kwargs)
+
+        monkeypatch.setattr(executor, "build_schema_repair_prompt", spy)
+        lane.respond(_opencode_stream(self.BROKEN))
+
+        outcome = lane.dispatch(
+            "task_generation", runner="opencode:opencode/big-pickle", timeout=600
+        )
+
+        assert outcome.status == executor.STATUS_SCHEMA_INVALID
+        assert outcome.reason.startswith(
+            "the reply is not valid JSON (line 8, column 42: Expecting ',' delimiter"
+        )
+        assert "only a fragment of it could be read" in outcome.reason
+        assert len(sent) == 1
+        assert sent[0]["syntax_error"].startswith("line 8, column 42")
+        assert "is not valid JSON; re-asking" in capsys.readouterr().out
+
+    def test_a_whole_document_of_the_wrong_shape_is_still_its_own_errors(self, lane):
+        lane.respond(_opencode_stream(json.dumps({"verdict": "looks good"})))
+
+        outcome = lane.dispatch(
+            "task_generation", runner="opencode:opencode/big-pickle", timeout=600
+        )
+
+        assert outcome.reason.startswith(
+            "the extracted result does not match the task_generation result shape"
+        )

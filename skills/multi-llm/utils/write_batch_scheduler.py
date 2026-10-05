@@ -2754,6 +2754,9 @@ class WriteBatchScheduler:
         self._announce_rung(runner, batch_index)
 
         def before_attempt(context: Dict[str, Any]) -> None:
+            # The prompt this attempt really sends: a report re-ask (the
+            # ladder's rule 7) sends its own, never the batch's instructions.
+            sent = context.get("prompt") or prompt
             self.audit.dispatched(
                 task_id=context["task_id"],
                 kind=self.kind,
@@ -2762,8 +2765,8 @@ class WriteBatchScheduler:
                 profile=profile,
                 cwd=context["cwd"],
                 sandbox_root=self.repo_root,
-                argv=self._render_argv(runner, prompt, profile),
-                prompt=prompt,
+                argv=self._render_argv(runner, sent, profile),
+                prompt=sent,
                 declared_files=list(declared),
                 snapshot_dir=snapshot.directory,
                 snapshot_before={
@@ -2793,9 +2796,24 @@ class WriteBatchScheduler:
             # pre-batch snapshot and pre-run census `_classify` reads.
             return self._moved_since_dispatch(context["task_id"], snapshot)
 
+        def tree_fingerprint(context: Dict[str, Any]) -> Dict[str, Optional[str]]:
+            # A report re-ask's guard: the current bytes of every declared file
+            # and of every path this dispatch has moved so far (the same two
+            # sources `_classify` decides on, peeked). The executor compares the
+            # value before and after the re-ask; any difference is an edit the
+            # re-ask was told not to make.
+            moved = self._moved_since_dispatch(context["task_id"], snapshot)
+            paths = set(moved) | {entry.relative for entry in snapshot.entries}
+            return {
+                relative: file_sha256(os.path.join(self.repo_root, relative))
+                for relative in sorted(paths)
+            }
+
         extra: Dict[str, Any] = {}
         if request is not None and _accepts_keyword(dispatch_task, "jail_request"):
             extra["jail_request"] = request
+        if _accepts_keyword(dispatch_task, "tree_fingerprint"):
+            extra["tree_fingerprint"] = tree_fingerprint
         return dispatch_task(
             task,
             phase_dir=self.phase_dir,

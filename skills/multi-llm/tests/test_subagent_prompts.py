@@ -811,3 +811,88 @@ class TestJudgePrompt:
     def test_the_reply_asks_the_judge_to_name_its_model(self):
         prompt = build_human_decision_judge_prompt([{"group_id": "g", "title": "t"}])
         assert '"judge": "<the model you are>"' in prompt
+
+
+class TestSchemaRepairPrompt:
+    """The one schema-repair re-ask, shaped so a weaker model can follow it
+    (2026-10-05: opencode/big-pickle failed task generation twice, after a
+    re-ask that quoted a fragment's errors back at it)."""
+
+    @pytest.mark.parametrize("kind", sorted(subagent_prompts.SCHEMA_REPAIR_SHAPES))
+    def test_every_example_passes_the_kinds_whole_validation(self, kind):
+        import copy
+
+        from utils.subagent_executor import normalize_result, validate_result
+
+        example = copy.deepcopy(subagent_prompts.SCHEMA_REPAIR_EXAMPLES[kind])
+        normalize_result(kind, example)
+        assert validate_result(kind, example) == []
+
+    @pytest.mark.parametrize("kind,schema", [
+        ("task_generation", "generated_tasks.schema.json"),
+        ("apply_suggestions", "write_batch_result.schema.json"),
+        ("apply_task_suggestions", "write_batch_result.schema.json"),
+        ("apply_code_fixes", "write_batch_result.schema.json"),
+    ])
+    def test_the_named_top_level_keys_are_the_schemas_required_ones(self, kind, schema):
+        document = json.loads(
+            (SKILL_ROOT / "schemas" / schema).read_text(encoding="utf-8")
+        )
+        assert list(subagent_prompts.SCHEMA_REPAIR_TOP_KEYS[kind]) == document["required"]
+
+    def test_the_read_form_names_the_keys_and_ends_on_a_valid_document(self):
+        prompt = subagent_prompts.build_schema_repair_prompt(
+            "task_generation", "ORIGINAL QUESTION", ["<root>: missing required field 'tasks'"]
+        )
+        assert prompt.startswith("ORIGINAL QUESTION")
+        assert "- <root>: missing required field 'tasks'" in prompt
+        assert 'top-level keys are exactly "schema_version", "plan_preamble", "tasks"' in prompt
+        assert 'Every task goes inside the "tasks" array' in prompt
+        tail = prompt[prompt.rindex("copy its format, not its content:"):]
+        document = json.loads(tail.split(":", 1)[1])
+        assert document == subagent_prompts.SCHEMA_REPAIR_EXAMPLES["task_generation"]
+
+    def test_a_syntax_error_replaces_the_fragments_errors(self):
+        """The validator's errors describe whatever fragment was salvaged from
+        inside the broken document; quoting them told a model whose keys were
+        right that its keys were wrong."""
+        prompt = subagent_prompts.build_schema_repair_prompt(
+            "task_generation", "Q",
+            ["<root>: missing required field 'schema_version'",
+             "<root>: unexpected field 'acceptance_criteria'"],
+            syntax_error="line 182, column 341: Expecting ',' delimiter — the "
+                         "text there reads: so \"<<HERE>>3\", \"2\"",
+        )
+        assert "Your reply is not valid JSON" in prompt
+        assert "line 182, column 341: Expecting ',' delimiter" in prompt
+        assert "missing required field 'schema_version'" not in prompt
+        assert "unexpected field 'acceptance_criteria'" not in prompt
+        assert 'write it as \\"' in prompt
+
+    def test_the_write_form_restates_and_never_resends_the_instructions(self):
+        prompt = subagent_prompts.build_schema_repair_prompt(
+            "apply_suggestions", "Apply batch 6: rewrite the Race logic section",
+            ["<root>: expected type object, got list"],
+            previous_reply='Changes applied.\n{"status": "applied", "ids": ["a"]}',
+        )
+        sys.path.insert(0, str(SKILL_ROOT / "tests" / "mocks"))
+        import mock_llm
+
+        assert prompt.startswith(mock_llm.REPORT_REASK_MARKER)
+        assert "rewrite the Race logic section" not in prompt
+        assert "Do NOT open, edit, create or delete any file" in prompt
+        assert 'Changes applied.\n{"status": "applied", "ids": ["a"]}' in prompt
+        assert "never name an id or a\nfile it does not name" in prompt
+
+    def test_the_write_form_needs_a_reply_and_keeps_its_tail(self):
+        with pytest.raises(ValueError):
+            subagent_prompts.build_schema_repair_prompt(
+                "apply_code_fixes", "Q", ["x"], previous_reply="  "
+            )
+        long_reply = "x" * 9000 + '{"status": "applied"}'
+        prompt = subagent_prompts.build_schema_repair_prompt(
+            "apply_code_fixes", "Q", ["x"], previous_reply=long_reply
+        )
+        assert '{"status": "applied"}' in prompt
+        assert "earlier characters omitted" in prompt
+        assert "x" * 7000 not in prompt
