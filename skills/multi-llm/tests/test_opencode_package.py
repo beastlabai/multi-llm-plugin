@@ -1096,24 +1096,33 @@ class TestArguments:
                 f"{args!r} was rejected with the wrong reason: {verdict['error']!r}"
             )
 
-        # One case per code-composed flag appearing in extra_flags.
+        # One case per code-composed flag appearing in extra_flags: refused,
+        # except a valueless one the surface lists as a no-op restatement
+        # (`reserved_flags.redundant.flags`), which is accepted and dropped. A
+        # bare `--host` (no value) is still refused.
         surface = pkg_build.cli_surface()
-        composed = [
+        composed = sorted(set([
             token for token in surface["baked_flags"] if token.startswith("-")
-        ] + [surface["detach_flag"]] + surface["reserved_flags"]["exact"]
-        refusals = node_json(
+        ] + [surface["detach_flag"]] + surface["reserved_flags"]["exact"]))
+        verdicts = node_json(
             f"""
-            const flags = {json.dumps(sorted(set(composed)))}
+            const flags = {json.dumps(composed)}
             emit(flags.map((flag) => T.validateArgs(
               {{mode: "review-plan", plan: "p.md", question: "", extra_flags: [flag]}},
               surface,
-            ).ok))
+            )))
             """,
             built_package,
         )
-        assert not any(refusals), (
-            "a flag the plugin composes was accepted in extra_flags"
-        )
+        noop = set(surface["reserved_flags"]["redundant"]["flags"])
+        for flag, verdict in zip(composed, verdicts):
+            if flag in noop:
+                assert verdict["ok"] is True and verdict["extraFlags"] == [], flag
+                assert verdict["dropped"] == [flag], flag
+            else:
+                assert verdict["ok"] is False, (
+                    f"{flag}, a flag the plugin composes, was accepted in extra_flags"
+                )
 
     def test_composed_argv_order_and_empties(self, built_package):
         """Positionals precede every flag; an empty one contributes **zero**
@@ -4814,6 +4823,216 @@ class TestResumeCommand:
         source = (REPO_ROOT / "packaging" / "opencode" / "src" / "index.mjs").read_text()
         for word in [*resume["argv"], resume["option"]]:
             assert f'"{word}"' not in source, word
+
+
+class TestAFailedResultSaysWhatTheUserCanRun:
+    """Racing re-run 2026-10-04 (opencode #3/#4): a failed generate-tasks came
+    back with the same re-invoke option twice, its plan absolute, the
+    dispatcher's own retry and resume lines replaced by a removal note, and
+    no command key at all — and the host model printed a next command it had
+    composed itself. Every failed result now says what the user can run."""
+
+    PLAN = "plans/racing-game.md"
+    ARGS = {"mode": "generate-tasks", "plan": PLAN, "question": "", "extra_flags": []}
+    LAUNCH = {"exit": 0, "stdout": [
+        "run_id: R", "log: /l", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+
+    @staticmethod
+    def _surface(package):
+        return json.loads((package / "dist" / "cli-surface.json").read_text())
+
+    def _failed(self, tmp_path):
+        """The poll a failed detached generate-tasks answers with: its own
+        retry hint (`--yes`, from the worker) and status's `resume with:` line
+        (the launcher's `--detach`), both naming the plan absolutely."""
+        absolute = str(tmp_path / "plans" / "racing-game.md")
+        prefix = "uv run --frozen --no-dev --project /skill -- python /skill/multi_llm.py"
+        body = {"mode": "generate-tasks", "phase": None, "state": "needs-human",
+                "exit": 3, "artifacts": [], "next": None}
+        return {"exit": 3, "stdout": [
+            "Re-invoke to retry only the failures (task_generation):",
+            f"  {prefix} generate-tasks {absolute} --host opencode --yes",
+            f"      resume with: {prefix} generate-tasks {absolute} "
+            "--host opencode --detach --yes",
+            "MULTI_LLM_RESULT: " + json.dumps(body),
+        ]}
+
+    def test_one_option_per_call_with_the_plan_as_typed(self, built_package, uv_stub,
+                                                        tmp_path):
+        result, _ = uv_stub.run(built_package, self.ARGS,
+                                [self.LAUNCH, self._failed(tmp_path)],
+                                extra_env={"STUB_RESUME_FAIL": "1"})
+        calls = [option for option in result["options"] if "tool" in option]
+        assert len(calls) == 1, result["options"]
+        assert calls[0]["args"] == {"mode": "generate-tasks", "plan": self.PLAN,
+                                    "question": "", "extra_flags": []}
+        assert str(tmp_path) not in calls[0]["human"]
+        assert result["options"][-1] == {
+            "human": self._surface(built_package)["needs_human_option"]}
+
+    def test_the_redacted_lines_name_the_hosts_own_command(self, built_package,
+                                                           uv_stub, tmp_path):
+        result, _ = uv_stub.run(built_package, self.ARGS,
+                                [self.LAUNCH, self._failed(tmp_path)],
+                                extra_env={"STUB_RESUME_FAIL": "1"})
+        spelled = f"/multi-llm --generate-tasks {self.PLAN}"
+        lines = result["output"].split("\n")
+        assert f"  {spelled}" in lines
+        assert f"      resume with: {spelled}" in lines
+        blob = json.dumps({key: result.get(key)
+                           for key in ("output", "result", "options", "stderr", "message")})
+        assert "uv run" not in blob and "multi_llm.py" not in blob
+        assert "a runnable command was removed" not in blob
+
+    def test_no_resume_means_an_explicit_no_command(self, built_package, uv_stub,
+                                                    tmp_path):
+        surface = self._surface(built_package)
+        result, _ = uv_stub.run(built_package, self.ARGS,
+                                [self.LAUNCH, self._failed(tmp_path)],
+                                extra_env={"STUB_RESUME_FAIL": "1"})
+        assert "user_next_step" in result and result["user_next_step"] is None
+        assert result["no_command_reason"] == surface["no_command_reason"]
+        assert "resume_command" not in result
+        assert result["message"].endswith(surface["needs_human_message"]["no_command"])
+
+    def test_a_resume_command_replaces_the_no_command(self, built_package, uv_stub,
+                                                      tmp_path):
+        surface = self._surface(built_package)
+        result, _ = uv_stub.run(
+            built_package, self.ARGS, [self.LAUNCH, self._failed(tmp_path)],
+            extra_env={"STUB_RESUME_COMMAND": f"/multi-llm --generate-tasks {self.PLAN}"})
+        assert result["resume_command"] == f"/multi-llm --generate-tasks {self.PLAN}"
+        assert result["user_next_step"] is None
+        assert "no_command_reason" not in result
+        assert result["message"].endswith(surface["needs_human_message"]["resume"])
+
+    def test_an_error_result_says_so_too(self, built_package, uv_stub):
+        surface = self._surface(built_package)
+        crashed = {"exit": 1, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"error","exit":1,"artifacts":[],"next":null}']}
+        result, _ = uv_stub.run(built_package, self.ARGS, [self.LAUNCH, crashed])
+        assert result["ok"] is False
+        assert result["user_next_step"] is None
+        assert result["no_command_reason"] == surface["no_command_reason"]
+        assert not result["message"].endswith(surface["needs_human_message"]["no_command"])
+
+    def test_a_finished_run_and_a_refused_call_carry_neither(self, built_package,
+                                                             uv_stub):
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":null}']}
+        result, _ = uv_stub.run(built_package, self.ARGS, [self.LAUNCH, done])
+        assert "no_command_reason" not in result and "user_next_step" not in result
+        refused, calls = uv_stub.run(
+            built_package, dict(self.ARGS, extra_flags=["--detach"]), [done])
+        assert calls == [] and refused["ok"] is False
+        assert "no_command_reason" not in refused and "user_next_step" not in refused
+
+    def test_an_older_surface_keeps_the_note_and_drops_only_the_sentences(
+        self, built_package, tmp_path
+    ):
+        """Additive within schema v5: without `user_command` a redacted command
+        keeps its pointer, and without `no_command_reason` the null stands alone."""
+        absolute = str(tmp_path / "p.md")
+        out = node_json(
+            f"""
+            const bare = structuredClone(surface)
+            delete bare.dispatcher.user_command
+            delete bare.no_command_reason
+            delete bare.needs_human_message.no_command
+            const values = {{ word: "generate-tasks", plan: {json.dumps(absolute)},
+                             planArg: "p.md", question: "", extraFlags: [] }}
+            const child = {{
+              code: 3, argv: ["uv"], stderr: "", resultRaw: null, truncated: false,
+              banner: {{}}, aborted: false, timedOut: false, spawnError: null,
+              result: {{ state: "needs-human", exit: 3, next: null }},
+              stdout: "  uv run -- python /s/multi_llm.py generate-tasks " +
+                {json.dumps(absolute)} + " --yes\\n",
+            }}
+            const terminal = T.terminalResult(child, {{ anchor: "/a", surface: bare, values }})
+            emit({{ terminal, finished: T.finishOutcome({{ ...terminal }}, {{}}, bare) }})
+            """,
+            built_package,
+        )
+        assert "a runnable command was removed" in out["terminal"]["output"]
+        finished = out["finished"]
+        assert finished["user_next_step"] is None
+        assert "no_command_reason" not in finished
+        assert finished["message"] == out["terminal"]["message"]
+
+
+#: Values the plan quoting must agree on with `next_phase.quote_plan_arg`.
+QUOTE_CASES = [
+    "plans/x.md", "plans/my plan.md", "plans/it's.md", 'plans/a"b.md',
+    "plans/a\"b'c.md", "C:\\skill\\x.md", "tab\there", "--quick", "a,b", "",
+]
+
+
+class TestRestatedComposedFlags:
+    """Racing re-run 2026-10-04 (opencode #1): big-pickle put `--yes` in
+    extra_flags on four calls and each came back "reserved". A flag this tool
+    composes with the same meaning is now dropped with a note; one whose
+    meaning would differ is still refused."""
+
+    ARGS = {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []}
+    DONE = {"exit": 0, "stdout": [
+        "run_id: R", "log: /l", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+    FINISHED = {"exit": 0, "stdout": [
+        'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":null}']}
+
+    @pytest.mark.parametrize("flags, shown", [
+        (["--yes"], "--yes"), (["-y"], "-y"), (["--non-interactive"], "--non-interactive"),
+        (["--exec-subagents"], "--exec-subagents"), (["--ye"], "--ye"),
+        (["--host", "opencode"], "--host opencode"), (["--host=opencode"], "--host=opencode"),
+    ])
+    def test_a_restated_flag_runs_and_is_named_in_a_note(self, built_package, uv_stub,
+                                                         flags, shown):
+        result, calls = uv_stub.run(
+            built_package, dict(self.ARGS, extra_flags=[*flags, "--quick"]),
+            [self.DONE, self.FINISHED])
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        assert result["ok"] is True, result
+        launch = _dispatcher_argv(calls[0])
+        for baked in surface["baked_flags"]:
+            if baked.startswith("-"):
+                assert launch.count(baked) == 1, launch
+        assert "--quick" in launch
+        assert not set(flags) - set(surface["baked_flags"]) & set(launch)
+        note = surface["reserved_flags"]["redundant"]["note"]
+        assert result["extra_flags_note"] == note.replace("{flags}", shown)
+
+    @pytest.mark.parametrize("flags", [
+        ["--host", "codex"], ["--host=codex"], ["--host"], ["--detach"],
+        ["--interactive"], ["--internal-worker"], ["--if-not-running"], ["--yes=1"],
+    ])
+    def test_a_flag_with_another_meaning_is_still_refused(self, built_package,
+                                                          uv_stub, flags):
+        result, calls = uv_stub.run(
+            built_package, dict(self.ARGS, extra_flags=flags), [self.DONE])
+        assert result["ok"] is False and calls == []
+        assert "extra_flags_note" not in result
+
+    def test_a_surface_without_the_set_refuses_as_before(self, built_package):
+        out = node_json(
+            """
+            const bare = structuredClone(surface)
+            delete bare.reserved_flags.redundant
+            emit(T.validateArgs(
+              {mode: "review-plan", plan: "p.md", question: "", extra_flags: ["--yes"]},
+              bare,
+            ))
+            """,
+            built_package,
+        )
+        assert out["ok"] is False and "reserved" in out["error"]
+
+    def test_the_quoting_agrees_with_the_dispatchers(self, built_package):
+        from utils import next_phase
+
+        quoted = node_json(
+            f"emit({json.dumps(QUOTE_CASES)}.map((v) => T.quoteForReader(v)))",
+            built_package,
+        )
+        assert quoted == [next_phase.quote_plan_arg(v) for v in QUOTE_CASES]
 
 
 # ===========================================================================

@@ -329,9 +329,9 @@ function validateArgs(args, surface) {
     )
   }
 
-  for (const token of extraFlags) {
-    const hit = reservedHit(token, surface)
-    if (!hit) continue
+  const split = splitExtraFlags(extraFlags, surface)
+  if (split.refused) {
+    const { token, hit } = split.refused
     if (surface.reserved_flags.named_exception.includes(hit)) {
       return fail(interactiveRefusal(hit, token))
     }
@@ -341,7 +341,49 @@ function validateArgs(args, surface) {
     )
   }
 
-  return { ok: true, mode: row }
+  return { ok: true, mode: row, extraFlags: split.kept, dropped: split.dropped }
+}
+
+/**
+ * `extra_flags` split into what is forwarded, what is dropped as a no-op, and
+ * the first token that is refused.
+ *
+ * A token naming a flag this tool composes is a no-op when the surface lists
+ * it as `reserved_flags.redundant` — a valueless one (`--yes` in every
+ * spelling, `--exec-subagents`) always, a valued one (`--host`) only with the
+ * value this tool composes, read from the `=` form or the next element. Every
+ * other reserved token is refused, as is a valued one missing its value or
+ * naming another value. A surface without `redundant` drops nothing, so every
+ * reserved token is refused exactly as before.
+ */
+function splitExtraFlags(extraFlags, surface) {
+  const redundant = surface.reserved_flags.redundant ?? { flags: [], valued: {} }
+  const kept = []
+  const dropped = []
+  for (let index = 0; index < extraFlags.length; index += 1) {
+    const token = extraFlags[index]
+    const hit = reservedHit(token, surface)
+    if (!hit) {
+      kept.push(token)
+      continue
+    }
+    if ((redundant.flags ?? []).includes(hit) && !token.includes("=")) {
+      dropped.push(token)
+      continue
+    }
+    const value = redundant.valued?.[hit]
+    if (typeof value === "string") {
+      const inline = token.includes("=")
+      const given = inline ? token.slice(token.indexOf("=") + 1) : extraFlags[index + 1]
+      if (given === value) {
+        dropped.push(inline ? token : `${token} ${given}`)
+        if (!inline) index += 1
+        continue
+      }
+    }
+    return { kept, dropped, refused: { token, hit } }
+  }
+  return { kept, dropped, refused: null }
 }
 
 /**
@@ -1955,9 +1997,16 @@ function terminalResult(child, context) {
     // It stops at the `MULTI_LLM_RESULT:` envelope too, which was never part of
     // the block a human is being asked to read and comes back parsed in
     // `result` instead.
-    const payload = redactCommand(child.result ?? null, null, surface)
-    const output = humanOutput(child, null, surface)
-    const stderr = redactCommand(child.stderr, null, surface)
+    //
+    // Each redacted dispatcher command is re-spelled the way this route's user
+    // types it (`dispatcher.user_command`), with the plan as this call typed
+    // it, rather than replaced by a removal note: the line that named the
+    // retry still names it, in the only spelling a person can use. A surface
+    // without the key, or a command that does not parse, keeps the note.
+    const respell = respellerFor(surface, values)
+    const payload = redactCommand(child.result ?? null, null, surface, respell)
+    const output = humanOutput(child, null, surface, respell)
+    const stderr = redactCommand(child.stderr, null, surface, respell)
     return {
       ...base,
       state: "needs-human",
@@ -1978,7 +2027,7 @@ function terminalResult(child, context) {
       // can never auto-follow it. Exit 1 (`errorResult`) does not get it: an
       // error result with nothing scraped still reports no `options` key.
       options: [
-        ...toolCallsFor(child, surface),
+        ...toolCallsFor(child, surface, values),
         { human: surface.needs_human_option },
       ],
       nested_exec: nestedExecReason(child, surface),
@@ -2161,11 +2210,12 @@ const RUNNABLE_MARKER =
  * the surrounding encoding can hide a copy from the pattern or be broken by the
  * replacement.
  */
-function redactCommand(value, command, surface = null) {
+function redactCommand(value, command, surface = null, respell = null) {
   return scrubValue(
     value,
     commandForms(command),
     surface ? runnablePattern(surface) : null,
+    respell,
   )
 }
 
@@ -2206,8 +2256,8 @@ function commandForms(command) {
  * carries it, and dropping it would delete the only evidence of what the child
  * actually printed.
  */
-function humanOutput(child, command, surface) {
-  const text = redactCommand(child?.stdout, command, surface)
+function humanOutput(child, command, surface, respell = null) {
+  const text = redactCommand(child?.stdout, command, surface, respell)
   const marker = surface?.dispatcher?.result_marker
   if (typeof text !== "string" || !text || !marker || !child?.result) {
     return text
@@ -2219,22 +2269,85 @@ function humanOutput(child, command, surface) {
     .trimEnd()
 }
 
-function scrubValue(value, commands, pattern) {
+function scrubValue(value, commands, pattern, respell = null) {
   if (typeof value === "string") {
     let once = value
     for (const form of commands) once = once.split(form).join(NEXT_MARKER)
-    return pattern ? once.replace(pattern, RUNNABLE_MARKER) : once
+    if (!pattern) return once
+    return once.replace(
+      pattern,
+      (match) => (respell && respell(match)) || RUNNABLE_MARKER,
+    )
   }
   if (Array.isArray(value)) {
-    return value.map((item) => scrubValue(item, commands, pattern))
+    return value.map((item) => scrubValue(item, commands, pattern, respell))
   }
   if (value && typeof value === "object") {
     const out = {}
     for (const [key, item] of Object.entries(value)) {
-      out[key] = scrubValue(item, commands, pattern)
+      out[key] = scrubValue(item, commands, pattern, respell)
     }
     return out
   }
+  return value
+}
+
+/**
+ * The function that re-spells one redacted dispatcher command for the user,
+ * or null when the surface carries no `dispatcher.user_command`.
+ *
+ * The command is parsed into tool-call arguments first (`nextAsToolCall`, so
+ * the flags this tool composes are already gone), its plan put back the way
+ * this call typed it, and the result spelled through the route's own template.
+ * A command that does not parse answers null, and the caller keeps the note.
+ */
+function respellerFor(surface, values) {
+  if (!surface?.dispatcher?.user_command) return null
+  return (command) => {
+    const call = nextAsToolCall(command, surface)
+    if (!call?.args) return null
+    return userSpelling(
+      { ...call.args, plan: typedPlan(call.args.plan, values) },
+      surface,
+    )
+  }
+}
+
+/** *plan* as this call typed it, when it names the call's own plan file. */
+function typedPlan(plan, values) {
+  return values?.planArg && plan && plan === values.plan ? values.planArg : plan
+}
+
+/**
+ * Tool-call arguments spelled the way this route's user types them, or null.
+ *
+ * The template and its slot are `dispatcher.user_command`, the mode word is
+ * the row's `user_flag`, and every value is quoted by `quoteForReader`: the
+ * pieces `next_phase.resume_command` builds the same string from, which the
+ * suite holds equal. This file spells none of them.
+ */
+function userSpelling(args, surface) {
+  const spell = surface?.dispatcher?.user_command
+  const row = resolveMode(args.mode, surface)
+  if (!spell || typeof spell.template !== "string" || !row?.user_flag) return null
+  const words = [row.user_flag]
+  if (args.plan) words.push(quoteForReader(args.plan))
+  if (args.question) words.push(quoteForReader(args.question))
+  for (const flag of args.extra_flags ?? []) words.push(quoteForReader(flag))
+  return spell.template.split(spell.args_slot).join(words.join(" "))
+}
+
+/**
+ * A value quoted for the model that reads a user-spelled command, never for a
+ * shell: `next_phase.quote_plan_arg`'s rule, which the suite holds this to over
+ * a shared case table. Bare without whitespace or a quote; single quotes around
+ * a value holding `"` but not `'`; double quotes otherwise. Nothing escaped.
+ */
+function quoteForReader(value) {
+  const hasDouble = value.includes('"')
+  const hasSingle = value.includes("'")
+  if (hasDouble && !hasSingle) return `'${value}'`
+  if (hasDouble || hasSingle || /\s/.test(value)) return `"${value}"`
   return value
 }
 
@@ -2273,7 +2386,7 @@ function escapeRegExp(text) {
  * back in the only form this plugin ever hands one back, in the order it
  * appeared — so nothing is dropped by the redaction and nothing is pasteable.
  */
-function toolCallsFor(child, surface) {
+function toolCallsFor(child, surface, values = null) {
   if (!child || !surface) return []
   const raw = child.result?.next
   const commands = typeof raw === "string" && raw ? [raw] : []
@@ -2282,12 +2395,23 @@ function toolCallsFor(child, surface) {
   const seen = new Set()
   const calls = []
   for (const command of commands) {
-    if (seen.has(command)) continue
-    seen.add(command)
     const call = nextAsToolCall(command, surface)
     // Never a `null` beside the human entry: the needs-human branch appends
     // that entry after this list, and "the last option" has to mean it.
-    if (call) calls.push(call)
+    if (!call) continue
+    if (call.args) {
+      // The plan as this call typed it, when it is this call's plan: the
+      // dispatcher prints it absolute (racing re-run 2026-10-04).
+      call.args.plan = typedPlan(call.args.plan, values)
+      call.human = describeCall(call.args, surface)
+    }
+    // One option per distinct call, not per printed line: a failed run's own
+    // retry hint and `status`'s `resume with:` line differ only in flags this
+    // tool composes, and the same option was listed twice.
+    const key = JSON.stringify(call.args ?? call)
+    if (seen.has(key)) continue
+    seen.add(key)
+    calls.push(call)
   }
   return calls
 }
@@ -2450,7 +2574,7 @@ function errorResult(child, message, anchor, extra = {}) {
   // captured output routinely carries runnable commands — a launch banner's
   // `status:`/`abort:` lines, a refusal that names its own fix — and an error is
   // no licence to hand one to a model. Redacted here, returned as tool calls.
-  const options = toolCallsFor(child, surface)
+  const options = toolCallsFor(child, surface, values)
   const out = {
     state: "error",
     ok: false,
@@ -2752,12 +2876,12 @@ async function execute(args, ctx, surface, client) {
       // are pinned in uv.lock and resolved by `uv run` from pyproject.toml, so a
       // bare interpreter turns a clear "install uv" into a ModuleNotFoundError
       // or, worse, a silently wrong dependency version mid-fan-out.
-      return {
+      return finishOutcome({
         state: "needs-human",
         ok: false,
         anchor,
         message: uvMissingText(surface),
-      }
+      }, checked, surface)
     }
     // Propagate the binary the preflight approved, so the detached worker
     // re-resolves to it instead of re-probing a PATH it may not share.
@@ -2785,7 +2909,9 @@ async function execute(args, ctx, surface, client) {
       plan: normalizePlan(args.plan, anchor),
       planArg: planSpelling(args.plan),
       question: args.question,
-      extraFlags: args.extra_flags,
+      // What `validateArgs` forwards: a restated flag this tool composes with
+      // the same meaning is dropped here and named in `extra_flags_note`.
+      extraFlags: checked.extraFlags ?? args.extra_flags,
     }
 
     // What the relay has already said, and what it did: see `relayMemory`,
@@ -2831,7 +2957,7 @@ async function execute(args, ctx, surface, client) {
     // invisible, surfacing as "why did it review with THAT model" rather than
     // as anything anyone can point at.
     if (sessionModel) outcome.session_model = sessionModel
-    return outcome
+    return finishOutcome(outcome, checked, surface)
   } catch (error) {
     // The last line of defence for rule 4. A throw here would be a silent
     // exit-0 death with a 0-byte log; a result is at least readable.
@@ -2841,6 +2967,42 @@ async function execute(args, ctx, surface, client) {
       message: `the multi_llm tool failed unexpectedly: ${describe(error)}`,
     }
   }
+}
+
+/**
+ * The two things every outcome past argument validation owes the model.
+ *
+ * A failed or needs-human result says explicitly what the user can run
+ * (racing re-run 2026-10-04: a result with no command key at all, and the host
+ * model composed a "next phase" of its own): `user_next_step` is null — a phase
+ * that did not finish has no next phase — and, unless the result carries a
+ * `resume_command`, `no_command_reason` says there is none to give; the
+ * dispatcher's exit-3 message gains the surface's `no_command` clause. And a
+ * call whose `extra_flags` restated a flag this tool composes gets the
+ * surface's note naming what was dropped. Every sentence is the surface's; a
+ * surface lacking one only loses that sentence.
+ */
+function finishOutcome(outcome, checked, surface) {
+  const dropped = checked?.dropped ?? []
+  const note = surface?.reserved_flags?.redundant?.note
+  if (dropped.length && typeof note === "string") {
+    outcome.extra_flags_note = note.split("{flags}").join(dropped.join(", "))
+  }
+  if (outcome.ok !== false) return outcome
+  outcome.user_next_step = null
+  if (outcome.resume_command) return outcome
+  if (typeof surface?.no_command_reason === "string") {
+    outcome.no_command_reason = surface.no_command_reason
+  }
+  const clause = surface?.needs_human_message?.no_command
+  if (
+    typeof clause === "string" &&
+    outcome.state === surface.dispatcher.states.needs_human &&
+    outcome.exit === surface.dispatcher.exit_codes.needs_human
+  ) {
+    outcome.message = `${outcome.message} ${clause}`
+  }
+  return outcome
 }
 
 /**
@@ -2890,7 +3052,12 @@ const __testing = {
   normalizePlan,
   planSpelling,
   fetchResumeCommand,
+  finishOutcome,
   parseDispatcherCommand,
+  quoteForReader,
+  splitExtraFlags,
+  toolCallsFor,
+  userSpelling,
   redactCommand,
   relayCounts,
   relayMemory,
