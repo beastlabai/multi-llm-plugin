@@ -347,3 +347,116 @@ class TestTheInstructionsDispatchThroughIt:
         assert appends, core
         assert set(appends) == {"{plan}"}, (core, appends)
         assert f'--phase "{phase_word}"' in text, core
+
+
+class TestAPromptBoundOutOfOrderSaysSo:
+    """Fix round 7 (racing re-run 3, Claude Code apply-code-fixes): the host
+    recorded batch 0, bound batch 1's prompt, and only then appended batch 0's
+    summary, so batch 1 went out without it and the host had to re-bind batch
+    1 and batch 2. `util write-prompt` now names an earlier batch the log does
+    not hold yet — a warning on stderr; the prompt is still written."""
+
+    @staticmethod
+    def _state(out, statuses):
+        (out / "state.json").write_text(
+            json.dumps({"task_status": statuses}), encoding="utf-8")
+
+    def _setup(self, plan_dir):
+        plan, out = plan_dir
+        phase_dir, tasks = _materialize(
+            plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+        return out, phase_dir, tasks
+
+    def _bind(self, phase_dir, task_id, capsys, *extra):
+        code = write_prompt.main(
+            ["--phase-dir", str(phase_dir), "--task-id", task_id, *extra])
+        captured = capsys.readouterr()
+        return code, captured.out, [
+            line for line in captured.err.splitlines()
+            if line.startswith(write_prompt.MARKER_ORDER)
+        ]
+
+    def test_recorded_but_not_appended_is_named(self, plan_dir, capsys):
+        out, phase_dir, tasks = self._setup(plan_dir)
+        self._state(out, {"apply-batch-0": "completed"})
+        code, stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys)
+        assert code == 0
+        assert stdout.startswith("[WRITE_PROMPT] ")  # still written
+        entry_id = tasks[0]["prior_changes_id"]
+        assert warnings == [
+            f"{write_prompt.MARKER_ORDER} apply-batch-0 is recorded completed, "
+            f"but its summary is not in the prior-changes log yet, so this "
+            f"prompt does not carry it. Run its `util prior-changes append` "
+            f"(--id {entry_id}), then run this `util write-prompt` again."
+        ]
+
+        # Appended, re-bound: silent, and the prompt now carries it.
+        prior_changes.append(str(out), entry_id, "apply-suggestions", "batch 0 done")
+        code, _stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys)
+        assert code == 0 and warnings == []
+        text = (phase_dir / "prompts" / "apply-batch-1.prompt.txt").read_text()
+        assert "batch 0 done" in text
+
+    def test_an_unfinished_earlier_batch_is_named(self, plan_dir, capsys):
+        out, phase_dir, _tasks = self._setup(plan_dir)
+        self._state(out, {})
+        _code, _stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys)
+        assert len(warnings) == 1
+        assert "apply-batch-0, an earlier batch, has no `util batch-done` record" in (
+            warnings[0])
+
+    def test_the_first_batch_a_skipped_one_and_no_state_say_nothing(
+        self, plan_dir, capsys
+    ):
+        out, phase_dir, _tasks = self._setup(plan_dir)
+        assert self._bind(phase_dir, "apply-batch-0", capsys)[2] == []  # no state
+        self._state(out, {})
+        assert self._bind(phase_dir, "apply-batch-0", capsys)[2] == []  # first
+        self._state(out, {"apply-batch-0": "skipped"})
+        assert self._bind(phase_dir, "apply-batch-1", capsys)[2] == []
+
+    def test_stdout_mode_keeps_stdout_the_prompt_alone(self, plan_dir, capsys):
+        out, phase_dir, tasks = self._setup(plan_dir)
+        self._state(out, {"apply-batch-0": "completed"})
+        code, stdout, warnings = self._bind(phase_dir, "apply-batch-1", capsys, "--stdout")
+        assert code == 0 and len(warnings) == 1
+        assert stdout == _executor_rendering(
+            "apply_suggestions", out, "apply-suggestions", tasks[1])
+
+    def test_a_human_task_and_a_same_batch_sibling_are_passed_over(
+        self, plan_dir, capsys
+    ):
+        plan, out = plan_dir
+        batches = _implement_batches()
+        batches[0]["can_parallelize"] = True
+        batches[0]["tasks"].append(
+            {"id": "T004", "title": "Sibling", "prompt": PROMPT,
+             "files_to_create": ["src/b.py"], "depends_on": [],
+             "executor_role": "agent"})
+        batches.append({"batch_index": 2, "can_parallelize": False, "tasks": [
+            {"id": "T003", "title": "After the manual step", "prompt": PROMPT,
+             "files_to_create": ["src/c.py"], "depends_on": ["T002"],
+             "executor_role": "agent"},
+        ]})
+        phase_dir, tasks = _materialize(plan, out, "implement", batches, "implement")
+        by_id = {t["task_id"]: t for t in tasks}
+        # T004 runs beside T001: binding it before T001 finished is legal.
+        self._state(out, {})
+        assert self._bind(phase_dir, "T004", capsys)[2] == []
+        self._state(out, {"T001": "completed", "T004": "completed"})
+        for task_id in ("T001", "T004"):
+            prior_changes.append(
+                str(out), by_id[task_id]["prior_changes_id"], "implement", task_id)
+        # T002 is the manual task between them: never in the log, never named.
+        assert self._bind(phase_dir, "T003", capsys)[2] == []
+
+
+@pytest.mark.parametrize("core", [
+    "implement", "apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
+])
+def test_every_native_write_core_says_what_the_order_warning_means(core):
+    text = (Path(__file__).parent.parent / "instructions" / f"{core}.md").read_text(
+        encoding="utf-8")
+    flat = " ".join(text.split())
+    assert f"A `{write_prompt.MARKER_ORDER}` line" in flat
+    assert "then run this `util write-prompt` again before spawning the subagent" in flat
