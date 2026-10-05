@@ -931,6 +931,175 @@ class TestVerificationOnlyImplementTask:
         assert result.outcomes[0].write_outcome == executor.WRITE_CLEAN_FAILURE
         assert result.exit_code == 3
 
+    # -- racing re-run 4 (2026-10-05): a check that reported problems ------
+
+    FINDINGS = [
+        "npx html-validate index.html: index.html:1 doctype must be lowercase",
+        "npx html-validate index.html: index.html:105 aria-label misused on a div",
+    ]
+
+    def _check_reply(self, *, status="no-op", passed=False, findings=None, **extra):
+        reply = {
+            "status": status, "ids": ["T009"], "files_touched": [],
+            "summary": "Static checks ran; html-validate reported two findings.",
+            "notes": "node --check: PASS. npx html-validate: 2 findings.",
+            "check": {"passed": passed,
+                      "findings": self.FINDINGS if findings is None else findings},
+        }
+        reply.update(extra)
+        return reply
+
+    def test_a_check_that_reports_problems_never_reads_verified(self, env):
+        """Codex T007: `npx html-validate` reported two problems, the runner
+        said `no-op` and kept them in `notes`, and every surface read
+        VERIFIED. The reply's structured `check` now decides the label:
+        `check-findings`, the loop continues (exit 0), and the findings are on
+        the reports, the verdict stamp, summary.md, the batch log line, the
+        status mirror, the result messages, state.json and the prior-changes
+        line review-code's implementation record renders."""
+        from utils import run_status
+
+        log = env.enable_call_log()
+        env.edits([], result=self._check_reply())
+        state = FakeState(env.tmp_path / "state.json")
+        summary = env.out_dir / "implement" / "implementation_summary.md"
+        lines = []
+        result = env.scheduler(
+            [self._task(env)], kind="implement", state=state,
+            summary_file=str(summary), log=lines.append,
+        ).run()
+
+        assert result.exit_code == 0, result.messages
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_OK
+        assert outcome.write_outcome == executor.WRITE_NO_OP
+        assert outcome.outcome_label == executor.WRITE_LABEL_CHECK_FINDINGS == "check-findings"
+        assert outcome.reason.startswith("CHECK FINDINGS"), outcome.reason
+        assert outcome.check_findings == self.FINDINGS
+
+        for name in ("write_batch_report.json", "subagent_batch_report.json"):
+            row = json.loads((env.phase_dir / name).read_text())["tasks"][0]
+            assert row["outcome_label"] == "check-findings", name
+            assert row["check"] == {"passed": False, "findings": self.FINDINGS}, name
+        verdict = json.loads(
+            (env.phase_dir / "implement_batch_T009.json").read_text()
+        )["verdict"]
+        assert verdict["outcome_label"] == "check-findings"
+        assert verdict["check"]["findings"] == self.FINDINGS
+
+        text = Path(result.summary_file).read_text()
+        assert "| T009 | check-findings |" in text
+        assert "| T009 | verified |" not in text
+        assert "## Check Findings" in text
+        for finding in self.FINDINGS:
+            assert f"- {finding}" in text
+        assert "1 with check findings: T009" in text
+
+        batch_lines = [l for l in lines if "batch 0: T009" in l]
+        assert batch_lines and "T009 check-findings (2 problem(s)" in batch_lines[0], lines
+        assert any(
+            m.startswith("[CHECK_FINDINGS] T009 2 problem(s): ") for m in result.messages
+        ), result.messages
+
+        mirror = json.loads(
+            (env.phase_dir / ".status.json").read_text()
+        )["progress"]["write_subagents"]
+        assert mirror["tasks"][0]["outcome_label"] == "check-findings"
+        assert mirror["tasks"][0]["check_findings"] == self.FINDINGS
+        assert mirror["check_findings_task_ids"] == ["T009"]
+        status_text = ", ".join(run_status._mirror_text("write_subagents", mirror))
+        assert "check findings T009" in status_text, status_text
+        assert "verified" not in status_text, status_text
+
+        state.reload()
+        assert state.state["task_status"]["T009"] == "completed"
+        assert state.state["task_check_findings"] == {"T009": self.FINDINGS}
+
+        entries = [
+            json.loads(line) for line in
+            (env.out_dir / "prior_changes.jsonl").read_text().splitlines()
+        ]
+        logged = entries[-1]["summary"]
+        assert logged.startswith("(check findings — 2 problem(s)"), logged
+        assert "verified" not in logged
+
+        # The dispatched prompt asked for the structured field.
+        prompt = [json.loads(l) for l in log.read_text().splitlines()][0]["prompt"]
+        assert "## Check result (required for this task)" in prompt
+        assert '"check": {"passed": false, "findings"' in prompt
+
+    def test_a_failed_claim_with_structured_findings_does_not_stop_implement(self, env):
+        """Racing re-run 3's T009 (worded "must exit 0") claimed `failed` and
+        stopped implement for good. A check's problems are findings, never a
+        stop, whatever the task's wording made the runner claim."""
+        env.edits([], result=self._check_reply(status="failed"))
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert result.exit_code == 0, result.messages
+        assert outcome.ok and outcome.outcome_label == "check-findings"
+
+    def test_a_finding_beside_passed_true_still_counts(self, env):
+        env.edits([], result=self._check_reply(passed=True, findings=["one problem"]))
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        assert result.outcomes[0].outcome_label == "check-findings"
+
+    def test_passed_false_without_findings_is_not_verified(self, env):
+        env.edits([], result=self._check_reply(findings=[]))
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert outcome.outcome_label == "check-findings"
+        assert outcome.check_findings == [executor.CHECK_FAILED_WITHOUT_FINDINGS]
+
+    def test_a_check_that_passed_is_verified_and_records_no_findings(self, env):
+        env.edits([], result=self._check_reply(passed=True, findings=[]))
+        state = FakeState(env.tmp_path / "state.json")
+        state.state["task_check_findings"] = {"T009": ["from an earlier run"]}
+        result = env.scheduler(
+            [self._task(env)], kind="implement", state=state, finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert outcome.outcome_label == "verified"
+        assert "its check reported that it passed" in outcome.reason
+        row = result.to_dict()["tasks"][0]
+        assert row["check"] == {"passed": True, "findings": []}
+        state.reload()
+        # The earlier run's findings for the same task are cleared.
+        assert "task_check_findings" not in state.state
+        assert not any(m.startswith("[CHECK_FINDINGS]") for m in result.messages)
+
+    def test_a_resume_skip_keeps_the_check_findings_label(self, env):
+        env.edits([], result=self._check_reply())
+        env.scheduler([self._task(env)], kind="implement", finalize=False).run()
+        again = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False, resume=True,
+        ).run()
+        outcome = again.outcomes[0]
+        assert outcome.skipped is True
+        assert outcome.outcome_label == "check-findings"
+        assert again.check_findings() == {"T009": self.FINDINGS}
+
+    def test_a_task_that_declares_files_gets_no_check_contract(self, env):
+        from utils.write_batch_scheduler import CHECK_RESULT_CONTRACT, with_result_contract
+
+        check = self._task(env)
+        code = env.apply_task(
+            0, kind="implement", task_id="T001", expected_ids=["T001"],
+            output_name="implement_batch_T001.json",
+            declared_files=["index.html"],
+        )
+        prompt = f"Do it.\n{PRIOR_CHANGES_TOKEN}\n"
+        assert CHECK_RESULT_CONTRACT in with_result_contract("implement", check, prompt)
+        assert "## Check result" not in with_result_contract("implement", code, prompt)
+        assert "## Check result" not in with_result_contract(
+            "apply_suggestions", env.apply_task(0), prompt,
+        )
+
     def test_the_apply_kinds_are_still_refused_with_nothing_to_snapshot(self, env):
         task = env.apply_task(0, declared_files=[], snapshot_files=[])
         result = env.scheduler([task]).run()

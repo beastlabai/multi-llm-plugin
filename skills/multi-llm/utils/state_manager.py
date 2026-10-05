@@ -115,6 +115,36 @@ def update_task_status_in_state(
         state["task_status_reasons"].pop(task_id, None)
 
 
+#: ``state.json``'s map of what an implement check task found:
+#: ``{task_id: [finding, ...]}``, present only while some task has findings.
+TASK_CHECK_FINDINGS_KEY = "task_check_findings"
+
+
+def set_task_check_findings_in_state(
+    state: Dict[str, Any], task_id: str, findings: Optional[Iterable[str]],
+) -> None:
+    """Record (or, with no findings, clear) *task_id*'s check findings.
+
+    Written by both write legs after an implement task is recorded — the
+    executor's scheduler and ``util batch-done`` — from the reply's structured
+    ``check`` object (racing re-run 4, 2026-10-05: T007's two html-validate
+    problems lived only in the runner's notes). ``status``, the workflow's
+    closing notice and review-code's implementation record read it. The key
+    is dropped when the map empties, so a plan with no findings gains none.
+    """
+    recorded = state.get(TASK_CHECK_FINDINGS_KEY)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    kept = [str(item) for item in (findings or []) if str(item).strip()]
+    if kept:
+        current[str(task_id)] = kept
+    else:
+        current.pop(str(task_id), None)
+    if current:
+        state[TASK_CHECK_FINDINGS_KEY] = current
+    else:
+        state.pop(TASK_CHECK_FINDINGS_KEY, None)
+
+
 def mark_item_processed_in_state(
     state: Dict[str, Any],
     phase: str,
@@ -982,6 +1012,38 @@ class StateManager:
             for task_id in sorted(owed)
             if scope is None or task_id in scope
         ]
+
+    def implementation_check_findings(self) -> List[Dict[str, Any]]:
+        """The implement check tasks whose check reported problems, by id.
+
+        ``[{id, title, findings}]`` from :data:`TASK_CHECK_FINDINGS_KEY`, for
+        tasks recorded ``completed`` (a check with findings is a completed
+        task; a later failure or re-run clears its entry) and scoped to the
+        decomposition implement ran last, as
+        :meth:`deferred_implementation_tasks` is.
+        """
+        recorded = self.state.get(TASK_CHECK_FINDINGS_KEY)
+        if not isinstance(recorded, dict) or not recorded:
+            return []
+        titles = self.state.get("task_titles") or {}
+        current = self.state.get("implement_task_ids")
+        scope = set(current) if isinstance(current, list) else None
+        statuses = self.implementation_task_statuses()
+        out: List[Dict[str, Any]] = []
+        for task_id in sorted(recorded):
+            findings = recorded.get(task_id)
+            if not isinstance(findings, list) or not findings:
+                continue
+            if statuses.get(task_id) != "completed":
+                continue
+            if scope is not None and task_id not in scope:
+                continue
+            out.append({
+                "id": task_id,
+                "title": titles.get(task_id) or None,
+                "findings": [str(item) for item in findings],
+            })
+        return out
 
     def track_file(self, path: str, action: str, task_id: str) -> None:
         """

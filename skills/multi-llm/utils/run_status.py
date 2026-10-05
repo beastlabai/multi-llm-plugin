@@ -545,6 +545,25 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
         )
         if named:
             lines.append(f"{prefix}manual tasks left for you: {named}")
+    # The implement check tasks that ran and reported problems
+    # (`phases.implement.check_findings`, from state.json), until review-code
+    # — which is given them — has completed (racing re-run 4, 2026-10-05).
+    phases = payload.get("phases", {}) or {}
+    findings = (phases.get("implement") or {}).get("check_findings")
+    review_done = (phases.get("code-review") or {}).get("status") == "completed"
+    if isinstance(findings, list) and findings and not review_done:
+        named = "; ".join(
+            f"{entry['id']} ({len(entry.get('findings') or [])} problem(s): "
+            f"{(entry.get('findings') or [''])[0][:120]}"
+            f"{', …' if len(entry.get('findings') or []) > 1 else ''})"
+            for entry in findings
+            if isinstance(entry, dict) and entry.get("id")
+        )
+        if named:
+            lines.append(
+                f"{prefix}check findings for review-code (implement "
+                f"continued; see implement/summary.md): {named}"
+            )
     return lines
 
 
@@ -1832,6 +1851,11 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     failed = mirror.get("failed_task_ids") or []
     if failed:
         parts.append(f"failed {', '.join(map(str, failed))}")
+    # Racing re-run 4 (2026-10-05): a check task that ran and reported
+    # problems is named, never only counted under its label.
+    flagged = mirror.get("check_findings_task_ids")
+    if isinstance(flagged, list) and flagged:
+        parts.append(f"check findings {', '.join(map(str, flagged))}")
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []

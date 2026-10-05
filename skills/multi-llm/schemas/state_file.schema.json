@@ -54,6 +54,14 @@
       "description": "The task ids of the decomposition implement ran last, replaced on every run (scopes the deferred manual tasks named on completion)",
       "items": { "type": "string" }
     },
+    "task_check_findings": {
+      "type": "object",
+      "description": "Per implement check task (no declared files) whose check ran, changed nothing and reported problems: the findings from its reply's structured `check` object. Present only while some task has findings; read by status, the result notice and review-code's implementation record",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    },
     "human_task_strategy": {
       "type": "string",
       "description": "Chosen strategy for handling human tasks during implementation",
