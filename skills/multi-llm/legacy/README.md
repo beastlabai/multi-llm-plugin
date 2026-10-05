@@ -35,7 +35,16 @@ implementation.
   fallback for the reference host and for nothing else. A non-Claude host that sets
   the variable gets instructions naming tools it does not have.
 - **Not maintained.** These files are frozen at the pre-refactor state. Fixes land
-  in `instructions/`; nothing is back-ported here.
+  in `instructions/`; nothing is back-ported here. One exception, forced by a
+  Python change rather than a markdown one (2026-10-05): the write phases'
+  orchestrators now record a phase *started* at emit and leave completion to the
+  host's closing step, so `instructions/apply-suggestions.md` gained a closing
+  `apply_suggestions_orchestrator.py --plan-file … --mark-completed` step (§8) and
+  `instructions/implement.md`'s step 10 a closing
+  `finalize_tracking.py --state-file … --mark-completed` call. Without them this
+  core could no longer complete either phase; a write-path branch on the
+  environment variable would have broken the "read path only" rule above
+  instead. `tests/test_legacy_instructions.py` pins both.
 - **Not linted, not counted.** The host-neutrality lint, the `${CLAUDE_SKILL_DIR}`
   manifest and the `{SKILL_DIR}` site inventory all scan `instructions/` and
   `references/` and deliberately skip this directory — a frozen copy that had to
