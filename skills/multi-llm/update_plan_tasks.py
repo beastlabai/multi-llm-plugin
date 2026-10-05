@@ -372,7 +372,13 @@ def main(argv=None) -> int:
 
     # Update plan file
     plan_path.write_text(updated_plan, encoding="utf-8")
-    print(f"Updated plan file: {plan_path}")
+    # Said what was written: a bare "Updated plan file" read as generate-tasks
+    # rewriting the plan (OpenCode racing run 4). The section and its
+    # TASKS_FILE marker are how every later phase finds the task list.
+    print(
+        f"Updated plan file: {plan_path} (its \"Implementation Tasks\" section "
+        f"now links {tasks_relative_path}, the task list later phases read)"
+    )
     existing = find_in_plan_task_sections(plan_content)
     if existing:
         print(

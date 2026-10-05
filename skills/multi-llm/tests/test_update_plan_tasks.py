@@ -291,6 +291,33 @@ class TestGeneratedStamp:
         assert plan_path.read_text(encoding="utf-8") == "# My Plan\n"
 
 
+class TestThePlanUpdateSaysWhatItWrote:
+    """OpenCode racing run 4 (03): a bare "Updated plan file: <plan>" read as
+    generate-tasks rewriting the plan. It adds (or refreshes) the plan's
+    "Implementation Tasks" section and its TASKS_FILE marker, which is how
+    every later phase finds the task list, and the line says so."""
+
+    def test_the_line_names_the_section_and_the_task_list(
+            self, temp_dir, sample_tasks_json, capsys):
+        plan_path = temp_dir / "my-plan.md"
+        plan_path.write_text("# My Plan\n\nBody.\n", encoding="utf-8")
+        tasks_json_path = temp_dir / "tasks.json"
+        tasks_json_path.write_text(
+            json.dumps({"tasks": sample_tasks_json}), encoding="utf-8")
+
+        code = update_plan_tasks.main(["--plan-file", str(plan_path),
+                                       "--tasks-file", str(tasks_json_path)])
+
+        assert code == 0
+        out = capsys.readouterr().out
+        assert (f"Updated plan file: {plan_path.resolve()} (its \"Implementation "
+                "Tasks\" section now links my-plan/tasks/tasks.md, the task list "
+                "later phases read)") in out
+        text = plan_path.read_text(encoding="utf-8")
+        assert text.startswith("# My Plan\n\nBody.\n")
+        assert "<!-- TASKS_FILE: my-plan/tasks/tasks.md -->" in text
+
+
 class TestGenerateDependencyDiagram:
     """Tests for generate_dependency_diagram function."""
 
