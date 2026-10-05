@@ -181,14 +181,39 @@ class TestStrictRules:
             "type": ["string", "null"], "enum": ["a", None],
         })) == []
 
+    def test_a_non_empty_enum_stands_in_for_type(self):
+        """Accepted live 2026-10-04: the Codex 03c workaround copy of
+        ``generated_tasks.schema.json`` kept ``estimated_complexity`` and
+        ``executor_role`` as enum-only nodes and OpenAI's strict mode took it
+        (only the untyped ``const`` drew the 400). Declining such a schema
+        would take the native path away from a shape the API accepts."""
+        assert so._strict_openai_errors(_wrap({"enum": ["low", "high"]})) == []
+        assert so._strict_openai_errors(_wrap({"enum": ["a", None]})) == []
+        assert so._strict_openai_errors(_wrap({
+            "type": "array", "items": {"enum": ["x"]},
+        })) == []
+        assert so._strict_openai_errors(_wrap(
+            {"$ref": "#/$defs/x"}, **{"$defs": {"x": {"enum": ["a"]}}},
+        )) == []
+        # An integer member is a number too.
+        assert so._strict_openai_errors(_wrap({"type": "number", "enum": [1, 2.5]})) == []
+
     @pytest.mark.parametrize("prop,needle", [
         ({"const": "1.0"}, "schema must have a 'type' key"),
-        ({"enum": ["low", "high"]}, "schema must have a 'type' key"),
+        ({"enum": []}, "enum must be a non-empty list"),
+        ({"enum": "low"}, "enum must be a non-empty list"),
+        ({"type": "string", "enum": ["low", 1]},
+         "enum member 1 is not of the declared type 'string'"),
+        ({"type": ["string", "null"], "enum": ["a", True]},
+         "enum member True is not of the declared type ['string', 'null']"),
+        ({"type": "integer", "enum": [1, 2.5]},
+         "enum member 2.5 is not of the declared type 'integer'"),
+        ({"const": "1.0", "enum": ["1.0"]}, "schema must have a 'type' key"),
         ({"description": "anything"}, "schema must have a 'type' key"),
         ({"type": "decimal"}, "unsupported type"),
         ({"type": "array"}, "needs one 'items' schema"),
         ({"type": "array", "items": [{"type": "string"}]}, "needs one 'items' schema"),
-        ({"type": "array", "items": {"enum": ["x"]}}, "<root>.p[]: schema must have"),
+        ({"type": "array", "items": {"const": "x"}}, "<root>.p[]: schema must have"),
         ({"type": "object", "properties": {"a": {"type": "string"}},
           "required": ["a"]}, "additionalProperties must be present and false"),
         ({"type": "object", "additionalProperties": False,
@@ -216,7 +241,7 @@ class TestStrictRules:
     def test_a_ref_is_followed_into_its_definition(self):
         document = _wrap(
             {"$ref": "#/$defs/x"},
-            **{"$defs": {"x": {"enum": ["a"]}}},
+            **{"$defs": {"x": {"const": "a"}}},
         )
         errors = so._strict_openai_errors(document)
         assert errors == ["<root>.p: schema must have a 'type' key"]

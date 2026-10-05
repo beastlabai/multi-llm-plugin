@@ -226,6 +226,31 @@ _STRICT_FORMATS = frozenset(
 )
 
 
+def _json_type_matches(value: Any, names: List[Any]) -> bool:
+    """Whether *value*'s JSON type is one of the declared type *names*.
+
+    ``bool`` is checked before ``int`` (it is one in Python), and an integral
+    number is an ``integer`` as well as a ``number``, as draft-07 has it.
+    """
+    if value is None:
+        kinds = {"null"}
+    elif isinstance(value, bool):
+        kinds = {"boolean"}
+    elif isinstance(value, int):
+        kinds = {"integer", "number"}
+    elif isinstance(value, float):
+        kinds = {"integer", "number"} if value.is_integer() else {"number"}
+    elif isinstance(value, str):
+        kinds = {"string"}
+    elif isinstance(value, list):
+        kinds = {"array"}
+    elif isinstance(value, dict):
+        kinds = {"object"}
+    else:  # pragma: no cover - not a JSON value
+        return False
+    return bool(kinds & set(names))
+
+
 def _strict_openai_errors(
     node: Any,
     path: str = "<root>",
@@ -252,8 +277,12 @@ def _strict_openai_errors(
     off the document:
 
     * every schema node carries ``type`` (a name or a list of names from
-      :data:`_STRICT_TYPES`), unless it is a ``$ref`` or an ``anyOf`` of typed
-      branches — ``const`` and ``enum`` do not stand in for it;
+      :data:`_STRICT_TYPES`), unless it is a ``$ref``, an ``anyOf`` of typed
+      branches, or a non-empty ``enum`` — the Codex 03c workaround copy of
+      2026-10-04 kept ``estimated_complexity``/``executor_role`` enum-only and
+      the API accepted it. ``const`` never stands in for it (that is the 400
+      above), and an ``enum`` beside a declared ``type`` must hold only members
+      of that type;
     * the root is an object and not an ``anyOf``;
     * every object has ``additionalProperties: false`` and lists every property
       in ``required`` (an optional one is spelled nullable instead);
@@ -305,6 +334,10 @@ def _strict_openai_errors(
 
     declared = node.get("type")
     names = declared if isinstance(declared, list) else [declared]
+    enum = node.get("enum")
+    if "enum" in node and (not isinstance(enum, list) or not enum):
+        errors.append(f"{path}: enum must be a non-empty list")
+        enum = None
     if "anyOf" in node:
         branches = node.get("anyOf")
         if not isinstance(branches, list) or not branches:
@@ -315,11 +348,21 @@ def _strict_openai_errors(
                     sub, f"{path}.anyOf[{index}]", root, visited
                 ))
     elif declared is None:
-        errors.append(f"{path}: schema must have a 'type' key")
+        # A non-empty `enum` stands in for `type` (accepted live 2026-10-04);
+        # `const` never does, beside an enum or not (the live 400).
+        if not enum or "const" in node:
+            errors.append(f"{path}: schema must have a 'type' key")
     else:
         unknown = [n for n in names if n not in _STRICT_TYPES]
         if unknown or not names:
             errors.append(f"{path}: unsupported type {declared!r}")
+        elif enum:
+            for member in enum:
+                if not _json_type_matches(member, names):
+                    errors.append(
+                        f"{path}: enum member {member!r} is not of the declared "
+                        f"type {declared!r}"
+                    )
 
     if "object" in names or "properties" in node:
         if node.get("additionalProperties") is not False:
