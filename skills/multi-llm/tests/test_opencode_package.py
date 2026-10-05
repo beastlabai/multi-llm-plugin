@@ -4911,6 +4911,55 @@ class TestTheTypedPlanSurvivesEveryFailure:
         assert absolute not in result["next"]["human"]
 
 
+class TestTheWayForwardLeadsTheResult:
+    """Racing re-run 3 (2026-10-05, codex 06b): the model read a cut of a large
+    result, `resume_command` sat in the dropped middle, and the model told the
+    user there was none. Every result here leads with the way forward."""
+
+    LAUNCH = {"exit": 0, "stdout": [
+        "run_id: R", "log: /l", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+    BLOCKED = {"exit": 3, "stdout": [
+        "progress line " + "x" * 80 for _ in range(60)] + [
+        'MULTI_LLM_RESULT: {"mode":"implement","phase":"implement",'
+        '"state":"needs-human","exit":3,"artifacts":[],"next":null}']}
+    IMPLEMENT = {"mode": "implement", "plan": "plans/x.md", "question": "",
+                 "extra_flags": []}
+
+    def test_a_blocked_run_leads_with_the_resume_command(self, built_package, uv_stub):
+        result, _ = uv_stub.run(built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED])
+        assert list(result)[:5] == [
+            "ok", "state", "user_next_step", "resume_command", "message"]
+
+    def test_no_command_leads_with_its_reason(self, built_package, uv_stub):
+        result, _ = uv_stub.run(built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED],
+                                extra_env={"STUB_RESUME_FAIL": "1"})
+        assert list(result)[:4] == ["ok", "state", "user_next_step", "no_command_reason"]
+
+    def test_a_finished_phase_leads_with_its_next_step(self, built_package, uv_stub):
+        step = {"phase": "generate-tasks", "command": "/multi-llm --generate-tasks x.md",
+                "complete": False}
+        done = {"exit": 0, "stdout": ["MULTI_LLM_RESULT: " + json.dumps({
+            "state": "done", "exit": 0, "artifacts": [], "next": None,
+            "user_next_step": step})]}
+        result, _ = uv_stub.run(
+            built_package, {"mode": "review-plan", "plan": "x.md", "question": "",
+                            "extra_flags": []}, [self.LAUNCH, done])
+        assert list(result)[:3] == ["ok", "state", "user_next_step"]
+        assert result["user_next_step"] == step
+
+    def test_the_instructions_come_last(self, built_package):
+        ordered = node_json(
+            """
+            emit(Object.keys(T.wayForwardFirst({
+              instructions: "long", exit: 0, ok: true, next: null, state: "done",
+              message: "m", user_next_step: null })))
+            """,
+            built_package,
+        )
+        assert ordered == ["ok", "state", "user_next_step", "message", "exit", "next",
+                           "instructions"]
+
+
 class TestAFailedResultSaysWhatTheUserCanRun:
     """Racing re-run 2026-10-04 (opencode #3/#4): a failed generate-tasks came
     back with the same re-invoke option twice, its plan absolute, the

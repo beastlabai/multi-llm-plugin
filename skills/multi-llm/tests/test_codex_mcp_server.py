@@ -2293,6 +2293,56 @@ class TestTheTypedPlanSurvivesEveryFailure:
         assert envelope["next"]["plan"] == TYPED_PLAN
 
 
+def codex_cut(text: str, keep: int = 2000) -> str:
+    """What codex 0.160.0 showed its model of a large result: the head and the
+    tail, the middle dropped (racing re-run 3, 06b: "…7996 tokens truncated…"
+    inside a 50 355-character result)."""
+    return text if len(text) <= 2 * keep else text[:keep] + text[-keep:]
+
+
+class TestTheWayForwardLeadsTheResult:
+    """Racing re-run 3 (2026-10-05, codex 06b): the result carried
+    `resume_command`, the model read a cut of it with the middle dropped, the
+    key sat in that middle just before the runbook, and the model told the user
+    the result had no resume command."""
+
+    META = turn_meta(sandbox_mode="workspace-write")
+
+    def _blocked(self, harness, **kwargs):
+        # A runbook and an output the size of the real ones (~40 000 and ~6 000
+        # characters), so the result is cut the way 06b's was.
+        harness.runbook.write_text(runbook_text().replace(
+            "# Core\n", "# Core\n" + "WORKFLOW-PADDING: a step the model owes.\n" * 1000),
+            encoding="utf-8")
+        blocked = {"exit": CODES["needs_human"], "stdout": [
+            "progress line {} ".format(n) + "x" * 80 for n in range(60)] + [
+            result_line(mode="implement", phase="implement",
+                        state=STATES["needs_human"], exit=CODES["needs_human"])]}
+        return harness.run(IMPLEMENT, [launch_step(), blocked], meta=self.META, **kwargs)
+
+    def test_a_blocked_run_leads_with_the_resume_command(self, harness):
+        envelope, result, _, _ = self._blocked(harness)
+        assert list(envelope)[:4] == ["ok", "state", "user_next_step", "resume_command"]
+        assert list(envelope)[4] == "message"
+        assert list(envelope)[-1] == "runbook"
+        text = result["content"][0]["text"]
+        assert len(text) > 40_000
+        assert json.dumps(envelope["resume_command"]) in codex_cut(text)
+
+    def test_no_command_leads_with_its_reason(self, harness):
+        envelope, result, _, _ = self._blocked(harness, extra_env={"STUB_RESUME_FAIL": "1"})
+        assert list(envelope)[:4] == ["ok", "state", "user_next_step", "no_command_reason"]
+        assert json.dumps(envelope["no_command_reason"]) in codex_cut(
+            result["content"][0]["text"])
+
+    def test_a_finished_phase_leads_with_its_next_step(self, harness):
+        command = "$multi-llm:multi-llm --generate-tasks p.md"
+        envelope, _, _, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0, user_next_step=next_step(command))])
+        assert list(envelope)[:3] == ["ok", "state", "user_next_step"]
+        assert envelope["user_next_step"]["command"] == command
+
+
 # ===========================================================================
 # What a failed result says the user can run (racing re-run 2026-10-04)
 # ===========================================================================
