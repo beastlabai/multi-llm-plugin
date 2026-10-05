@@ -151,7 +151,7 @@ def repo_keys(directory: Optional[str]) -> List[str]:
     keys: List[str] = []
     try:
         top = subprocess.run(
-            git_argv("rev-parse", "--show-toplevel", "--git-common-dir"),
+            git_argv("rev-parse", "--show-toplevel", "--git-common-dir", cwd=start),
             capture_output=True, text=True, cwd=start, timeout=10,
             encoding="utf-8", errors="replace",
         )

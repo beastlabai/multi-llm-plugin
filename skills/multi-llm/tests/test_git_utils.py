@@ -2530,19 +2530,188 @@ class TestThePluginsGitCallsRunNothingPlanted:
     def test_every_runtime_git_invocation_goes_through_the_one_builder(self):
         """Every ``["git", …]`` argv a runtime module spawns is built by
         ``git_utils.git_argv`` (which carries the hardening), never spelled
-        as a list literal: an AST scan over every runtime module but
-        ``git_utils`` itself."""
+        as a list literal: an AST scan over every runtime module,
+        ``git_utils`` included — its one admitted literal is the body of
+        ``_hardened_argv``, the builder itself (review fixes 2026-10-05: the
+        ``cat-file`` call in ``paths_in_commit`` was a raw literal under a
+        whole-module exemption)."""
         import ast
         skill_root = Path(__file__).resolve().parent.parent
         offenders = []
         for path in sorted(skill_root.rglob("*.py")):
             rel = path.relative_to(skill_root).as_posix()
-            if rel.startswith(("tests/", ".venv/", "legacy/", "packaging/")) or rel == "utils/git_utils.py":
+            if rel.startswith(("tests/", ".venv/", "legacy/", "packaging/")):
                 continue
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            admitted = set()
             for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef) and node.name == "_hardened_argv" \
+                        and rel == "utils/git_utils.py":
+                    admitted.update(id(n) for n in ast.walk(node))
+            for node in ast.walk(tree):
+                if id(node) in admitted:
+                    continue
                 if isinstance(node, (ast.List, ast.Tuple)) and node.elts:
                     first = node.elts[0]
                     if isinstance(first, ast.Constant) and first.value == "git":
                         offenders.append(f"{rel}:{node.lineno}")
         assert offenders == [], offenders
+
+    # -- clean/smudge/process filters (review fixes 2026-10-05) -------------
+
+    @staticmethod
+    def _plant_clean_filter(root, git, script, *, where: str = "info"):
+        """Bind a planted clean filter to ``*.py`` through ``where``: the
+        ``.git/info/attributes`` file, the worktree ``.gitattributes``, or a
+        ``core.attributesFile`` under ``.git/``."""
+        line = "*.py filter=planted\n"
+        if where == "info":
+            (root / ".git" / "info").mkdir(exist_ok=True)
+            (root / ".git" / "info" / "attributes").write_text(line, encoding="utf-8")
+        elif where == "worktree":
+            (root / ".gitattributes").write_text(line, encoding="utf-8")
+        else:
+            (root / ".git" / "attrs").write_text(line, encoding="utf-8")
+            git("config", "core.attributesFile", ".git/attrs")
+        git("config", "filter.planted.clean", f"{script} clean")
+        git("config", "filter.planted.smudge", f"{script} smudge")
+
+    @pytest.mark.parametrize("where", ["info", "worktree", "attributesfile"])
+    def test_a_planted_clean_filter_is_not_run_by_status_or_diff(self, tmp_path, monkeypatch, where):
+        root, git = _real_repo(tmp_path)
+        script, marker = _planted(tmp_path, "clean")
+        self._plant_clean_filter(root, git, script, where=where)
+        monkeypatch.chdir(root)
+        (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+        assert "app.py" in get_modified_files()
+        assert "+x = 2" in get_file_diff("app.py")
+        assert "+x = 2" in get_diff_since_ref("HEAD")
+        assert "app.py" in capture_diff_hunks("HEAD", ["app.py"])
+        assert not marker.exists(), "status/diff ran the planted clean filter"
+
+    def test_every_other_sweep_and_review_call_runs_no_planted_filter(self, tmp_path, monkeypatch):
+        """The reviewer's list, re-measured through the plugin's own callers:
+        the porcelain snapshot's ``status -z``, ``hash-object``, ``ls-files``,
+        ``add -N``, ``check-ignore``, ``cat-file``, ``diff --numstat`` and
+        ``add`` — none of them runs the filter the batch planted."""
+        from utils import review_orchestrator_base as rob
+        from utils.git_utils import _numstat_counts, paths_in_commit, stage_files
+        root, git = _real_repo(tmp_path)
+        script, marker = _planted(tmp_path, "clean")
+        self._plant_clean_filter(root, git, script)
+        monkeypatch.chdir(root)
+        (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+        (root / "new.py").write_text("y = 1\n", encoding="utf-8")
+        snapshot = rob.porcelain_snapshot(str(root))
+        assert snapshot is not None and "app.py" in snapshot.entries
+        with intent_to_add_untracked(["new.py"], cwd=str(root)) as touched:
+            assert touched == ["new.py"]
+        assert ignored_paths(["app.py", "new.py"], cwd=str(root)) == set()
+        assert paths_in_commit("HEAD", ["app.py", "new.py"], cwd=str(root)) == {"app.py"}
+        counts, error = _numstat_counts("HEAD", ["app.py"], str(root))
+        assert error is None and counts["app.py"] == (1, 1)
+        assert list_worktree_untracked_files() == ["new.py"]
+        stage_files(["app.py"])
+        assert get_staged_files() == ["app.py"]
+        assert not marker.exists(), "a plugin git call ran the planted clean filter"
+
+    def test_a_planted_required_filter_does_not_break_the_call(self, tmp_path, monkeypatch):
+        """``filter.<n>.required=true`` beside an emptied driver is ``fatal:
+        clean filter failed`` (measured): the override carries
+        ``required=false`` so the plant cannot turn into a denial of service."""
+        root, git = _real_repo(tmp_path)
+        script, marker = _planted(tmp_path, "clean")
+        self._plant_clean_filter(root, git, script)
+        git("config", "filter.planted.required", "true")
+        monkeypatch.chdir(root)
+        (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+        assert get_modified_files() == ["app.py"]
+        assert not marker.exists()
+
+    def test_a_process_filter_and_one_reached_through_an_include_are_neutralized(self, tmp_path, monkeypatch):
+        root, git = _real_repo(tmp_path)
+        script, marker = _planted(tmp_path, "proc")
+        (root / ".git" / "info").mkdir(exist_ok=True)
+        (root / ".git" / "info" / "attributes").write_text("*.py filter=inc\n", encoding="utf-8")
+        included = root / ".git" / "evil.inc"
+        included.write_text(
+            f'[filter "inc"]\n\tprocess = {script} process\n\tclean = {script} clean\n',
+            encoding="utf-8",
+        )
+        git("config", "include.path", str(included))
+        monkeypatch.chdir(root)
+        (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+        assert get_modified_files() == ["app.py"]
+        assert not marker.exists(), "git ran a filter defined through a planted include.path"
+
+    def test_a_filter_the_users_global_config_defines_is_left_in_force(self, tmp_path, monkeypatch):
+        """Neutralizing is scoped to what a batch can write: a global
+        ``filter.lfs.*`` is the user's own tool, and emptying it would make
+        the plugin see every LFS-tracked file as modified and ``git add`` its
+        raw bytes."""
+        from utils.git_utils import planted_driver_overrides
+        root, git = _real_repo(tmp_path)
+        global_config = Path(os.path.realpath(tmp_path)) / "gitconfig"
+        global_config.write_text('[filter "lfs"]\n\tclean = git-lfs clean -- %f\n', encoding="utf-8")
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+        assert planted_driver_overrides(str(root)) == []
+        git("config", "filter.planted.clean", "cat")
+        overrides = planted_driver_overrides(str(root))
+        assert "filter.planted.clean=" in overrides
+        assert not any("lfs" in item for item in overrides)
+
+    def test_the_overrides_are_read_from_the_cwd_the_command_runs_in(self, tmp_path, monkeypatch):
+        """``git_argv(…, cwd=…)`` reads the repository the spawn will run in,
+        not the process's cwd, and honours a ``-C <dir>`` global option."""
+        root, git = _real_repo(tmp_path)
+        git("config", "filter.planted.clean", "cat")
+        elsewhere = Path(os.path.realpath(tmp_path)) / "elsewhere"
+        elsewhere.mkdir()
+        monkeypatch.chdir(elsewhere)
+        assert "filter.planted.clean=" not in git_argv("status")
+        assert "filter.planted.clean=" in git_argv("status", cwd=str(root))
+        assert "filter.planted.clean=" in git_argv("-C", str(root), "status")
+
+    # -- the diff prefixes review-code keys hunks by (review fixes 2026-10-05)
+
+    @pytest.mark.parametrize("key", ["diff.noprefix", "diff.mnemonicPrefix"])
+    def test_a_planted_diff_prefix_setting_does_not_empty_the_review(self, tmp_path, monkeypatch, key):
+        root, git = _real_repo(tmp_path)
+        git("config", key, "true")
+        (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+        monkeypatch.chdir(root)
+        hunks = capture_diff_hunks("HEAD", ["app.py"])
+        assert hunks.get("app.py", {}).get("hunks"), hunks
+
+    def test_a_planted_diff_relative_does_not_empty_a_diff_asked_from_a_subdirectory(self, tmp_path):
+        """``diff.relative=true`` prints nothing for a path outside the cwd
+        (measured, git 2.43), so a review run from a subdirectory would read
+        every root-named file as unchanged."""
+        from utils.git_utils import _git_diff_output
+        root, git = _real_repo(tmp_path)
+        git("config", "diff.relative", "true")
+        (root / "app.py").write_text("x = 2\n", encoding="utf-8")
+        sub = root / "sub"
+        sub.mkdir()
+        out, error = _git_diff_output(["diff", "HEAD", "--", "../app.py"], str(sub))
+        assert error is None and b"+x = 2" in out
+
+    # -- the fingerprint names what the plugin's calls no longer run ---------
+
+    def test_the_fingerprint_sees_info_attributes_info_exclude_and_include_targets(self, tmp_path):
+        from utils.git_utils import describe_git_metadata_change, git_metadata_fingerprint
+        root, git = _real_repo(tmp_path)
+        included = root / ".git" / "evil.inc"
+        included.write_text("[core]\n", encoding="utf-8")
+        git("config", "include.path", str(included))
+        before = git_metadata_fingerprint(str(root))
+        assert describe_git_metadata_change(before, git_metadata_fingerprint(str(root))) is None
+        (root / ".git" / "info").mkdir(exist_ok=True)
+        (root / ".git" / "info" / "attributes").write_text("*.py filter=x\n", encoding="utf-8")
+        (root / ".git" / "info" / "exclude").write_text("*\n", encoding="utf-8")
+        included.write_text("[core]\n\tfsmonitor = /x\n", encoding="utf-8")
+        change = describe_git_metadata_change(before, git_metadata_fingerprint(str(root)))
+        assert ".git/info/attributes added" in change
+        assert ".git/info/exclude" in change
+        assert f"include.path target {included} changed" in change
+        assert ".git/config changed" not in change
