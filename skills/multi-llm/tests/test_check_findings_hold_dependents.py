@@ -190,7 +190,7 @@ class TestTheDependentsAreNotRun:
         _check_finds(repo)
         assert _implement(repo) == 0
         captured = capsys.readouterr()
-        assert "no task depends on them, so implement went on" in captured.out
+        assert "no task waits for them, so implement went on" in captured.out
         assert get_or_create_state(repo.plan).is_phase_completed("implement")
         assert _report(repo)["blocked_by_check"] == {}
 
