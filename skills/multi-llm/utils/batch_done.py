@@ -48,7 +48,14 @@ twice, so the resume is refused (exit 3) naming the batch, this command and
 Usage::
 
     multi_llm.py util batch-done --phase-dir <dir> --task-id <id> \\
-        --status completed|failed [--reason TEXT] [--state-file PATH]
+        --status completed|failed [--reason TEXT] [--state-file PATH] \\
+        [--check passed|findings [--finding TEXT ...]]
+
+``--check`` is a check task's structured result (an implement task that
+declares no files; its reply's ``check`` object): ``findings`` records each
+``--finding`` in ``state.json``'s ``task_check_findings`` beside a
+``completed`` status, which ``status``, the result notice and review-code's
+implementation record read (racing re-run 4, 2026-10-05).
 
 Import is side-effect free: argparse and all I/O live inside :func:`main`.
 """
@@ -66,26 +73,33 @@ try:
     from .metrics import _read_state, _write_state, state_file_lock
     from .state_manager import (
         mark_item_processed_in_state,
+        set_task_check_findings_in_state,
         update_task_status_in_state,
     )
     from .stream_bootstrap import bootstrap_streams
+    from .subagent_executor import check_findings_from
     from .subagent_tasks import PHASE_BY_WRITE_KIND
     from .write_phase_bridge import WRITE_TASK_FILENAME
+    from .write_batch_scheduler import is_check_task
     from .write_prompt import WritePromptError, load_write_task
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils.metrics import _read_state, _write_state, state_file_lock  # type: ignore
     from utils.state_manager import (  # type: ignore
         mark_item_processed_in_state,
+        set_task_check_findings_in_state,
         update_task_status_in_state,
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
+    from utils.subagent_executor import check_findings_from  # type: ignore
     from utils.subagent_tasks import PHASE_BY_WRITE_KIND  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
+    from utils.write_batch_scheduler import is_check_task  # type: ignore
     from utils.write_prompt import WritePromptError, load_write_task  # type: ignore
 
 
 __all__ = [
+    "CHECK_RESULTS",
     "MARKER",
     "RESUME_REFUSED_MARKER",
     "STATUSES",
@@ -111,6 +125,10 @@ _RECORDED_TASK_STATUSES = frozenset({"completed", "failed", "skipped"})
 
 #: ``processed_<phase>`` status per recorded outcome.
 _ITEM_STATUS = {"completed": "applied", "failed": "failed"}
+
+#: ``--check``'s two words: what a check task's reply said in its ``check``
+#: object (``passed: true`` and no finding, or problems found).
+CHECK_RESULTS = ("passed", "findings")
 
 
 def _processed_phase_word(phase_dir: Path) -> str:
@@ -165,15 +183,42 @@ def record_batch(
     *,
     reason: Optional[str] = None,
     state_file: Optional[Path] = None,
+    check: Optional[str] = None,
+    findings: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    """Record *task_id*'s outcome; the ``{task_id, status, items, state_file}`` written.
+    """Record *task_id*'s outcome; the ``{task_id, status, items, state_file,
+    check_findings}`` written.
+
+    *check* / *findings* are a check task's structured result (its reply's
+    ``check`` object, racing re-run 4): ``findings`` records them in
+    ``state.json``'s ``task_check_findings`` beside a ``completed`` status,
+    as the executor leg does; every other record of an implement task clears
+    that task's entry.
 
     Raises :class:`WritePromptError` (exit 3) for a missing task file, an
-    unknown id, a human task or a status outside :data:`STATUSES`.
+    unknown id, a human task, a status outside :data:`STATUSES`, or a check
+    result that does not fit the task or the status.
     """
     if status not in STATUSES:
         raise WritePromptError(
             f"--status must be one of {', '.join(STATUSES)}, not {status!r}."
+        )
+    if check is not None and check not in CHECK_RESULTS:
+        raise WritePromptError(
+            f"--check must be one of {', '.join(CHECK_RESULTS)}, not {check!r}."
+        )
+    if findings and check != "findings":
+        raise WritePromptError(
+            "--finding is recorded only with --check findings: pass "
+            "--check findings and one --finding per problem the check reported."
+        )
+    if check == "findings" and status != "completed":
+        raise WritePromptError(
+            "A check that ran and reported problems is recorded "
+            "--status completed with --check findings: implement continues "
+            "past it and review-code is told about the findings. Use "
+            "--status failed (without --check) only for a check task whose "
+            "subagent failed or changed a file."
         )
     phase_dir = Path(phase_dir).resolve()
     document, task = load_write_task(phase_dir, task_id)
@@ -189,6 +234,17 @@ def record_batch(
             f"subagent, so there is no batch outcome to record. Answer it "
             f"through the phase's human-task strategy instead."
         )
+    if check is not None and not is_check_task(kind, task):
+        raise WritePromptError(
+            f"Task {task_id} is not a check task (a check task is an implement "
+            f"task that declares no files), so it has no check result: record "
+            f"it without --check."
+        )
+    check_findings: Optional[List[str]] = None
+    if check is not None:
+        check_findings = check_findings_from({
+            "check": {"passed": check == "passed", "findings": list(findings or [])}
+        }) or []
     target = Path(state_file) if state_file else phase_dir.parent / "state.json"
     if not target.is_file():
         raise WritePromptError(
@@ -205,6 +261,8 @@ def record_batch(
             raise WritePromptError(f"{target} is not a JSON object.")
 
         update_task_status_in_state(state, task_id, status, reason)
+        if kind == "implement":
+            set_task_check_findings_in_state(state, task_id, check_findings)
         tracked = _tracked_after_batch(state, target, kind)
         if tracked is not None:
             state["tracked_files"] = tracked
@@ -227,7 +285,7 @@ def record_batch(
         _write_state(target, state)
     return {
         "task_id": task_id, "status": status, "items": items,
-        "state_file": str(target),
+        "state_file": str(target), "check_findings": check_findings or [],
     }
 
 
@@ -347,6 +405,16 @@ def _build_parser() -> argparse.ArgumentParser:
         "--state-file", default=None, metavar="PATH",
         help="The plan's state.json; default: <phase-dir>/../state.json.",
     )
+    parser.add_argument(
+        "--check", default=None, choices=CHECK_RESULTS,
+        help="For a check task (an implement task that declares no files): "
+             "its reply's check result — passed, or findings (the check ran "
+             "and reported problems; recorded with --status completed).",
+    )
+    parser.add_argument(
+        "--finding", action="append", default=None, metavar="TEXT",
+        help="One problem a check reported (repeatable; with --check findings).",
+    )
     return parser
 
 
@@ -359,6 +427,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             Path(args.phase_dir), args.task_id, args.status,
             reason=args.reason,
             state_file=Path(args.state_file) if args.state_file else None,
+            check=args.check,
+            findings=args.finding,
         )
     except WritePromptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -368,6 +438,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 1
     items = written["items"]
     suffix = f" ({len(items)} item(s) recorded)" if items else ""
+    found = written.get("check_findings") or []
+    if found:
+        suffix += f" ({len(found)} check finding(s) recorded)"
     print(f"{MARKER} {written['task_id']} {written['status']}{suffix}")
     return 0
 

@@ -455,6 +455,7 @@ your host.
        --phase-dir "{plan}/implement" --task-id "{task_id}" --status {batch_status}
      ```
      `{batch_status}` is `completed` for an applied task (a verified no-op included) and `failed` for one that failed — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task_id} {batch_status}` line and writes `task_status[{task_id}]` into `state.json`, the same entry the `--exec-subagents` executor writes: what `--resume` reads to skip the task (a `failed` task is dispatched again) and what `status` counts as progress. Run it **before** the append below — a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-run — and never retype this as a hand-rolled JSON edit of the state file.
+     For a **check task** (an agent task that declares no files) its reply carries a `check` object: add `--check passed` when it says `"passed": true` with no findings, else `--check findings` and one `--finding "{finding}"` per entry of its `findings` list, with `--status completed`. A check that ran, changed no file and reported problems is not a failed task: carry on with the next task, and `status`, the workflow notice and the code review are told the findings. Use `failed` for a check task only when its subagent failed without a `check` object or changed a file. Its prior-changes summary is `(check findings — {n} problem(s): {findings}; no file changed)`.
    - **Append to prior changes** — record the task's one-line `summary` (normalized: one line, at most 200 characters; for a failed task `(task failed — {compact reason})`) so every later task's bound prompt sees it, as the `--exec-subagents` leg records it. `--id` is the task id, `--phase` is `implement`, and `--output-dir` is the plan directory `{plan}` (the one holding `state.json`: the one log every write phase shares and the one `util write-prompt` binds from):
      ```bash
      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
@@ -534,6 +535,7 @@ your host.
    After all tasks complete, create the implementation summary file using the `summary_file` path from the JSON output.
    Use `summary_file_relative` for links within the file (relative to plan's parent directory).
    In `## Task Results`, an agent task that declares no files (`Files to modify` and `Files to create` both none) is a verification-only check: its Status is `Verified` when its subagent changed no file and `Partial` when it changed one (name the files), the words the executor leg's summary uses (`verified` / `partial-application`); a human task is not one of these, it is deferred.
+   A check whose reply said `"passed": false` or listed findings is never `Verified`: its Status is `Check findings` (the executor leg's `check-findings`), and a `## Check Findings` section after `## Task Results` lists each such task under a `### {task_id}` heading with one bullet per finding, so the reader and the code review see them.
 
    Write the summary to the path specified in `summary_file` from the JSON:
    ```markdown
@@ -607,6 +609,7 @@ your host.
 
 11. **Report results** following `references/summary-format.md`, including:
    - Number of tasks completed/failed
+   - Each check task that reported problems, with its findings (the code review is told about them)
    - Implementation summary file location
    - State file location
    - Any errors encountered

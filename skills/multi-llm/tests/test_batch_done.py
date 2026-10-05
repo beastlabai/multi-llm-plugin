@@ -318,6 +318,83 @@ class TestTheUtilRecordsABatch:
         assert "human task" in err
 
 
+def _check_batches():
+    """T001 writes a file; T002 is a check task (declares no files)."""
+    return [
+        {"batch_index": 0, "can_parallelize": False, "tasks": [
+            {"id": "T001", "title": "Foundation", "prompt": PROMPT,
+             "files_to_create": ["src/a.py"], "depends_on": [],
+             "executor_role": "agent"},
+        ]},
+        {"batch_index": 1, "can_parallelize": False, "tasks": [
+            {"id": "T002", "title": "Run static checks", "prompt": PROMPT,
+             "files_to_create": [], "files_to_modify": [], "depends_on": ["T001"],
+             "executor_role": "agent"},
+        ]},
+    ]
+
+
+class TestACheckTaskRecordsWhatItFound:
+    """Racing re-run 4 (2026-10-05): a check task's problems lived only in its
+    runner's notes. On the native leg the host passes its reply's structured
+    `check` object to `batch-done`, which writes the same `task_check_findings`
+    the executor leg writes."""
+
+    FINDINGS = ["html-validate: index.html:1 doctype", "html-validate: index.html:105 aria-label"]
+
+    def _record(self, plan_dir, capsys, *extra, task="T002", status="completed"):
+        plan, out = plan_dir
+        if not (out / "state.json").exists():
+            StateManager(plan).save()
+        phase_dir, _tasks = _materialize(
+            plan, out, "implement", _check_batches(), "implement")
+        return _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", task, "--status", status, *extra,
+        ], capsys)
+
+    def test_findings_are_recorded_beside_a_completed_status(self, plan_dir, capsys):
+        code, stdout, err, _result = self._record(
+            plan_dir, capsys, "--check", "findings",
+            "--finding", self.FINDINGS[0], "--finding", self.FINDINGS[1],
+        )
+        assert code == 0, err
+        assert "T002 completed (2 check finding(s) recorded)" in stdout
+        state = _state(plan_dir[1])
+        assert state["task_status"]["T002"] == "completed"
+        assert state["task_check_findings"] == {"T002": self.FINDINGS}
+
+    def test_a_passed_check_or_a_plain_record_clears_earlier_findings(
+        self, plan_dir, capsys
+    ):
+        self._record(plan_dir, capsys, "--check", "findings", "--finding", "x")
+        code, stdout, err, _result = self._record(plan_dir, capsys, "--check", "passed")
+        assert code == 0, err
+        assert "check finding" not in stdout
+        assert "task_check_findings" not in _state(plan_dir[1])
+        self._record(plan_dir, capsys, "--check", "findings", "--finding", "x")
+        self._record(plan_dir, capsys)
+        assert "task_check_findings" not in _state(plan_dir[1])
+
+    def test_a_check_with_findings_is_never_recorded_failed(self, plan_dir, capsys):
+        code, _out, err, _result = self._record(
+            plan_dir, capsys, "--check", "findings", "--finding", "x", status="failed")
+        assert code == 3
+        assert "--status completed with --check findings" in err
+        assert "T002" not in _state(plan_dir[1]).get("task_status", {})
+
+    def test_a_task_that_declares_files_has_no_check_result(self, plan_dir, capsys):
+        code, _out, err, _result = self._record(
+            plan_dir, capsys, "--check", "passed", task="T001")
+        assert code == 3
+        assert "not a check task" in err
+
+    def test_a_finding_needs_check_findings(self, plan_dir, capsys):
+        code, _out, err, _result = self._record(plan_dir, capsys, "--finding", "x")
+        assert code == 3
+        assert "--check findings" in err
+
+
 # ---------------------------------------------------------------------------
 # Fix round 8: one lock around every raw read-modify-write of state.json
 # ---------------------------------------------------------------------------
