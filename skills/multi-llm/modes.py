@@ -411,13 +411,19 @@ TOOL_OUTCOMES_LINE = (
 #: to ``next``, which the same model is taught to treat as a call — so the
 #: description says, once, that this one is the user's to type and never a call.
 #: Rendered after :data:`TOOL_OUTCOMES_LINE` on both package hosts; neither
-#: server authors the string.
+#: server authors the string. "Only then" / "never otherwise" since fix round
+#: 11: on OpenCode racing run 4, phase 06, the host ended an implement result
+#: whose `command` named review-code, and whose notice listed the manual tasks
+#: left, with "Workflow complete. Manual tasks left …".
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
     "call to make: copy its `command`, and each `optional_before` command, into your "
-    "report, each in its own fenced block, and stop; when it is `complete`, say "
-    "\"Workflow complete.\" and list each of its `manual_tasks` (id and title): "
-    "tasks the run deferred to the user, which no phase will run. Only `next` is "
+    "report, each in its own fenced block, and stop; when it is `complete`, and "
+    "only then, say \"Workflow complete.\" and list each of its `manual_tasks` "
+    "(id and title): tasks the run deferred to the user, which no phase will run. "
+    "Never say \"Workflow complete.\" otherwise, even when a notice lists manual "
+    "tasks left for the user: while `user_next_step` names a `command`, the "
+    "workflow goes on. Only `next` is "
     "a call. A "
     "needs-human result's `resume_command` is the same kind of thing: the user's to "
     "type, never a call."
