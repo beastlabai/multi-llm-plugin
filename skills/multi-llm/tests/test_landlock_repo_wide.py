@@ -178,6 +178,18 @@ class TestTheRootGrant:
             ld.allow_entries(JailContext(request, str(wide.slot), str(wide.home)))
         assert excinfo.value.reason == "repo-root-missing"
 
+    def test_a_planted_core_worktree_refuses_the_grant(self, wide, tmp_path):
+        """Review fixes 2026-10-05: the one rule lands only on a root git
+        agrees is the top level of the tree whose `.git` it holds."""
+        planted = Path(os.path.realpath(tmp_path)) / "home"
+        planted.mkdir()
+        _git(wide.repo, "config", "core.worktree", str(planted))
+        with pytest.raises(ld.JailRefused) as excinfo:
+            ld.repo_wide_entry(_request(wide))
+        assert excinfo.value.reason == "repo-root-redirected"
+        assert "core.worktree" in excinfo.value.message
+        assert str(planted) not in [e.path for e in []]  # the grant was never built
+
     def test_the_hands_off_names_are_instruction_level_only(self, wide):
         """The old protected set is now the developer message's: no entry
         for it, no refusal of a declared path under it."""

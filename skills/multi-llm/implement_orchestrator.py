@@ -813,7 +813,7 @@ def _record_implement_write_artifacts(
 
     from utils import write_safety as _write_safety
 
-    repo_root = _write_safety.resolve_repo_root(plan_file)
+    repo_root = _write_safety.repo_root_for_report(plan_file)
 
     touched: List[str] = []
     seen: set = set()
@@ -889,6 +889,8 @@ def run_implement_write_phase(
     output_dir = str(get_output_dir(plan_path))
     tasks_file_str = str(tasks_file) if tasks_file else None
 
+    from utils import write_safety as _write_safety
+
     tasks = materialize_write_tasks(
         kind="implement",
         batches=output_data.get("batches") or [],
@@ -906,21 +908,27 @@ def run_implement_write_phase(
     # function's own docstring.
     _seed_pending_task_statuses(state, tasks)
 
-    scheduler = WriteBatchScheduler(
-        tasks=tasks,
-        phase_dir=phase_dir,
-        kind="implement",
-        output_dir=output_dir,
-        state=state,
-        plan_file=plan_file,
-        summary_file=output_data.get("summary_file"),
-        summary_file_relative=output_data.get("summary_file_relative"),
-        anchor=plan_file,
-        resume=bool(getattr(args, "resume", False)),
-        dry_run=bool(getattr(args, "dry_run_subagents", False)),
-        human_task_strategy=human_task_strategy,
-        human_task_decisions=human_task_decisions,
-    )
+    try:
+        scheduler = WriteBatchScheduler(
+            tasks=tasks,
+            phase_dir=phase_dir,
+            kind="implement",
+            output_dir=output_dir,
+            state=state,
+            plan_file=plan_file,
+            summary_file=output_data.get("summary_file"),
+            summary_file_relative=output_data.get("summary_file_relative"),
+            anchor=plan_file,
+            resume=bool(getattr(args, "resume", False)),
+            dry_run=bool(getattr(args, "dry_run_subagents", False)),
+            human_task_strategy=human_task_strategy,
+            human_task_decisions=human_task_decisions,
+        )
+    except _write_safety.WriteSafetyError as exc:
+        # A repository root that cannot be pinned (a planted `core.worktree`,
+        # review fixes 2026-10-05) is exit 3 with the resolver's own words.
+        print(f"ERROR: {exc.message}", file=sys.stderr)
+        return int(getattr(exc, "exit_code", 3) or 3)
     result = scheduler.run()
     for line in result.messages:
         print(line, file=sys.stderr if result.exit_code else sys.stdout)
