@@ -168,6 +168,32 @@ class TestTheReplyField:
         found = check_findings_from({"status": "no-op", "check": None})
         assert found == [f"{CHECK_RESULT_UNKNOWN} (its `check` was null)"]
 
+    # Fix round 12 (review item 4): a pass that spelled "nothing found" as a
+    # bare value was one finding, which held back every task after it.
+    @pytest.mark.parametrize("bare", [
+        "none", "None", "N/A", "n/a", "No problems found.", "no findings", "",
+        "  ", 0, "0",
+    ])
+    def test_a_pass_whose_bare_findings_say_nothing_found_is_a_pass(self, bare):
+        from utils.subagent_executor import check_findings_from
+
+        assert check_findings_from({"check": {"passed": True, "findings": bare}}) == []
+
+    @pytest.mark.parametrize("check,expected", [
+        ({"passed": True, "findings": "one problem"}, ["one problem"]),
+        ({"passed": True, "findings": "none of the links resolve"},
+         ["none of the links resolve"]),
+        ({"passed": True, "findings": ["none"]}, ["none"]),
+        ({"passed": True, "findings": 3}, ["3"]),
+        ({"passed": True, "findings": False}, ["False"]),
+        ({"passed": False, "findings": "none"}, ["none"]),
+        ({"passed": "maybe", "findings": "n/a"}, ["n/a"]),
+    ])
+    def test_anything_else_stays_a_finding(self, check, expected):
+        from utils.subagent_executor import check_findings_from
+
+        assert check_findings_from({"check": check}) == expected
+
 
 class TestTheStateRecord:
     def test_set_and_clear(self):

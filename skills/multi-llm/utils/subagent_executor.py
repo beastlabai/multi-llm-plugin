@@ -655,6 +655,27 @@ CHECK_RESULT_UNKNOWN = (
 _CHECK_PASSED_WORDS = frozenset({"true", "yes", "pass", "passed"})
 _CHECK_FAILED_WORDS = frozenset({"false", "no", "fail", "failed"})
 
+#: A bare ``findings`` value that says "nothing found" (any case, a trailing
+#: ``.``/``!`` ignored), read as ``[]`` only beside a ``passed`` that reads
+#: true (fix round 12: ``{"passed": true, "findings": "none"}`` was one
+#: finding, "none", which held back every task after the check). Kept
+#: short on purpose: any other text is a finding.
+_EMPTY_FINDINGS_WORDS = frozenset({
+    "", "none", "n/a", "na", "no problems", "no problems found", "no findings", "0",
+})
+
+
+def _says_nothing_found(value: Any) -> bool:
+    """Whether a bare (non-list) ``findings`` value is an empty-ish marker."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        word = " ".join(value.strip().lower().rstrip(".!").split())
+        return word in _EMPTY_FINDINGS_WORDS
+    return False
+
 
 def write_outcome_label(
     write_outcome: Optional[str], verification_only: bool = False,
@@ -720,7 +741,10 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     neither (``{}``, ``passed: null``, ``check: null``, a ``check`` that is
     not an object) gets :data:`CHECK_RESULT_UNKNOWN` — never a pass. Fix
     round 12: ``check: null`` read as no result, so a check task's reply
-    carrying it was VERIFIED; only a missing key is no result now.
+    carrying it was VERIFIED; only a missing key is no result now. A bare
+    ``findings`` that says "nothing found" (``"none"``, ``"N/A"``, ``"No
+    problems found."``, ``0``) beside a ``passed`` that reads true is
+    ``[]`` (:data:`_EMPTY_FINDINGS_WORDS`).
     """
     if not isinstance(result, dict) or "check" not in result:
         return None
@@ -738,6 +762,9 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     if isinstance(raw, list):
         items = raw
     elif raw is None:
+        items = []
+    elif passed is True and _says_nothing_found(raw):
+        # "findings": "none" beside a pass says there is none (fix round 12).
         items = []
     else:
         # One finding given bare (a string, an object, a number).
