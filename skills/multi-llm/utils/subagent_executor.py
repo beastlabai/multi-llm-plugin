@@ -7487,6 +7487,10 @@ def _parse_with_schema_policy(
             declined_marker if status == STATUS_OK else None,
         )
 
+    # The native document is completed before it is validated, as this lane's
+    # own parse is: a reply that left out a required-but-nullable key is
+    # native, not "present but did not validate" (fix round 8).
+    native_notes: List[str] = []
     verdict = structured_output.classify_attempt(
         schema,
         stdout=capture.stdout,
@@ -7496,6 +7500,9 @@ def _parse_with_schema_policy(
         model=model,
         native_document=structured_output.native_document_for(
             provider, capture.stdout
+        ),
+        normalize=lambda document: native_notes.extend(
+            normalize_result(kind, document)
         ),
     )
     if verdict.warning:
@@ -7512,7 +7519,7 @@ def _parse_with_schema_policy(
             f"structured output: no document conforming to {schema.name}"
         ), None, None
     if verdict.marker == structured_output.MARKER_NATIVE and verdict.data is not None:
-        _report_normalized(kind, normalize_result(kind, verdict.data))
+        _report_normalized(kind, native_notes + normalize_result(kind, verdict.data))
         errors = validate_result(kind, verdict.data)
         if errors:
             return (

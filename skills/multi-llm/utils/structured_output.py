@@ -49,7 +49,7 @@ import tempfile
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
 from .json_extractor import extract_json_from_text
 from .providers.base import (
@@ -603,6 +603,7 @@ def classify_attempt(
     phase: str = "",
     model: str = "",
     native_document: Any = None,
+    normalize: Optional[Callable[[Any], Any]] = None,
 ) -> StructuredResult:
     """§4.2.1's decision, applied to one attempt's captured streams.
 
@@ -618,6 +619,14 @@ def classify_attempt(
     become ``native`` by conforming. Before it existed every codex
     task generation was marked ``recovered`` under a WARN, although codex had
     carried the schema and answered in it (2026-10-05).
+
+    ``normalize`` is the caller's completion of a document (the executor's
+    ``normalize_result``: ``[]``/``null`` for the keys that mean the same thing
+    absent as empty), applied in place to the native document **before** it is
+    validated, exactly as the lane completes its own parse before validating.
+    Without it a codex answer that left out the required-but-nullable
+    ``subagent_type`` was reported "present but did not validate" and then
+    accepted by the lane as ``recovered`` (fix round 8).
     """
     if timed_out:
         return StructuredResult(
@@ -665,6 +674,8 @@ def classify_attempt(
     if native is None:
         native = native_document
     if native is not None:
+        if normalize is not None:
+            normalize(native)
         # Case 4: defence in depth. The CLI validates client-side, so this
         # should be unreachable — and if it is reached it takes case 2's failure
         # branch rather than being trusted.
