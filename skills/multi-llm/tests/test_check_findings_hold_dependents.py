@@ -192,3 +192,114 @@ class TestTheDependentsAreNotRun:
         assert "no task depends on them, so implement went on" in captured.out
         assert get_or_create_state(repo.plan).is_phase_completed("implement")
         assert _report(repo)["blocked_by_check"] == {}
+
+
+class TestTheCheckRunsAgain:
+    """Review T2: a check with findings was done for good — `--resume`
+    skipped it and `--human-task <id>=retry` answered only a failed task."""
+
+    def test_a_resume_that_changes_nothing_keeps_the_findings_and_the_hold(
+        self, repo, capsys
+    ):
+        _run_one_with_findings(repo, capsys)
+        repo.log.unlink(missing_ok=True)
+        assert _implement(repo, "--resume") == 3
+        text = capsys.readouterr()
+        text = text.out + text.err
+        assert _dispatched_titles(repo) == [], "nothing changed: nothing runs"
+        assert "not run: T004" in text
+        state = get_or_create_state(repo.plan)
+        assert state.get("task_check_findings") == {"T002": FINDINGS}
+        assert _statuses(repo)["T004"] == "pending"
+        assert state.get_task_status_reason("T002") == (
+            "not run again: nothing changed since its check reported problems"
+        )
+        report = _report(repo)
+        assert report["blocked_by_check"] == {"T004": "T002"}
+        row = [r for r in report["tasks"] if r["task_id"] == "T002"][-1]
+        assert row["outcome_label"] == "check-findings"
+
+    def test_retry_runs_the_check_again_on_the_same_tree(self, repo, capsys):
+        _run_one_with_findings(repo, capsys)
+        repo.log.unlink(missing_ok=True)
+        assert _implement(repo, "--resume", "--human-task", "T002=retry") == 3
+        assert _dispatched_titles(repo) == ["Check the module"]
+        assert "T002" not in (
+            get_or_create_state(repo.plan).get("human_task_decisions") or {}
+        )
+
+    def test_the_fixed_code_resumes_through_the_check_to_completion(self, repo, capsys):
+        _run_one_with_findings(repo, capsys)
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "# fixed by hand\n", encoding="utf-8")
+        _check_passes(repo)
+        repo.log.unlink(missing_ok=True)
+
+        assert _implement(repo, "--resume") == 0
+        assert _dispatched_titles(repo) == ["Check the module", "Edit: wire the fallback"]
+        state = get_or_create_state(repo.plan)
+        assert state.implementation_task_statuses() == {
+            "T001": "completed", "T002": "completed", "T003": "completed",
+            "T004": "completed", "T005": "skipped",
+        }
+        assert state.is_phase_completed("implement")
+        assert "task_check_findings" not in state.state
+        report = _report(repo)
+        assert report["finalized"] is True
+        assert report["blocked_by_check"] == {} and report["not_run_tasks"] == {}
+        verdict = json.loads(
+            (repo.phase_dir / "implement_batch_T002.json").read_text()
+        )["verdict"]
+        assert verdict["outcome_label"] == "verified"
+
+
+class TestAnsweringACheckWithFindings:
+
+    def test_done_accepts_the_findings_and_runs_the_rest(self, repo, capsys):
+        _run_one_with_findings(repo, capsys)
+        repo.log.unlink(missing_ok=True)
+        assert _implement(repo, "--resume", "--human-task", "T002=done") == 0
+        assert _dispatched_titles(repo) == ["Edit: wire the fallback"]
+        state = get_or_create_state(repo.plan)
+        assert _statuses(repo)["T004"] == "completed"
+        reason = state.get_task_status_reason("T002")
+        assert reason.startswith(
+            "accepted — you answered --human-task T002=done after its check "
+            "reported problems"
+        ), reason
+        assert state.is_phase_completed("implement")
+        # The findings stand: review-code is still told about them.
+        assert [e["id"] for e in state.implementation_check_findings()] == ["T002"]
+        report = _report(repo)
+        assert report["accepted_tasks"] == {"T002": reason}
+        assert report["blocked_by_check"] == {}
+        # A later resume keeps the answer: the check is not handed out again.
+        repo.log.unlink(missing_ok=True)
+        assert _implement(repo, "--resume") == 0
+        assert _dispatched_titles(repo) == []
+
+    def test_skip_leaves_the_check_and_its_dependents_undone(self, repo, capsys):
+        _run_one_with_findings(repo, capsys)
+        repo.log.unlink(missing_ok=True)
+        assert _implement(repo, "--resume", "--human-task", "T002=skip") == 0
+        assert _dispatched_titles(repo) == []
+        state = get_or_create_state(repo.plan)
+        statuses = _statuses(repo)
+        assert statuses["T002"] == "skipped" and statuses["T004"] == "skipped"
+        assert state.get_task_status_reason("T002").endswith(
+            "T002=skip after its check reported problems"
+        )
+        assert "depends on skipped task T002" in state.get_task_status_reason("T004")
+        assert state.is_phase_completed("implement")
+        # Skipping the check does not make its problems go away.
+        assert [e["id"] for e in state.implementation_check_findings()] == ["T002"]
+
+    def test_only_on_resume_and_only_a_check_whose_findings_hold_tasks(
+        self, repo, capsys
+    ):
+        _run_one_with_findings(repo, capsys)
+        assert _implement(repo, "--human-task", "T002=done") == 3
+        assert "only with --resume" in capsys.readouterr().err
+        assert _implement(repo, "--resume", "--human-task", "T003=retry") == 3
+        assert "code tasks that did not fail: T003" in capsys.readouterr().err
+        assert _statuses(repo)["T002"] == "completed"
