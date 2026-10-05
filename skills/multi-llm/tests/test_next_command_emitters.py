@@ -364,6 +364,27 @@ class TestNoCommandWhereNoneBelongs:
         # The builder alone would have answered: the invocation is excluded.
         assert next_phase.next_phase_commands(P, "claude-code", None, mode) is not None
 
+    def test_the_closing_mark_completed_call_of_a_native_apply_phase_answers(
+        self, workdir, capsys
+    ):
+        """The exclusion is for the EMIT call (the phase is handed to the
+        host and `--resume` would be the answer for the phase being run).
+        The host's closing `--mark-completed` records the phase completed
+        and exits 0 with no `--exec-subagents`: a finished phase on record,
+        and the one dispatcher call on the native apply leg that can carry
+        the key (reviewer finding 5, 2026-10-05)."""
+        plan = build(workdir, S(("review-plan",), files=RP_VALID))
+        state = StateManager(plan)
+        state.mark_phase_started("apply-suggestions")
+        state.save()
+        code, out, err, result = _run(
+            ["apply-suggestions", P, "--mark-completed"], capsys
+        )
+        assert code == 0, err
+        assert result["user_next_step"]["command"] == f"{PLUGIN}--generate-tasks {P}"
+        assert _block(out) == [f"{NEXT_COMMAND_MARKER} {PLUGIN}--generate-tasks {P}"]
+        assert StateManager(plan).is_phase_completed("apply-suggestions")
+
     @pytest.mark.parametrize("mode,spec,marker", [
         ("review-plan", S(), "[VALIDATION_PENDING]"),
         ("review-tasks", S(UP_TO_TASKS), "[VALIDATION_PENDING]"),
@@ -935,12 +956,18 @@ class TestUtilNextCommand:
         assert result["user_next_step"]["command"] == resume
         assert result["mode"] == "util next-command"
 
-        # The native leg's completion write (it carries no key itself).
+        # The native leg's completion write: a finished phase on record, so
+        # the closing call itself answers (reviewer finding 5, 2026-10-05 —
+        # until then the write-phase exclusion swallowed it and only the
+        # report step's lookup below ever carried the key).
         code, out, err, result = _run(
             ["apply-code-fixes", P, "--mark-completed"], capsys
         )
         assert code == 0, err
-        _assert_neither(out, err, result)
+        assert result["user_next_step"] == {
+            "phase": None, "command": None, "complete": True,
+        }
+        assert _block(out) == [WORKFLOW_COMPLETE_MARKER]
 
         code, out, err, result = _run(lookup, capsys)
         assert code == 0, err
