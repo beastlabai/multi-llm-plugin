@@ -1230,22 +1230,32 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
 #: (``subagent_executor.check_findings_from``). Racing re-run 4 (2026-10-05):
 #: T007's ``npx html-validate`` reported two problems, the runner said
 #: ``no-op`` and wrote them only in ``notes``, and the task read VERIFIED.
+#: Fix round 11: a check that could not run is ``failed`` (it used to be asked
+#: for as a finding, so a missing ``npx`` read as findings the run went on
+#: past), and the tasks that depend on a check with findings wait for it.
 CHECK_RESULT_CONTRACT = (
     "\n## Check result (required for this task)\n\n"
     "This task declares no files: it is a check, and it must not change any "
-    "file. Run every check it names, answer `status: \"no-op\"`, and add a "
-    "`check` object to the JSON above:\n\n"
+    "file. Run every check it names.\n\n"
+    "If every check ran, answer `status: \"no-op\"` and add a `check` object "
+    "to the JSON above:\n\n"
     "```json\n"
     '{"check": {"passed": false, "findings": ["<one problem: the command, '
     'what it reported, the file and line>"]}}\n'
     "```\n\n"
-    "- `passed`: `true` only when every check the task names ran and met its "
-    "acceptance criteria.\n"
-    "- `findings`: one entry per problem a check reported, and one per check "
-    "you could not run; empty when `passed` is `true`.\n\n"
+    "- `passed`: the JSON boolean `true` only when every check the task names "
+    "ran and met its acceptance criteria, else `false`.\n"
+    "- `findings`: one string per problem a check reported; `[]` when "
+    "`passed` is `true`.\n\n"
     "A problem a check finds is a finding, not a failure: do not fix it and "
-    "do not answer `failed` for it. The run continues, and the findings are "
-    "recorded for the code review, which fixes them.\n"
+    "do not answer `failed` for it. The findings are recorded for the code "
+    "review, and the tasks that depend on this check wait until they are "
+    "fixed or accepted.\n\n"
+    "If a check could not run — its command is missing, it crashed, it timed "
+    "out or it printed no result — answer `status: \"failed\"` and say in "
+    "`summary` which check could not run and why. Never list a check that "
+    "did not run as a finding: it says nothing about the code, and `failed` "
+    "stops the run so the cause can be fixed.\n"
 )
 
 
@@ -3966,24 +3976,30 @@ class WriteBatchScheduler:
           left on disk stays PARTIAL until it is declared or restored, instead
           of being laundered by a second run that touched nothing (adversarial
           review, 2026-10-02).
-        * nothing moved, the runner did not crash, and its reply's structured
-          ``check`` (*check*, :func:`subagent_executor.check_findings_from`)
-          lists findings: ``no-op``/``ok`` labelled ``check-findings`` —
-          whatever ``status`` it claimed. The loop continues and the findings
-          are named on every surface and recorded in ``state.json`` for
-          review-code, the phase that fixes them (racing re-run 4,
-          2026-10-05: T007's ``npx html-validate`` reported two problems and
-          the task read VERIFIED, the problems only in its free-text notes;
-          in run 3 the same kind of check claimed ``failed`` and stopped
-          implement for good). A check that reports problems is a finding,
-          never a stop, so a task's wording no longer decides which of the two
-          happens.
+        * nothing moved and the runner crashed, or claimed ``failed``: falls
+          through to the ordinary clean-failure branch (``False``), whatever
+          its ``check`` lists. The contract (:data:`CHECK_RESULT_CONTRACT`)
+          spells ``failed`` "a check that could not run" — a missing command,
+          a crash, a timeout — and a check that did not run says nothing
+          about the code, so it is never recorded as findings the run goes
+          on past (fix round 11: ``failed`` + ``findings: ["npx: command not
+          found"]`` read as check-findings, so any failure could be laundered
+          into one). The findings, when the reply listed some and wrote no
+          ``notes``, become what the stop says the check reported.
+        * nothing moved and its reply's structured ``check`` (*check*,
+          :func:`subagent_executor.check_findings_from`) lists findings:
+          ``no-op``/``ok`` labelled ``check-findings``. The findings are named
+          on every surface and recorded in ``state.json`` for review-code
+          (racing re-run 4, 2026-10-05: T007's ``npx html-validate`` reported
+          two problems and the task read VERIFIED, the problems only in its
+          free-text notes). The tasks that do not depend on the check go on;
+          the ones that do are not run (:meth:`_run`).
         * nothing moved and the runner did not fail: ``no-op``/``ok``. The
           check ran and left the repo as it was, which is a verification
-          passing, and the loop continues.
-        * nothing moved and the runner failed (with no structured findings)
-          or crashed: falls through to the ordinary clean-failure branch
-          (``False``).
+          passing, and the loop continues. Only a ``check`` that clearly says
+          it passed, or none at all (an older reply), reads so: an empty or
+          unreadable one is :data:`subagent_executor.CHECK_RESULT_UNKNOWN`,
+          a finding.
         """
         if not undeclared.observed:
             outcome.status = STATUS_BATCH_FAILED
@@ -4028,6 +4044,10 @@ class WriteBatchScheduler:
             return True
         if crashed_exit not in (0, None):
             return False
+        if claimed == "failed":
+            if check and not outcome.runner_notes:
+                outcome.runner_notes = "; ".join(check)[:600]
+            return False
         if check:
             outcome.write_outcome = WRITE_NO_OP
             outcome.status = STATUS_OK
@@ -4042,8 +4062,6 @@ class WriteBatchScheduler:
                 f"implementation summary and go to review-code."
             )
             return True
-        if claimed == "failed":
-            return False
         outcome.write_outcome = WRITE_NO_OP
         outcome.status = STATUS_OK
         outcome.check_findings = check

@@ -1120,17 +1120,71 @@ class TestVerificationOnlyImplementTask:
         assert "## Check result (required for this task)" in prompt
         assert '"check": {"passed": false, "findings"' in prompt
 
-    def test_a_failed_claim_with_structured_findings_does_not_stop_implement(self, env):
-        """Racing re-run 3's T009 (worded "must exit 0") claimed `failed` and
-        stopped implement for good. A check's problems are findings, never a
-        stop, whatever the task's wording made the runner claim."""
-        env.edits([], result=self._check_reply(status="failed"))
+    def test_a_failed_claim_is_a_check_that_could_not_run_and_stops(self, env):
+        """Fix round 11 (review T4): the contract used to ask for a finding
+        "per check you could not run", and `failed` beside any finding read
+        as check-findings — so `npx: command not found` was recorded as a
+        check that ran, and any failure could be laundered into findings the
+        run went on past. `failed` is now a check that could not run: a
+        failed task that stops the run, whatever its `check` lists, and the
+        listed text is what the stop says it reported."""
+        not_run = ["npx html-validate could not run: npx: command not found"]
+        env.edits([], result=self._check_reply(
+            status="failed", findings=not_run, notes=""))
+        state = FakeState(env.tmp_path / "state.json")
+        result = env.scheduler(
+            [self._task(env)], kind="implement", state=state, finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert result.exit_code == 3, result.messages
+        assert not outcome.ok
+        assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
+        assert outcome.outcome_label != "check-findings"
+        assert outcome.runner_notes == not_run[0]
+        assert any(f"what it reported: {not_run[0]}" in m for m in result.messages), (
+            result.messages)
+        state.reload()
+        assert state.state["task_status"]["T009"] == "failed"
+        assert "task_check_findings" not in state.state
+
+    def test_the_contract_says_a_check_that_could_not_run_is_failed(self):
+        from utils.write_batch_scheduler import CHECK_RESULT_CONTRACT
+
+        assert "could not run" in CHECK_RESULT_CONTRACT
+        assert 'answer `status: \"failed\"`' in CHECK_RESULT_CONTRACT
+        assert "Never list a check that did not run as a finding" in CHECK_RESULT_CONTRACT
+        assert "per check you could not run" not in CHECK_RESULT_CONTRACT
+
+    @pytest.mark.parametrize("check", [
+        {"passed": "false", "findings": ["one problem"]},
+        {"passed": False, "findings": "one problem"},
+        {"passed": 0, "findings": None},
+        {"passed": False, "findings": [3]},
+    ])
+    def test_a_near_miss_check_shape_is_read_not_a_schema_failure(self, env, check):
+        """Fix round 11 (review T3): each of these was `schema_invalid`, exit
+        3, and implement has no report re-ask, so it stopped for good on a
+        check that had answered."""
+        env.edits([], result=self._check_reply(check=check))
         result = env.scheduler(
             [self._task(env)], kind="implement", finalize=False,
         ).run()
         outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_OK, outcome.reason
+        assert outcome.outcome_label == "check-findings"
+        assert outcome.check_findings
         assert result.exit_code == 0, result.messages
-        assert outcome.ok and outcome.outcome_label == "check-findings"
+
+    def test_an_empty_check_object_is_never_verified(self, env):
+        """Fix round 11 (review, repro_check_shapes): `check: {}` read as
+        VERIFIED — a check that said nothing passed."""
+        env.edits([], result=self._check_reply(check={}))
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert outcome.outcome_label == "check-findings"
+        assert outcome.check_findings[0].startswith(executor.CHECK_RESULT_UNKNOWN)
 
     def test_a_finding_beside_passed_true_still_counts(self, env):
         env.edits([], result=self._check_reply(passed=True, findings=["one problem"]))

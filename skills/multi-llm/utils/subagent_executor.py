@@ -622,9 +622,11 @@ WRITE_LABEL_VERIFIED = "verified"
 #: (2026-10-05) recorded T007 VERIFIED while ``npx html-validate`` had reported
 #: two problems that lived only in the runner's free-text notes. Not a stop
 #: either: what a check finds is a finding, never an exit code (AGENTS.md), and
-#: review-code / apply-code-fixes are the phases that fix it — so the loop
-#: continues, ``write_outcome`` stays ``no-op`` and every surface names the
-#: findings.
+#: review-code / apply-code-fixes are the phases that fix it — so the tasks
+#: that do not depend on the check go on, ``write_outcome`` stays ``no-op``
+#: and every surface names the findings. The tasks that DO depend on it are
+#: not run (fix round 11): ``WriteBatchScheduler`` records them ``not run —
+#: upstream check … reported problems`` and implement ends needing a human.
 WRITE_LABEL_CHECK_FINDINGS = "check-findings"
 WRITE_PARTIAL = "partial-application"
 
@@ -633,12 +635,25 @@ WRITE_PARTIAL = "partial-application"
 CHECK_FINDINGS_MAX = 20
 CHECK_FINDING_MAX_CHARS = 300
 
-#: The finding recorded for a ``check`` that said ``passed: false`` and listed
-#: none, so the task still reads as one with findings.
+#: The finding recorded for a ``check`` that said it did not pass and listed
+#: no finding, so the task still reads as one with findings.
 CHECK_FAILED_WITHOUT_FINDINGS = (
     "the check reported that it did not pass but listed no finding; "
     "see the runner notes"
 )
+
+#: The finding recorded for a ``check`` that says neither that it passed nor
+#: what it found (``{}``, ``{"passed": null, "findings": []}``): an unknown
+#: result is never a pass (fix round 11 — ``check: {}`` used to read VERIFIED).
+CHECK_RESULT_UNKNOWN = (
+    "the check's reply did not say whether it passed (its `check` object had "
+    "no usable `passed` value and no findings); see the runner notes"
+)
+
+#: The words ``check.passed`` may be spelled in, besides the JSON booleans
+#: (a near-miss reply: ``"false"``, ``0``). Anything else is an unknown result.
+_CHECK_PASSED_WORDS = frozenset({"true", "yes", "pass", "passed"})
+_CHECK_FAILED_WORDS = frozenset({"false", "no", "fail", "failed"})
 
 
 def write_outcome_label(
@@ -651,33 +666,80 @@ def write_outcome_label(
     return write_outcome
 
 
+def _check_passed(value: Any) -> Optional[bool]:
+    """``check.passed`` read leniently: ``True``/``False``, else ``None``.
+
+    The JSON booleans, ``1``/``0`` and the words in
+    :data:`_CHECK_PASSED_WORDS` / :data:`_CHECK_FAILED_WORDS` (any case);
+    anything else (``null``, a missing key, ``"maybe"``) is unknown.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        word = value.strip().lower()
+        if word in _CHECK_PASSED_WORDS:
+            return True
+        if word in _CHECK_FAILED_WORDS:
+            return False
+    return None
+
+
+def _finding_text(item: Any) -> str:
+    """One finding as one line: an object is read as its non-empty values."""
+    if item is None:
+        return ""
+    if isinstance(item, dict):
+        # An object per finding (`{"command": …, "message": …}`) is read as
+        # its values, so a near-miss shape still names the problem.
+        item = "; ".join(
+            f"{key}: {value}" for key, value in item.items()
+            if value not in (None, "", [], {})
+        )
+    return " ".join(str(item).split())
+
+
 def check_findings_from(result: Any) -> Optional[List[str]]:
     """The structured check result of a write reply, as a findings list.
 
-    ``None`` when the reply carries no usable ``check`` object (an older
-    reply, or a task that is not a check); ``[]`` when it says the check
-    passed and lists nothing; otherwise the findings, one line each and
-    bounded (:data:`CHECK_FINDINGS_MAX`, :data:`CHECK_FINDING_MAX_CHARS`).
-    ``passed: false`` with no finding listed gets
-    :data:`CHECK_FAILED_WITHOUT_FINDINGS`, and a finding listed beside
-    ``passed: true`` still counts: a check that reported a problem never reads
-    as a clean pass. Read from the reply's own field, never from its notes.
+    ``None`` when the reply carries no ``check`` at all (an older reply, a
+    task that is not a check, or ``check: null``); ``[]`` when it says the
+    check passed and lists nothing; otherwise the findings, one line each
+    and bounded (:data:`CHECK_FINDINGS_MAX`, :data:`CHECK_FINDING_MAX_CHARS`).
+    Read from the reply's own field, never from its notes.
+
+    Lenient on shape, strict on meaning (fix round 11). The schema admits
+    any ``check``, because a near-miss shape (``passed: "false"``,
+    ``findings: "one problem"``, a number as a finding) used to be a
+    ``schema_invalid`` reply, and implement has no report re-ask, so the run
+    stopped for good on a check that had answered. Each shape is read here
+    instead, and only a clear pass with nothing listed is a pass: a finding
+    beside ``passed: true`` still counts, ``passed: false`` with none listed
+    gets :data:`CHECK_FAILED_WITHOUT_FINDINGS`, and a ``check`` that says
+    neither (``{}``, ``passed: null``, a ``check`` that is not an object)
+    gets :data:`CHECK_RESULT_UNKNOWN` — never a pass.
     """
-    check = result.get("check") if isinstance(result, dict) else None
-    if not isinstance(check, dict):
+    if not isinstance(result, dict) or result.get("check") is None:
         return None
+    check = result.get("check")
+    if not isinstance(check, dict):
+        shown = " ".join(str(check).split())[:80]
+        return [
+            f"{CHECK_RESULT_UNKNOWN} (its `check` was "
+            f"{type(check).__name__} {shown!r}, not an object)"
+        ]
     raw = check.get("findings")
-    items = raw if isinstance(raw, list) else []
+    if isinstance(raw, list):
+        items = raw
+    elif raw is None:
+        items = []
+    else:
+        # One finding given bare (a string, an object, a number).
+        items = [raw]
     findings = []
     for item in items:
-        if isinstance(item, dict):
-            # An object per finding (`{"command": …, "message": …}`) is read
-            # as its values, so a near-miss shape still names the problem.
-            item = "; ".join(
-                f"{key}: {value}" for key, value in item.items()
-                if value not in (None, "", [], {})
-            )
-        text = " ".join(str(item).split())
+        text = _finding_text(item)
         if text:
             findings.append(text[:CHECK_FINDING_MAX_CHARS])
     if len(findings) > CHECK_FINDINGS_MAX:
@@ -685,12 +747,14 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
         findings = findings[:CHECK_FINDINGS_MAX - 1] + [
             f"(+{extra} more finding(s) in the batch result file)"
         ]
-    passed = check.get("passed")
-    if not findings and passed is False:
-        findings = [CHECK_FAILED_WITHOUT_FINDINGS]
-    if not findings and passed is not True:
-        return None
-    return findings
+    if findings:
+        return findings
+    passed = _check_passed(check.get("passed"))
+    if passed is True:
+        return []
+    if passed is False:
+        return [CHECK_FAILED_WITHOUT_FINDINGS]
+    return [CHECK_RESULT_UNKNOWN]
 
 
 def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
