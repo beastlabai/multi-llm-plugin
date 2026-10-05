@@ -164,7 +164,7 @@ def resolve_repo_root(anchor: Optional[str]) -> str:
     probe_dir = str(start if start.is_dir() else start.parent)
     try:
         completed = subprocess.run(
-            git_argv("rev-parse", "--show-toplevel"),
+            git_argv("rev-parse", "--show-toplevel", cwd=probe_dir),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=probe_dir, timeout=30, stdin=subprocess.DEVNULL,
         )

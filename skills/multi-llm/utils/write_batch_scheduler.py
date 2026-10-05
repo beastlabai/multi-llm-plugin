@@ -2489,7 +2489,9 @@ class WriteBatchScheduler:
         path = ""
         try:
             result = subprocess.run(
-                _git_utils.git_argv("config", "--path", "--get", "core.excludesFile"),
+                _git_utils.git_argv(
+                    "config", "--path", "--get", "core.excludesFile", cwd=self.repo_root,
+                ),
                 cwd=self.repo_root, capture_output=True, text=True,
                 encoding="utf-8", errors="replace",
             )

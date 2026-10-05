@@ -3456,14 +3456,14 @@ def porcelain_snapshot(
         return None
     try:
         completed = subprocess.run(
-            git_argv("status", "--porcelain", "-z", "--untracked-files=all"),
+            git_argv("status", "--porcelain", "-z", "--untracked-files=all", cwd=cwd),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=cwd, timeout=30,
         )
         if completed.returncode != 0:
             return None
         top = subprocess.run(
-            git_argv("rev-parse", "--show-toplevel"),
+            git_argv("rev-parse", "--show-toplevel", cwd=cwd),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=cwd, timeout=30,
         )
@@ -3533,7 +3533,7 @@ def porcelain_snapshot(
     elif to_hash:
         def hash_batch(paths: List[str]) -> Tuple[int, List[str]]:
             hashed = subprocess.run(
-                git_argv("hash-object", "--no-filters", "--stdin-paths"),
+                git_argv("hash-object", "--no-filters", "--stdin-paths", cwd=root),
                 input="\n".join(paths) + "\n",
                 capture_output=True, text=True, encoding="utf-8", errors="replace",
                 cwd=root, timeout=30,
@@ -3888,7 +3888,7 @@ def _mode_snapshot(repo_root: Optional[str]) -> Optional[Dict[str, str]]:
         return None
     try:
         top = subprocess.run(
-            git_argv("rev-parse", "--show-toplevel"),
+            git_argv("rev-parse", "--show-toplevel", cwd=repo_root),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=repo_root, timeout=30,
         )
@@ -3896,14 +3896,14 @@ def _mode_snapshot(repo_root: Optional[str]) -> Optional[Dict[str, str]]:
             return None
         root = top.stdout.strip() or repo_root
         file_mode = subprocess.run(
-            git_argv("config", "--bool", "core.fileMode"),
+            git_argv("config", "--bool", "core.fileMode", cwd=root),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=root, timeout=30,
         )
         if file_mode.returncode == 0 and file_mode.stdout.strip() == "false":
             return None
         listed = subprocess.run(
-            git_argv("ls-files", "-z"), capture_output=True, cwd=root, timeout=120,
+            git_argv("ls-files", "-z", cwd=root), capture_output=True, cwd=root, timeout=120,
         )
     except (OSError, subprocess.SubprocessError):
         return None
