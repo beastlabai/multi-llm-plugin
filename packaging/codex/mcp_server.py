@@ -960,8 +960,8 @@ def hand_back_typed(outcome, values) -> None:
     leave in the re-attach ``next`` and the ``abort_command``. The call the
     model sent back then *typed* the absolute path, so its resume command and
     its re-spelled output lines carried it too (racing re-run 3, 2026-10-05:
-    ``$multi-llm:multi-llm --implement /tmp/…/plans/racing-game.md --resume``
-    for a plan the user typed ``plans/racing-game.md``). The call runs in the
+    ``--implement <absolute path>/plans/racing-game.md --resume`` for a plan
+    the user typed ``plans/racing-game.md``). The call runs in the
     same anchor, so the typed spelling names the same file. The port of
     ``handBackTyped``.
     """
