@@ -59,7 +59,13 @@ def mark_phase_started_in_state(state: Dict[str, Any], phase: str) -> None:
     six minutes before its last task). ``get_workflow_status`` reads this map
     as ``in_progress``, the one status that spells ``--resume``. Re-stamped on
     every emit (a ``--resume`` is a new run of the same phase), popped by
-    :func:`mark_phase_completed_in_state` and by a skip.
+    :func:`mark_phase_completed_in_state` and by a skip. An EARLIER completion
+    of the same phase (a previous review cycle's, or the implement run this
+    one repeats) is left in ``phases_completed`` untouched — nothing rewrites
+    history — and the two stamps decide: :meth:`StateManager.is_phase_started`
+    and :meth:`StateManager.is_phase_completed` read the newer record as the
+    phase's state (reviewer repro, 2026-10-05: a cycle-2 native re-run read
+    ``completed`` on cycle 1's stamp, mid-loop).
     """
     started = state.get("phases_started")
     if not isinstance(started, dict):
@@ -970,11 +976,24 @@ class StateManager:
         mark_phase_started_in_state(self.state, phase)
 
     def is_phase_started(self, phase: str) -> bool:
-        """Whether *phase* carries a started record and no completion."""
-        if phase in self.state.get("phases_completed", {}):
+        """Whether *phase*'s newest record is a start, not a completion.
+
+        A started record beside no completion is a start. Beside one, the
+        stamps decide: a start newer than the completion is a re-run of a
+        phase that finished once before (a second review cycle, an implement
+        repeated), and the phase is mid-loop again; a start older than the
+        completion is the run that completion closed, and is ignored. A
+        stamp that does not parse keeps the completion (absence of a date
+        is not a re-run).
+        """
+        started_at = _parse_completion_time(self.phase_started_at(phase))
+        if started_at is None:
             return False
-        started = self.state.get("phases_started")
-        return isinstance(started, dict) and phase in started
+        completed_at = self.state.get("phases_completed", {}).get(phase)
+        if completed_at is None:
+            return True
+        completed = _parse_completion_time(completed_at)
+        return completed is not None and started_at > completed
 
     def phase_started_at(self, phase: str) -> Optional[str]:
         """The ISO timestamp *phase* was recorded started, or None."""
@@ -1009,9 +1028,11 @@ class StateManager:
 
         A ``code-review`` or ``apply-code-fixes`` completion recorded before
         implement's latest completion is not one (see
-        :meth:`phase_completion_is_stale`): the raw record stays in
-        ``phases_completed``, but every reader — the next-step builder, the
-        completed-phase guard, ``status`` — sees the phase as pending again.
+        :meth:`phase_completion_is_stale`), and neither is a completion older
+        than the phase's own started record (see :meth:`is_phase_started`):
+        the raw record stays in ``phases_completed``, but every reader — the
+        next-step builder, the completed-phase guard, ``status`` — sees the
+        phase as pending (or ``in_progress``) again.
 
         Args:
             phase: Phase name to check
@@ -1020,6 +1041,10 @@ class StateManager:
             True if the phase has been marked as completed
         """
         if phase not in self.state.get("phases_completed", {}):
+            return False
+        if self.is_phase_started(phase):
+            # A start newer than the completion: the phase is running again
+            # (its re-run's emit), and its old completion is not its state.
             return False
         return not self.phase_completion_is_stale(phase)
 

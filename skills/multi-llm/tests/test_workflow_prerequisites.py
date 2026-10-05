@@ -2043,16 +2043,94 @@ class TestStartedPhaseReadsInProgress:
         state.save()
         assert _status(plan)["phases"][phase]["status"] == "in_progress"
 
-    def test_a_completed_phase_never_reads_started(self, tmp_path):
+    def test_a_start_older_than_the_completion_never_reads_started(self, tmp_path):
         plan = _workflow_plan(tmp_path)
         state = StateManager(plan)
         state.mark_phase_started("apply-suggestions")
-        # A stale started key left by hand beside a completion is ignored.
+        # A stale started key left by hand beside a LATER completion is ignored:
+        # the completion is the newer record, so the phase finished.
+        state.state["phases_started"]["apply-suggestions"] = "2026-01-02T09:00:00"
         state.state.setdefault("phases_completed", {})["apply-suggestions"] = (
             "2026-01-02T10:00:00")
         state.save()
         assert not StateManager(plan).is_phase_started("apply-suggestions")
+        assert StateManager(plan).is_phase_completed("apply-suggestions")
         _put(plan, "review-plan", "validation.json", {
             "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]})
         _record(plan, completed=("review-plan",))
         assert _status(plan)["phases"]["apply-suggestions"]["status"] == "completed"
+
+    def test_a_start_newer_than_an_earlier_completion_reads_started(self, tmp_path):
+        """A second review cycle (reviewer repro, 2026-10-05): cycle 1's
+        apply-suggestions completed, `review-plan --force` completed later, and
+        the host re-runs apply-suggestions natively. The emit stamps a start
+        that is NEWER than the cycle-1 completion, so the phase is mid-loop —
+        not `completed` on the old stamp, and never `suggested_next:
+        generate-tasks` while the host is still applying batches."""
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {
+            "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]})
+        _record(plan, completed=("review-plan", "apply-suggestions"))
+        time.sleep(0.01)
+        _record(plan, completed=("review-plan",))  # cycle 2: --force re-run
+        time.sleep(0.01)
+        self._started(plan, "apply-suggestions")  # cycle 2: native emit
+
+        state = StateManager(plan, read_only=True)
+        assert state.is_phase_started("apply-suggestions")
+        assert not state.is_phase_completed("apply-suggestions")
+        # The raw cycle-1 record is kept: nothing rewrites history.
+        assert "apply-suggestions" in state.state["phases_completed"]
+        status = _status(plan)
+        assert status["phases"]["apply-suggestions"]["status"] == "in_progress"
+        assert status["phases"]["apply-suggestions"]["started_at"]
+        assert status["suggested_next"] == "apply-suggestions"
+
+    def test_a_restarted_implement_reads_started_over_its_old_completion(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan", "apply-suggestions",
+                                 "generate-tasks", "implement"))
+        time.sleep(0.01)
+        self._started(plan, "implement")  # implement re-run, native emit
+        state = StateManager(plan, read_only=True)
+        assert state.is_phase_started("implement")
+        assert not state.is_phase_completed("implement")
+        status = _status(plan)
+        assert status["phases"]["implement"]["status"] == "in_progress"
+        assert status["suggested_next"] == "implement"
+
+    def test_a_restarted_apply_code_fixes_staled_by_implement_reads_started(self, tmp_path):
+        """reproA/repro_stale_acf.py: cycle 1 complete, implement re-run
+        completes later (apply-code-fixes now `stale`), code-review re-runs,
+        and the host re-emits apply-code-fixes natively: `in_progress`."""
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "code-review", "grouped.json", _ONE_FINDING)
+        for phase in ("review-plan", "apply-suggestions", "generate-tasks",
+                      "implement", "code-review", "apply-code-fixes"):
+            _record(plan, completed=(phase,))
+            time.sleep(0.01)
+        _record(plan, completed=("implement",))
+        time.sleep(0.01)
+        _record(plan, completed=("code-review",))
+        time.sleep(0.01)
+        assert _status(plan)["phases"]["apply-code-fixes"].get("stale")
+        self._started(plan, "apply-code-fixes")
+        state = StateManager(plan, read_only=True)
+        assert state.is_phase_started("apply-code-fixes")
+        status = _status(plan)
+        assert status["phases"]["apply-code-fixes"]["status"] == "in_progress"
+        assert status["suggested_next"] == "apply-code-fixes"
+
+    def test_the_completion_write_after_a_restart_is_the_newest_record(self, tmp_path):
+        """The closing `--mark-completed` of the re-run wins again."""
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan", "apply-suggestions"))
+        time.sleep(0.01)
+        self._started(plan, "apply-suggestions")
+        state = StateManager(plan)
+        assert state.is_phase_started("apply-suggestions")
+        state.mark_phase_completed("apply-suggestions")
+        state.save()
+        reloaded = StateManager(plan, read_only=True)
+        assert reloaded.is_phase_completed("apply-suggestions")
+        assert not reloaded.is_phase_started("apply-suggestions")
