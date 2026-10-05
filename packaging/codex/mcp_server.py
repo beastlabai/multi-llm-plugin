@@ -862,6 +862,30 @@ def typed_plan(plan, values):
     return plan
 
 
+#: The result keys that hand the model a tool call to send back.
+HANDED_BACK_CALLS = ("next", "abort_command")
+
+
+def hand_back_typed(outcome, values) -> None:
+    """Every tool call *outcome* hands back names the plan as this call typed it.
+
+    The server names the plan absolutely inside its own loop (the polls, the
+    abort dispatch, a mechanical continuation), and those spellings used to
+    leave in the re-attach ``next`` and the ``abort_command``. The call the
+    model sent back then *typed* the absolute path, so its resume command and
+    its re-spelled output lines carried it too (racing re-run 3, 2026-10-05:
+    ``$multi-llm:multi-llm --implement /tmp/…/plans/racing-game.md --resume``
+    for a plan the user typed ``plans/racing-game.md``). The call runs in the
+    same anchor, so the typed spelling names the same file. The port of
+    ``handBackTyped``.
+    """
+    for key in HANDED_BACK_CALLS:
+        call_args = outcome.get(key)
+        if (isinstance(call_args, dict) and not call_args.get("unparseable")
+                and isinstance(call_args.get("plan"), str)):
+            outcome[key] = dict(call_args, plan=typed_plan(call_args["plan"], values))
+
+
 def same_plan_file(left, right) -> bool:
     """Whether two plan paths name one file, symlinks followed on both sides.
 
@@ -1702,6 +1726,7 @@ class Server:
                   # dropped (`split_extra_flags`) and named in the note.
                   "question": args["question"], "extra": list(kept_flags)}
         outcome = self.run_workflow(call, row, values)
+        hand_back_typed(outcome, values)
         if not call.cancel.is_set():
             self.attach_resume(call, values, outcome)
         if not call.cancel.is_set() and self.unfinished(row, outcome):
@@ -1771,7 +1796,9 @@ class Server:
         user who typed ``plans/racing-game.md`` was told to type ``$multi-llm:
         multi-llm --implement <absolute path>/plans/racing-game.md``). The child runs in
         the anchor, so a relative spelling names the same file there, and the
-        launch passes this one; the polls and the abort keep the absolute path.
+        launch passes this one; the polls and the abort keep the absolute path
+        inside this server, and the tool calls it hands back carry this one
+        (:func:`hand_back_typed`).
         """
         return expand_home(plan, self.layer1) if plan else ""
 

@@ -2207,6 +2207,93 @@ class TestResumeCommand:
 
 
 # ===========================================================================
+# Every phase, both ways a failure reaches the user: the plan as typed
+# ===========================================================================
+
+#: Every phase the surface knows, read from the surface (never retyped), so a
+#: phase added later is covered the day it lands.
+PHASE_ROWS = [row for row in SURFACE["modes"] if row.get("phase")]
+TYPED_PLAN = "plans/p.md"
+
+
+def phase_args(row) -> dict:
+    """A call on *row* with the plan typed relative (and a question for ask)."""
+    takes_question = SURFACE["positional_kinds"]["question"] in row["positionals"]
+    return {"mode": row["name"], "plan": TYPED_PLAN,
+            "question": "why?" if takes_question else "", "extra_flags": []}
+
+
+class TestTheTypedPlanSurvivesEveryFailure:
+    """Racing re-run 3 (2026-10-05, codex 06): implement outlived the call's
+    budget, the re-attach `next` named the plan absolutely, the model sent it
+    back as given, and the run's failure came back with
+    `resume_command: $multi-llm:multi-llm --implement /tmp/…/plans/racing-game.md
+    --resume` for a plan the user typed `plans/racing-game.md`. Every phase, the
+    failure in the launching call and the failure in the re-attach."""
+
+    META = turn_meta(sandbox_mode="workspace-write")
+
+    def _absolute(self, harness) -> str:
+        return os.path.join(os.path.realpath(harness.workspace), "plans", "p.md")
+
+    def _failed_poll(self, harness, row) -> dict:
+        """A failed run's terminal poll: status's own `resume with:` line names
+        the plan absolutely, as `run_status` prints it."""
+        return {"exit": CODES["needs_human"], "stdout": [
+            "      resume with: {} {} {} --host {} --detach --yes --resume".format(
+                UV_PREFIX, row["name"], self._absolute(harness), SURFACE["host"]),
+            result_line(mode=row["name"], phase=row["phase"],
+                        state=STATES["needs_human"], exit=CODES["needs_human"])]}
+
+    def _assert_typed(self, harness, envelope, row):
+        absolute = self._absolute(harness)
+        assert TYPED_PLAN in envelope["resume_command"]
+        assert absolute not in envelope["resume_command"]
+        assert envelope["user_next_step"] is None
+        (asked,) = harness.resume_calls()
+        assert dispatcher_argv(asked)[2] == TYPED_PLAN
+        for option in envelope["options"]:
+            if "plan" in option:
+                assert option["plan"] == TYPED_PLAN, option
+        assert absolute not in envelope["output"]
+
+    @pytest.mark.parametrize("row", PHASE_ROWS, ids=[row["name"] for row in PHASE_ROWS])
+    def test_a_failure_in_the_launching_call(self, harness, row):
+        envelope, _, _, _ = harness.run(
+            phase_args(row), [launch_step(), self._failed_poll(harness, row)],
+            meta=self.META)
+        self._assert_typed(harness, envelope, row)
+
+    @pytest.mark.parametrize("row", PHASE_ROWS, ids=[row["name"] for row in PHASE_ROWS])
+    def test_a_failure_after_the_handoff_and_the_reattach(self, harness, row):
+        handoff, _, _, _ = harness.run(
+            phase_args(row),
+            [launch_step(run_id="RID-T")] + [poll_step(2, sleep=0.2)] * 50,
+            meta=self.META, extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1000"})
+        assert handoff["state"] == STATES["running"]
+        assert handoff["next"]["plan"] == TYPED_PLAN
+        assert handoff["abort_command"]["plan"] == TYPED_PLAN
+
+        live = {"exit": 2, "stdout": [result_line(
+            state=STATES["nothing_to_do"], exit=2,
+            next="uv run -- python multi_llm.py status {} --view run --wait "
+                 "--run-id RID-T".format(self._absolute(harness)))]}
+        envelope, _, calls, _ = harness.run(
+            handoff["next"], [live, self._failed_poll(harness, row)], meta=self.META)
+        # The re-attach still polls by the absolute path inside the server.
+        assert dispatcher_argv(calls[-1])[1] == self._absolute(harness)
+        self._assert_typed(harness, envelope, row)
+
+    def test_an_unfollowed_next_names_the_plan_as_typed(self, harness):
+        done = poll_step(0, next="uv run -- python multi_llm.py generate-tasks {}".format(
+            self._absolute(harness)))
+        envelope, _, _, _ = harness.run(
+            dict(REVIEW, plan=TYPED_PLAN), [launch_step(), done])
+        assert envelope["next"]["mode"] == "generate-tasks"
+        assert envelope["next"]["plan"] == TYPED_PLAN
+
+
+# ===========================================================================
 # What a failed result says the user can run (racing re-run 2026-10-04)
 # ===========================================================================
 
