@@ -1039,6 +1039,14 @@ def get_workflow_status(
     deferred = state.deferred_implementation_tasks()
     if deferred:
         phases["implement"]["manual_tasks"] = deferred
+    # The implement check tasks whose check ran and reported problems
+    # (`task_check_findings`, written by both write legs from the reply's
+    # structured `check`): racing re-run 4 recorded T007 VERIFIED with two
+    # html-validate problems that nothing surfaced. `status` names them on
+    # its trailer until review-code, which is given them, has run.
+    check_findings = state.implementation_check_findings()
+    if check_findings:
+        phases["implement"]["check_findings"] = check_findings
 
     notices = []
 
