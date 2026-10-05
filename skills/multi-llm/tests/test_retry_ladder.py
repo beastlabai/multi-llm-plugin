@@ -23,6 +23,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.retry_ladder import (  # noqa: E402
     MAX_RATE_LIMIT_BACKOFFS,
     MIN_ATTEMPT_BUDGET_S,
+    REPAIR_SCHEMA_INVALID,
     RetryLadder,
     STATUS_AUTH_FAILED,
     STATUS_INVALID_MODEL,
@@ -426,3 +427,67 @@ class TestBackoffDelay:
 
     def test_it_is_capped(self):
         assert backoff_delay(50, jitter=lambda: 1.0) == 30.0
+
+
+class TestSchemaRepairAllowance:
+    """Rule 7 (2026-10-05): a granted schema-repair re-ask, and only that.
+
+    Rung 6 stays terminal for every caller that grants nothing — which is every
+    caller but Lane B's ``task_generation`` — and a grant is spent once, on the
+    same deadline, without touching the transport or rate-limit counters.
+    """
+
+    def test_no_grant_leaves_rung_6_terminal(self):
+        ladder = _ladder(Clock(), retries=3)
+        ladder.next_attempt()
+        action = ladder.record(STATUS_SCHEMA_INVALID)
+        assert action.retry is False and action.repair is False
+        assert ladder.stop_reason == STOP_TERMINAL
+        assert ladder.next_attempt() is None
+
+    def test_one_grant_is_one_re_ask_then_terminal(self):
+        ladder = RetryLadder(timeout=1200.0, retries=2, now=Clock(), schema_repairs=1)
+        ladder.next_attempt()
+        first = ladder.record(STATUS_SCHEMA_INVALID)
+        assert first.retry is True and first.repair is True
+        assert first.reason == REPAIR_SCHEMA_INVALID
+        assert first.delay == 0.0
+        assert ladder.schema_repairs_used == 1
+        assert ladder.transport_retries_left == 2, "the re-ask spends no retry"
+        assert ladder.next_attempt() is not None
+        second = ladder.record(STATUS_SCHEMA_INVALID)
+        assert second.retry is False and second.repair is False
+        assert ladder.stop_reason == STOP_TERMINAL
+        assert ladder.spawns == 2
+
+    def test_a_reply_with_no_document_is_not_repairable(self):
+        ladder = RetryLadder(timeout=1200.0, retries=2, now=Clock(), schema_repairs=1)
+        ladder.next_attempt()
+        action = ladder.record(STATUS_SCHEMA_INVALID, repairable=False)
+        assert action.retry is False
+        assert ladder.schema_repairs_used == 0
+
+    def test_the_re_ask_runs_on_what_is_left_of_the_same_deadline(self):
+        clock = Clock()
+        ladder = RetryLadder(timeout=100.0, retries=0, now=clock, schema_repairs=1)
+        assert ladder.next_attempt() == 100.0
+        clock.advance(70.0)
+        assert ladder.record(STATUS_SCHEMA_INVALID).repair is True
+        assert ladder.next_attempt() == pytest.approx(30.0)
+
+    def test_no_re_ask_when_the_deadline_is_spent(self):
+        clock = Clock()
+        ladder = RetryLadder(timeout=100.0, retries=0, now=clock, schema_repairs=1)
+        ladder.next_attempt()
+        clock.advance(100.0 - MIN_ATTEMPT_BUDGET_S / 2)
+        action = ladder.record(STATUS_SCHEMA_INVALID)
+        assert action.retry is False
+        assert ladder.stop_reason == STOP_DEADLINE
+        assert "no schema-repair re-ask" in action.reason
+
+    @pytest.mark.parametrize("status", [STATUS_REJECTED, STATUS_UNPARSEABLE])
+    def test_the_grant_is_for_rung_6_only(self, status):
+        ladder = RetryLadder(timeout=1200.0, retries=0, now=Clock(), schema_repairs=1)
+        ladder.next_attempt()
+        assert ladder.record(status).repair is False
+        assert ladder.schema_repairs_used == 0

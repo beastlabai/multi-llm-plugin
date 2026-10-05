@@ -454,7 +454,11 @@ class TestSchemaReachesTheRunner:
 
         assert outcome.status == executor.STATUS_SCHEMA_INVALID
         assert outcome.rung == 6
-        assert len(outcome.attempts) == 1  # rung 6 is never retried
+        # Rung 6 spends no transport retry; task_generation's one
+        # schema-repair re-ask (2026-10-05) is the only second attempt.
+        assert [a.repair for a in outcome.attempts] == [
+            None, executor.REPAIR_SCHEMA_INVALID,
+        ]
         assert outcome.structured_output != so.MARKER_NATIVE
 
     def test_the_clis_exhausted_budget_is_rung_6_and_is_never_re_run(self, lane):
@@ -608,3 +612,41 @@ class TestGeneratedTasksSchemaIsStrictClean:
         assert any("disagrees" in p for p in validate_generated_tasks(tasks))
         tasks[0]["subagent_type"] = "general-purpose"
         assert validate_generated_tasks(tasks) == []
+
+
+class TestSchemaRepairIsTaskGenerationOnly:
+    """The one schema-repair re-ask (2026-10-05) is granted per kind, and only
+    `task_generation` holds a grant: every other kind's rung 6 is exactly as
+    terminal as it was."""
+
+    def test_the_grant_table_is_the_one_kind_it_claims(self):
+        from utils.subagent_prompts import SCHEMA_REPAIR_SHAPES
+
+        assert executor.SCHEMA_REPAIRS_BY_KIND == {"task_generation": 1}
+        # A granted kind must have a reply shape to restate.
+        assert set(executor.SCHEMA_REPAIRS_BY_KIND) <= set(SCHEMA_REPAIR_SHAPES)
+        assert set(executor.SCHEMA_REPAIRS_BY_KIND) <= set(KINDS)
+
+    @pytest.mark.parametrize("kind", ["validation", "consolidation"])
+    def test_another_kinds_rung_6_is_still_one_attempt(self, lane, kind):
+        lane.respond(_envelope(json.dumps({"verdict": "looks good"})))
+
+        outcome = lane.dispatch(kind, retries=2)
+
+        assert outcome.status == executor.STATUS_SCHEMA_INVALID
+        assert len(outcome.attempts) == 1
+        assert len(lane.calls) == 1
+        assert outcome.attempts[0].repair is None
+        assert "schema-repair" not in (outcome.reason or "")
+
+    def test_task_generation_re_asks_once_with_the_errors(self, lane):
+        lane.respond(_envelope(json.dumps({"verdict": "looks good"})))
+
+        outcome = lane.dispatch("task_generation", retries=2)
+
+        assert outcome.status == executor.STATUS_SCHEMA_INVALID
+        assert len(lane.calls) == 2
+        assert [a.repair for a in outcome.attempts] == [
+            None, executor.REPAIR_SCHEMA_INVALID,
+        ]
+        assert outcome.reason.endswith("(after the one schema-repair re-ask)")
