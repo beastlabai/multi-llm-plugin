@@ -660,7 +660,10 @@ def render_run_text(
                 )
                 lines.append(f"      advance it with: {advance}")
         if view.get("progress"):
-            lines.append(f"      progress:       {_progress_text(view['progress'])}")
+            lines.append(
+                f"      progress:       "
+                f"{_progress_text(view['progress'], phase=_view_dir_name(view))}"
+            )
             # Between the counts and the table, and INSIDE this guard by
             # decision rather than by accident: the delta is computed from
             # `progress.models` (see `_attach_finished_during_wait`), so a
@@ -940,7 +943,25 @@ def _high_priority_text(high_priority: Any) -> Optional[str]:
 NO_PROGRESS_RECORDED = "(none recorded)"
 
 
-def _progress_text(progress: Dict[str, Any]) -> str:
+def _generated_count(progress: Dict[str, Any], phase: Optional[str]) -> Optional[int]:
+    """How many tasks a ``generate-tasks`` run produced, or ``None``.
+
+    ``tasks_generated`` is what that phase writes; a checkpoint written before
+    the key existed carried the same count as a ``tasks_total``/``tasks_done``
+    pair, which is read the same way under that phase alone.
+    """
+    generated = progress.get("tasks_generated")
+    if isinstance(generated, int) and not isinstance(generated, bool):
+        return generated
+    total = progress.get("tasks_total")
+    if (phase == "generate-tasks" and isinstance(total, int) and total
+            and progress.get("tasks_done") == total):
+        return total
+    return None
+
+
+def _progress_text(progress: Dict[str, Any], *, phase: Optional[str] = None) -> str:
+    """The ``progress:`` line; *phase* is the view's phase dir, when known."""
     parts = []
     if progress.get("step"):
         parts.append(str(progress["step"]))
@@ -964,7 +985,13 @@ def _progress_text(progress: Dict[str, Any]) -> str:
             failed = done - succeeded if isinstance(done, int) else 0
             clause += f" done, {succeeded} ok, {max(failed, 0)} failed"
         parts.append(clause)
-    if progress.get("tasks_total"):
+    generated = _generated_count(progress, phase)
+    if generated is not None:
+        # What that run produced, labelled as such: a `tasks 10/10` pair read
+        # as a live count of tasks.md and went stale the moment
+        # apply-task-suggestions split a task (2026-10-04).
+        parts.append(f"generated {generated} task{'' if generated == 1 else 's'}")
+    elif progress.get("tasks_total"):
         parts.append(f"tasks {progress.get('tasks_done', 0)}/{progress['tasks_total']}")
     if progress.get("batches_total"):
         parts.append(
@@ -1482,7 +1509,9 @@ def _progress_lines(view: Dict[str, Any]) -> List[str]:
     roster = render_roster_line(progress.get("models"))
     if roster:
         lines.append(roster)
-    current = _current_state_text(progress)
+    current = _current_state_text(
+        progress, phase=_view_dir_name(view) if view.get("phase_dir") else None,
+    )
     if current:
         lines.append(current)
     just_finished = _just_finished_text(view)
@@ -1513,7 +1542,9 @@ def _has_live_row(models: Any) -> bool:
     )
 
 
-def _current_state_text(progress: Dict[str, Any]) -> str:
+def _current_state_text(
+    progress: Dict[str, Any], *, phase: Optional[str] = None,
+) -> str:
     """One line saying what the run is doing *now*, or ``""`` when nothing is.
 
     The third thing a reader with no agent in the loop needs, beside the roster
@@ -1550,7 +1581,7 @@ def _current_state_text(progress: Dict[str, Any]) -> str:
         line = render_progress_line(models)
         if line:
             return line
-    text = _progress_text(progress)
+    text = _progress_text(progress, phase=phase)
     return "" if text == NO_PROGRESS_RECORDED else text
 
 

@@ -65,6 +65,7 @@ Call it from `src/main.py`.
 #: the checkpoint is allowed to meet, and never a ``run`` object beside them.
 _RESERVED_PROGRESS_KEYS = {
     "step", "batch_index", "batches_total", "tasks_done", "tasks_total",
+    "tasks_generated",
     "failed_task_ids", "models", "models_done", "models_succeeded",
     "models_total", "interval_s",
     # Written straight through ``update_status`` by the two executor mirrors,
@@ -820,12 +821,17 @@ class TestTheHostIsToldWhatWasProduced:
     def test_the_progress_line_carries_the_task_count(
         self, tmp_path, monkeypatch, capsys
     ):
-        """1/1 subagents is the least informative number this phase has."""
+        """1/1 subagents is the least informative number this phase has.
+
+        The count is what this run PRODUCED (`tasks_generated`), never a
+        done/total pair: `apply-task-suggestions` later splits tasks in
+        tasks.md, and `tasks 10/10` beside a 12-task list read as a live
+        count gone stale (2026-10-04, Claude Code racing re-run)."""
         _plan, status = self._consume_detached(tmp_path, monkeypatch, capsys)
         progress = status.get("progress") or {}
         assert progress.get("step") == "complete"
-        assert progress.get("tasks_total") == 2
-        assert progress.get("tasks_done") == 2
+        assert progress.get("tasks_generated") == 2
+        assert "tasks_total" not in progress and "tasks_done" not in progress
 
     def test_a_foreground_run_records_progress_and_no_run(self, tmp_path, capsys):
         """The two halves of the same checkpoint now disagree, on purpose.
@@ -851,8 +857,7 @@ class TestTheHostIsToldWhatWasProduced:
         assert "output_files" not in status
         progress = status.get("progress") or {}
         assert progress.get("step") == "complete"
-        assert progress.get("tasks_total") == 2
-        assert progress.get("tasks_done") == 2
+        assert progress.get("tasks_generated") == 2
         # Only keys the reserved object documents: a foreground checkpoint is
         # not a place for a writer to invent one.
         assert set(progress) <= _RESERVED_PROGRESS_KEYS, progress
