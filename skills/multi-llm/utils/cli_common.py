@@ -246,6 +246,16 @@ RETRY_VERBS: FrozenSet[str] = frozenset({
     "--consolidate", "--consolidate-dry-run", "--reaggregate-consolidation",
 })
 
+#: The verbs of a *continuation*: the follow-up a native leg hands back (the
+#: phase's ``next``) so the invoker can finish the same phase after its
+#: subagents wrote their replies. That command names the plan absolutely, like
+#: every printed follow-up, so the plan spelling the user typed survives it only
+#: through the phase dir's ``.status.json`` (``multi_llm._remember_plan_spelling``
+#: writes it, ``multi_llm._continued_plan_arg`` reads it back).
+CONTINUATION_VERBS: FrozenSet[str] = frozenset({
+    "--reaggregate", "--reaggregate-consolidation",
+})
+
 
 def retry_command(
     mode: str,
@@ -1033,7 +1043,9 @@ def record_user_resume(obj: Optional[Dict[str, Any]]) -> None:
 _INVOCATION: Optional[Dict[str, Any]] = None
 
 
-def record_invocation(mode: str, argv: Sequence[str]) -> None:
+def record_invocation(
+    mode: str, argv: Sequence[str], *, plan_arg: Optional[str] = None
+) -> None:
     """Remember the mode word and the **normalized** argv the dispatcher built.
 
     ``--detach`` rebuilds the child's command line from this rather than echoing
@@ -1043,9 +1055,14 @@ def record_invocation(mode: str, argv: Sequence[str]) -> None:
     through every orchestrator signature) also means a direct
     ``python review_plan_orchestrator.py`` still works — it simply falls back to
     the argv its own ``main`` received.
+
+    *plan_arg* is the plan as the user typed it, when that is not the argv's own
+    ``--plan-file`` value (:func:`invocation_plan_arg`).
     """
     global _INVOCATION
     _INVOCATION = {"mode": mode, "argv": list(argv)}
+    if plan_arg:
+        _INVOCATION["plan_arg"] = str(plan_arg)
 
 
 def clear_invocation() -> None:
@@ -1055,6 +1072,24 @@ def clear_invocation() -> None:
 
 def invocation() -> Optional[Dict[str, Any]]:
     return _INVOCATION
+
+
+def invocation_plan_arg() -> Optional[str]:
+    """The plan as the user typed it, for this invocation, or ``None``.
+
+    The record's ``plan_arg`` when the dispatcher recovered one — a
+    continuation (:data:`CONTINUATION_VERBS`) whose ``--plan-file`` is the
+    absolute path its hand-off printed, while the spelling the user typed is
+    what the next-phase command must carry — else the ``--plan-file`` value the
+    dispatcher received, verbatim.
+    """
+    record = _INVOCATION
+    if not record:
+        return None
+    recovered = record.get("plan_arg")
+    if recovered:
+        return str(recovered)
+    return flag_value(list(record.get("argv") or []), "--plan-file") or None
 
 
 # ---------------------------------------------------------------------------
