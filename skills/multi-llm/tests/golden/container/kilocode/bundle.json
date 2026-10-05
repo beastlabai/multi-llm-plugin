@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-10-03T22:12:35Z",
+    "captured_at": "2026-10-05T12:57:37Z",
     "cli": "kilocode",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -58,10 +58,10 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:fix4-reseed",
+    "image": "mllm-e2e:fix6-reseed",
     "reviewer": "kilocode",
     "row_id": "chain-kilocode",
-    "run_bundle": "20261003T214841Z"
+    "run_bundle": "20261005T123505Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -4774,6 +4774,11 @@
     },
     "head_at_start": "<str>",
     "head_before_implement": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
+    "implement_task_ids": [
+      "T001",
+      "T002",
+      "T003"
+    ],
     "metrics": {
       "apply-code-fixes": [
         {
@@ -4938,6 +4943,11 @@
       "apply-task-batch-1": "completed",
       "apply-task-batch-2": "completed"
     },
+    "task_titles": {
+      "T001": "Make token comparison constant time",
+      "T002": "Bound the login attempt store",
+      "T003": "Add regression tests for lockout"
+    },
     "tracked_files": [
       {
         "action": "modified",
@@ -4967,6 +4977,17 @@
     },
     "head_at_start": "<str>",
     "head_before_implement": "<str>",
+    "implement_task_ids": {
+      "<item-types>": [
+        "<str>"
+      ],
+      "<items>": [
+        "<str>",
+        "<str>",
+        "<str>"
+      ],
+      "<list>": 3
+    },
     "metrics": {
       "apply-code-fixes": {
         "<item-types>": [
@@ -5160,6 +5181,11 @@
       "apply-task-batch-0": "<str>",
       "apply-task-batch-1": "<str>",
       "apply-task-batch-2": "<str>"
+    },
+    "task_titles": {
+      "T001": "<str>",
+      "T002": "<str>",
+      "T003": "<str>"
     },
     "tracked_files": {
       "<item-types>": [
@@ -5673,8 +5699,7 @@
             },
             "total": "<int>"
           },
-          "tasks_done": "<int>",
-          "tasks_total": "<int>"
+          "tasks_generated": "<int>"
         },
         "state": "<str>",
         "updated_at": "<str>"
@@ -5683,8 +5708,7 @@
         "state=complete",
         "progress.step",
         "progress.subagents",
-        "progress.tasks_done",
-        "progress.tasks_total"
+        "progress.tasks_generated"
       ]
     },
     "implement/.status.json": {
