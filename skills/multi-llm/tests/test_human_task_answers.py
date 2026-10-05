@@ -252,7 +252,7 @@ class TestSkipTakesTheDependentsUnderEveryStrategy:
         assert _implement(repo, "--force-strategy", "skip-continue") == 3
         text = capsys.readouterr()
         text = text.out + text.err
-        skip_line = next(l for l in text.splitlines() if "--human-task T002=skip" in l)
+        skip_line = next(row for row in text.splitlines() if "--human-task T002=skip" in row)
         assert "T004" in skip_line and "stay undone" in skip_line
         # The deferred manual task is not something the skip decides.
         assert "T005" not in skip_line, skip_line
@@ -410,7 +410,7 @@ class TestTheReviewRecordNamesAnAcceptedFailure:
         _run_one_that_stops(repo, capsys)
         assert _implement(repo, "--resume", "--human-task", "T002=done") == 0
         record = code_review_orchestrator.build_implementation_record(repo.plan)
-        line = next((l for l in record.splitlines() if "whose failure the user accepted" in l), "")
+        line = next((row for row in record.splitlines() if "whose failure the user accepted" in row), "")
         assert "T002 (accepted — you answered --human-task T002=done" in line, record
         assert "did not pass" in line
 
@@ -434,7 +434,7 @@ class TestTheStatusPollRelaysTheStopLineUnderExitZero:
             "status", str(plan), "--view", "run", "--run-id", "run-stop-1", "--exit-zero",
         ]) == 0
         out = capsys.readouterr().out
-        line = [l for l in out.splitlines() if l.startswith("MULTI_LLM_RESULT:")][-1]
+        line = [row for row in out.splitlines() if row.startswith("MULTI_LLM_RESULT:")][-1]
         payload = json.loads(line.split(" ", 1)[1])
         assert payload["exit"] == 0 and payload["state"] == "needs-human"
         assert payload["error"] == headline
