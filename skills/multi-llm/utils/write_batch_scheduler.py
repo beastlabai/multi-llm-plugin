@@ -2188,8 +2188,8 @@ class WriteBatchScheduler:
         lines.append(
             f"Check findings: {', '.join(found)} ran, changed no file and "
             f"reported problems, so implement continued{where}. Review-code "
-            f"is told about them, and apply-code-fixes applies the fixes it "
-            f"validates."
+            f"is told about them, and apply-code-fixes applies the fixes "
+            f"review-code validates."
         )
         return lines
 
@@ -6255,7 +6255,7 @@ class WriteBatchScheduler:
                 "", "## Check Findings", "",
                 "These checks ran and changed no file, but reported problems. "
                 "Implement continued; review-code is told about them, and "
-                "apply-code-fixes applies the fixes it validates.", "",
+                "apply-code-fixes applies the fixes review-code validates.", "",
             ]
             for row in findings_rows:
                 lines.append(f"### {row['task_id']}")
