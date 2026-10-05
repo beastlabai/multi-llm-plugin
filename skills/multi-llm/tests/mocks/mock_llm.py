@@ -104,6 +104,10 @@ Environment Variables (New - for scenario-based testing):
         contains it prints a ``status: failed`` batch result (summary from
         MOCK_LLM_WRITE_FAIL_SUMMARY, notes from MOCK_LLM_WRITE_FAIL_NOTES)
         while every other invocation keeps the derived result.
+    MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS: a substring; an invocation whose prompt
+        contains it prints a ``status: no-op`` batch result carrying the
+        ``check`` object in MOCK_LLM_WRITE_CHECK (JSON; default: two findings)
+        — a check task that ran and reported problems.
     MOCK_LLM_WRITE_RESULT: JSON object the mock prints as the D3g batch result
         (``status``/``ids``/``files_touched``/``summary``/``notes``). Defaults are
         derived from MOCK_LLM_EDITS so the common case needs only that.
@@ -622,6 +626,22 @@ def write_batch_result(applied: List[Dict[str, Any]], prompt: str = "") -> str:
         ids = json.loads(os.environ.get("MOCK_LLM_WRITE_IDS") or "[]")
     except json.JSONDecodeError:
         ids = []
+    checking = os.environ.get("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS")
+    if checking and checking in (prompt or "") and not applied:
+        check = json.loads(os.environ.get("MOCK_LLM_WRITE_CHECK") or json.dumps({
+            "passed": False,
+            "findings": [
+                "npx html-validate index.html: index.html:1 doctype must be lowercase",
+                "npx html-validate index.html: index.html:9 aria-label misused",
+            ],
+        }))
+        return json.dumps({
+            "status": "no-op",
+            "ids": [str(item) for item in ids] if isinstance(ids, list) else [],
+            "files_touched": [],
+            "summary": "the checks ran",
+            "check": check,
+        })
     return json.dumps({
         "status": "applied" if applied else "no-op",
         "ids": [str(item) for item in ids] if isinstance(ids, list) else [],
@@ -1981,6 +2001,7 @@ def main() -> int:
     gated_write = bool(
         (os.environ.get("MOCK_LLM_EDITS") and os.environ.get("MOCK_LLM_EDITS_IF_PROMPT_HAS"))
         or os.environ.get("MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS")
+        or os.environ.get("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS")
     )
     if applied_edits or gated_write or os.environ.get("MOCK_LLM_WRITE_RESULT") or os.environ.get(
         "MOCK_LLM_PROSE"

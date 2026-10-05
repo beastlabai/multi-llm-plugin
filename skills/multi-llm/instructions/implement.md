@@ -317,6 +317,16 @@ again: when the files git sees have the same sizes and timestamps as when it fai
 (`verdict.tree_fingerprint` on its result file), the stop is repeated with the remedy
 and no dispatch is spent; `--human-task <id>=retry` runs it anyway.
 
+A check that ran and reported problems (`check-findings`) is not a stop: the tasks that
+do not depend on it run. The tasks that depend on it, directly or through another task,
+are not run — each is recorded `not run — upstream check <id> reported problems` in
+`state.json`, `summary.md` (`## Not Run: Upstream Check Reported Problems`),
+`write_batch_report.json` (`blocked_by_check`, `not_run_tasks`, `stop`) and `status` —
+and once every other task has run, implement ends needing a human (exit 3, the phase not
+completed) with the same three ways forward: fix the code and `--resume`, accept the
+findings with `--human-task <id>=done` (the waiting tasks run and the findings stay listed
+for review-code), or `--human-task <id>=skip`.
+
 `--dry-run-subagents` renders every command, applies every admission and policy
 check, writes `{phase}/subagent_dry_run.json` and starts no child.
 `--detach` self-daemonizes the phase and reports per-task progress in

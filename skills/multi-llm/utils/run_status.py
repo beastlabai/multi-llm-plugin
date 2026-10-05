@@ -1859,8 +1859,17 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
-    if not_run:
-        parts.append(f"not run {', '.join(map(str, not_run))}")
+    # Fix round 11: a task a check with findings kept from running says so,
+    # naming the check (from the run's first such check on, not only at its end).
+    blocked = mirror.get("blocked_by_check") if isinstance(mirror.get("blocked_by_check"), dict) else {}
+    stopped = [task_id for task_id in not_run if str(task_id) not in blocked]
+    if stopped:
+        parts.append(f"not run {', '.join(map(str, stopped))}")
+    for check_id in sorted({str(value) for value in blocked.values()}):
+        waiting = sorted(str(t) for t, c in blocked.items() if str(c) == check_id)
+        parts.append(
+            f"not run (upstream check {check_id} reported problems) {', '.join(waiting)}"
+        )
     accepted = mirror.get("accepted_task_ids") if isinstance(mirror.get("accepted_task_ids"), list) else []
     if accepted:
         parts.append(f"accepted after failing {', '.join(map(str, accepted))}")

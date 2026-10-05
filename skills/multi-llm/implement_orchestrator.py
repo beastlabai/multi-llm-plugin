@@ -948,8 +948,9 @@ def check_findings_notice(found: Dict[str, List[str]]) -> str:
         more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
         parts.append(f"{task_id}: {first[:160]}{more}")
     return (
-        "check findings (implement continued; review-code is told about "
-        "them; all listed in implement/summary.md): " + "; ".join(parts)
+        "check findings (the tasks that depend on these checks wait for them; "
+        "review-code is told about them; all listed in implement/summary.md): "
+        + "; ".join(parts)
     )[:900]
 
 
