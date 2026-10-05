@@ -99,6 +99,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         profile_for_kind,
         resolve_output_target,
         resolve_task_runner,
+        row_outcome_label,
         validate_result,
     )
     from .subagent_tasks import (
@@ -178,6 +179,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         profile_for_kind,
         resolve_output_target,
         resolve_task_runner,
+        row_outcome_label,
         validate_result,
     )
     from utils.subagent_tasks import (
@@ -1781,6 +1783,7 @@ class WriteBatchScheduler:
                                    else WRITE_APPLIED)),
                 summary=data.get("summary"),
                 reason=verdict.get("reason") or recorded.get("reason"),
+                verification_only=bool(verdict.get("verification_only")),
             )
             outcome.output_path = output_path
             # The files the earlier run verified for this batch, so a resumed
@@ -2888,6 +2891,9 @@ class WriteBatchScheduler:
         # and the per-batch result file.
         outcome.expected_ids = expected_ids
         outcome.returned_ids = reported_ids
+        # Whatever branch decides it, a file-less implement task's verdict
+        # reads VERIFIED or PARTIAL on every surface (`outcome_label`).
+        outcome.verification_only = self._verification_only(snapshot)
         outcome.sha256_before = {
             relative: row.get("sha256_before") for relative, row in observed.items()
         }
@@ -3560,6 +3566,11 @@ class WriteBatchScheduler:
                 "sha256_after": outcome.sha256_after,
                 "reason": outcome.reason,
             }
+            if outcome.verification_only:
+                # The same two keys the report rows carry; a resume skip
+                # reads them back so its row keeps the label.
+                data["verdict"]["verification_only"] = True
+                data["verdict"]["outcome_label"] = outcome.outcome_label
             # The batch's identity beyond its positional name (2026-10-02):
             # the items it was materialized for and the inputs binding they
             # were materialized from, so a resume whose selection renumbered
@@ -3614,6 +3625,13 @@ class WriteBatchScheduler:
 
         if outcome.write_outcome == WRITE_APPLIED:
             summary = outcome.summary or f"batch {batch_index} applied"
+        elif outcome.write_outcome == WRITE_NO_OP and outcome.verification_only:
+            # A check that ran and moved nothing: say it passed, in the word
+            # every other surface uses for it.
+            summary = (
+                f"(verified — {outcome.summary or 'the check passed'}, "
+                f"no file changed)"
+            )
         elif outcome.write_outcome == WRITE_NO_OP:
             # The claim and the verdict agreed; say so, so the next batch reads
             # "already there" rather than "failed".
@@ -3671,7 +3689,7 @@ class WriteBatchScheduler:
             # One line per batch, on the happy path (F7). Every other `self.log`
             # in the loop is exceptional, so a 25-minute five-batch run left an
             # 11-line log — and `status` points the user at that log.
-            verdict = outcome.write_outcome or outcome.status
+            verdict = outcome.outcome_label or outcome.status
             if outcome.write_outcome and not outcome.ok:
                 # Plan step 3: a failed batch whose write outcome reads
                 # "clean-failure" says which failure it was.
@@ -5014,7 +5032,7 @@ class WriteBatchScheduler:
                 " (earlier run)" if row.get("from_earlier_run") else ""
             )
             lines.append(
-                f"| {task_cell} | {row.get('write_outcome') or row.get('status')} | "
+                f"| {task_cell} | {row_outcome_label(row) or row.get('status')} | "
                 f"{', '.join(row.get('files_touched') or []) or '—'} | "
                 f"{(row.get('reason') or row.get('summary') or '').replace('|', '/')[:160]} |"
             )
@@ -5239,6 +5257,9 @@ class WriteBatchScheduler:
                                 "batch_index": self._batch_index_of(o.task_id),
                                 "status": o.status,
                                 "write_outcome": o.write_outcome,
+                                **({"verification_only": True,
+                                    "outcome_label": o.outcome_label}
+                                   if o.verification_only else {}),
                                 "files_touched": list(o.files_touched),
                                 # Plan step 3: the rung, only when there was one.
                                 **({"sandbox_rung": self._dispatch_rungs[o.task_id]}

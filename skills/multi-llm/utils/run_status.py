@@ -1774,7 +1774,10 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             parts.append(f"{status} {count}")
     outcomes: Dict[str, int] = {}
     for row in tasks:
-        outcome = str((row or {}).get("write_outcome") or "")
+        # `outcome_label` first: a verification-only task's `no-op` reads
+        # `verified` here as on every other surface (2026-10-04).
+        row = row if isinstance(row, dict) else {}
+        outcome = str(row.get("outcome_label") or row.get("write_outcome") or "")
         if outcome:
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
     # F14: when every batch's outcome is `applied` the breakdown collapses to
