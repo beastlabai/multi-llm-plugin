@@ -804,3 +804,63 @@ class TestLooksLikeNdjson:
     def test_a_torn_line_outside_the_last_position_is_prose(self):
         text = '{"type":"a"}\n{"type":"b"\n{"type":"c"}'
         assert looks_like_ndjson(text) is False
+
+
+#: apply-suggestions batch 6 of the 2026-10-05 OpenCode run (opencode/big-pickle),
+#: trimmed: the closing message's report object carries a raw NUL byte in a key.
+#: The strict parse failed the whole object and the extractor served the report's
+#: own `files_touched` array, so the batch was rejected as "expected type object,
+#: got list".
+BATCH_6_REPLY = (
+    "Changes applied to `plans/racing-game.md` (Race logic + Game loop):\n\n"
+    "- **Countdown timing**: each of \"3\", \"2\", \"1\", \"GO\" lasts exactly 1 s.\n\n"
+    "```json\n"
+    '{"status": "applied", "ids\x00": ["cce38d9dab8f0315"], '
+    '"ids": ["cce38d9dab8f0315"], "files_touched": ["plans/racing-game.md"], '
+    '"summary": "Race logic + Game loop now specify the 4s countdown.", '
+    '"notes": "Timer start at GO was already specified by Batch 1."}\n'
+    "```"
+)
+
+
+class TestRawControlCharacters:
+    """A tab, line break or NUL byte typed inside a string is kept, not fatal."""
+
+    def test_a_nul_byte_in_a_key_no_longer_hands_back_an_inner_array(self):
+        result = extract_json_from_text(BATCH_6_REPLY)
+
+        assert result["success"]
+        assert isinstance(result["data"], dict)
+        assert result["data"]["status"] == "applied"
+        assert result["data"]["files_touched"] == ["plans/racing-game.md"]
+        # The byte is kept exactly as written, never cleaned up.
+        assert "ids\x00" in result["data"]
+
+    def test_a_raw_line_break_inside_a_string_is_kept(self):
+        result = extract_json_from_text('{"summary": "line one\nline two"}')
+
+        assert result["success"]
+        assert result["data"] == {"summary": "line one\nline two"}
+
+    def test_every_other_syntax_error_still_fails_the_document(self):
+        """Only control characters are tolerated: an unescaped quote still breaks
+        the outer object, so the extractor still falls back to a fragment."""
+        broken = '{"a": "the overlay shows "GO" now", "b": [{"c": 1}]}'
+
+        result = extract_json_from_text(broken)
+
+        assert result["data"] != json.loads(
+            '{"a": "the overlay shows \\"GO\\" now", "b": [{"c": 1}]}'
+        )
+
+    def test_the_opencode_adapter_reads_the_report_object(self):
+        sys.path.insert(0, str(Path(__file__).parent / "mocks"))
+        import mock_llm
+        from utils.providers.opencode import OpenCodeProvider
+
+        stream = mock_llm.format_opencode_output(BATCH_6_REPLY)
+        parsed = OpenCodeProvider().parse_output(stream, "")
+
+        assert parsed["success"]
+        assert isinstance(parsed["data"], dict)
+        assert parsed["data"]["status"] == "applied"
