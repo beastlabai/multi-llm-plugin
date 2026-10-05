@@ -3086,8 +3086,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # target — the plan, or the tasks file — is the grant a dispatch on
         # the plugin-landlock rung carries, and every task's declared set is
         # checked against it. A phase with no single target (apply-code-fixes,
-        # `repo-wide`) passes none; its entries come from step 3b's
-        # enumeration, never from a target.
+        # `repo-wide`) passes none; its grant is one rule on the repository
+        # root (step 3b, revised 2026-10-05), never a target.
         write_target = artifact if self.has_single_write_target else None
         # Every run resumes — a re-run must never apply a landed batch twice —
         # except `--fresh`, which declares prior progress void (`_setup` has
