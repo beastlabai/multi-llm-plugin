@@ -234,8 +234,9 @@ Where `{total_batches}` is the length of the `batches` array.
 ### The Python write executor: `--exec-subagents` (an alternative to this loop)
 
 Everything from here to the end of the batch loop is the **native-subagent** path:
-this agent substitutes `{prior_changes_context}`, snapshots the artifact, spawns a
-subagent, diffs against the snapshot and appends to the prior-changes log.
+this agent binds each batch's prompt with `util write-prompt`, snapshots the
+artifact, spawns a subagent on the bound prompt file, diffs against the snapshot
+and appends to the prior-changes log.
 
 A host with no native subagent tool runs the *same* loop in Python instead. Add
 `--exec-subagents` to the orchestrator invocation above and the phase schedules
@@ -281,41 +282,44 @@ Three flags belong to that path and are worth knowing even on this one:
 
 For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
-1. **Read prior changes** — Run:
+1. **Bind the batch prompt** — Run:
    ```bash
-   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes read \
-     --output-dir "{plan}/apply-fixes"
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
+     --phase-dir "{plan}/apply-fixes" --task-id "{task.task_id}"
    ```
-   Capture stdout as `prior_changes_text`.
+   `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-fix-batch-0`, `apply-fix-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 6 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-fixes/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Note the path and the line count for step 2. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
 
-   **Error handling**: If `read` fails (corrupted JSONL, permission error, unexpected exception), use the default text `(none — this is the first batch)` and log a warning. Do not abort the batch loop.
+   **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report.
 
-2. **Substitute placeholder** — In `batch.prompt`, replace the literal `{prior_changes_context}` with `prior_changes_text`.
-
-3. **Run the batch as a subagent** (`executor_role: "agent"` on every fix batch):
+2. **Run the batch as a subagent** (`executor_role: "agent"` on every fix batch) whose whole prompt is: read the file at the `[WRITE_PROMPT]` path in full — through line `[WRITE_PROMPT_LINES]`, paging if a single read stops short — and follow it verbatim.
    - `general-purpose` for all fixes
-4. **Wait for completion** - Do NOT parallelize batch processing
+   - That is the entire contract: do not paste the prompt text, add instructions of your own, or hand the subagent the JSON. The file already contains the fixes, the prior-batch context and the reply format (it ends with a JSON object the steps below read)
+3. **Wait for completion** - Do NOT parallelize batch processing
 
-5. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file/diff state rather than relying solely on the subagent's exit status. Classify the result:
+4. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file/diff state rather than relying solely on the subagent's exit status. Classify the result:
    - **Success**: The expected changes are present in the target files (verified via diff or content check).
    - **Failure (clean)**: The subagent failed and no file modifications were made (verified by checking that target files are unchanged from their pre-batch state).
    - **Partial application**: Some but not all expected changes are present, or the subagent failed but file modifications were detected.
 
    **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming.
 
-6. **Extract summary** — Generate a one-line summary by compressing the subagent's response into a single sentence. Do **not** require the subagent to output a special summary line.
+5. **Extract summary** — The subagent's reply ends with one JSON object (`{"status", "ids", "files_touched", "summary", "notes"}`: the result contract the prompt file carries). Take its `summary` as the one-line summary; its `status` (`applied` / `no-op` / `failed`) and `files_touched` are evidence for step 4, never a substitute for the file check. If the reply carries no such object, compress the reply into a single sentence instead.
 
    **Normalize** the summary: collapse any newlines or multiple spaces to a single space, trim leading/trailing whitespace, and truncate to 200 characters if needed.
 
-7. **Append to prior changes (only after verification)** — This step runs **only** after step 5 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
+6. **Append to prior changes (only after verification)** — This step runs **only** after step 4 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
-     --output-dir "{plan}/apply-fixes" \
+     --output-dir "{plan}" \
      --id "{batch.prior_changes_id}" --phase "apply-fixes" --summary-stdin <<'SUMMARY_EOF'
    {normalized_summary}
    SUMMARY_EOF
    ```
-   The `--id` is `batch.prior_changes_id` — read it off the batch, never construct one.
+   `--output-dir` is the plan directory `{plan}` (the one holding `state.json`): the one
+   log every write phase of this plan shares, the one `util write-prompt` binds the next
+   batch's prompt from, and the one the `--exec-subagents` executor appends to — scoped
+   per phase by `--phase`, never a per-phase file.
+   The `--id` is `batch.prior_changes_id` — read it off the batch (it is the same value in `write_tasks.json`), never construct one.
    The batcher emits **many** batches for the same `file_key`, and `append` is idempotent
    on `(id, phase)`: an id two batches share records the first and silently drops the
    rest (exit 0, a `Notice:` on stderr), so every later batch reads a prior-changes
@@ -332,8 +336,8 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Error handling**: If `append` fails, log a warning but do not abort the batch loop.
 
-8. **Log the result** - Track success/failure for the summary
-9. **Record metrics** — Run:
+7. **Log the result** - Track success/failure for the summary
+8. **Record metrics** — Run:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-code-fixes" \
@@ -499,17 +503,17 @@ See: [Applied Fixes Report](./my-feature/apply-fixes/summary.md)
 
 ### 10. Mark Phase Completed
 
-**Run this only if step 5's batch loop reached the end** — every batch dispatched, every batch verified in step 5.5, and step 7's verification run. Then mark the apply-code-fixes phase as completed in state.json:
+**Run this only if step 5's batch loop reached the end** — every batch dispatched, every batch verified in step 5.4, and step 7's verification run. Then mark the apply-code-fixes phase as completed in state.json:
 
 ```bash
 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-code-fixes --plan-file "$PLAN_PATH" --mark-completed
 ```
 
-**Do NOT run it if the loop stopped early** — a clean failure you aborted on, a partial application you surfaced for human review (step 5.5), or an interrupted run. The phase must stay *incomplete* in those cases, because that record is what tells a later `--resume`, `--full` run or grader that the fixes were actually applied. A stopped loop simply never reaches this step; there is nothing else to do to leave the phase open.
+**Do NOT run it if the loop stopped early** — a clean failure you aborted on, a partial application you surfaced for human review (step 5.4), or an interrupted run. The phase must stay *incomplete* in those cases, because that record is what tells a later `--resume`, `--full` run or grader that the fixes were actually applied. A stopped loop simply never reaches this step; there is nothing else to do to leave the phase open.
 
 Two notes on the word this writes:
 
-- It records the **mode** name `apply-code-fixes` in `phases_completed`, not the phase-**directory** name `apply-fixes` that steps 5.1 and 5.7 pass to `util prior-changes`. These are two different fields with two different owners (`state.json.phases_completed` vs. `prior_changes.jsonl`'s per-entry `phase`) and both spellings are deliberate; do not "unify" them here. `util prior-changes` itself is more forgiving of the *other* field: `append`/`render` treat `apply-fixes` and `apply-code-fixes` as one phase (`utils/prior_changes.PHASE_ALIASES`), because the `--exec-subagents` executor writes `prior_changes.jsonl` entries under the mode word — so passing either spelling to `util prior-changes` lands on the same entries; step 5.7 still names `"apply-fixes"` as the one to type.
+- It records the **mode** name `apply-code-fixes` in `phases_completed`, not the phase-**directory** name `apply-fixes` that step 5.6 passes to `util prior-changes`. These are two different fields with two different owners (`state.json.phases_completed` vs. `prior_changes.jsonl`'s per-entry `phase`) and both spellings are deliberate; do not "unify" them here. `util prior-changes` itself is more forgiving of the *other* field: `append`/`render` treat `apply-fixes` and `apply-code-fixes` as one phase (`utils/prior_changes.PHASE_ALIASES`), because the `--exec-subagents` executor writes `prior_changes.jsonl` entries under the mode word — so passing either spelling to `util prior-changes` lands on the same entries; step 5.6 still names `"apply-fixes"` as the one to type.
 - It is the same word `--exec-subagents` records when its executor finalizes, so the native loop and the Python executor cannot drift apart. Under `--exec-subagents` the executor has already done this and there is no separate command to run.
 
 This ensures subsequent phases (and `check_workflow_prerequisites`) recognize that the code fixes have been applied.
