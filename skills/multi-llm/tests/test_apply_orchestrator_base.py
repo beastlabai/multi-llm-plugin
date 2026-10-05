@@ -837,11 +837,23 @@ class TestConfigDrivenBranching:
         args = _make_args(plan_file=str(plan_path))
 
         orch = MockApplyOrchestrator(args)
+        orch.create_batches = lambda items: [{"items": list(items)}]
         exit_code = orch.run()
         assert exit_code == 0
 
         assert orch.state.is_phase_started(orch.phase_name)
         assert not orch.state.is_phase_completed(orch.phase_name)
+
+    def test_nothing_handed_out_completes_the_phase_at_emit(self, tmp_path):
+        """No batch and no human item left: the work is done at emit, so the
+        record says completed — a started record would wait for a closing
+        step over an empty loop (every suggestion invalid, 2026-10-05)."""
+        plan_path = _setup_plan_with_output(tmp_path)
+        orch = MockApplyOrchestrator(_make_args(plan_file=str(plan_path)))
+        assert orch.run() == 0
+        assert orch.batches == [] and orch.needs_human == []
+        assert orch.state.is_phase_completed(orch.phase_name)
+        assert not orch.state.is_phase_started(orch.phase_name)
 
     def test_supports_skip_flag_false_ignores_skip(self, tmp_path):
         """When supports_skip_flag=False, --skip flag has no effect."""
@@ -2724,6 +2736,13 @@ class TestStateTransitionParity:
                 self.call_log.append("load_data")
                 return (_groups, _validation)
 
+            def create_batches(self, items):
+                # One batch per run, so the emit path has something to hand
+                # out: with no batch and no human item it records the phase
+                # completed instead (see `_write_outputs`).
+                self.call_log.append("create_batches")
+                return [{"items": list(items)}] if items else []
+
         return ConfiguredOrch
 
     @staticmethod
@@ -3865,6 +3884,13 @@ class TestExitCodeAndPromptParity:
             def load_data(self):
                 self.call_log.append("load_data")
                 return (_groups, _validation)
+
+            def create_batches(self, items):
+                # One batch per run, so the emit path has something to hand
+                # out: with no batch and no human item it records the phase
+                # completed instead (see `_write_outputs`).
+                self.call_log.append("create_batches")
+                return [{"items": list(items)}] if items else []
 
         return ConfiguredOrch
 

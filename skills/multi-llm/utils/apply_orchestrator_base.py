@@ -1991,9 +1991,15 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # and the next-step builder read a phase as done while the host was
         # still applying its batches — or after it had died halfway.
         if self.state is not None:
-            self.state.mark_phase_started(
-                self.confirmation_phase_name or self.phase_name
-            )
+            word = self.confirmation_phase_name or self.phase_name
+            if not self.batches and not self.needs_human:
+                # Nothing handed out and nothing left to decide (every item
+                # invalid or skipped): the phase's work is done at emit, so
+                # the record says so — a started record here would wait for
+                # a closing step over an empty loop.
+                self.state.mark_phase_completed(word)
+            else:
+                self.state.mark_phase_started(word)
             self.state.save()
 
         # Step 34: Print summary
