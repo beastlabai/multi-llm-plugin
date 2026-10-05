@@ -574,6 +574,11 @@ ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
 #: whole sentence into ``HumanTaskPlan.accepted``).
 ACCEPTED_REASON_PREFIX = "accepted — "
 
+#: The words in the recorded reason of a check accepted with its findings
+#: (``--human-task <id>=done`` on a check that reported problems, fix round
+#: 11): the account names it apart from a task accepted after failing.
+ACCEPTED_WITH_FINDINGS_MARK = "after its check reported problems"
+
 #: The recorded reason of a manual task answered ``--human-task <id>=done``
 #: (:func:`persist_human_task_plan`; the ``<id>`` is literal).
 COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
@@ -771,10 +776,17 @@ def _accounting_line(account: Dict[str, Any]) -> str:
                 f"{', '.join(waiting)}: upstream check {check_id} reported problems"
             )
         parts.append(f"{len(account['not_run'])} not run ({'; '.join(named)})")
-    if account["accepted"]:
+    with_findings = account.get("accepted_with_findings") or []
+    after_failing = [tid for tid in account["accepted"] if tid not in with_findings]
+    if after_failing:
         parts.append(
-            f"{len(account['accepted'])} accepted after failing "
-            f"({', '.join(account['accepted'])})"
+            f"{len(after_failing)} accepted after failing "
+            f"({', '.join(after_failing)})"
+        )
+    if with_findings:
+        parts.append(
+            f"{len(with_findings)} accepted with their check findings "
+            f"({', '.join(with_findings)})"
         )
     if account["completed_manual"]:
         parts.append(
@@ -907,7 +919,7 @@ def resolve_human_task_plan(
             plan.accepted[task_id] = (
                 f"{ACCEPTED_REASON_PREFIX}you answered --human-task {task_id}=done "
                 + (
-                    "after its check reported problems; the findings stand "
+                    f"{ACCEPTED_WITH_FINDINGS_MARK}; the findings stand "
                     "(review-code is told about them), the check is not run "
                     "again and the tasks after it run"
                     if found else
@@ -5608,10 +5620,17 @@ class WriteBatchScheduler:
                     f"Not run (the stop came before they were dispatched): "
                     f"{', '.join(stopped)}."
                 )
-        if account["accepted"]:
+        with_findings = account.get("accepted_with_findings") or []
+        after_failing = [t for t in account["accepted"] if t not in with_findings]
+        if after_failing:
             lines.append(
                 f"Accepted after failing (--human-task <id>=done): "
-                f"{', '.join(account['accepted'])}."
+                f"{', '.join(after_failing)}."
+            )
+        if with_findings:
+            lines.append(
+                f"Accepted with their check findings (--human-task <id>=done): "
+                f"{', '.join(with_findings)}."
             )
         if account["completed_manual"]:
             lines.append(
@@ -5792,6 +5811,10 @@ class WriteBatchScheduler:
                 tid: cid for tid, cid in result.blocked_by_check.items()
                 if tid in result.not_run
             },
+            "accepted_with_findings": sorted(
+                tid for tid in accepted
+                if ACCEPTED_WITH_FINDINGS_MARK in str(plan.accepted.get(tid) or "")
+            ),
             "accepted": accepted,
             "completed_manual": completed_manual,
             "declined": declined,
@@ -6808,7 +6831,11 @@ class WriteBatchScheduler:
                 f"{(row.get('reason') or row.get('summary') or '').replace('|', '/')[:160]} |"
             )
         for task_id, reason in sorted(result.human_plan.accepted.items()):
-            lines.append(f"| {task_id} | accepted after failing | — | {reason.replace('|', '/')[:160]} |")
+            label = (
+                "accepted with its check findings"
+                if ACCEPTED_WITH_FINDINGS_MARK in reason else "accepted after failing"
+            )
+            lines.append(f"| {task_id} | {label} | — | {reason.replace('|', '/')[:160]} |")
         for task_id in sorted(result.human_plan.completed):
             lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
         for task_id, reason in sorted(result.not_run.items()):
