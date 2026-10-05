@@ -884,6 +884,42 @@ class TestSchemaRepairPrompt:
         assert 'Changes applied.\n{"status": "applied", "ids": ["a"]}' in prompt
         assert "never name an id or a\nfile it does not name" in prompt
 
+    @pytest.mark.parametrize("kind,item", [
+        ("apply_suggestions", "suggestion"),
+        ("apply_task_suggestions", "suggestion"),
+        ("apply_code_fixes", "fix"),
+    ])
+    def test_the_write_form_lists_the_batchs_ids_in_prompt_order(self, kind, item):
+        """Fix round 11 (OpenCode racing run 4): the re-ask never named the
+        batch's ids, and a reply that numbered its items ("Suggestion 1: …",
+        as the batch prompt's Return Format asks) was restated with those
+        names instead of the ids."""
+        prompt = subagent_prompts.build_schema_repair_prompt(
+            kind, "Q", ["x"], previous_reply="Suggestion 1: done\nSuggestion 2: done",
+            expected_ids=["ec8092961e62a151", "7f1f3c58776954ff"],
+        )
+        assert (
+            f"- {item} 1 = `ec8092961e62a151`\n- {item} 2 = `7f1f3c58776954ff`"
+        ) in prompt
+        assert "`ids` must use these spellings" in prompt
+        assert "write the id listed beside\nthat number" in prompt
+        assert "Name no id outside this list." in prompt
+        assert "never claim an id for an item it does\nnot say it applied" in prompt
+        # The list comes after the quoted reply and before the reply rules.
+        assert (
+            prompt.index("PREVIOUS REPLY>>>")
+            < prompt.index("## The batch's ids")
+            < prompt.index("## Reply")
+        )
+
+    def test_the_write_form_without_ids_lists_none(self):
+        prompt = subagent_prompts.build_schema_repair_prompt(
+            "apply_suggestions", "Q", ["x"], previous_reply="done",
+            expected_ids=[],
+        )
+        assert "## The batch's ids" not in prompt
+        assert "never name an id or a\nfile it does not name" in prompt
+
     def test_the_write_form_needs_a_reply_and_keeps_its_tail(self):
         with pytest.raises(ValueError):
             subagent_prompts.build_schema_repair_prompt(
