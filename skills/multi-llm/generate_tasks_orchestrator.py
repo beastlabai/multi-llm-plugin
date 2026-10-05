@@ -533,13 +533,14 @@ def consume_document(plan_path: Path, result_path: str) -> int:
         phase_dir, tasks=str(tasks_path), plan=str(plan_path)
     )
     _update_status(phase_dir, {"state": "complete"})
-    # The count is this phase's whole output, so report it: `_progress_text`
-    # renders `tasks_total`/`tasks_done`, and a step-only report left `status`
-    # printing the one subagent that produced the list (`task_generation 1/1
-    # ok`) as the only number on screen.
-    _detach.report_progress(
-        phase_dir, step="complete", tasks_total=len(tasks), tasks_done=len(tasks)
-    )
+    # The count is this phase's whole output, so report it: a step-only report
+    # left `status` printing the one subagent that produced the list
+    # (`task_generation 1/1 ok`) as the only number on screen. It is what this
+    # run PRODUCED (`generated N tasks`), never a done/total pair: the
+    # `tasks 10/10` that pair rendered read as a live count of tasks.md, and
+    # stayed 10/10 after apply-task-suggestions split two tasks into four
+    # (2026-10-04, Claude Code racing re-run).
+    _detach.report_progress(phase_dir, step="complete", tasks_generated=len(tasks))
     print(f"\nTask generation complete: {len(tasks)} task(s) in {tasks_path}")
     # No "Next: uv run … review-tasks" line here (issue #17, 2026-10-02): it sat
     # beside `[NEXT_COMMAND]` in the log, and a dispatcher command is not a

@@ -34,8 +34,8 @@ writing a second file with a private shape — ``run`` only ever on a detached r
   **not** process state — ``update_run``'s successor-state guard does not
   apply to it, and ``claim_run`` writes it once at start and never again.
 * ``progress``: ``{step, batch_index, batches_total, tasks_done, tasks_total,
-  failed_task_ids, models, models_done, models_succeeded, models_total,
-  interval_s}`` — reporting only; no external actor advances it, and nothing
+  tasks_generated, failed_task_ids, models, models_done, models_succeeded,
+  models_total, interval_s}`` — reporting only; no external actor advances it, and nothing
   resumes, reaggregates or branches on it. That is why it is the one reserved
   object a **foreground** run writes too, and why ``detach.report_progress``
   writes on *every* path: the run handle it consults picks the **door**, never

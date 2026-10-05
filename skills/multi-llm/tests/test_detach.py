@@ -2118,8 +2118,11 @@ class TestStatusSurface:
         """For the phase whose whole output is a count, `1/1 subagents` is the
         least informative number on screen — the interesting one is how many
         tasks it wrote (measured 2026-09-16: 14, present nowhere in
-        `.status.json`). `consume_document` now reports `tasks_total`/
-        `tasks_done`, which `_progress_text` already knew how to render."""
+        `.status.json`). It is labelled as what the run PRODUCED: a
+        `tasks 14/14` pair read as a live count of tasks.md, and went stale
+        the moment apply-task-suggestions split a task (2026-10-04, Claude
+        Code racing re-run: `tasks 10/10` beside a 12-task list). A checkpoint
+        written before `tasks_generated` existed renders the same way."""
         plan = _plan(tmp_path)
         phase = _phase_dir(plan, "generate-tasks")
         status_file.claim_run(str(phase), {
@@ -2140,10 +2143,31 @@ class TestStatusSurface:
             },
         })
         assert run_status.main(["--plan-file", str(plan)]) == 0
+        out = capsys.readouterr().out
         assert (
-            "progress:       complete, tasks 14/14, task_generation 1/1 ok"
-            in capsys.readouterr().out
+            "progress:       complete, generated 14 tasks, task_generation 1/1 ok"
+            in out
         )
+        assert "tasks 14/14" not in out
+
+        # The checkpoint today's generate-tasks writes.
+        status_file.update_status(str(phase), {
+            "progress": {"step": "complete", "tasks_generated": 12,
+                         "tasks_total": None, "tasks_done": None},
+        })
+        assert run_status.main(["--plan-file", str(plan)]) == 0
+        assert "progress:       complete, generated 12 tasks" in capsys.readouterr().out
+
+    def test_a_task_count_elsewhere_keeps_its_done_total_reading(self, tmp_path, capsys):
+        """Only generate-tasks' count is a product; `tasks_done/tasks_total`
+        under any other phase is still progress."""
+        from utils import run_status as rs
+
+        assert rs._progress_text({"tasks_total": 9, "tasks_done": 4}) == "tasks 4/9"
+        assert rs._progress_text(
+            {"tasks_total": 9, "tasks_done": 9}, phase="implement"
+        ) == "tasks 9/9"
+        assert rs._progress_text({"tasks_generated": 1}) == "generated 1 task"
 
     def test_the_write_mirror_counts_its_task_rows(self, tmp_path, capsys):
         """`write_subagents` records one row per task and no `counts`/`ok`
