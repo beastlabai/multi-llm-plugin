@@ -2336,14 +2336,40 @@ class TestTheWayForwardLeadsTheResult:
                         state=STATES["needs_human"], exit=CODES["needs_human"])]}
         return harness.run(IMPLEMENT, [launch_step(), blocked], meta=self.META, **kwargs)
 
+    def _pad_runbook(self, harness):
+        # A runbook and an output the size of the real ones (~40 000 and ~6 000
+        # characters), so the result is cut the way 06b's was.
+        harness.runbook.write_text(runbook_text().replace(
+            "# Core\n", "# Core\n" + "WORKFLOW-PADDING: a step the model owes.\n" * 1000),
+            encoding="utf-8")
+
     def test_a_blocked_run_leads_with_the_resume_command(self, harness):
         envelope, result, _, _ = self._blocked(harness)
         assert list(envelope)[:4] == ["ok", "state", "user_next_step", "resume_command"]
-        assert list(envelope)[4] == "message"
+        assert list(envelope)[4:6] == ["options", "message"]
         assert list(envelope)[-1] == "runbook"
         text = result["content"][0]["text"]
         assert len(text) > 40_000
         assert json.dumps(envelope["resume_command"]) in codex_cut(text)
+        # Fix round 8: the re-invoke options trailed `result`, `output` and
+        # `stderr`, inside the dropped middle.
+        assert json.dumps(envelope["options"]) in codex_cut(text)
+
+    def test_a_budget_handoff_leads_with_the_reattach_and_the_abort(self, harness):
+        """Fix round 8: a handoff (`ok: true`, `state: running`, runbook
+        attached) has its way forward in `next` and `abort_command`, which sat
+        after the environment, the relays and the progress lines."""
+        self._pad_runbook(harness)
+        envelope, result, _, _ = harness.run(
+            IMPLEMENT, [launch_step(run_id="RID-T")] + [poll_step(2, sleep=0.2)] * 50,
+            meta=self.META, extra_env={"MLLM_TEST_POLL_BUDGET_MS": "1000"})
+        assert envelope["ok"] is True and envelope["state"] == STATES["running"]
+        assert list(envelope)[:5] == ["ok", "state", "next", "abort_command", "message"]
+        assert list(envelope)[-1] == "runbook"
+        text = result["content"][0]["text"]
+        assert len(text) > 40_000
+        for key in ("next", "abort_command"):
+            assert json.dumps(envelope[key]) in codex_cut(text), key
 
     def test_no_command_leads_with_its_reason(self, harness):
         envelope, result, _, _ = self._blocked(harness, extra_env={"STUB_RESUME_FAIL": "1"})
