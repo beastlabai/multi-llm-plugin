@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "required": ["schema_version", "plan_preamble", "tasks"],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"type": "string", "const": "1.0"},
     "plan_preamble": {
       "type": "string",
       "minLength": 1,
@@ -43,8 +43,8 @@
         "files_to_create": {"type": "array", "items": {"type": "string"}},
         "files_to_modify": {"type": "array", "items": {"type": "string"}},
         "acceptance_criteria": {"type": "array", "items": {"type": "string"}},
-        "estimated_complexity": {"enum": ["low", "medium", "high"]},
-        "executor_role": {"enum": ["agent", "human"]},
+        "estimated_complexity": {"type": "string", "enum": ["low", "medium", "high"]},
+        "executor_role": {"type": "string", "enum": ["agent", "human"]},
         "subagent_type": {
           "type": ["string", "null"],
           "enum": ["general-purpose", "human", null],
