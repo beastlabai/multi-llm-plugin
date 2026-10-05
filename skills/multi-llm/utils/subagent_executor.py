@@ -616,16 +616,81 @@ WRITE_NO_OP = "no-op"
 #: ``partial-application`` like any other partial, so the pair is VERIFIED or
 #: PARTIAL on every surface.
 WRITE_LABEL_VERIFIED = "verified"
+#: A verification-only task whose check ran, changed nothing and reported
+#: problems in its reply's structured ``check`` object (``passed: false`` or a
+#: non-empty ``findings`` list). Never ``verified``: racing re-run 4
+#: (2026-10-05) recorded T007 VERIFIED while ``npx html-validate`` had reported
+#: two problems that lived only in the runner's free-text notes. Not a stop
+#: either: what a check finds is a finding, never an exit code (AGENTS.md), and
+#: review-code / apply-code-fixes are the phases that fix it — so the loop
+#: continues, ``write_outcome`` stays ``no-op`` and every surface names the
+#: findings.
+WRITE_LABEL_CHECK_FINDINGS = "check-findings"
 WRITE_PARTIAL = "partial-application"
+
+#: Bounds on what one check reply's ``findings`` may put on the surfaces
+#: (summary.md, the reports, state.json, review-code's prompts).
+CHECK_FINDINGS_MAX = 20
+CHECK_FINDING_MAX_CHARS = 300
+
+#: The finding recorded for a ``check`` that said ``passed: false`` and listed
+#: none, so the task still reads as one with findings.
+CHECK_FAILED_WITHOUT_FINDINGS = (
+    "the check reported that it did not pass but listed no finding; "
+    "see the runner notes"
+)
 
 
 def write_outcome_label(
     write_outcome: Optional[str], verification_only: bool = False,
+    check_findings: Optional[Sequence[str]] = None,
 ) -> Optional[str]:
     """The word every report shows for a write outcome (:data:`WRITE_LABEL_VERIFIED`)."""
     if verification_only and write_outcome == WRITE_NO_OP:
-        return WRITE_LABEL_VERIFIED
+        return WRITE_LABEL_CHECK_FINDINGS if check_findings else WRITE_LABEL_VERIFIED
     return write_outcome
+
+
+def check_findings_from(result: Any) -> Optional[List[str]]:
+    """The structured check result of a write reply, as a findings list.
+
+    ``None`` when the reply carries no usable ``check`` object (an older
+    reply, or a task that is not a check); ``[]`` when it says the check
+    passed and lists nothing; otherwise the findings, one line each and
+    bounded (:data:`CHECK_FINDINGS_MAX`, :data:`CHECK_FINDING_MAX_CHARS`).
+    ``passed: false`` with no finding listed gets
+    :data:`CHECK_FAILED_WITHOUT_FINDINGS`, and a finding listed beside
+    ``passed: true`` still counts: a check that reported a problem never reads
+    as a clean pass. Read from the reply's own field, never from its notes.
+    """
+    check = result.get("check") if isinstance(result, dict) else None
+    if not isinstance(check, dict):
+        return None
+    raw = check.get("findings")
+    items = raw if isinstance(raw, list) else []
+    findings = []
+    for item in items:
+        if isinstance(item, dict):
+            # An object per finding (`{"command": …, "message": …}`) is read
+            # as its values, so a near-miss shape still names the problem.
+            item = "; ".join(
+                f"{key}: {value}" for key, value in item.items()
+                if value not in (None, "", [], {})
+            )
+        text = " ".join(str(item).split())
+        if text:
+            findings.append(text[:CHECK_FINDING_MAX_CHARS])
+    if len(findings) > CHECK_FINDINGS_MAX:
+        extra = len(findings) - (CHECK_FINDINGS_MAX - 1)
+        findings = findings[:CHECK_FINDINGS_MAX - 1] + [
+            f"(+{extra} more finding(s) in the batch result file)"
+        ]
+    passed = check.get("passed")
+    if not findings and passed is False:
+        findings = [CHECK_FAILED_WITHOUT_FINDINGS]
+    if not findings and passed is not True:
+        return None
+    return findings
 
 
 def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
@@ -635,6 +700,19 @@ def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
     is byte-identical to before), so a reader asks this rather than either key.
     """
     return row.get("outcome_label") or row.get("write_outcome")
+
+
+def check_record(findings: Sequence[str]) -> Dict[str, Any]:
+    """The ``check`` object a row, a verdict stamp and a mirror row carry."""
+    return {"passed": not findings, "findings": list(findings)}
+
+
+def row_check_findings(row: Dict[str, Any]) -> List[str]:
+    """A serialized row's check findings (its ``check`` object), else ``[]``."""
+    check = row.get("check") if isinstance(row, dict) else None
+    if not isinstance(check, dict):
+        return []
+    return [str(item) for item in (check.get("findings") or []) if str(item)]
 WRITE_SCHEMA_REJECTED = "schema-rejection"
 WRITE_POLICY_VIOLATION = "policy-violation"
 
@@ -890,6 +968,11 @@ class TaskOutcome:
     #: nothing in the repository changed since it failed (the scheduler's
     #: unchanged-tree guard). No child ran, so no metric is recorded for it.
     not_rerun: bool = False
+    #: A verification-only task's structured check result
+    #: (:func:`check_findings_from`): ``None`` when its reply carried none,
+    #: ``[]`` when the check passed, else what the check found. Non-empty on a
+    #: ``no-op`` makes the label ``check-findings`` (racing re-run 4).
+    check_findings: Optional[List[str]] = None
 
     @property
     def ok(self) -> bool:
@@ -898,7 +981,9 @@ class TaskOutcome:
     @property
     def outcome_label(self) -> Optional[str]:
         """The word every surface shows for this outcome (:func:`write_outcome_label`)."""
-        return write_outcome_label(self.write_outcome, self.verification_only)
+        return write_outcome_label(
+            self.write_outcome, self.verification_only, self.check_findings,
+        )
 
     @property
     def stops_the_loop(self) -> bool:
@@ -955,6 +1040,8 @@ class TaskOutcome:
                 # Additive and only here, so every other row is unchanged.
                 out["verification_only"] = True
                 out["outcome_label"] = self.outcome_label
+                if self.check_findings is not None:
+                    out["check"] = check_record(self.check_findings)
             if self.runner_notes:
                 out["runner_notes"] = self.runner_notes
             if self.not_rerun:
