@@ -213,6 +213,32 @@ class TestStatusNamesThem:
         run_status.main(["--plan-file", str(reviewed)])
         assert "check findings" not in capsys.readouterr().out
 
+    def test_new_findings_of_an_implement_resume_show_beside_an_older_review(
+        self, tmp_path, capsys
+    ):
+        """Fix round 11 (review finding 5): a review completed before an
+        `implement --resume` that recorded new findings hid them until
+        implement finished."""
+        plan = _plan(tmp_path, completed=UP_TO_CODE_REVIEW)
+        state = StateManager(plan)
+        state.mark_phase_started("implement")
+        state.save()
+        workflow = _workflow(plan)
+        assert workflow["phases"]["implement"]["status"] == "in_progress"
+        assert workflow["phases"]["code-review"]["status"] == "completed"
+        run_status.main(["--plan-file", str(plan)])
+        assert "check findings for review-code" in capsys.readouterr().out
+
+    def test_a_skipped_review_settles_them(self, tmp_path, capsys):
+        """Fix round 11 (review finding 5): a skipped review kept them on
+        screen for good."""
+        plan = _plan(tmp_path)
+        state = StateManager(plan)
+        state.mark_phase_skipped("code-review", "not reviewing this one")
+        state.save()
+        run_status.main(["--plan-file", str(plan)])
+        assert "check findings" not in capsys.readouterr().out
+
     def test_a_terminal_implement_poll_carries_them_into_its_notice(
         self, tmp_path, capsys, monkeypatch
     ):

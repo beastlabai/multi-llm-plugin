@@ -546,12 +546,21 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
         if named:
             lines.append(f"{prefix}manual tasks left for you: {named}")
     # The implement check tasks that ran and reported problems
-    # (`phases.implement.check_findings`, from state.json), until review-code
-    # — which is given them — has completed (racing re-run 4, 2026-10-05).
+    # (`phases.implement.check_findings`, from state.json; racing re-run 4,
+    # 2026-10-05). Shown while implement is unfinished — its findings are
+    # newer than any review on record — and, once it has completed, until a
+    # review-code that judged it has completed or the review was skipped.
+    # Fix round 11 (review finding 5): keyed on review-code alone, an
+    # `implement --resume` that recorded new findings beside an older
+    # completed review hid them until implement finished, and a skipped
+    # review kept them on screen for good.
     phases = payload.get("phases", {}) or {}
     findings = (phases.get("implement") or {}).get("check_findings")
-    review_done = (phases.get("code-review") or {}).get("status") == "completed"
-    if isinstance(findings, list) and findings and not review_done:
+    implement_done = (phases.get("implement") or {}).get("status") == "completed"
+    review_settled = (phases.get("code-review") or {}).get("status") in (
+        "completed", "skipped",
+    )
+    if isinstance(findings, list) and findings and not (implement_done and review_settled):
         named = "; ".join(
             f"{entry['id']} ({len(entry.get('findings') or [])} problem(s): "
             f"{(entry.get('findings') or [''])[0][:120]}"
@@ -561,8 +570,8 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
         )
         if named:
             lines.append(
-                f"{prefix}check findings for review-code (implement "
-                f"continued; see implement/summary.md): {named}"
+                f"{prefix}check findings for review-code (see "
+                f"implement/summary.md): {named}"
             )
     return lines
 
