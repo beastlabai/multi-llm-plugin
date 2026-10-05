@@ -581,7 +581,7 @@ Agent:
 
 For each batch (sequentially):
 - Reads current tasks.md
-- Spawns one subagent with batch.prompt
+- Binds the batch's prompt with `util write-prompt` and spawns one subagent on the bound file
 - Waits for completion
 - Logs results
 
@@ -597,7 +597,7 @@ For needs-human-decision items:
 
 ## Batch Prompt Format
 
-Each batch includes a pre-generated prompt. For single-suggestion batches:
+Each batch carries a prompt template in its `prompt` field (unbound: `util write-prompt` is what binds it for a subagent). For single-suggestion batches:
 
 ```
 Apply the following task suggestion to the tasks file:
@@ -726,7 +726,7 @@ Suggestion N: Already addressed by prior changes - skipped
 
 1. **SEQUENTIAL BATCHES**: Never parallelize batch processing - one batch at a time
 2. **ALWAYS READ FIRST**: Read tasks.md before each batch to get latest state
-3. **USE PRE-GENERATED PROMPTS**: Use the `prompt` field from each batch
+3. **USE THE BOUND PROMPT FILE**: hand each subagent only the `[WRITE_PROMPT]` file `util write-prompt` wrote — never the raw `prompt` field of the JSON, which carries an unbound `{prior_changes_context}` token
 4. **USE SUBAGENTS**: always **spawn subagents** to do the work
 5. **PRESERVE BACKUP**: The orchestrator automatically backs up tasks.md to `apply-task-suggestions/tasks-backup.md` before any modifications. Do not overwrite this backup. The `tasks_file_backup` field in orchestrator_output.json contains the path.
 6. **TRACK EVERYTHING**: Log every applied/skipped suggestion for the report

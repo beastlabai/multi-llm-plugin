@@ -634,15 +634,15 @@ Agent:
    - Tasks file path: plans/my-feature/my-feature_tasks.md
    - Summary file relative: my-feature/my-feature_implementation_summary.md
 3. the agent reads the `Output file:` path exactly as printed in step 2 (absolute path)
-4. For each batch, the agent spawns subagents:
-   - Batch 0 (1 task): subagent with prompt="Create database schema..."
+4. For each batch, the agent binds each task's prompt with `util write-prompt` and spawns subagents that read the bound file:
+   - Batch 0 (1 task): subagent reading T001's `[WRITE_PROMPT]` file ("Create database schema...")
    - Batch 1 (2 tasks, parallel):
-     - subagent with prompt="Implement service layer..."
-     - subagent with prompt="Create form component..."
+     - subagent reading T002's file ("Implement service layer...")
+     - subagent reading T003's file ("Create form component...")
    - Batch 2 (2 tasks, parallel):
-     - subagent with prompt="Add API routes..."
-     - subagent with prompt="Write E2E tests..."
-5. After each task, the agent updates the state file with status
+     - subagent reading T004's file ("Add API routes...")
+     - subagent reading T005's file ("Write E2E tests...")
+5. After each task, the agent records its outcome with `util batch-done` and appends its summary to the prior-changes log
 6. After all tasks complete, Claude generates:
    - plans/my-feature/my-feature_implementation_summary.md (summary of what was done)
 7. Claude updates the original plan to link to the summary using relative path

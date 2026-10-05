@@ -310,6 +310,27 @@ class TestTheInstructionsDispatchThroughIt:
         assert "util prior-changes read" not in text, core
         assert "replace the literal `{prior_changes_context}`" not in text, core
 
+    @pytest.mark.parametrize("core", [
+        "apply-suggestions.md", "apply-task-suggestions.md", "apply-code-fixes.md",
+        "implement.md",
+    ])
+    def test_no_line_still_hands_the_subagent_the_raw_prompt_field(self, core):
+        """Reviewer finding 4 (fix round 6, 2026-10-05): step 5.1 said never
+        hand the subagent `batch.prompt`, while the Process summary, the
+        Critical Rules and implement's worked example still said to. One
+        rule, everywhere: the subagent reads the bound `[WRITE_PROMPT]` file."""
+        text = (self.INSTRUCTIONS / core).read_text(encoding="utf-8")
+        for stale in (
+            "Spawns one subagent with batch.prompt",
+            "Uses pre-generated batch.prompt",
+            "USE PRE-GENERATED PROMPTS",
+            "Use the `prompt` field from each batch",
+            'subagent with prompt="',
+            "step-3 Read",
+        ):
+            assert stale not in text, (core, stale)
+        assert "USE THE BOUND PROMPT FILE" in text or core == "implement.md", core
+
     @pytest.mark.parametrize("core,phase_word", [
         ("apply-suggestions.md", "apply-suggestions"),
         ("apply-task-suggestions.md", "apply-task-suggestions"),

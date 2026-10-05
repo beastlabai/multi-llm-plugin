@@ -628,7 +628,7 @@ Agent:
 
 For each batch (sequentially):
 - Runs the batch as a subagent (batch.executor_role)
-- Uses pre-generated batch.prompt
+- Binds the batch's prompt with `util write-prompt` and hands the subagent the bound file
 - Waits for completion
 - Logs results
 
@@ -647,7 +647,7 @@ For needs-human-decision items:
 
 ## Batch Prompt Format
 
-Each batch includes a pre-generated prompt. For single-fix batches:
+Each batch carries a prompt template in its `prompt` field (unbound: `util write-prompt` is what binds it for a subagent). For single-fix batches:
 
 ```
 Fix the following code issue:
@@ -728,7 +728,7 @@ Fix 2: [What was changed]
 
 1. **SEQUENTIAL BATCHES**: Never parallelize batch processing - one batch at a time
 2. **DELEGATE EVERY BATCH**: Every batch is `executor_role: "agent"` — run it as a subagent, never inline
-3. **USE PRE-GENERATED PROMPTS**: Use the `prompt` field from each batch
+3. **USE THE BOUND PROMPT FILE**: hand each subagent only the `[WRITE_PROMPT]` file `util write-prompt` wrote — never the raw `prompt` field of the JSON, which carries an unbound `{prior_changes_context}` token
 4. **NEVER IMPLEMENT MANUALLY**: always **spawn subagents** to do the work
 5. **TRACK EVERYTHING**: Log every applied/skipped fix for the report
 6. **SECURITY IS ISOLATED**: Security and HIGH importance fixes are always in their own batch
