@@ -521,6 +521,33 @@ class TestFourWriteOutcomes:
         # The half-applied bytes are deliberately still there.
         assert "edit" in env.plan.read_text()
 
+    def test_ids_the_batch_does_not_hold_are_not_counted_as_came_back(self, env):
+        """OpenCode racing run 4 (2026-10-05): the reply named "Suggestion 1"
+        and "Suggestion 2" instead of the batch's two ids, and the reason read
+        "only 2 of 2 expected id(s) came back (missing: <both>)"."""
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied",
+                          "ids": ["Suggestion 1", "Suggestion 2"],
+                          "files_touched": [], "summary": "S"})
+        task = env.apply_task(0, expected_ids=["ec80", "7f1f"])
+        result = env.scheduler([task]).run()
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert ("none of the 2 expected id(s) came back (missing: ec80, 7f1f); "
+                "the reply named 2 id(s) this batch does not hold "
+                "('Suggestion 1', 'Suggestion 2')") in outcome.reason
+        assert "2 of 2" not in outcome.reason
+
+    def test_a_partly_attested_batch_counts_only_the_ids_it_holds(self, env):
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0", "stray"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        task = env.apply_task(0, expected_ids=["s0", "s1"])
+        outcome = env.scheduler([task]).run().outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert ("only 1 of 2 expected id(s) came back (missing: s1); the reply "
+                "named 1 id(s) this batch does not hold ('stray')") in outcome.reason
+
     def test_partial_application_is_also_a_non_zero_exit(self, env):
         """D3k inverts the read rule for writes: a crash is never an application.
 
