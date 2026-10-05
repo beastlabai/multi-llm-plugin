@@ -975,3 +975,82 @@ class TestNativeTransportPreconditions:
         resolved, marker = so.schema_for_dispatch(_PROVIDERS["gemini"], "generate-tasks")
         assert resolved is None
         assert marker != so.MARKER_NATIVE
+
+
+#: codex-cli 0.160.0 `exec --json --output-schema <file>`, captured 2026-10-05
+#: verbatim from the real binary driven at a localhost Responses stub (zero
+#: spend, throwaway CODEX_HOME). The request the stub received carried
+#: `text.format = {"type": "json_schema", "strict": true, "name":
+#: "codex_output_schema", "schema": <the file>}`; the document came back as the
+#: final agent_message's text. No event carries a `structured_output` key.
+CODEX_0160_OUTPUT_SCHEMA_STREAM = (
+    '{"type":"thread.started","thread_id":"01a10c51-c9bb-7430-ac35-57cafd990b0c"}\n'
+    '{"type":"turn.started"}\n'
+    '{"type":"item.completed","item":{"id":"item_0","type":"agent_message",'
+    '"text":"{\\"answer\\": \\"hello\\"}"}}\n'
+    '{"type":"turn.completed","usage":{"input_tokens":1,"cached_input_tokens":0,'
+    '"cache_write_input_tokens":0,"output_tokens":1,"reasoning_output_tokens":0}}\n'
+)
+
+ANSWER_SCHEMA = StructuredSchema(
+    document={
+        "type": "object", "additionalProperties": False,
+        "required": ["answer"], "properties": {"answer": {"type": "string"}},
+    },
+    name="answer.schema.json",
+)
+
+
+class TestCodexCarriesItsAnswerInTheFinalMessage:
+    """Every codex task generation logged "[WARN] structured output: no
+    `structured_output` key … recovered" (2026-10-05, run 3): the policy looked
+    for claude's key, which codex never prints."""
+
+    def test_the_adapter_reads_the_document_off_the_final_message(self):
+        from utils.providers.codex import CodexProvider
+
+        assert CodexProvider().native_structured_output(
+            CODEX_0160_OUTPUT_SCHEMA_STREAM
+        ) == {"answer": "hello"}
+
+    def test_a_conforming_final_message_is_native_with_no_warning(self):
+        from utils.providers.codex import CodexProvider
+
+        outcome = so.classify_attempt(
+            ANSWER_SCHEMA,
+            stdout=CODEX_0160_OUTPUT_SCHEMA_STREAM,
+            native_document=so.native_document_for(
+                CodexProvider(), CODEX_0160_OUTPUT_SCHEMA_STREAM
+            ),
+        )
+
+        assert outcome.marker == so.MARKER_NATIVE
+        assert outcome.data == {"answer": "hello"}
+        assert outcome.warning is None
+
+    def test_a_non_conforming_one_is_still_a_violation(self):
+        outcome = so.classify_attempt(
+            ANSWER_SCHEMA,
+            stdout=CODEX_0160_OUTPUT_SCHEMA_STREAM,
+            native_document={"wrong": 1},
+        )
+
+        assert outcome.marker is None
+        assert outcome.failure_reason == so.FAILURE_SCHEMA_VIOLATION
+
+    def test_prose_around_the_document_is_not_native(self):
+        from utils.providers.codex import CodexProvider
+
+        stream = CODEX_0160_OUTPUT_SCHEMA_STREAM.replace(
+            '"text":"{\\"answer\\": \\"hello\\"}"',
+            '"text":"Here you go: {\\"answer\\": \\"hello\\"}"',
+        )
+        assert CodexProvider().native_structured_output(stream) is None
+
+    def test_an_adapter_without_the_hook_or_a_raising_one_has_no_opinion(self):
+        class _Raising:
+            def native_structured_output(self, stdout):
+                raise RuntimeError("boom")
+
+        assert so.native_document_for(object(), "x") is None
+        assert so.native_document_for(_Raising(), "x") is None

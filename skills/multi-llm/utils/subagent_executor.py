@@ -7467,6 +7467,9 @@ def _parse_with_schema_policy(
         exit_code=capture.exit_code,
         phase=schema_phase,
         model=model,
+        native_document=structured_output.native_document_for(
+            provider, capture.stdout
+        ),
     )
     if verdict.warning:
         print(f"[WARN] {verdict.warning}", file=sys.stderr)

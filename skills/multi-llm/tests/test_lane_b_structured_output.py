@@ -716,3 +716,17 @@ class TestAReplyThatIsNotJson:
         assert outcome.reason.startswith(
             "the extracted result does not match the task_generation result shape"
         )
+
+
+class TestCodexNativeAnswer:
+    """codex carries the schema natively (`--output-schema`) and answers in its
+    final agent_message, so a conforming answer is `native`, with no WARN."""
+
+    def test_a_codex_task_generation_is_native_and_silent(self, lane, capsys):
+        lane.respond(_codex_stream(json.dumps(GENERATED_TASKS_DOC)))
+
+        outcome = lane.dispatch("task_generation", runner="codex:gpt-5.5", timeout=600)
+
+        assert outcome.status == executor.STATUS_OK
+        assert outcome.structured_output == so.MARKER_NATIVE
+        assert "no `structured_output` key" not in capsys.readouterr().err
