@@ -3726,9 +3726,24 @@ class WriteBatchScheduler:
                     f"{', …' if len(expected_ids) > 5 else ''}) are what landed"
                 )
             elif missing_ids:
+                # Counted from the expected side: the reply's own `ids` may
+                # name things this batch does not hold. OpenCode racing run 4
+                # (2026-10-05): a report re-ask restated "Suggestion 1",
+                # "Suggestion 2", and the reason read "only 2 of 2 expected
+                # id(s) came back (missing: <both of them>)".
+                matched = len(expected_ids) - len(missing_ids)
+                unexpected = [i for i in reported_ids if i not in expected_ids]
                 details.append(
-                    f"only {len(reported_ids)} of {len(expected_ids)} expected "
-                    f"id(s) came back (missing: {', '.join(missing_ids)})"
+                    (f"only {matched} of {len(expected_ids)}" if matched
+                     else f"none of the {len(expected_ids)}")
+                    + f" expected id(s) came back (missing: "
+                    f"{', '.join(missing_ids)})"
+                    + (
+                        f"; the reply named {len(unexpected)} id(s) this batch "
+                        f"does not hold ({', '.join(repr(i) for i in unexpected[:5])}"
+                        f"{', …' if len(unexpected) > 5 else ''})"
+                        if unexpected else ""
+                    )
                 )
             detail = " and ".join(details)
             outcome.status = STATUS_PARTIAL
