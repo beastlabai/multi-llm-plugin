@@ -43,7 +43,6 @@ from __future__ import annotations
 
 import codecs
 import collections
-import hashlib
 import json
 import os
 import re
@@ -161,18 +160,6 @@ NO_BYTECODE_ENV = "PYTHONDONTWRITEBYTECODE"
 
 #: What this server exports for the child (D9 layer 2), beside the resolved uv.
 SKILL_DIR_ENV = "MULTI_LLM_SKILL_DIR"
-
-#: D9 layer 2: where ``uv run`` keeps the payload's environment, set for the
-#: child unless the user's environment already sets it (the container image
-#: does). Left to uv, the environment is ``<payload>/.venv`` — inside the plugin
-#: cache under ``$CODEX_HOME``, a tree the plugin's own ``[CODEX_HOME_CHECK]``
-#: watches because codex loads it as code. The first call after an install
-#: created it there, and a codex slot of another run that was live in that
-#: window reported its ~40 new files as a change to ``$CODEX_HOME`` (racing
-#: re-run 3, opencode 01). Kept under the user's cache directory instead,
-#: outside ``$CODEX_HOME`` and outside every grant of the plugin's jail, named
-#: by the payload's lockfile so installs that pin the same packages share one.
-UV_PROJECT_ENV = "UV_PROJECT_ENVIRONMENT"
 
 #: Plan codex-sandbox-unavailable step 6 (F5, user decision 2026-09-30): the
 #: chat's own sandbox posture — the turn metadata's ``sandbox_mode`` — exported
@@ -667,45 +654,6 @@ def find_uv(surface, env):
 #: D5's health contract, row 2: the payload files every spawn needs, beside the
 #: surface's dispatcher script. Checked at call time, never at start (rule 7).
 PAYLOAD_INVENTORY = ("pyproject.toml", "uv.lock")
-
-
-def _inside(path, root) -> bool:
-    """Whether *path* is *root* or under it, compared as given and resolved."""
-    for left, right in ((os.path.abspath(path), os.path.abspath(root)),
-                        (os.path.realpath(path), os.path.realpath(root))):
-        if left == right or left.startswith(right.rstrip(os.sep) + os.sep):
-            return True
-    return False
-
-
-def project_environment(environ, run_args):
-    """The ``UV_PROJECT_ENVIRONMENT`` to export, or ``None`` to leave it alone.
-
-    Only for a payload inside ``$CODEX_HOME`` (default ``$HOME/.codex``), the
-    one place its ``.venv`` is a watched tree; and never when *environ*
-    (layer 1) already names one, when *run_args* carry ``--no-sync`` (the
-    posture that runs against an environment something else already built), or
-    when the lockfile cannot be read (the payload check reports that).
-    Otherwise ``<cache>/multi-llm/uv-env/<lockfile sha256, 16 hex>``, the cache
-    being ``$XDG_CACHE_HOME``, else ``$HOME/.cache`` (``%LOCALAPPDATA%`` on
-    Windows). See :data:`UV_PROJECT_ENV`.
-    """
-    if environ.get(UV_PROJECT_ENV) or "--no-sync" in run_args:
-        return None
-    home = environ.get("HOME") or os.path.expanduser("~")
-    codex_home = environ.get("CODEX_HOME") or os.path.join(home, ".codex")
-    if not _inside(str(SKILL_DIR), codex_home):
-        return None
-    try:
-        lock = (SKILL_DIR / "uv.lock").read_bytes()
-    except OSError:
-        return None
-    if os.name == "nt" and environ.get("LOCALAPPDATA"):
-        base = environ["LOCALAPPDATA"]
-    else:
-        base = environ.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
-    digest = hashlib.sha256(lock).hexdigest()[:16]
-    return os.path.join(base, "multi-llm", "uv-env", digest)
 
 
 def missing_payload(surface):
@@ -1815,9 +1763,6 @@ class Server:
         # this call spawns — launch, polls, abort, runbook — carries all three.
         os.environ[surface["uv"]["env"]] = uv
         os.environ[SKILL_DIR_ENV] = str(SKILL_DIR)
-        environment = project_environment(self.layer1, self.uv_run_args())
-        if environment is not None:
-            os.environ[UV_PROJECT_ENV] = environment
         route_env = surface["dispatcher"]["route_env"]
         os.environ[route_env["name"]] = route_env["value"]
         if NO_BYTECODE_ENV not in os.environ:
