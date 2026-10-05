@@ -330,6 +330,41 @@ class TestBudgetExhaustedRefusesTheSpawn:
         assert reason.startswith(STATUS_BUDGET_EXHAUSTED)
         assert "736" in reason, "the declared envelope is named"
 
+    def test_lane_a_names_the_envelope_when_it_refuses_a_retry(self, monkeypatch):
+        """Fix round 6: the ladder refuses a retry the envelope cannot hold at
+        the grant, so Lane A's "granted, then refused" note no longer fires
+        for it; the refusal's own note has to reach the slot's error instead,
+        naming the declared wall rather than an exhausted budget."""
+        from types import SimpleNamespace
+
+        from utils import review_orchestrator_base as rob
+
+        clock = {"t": 0.0}
+        real_ladder = rob.RetryLadder
+
+        class Ladder(real_ladder):
+            def __init__(self, *args, **kwargs):
+                kwargs["now"] = lambda: clock["t"]
+                super().__init__(*args, **kwargs)
+                self.envelope = SimpleNamespace(
+                    max_requests=4, max_wall_s=self.timeout - 10.0,
+                    retries_rate_limit=False,
+                )
+
+            def record(self, status, **kwargs):
+                clock["t"] += 40.0  # the attempt took 40 s
+                return super().record(status, **kwargs)
+
+        monkeypatch.setattr(rob, "RetryLadder", Ladder)
+        result, calls = _run_lane_a(
+            error="Error: connection refused by api.openai.com", timeout=300,
+        )
+        assert len(calls) == 1
+        assert result["success"] is False
+        error = str(result["error"])
+        assert "(no retry: only 260.0s of the slot's 300.0s budget is left" in error
+        assert "§7.5 rule 4" in error
+
     def test_lane_b_records_budget_exhausted_and_spawns_nothing(
         self, tmp_path, monkeypatch
     ):

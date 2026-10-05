@@ -1057,6 +1057,118 @@ class TestSchemaRepairReAsk:
         assert "schema-repair re-ask" not in row["reason"]
         assert [a.get("repair") for a in row["attempts"]] == [None]
 
+    @staticmethod
+    def _slot_clock(monkeypatch, *, wall_below_timeout=None):
+        """Drive the dispatch's ladder on a hand-advanced clock.
+
+        Returns ``(clock, box)``: each task-generation spawn advances
+        ``clock["t"]`` by ``clock["tick"]`` (a callable of the ladder's
+        timeout), and ``box["ladder"]`` is the ladder the dispatch built. With
+        *wall_below_timeout*, the runner declares a worst-case attempt that
+        many seconds under the slot's timeout (§7.5 rule 4's envelope), so the
+        first attempt is admitted and nothing after a long one is.
+        """
+        from types import SimpleNamespace
+
+        from utils import subagent_executor as executor
+
+        clock = {"t": 1000.0, "tick": lambda timeout: 0.0}
+        box = {}
+        real_ladder = executor.RetryLadder
+
+        class Ladder(real_ladder):
+            def __init__(self, *args, **kwargs):
+                kwargs["now"] = lambda: clock["t"]
+                super().__init__(*args, **kwargs)
+                if wall_below_timeout is not None:
+                    self.envelope = SimpleNamespace(
+                        max_requests=4,
+                        max_wall_s=self.timeout - wall_below_timeout,
+                        retries_rate_limit=False,
+                    )
+                box["ladder"] = self
+
+        monkeypatch.setattr(executor, "RetryLadder", Ladder)
+        scripted = executor._spawn
+
+        def ticking_spawn(**kwargs):
+            capture = scripted(**kwargs)
+            if "You are decomposing" in (kwargs.get("prompt") or ""):
+                clock["t"] += clock["tick"](box["ladder"].timeout)
+            return capture
+
+        monkeypatch.setattr(executor, "_spawn", ticking_spawn)
+        return clock, box
+
+    def test_a_re_ask_the_envelope_cannot_hold_keeps_the_attempts_own_status(
+        self, tmp_path, exec_env, scripted_runner, capsys, monkeypatch
+    ):
+        """Fix round 6: the re-ask used to be granted on rule 3 alone, then
+        refused by rule 4 at the next start, and the slot was recorded
+        ``budget_exhausted`` — "Nothing was dispatched" — after attempt 1 ran."""
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner(WRONG_SHAPE, _valid_document())
+        clock, _box = self._slot_clock(monkeypatch, wall_below_timeout=10.0)
+        clock["tick"] = lambda timeout: 40.0
+        plan = _plan(tmp_path)
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--exec-subagents"])
+        capsys.readouterr()
+
+        assert code == 3
+        assert len(prompts) == 1
+        row = self._report(plan)["tasks"][0]
+        assert row["status"] == "schema_invalid", row["reason"]
+        assert "Nothing was dispatched" not in row["reason"]
+        assert "no schema-repair re-ask: only " in row["reason"]
+        assert "§7.5 rule 4" in row["reason"]
+        assert [a["status"] for a in row["attempts"]] == ["schema_invalid"]
+
+    def test_a_re_ask_the_deadline_refuses_says_so(
+        self, tmp_path, exec_env, scripted_runner, capsys, monkeypatch
+    ):
+        """The ladder's "(no schema-repair re-ask: …)" note used to be dropped,
+        leaving a reason that read as if the re-ask had never been owed."""
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner(WRONG_SHAPE, _valid_document())
+        clock, _box = self._slot_clock(monkeypatch)
+        clock["tick"] = lambda timeout: timeout - 0.5
+        plan = _plan(tmp_path)
+
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
+        ) == 3
+        capsys.readouterr()
+
+        assert len(prompts) == 1
+        row = self._report(plan)["tasks"][0]
+        assert row["status"] == "schema_invalid"
+        assert "no schema-repair re-ask: the per-slot wall-clock budget" in row["reason"]
+
+    def test_a_transport_retry_the_envelope_cannot_hold_keeps_its_status(
+        self, tmp_path, exec_env, scripted_runner, capsys, monkeypatch
+    ):
+        """The same grant-then-refuse shape on rung 5: an unparseable reply's
+        retry was granted, refused at the next start, and recorded as a slot
+        that dispatched nothing."""
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner("no JSON here, just prose", _valid_document())
+        clock, _box = self._slot_clock(monkeypatch, wall_below_timeout=10.0)
+        clock["tick"] = lambda timeout: 40.0
+        plan = _plan(tmp_path)
+
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
+        ) == 3
+        capsys.readouterr()
+
+        assert len(prompts) == 1
+        row = self._report(plan)["tasks"][0]
+        assert row["status"] == "unparseable_result", row["reason"]
+        assert "Nothing was dispatched" not in row["reason"]
+        assert "(no retry: only " in row["reason"]
+        assert "1 retry unused" in row["reason"]
+
     def test_a_right_first_reply_is_never_re_asked(
         self, tmp_path, exec_env, scripted_runner, capsys
     ):

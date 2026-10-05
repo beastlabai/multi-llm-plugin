@@ -6559,10 +6559,20 @@ def dispatch_task(
             # adapter's *declared* vendor envelope — better a slot that spawned
             # nothing than a child killed part-way through a retry chain the
             # harness cannot see.
-            if ladder.stop_reason == STOP_BUDGET:
+            if ladder.stop_reason == STOP_BUDGET and not ladder.attempt_index:
                 status = STATUS_BUDGET_EXHAUSTED
                 error = budget_exhausted_reason(
                     ladder, target=runner, timeout=effective_timeout
+                )
+            elif ladder.stop_reason == STOP_BUDGET:
+                # A grant taken back at the next start: `record()` applies the
+                # same admission test to every grant, so only a clock that
+                # moved in between (an overslept backoff) lands here. The last
+                # attempt RAN, so its own status stands — `budget_exhausted`
+                # means nothing was spawned (fix round 6).
+                error = (
+                    f"{error} (no further attempt: "
+                    f"{budget_exhausted_reason(ladder, target=runner, timeout=effective_timeout)})"
                 )
             else:
                 status, error = STATUS_TIMEOUT, never_started(ladder.attempt_index)
@@ -6860,17 +6870,13 @@ def dispatch_task(
                 # exact 10 ms without putting an env read in the policy object.
                 napper(_apply_backoff_hook(action.delay))
             continue
-        if status in RETRYABLE_STATUSES and ladder.stop_reason == STOP_DEADLINE:
-            # The retry budget is not the only budget: a retry runs inside the
-            # task's remaining wall clock, never on a fresh copy of it. The
-            # unused count is the ladder's, still undecremented.
-            unused = ladder.transport_retries_left
-            error = (
-                f"{error} (no retry: the per-task wall-clock budget of "
-                f"{effective_timeout}s is exhausted, "
-                f"{unused} retr"
-                f"{'y' if unused == 1 else 'ies'} unused)"
-            )
+        if action.note:
+            # A retry, backoff or schema-repair re-ask the status earned and the
+            # budget refused (rule 3's deadline or rule 4's declared envelope):
+            # the retry budget is not the only budget, and without the note the
+            # recorded reason names a failure the harness had, and did not
+            # spend, an attempt for. The unused counts are the ladder's own.
+            error = f"{error} ({action.note})"
         break
 
     if attempt_repair and status == STATUS_SCHEMA_INVALID:

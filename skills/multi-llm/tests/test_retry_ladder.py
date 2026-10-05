@@ -43,6 +43,7 @@ from utils.retry_ladder import (  # noqa: E402
     STOP_TERMINAL,
     STOP_VENDOR_ALREADY_RETRIED,
     backoff_delay,
+    budget_exhausted_reason,
 )
 
 
@@ -491,3 +492,121 @@ class TestSchemaRepairAllowance:
         ladder.next_attempt()
         assert ladder.record(status).repair is False
         assert ladder.schema_repairs_used == 0
+
+
+class TestAGrantIsNeverTakenBackByAdmission:
+    """Fix round 6: rule 4's envelope bound decides a grant, not the next start.
+
+    ``record()`` used to grant a retry, a backoff or the schema-repair re-ask
+    on rule 3 alone; ``next_attempt()`` then applied rule 4 and refused, and
+    Lane B recorded the slot ``budget_exhausted`` — "Nothing was dispatched" —
+    although attempt 1 had run. A grant is now taken against both admission
+    rules, so a granted retry is always admitted, and a refusal is the
+    attempt's own stop with the reason as a note.
+    """
+
+    def _codex_like(self, clock, *, timeout=60.0, retries=2, repairs=1):
+        return RetryLadder(
+            timeout=timeout, retries=retries, now=clock, schema_repairs=repairs,
+            envelope=_envelope(max_requests=4, max_wall_s=25.0),
+        )
+
+    def test_the_re_ask_is_refused_when_the_rest_cannot_hold_the_envelope(self):
+        clock = Clock()
+        ladder = self._codex_like(clock)
+        assert ladder.next_attempt() == pytest.approx(60.0)
+        clock.advance(40.0)  # 20 s left, under the declared 25 s
+        action = ladder.record(STATUS_SCHEMA_INVALID)
+        assert action.retry is False and action.repair is False
+        assert ladder.schema_repairs_used == 0
+        assert ladder.stop_reason == STOP_BUDGET
+        assert action.note.startswith("no schema-repair re-ask: ")
+        assert "20.0s" in action.note and "25s" in action.note
+        assert action.reason == f"{STATUS_SCHEMA_INVALID} ({action.note})"
+        assert ladder.next_attempt() is None
+        assert ladder.spawns == 1
+
+    def test_the_transport_retry_is_refused_the_same_way(self):
+        clock = Clock()
+        ladder = self._codex_like(clock)
+        ladder.next_attempt()
+        clock.advance(40.0)
+        action = ladder.record(STATUS_TIMEOUT)
+        assert action.retry is False
+        assert ladder.stop_reason == STOP_BUDGET
+        assert ladder.transport_retries_left == 2, "a refused retry is not spent"
+        assert action.note.startswith("no retry: ")
+        assert "25s" in action.note and "2 retries unused" in action.note
+
+    def test_the_backoff_is_refused_when_what_follows_it_cannot_hold_it(self):
+        clock = Clock()
+        ladder = RetryLadder(
+            timeout=60.0, retries=0, now=clock, jitter=lambda: 0.0,
+            envelope=_envelope(max_requests=4, max_wall_s=25.0),
+        )
+        ladder.next_attempt()
+        clock.advance(34.5)  # 25.5 s left, but not after the 1 s backoff
+        action = ladder.record(STATUS_RATE_LIMITED)
+        assert action.retry is False and action.delay == 0.0
+        assert ladder.stop_reason == STOP_BUDGET
+        assert "25s" in action.note
+
+    def test_the_deadline_refusal_carries_its_note_too(self):
+        clock = Clock()
+        ladder = RetryLadder(timeout=100.0, retries=0, now=clock, schema_repairs=1)
+        ladder.next_attempt()
+        clock.advance(100.0 - MIN_ATTEMPT_BUDGET_S / 2)
+        action = ladder.record(STATUS_SCHEMA_INVALID)
+        assert ladder.stop_reason == STOP_DEADLINE
+        assert action.note == (
+            "no schema-repair re-ask: the per-slot wall-clock budget of 100.0s "
+            "is exhausted"
+        )
+
+    @pytest.mark.parametrize("status", [
+        STATUS_SCHEMA_INVALID, STATUS_TIMEOUT, STATUS_RUNNER_ERROR,
+        STATUS_UNPARSEABLE, STATUS_RATE_LIMITED,
+    ])
+    @pytest.mark.parametrize("spent", [0.0, 10.0, 34.0, 35.5, 40.0, 59.5])
+    def test_a_granted_retry_is_always_admitted(self, status, spent):
+        clock = Clock()
+        ladder = RetryLadder(
+            timeout=60.0, retries=2, now=clock, schema_repairs=1,
+            jitter=lambda: 0.5, envelope=_envelope(max_requests=4, max_wall_s=25.0),
+        )
+        ladder.next_attempt()
+        clock.advance(spent)
+        action = ladder.record(status)
+        if action.retry:
+            clock.advance(action.delay)
+            assert ladder.next_attempt() is not None, (status, spent, action)
+        else:
+            assert action.note, (status, spent, action)
+            assert ladder.next_attempt() is None
+
+    def test_a_refusal_after_attempts_ran_never_says_nothing_was_dispatched(self):
+        """The admission refusal can still land after a grant if the clock
+        moves in between (a backoff the lane overslept); its sentence must not
+        claim a slot that ran attempts dispatched nothing."""
+        clock = Clock()
+        ladder = self._codex_like(clock)
+        ladder.next_attempt()
+        clock.advance(10.0)
+        assert ladder.record(STATUS_TIMEOUT).retry is True
+        clock.advance(30.0)  # overslept: 20 s left
+        assert ladder.next_attempt() is None
+        assert ladder.stop_reason == STOP_BUDGET
+        reason = budget_exhausted_reason(ladder, target="codex:gpt-5.5", timeout=60.0)
+        assert "Nothing was dispatched" not in reason
+        assert "1 attempt(s) ran" in reason
+        assert "attempt 2 was not started" in reason
+
+    def test_a_refusal_before_any_attempt_still_says_nothing_was_dispatched(self):
+        ladder = RetryLadder(
+            timeout=10.0, retries=0, now=Clock(),
+            envelope=_envelope(max_requests=4, max_wall_s=25.0),
+        )
+        assert ladder.next_attempt() is None
+        reason = budget_exhausted_reason(ladder, target="codex:gpt-5.5", timeout=10.0)
+        assert "Nothing was dispatched" in reason
+
