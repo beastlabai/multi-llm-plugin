@@ -225,6 +225,33 @@ class TestLastDocumentWins:
         assert result["success"]
         assert result["data"] == {"id": "S001"}
 
+    def test_clause_1_a_document_that_parses_beats_the_pieces_inside_it(self):
+        """A stray `{` in the prose before a document and a `}` after it make
+        one balanced span around it, so the whole document is only
+        "contained". The pieces inside it used to be tried first (the last by
+        position), and a task-generation reply was read as its last task."""
+        document = {
+            "schema_version": "1.0",
+            "plan_preamble": "p",
+            "tasks": [{"id": "T001", "depends_on": []}],
+        }
+        text = (
+            "Opening brace here { and the document follows:\n"
+            + json.dumps(document)
+            + "\nclosing }"
+        )
+
+        result = extract_json_from_text(text, prefer_arrays=False)
+
+        assert result["data"] == document
+        # Shape before position still holds: an array-preferring caller gets
+        # what it gets from the same document without the stray braces.
+        assert extract_json_from_text(text, prefer_arrays=True)["data"] == (
+            extract_json_from_text(
+                "Here: " + json.dumps(document), prefer_arrays=True
+            )["data"]
+        )
+
     def test_clause_2_a_trailing_object_does_not_displace_a_preceding_array(self):
         """Shape before position: every array is tried before every object."""
         array_then_object = (
