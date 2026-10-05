@@ -501,6 +501,47 @@ def _optional_why(modes, phase: str, entry: Mapping[str, Any]) -> str:
 # Resuming the SAME phase after a needs-human stop
 # ---------------------------------------------------------------------------
 
+#: The phases whose way forward after a failed dispatch is the plain
+#: re-invocation, not ``--resume``: ``run_status._RESUME_VERB_BY_MODE`` gives
+#: them the dispatcher's bare ``--yes``, which a host spelling never carries.
+#: ``generate-tasks``' ``--reaggregate`` only consumes a result already on disk,
+#: so the plain re-invoke is what re-dispatches its failed task (and a test
+#: holds this tuple to that table).
+RERUN_RESUME_PHASES: Tuple[str, ...] = ("generate-tasks",)
+
+#: The in-phase word ``dispatch_subagent_tasks`` writes when a batch ended
+#: with a failed task (``review_orchestrator_base``): the one state whose
+#: re-invocation re-dispatches the failures.
+SUBAGENTS_FAILED_STATE = "subagents_failed"
+
+
+def _rerun_resumes(phase_status: Mapping[str, Any]) -> bool:
+    """Would a plain re-run of this phase's failed dispatch do anything new?
+
+    Only a dispatch that failed (:data:`SUBAGENTS_FAILED_STATE`) and whose
+    executor mirror (``progress.subagents``, rewritten with the run record by
+    ``claim_run``) names the failures; and only when none of them is one a
+    re-run repeats (``retry_ladder.RERUN_FUTILE_STATUSES``) and no runner
+    refusal closed the run out. Everything else — a refusal before the
+    dispatch, a prerequisite gate, a schema the CLI rejects — is fixed by
+    what the phase's own message names, and a command here would only repeat it.
+    """
+    from .retry_ladder import RERUN_FUTILE_STATUSES
+
+    if phase_status.get("state") != SUBAGENTS_FAILED_STATE:
+        return False
+    run = phase_status.get("run") if isinstance(phase_status.get("run"), dict) else {}
+    if run.get("reason_code") or phase_status.get("reason_code"):
+        return False
+    progress = phase_status.get("progress")
+    mirror = progress.get("subagents") if isinstance(progress, dict) else None
+    counts = mirror.get("counts") if isinstance(mirror, dict) else None
+    if not isinstance(counts, dict):
+        return False
+    failed = {str(status) for status, n in counts.items() if status != "ok" and n}
+    return bool(failed) and not failed & RERUN_FUTILE_STATUSES
+
+
 def resume_command(
     plan_arg: str,
     host_id: str,
@@ -509,6 +550,7 @@ def resume_command(
     *,
     plan_path: Optional[Union[str, Path]] = None,
     workflow: Optional[Dict[str, Any]] = None,
+    phase_status: Optional[Mapping[str, Any]] = None,
 ) -> Optional[str]:
     """The host-spelled command that resumes *mode_word*'s write phase, or ``None``.
 
@@ -535,7 +577,15 @@ def resume_command(
     Every other exit 3 is not something ``--resume`` fixes: a prerequisite
     refusal (``PREREQUISITE_UNMET``) and a stop on pending human-task
     decisions both land before anything is recorded, and the phase's own
-    message names the way forward. The servers pass through whatever this
+    message names the way forward.
+
+    One phase answers without ``--resume``: ``generate-tasks``
+    (:data:`RERUN_RESUME_PHASES`), whose recovery after a failed dispatch is
+    the plain re-invocation (racing re-run 2026-10-04: a ``schema_invalid``
+    task generation left the tool result with no command, and the host model
+    invented one). It answers from the phase dir's ``.status.json``
+    (*phase_status*, else read for the plan) through :func:`_rerun_resumes`,
+    so a failure no re-run can change gets none. The servers pass through whatever this
     says and attach nothing when it says nothing; before the adversarial
     review (2026-10-02) they attached ``--resume`` to every write-phase exit 3,
     and ``util next-command does-not-exist.md --blocked implement`` printed
@@ -550,6 +600,17 @@ def resume_command(
     from .subagent_tasks import PHASE_BY_WRITE_KIND
 
     template = _host_capabilities().next_command_template(host_id, route)
+    if mode.phase in RERUN_RESUME_PHASES:
+        if phase_status is None:
+            from .output_handler import phase_dir_path
+            from .status_file import read_status
+
+            source = plan_arg if plan_path is None else plan_path
+            phase_status = read_status(str(phase_dir_path(
+                Path(os.path.abspath(str(source))), mode.phase)))
+        if not _rerun_resumes(phase_status):
+            return None
+        return template.replace(ARGS_SLOT, f"--{mode.name} {quote_plan_arg(plan_arg)}")
     if mode.phase not in PHASE_BY_WRITE_KIND.values():
         return None
     if workflow is None:
@@ -772,7 +833,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--blocked", metavar="MODE", default=None, dest="blocked",
         help="Instead of the next phase, print the command that resumes MODE's "
-             "own stopped write phase (`[RESUME_COMMAND]`, and "
+             "own stopped phase — a write phase with progress on record, or a "
+             "generate-tasks whose dispatch failed in a way a re-run can change "
+             "(`[RESUME_COMMAND]`, and "
              "MULTI_LLM_RESULT.user_resume). The tool routes ask this after an "
              "exit 3. Prints nothing for a mode that has none. Excludes --after.",
     )
