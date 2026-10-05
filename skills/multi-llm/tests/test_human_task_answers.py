@@ -402,6 +402,18 @@ class TestAManualTaskAnsweredDoneIsCounted:
         assert "| T005 | completed by hand |" in _summary(repo)
 
 
+class TestTheReviewRecordNamesAnAcceptedFailure:
+
+    def test_an_accepted_check_is_told_to_the_reviewers(self, repo, capsys):
+        import code_review_orchestrator
+
+        _run_one_that_stops(repo, capsys)
+        assert _implement(repo, "--resume", "--human-task", "T002=done") == 0
+        record = code_review_orchestrator.build_implementation_record(repo.plan)
+        line = next((l for l in record.splitlines() if "whose failure the user accepted" in l), "")
+        assert "T002 (accepted — you answered --human-task T002=done" in line, record
+        assert "did not pass" in line
+
 
 
 # --- a skip the user chose is not deferred work -------------------------------
