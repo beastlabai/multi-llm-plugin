@@ -445,6 +445,16 @@ Items whose decision was offloaded to the judge agent — via `--agent-decide`, 
    ```
    Best-effort: if `report_data.json` is missing from the review dir (the review predates this feature), the command prints a notice and exits 0 without changing the report — just continue.
 
+### 8. Mark Phase Completed
+
+**Run this only if step 5's batch loop reached the end** — every batch dispatched and verified, and the human-decision items of step 6 handled. The orchestrator records the phase *started* when it writes the batches (step 2), and this is the only command that records it *completed*:
+
+```bash
+uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/apply_suggestions_orchestrator.py" --plan-file "$PLAN_PATH" --mark-completed
+```
+
+**Do NOT run it if the loop stopped early** — the phase then stays `in_progress`, which is what makes `status` offer `--resume` instead of calling the phase done.
+
 ---
 
 ## JSON Output Structure

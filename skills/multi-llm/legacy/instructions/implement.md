@@ -556,6 +556,11 @@ host's own background primitive (on Claude Code use `run_in_background`).
    " "${CLAUDE_SKILL_DIR}" "$PLAN_FILE" "$SUMMARY_FILE_RELATIVE"
    ```
 
+   Then record the phase completed. The orchestrator recorded it *started* when it wrote the task JSON (step 2), and this is the only command that records it *completed* — run it only when every task ran and step 8's regression tests passed; on a cancelled run or a loop that stopped early, skip it so the phase stays `in_progress` and `--resume` is offered:
+   ```bash
+   uv run --project "${CLAUDE_SKILL_DIR}" -- python "${CLAUDE_SKILL_DIR}/finalize_tracking.py" --state-file "$STATE_FILE" --mark-completed
+   ```
+
 11. **Report results** including:
    - Number of tasks completed/failed
    - Implementation summary file location
