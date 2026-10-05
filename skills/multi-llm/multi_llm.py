@@ -1013,8 +1013,9 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
 
     Only for the recorded invocation of a workflow-phase mode that exits 0 or 2,
     or ``full`` on 0, with no ``next`` owed — and never for a write phase that
-    handed its batch loop to the invoker (no ``--exec-subagents``) or for the
-    invoker of a ``--detach`` launch, whose run's terminal poll answers instead.
+    handed its batch loop to the invoker (no ``--exec-subagents`` and not the
+    closing ``--mark-completed`` call) or for the invoker of a ``--detach``
+    launch, whose run's terminal poll answers instead.
     That last exclusion is the ``next`` test itself: ``detach.launch`` records
     the run's poll command as ``next`` on both of its success paths (a fresh
     launch and an ``--if-not-running`` re-attach) and fails every other way
@@ -1044,7 +1045,21 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
     # above on its recorded `next`, and keying on the flag instead silenced a
     # completed phase's exit 2 that launched no run and so has no poll to
     # carry the answer.
-    if mode.phase in _write_phases() and not flag_present(argv, "--exec-subagents"):
+    #
+    # The native write leg's EMIT call is excluded (the batches are the
+    # host's now, and the builder would answer `--resume` for the phase
+    # being run); its closing `--mark-completed` call is not — that call
+    # records the phase completed and is the one dispatcher invocation on
+    # the native apply leg that can carry the answer (until 2026-10-05 the
+    # exclusion swallowed it too, and only the report step's `util
+    # next-command` ever answered). implement's closing step is `util
+    # finalize-tracking --mark-completed`, a util, so that leg still reads
+    # its answer from the report step's lookup.
+    if (
+        mode.phase in _write_phases()
+        and not flag_present(argv, "--exec-subagents")
+        and not flag_present(argv, "--mark-completed")
+    ):
         return
     plan_arg = flag_value(argv, "--plan-file")
     plan_path = os.path.abspath(plan_arg) if plan_arg else None
