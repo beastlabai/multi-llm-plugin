@@ -1461,9 +1461,17 @@ def env_allowlist_column_is_green(
 #: into the skill's environment, after round 7 (3b9cf25, reverted) exported the
 #: second from the codex MCP server. :func:`build_child_env` drops each one
 #: that names the running interpreter's environment; a value naming any other
-#: environment is the user's and stays. The venv's ``bin`` still leads
-#: ``PATH`` (uv puts it there, and the fake runners of the suite rely on it).
+#: environment is the user's and stays. The same builder also takes the
+#: environment's ``bin`` (``Scripts`` on Windows) off ``PATH``: uv puts it
+#: first, and with neither name set and no ``.venv`` in the repository uv uses
+#: the first ``python`` on ``PATH`` (fix round 9 measured ``uv pip install``
+#: in an empty repository naming the skill's environment), and a runner's own
+#: ``python``/``pytest`` resolved there too. No runner CLI lives in it.
 SKILL_ENVIRONMENT_NAMES: Tuple[str, ...] = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
+
+#: Where a virtual environment keeps its executables: ``bin`` on POSIX,
+#: ``Scripts`` on Windows.
+SKILL_ENVIRONMENT_SCRIPT_DIRS: Tuple[str, ...] = ("bin", "Scripts")
 
 
 def _same_path(left: str, right: str) -> bool:
@@ -1490,6 +1498,38 @@ def skill_environment_names(env: Mapping[str, str]) -> Tuple[str, ...]:
         name for name in SKILL_ENVIRONMENT_NAMES
         if env.get(name) and os.path.isabs(env[name]) and _same_path(env[name], own)
     )
+
+
+def _path_keys(env: Mapping[str, str]) -> Tuple[str, ...]:
+    """The key(s) holding the search path: ``PATH``, or any spelling on Windows."""
+    if os.name == "nt":
+        return tuple(key for key in env if key.upper() == "PATH")
+    return ("PATH",) if "PATH" in env else ()
+
+
+def skill_environment_path(value: str) -> str:
+    """``value`` (a ``PATH``) without the skill environment's script directory.
+
+    Every entry that names ``sys.prefix``'s ``bin`` or ``Scripts``, as given or
+    resolved, is dropped; every other entry stays, in order. Unchanged outside
+    a virtual environment, where ``sys.prefix`` is the system's own
+    installation and its ``bin`` is everyone's. Empty and relative entries are
+    left alone: the child resolves them against its own working directory.
+    """
+    own = sys.prefix
+    if own == getattr(sys, "base_prefix", own) or not value:
+        return value
+    scripts = [os.path.join(own, name) for name in SKILL_ENVIRONMENT_SCRIPT_DIRS]
+    return os.pathsep.join(
+        entry for entry in value.split(os.pathsep)
+        if not (entry and os.path.isabs(entry)
+                and any(_same_path(entry, directory) for directory in scripts))
+    )
+
+
+def _skill_environment_on_path(env: Mapping[str, str]) -> bool:
+    """Whether ``env``'s ``PATH`` carries the skill environment's scripts."""
+    return any(skill_environment_path(env[key]) != env[key] for key in _path_keys(env))
 
 
 # ── the builder both lanes go through ────────────────────────────────────────
@@ -1593,7 +1633,8 @@ def build_child_env(
     ]
     allowlist = env_allowlist_enabled(anchor)
     if (not provider_env and not removals and not allowlist
-            and not skill_environment_names(source)):
+            and not skill_environment_names(source)
+            and not _skill_environment_on_path(source)):
         return None
     if allowlist:
         env = apply_env_allowlist(source, getattr(provider, "name", ""))
@@ -1606,6 +1647,16 @@ def build_child_env(
     # skill's own environment (see SKILL_ENVIRONMENT_NAMES).
     for key in skill_environment_names(env):
         env.pop(key, None)
+    for key in _path_keys(env):
+        kept = skill_environment_path(env[key])
+        if kept == env[key]:
+            continue
+        if kept:
+            env[key] = kept
+        else:
+            # Nothing else was on it: the platform's default search path, not
+            # an empty one (which a shell reads as "the current directory").
+            env.pop(key)
     return env
 
 

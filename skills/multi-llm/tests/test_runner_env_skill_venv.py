@@ -14,11 +14,18 @@ runner by any route: every adapter on both lanes, the codex agent dispatch on
 and off the plugin's jail, the fan-out spawn site, and the repository's own
 verification command. A value naming any other environment is the user's and
 is kept.
+
+Fix round 9: uv also puts the environment's ``bin`` first on ``PATH``, and with
+neither name set and no ``.venv`` in the repository uv falls back to the first
+``python`` on ``PATH``, so ``uv pip install`` in an empty repository still named
+the skill's environment and a runner's ``python``/``pytest`` were the skill's.
+The same builder now drops that ``PATH`` entry too, and only that entry.
 """
 
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -57,9 +64,28 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+#: Where uv puts the environment's executables, first on ``PATH``.
+OWN_BIN = os.path.join(OWN, "Scripts" if os.name == "nt" else "bin")
+
+
+def _names_own_bin(entry: str) -> bool:
+    return bool(entry) and any(
+        os.path.normcase(a) == os.path.normcase(b)
+        for a, b in ((os.path.abspath(entry), os.path.abspath(OWN_BIN)),
+                     (os.path.realpath(entry), os.path.realpath(OWN_BIN))))
+
+
+def _user_path() -> str:
+    """This process's ``PATH`` without the skill's ``bin``: the user's own."""
+    return os.pathsep.join(
+        entry for entry in os.environ.get("PATH", "").split(os.pathsep)
+        if not _names_own_bin(entry))
+
+
 def _leaky(own: str = OWN) -> dict:
     """What the dispatcher's environment carries under ``uv run``."""
     return {"VIRTUAL_ENV": own, "UV_PROJECT_ENVIRONMENT": own,
+            "PATH": os.pathsep.join([OWN_BIN, _user_path()]),
             "MLLM_UNRELATED": "keep-me"}
 
 
@@ -68,8 +94,13 @@ def _assert_clean(env, *, expect_unrelated: bool = True) -> None:
     assert env is not None, "the child inherits the dispatcher's environment unchanged"
     for name in NAMES:
         assert name not in env, f"{name} reaches the runner: {env.get(name)!r}"
+    leaked = [entry for entry in env.get("PATH", "").split(os.pathsep)
+              if _names_own_bin(entry)]
+    assert not leaked, f"the skill environment's {OWN_BIN} is on the runner's PATH"
     if expect_unrelated:
         assert env.get("MLLM_UNRELATED") == "keep-me"
+        # Only that entry goes: the rest of the user's PATH, in order.
+        assert env.get("PATH") == _user_path()
 
 
 class _Bare:
@@ -104,6 +135,63 @@ class TestTheBuilder:
         env = base.build_child_env(_Bare(), provider_env={"X": "1"}, base_env=source)
         assert env["VIRTUAL_ENV"] == theirs and env["UV_PROJECT_ENVIRONMENT"] == theirs
 
+    def test_the_skill_environment_bin_alone_leaves_path(self):
+        """``uv run`` with VIRTUAL_ENV already unset: the PATH entry is enough."""
+        env = base.build_child_env(
+            _Bare(), provider_env={},
+            base_env={"PATH": os.pathsep.join([OWN_BIN, "/usr/bin", "", "rel/bin"])})
+        assert env is not None
+        assert env["PATH"] == os.pathsep.join(["/usr/bin", "", "rel/bin"])
+
+    def test_every_spelling_of_the_bin_is_dropped(self, tmp_path):
+        link = tmp_path / "venv-link"
+        link.symlink_to(OWN, target_is_directory=True)
+        spellings = [str(link / os.path.basename(OWN_BIN)), OWN_BIN + os.sep,
+                     os.path.join(OWN_BIN, "..", os.path.basename(OWN_BIN))]
+        env = base.build_child_env(
+            _Bare(), provider_env={},
+            base_env={"PATH": os.pathsep.join([*spellings, "/usr/bin", OWN_BIN])})
+        assert env["PATH"] == "/usr/bin"
+
+    def test_a_user_environment_bin_on_path_is_kept(self, tmp_path):
+        theirs = tmp_path / "their-venv"
+        (theirs / "bin").mkdir(parents=True)
+        path = os.pathsep.join([str(theirs / "bin"), OWN_BIN, "/usr/bin"])
+        env = base.build_child_env(
+            _Bare(), provider_env={},
+            base_env={"VIRTUAL_ENV": str(theirs), "PATH": path})
+        assert env["VIRTUAL_ENV"] == str(theirs)
+        assert env["PATH"] == os.pathsep.join([str(theirs / "bin"), "/usr/bin"])
+        # With nothing of the skill's on it, the environment is inherited as is.
+        clean = {"VIRTUAL_ENV": str(theirs),
+                 "PATH": os.pathsep.join([str(theirs / "bin"), "/usr/bin"])}
+        assert base.build_child_env(_Bare(), provider_env={}, base_env=clean) is None
+
+    def test_an_adapter_delta_cannot_put_the_bin_back(self):
+        env = base.build_child_env(
+            _Bare(), provider_env={"PATH": os.pathsep.join([OWN_BIN, "/usr/bin"])},
+            base_env={})
+        assert env["PATH"] == "/usr/bin"
+
+    def test_a_path_of_only_the_skill_bin_falls_back_to_the_default(self):
+        env = base.build_child_env(_Bare(), provider_env={}, base_env={"PATH": OWN_BIN})
+        assert "PATH" not in env
+
+    def test_outside_a_virtual_environment_path_is_untouched(self, monkeypatch):
+        """Then ``sys.prefix`` is the system's, and its ``bin`` is everyone's."""
+        monkeypatch.setattr(sys, "base_prefix", sys.prefix)
+        path = os.pathsep.join([OWN_BIN, "/usr/bin"])
+        assert base.skill_environment_path(path) == path
+        assert base.build_child_env(_Bare(), provider_env={},
+                                    base_env={"PATH": path}) is None
+
+    def test_python_and_pytest_are_not_the_skills(self):
+        env = base.build_child_env(_Bare(), provider_env={}, base_env=_leaky())
+        for tool in ("python", "python3", "pytest"):
+            found = shutil.which(tool, path=env["PATH"])
+            assert found is None or not _names_own_bin(os.path.dirname(found)), (
+                f"a runner's {tool} is the skill's: {found}")
+
     @pytest.mark.parametrize("name", sorted(_PROVIDERS))
     @pytest.mark.parametrize("profile", [PROFILE_GENERATE, PROFILE_AGENT_READONLY,
                                          PROFILE_AGENT_WRITE])
@@ -126,6 +214,47 @@ class TestTheBuilder:
         with patch.dict(os.environ, _leaky(), clear=False):
             env = base.build_child_env(None, provider_env={})
         _assert_clean(env)
+
+
+class TestARealUvInAnEmptyRepository:
+    """The measured symptom, end to end: ``uv pip`` in a repository with no
+    ``.venv`` of its own, under the environment the builder hands a runner."""
+
+    @staticmethod
+    def _uv_pip(uv, cwd, env):
+        # Offline and already satisfied: no index is reached, and the first
+        # line names the environment uv picked (or says it found none).
+        return subprocess.run(
+            [uv, "pip", "install", "--dry-run", "--offline", "pyyaml"],
+            cwd=str(cwd), env=env, capture_output=True, text=True, timeout=60,
+            stdin=subprocess.DEVNULL,
+        )
+
+    def test_uv_pip_does_not_target_the_skill_environment(self, tmp_path):
+        uv = shutil.which("uv", path=_user_path())
+        if uv is None:
+            pytest.skip("uv is not on PATH")
+        # A source that is the dispatcher's under `uv run`, minus anything else
+        # that could pick an environment for uv.
+        source = {key: value for key, value in os.environ.items()
+                  if not key.startswith(("UV_", "CONDA_", "VIRTUAL_ENV", "PYTHON"))}
+        source.update(_leaky())
+        source["PATH"] = os.pathsep.join([OWN_BIN, _user_path()])
+        repo = tmp_path / "userrepo"
+        repo.mkdir()
+
+        # Round 8's child: both names gone, the skill's bin still first.
+        leaked = self._uv_pip(uv, repo, {k: v for k, v in source.items() if k not in NAMES})
+        if OWN not in leaked.stdout + leaked.stderr:
+            pytest.skip("this uv does not fall back to the python on PATH: "
+                        + (leaked.stdout + leaked.stderr).strip()[:200])
+
+        env = base.build_child_env(_Bare(), provider_env={}, base_env=source)
+        done = self._uv_pip(uv, repo, env)
+        assert OWN not in done.stdout + done.stderr, (
+            "uv pip in the user's repository still targets the skill's environment:\n"
+            + done.stdout + done.stderr)
+        _assert_clean(env, expect_unrelated=False)
 
 
 class TestTheSpawnSites:
