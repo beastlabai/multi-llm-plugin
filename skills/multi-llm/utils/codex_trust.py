@@ -57,6 +57,11 @@ import threading
 from dataclasses import dataclass, field
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 
+try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from .git_utils import git_argv
+except ImportError:  # pragma: no cover - direct-script import shim
+    from utils.git_utils import git_argv
+
 CONFIG_NAME = "config.toml"
 
 #: Reentrant because :func:`restore_all` also runs inside the detached worker's
@@ -146,7 +151,7 @@ def repo_keys(directory: Optional[str]) -> List[str]:
     keys: List[str] = []
     try:
         top = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel", "--git-common-dir"],
+            git_argv("rev-parse", "--show-toplevel", "--git-common-dir"),
             capture_output=True, text=True, cwd=start, timeout=10,
             encoding="utf-8", errors="replace",
         )

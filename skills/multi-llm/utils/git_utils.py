@@ -34,6 +34,48 @@ class GitError(Exception):
     """Raised when a git operation fails."""
     pass
 
+
+#: The ``-c`` overrides every git command the plugin spawns carries (root
+#: grant, 2026-10-05). A repo-wide batch on the plugin's Landlock jail can
+#: write ``.git/config`` and ``.git/hooks/`` — the user decided against
+#: backing the metadata up around each batch — so the plugin's own git calls
+#: that run after it (the sweep's ``status``, ``ls-files`` and
+#: ``hash-object``, intent-to-add's ``add -N``, review-code's diffs) must not
+#: execute anything the batch planted: ``core.fsmonitor`` is a hook ``status``
+#: and ``diff`` run on every call, and ``core.hooksPath`` is where ``add -N``
+#: finds ``post-index-change``. Cheap and detective: the user's own git still
+#: honours the planted config, which :func:`git_metadata_fingerprint` and the
+#: scheduler's ``[GIT_CONFIG_CHANGED]`` line exist to say.
+GIT_HARDENING_ARGS: Tuple[str, ...] = (
+    "-c", "core.fsmonitor=false",
+    "-c", "core.hooksPath=/dev/null",
+)
+#: The diff options for the same reason: ``diff.external`` and a driver's
+#: ``diff.<x>.command`` / ``diff.<x>.textconv`` (bound by a plantable
+#: ``.gitattributes``) are executables ``git diff`` runs by config.
+GIT_DIFF_HARDENING_ARGS: Tuple[str, ...] = ("--no-ext-diff", "--no-textconv")
+
+#: The git subcommands that take :data:`GIT_DIFF_HARDENING_ARGS`.
+_DIFF_SUBCOMMANDS = frozenset({"diff", "diff-index", "diff-tree", "diff-files", "log", "show"})
+
+
+def git_argv(*args: str) -> List[str]:
+    """``git`` plus :data:`GIT_HARDENING_ARGS` plus ``args`` — the one way
+    the plugin spells a git command (``tests/test_git_utils.py`` fails any
+    runtime git list literal outside this module). A diff-producing
+    subcommand also gets :data:`GIT_DIFF_HARDENING_ARGS` right after its
+    name; a ``git show <ref>:<path>`` blob read accepts them harmlessly."""
+    argv = ["git", *GIT_HARDENING_ARGS]
+    rest = list(args)
+    # Global options (`--literal-pathspecs`, `-C <dir>`) precede the subcommand.
+    index = 0
+    while index < len(rest) and rest[index].startswith("-"):
+        index += 2 if rest[index] in ("-C", "-c", "--git-dir", "--work-tree") else 1
+    if index < len(rest) and rest[index] in _DIFF_SUBCOMMANDS:
+        rest[index + 1:index + 1] = list(GIT_DIFF_HARDENING_ARGS)
+    return argv + rest
+
+
 def _run_git(
     *args: str, check: bool = True, cwd: Optional[str] = None
 ) -> Tuple[str, str, int]:
@@ -49,7 +91,7 @@ def _run_git(
     # backslashreplace (noisier in model-visible output).
     where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
     result = subprocess.run(
-        ["git"] + list(args),
+        git_argv(*args),
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -71,7 +113,7 @@ def get_project_root(from_path: str) -> Optional[str]:
         Absolute path to the project root, or None if not in a git repo.
     """
     result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
+        git_argv("rev-parse", "--show-toplevel"),
         capture_output=True, text=True,
         encoding="utf-8", errors="replace",
         cwd=os.path.dirname(from_path) or "."
@@ -98,7 +140,7 @@ def get_project_root_from_dir(directory: Optional[str] = None) -> Optional[str]:
         Absolute path to the project root, or None if not in a git repo.
     """
     result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
+        git_argv("rev-parse", "--show-toplevel"),
         capture_output=True, text=True,
         encoding="utf-8", errors="replace",
         cwd=directory or "."
@@ -323,7 +365,7 @@ def ignored_paths(paths: Iterable[str], *, cwd: Optional[str] = None) -> Set[str
         return set()
     try:
         result = subprocess.run(
-            ["git", "check-ignore", "-z", "--stdin"],
+            git_argv("check-ignore", "-z", "--stdin"),
             input="\0".join(inside) + "\0",
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             **where,
@@ -613,7 +655,7 @@ def validate_git_ref(ref: str) -> str:
 
     try:
         subprocess.run(
-            ["git", "rev-parse", "--verify", ref],
+            git_argv("rev-parse", "--verify", ref),
             check=True,
             capture_output=True,
             text=True,
@@ -639,7 +681,7 @@ def validate_git_ref(ref: str) -> str:
     # Fallback to HEAD~1
     try:
         subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD~1"],
+            git_argv("rev-parse", "--verify", "HEAD~1"),
             check=True,
             capture_output=True,
             text=True,
@@ -1012,7 +1054,7 @@ def capture_diff_hunks(
     # --- Check for uncommitted changes ---
     try:
         status_result = subprocess.run(
-            ["git", "status", "--porcelain"],
+            git_argv("status", "--porcelain"),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1041,7 +1083,7 @@ def capture_diff_hunks(
     # --- Run git diff ---
     try:
         diff_result = subprocess.run(
-            ["git", "diff", base_ref, "--"] + list(file_paths),
+            git_argv("diff", base_ref, "--", *file_paths),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -1118,7 +1160,7 @@ def capture_diff_hunks(
         if fpath in result and isinstance(result[fpath], dict) and result[fpath].get("deleted"):
             try:
                 show_result = subprocess.run(
-                    ["git", "show", f"{base_ref}:{fpath}"],
+                    git_argv("show", f"{base_ref}:{fpath}"),
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
@@ -1437,7 +1479,7 @@ def _linguist_generated(paths: Sequence[str], cwd: Optional[str] = None) -> Set[
         return set()
     try:
         result = subprocess.run(
-            ["git", "check-attr", "--stdin", "-z", "linguist-generated"],
+            git_argv("check-attr", "--stdin", "-z", "linguist-generated"),
             input="\0".join(paths) + "\0",
             capture_output=True,
             text=True,
@@ -1716,7 +1758,7 @@ def _git_diff_output(
     """
     try:
         proc = subprocess.run(
-            ["git", "--literal-pathspecs", *args],
+            git_argv("--literal-pathspecs", *args),
             capture_output=True,
             stdin=subprocess.DEVNULL,
             cwd=cwd,
