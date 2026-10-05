@@ -996,7 +996,13 @@ class WriteBatchScheduler:
         self.phase = phase or PHASE_BY_WRITE_KIND[kind]
         self.output_dir = str(output_dir)
         self.anchor = anchor or plan_file
-        self.repo_root = str(repo_root) if repo_root else resolve_repo_root(self.anchor)
+        # An explicit root is checked the way the resolver pins one (review
+        # fixes 2026-10-05): a planted `core.worktree` or a redirecting `.git`
+        # refuses the phase at construction, before any snapshot or dispatch.
+        self.repo_root = (
+            self._checked_repo_root(repo_root) if repo_root
+            else resolve_repo_root(self.anchor)
+        )
         self.state = state
         self.plan_file = plan_file
         self.summary_file = summary_file
@@ -1160,6 +1166,21 @@ class WriteBatchScheduler:
         self._rung_noticed: set = set()
 
     # -- the write grant (plan step 3, 2026-09-30) ----------------------
+
+    @staticmethod
+    def _checked_repo_root(raw: str) -> str:
+        """``raw`` ``realpath``-resolved, refused (exit 3) when
+        ``git_utils.pin_repo_root`` says git's view of that tree is
+        redirected — the check :func:`resolve_repo_root` makes for a root it
+        derives itself, applied to one a caller hands in."""
+        root = os.path.realpath(str(raw))
+        _pinned, problem = _git_utils.pin_repo_root(root)
+        if problem:
+            raise WriteSafetyError(
+                f"Refusing the repository root {root}: {problem}. Nothing was "
+                f"dispatched."
+            )
+        return root
 
     def _checked_write_target(self, raw: Optional[str]) -> Optional[str]:
         """``raw`` ``realpath``-resolved, or refuse the phase at construction.

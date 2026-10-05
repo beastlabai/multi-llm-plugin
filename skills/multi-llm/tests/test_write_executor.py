@@ -30,6 +30,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import sys
 import time
 from typing import Dict
@@ -1057,6 +1058,91 @@ class TestWorkspaceSafety:
     def test_the_repo_root_is_the_git_toplevel_canonicalized(self, env):
         assert Path(write_safety.resolve_repo_root(str(env.plan))).resolve() == \
             env.root.resolve()
+
+    # -- the root is pinned independently of git's configuration (review
+    # fixes 2026-10-05): a repo-wide batch can write `[core] worktree` into
+    # `.git/config`, and `rev-parse --show-toplevel` then answered the planted
+    # directory on every later phase and `--resume`, where the next repo-wide
+    # jail's one rule landed.
+
+    @staticmethod
+    def _git(env, *args):
+        subprocess.run(["git", *args], cwd=env.root, check=True, capture_output=True)
+
+    def test_a_planted_core_worktree_is_refused_naming_the_cause(self, env, tmp_path):
+        planted = tmp_path / "home"
+        planted.mkdir()
+        self._git(env, "config", "core.worktree", str(planted))
+        with pytest.raises(write_safety.WriteSafetyError) as excinfo:
+            write_safety.resolve_repo_root(str(env.plan))
+        message = excinfo.value.message
+        assert "core.worktree" in message and str(planted) in message
+        assert "git config --unset core.worktree" in message
+        assert excinfo.value.exit_code == 3
+
+    def test_a_planted_core_worktree_refuses_the_scheduler_before_any_dispatch(self, env, tmp_path):
+        planted = tmp_path / "home"
+        planted.mkdir()
+        self._git(env, "config", "core.worktree", str(planted))
+        with pytest.raises(write_safety.WriteSafetyError):
+            env.scheduler([env.apply_task(0)])
+        assert not (env.phase_dir / "pre_batch").exists()
+
+    def test_a_gitfile_pointing_at_a_planted_git_dir_is_refused(self, env, tmp_path):
+        planted_home = tmp_path / "home"
+        planted_home.mkdir()
+        other = tmp_path / "other"
+        other.mkdir()
+        subprocess.run(["git", "init", "-q"], cwd=other, check=True)
+        subprocess.run(["git", "config", "core.worktree", str(planted_home)],
+                       cwd=other, check=True)
+        shutil.move(str(env.root / ".git"), str(tmp_path / "real-git"))
+        (env.root / ".git").write_text(f"gitdir: {other / '.git'}\n", encoding="utf-8")
+        with pytest.raises(write_safety.WriteSafetyError) as excinfo:
+            write_safety.resolve_repo_root(str(env.plan))
+        assert str(env.root / ".git") in excinfo.value.message or "core.worktree" in excinfo.value.message
+
+    @pytest.mark.parametrize("name", ["GIT_WORK_TREE", "GIT_DIR"])
+    def test_a_git_environment_redirect_is_refused(self, env, tmp_path, monkeypatch, name):
+        monkeypatch.setenv(name, str(tmp_path))
+        with pytest.raises(write_safety.WriteSafetyError) as excinfo:
+            write_safety.resolve_repo_root(str(env.plan))
+        assert name in excinfo.value.message
+
+    def test_a_linked_worktree_and_a_submodule_shaped_checkout_still_pin_themselves(self, env, tmp_path):
+        """A `.git` *file* is the normal shape of a linked worktree and of a
+        submodule, and a submodule's own config sets `core.worktree` — both
+        agree with the walked root and are not refused."""
+        subprocess.run(["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t",
+                        "commit", "-q", "--allow-empty", "-m", "init"], cwd=env.root, check=True)
+        linked = tmp_path / "linked"
+        self._git(env, "worktree", "add", "-q", str(linked), "-b", "side")
+        assert Path(write_safety.resolve_repo_root(str(linked / "x.md"))).resolve() == linked.resolve()
+        # Submodule shape: a gitfile plus a core.worktree that points back here.
+        sub = env.root / "vendor" / "lib"
+        sub.mkdir(parents=True)
+        modules = env.root / ".git" / "modules" / "lib"
+        modules.parent.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", "--separate-git-dir", str(modules), str(sub)], check=True,
+                       capture_output=True)
+        subprocess.run(["git", "config", "core.worktree", "../../../vendor/lib"], cwd=sub, check=True)
+        assert (sub / ".git").is_file()
+        assert Path(write_safety.resolve_repo_root(str(sub / "p.md"))).resolve() == sub.resolve()
+
+    def test_outside_any_repository_the_anchors_directory_is_the_root(self, tmp_path):
+        bare = tmp_path / "bare"
+        bare.mkdir()
+        plan = bare / "p.md"
+        plan.write_text("# p\n", encoding="utf-8")
+        assert Path(write_safety.resolve_repo_root(str(plan))).resolve() == bare.resolve()
+
+    def test_the_report_time_root_degrades_to_a_warning(self, env, tmp_path, capsys):
+        """A redirect planted DURING the run must not crash the finished
+        phase's artifact hand-back: it warns and resolves against the walked
+        `.git` holder."""
+        self._git(env, "config", "core.worktree", str(tmp_path))
+        assert Path(write_safety.repo_root_for_report(str(env.plan))).resolve() == env.root.resolve()
+        assert "core.worktree" in capsys.readouterr().err
 
     def test_every_write_mode_records_a_dirty_tree_baseline(self, env, capsys):
         """D3h: `record_pre_existing_changes` for every executor-backed write mode."""

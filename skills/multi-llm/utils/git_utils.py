@@ -246,6 +246,84 @@ def get_project_root(from_path: str) -> Optional[str]:
     return None
 
 
+#: Environment variables that point git at another repository or working
+#: tree than the one the plan is in. :func:`pin_repo_root` refuses while any
+#: is set: the plugin's git calls and a repo-wide jail would then disagree
+#: about which tree they act on.
+GIT_ENV_REDIRECTS: Tuple[str, ...] = ("GIT_DIR", "GIT_WORK_TREE", "GIT_COMMON_DIR")
+
+
+def find_git_entry_root(start: str) -> Optional[str]:
+    """The nearest directory at or above ``start`` holding a ``.git`` entry
+    (a directory, or the gitfile of a linked worktree or submodule),
+    ``realpath``'d; ``None`` when there is none. Pure path walking — git
+    itself is not asked, so no configuration can move the answer."""
+    current = os.path.realpath(start)
+    while True:
+        if os.path.lexists(os.path.join(current, ".git")):
+            return current
+        parent = os.path.dirname(current)
+        if parent == current:
+            return None
+        current = parent
+
+
+def pin_repo_root(start_dir: str) -> Tuple[Optional[str], Optional[str]]:
+    """``(root, problem)``: the repository root pinned independently of git's
+    configuration, and why it cannot be trusted when it cannot.
+
+    The root is :func:`find_git_entry_root`'s walk, never ``git rev-parse
+    --show-toplevel`` alone: a repo-wide batch on the root grant can write
+    ``[core] worktree = <dir>`` into ``.git/config`` (or replace ``.git`` with
+    a gitfile naming a git dir whose config says so), after which every
+    later phase and ``--resume`` re-pinned the root from git's answer and the
+    next repo-wide jail's one rule landed on the planted directory (review
+    fixes 2026-10-05). git is still asked, and its answer must **equal** the
+    walked root; a ``core.worktree`` that agrees (a submodule sets one
+    legitimately) is fine, one that disagrees is named as the cause. While a
+    :data:`GIT_ENV_REDIRECTS` variable is set nothing is pinned at all.
+    ``(None, None)`` outside any repository.
+    """
+    redirected = [name for name in GIT_ENV_REDIRECTS if os.environ.get(name)]
+    if redirected:
+        return None, (
+            f"{', '.join(redirected)} is set in the environment, so git would act "
+            f"on another repository or working tree than the one the plan is in; "
+            f"unset it for this run"
+        )
+    root = find_git_entry_root(start_dir)
+    if root is None:
+        return None, None
+    worktree_out, _, worktree_rc = _run_git(
+        "config", "--get", "core.worktree", check=False, cwd=root,
+    )
+    configured = worktree_out.strip() if worktree_rc == 0 else ""
+    top_out, _, top_rc = _run_git("rev-parse", "--show-toplevel", check=False, cwd=root)
+    answered = os.path.realpath(top_out.strip()) if top_rc == 0 and top_out.strip() else None
+    if answered == root or (answered is None and not configured):
+        # Agreement — or nothing to compare: git cannot answer (a `.git`
+        # that is not a repository, dubious ownership) and no `core.worktree`
+        # is configured, so the walked root stands; a redirect needs the
+        # configuration git would have honoured, and none is there.
+        return root, None
+    cause = (
+        f"core.worktree = {configured!r} in its configuration redirects the "
+        f"working tree — a repo-wide batch can plant that key in .git/config, so "
+        f"inspect .git/config and remove it (git config --unset core.worktree)"
+        if configured else
+        f"the .git entry or the configuration it points at redirects the "
+        f"working tree (a gitfile naming another git directory, say); inspect "
+        f"{os.path.join(root, '.git')}"
+    )
+    where = (
+        f"git answers {answered} as the top level" if answered
+        else "git cannot confirm the top level"
+    )
+    return root, (
+        f"{where} of the tree whose .git entry is at {root}: {cause}"
+    )
+
+
 def get_project_root_from_dir(directory: Optional[str] = None) -> Optional[str]:
     """Detect the git project root by running git from a *directory* directly.
 

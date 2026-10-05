@@ -59,6 +59,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     )
     from . import process_control
     from . import landlock_exec
+    from . import git_utils as _git_utils
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils.providers.base import (  # type: ignore[no-redef]
         JailContext,
@@ -70,6 +71,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     )
     from utils import process_control  # type: ignore[no-redef]
     from utils import landlock_exec  # type: ignore[no-redef]
+    from utils import git_utils as _git_utils  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # The wrapper and its launch
@@ -363,6 +365,19 @@ def repo_wide_root(request: JailRequest) -> str:
             f"the repository root {render_home(root)} is not a directory, so "
             f"a repo-wide grant has nothing to rule",
             path=root, reason="repo-root-missing",
+        )
+    # Review fixes 2026-10-05: the rule lands only on a root git agrees is
+    # the top level of the tree whose `.git` entry it holds. A planted
+    # `core.worktree` (writable under this very grant) used to move
+    # `rev-parse --show-toplevel`, and so the next dispatch's one rule, to
+    # any directory; `write_safety.resolve_repo_root` refuses it first, and
+    # this is the same check at the grant itself.
+    _pinned, problem = _git_utils.pin_repo_root(root)
+    if problem:
+        raise JailRefused(
+            f"the repository root {render_home(root)} cannot be trusted for a "
+            f"repo-wide grant: {problem}",
+            path=root, reason="repo-root-redirected",
         )
     return root
 

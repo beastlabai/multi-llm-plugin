@@ -57,6 +57,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import time
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -64,11 +65,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .git_utils import git_argv
+    from .git_utils import git_argv, pin_repo_root
     from .provider_registry import get_write_paths
     from .subagent_tasks import declared_file_set
 except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.git_utils import git_argv
+    from utils.git_utils import git_argv, pin_repo_root
     from utils.provider_registry import get_write_paths
     from utils.subagent_tasks import declared_file_set
 
@@ -85,6 +86,7 @@ __all__ = [
     "TaskSnapshot",
     "SnapshotEntry",
     "resolve_repo_root",
+    "repo_root_for_report",
     "contain_under_root",
     "relative_to_root",
     "admit_disjoint_groups",
@@ -147,7 +149,8 @@ class PolicyViolation(WriteSafetyError):
 # ---------------------------------------------------------------------------
 
 def resolve_repo_root(anchor: Optional[str]) -> str:
-    """The write path's one root: ``git rev-parse --show-toplevel``, canonicalized.
+    """The write path's one root: the directory holding the ``.git`` entry
+    above the anchor, canonicalized (``git_utils.pin_repo_root``).
 
     ``realpath``, not ``abspath``: this value is one side of every containment
     comparison below and the other side is canonicalized too, so a symlinked
@@ -156,6 +159,14 @@ def resolve_repo_root(anchor: Optional[str]) -> str:
     ``utils/cli_common``. The distinction is exactly D1c: canonicalize for
     containment, preserve for invocation.)
 
+    Until the 2026-10-05 review fixes this was ``git rev-parse --show-toplevel``
+    alone, which a planted ``core.worktree`` (writable by a repo-wide batch
+    under the root grant) redirected to any directory, where the next
+    repo-wide jail's one rule then landed. The root is now walked from the
+    anchor, git's answer must agree with it, and a disagreement — or a
+    ``GIT_DIR``/``GIT_WORK_TREE`` in the environment — is refused with exit 3
+    naming the cause rather than silently re-pinned.
+
     Falls back to the anchor's own directory when the anchor is not in a git repo,
     because a plan in a bare directory is a legitimate target — but the root is
     still pinned to *something* explicit, never left to the process cwd.
@@ -163,16 +174,36 @@ def resolve_repo_root(anchor: Optional[str]) -> str:
     start = Path(anchor).resolve() if anchor else Path.cwd().resolve()
     probe_dir = str(start if start.is_dir() else start.parent)
     try:
-        completed = subprocess.run(
-            git_argv("rev-parse", "--show-toplevel", cwd=probe_dir),
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=probe_dir, timeout=30, stdin=subprocess.DEVNULL,
-        )
+        root, problem = pin_repo_root(probe_dir)
     except (OSError, subprocess.SubprocessError):  # pragma: no cover - no git
         return str(Path(probe_dir).resolve())
-    if completed.returncode == 0 and completed.stdout.strip():
-        return str(Path(completed.stdout.strip()).resolve())
+    if problem:
+        raise WriteSafetyError(
+            f"Refusing to pin the repository root for {anchor or probe_dir}: "
+            f"{problem}. Nothing was dispatched."
+        )
+    if root:
+        return root
     return str(Path(probe_dir).resolve())
+
+
+def repo_root_for_report(anchor: Optional[str]) -> str:
+    """:func:`resolve_repo_root` for a post-run *report* — the artifact hand-back
+    that resolves ``files_touched`` — which must not crash a finished phase
+    when a batch planted a redirect during the run: the refusal is printed as
+    a warning and the walked ``.git`` holder (else the anchor's directory),
+    which no configuration moves, resolves the paths instead."""
+    try:
+        return resolve_repo_root(anchor)
+    except WriteSafetyError as exc:
+        print(f"WARNING: {exc.message}", file=sys.stderr)
+    start = Path(anchor).resolve() if anchor else Path.cwd().resolve()
+    probe_dir = str(start if start.is_dir() else start.parent)
+    try:
+        from .git_utils import find_git_entry_root
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.git_utils import find_git_entry_root  # type: ignore[no-redef]
+    return find_git_entry_root(probe_dir) or str(Path(probe_dir).resolve())
 
 
 def contain_under_root(candidate: str, root: str, *, what: str = "path") -> Path:

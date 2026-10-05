@@ -2486,11 +2486,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         paths["summary"] = os.path.join(phase_dir, "summary.md")
 
         try:
-            from .write_safety import resolve_repo_root
+            from .write_safety import repo_root_for_report
         except ImportError:  # pragma: no cover - direct script runs
-            from write_safety import resolve_repo_root  # type: ignore
+            from write_safety import repo_root_for_report  # type: ignore
 
-        repo_root = resolve_repo_root(self.plan_path)
+        repo_root = repo_root_for_report(self.plan_path)
         for index, touched_path in enumerate(self._touched_files(), start=1):
             resolved = (
                 touched_path if os.path.isabs(touched_path)
@@ -3098,6 +3098,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             return None
 
         from .subagent_executor import ExecutorError
+        from .write_safety import WriteSafetyError
         from .write_batch_scheduler import WriteBatchScheduler
         from .write_phase_bridge import (
             materialize_write_tasks,
@@ -3169,10 +3170,12 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
                 write_target=write_target,
             )
-        except ExecutorError as exc:
+        except (ExecutorError, WriteSafetyError) as exc:
             # A target that cannot be granted (gone, a symlink, not a regular
-            # file, outside the repo) is refused at construction: exit 3 with
-            # the scheduler's own words, never the generic handler's exit 1.
+            # file, outside the repo) — or a repository root that cannot be
+            # pinned (a planted `core.worktree`, review fixes 2026-10-05) —
+            # is refused at construction: exit 3 with the scheduler's own
+            # words, never the generic handler's exit 1.
             print(f"ERROR: {exc.message}", file=sys.stderr)
             return int(getattr(exc, "exit_code", 3) or 3)
         self.write_tasks = list(tasks)
