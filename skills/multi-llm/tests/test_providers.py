@@ -5357,14 +5357,16 @@ class TestAiderProvider:
         assert result["success"] is True
         assert result["data"] == data
 
-    def test_aider_parse_wrapped_json_mid_string_fails(self, provider):
-        """Hard-wrapped JSON (literal newline INSIDE a string) is unparseable.
+    def test_aider_parse_wrapped_json_mid_string_keeps_the_break(self, provider):
+        """Hard-wrapped JSON (literal newline INSIDE a string) parses, break kept.
 
         This documents why get_env() sets COLUMNS=10000: without it aider
         wraps output at ~80 columns and long string values get literal
-        newlines inserted, which json.loads rejects (and
-        extract_json_from_text does not repair). Newlines BETWEEN tokens
-        are fine — only mid-string breaks matter.
+        newlines inserted. Until 2026-10-05 the strict parse rejected the
+        whole document; ``extract_json_from_text`` now tolerates raw control
+        characters inside strings (``_loads_reply``), so the answer survives,
+        but the inserted break is kept verbatim in the value — the wrap still
+        alters what the model wrote, which is why the variable stays.
         """
         wrapped = (
             '[\n  {\n    "title": "Missing Input Validation",\n'
@@ -5375,8 +5377,11 @@ class TestAiderProvider:
 
         result = provider.parse_output(stdout, "")
 
-        assert result["success"] is False
-        assert "error" in result
+        assert result["success"] is True
+        assert result["data"][0]["desc"] == (
+            "The function responsible for parsing user-supplied \n"
+            "configuration parameters lacks proper validation checks."
+        )
 
     def test_aider_parse_wrapped_between_tokens_ok(self, provider):
         """Newlines between JSON tokens (not inside strings) parse fine."""

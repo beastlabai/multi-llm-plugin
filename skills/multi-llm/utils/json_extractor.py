@@ -333,6 +333,24 @@ def _answer_rank(data: Any) -> int:
     return _RANK_BARE
 
 
+def _loads_reply(candidate: str) -> Any:
+    """``json.loads`` for a model's reply, tolerating raw control characters.
+
+    The one leniency is ``strict=False``: a tab, a line break or a NUL byte
+    typed *inside a string* instead of escaped (``\\t``, ``\\n``, ``\\u0000``).
+    Nothing else changes — the parsed value holds exactly the characters the
+    model wrote, every other syntax error still fails, and the caller still
+    validates the document against its schema. The strict parse turned that
+    one stray byte into a much worse answer: the document around it failed, so
+    the extractor served a fragment from inside it instead. Measured
+    2026-10-05 on ``opencode/big-pickle``, apply-suggestions batch 6: the
+    reply's report object carried a NUL byte in a key (``"ids\\x00"``), and
+    the batch was rejected as "expected type object, got list" — the list
+    being the report's own ``files_touched`` array.
+    """
+    return json.loads(candidate, strict=False)
+
+
 def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, Any]:
     """Extract JSON with multiple fallback strategies.
 
@@ -400,7 +418,7 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
     fence_fallbacks: Dict[int, Any] = {}
     for match in reversed(fence_matches):
         try:
-            fence_data = json.loads(match.group(1))
+            fence_data = _loads_reply(match.group(1))
         except json.JSONDecodeError:
             continue
         rank = _answer_rank(fence_data)
@@ -450,7 +468,7 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
     fallbacks: Dict[int, Any] = {}
     for candidate in candidates:
         try:
-            data = json.loads(candidate)
+            data = _loads_reply(candidate)
         except json.JSONDecodeError:
             continue
         rank = _answer_rank(data)
