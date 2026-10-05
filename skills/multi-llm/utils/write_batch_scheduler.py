@@ -116,7 +116,10 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         snapshot_file_set,
         write_output_name,
     )
-    from .state_manager import set_task_check_findings_in_state
+    from .state_manager import (
+        IMPLEMENT_TASK_GRAPH_KEY,
+        set_task_check_findings_in_state,
+    )
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
         DRY_RUN_FILENAME,
@@ -203,7 +206,10 @@ except ImportError:  # pragma: no cover - direct-script import shim
         snapshot_file_set,
         write_output_name,
     )
-    from utils.state_manager import set_task_check_findings_in_state  # type: ignore
+    from utils.state_manager import (  # type: ignore
+        IMPLEMENT_TASK_GRAPH_KEY,
+        set_task_check_findings_in_state,
+    )
     from utils.write_phase_bridge import WRITE_TASK_FILENAME
     from utils.write_safety import (
         DRY_RUN_FILENAME,
@@ -238,6 +244,7 @@ __all__ = [
     "BLOCKED_BY_CHECK_PREFIX",
     "bind_prior_changes",
     "blocked_by_check_reason",
+    "decomposition_graph",
     "rerunnable_checks",
     "transitive_dependents",
     "upstream_held_check",
@@ -660,12 +667,59 @@ def rerunnable_checks(state: Any) -> List[str]:
     )
 
 
+def decomposition_graph(
+    tasks: Sequence[Dict[str, Any]], state: Any,
+) -> List[Dict[str, Any]]:
+    """*tasks* plus one node per task of the recorded decomposition they lack.
+
+    Fix round 12 (review of round 11): a ``--resume`` materializes only the
+    unfinished tasks, so a walk over them alone lost every edge through a
+    finished one. With T001 → T002 (a check with findings) → T005 (manual,
+    answered done) → T006, the first run held T004 and T006; a plain
+    ``--resume`` that changed nothing kept T004 held and dispatched T006,
+    whose only path to T002 ran through T005, completed and so not
+    materialized — the executor's walk, ``util batch-done``'s and ``util
+    write-prompt``'s alike. *state* (a ``StateManager`` or ``state.json``'s
+    dict) carries the whole graph implement decomposed
+    (:data:`state_manager.IMPLEMENT_TASK_GRAPH_KEY`); each task it names that
+    *tasks* lacks is added as ``{"task_id", "depends_on", "on_record_only":
+    True}`` (``executor_role: human`` for a manual one), so a walk passes
+    through it. *tasks* win for the ids they hold. A state with no graph on
+    record (one written before fix round 12) adds nothing.
+    """
+    nodes = [task for task in tasks if isinstance(task, dict)]
+    if state is None or not hasattr(state, "get"):
+        return nodes
+    try:
+        recorded = state.get(IMPLEMENT_TASK_GRAPH_KEY)
+        human = {str(item) for item in (state.get("implement_human_task_ids") or [])}
+    except Exception:  # noqa: BLE001 - a graph read is never fatal
+        return nodes
+    if not isinstance(recorded, dict):
+        return nodes
+    have = {str(task.get("task_id", "")) for task in nodes}
+    for task_id in sorted(str(key) for key in recorded):
+        deps = recorded.get(task_id)
+        if not task_id or task_id in have or not isinstance(deps, list):
+            continue
+        node: Dict[str, Any] = {
+            "task_id": task_id,
+            "depends_on": [str(dep) for dep in deps if dep],
+            "on_record_only": True,
+        }
+        if task_id in human:
+            node["executor_role"] = "human"
+        nodes.append(node)
+    return nodes
+
+
 def transitive_dependents(tasks: Sequence[Dict[str, Any]], task_id: str) -> List[str]:
     """Every task of *tasks* that depends on *task_id*, transitively, sorted.
 
     Over each task's ``depends_on``; the one graph walk both legs use for
     the tasks a check with findings holds back (the scheduler's
-    ``_dependents_of``, ``util batch-done --check findings``).
+    ``_dependents_of``, ``util batch-done --check findings``). Pass the
+    whole graph (:func:`decomposition_graph`), not a resume's subset.
     """
     dependents: Dict[str, List[str]] = {}
     for task in tasks:
@@ -691,8 +745,10 @@ def upstream_held_check(
 
     *held* is :func:`rerunnable_checks`: checks whose findings hold back the
     tasks after them. Walks ``depends_on`` upward through *tasks*; an id a
-    task depends on that *tasks* does not hold (a task a resume did not
-    materialize) is still compared, just not walked further.
+    task depends on that *tasks* does not hold is still compared, just not
+    walked further — so pass the whole graph (:func:`decomposition_graph`):
+    a task a resume did not materialize is exactly where the walk used to
+    stop short of the check (fix round 12).
     """
     held_set = {str(item) for item in held}
     if not held_set:
@@ -863,6 +919,7 @@ def resolve_human_task_plan(
     strategy: Optional[str],
     decisions: Optional[Dict[str, str]] = None,
     check_findings_ids: Sequence[str] = (),
+    graph: Optional[Sequence[Dict[str, Any]]] = None,
 ) -> HumanTaskPlan:
     """Apply ``strategy`` over the task graph and return the resolved plan (D3n).
 
@@ -890,6 +947,15 @@ def resolve_human_task_plan(
     after it run; the findings stay listed for review-code), ``skip`` leaves
     it and its dependents undone, ``retry`` runs the check again on
     unchanged files (fix round 11).
+
+    *graph* is the whole decomposition (:func:`decomposition_graph`) when
+    *tasks* are a resume's subset (fix round 12): the walk from a code task
+    answered ``skip`` goes through a task this run does not hold (finished
+    before the resume, so not skipped) to the tasks after it, which are
+    skipped naming the skipped task they depend on — a check answered
+    ``skip`` used to leave a task whose chain to it ran through a manual
+    task answered done to run. The walk from a manual task stays over
+    *tasks*.
 
     Pure: takes the task list, returns the decision. Persisting it (through
     ``update_task_status`` / ``record_dependency_override``) is the scheduler's job,
@@ -970,21 +1036,38 @@ def resolve_human_task_plan(
     # T001(human) -> T003 -> T005 is skipped in full. skip-continue walks it
     # only from a failed code task answered `skip` (see the docstring).
     dependents: Dict[str, List[str]] = {}
-    for task_id, task in by_id.items():
+    nodes = list(graph) if graph is not None else list(by_id.values())
+    for task in nodes:
+        if not isinstance(task, dict):
+            continue
         for dep in task.get("depends_on") or []:
-            dependents.setdefault(str(dep), []).append(task_id)
-    queue = list(code_seeds if strategy == STRATEGY_SKIP_CONTINUE else seeds)
+            dependents.setdefault(str(dep), []).append(str(task.get("task_id", "")))
+    code_set = set(code_seeds)
+    # (task, the skipped task a dependent names, whether the walk may pass
+    # through a task this run does not hold — only from a code seed).
+    queue = [
+        (seed, seed, seed in code_set)
+        for seed in (code_seeds if strategy == STRATEGY_SKIP_CONTINUE else seeds)
+    ]
+    passed: set = set()
     while queue:
-        parent = queue.pop(0)
-        parent_title = str(by_id.get(parent, {}).get("task_title", "") or parent)
-        for child in sorted(dependents.get(parent, [])):
+        parent, named, through = queue.pop(0)
+        named_title = str(by_id.get(named, {}).get("task_title", "") or named)
+        for child in sorted(set(dependents.get(parent, []))):
+            if not child:
+                continue
+            if child not in by_id:
+                if through and child not in passed:
+                    passed.add(child)
+                    queue.append((child, named, through))
+                continue
             if child in plan.skipped:
                 continue
             plan.skipped[child] = (
-                f"skipped — depends on skipped task {parent} ({parent_title})"
+                f"skipped — depends on skipped task {named} ({named_title})"
             )
-            plan.chain[child] = parent
-            queue.append(child)
+            plan.chain[child] = named
+            queue.append((child, child, through))
 
     if strategy == STRATEGY_SKIP_CONTINUE:
         # A manual task's edges are treated as satisfied: its dependents run,
@@ -2253,6 +2336,10 @@ class WriteBatchScheduler:
             check_findings_ids=(
                 rerunnable_checks(self.state) if self.kind == "implement" else ()
             ),
+            graph=(
+                decomposition_graph(self.tasks, self.state)
+                if self.kind == "implement" else None
+            ),
         )
         if self.kind == "implement" and self.state is not None:
             try:
@@ -2455,8 +2542,10 @@ class WriteBatchScheduler:
         Fix round 11 (review of round 10, T1): a check task that reported
         problems was recorded ``check-findings`` and the loop dispatched the
         tasks that depend on it — on the code the check had just rejected.
-        Its transitive dependents (``depends_on``, over this run's tasks) are
-        now recorded in ``result.blocked_by_check`` and left out of every
+        Its transitive dependents (``depends_on``, over the whole
+        decomposition — fix round 12: over this run's tasks alone, a resume
+        lost the ones whose chain ran through a finished task) that this run
+        holds are now recorded in ``result.blocked_by_check`` and left out of every
         later batch; a task already skipped or accepted, and a manual task
         (never dispatched), are not. A resume skip and a check not run again
         because nothing changed carry the earlier findings, so they block
@@ -2469,7 +2558,12 @@ class WriteBatchScheduler:
             if not (outcome.ok and outcome.check_findings):
                 continue
             for dependent in self._dependents_of(outcome.task_id):
-                task = self._task_by_id(dependent) or {}
+                task = self._task_by_id(dependent)
+                if task is None:
+                    # Not in this run (a finished task a resume did not
+                    # materialize): nothing to hold, but the walk went
+                    # through it to the tasks after it (fix round 12).
+                    continue
                 if (
                     dependent in result.blocked_by_check
                     or plan.is_skipped(dependent)
@@ -5716,6 +5810,7 @@ class WriteBatchScheduler:
             dependents = [
                 dep for dep in self._dependents_of(task_id)
                 if dep not in already and dep not in manual
+                and self._task_by_id(dep) is not None
             ]
             after = sorted(stop.get("not_run") or [])
             accept = cmds.get("accept", "").replace("{task_id}", task_id) or (
@@ -5744,8 +5839,18 @@ class WriteBatchScheduler:
         return lines
 
     def _dependents_of(self, task_id: str) -> List[str]:
-        """Every task that depends on *task_id*, transitively, in id order."""
-        return transitive_dependents(self.tasks, task_id)
+        """Every task that depends on *task_id*, transitively, in id order.
+
+        Over the whole decomposition (:func:`decomposition_graph`), not only
+        this run's tasks: a resume does not materialize a finished task, and
+        a walk over the rest stopped at it (fix round 12). A task this run
+        does not hold is in the answer; callers that act on a task skip it.
+        """
+        if self.kind != "implement":
+            return transitive_dependents(self.tasks, task_id)
+        return transitive_dependents(
+            decomposition_graph(self.tasks, self.state), task_id,
+        )
 
     def _accounting(self, result: SchedulerResult) -> Dict[str, Any]:
         """Every task of the decomposition in exactly one bucket.
