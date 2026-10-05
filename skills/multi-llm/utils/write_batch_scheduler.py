@@ -1942,12 +1942,17 @@ class WriteBatchScheduler:
             return
         digests = {digest for _stamp, digest in self._retained.values() if digest}
         shards = {digest[:2] for digest in digests}
+        # The directory named in full: a jailed repo-wide batch keeps its
+        # snapshots under the state home, not the phase dir (Codex racing run
+        # 4: "restore points live in pre_batch/" read as the phase dir's copy,
+        # which the line before says is never read).
         self.log(
             f"[write-subagents] rollback store peaked at "
             f"{self._retained_bytes / (1024 * 1024):.1f} MB of the "
             f"{SWEEP_RETAIN_MAX_BYTES // (1024 * 1024)} MB budget "
             f"({len(digests)} files, {len(shards)} shards); discarded now "
-            f"— restore points live in pre_batch/"
+            f"— the restore points are the pre-batch snapshots in "
+            f"{os.path.join(self.safety_dir, 'pre_batch')}/"
         )
 
     def _discard_rollback_store(self) -> None:
