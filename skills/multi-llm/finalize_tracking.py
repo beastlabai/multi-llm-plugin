@@ -40,6 +40,7 @@ from utils import (
     subtract_baseline,
 )
 from utils.git_utils import get_project_root_from_dir, ignored_paths, paths_in_commit
+from utils.metrics import StateLockTimeout, state_file_lock
 from utils.output_handler import workflow_file_entries
 from utils.state_manager import compute_plan_hash, mark_phase_completed_in_state
 
@@ -132,13 +133,14 @@ def _restamp_plan_hash(state_path: Path, plan_path: Path) -> None:
     the census — this command's actual job — is already on disk.
     """
     try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        if not isinstance(state, dict) or "plan_hash" not in state:
-            # No hash recorded means nothing reads one; do not invent a field.
-            return
-        state["plan_hash"] = compute_plan_hash(plan_path)
-        state.pop("plan_changed", None)
-        _write_state_atomic(state_path, state)
+        with state_file_lock(state_path):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict) or "plan_hash" not in state:
+                # No hash recorded means nothing reads one; do not invent a field.
+                return
+            state["plan_hash"] = compute_plan_hash(plan_path)
+            state.pop("plan_changed", None)
+            _write_state_atomic(state_path, state)
     except (OSError, json.JSONDecodeError) as e:
         print(f"Warning: could not re-stamp plan_hash: {e}", file=sys.stderr)
 
@@ -284,6 +286,41 @@ def main(argv=None) -> int:
         print(f"ERROR: State file not found: {state_path}", file=sys.stderr)
         return 1
 
+    # One lock from the read to the write (fix round 8): `util batch-done`,
+    # `util metrics` and this command are separate processes a host may run
+    # side by side, and each rewrites the whole file.
+    try:
+        with state_file_lock(state_path):
+            outcome = _record_tracked_files(args, state_path, explicit_scope)
+    except StateLockTimeout as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    if isinstance(outcome, int):
+        return outcome
+    tracked_files = outcome
+
+    print(f"\nTracked {len(tracked_files)} implementation files:")
+    _print_path_list(tracked_files)
+
+    print(f"\nState file updated: {state_path}")
+    if args.mark_completed:
+        print("Phase implement marked completed")
+
+    if args.plan_file:
+        code = _insert_summary_reference(args.plan_file, args.summary_file_relative)
+        if code:
+            return code
+        _restamp_plan_hash(state_path, Path(args.plan_file))
+    return 0
+
+
+def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
+    """Read *state_path*, record its ``tracked_files`` and write it back.
+
+    ``main``'s read-modify-write, run under ``metrics.state_file_lock``.
+    Returns the entries written, or an exit code: ``1`` for an unreadable
+    or failed write, ``0`` for a ``--dry-run`` (which writes nothing).
+    """
     # Load state
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -343,19 +380,7 @@ def main(argv=None) -> int:
         print(f"ERROR: Failed to write state file: {e}", file=sys.stderr)
         return 1
 
-    print(f"\nTracked {len(tracked_files)} implementation files:")
-    _print_path_list(tracked_files)
-
-    print(f"\nState file updated: {state_path}")
-    if args.mark_completed:
-        print("Phase implement marked completed")
-
-    if args.plan_file:
-        code = _insert_summary_reference(args.plan_file, args.summary_file_relative)
-        if code:
-            return code
-        _restamp_plan_hash(state_path, Path(args.plan_file))
-    return 0
+    return tracked_files
 
 
 def _drop_ignored(paths, say=print) -> List[str]:

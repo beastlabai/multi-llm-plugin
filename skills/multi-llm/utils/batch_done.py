@@ -30,7 +30,9 @@ executor leg's ``WriteBatchScheduler`` writes for the same batch:
   after each batch (:func:`_tracked_after_batch`).
 
 It edits ``state.json`` as a file (read, mutate through the state manager's
-module-level helpers, atomic replace), never through a ``StateManager`` —
+module-level helpers, atomic replace) under ``metrics.state_file_lock`` —
+the host may record same-batch tasks in parallel — never through a
+``StateManager`` —
 which would read the plan the batch just edited as a human's mid-workflow
 edit — and preserves every other key: the host's closing ``--mark-completed``
 re-reads the same file.
@@ -61,7 +63,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 try:
     from . import prior_changes as _prior_changes
-    from .metrics import _read_state, _write_state
+    from .metrics import _read_state, _write_state, state_file_lock
     from .state_manager import (
         mark_item_processed_in_state,
         update_task_status_in_state,
@@ -72,7 +74,7 @@ try:
     from .write_prompt import WritePromptError, load_write_task
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
-    from utils.metrics import _read_state, _write_state  # type: ignore
+    from utils.metrics import _read_state, _write_state, state_file_lock  # type: ignore
     from utils.state_manager import (  # type: ignore
         mark_item_processed_in_state,
         update_task_status_in_state,
@@ -193,31 +195,36 @@ def record_batch(
             f"No state file at {target}: the phase's orchestrator writes it "
             f"when it emits its batches (pass --state-file if it lives elsewhere)."
         )
-    state = _read_state(target)
-    if not isinstance(state, dict):
-        raise WritePromptError(f"{target} is not a JSON object.")
+    # One lock from the read to the write (fix round 8): the host may record
+    # same-batch tasks in parallel, and the census below takes seconds, so an
+    # unlocked pair read the same file and the second write dropped the
+    # first one's `task_status`.
+    with state_file_lock(target):
+        state = _read_state(target)
+        if not isinstance(state, dict):
+            raise WritePromptError(f"{target} is not a JSON object.")
 
-    update_task_status_in_state(state, task_id, status, reason)
-    tracked = _tracked_after_batch(state, target, kind)
-    if tracked is not None:
-        state["tracked_files"] = tracked
-    items: List[str] = []
-    if kind != "implement":
-        phase_word = _processed_phase_word(phase_dir)
-        details = {
-            "task_id": task_id,
-            "prior_changes_id": str(task.get("prior_changes_id") or ""),
-        }
-        for item_id in task.get("expected_ids") or []:
-            item_id = str(item_id)
-            if not item_id:
-                continue
-            mark_item_processed_in_state(
-                state, phase_word, item_id, _ITEM_STATUS[status], details
-            )
-            items.append(item_id)
-    state["updated_at"] = datetime.now().isoformat()
-    _write_state(target, state)
+        update_task_status_in_state(state, task_id, status, reason)
+        tracked = _tracked_after_batch(state, target, kind)
+        if tracked is not None:
+            state["tracked_files"] = tracked
+        items: List[str] = []
+        if kind != "implement":
+            phase_word = _processed_phase_word(phase_dir)
+            details = {
+                "task_id": task_id,
+                "prior_changes_id": str(task.get("prior_changes_id") or ""),
+            }
+            for item_id in task.get("expected_ids") or []:
+                item_id = str(item_id)
+                if not item_id:
+                    continue
+                mark_item_processed_in_state(
+                    state, phase_word, item_id, _ITEM_STATUS[status], details
+                )
+                items.append(item_id)
+        state["updated_at"] = datetime.now().isoformat()
+        _write_state(target, state)
     return {
         "task_id": task_id, "status": status, "items": items,
         "state_file": str(target),
