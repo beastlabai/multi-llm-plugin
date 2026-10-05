@@ -381,6 +381,47 @@ class TestACheckTaskRecordsWhatItFound:
             plan_dir, capsys, "--check", "findings", "--finding", "x", status="failed")
         assert code == 3
         assert "--status completed with --check findings" in err
+        # Fix round 12: the refusal names both ways a `failed` reply goes.
+        assert 'said "status": "failed" but listed findings' in err
+        assert "--status failed --check could-not-run" in err
+        assert "T002" not in _state(plan_dir[1]).get("task_status", {})
+
+    def test_a_check_that_could_not_run_is_recorded_failed_never_findings(
+        self, plan_dir, capsys,
+    ):
+        """Fix round 12: the native twin of the reply's
+        `check.could_not_run: true`."""
+        self._record(plan_dir, capsys, "--check", "findings", "--finding", "x")
+        code, stdout, err, _result = self._record(
+            plan_dir, capsys, "--check", "could-not-run", status="failed")
+        assert code == 0, err
+        assert "[BATCH_DONE] T002 failed" in stdout
+        assert "[CHECK_BLOCKED]" not in stdout
+        state = _state(plan_dir[1])
+        assert state["task_status"]["T002"] == "failed"
+        assert state["task_status_reasons"]["T002"].startswith(
+            "its check could not run")
+        assert "task_check_findings" not in state
+        code, _out, err, _result = self._record(
+            plan_dir, capsys, "--check", "could-not-run",
+            "--reason", "npx: command not found", status="failed")
+        assert code == 0, err
+        assert _state(plan_dir[1])["task_status_reasons"]["T002"] == (
+            "npx: command not found")
+
+    @pytest.mark.parametrize("extra,status,expected", [
+        (("--check", "could-not-run"), "completed",
+         "recorded --status failed with --check could-not-run"),
+        (("--check", "could-not-run", "--finding", "x"), "failed",
+         "--finding is recorded only with --check findings"),
+    ])
+    def test_could_not_run_is_failed_and_lists_no_finding(
+        self, plan_dir, capsys, extra, status, expected,
+    ):
+        code, _out, err, _result = self._record(
+            plan_dir, capsys, *extra, status=status)
+        assert code == 3
+        assert expected in err
         assert "T002" not in _state(plan_dir[1]).get("task_status", {})
 
     def test_a_task_that_declares_files_has_no_check_result(self, plan_dir, capsys):

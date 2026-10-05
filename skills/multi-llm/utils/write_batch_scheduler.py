@@ -104,6 +104,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         row_outcome_label,
         check_findings_from,
         check_record,
+        read_check_reply,
         row_check_findings,
         validate_result,
     )
@@ -194,6 +195,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         row_outcome_label,
         check_findings_from,
         check_record,
+        read_check_reply,
         row_check_findings,
         validate_result,
     )
@@ -1511,6 +1513,9 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
 #: Fix round 11: a check that could not run is ``failed`` (it used to be asked
 #: for as a finding, so a missing ``npx`` read as findings the run went on
 #: past), and the tasks that depend on a check with findings wait for it.
+#: Fix round 12: it says so with ``check.could_not_run: true``, because a
+#: ``failed`` reply that lists findings is read as findings (runners answer
+#: ``failed`` for a check that ran and failed).
 CHECK_RESULT_CONTRACT = (
     "\n## Check result (required for this task)\n\n"
     "This task declares no files: it is a check, and it must not change any "
@@ -1530,10 +1535,17 @@ CHECK_RESULT_CONTRACT = (
     "review, and the tasks that depend on this check wait until they are "
     "fixed or accepted.\n\n"
     "If a check could not run — its command is missing, it crashed, it timed "
-    "out or it printed no result — answer `status: \"failed\"` and say in "
-    "`summary` which check could not run and why. Never list a check that "
-    "did not run as a finding: it says nothing about the code, and `failed` "
-    "stops the run so the cause can be fixed.\n"
+    "out or it printed no result — answer `status: \"failed\"` with "
+    "`\"could_not_run\": true` in the `check` object, and say in `summary` "
+    "which check could not run and why:\n\n"
+    "```json\n"
+    '{"status": "failed", "check": {"passed": false, "could_not_run": true, '
+    '"findings": []}}\n'
+    "```\n\n"
+    "Never list a check that did not run as a finding: it says nothing about "
+    "the code, and `could_not_run` stops the run so the cause can be fixed. "
+    "A `failed` reply whose `check` lists findings and does not say "
+    "`could_not_run` is recorded as a check that ran and found them.\n"
 )
 
 
@@ -4178,10 +4190,13 @@ class WriteBatchScheduler:
                                    observed, duration)
             return
 
+        reply_check = read_check_reply(result)
         if self._verification_only(snapshot) and self._verification_verdict(
             outcome, snapshot, undeclared, claimed, summary,
             changed=changed, crashed_exit=exit_code,
-            check=check_findings_from(result),
+            check=reply_check.findings,
+            listed=reply_check.listed,
+            could_not_run=reply_check.could_not_run,
         ):
             self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                    observed, duration)
@@ -4372,6 +4387,8 @@ class WriteBatchScheduler:
         changed: Sequence[str],
         crashed_exit: Optional[int],
         check: Optional[List[str]] = None,
+        listed: bool = False,
+        could_not_run: bool = False,
     ) -> bool:
         """The verdict for a task that declared no files. ``True`` when decided.
 
@@ -4398,16 +4415,23 @@ class WriteBatchScheduler:
           left on disk stays PARTIAL until it is declared or restored, instead
           of being laundered by a second run that touched nothing (adversarial
           review, 2026-10-02).
-        * nothing moved and the runner crashed, or claimed ``failed``: falls
-          through to the ordinary clean-failure branch (``False``), whatever
-          its ``check`` lists. The contract (:data:`CHECK_RESULT_CONTRACT`)
-          spells ``failed`` "a check that could not run" — a missing command,
-          a crash, a timeout — and a check that did not run says nothing
-          about the code, so it is never recorded as findings the run goes
-          on past (fix round 11: ``failed`` + ``findings: ["npx: command not
-          found"]`` read as check-findings, so any failure could be laundered
-          into one). The findings, when the reply listed some and wrote no
-          ``notes``, become what the stop says the check reported.
+        * nothing moved and the runner crashed, or its ``check`` says
+          ``could_not_run: true`` (*could_not_run*, the contract's
+          (:data:`CHECK_RESULT_CONTRACT`) word for a check that did not run —
+          a missing command, a crash, a timeout), or it claimed ``failed``
+          and listed no finding: a failed task that stops the run (the
+          ordinary clean-failure branch for a crash or a ``failed`` claim,
+          ``False``; a ``could_not_run`` beside any other claim is decided
+          here). A check that did not run says nothing about the code, so it
+          is never recorded as findings the run goes on past. The findings,
+          when the reply listed some and wrote no ``notes``, become what the
+          stop says the check reported.
+        * nothing moved, the runner claimed ``failed`` and its ``check``
+          listed findings (*listed*) without ``could_not_run``: findings, as
+          below. Fix round 12 (a coordinator decision): round 11 read every
+          ``failed`` as a check that could not run, which stopped implement
+          for every runner that answers ``failed`` for a failing check —
+          racing run 3's runners do exactly that.
         * nothing moved and its reply's structured ``check`` (*check*,
           :func:`subagent_executor.check_findings_from`) lists findings:
           ``no-op``/``ok`` labelled ``check-findings``. The findings are named
@@ -4466,10 +4490,24 @@ class WriteBatchScheduler:
             return True
         if crashed_exit not in (0, None):
             return False
-        if claimed == "failed":
+        if could_not_run or (claimed == "failed" and not listed):
             if check and not outcome.runner_notes:
                 outcome.runner_notes = "; ".join(check)[:600]
-            return False
+            if claimed == "failed":
+                return False
+            # `could_not_run` beside a `no-op`/`applied` claim: the reply
+            # says a check did not run, whatever status it picked.
+            outcome.write_outcome = WRITE_CLEAN_FAILURE
+            outcome.status = STATUS_BATCH_FAILED
+            outcome.reason = (
+                f"FAILED: {outcome.task_id}'s reply says a check could not "
+                f"run (`check.could_not_run`, beside status "
+                f"{claimed or 'none'!r}) and no file changed. A check that "
+                f"did not run says nothing about the code, so the loop stops "
+                f"here and --resume re-dispatches this batch."
+                + (f" Runner summary: {summary}" if summary else "")
+            )
+            return True
         if check:
             outcome.write_outcome = WRITE_NO_OP
             outcome.status = STATUS_OK
@@ -4482,6 +4520,12 @@ class WriteBatchScheduler:
                 f"{len(check)} problem(s): {shown}. No file changed, so the "
                 f"loop continues; the findings are listed in the "
                 f"implementation summary and go to review-code."
+                + (
+                    " Its reply said `failed`, but it listed what the check "
+                    "found and did not say the check could not run "
+                    "(`check.could_not_run`), so it is read as findings."
+                    if claimed == "failed" else ""
+                )
             )
             return True
         outcome.write_outcome = WRITE_NO_OP

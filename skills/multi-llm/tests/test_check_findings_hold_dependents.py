@@ -196,6 +196,47 @@ class TestTheDependentsAreNotRun:
         assert _report(repo)["blocked_by_check"] == {}
 
 
+class TestAFailedReplyThatListsFindings:
+    """Fix round 12 (coordinator decision): racing run 3's runners answer
+    `failed` for a check that ran and found problems, and round 11 read every
+    `failed` as a check that could not run, which stopped implement. Such a
+    reply is findings now; only `check.could_not_run: true` stops."""
+
+    def test_holds_the_dependents_and_runs_the_rest(self, repo, capsys):
+        _check_finds(repo)
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_STATUS", "failed")
+        assert _implement(repo) == 3
+        text = capsys.readouterr()
+        assert _dispatched_titles(repo) == [
+            "Edit: create the module", "Check the module", "Edit: add tests",
+        ]
+        statuses = _statuses(repo)
+        assert statuses["T002"] == "completed" and statuses["T003"] == "completed"
+        assert statuses["T004"] == "pending"
+        report = _report(repo)
+        assert report["stop"]["kind"] == "check-findings", text.err
+        assert report["blocked_by_check"] == {"T004": "T002"}
+        assert get_or_create_state(repo.plan).get("task_check_findings") == {
+            "T002": FINDINGS}
+
+    def test_a_check_that_could_not_run_stops_implement(self, repo, capsys):
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_STATUS", "failed")
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps({
+            "passed": False, "could_not_run": True,
+            "findings": ["npx: command not found"],
+        }))
+        assert _implement(repo) == 3
+        capsys.readouterr()
+        statuses = _statuses(repo)
+        assert statuses["T002"] == "failed"
+        assert statuses["T004"] == "pending"
+        report = _report(repo)
+        assert report["stop"]["kind"] != "check-findings"
+        assert report["blocked_by_check"] == {}
+        assert "task_check_findings" not in get_or_create_state(repo.plan).state
+
+
 class TestTheCheckRunsAgain:
     """Review T2: a check with findings was done for good — `--resume`
     skipped it and `--human-task <id>=retry` answered only a failed task."""
@@ -424,6 +465,12 @@ class TestTheNativeLegHoldsTheDependents:
         assert "## Not Run: Upstream Check Reported Problems" in text
         assert "refuses it while a held task is left" in text
         assert "a check that could not run" in text
+        # Fix round 12: the reply's `could_not_run`, and `failed` + findings.
+        assert "`--status failed --check could-not-run`" in text
+        assert (
+            'A reply that says `"status": "failed"` but lists findings in its '
+            '`check` and does not say `could_not_run` is a check that ran'
+        ) in text
 
 
 #: Fix round 12 (review of round 11, the leak): the PLAN with T005 (manual)

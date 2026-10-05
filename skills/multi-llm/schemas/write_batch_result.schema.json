@@ -43,8 +43,11 @@
         "passed": {
           "description": "true only when every check the task names ran and met its acceptance criteria. Read leniently (true/false, 1/0, \"true\"/\"false\"); anything else is an unknown result, never a pass."
         },
+        "could_not_run": {
+          "description": "true when a check the task names could not run (its command missing, a crash, a timeout, no result printed); the reply is then `failed` and the task stops implement, whatever `findings` lists. Read leniently (true, 1, \"true\", \"yes\"). Without it a `failed` reply whose `findings` lists problems is recorded `check-findings`, as a check that ran (fix round 12: runners answer `failed` for a check that ran and failed)."
+        },
         "findings": {
-          "description": "One string per problem a check reported; empty when passed is true. A check that could not run is not a finding: the reply is `failed`. An object is read as its values, a bare string or number as one finding — except a bare \"none\", \"n/a\", \"no problems found\", \"\" or 0 beside a passed that reads true, which is no finding (fix round 12)."
+          "description": "One string per problem a check reported; empty when passed is true. A check that could not run is not a finding: the reply is `failed` with `could_not_run: true`. An object is read as its values, a bare string or number as one finding — except a bare \"none\", \"n/a\", \"no problems found\", \"\" or 0 beside a passed that reads true, which is no finding (fix round 12)."
         }
       }
     }
