@@ -14,7 +14,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 
 def strip_jsonc(text: str) -> str:
@@ -485,6 +485,87 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
         "raw": text,
         "data": None,
     }
+
+
+#: How much of the reply a syntax diagnosis quotes on each side of the error.
+_SYNTAX_EXCERPT_BEFORE = 60
+_SYNTAX_EXCERPT_AFTER = 40
+
+
+def enclosing_syntax_error(text: str, data: Any) -> Optional[Dict[str, Any]]:
+    """Why the document around *data* is not JSON, when *data* is only a piece of it.
+
+    :func:`extract_json_from_text` salvages an inner structure when the one
+    around it does not parse (clause 1). That is the right move for a reader
+    that wants *something*, and the wrong thing to describe to a model: the
+    validator then reports the fragment's shape, not the reply's. Measured
+    2026-10-05 on ``opencode/big-pickle``'s task-generation reply, twice: the
+    document had the right top-level keys, but a description held unescaped
+    double quotes (``"3", "2", "1" and "GO"``), so the outer object failed and
+    the last task object inside it was served. The validator said the reply
+    was "missing required field 'schema_version' … unexpected field
+    'acceptance_criteria'", the re-ask quoted that back, and the model — whose
+    keys were right — repeated the same quoting mistake.
+
+    Returns ``None`` unless *data* is the parse of a candidate in *text* that
+    sits inside a larger top-level candidate that does **not** parse; then a
+    dict with ``message``, ``line``, ``column`` (both 1-based, within that
+    enclosing document) and ``excerpt`` (the text around the error, with
+    ``<<HERE>>`` at the position and line breaks shown as spaces). Never raises.
+    """
+    try:
+        body = _ANSI_ESCAPE.sub("", text or "")
+        spans = _candidate_spans(body, "both")
+        if not spans:
+            return None
+        top_level: List[Tuple[int, int, str]] = []
+        furthest_end = -1
+        for span in sorted(spans, key=lambda item: (item[0], -item[1])):
+            if span[1] > furthest_end:
+                top_level.append(span)
+                furthest_end = span[1]
+        matches = []
+        for start, end, candidate in spans:
+            try:
+                if _loads_reply(candidate) == data:
+                    matches.append((start, end))
+            except json.JSONDecodeError:
+                continue
+        if not matches:
+            return None
+        start, end = matches[-1]
+        if any(start == top[0] and end == top[1] for top in top_level):
+            return None  # the value IS a whole document
+        enclosing = next(
+            (top for top in top_level if top[0] <= start and end <= top[1]), None
+        )
+        if enclosing is None:
+            return None
+        try:
+            _loads_reply(enclosing[2])
+        except json.JSONDecodeError as exc:
+            doc = enclosing[2]
+            before = doc[max(0, exc.pos - _SYNTAX_EXCERPT_BEFORE):exc.pos]
+            after = doc[exc.pos:exc.pos + _SYNTAX_EXCERPT_AFTER]
+            excerpt = f"{before}<<HERE>>{after}"
+            excerpt = re.sub(r"\s+", " ", excerpt).strip()
+            return {
+                "message": exc.msg,
+                "line": exc.lineno,
+                "column": exc.colno,
+                "excerpt": excerpt,
+            }
+        return None
+    except Exception:  # noqa: BLE001 - a diagnosis must never fail a dispatch
+        return None
+
+
+def describe_syntax_error(error: Dict[str, Any]) -> str:
+    """One line for :func:`enclosing_syntax_error`'s dict, for logs and prompts."""
+    return (
+        f"line {error.get('line')}, column {error.get('column')}: "
+        f"{error.get('message')} — the text there reads: {error.get('excerpt')}"
+    )
 
 
 #: ANSI colour/OSC escapes, removed before anything goes looking for a bracket.
