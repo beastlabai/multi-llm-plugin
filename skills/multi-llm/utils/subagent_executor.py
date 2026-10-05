@@ -1433,7 +1433,7 @@ def _resolve_task_source(
     if recorded and task_id in recorded:
         return (
             recorded[task_id],
-            f"tasks[{task_id}].runner (recorded from a previous attempt)",
+            f"tasks[{task_id}].runner {_RECORDED_RUNNER_SUFFIX}",
             "",
         )
     hint = task.get("model_hint")
@@ -7969,6 +7969,29 @@ def _dispatch_order(tasks: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [task for _index, task in ordered]
 
 
+#: The suffix :func:`_resolve_task_source` puts on a runner a previous attempt
+#: of the same task recorded.
+_RECORDED_RUNNER_SUFFIX = "(recorded from a previous attempt)"
+
+
+def _pinned_runner_note(key: str) -> str:
+    """The dispatch line's reason when the runner is a recorded pin, else ``""``.
+
+    A pin outranks every rung of the ladder — the session model and
+    ``driver.subagent_runner`` included — so without this the line named a
+    runner the user had just tried to move away from and gave no reason
+    (2026-10-05, run 3: generate-tasks re-run after a host-model switch stayed
+    on ``opencode/big-pickle``, the runner its failed first run recorded).
+    """
+    if not key.endswith(_RECORDED_RUNNER_SUFFIX):
+        return ""
+    return (
+        "; the runner this task's earlier attempt used, kept from "
+        "subagent_batch_report.json so a re-run repeats it — the session model "
+        "and driver.subagent_runner do not change it"
+    )
+
+
 def run_tasks(
     tasks: Sequence[Dict[str, Any]],
     *,
@@ -8052,7 +8075,10 @@ def run_tasks(
     # The schedule is the separate line `_dispatch_order` prints when it differs.
     for task_id, spec in runners.items():
         version = report.runner_versions.get(spec, "unknown")
-        print(f"[exec-subagents]   {task_id} -> {spec} (version {version})")
+        print(
+            f"[exec-subagents]   {task_id} -> {spec} (version {version}"
+            f"{_pinned_runner_note(resolved[task_id][1])})"
+        )
 
     # D4a, the *during* half: a batch of eleven validation tasks ran for a
     # minute behind a status line that said nothing had started, because the
