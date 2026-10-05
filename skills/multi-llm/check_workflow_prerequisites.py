@@ -990,6 +990,22 @@ def get_workflow_status(
     # implement tasks and must never inflate this count.
     if phases["implement"]["status"] in ["pending", "in_progress"]:
         task_status = state.implementation_task_statuses()
+        # The denominator is the decomposition implement ran last
+        # (`implement_task_ids`, recorded on both legs), not the statuses
+        # recorded so far: the native leg records a task only once it ran, so
+        # a mid-run `status` on a 10-task plan read `6/6 tasks` where the
+        # executor leg, which seeds every task `pending`, read `8/13`
+        # (racing re-run 3, fix round 7). A state with no such record keeps
+        # the old count, and one with no task recorded and no started record
+        # (an `implement --dry-run`) still shows none: a count is what the
+        # next-step walk reads as "implement was started".
+        current = state.get("implement_task_ids")
+        if (isinstance(current, list) and current
+                and (task_status or state.is_phase_started("implement"))):
+            task_status = {
+                str(task_id): task_status.get(str(task_id), "pending")
+                for task_id in current
+            }
         if task_status:
             tasks_done = sum(1 for s in task_status.values() if s == "completed")
             tasks_total = len(task_status)
