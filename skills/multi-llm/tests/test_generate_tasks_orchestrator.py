@@ -1040,6 +1040,34 @@ class TestSchemaRepairReAsk:
         assert row["repair"] == "schema_invalid"
         assert "after the one schema-repair re-ask" in row["reason"]
 
+    def test_a_re_run_names_why_it_kept_the_earlier_runner(
+        self, tmp_path, exec_env, scripted_runner, capsys
+    ):
+        """2026-10-05, OpenCode run 3: generate-tasks re-run after a model switch
+        stayed on the runner the failed first run recorded, and the dispatch line
+        named the runner but not why."""
+        exec_env("codex:gpt-5.5")
+        scripted_runner(WRONG_SHAPE, WRONG_SHAPE, _valid_document())
+        plan = _plan(tmp_path)
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
+        ) == 3
+        first = capsys.readouterr().out
+        assert "task_generation -> codex:gpt-5.5 (version" in first
+        assert "kept from subagent_batch_report.json" not in first
+
+        exec_env("codex:gpt-5.4")
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
+        ) == 0
+        second = capsys.readouterr().out
+
+        assert "task_generation -> codex:gpt-5.5 (version" in second
+        assert (
+            "the runner this task's earlier attempt used, kept from "
+            "subagent_batch_report.json so a re-run repeats it" in second
+        )
+
     def test_a_reply_over_the_byte_cap_is_not_re_asked(
         self, tmp_path, exec_env, scripted_runner, capsys, monkeypatch
     ):
