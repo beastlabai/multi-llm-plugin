@@ -2299,6 +2299,10 @@ class TestNoCommandToCompose:
         respell = module.respeller_for(SURFACE, {"plan": "/w/p.md", "plan_arg": "p.md"})
         assert module.redact(text, None, SURFACE, respell).strip() == \
             "$multi-llm:multi-llm --generate-tasks p.md"
+        # Without `reserved_flags.redundant`, a restated `--yes` is refused as before.
+        del bare["reserved_flags"]["redundant"]
+        assert module.split_extra_flags(["--yes"], bare) == ([], [], ("--yes", "--yes"))
+        assert module.split_extra_flags(["--yes"], SURFACE) == ([], ["--yes"], None)
 
 
 #: Values the plan quoting must agree on with `next_phase.quote_plan_arg`.
