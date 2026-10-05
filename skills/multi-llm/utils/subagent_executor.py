@@ -721,6 +721,43 @@ def _finding_text(item: Any) -> str:
     return " ".join(str(item).split())
 
 
+class CheckReply(NamedTuple):
+    """What a check task's reply says in its ``check`` object.
+
+    ``findings`` is :func:`check_findings_from`'s answer. ``listed`` is
+    whether the reply listed at least one finding of its own (not one this
+    reader supplied: :data:`CHECK_FAILED_WITHOUT_FINDINGS`,
+    :data:`CHECK_RESULT_UNKNOWN`). ``could_not_run`` is ``check.could_not_run``
+    read leniently (``true``, ``1``, ``"true"``/``"yes"``): the runner says
+    a check could not run (fix round 12).
+    """
+
+    findings: Optional[List[str]]
+    listed: bool
+    could_not_run: bool
+
+
+def read_check_reply(result: Any) -> CheckReply:
+    """The reply's ``check`` object, read (:class:`CheckReply`).
+
+    Fix round 12 (a coordinator decision after racing run 3: real runners
+    answer ``failed`` for a check that ran and found problems): a check
+    that could not run says so with ``check.could_not_run: true``, and only
+    that, or a crash, is a check that did not run. ``_verification_verdict``
+    reads a ``failed`` reply whose ``check`` lists findings, and does not
+    say it could not run, as findings.
+    """
+    findings = check_findings_from(result)
+    check = result.get("check") if isinstance(result, dict) else None
+    if not isinstance(check, dict):
+        return CheckReply(findings, False, False)
+    could_not_run = _check_passed(check.get("could_not_run")) is True
+    listed = bool(findings) and findings[0] not in (
+        CHECK_FAILED_WITHOUT_FINDINGS, CHECK_RESULT_UNKNOWN,
+    )
+    return CheckReply(findings, listed, could_not_run)
+
+
 def check_findings_from(result: Any) -> Optional[List[str]]:
     """The structured check result of a write reply, as a findings list.
 

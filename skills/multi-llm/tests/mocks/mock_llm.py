@@ -636,7 +636,9 @@ def write_batch_result(applied: List[Dict[str, Any]], prompt: str = "") -> str:
             ],
         }))
         return json.dumps({
-            "status": "no-op",
+            # `failed` beside findings is how racing run 3's runners answered
+            # a check that ran and failed (fix round 12).
+            "status": os.environ.get("MOCK_LLM_WRITE_CHECK_STATUS") or "no-op",
             "ids": [str(item) for item in ids] if isinstance(ids, list) else [],
             "files_touched": [],
             "summary": "the checks ran",

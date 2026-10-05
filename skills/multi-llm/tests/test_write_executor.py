@@ -1120,17 +1120,15 @@ class TestVerificationOnlyImplementTask:
         assert "## Check result (required for this task)" in prompt
         assert '"check": {"passed": false, "findings"' in prompt
 
-    def test_a_failed_claim_is_a_check_that_could_not_run_and_stops(self, env):
-        """Fix round 11 (review T4): the contract used to ask for a finding
-        "per check you could not run", and `failed` beside any finding read
-        as check-findings — so `npx: command not found` was recorded as a
-        check that ran, and any failure could be laundered into findings the
-        run went on past. `failed` is now a check that could not run: a
-        failed task that stops the run, whatever its `check` lists, and the
+    def test_a_check_that_says_it_could_not_run_stops(self, env):
+        """Fix round 11 (review T4) made a check that could not run a failed
+        task that stops the run, never findings the run goes on past; fix
+        round 12 has the reply say so in `check.could_not_run`, and the
         listed text is what the stop says it reported."""
         not_run = ["npx html-validate could not run: npx: command not found"]
         env.edits([], result=self._check_reply(
-            status="failed", findings=not_run, notes=""))
+            status="failed", findings=not_run, notes="",
+            check={"passed": False, "could_not_run": True, "findings": not_run}))
         state = FakeState(env.tmp_path / "state.json")
         result = env.scheduler(
             [self._task(env)], kind="implement", state=state, finalize=False,
@@ -1147,11 +1145,70 @@ class TestVerificationOnlyImplementTask:
         assert state.state["task_status"]["T009"] == "failed"
         assert "task_check_findings" not in state.state
 
+    def test_a_failed_claim_that_lists_findings_is_check_findings(self, env):
+        """Fix round 12 (coordinator decision): round 11 read every `failed`
+        as a check that could not run, which stopped implement for every
+        runner that answers `failed` for a check that ran and failed —
+        racing run 3's runners do exactly that. A `failed` reply whose
+        `check` lists findings and does not say `could_not_run` ran."""
+        env.edits([], result=self._check_reply(status="failed"))
+        state = FakeState(env.tmp_path / "state.json")
+        result = env.scheduler(
+            [self._task(env)], kind="implement", state=state, finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert result.exit_code == 0, result.messages
+        assert outcome.ok and outcome.outcome_label == "check-findings"
+        assert outcome.check_findings == self.FINDINGS
+        assert "Its reply said `failed`" in outcome.reason
+        state.reload()
+        assert state.state["task_status"]["T009"] == "completed"
+        assert state.state["task_check_findings"] == {"T009": self.FINDINGS}
+
+    @pytest.mark.parametrize("reply", [
+        # An older reply: no `check` at all.
+        {"status": "failed", "ids": [], "files_touched": [], "summary": "x"},
+        # `failed` listing nothing: no finding to go on past.
+        {"status": "failed", "ids": [], "files_touched": [], "summary": "x",
+         "check": {"passed": False, "findings": []}},
+        {"status": "failed", "ids": [], "files_touched": [], "summary": "x",
+         "check": {}},
+        {"status": "failed", "ids": [], "files_touched": [], "summary": "x",
+         "check": None},
+    ])
+    def test_a_failed_claim_listing_no_finding_still_stops(self, env, reply):
+        env.edits([], result=reply)
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert result.exit_code == 3, result.messages
+        assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
+        assert outcome.outcome_label != "check-findings"
+
+    @pytest.mark.parametrize("could_not_run", [True, "true", "yes", 1])
+    def test_could_not_run_beside_any_claim_stops(self, env, could_not_run):
+        """`could_not_run` is the one word for a check that did not run,
+        whatever status the reply picked."""
+        env.edits([], result=self._check_reply(
+            status="no-op", notes="",
+            check={"passed": False, "could_not_run": could_not_run,
+                   "findings": ["npx: command not found"]}))
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert result.exit_code == 3, result.messages
+        assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
+        assert "could not run" in outcome.reason
+        assert outcome.runner_notes == "npx: command not found"
+
     def test_the_contract_says_a_check_that_could_not_run_is_failed(self):
         from utils.write_batch_scheduler import CHECK_RESULT_CONTRACT
 
         assert "could not run" in CHECK_RESULT_CONTRACT
         assert 'answer `status: \"failed\"`' in CHECK_RESULT_CONTRACT
+        assert '`\"could_not_run\": true` in the `check` object' in CHECK_RESULT_CONTRACT
         assert "Never list a check that did not run as a finding" in CHECK_RESULT_CONTRACT
         assert "per check you could not run" not in CHECK_RESULT_CONTRACT
 
