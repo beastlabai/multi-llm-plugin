@@ -1341,9 +1341,10 @@ def build_implementation_record(plan_path: Path) -> str:
         ]
         if accepted:
             lines.append(
-                "- Tasks that failed and whose failure the user accepted with "
-                "--human-task <id>=done (recorded completed, but the check or "
-                "work did not pass; report what it found as a gap normally): "
+                "- Tasks that failed (or whose check reported problems) and "
+                "whose failure the user accepted with --human-task <id>=done "
+                "(recorded completed, but the check or work did not pass; "
+                "report what it found as a gap normally): "
                 + "; ".join(accepted)
             )
         # A check task that ran, changed nothing and reported problems

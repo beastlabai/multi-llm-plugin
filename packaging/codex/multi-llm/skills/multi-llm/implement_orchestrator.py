@@ -19,7 +19,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -68,6 +68,14 @@ from check_workflow_prerequisites import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def rerunnable_checks(state: Any) -> List[str]:
+    """``write_batch_scheduler.rerunnable_checks``, imported when first used
+    (the scheduler stays off this module's import path)."""
+    from utils.write_batch_scheduler import rerunnable_checks as _rerunnable
+
+    return _rerunnable(state)
 
 
 def check_apply_suggestions_prerequisite(state, plan_dir: Path) -> dict:
@@ -194,10 +202,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         help='Answer one human task (D6 row 9), repeatable: --human-task '
              'T004=done. Turns the pause-and-ask pause into a process boundary '
              'instead of a blocked stdin. With --resume it also answers a code '
-             'task the last run recorded failed (a check that failed): done '
-             'treats it as satisfied and runs the tasks after it, skip leaves '
-             'it and its dependents undone, retry runs a check again even '
-             'though nothing in the repository changed since it failed.'
+             'task the last run recorded failed (a check that failed), or a '
+             'check whose findings hold back the tasks after it: done treats '
+             'it as satisfied and runs the tasks after it, skip leaves it and '
+             'its dependents undone, retry runs a check again even though '
+             'nothing in the repository changed since it ran.'
     )
 
     return parser.parse_args(argv)
@@ -676,6 +685,7 @@ def format_batches_for_output(
     plan_preamble: str = "",
     plan_path: str = "",
     all_tasks: Optional[Dict[str, Task]] = None,
+    rerun_ids: Optional[Sequence[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Format task batches for JSON output.
 
@@ -701,8 +711,15 @@ def format_batches_for_output(
     ``write_batch_report.json``'s ``skipped_tasks`` lost the chain. The
     scheduler re-resolves the same plan from the recorded strategy and
     answers, so the task is skipped again, never dispatched.
+
+    *rerun_ids* (``write_batch_scheduler.rerunnable_checks``) are ``completed``
+    check tasks whose findings hold back the tasks after them, kept as well
+    (fix round 11): dropped, the check could never run again and the tasks
+    it held never ran. The executor runs it again only when the files
+    changed (or on ``--human-task <id>=retry``); a native host runs it again.
     """
     output_batches = []
+    rerun = {str(task_id) for task_id in (rerun_ids or ())}
 
     for batch_idx, batch in enumerate(batches):
         # Filter tasks if skipping completed
@@ -720,15 +737,25 @@ def format_batches_for_output(
                                 TaskStatus.IN_PROGRESS, TaskStatus.SKIPPED)
                 or (t.executor_role == "human"
                     and t.status != TaskStatus.COMPLETED)
+                or t.id in rerun
             ]
 
         if not tasks_to_include:
             continue
 
+        entries = [
+            format_task_for_output(t, plan_preamble, plan_path, all_tasks=all_tasks)
+            for t in tasks_to_include
+        ]
+        for entry in entries:
+            if entry.get("id") in rerun:
+                # Handed out to run again: never `completed` in the JSON a
+                # native host reads, or it would pass the check over.
+                entry["status"] = TaskStatus.PENDING.value
         output_batches.append({
             "batch_index": batch_idx,
             "can_parallelize": len(tasks_to_include) > 1,
-            "tasks": [format_task_for_output(t, plan_preamble, plan_path, all_tasks=all_tasks) for t in tasks_to_include]
+            "tasks": entries,
         })
 
     return output_batches
@@ -792,11 +819,17 @@ def _applicable_task_decisions(
     """
     recorded = dict(state.get("human_task_decisions") or {})
     decisions: Dict[str, str] = {}
+    # A check whose findings hold back the tasks after it is answered like a
+    # failed task (fix round 11), until the answer is taken.
+    held_by = set(rerunnable_checks(state.state))
     for task_id, action in recorded.items():
         status = state.get_task_status(task_id)
         if task_id in human_task_ids:
             decisions[task_id] = action
-        elif status == "failed" or (action == "skip" and status == "skipped"):
+        elif (
+            status == "failed" or task_id in held_by
+            or (action == "skip" and status == "skipped")
+        ):
             decisions[task_id] = action
     for task_id, action in this_run.items():
         if action == "retry" and task_id not in human_task_ids:
@@ -948,8 +981,9 @@ def check_findings_notice(found: Dict[str, List[str]]) -> str:
         more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
         parts.append(f"{task_id}: {first[:160]}{more}")
     return (
-        "check findings (implement continued; review-code is told about "
-        "them; all listed in implement/summary.md): " + "; ".join(parts)
+        "check findings (review-code is told about them; all listed in "
+        "implement/summary.md): "
+        + "; ".join(parts)
     )[:900]
 
 
@@ -1109,6 +1143,7 @@ def _native_human_task_plan(
     decisions: Dict[str, str],
     on_record: Optional[Any] = None,
     recorded_statuses: Optional[Dict[str, str]] = None,
+    check_findings_ids: Optional[Sequence[str]] = None,
 ):
     """Resolve the human-task plan over the native leg's batches; annotate them.
 
@@ -1148,6 +1183,7 @@ def _native_human_task_plan(
     )
 
     batches = output_data.get("batches") or []
+    check_findings_ids = list(check_findings_ids or ())
     entries = [task for batch in batches for task in batch.get("tasks") or []]
     plan = resolve_human_task_plan(
         [
@@ -1162,6 +1198,7 @@ def _native_human_task_plan(
         ],
         strategy=strategy,
         decisions=decisions,
+        check_findings_ids=check_findings_ids,
     )
     for task in entries:
         task_id = str(task.get("id") or "")
@@ -1562,22 +1599,29 @@ def main(argv: Optional[List[str]] = None) -> int:
         # A code task is answerable only once it FAILED and only on a resume
         # (racing re-run 3, 2026-10-05: a failed check blocked implement for
         # good; `done` accepts the failure, `skip` leaves it and its dependents
-        # undone, `retry` re-runs a check the unchanged-tree guard refuses).
+        # undone, `retry` re-runs a check the unchanged-tree guard refuses) —
+        # or, since fix round 11, a check whose findings hold back the tasks
+        # after it (`rerunnable_checks`): `done` accepts the findings and runs
+        # them, `retry` runs the check again on unchanged files.
+        held_by = set(rerunnable_checks(state.state))
         failed_ids = {
-            tid for tid in not_human if state.get_task_status(tid) == "failed"
+            tid for tid in not_human
+            if state.get_task_status(tid) == "failed" or tid in held_by
         }
         if not_human and not args.resume:
             return unattended_mod.fail_closed(
                 "ERROR: --human-task answers a code task only with --resume, "
-                "after a run recorded it failed; these are code tasks: "
+                "after a run recorded it failed or its check reported "
+                "problems; these are code tasks: "
                 f"{', '.join(sorted(not_human))}.",
                 site_id=unattended_mod.row(9).site_id,
             )
         unanswerable = sorted(set(not_human) - failed_ids)
         if unanswerable:
             return unattended_mod.fail_closed(
-                "ERROR: --human-task answers a human task, or a code task the "
-                "last run recorded failed; these are code tasks that did not "
+                "ERROR: --human-task answers a human task, a code task the "
+                "last run recorded failed, or a check whose findings hold "
+                "back the tasks after it; these are code tasks that did not "
                 f"fail: {', '.join(unanswerable)}.",
                 site_id=unattended_mod.row(9).site_id,
             )
@@ -1633,7 +1677,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         # Get parallel batches
         batches = decomposer.get_parallel_batches()
         # Format for output
-        output_batches = format_batches_for_output(batches, skip_completed=args.resume, plan_preamble=plan_preamble, plan_path=plan_path_str, all_tasks=decomposer.tasks)
+        output_batches = format_batches_for_output(
+            batches, skip_completed=args.resume, plan_preamble=plan_preamble,
+            plan_path=plan_path_str, all_tasks=decomposer.tasks,
+            rerun_ids=rerunnable_checks(state.state) if args.resume else None,
+        )
 
         # The result line counts what dispatches ("0/13 batches"), and a manual
         # task is a graph node that dispatches nothing, so a bare "15 execution
@@ -1755,6 +1803,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             decisions=applicable_decisions,
             on_record=answered_on_record,
             recorded_statuses=state.get_all_task_statuses(),
+            check_findings_ids=rerunnable_checks(state.state),
         )
     if not executor_backed:
         write_native_handoff()

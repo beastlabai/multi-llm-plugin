@@ -368,6 +368,25 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
         _print_path_list(tracked_files)
         return 0
 
+    if args.mark_completed:
+        held = _held_by_a_check(state)
+        if held:
+            # Fix round 11: a task a check with findings holds back never
+            # ran, so the phase is not complete — the native leg's
+            # counterpart of the executor ending needs-human.
+            named = ", ".join(f"{task_id} (waits for {check_id})" for task_id, check_id in held)
+            print(
+                f"ERROR: implement is not complete: {named} did not run, "
+                f"because a check it depends on reported problems. Nothing "
+                f"was written. Run this command again without "
+                f"--mark-completed (the phase stays in progress), and report "
+                f"the way forward: fix what the check reported and re-run "
+                f"implement with --resume, or accept its findings with "
+                f"--resume --human-task <check id>=done.",
+                file=sys.stderr,
+            )
+            return 3
+
     # Update state
     state["tracked_files"] = tracked_files
     state["updated_at"] = datetime.now().isoformat()
@@ -381,6 +400,34 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
         return 1
 
     return tracked_files
+
+
+def _held_by_a_check(state: dict) -> List[Tuple[str, str]]:
+    """``(task id, check id)`` for each implement task still held back.
+
+    A task ``util batch-done --check findings`` (or the executor) recorded
+    ``pending`` with ``not run — upstream check <id> reported problems``
+    and that nothing recorded since, scoped to the decomposition implement
+    ran last when it is on record.
+    """
+    try:
+        from utils.write_batch_scheduler import BLOCKED_BY_CHECK_PREFIX
+    except ImportError:  # pragma: no cover - the skill is always on the path
+        return []
+    statuses = state.get("task_status") or {}
+    reasons = state.get("task_status_reasons") or {}
+    scope = state.get("implement_task_ids")
+    held: List[Tuple[str, str]] = []
+    for task_id, status in sorted(statuses.items()):
+        if status != "pending":
+            continue
+        if isinstance(scope, list) and task_id not in scope:
+            continue
+        reason = str(reasons.get(task_id) or "")
+        if reason.startswith(BLOCKED_BY_CHECK_PREFIX):
+            check_id = reason[len(BLOCKED_BY_CHECK_PREFIX):].split(" ", 1)[0]
+            held.append((str(task_id), check_id))
+    return held
 
 
 def _drop_ignored(paths, say=print) -> List[str]:
