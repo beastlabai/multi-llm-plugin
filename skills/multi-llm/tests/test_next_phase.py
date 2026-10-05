@@ -1072,6 +1072,39 @@ class TestResumeCommand:
         assert key == {"phase": "generate-tasks",
                        "command": f"/multi-llm --generate-tasks {P}"}
 
+    def test_no_re_invoke_after_a_prerequisite_refusal(self, tmp_path, monkeypatch, capsys):
+        """Adversarial review 2026-10-05: the gate exits 3 before any status
+        write (nothing is produced before it, D6a), so an earlier failed
+        dispatch's `subagents_failed` mirror survives the refusal — and the
+        tool routes offered the very command just refused as `resume_command`."""
+        plan = _build(tmp_path, S(("review-plan",), files=RP_VALID))
+        phase_dir = output_dir_path(plan) / "generate-tasks"
+        phase_dir.mkdir(parents=True)
+        (phase_dir / ".status.json").write_text(
+            json.dumps(self._gt_status({"schema_invalid": 1})), encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(modes.ROUTE_ENV, "package")
+        code, out, key = self._run(
+            [P, "--blocked", "generate-tasks", "--host", "opencode"], monkeypatch, capsys)
+        assert (code, out.out, key) == (0, "", None)
+
+    def test_the_refusal_is_the_real_gate(self, tmp_path, monkeypatch, capsys):
+        """The same plan, run through the orchestrator itself: exit 3 on the gate,
+        and the lookup the tool route asks next still prints nothing."""
+        import generate_tasks_orchestrator as gto
+
+        plan = _build(tmp_path, S(("review-plan",), files=RP_VALID))
+        phase_dir = output_dir_path(plan) / "generate-tasks"
+        phase_dir.mkdir(parents=True)
+        (phase_dir / ".status.json").write_text(
+            json.dumps(self._gt_status({"schema_invalid": 1})), encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        assert gto.main(["--plan-file", P, "--yes"]) == cli_common.EXIT_NEEDS_HUMAN
+        assert "[PREREQUISITE_UNMET]" in capsys.readouterr().err
+        assert json.loads((phase_dir / ".status.json").read_text())["state"] == \
+            "subagents_failed"
+        assert np_.resume_command(P, "opencode", "package", "generate-tasks") is None
+
     def test_after_and_blocked_exclude_each_other(self, monkeypatch, capsys):
         code, out, _key = self._run(
             [P, "--after", "implement", "--blocked", "implement"], monkeypatch, capsys)
