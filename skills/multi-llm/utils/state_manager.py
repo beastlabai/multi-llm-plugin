@@ -824,30 +824,74 @@ class StateManager:
         ``implement`` records them when it decomposes the task list, on both
         legs, so a deferred task can be named later by what it is and not only
         by its id (2026-10-04: a complete workflow said nothing about the two
-        manual tasks it left the user). Returns whether anything changed; the
-        caller saves.
+        manual tasks it left the user). *titles* is that whole decomposition:
+        the titles merge, but its id set REPLACES ``implement_task_ids``, which
+        is what :meth:`deferred_implementation_tasks` scopes to — nothing
+        resets ``task_status`` on a fresh implement, so an id an earlier
+        decomposition skipped stays ``skipped`` after tasks.md is regenerated
+        (adversarial review, 2026-10-05). Returns whether anything changed;
+        the caller saves.
         """
         recorded = dict(self.state.get("task_titles") or {})
         merged = {**recorded, **{str(k): str(v) for k, v in titles.items() if k}}
-        if merged == recorded:
+        current = sorted(str(k) for k in titles if k)
+        if merged == recorded and self.state.get("implement_task_ids") == current:
             return False
         self.state["task_titles"] = merged
+        self.state["implement_task_ids"] = current
         return True
 
-    def deferred_implementation_tasks(self) -> List[Dict[str, Optional[str]]]:
-        """The implement tasks recorded ``skipped``, as ``{id, title}``, by id.
+    #: The recorded reason of an implement task the USER declined at
+    #: pause-and-ask (``write_batch_scheduler.resolve_human_task_plan``, and
+    #: the same words ``instructions/implement.md`` gives the native host). A
+    #: decision, not a deferral: the task is not left for them to do.
+    _USER_DECLINED_REASON = "skipped by user during pause-and-ask"
 
-        Read from ``task_status`` alone (both legs record a deferred human task,
-        and a dependent ``skip-dependents`` skipped with it, as ``skipped``),
-        never by re-parsing tasks.md: what the run deferred is what state says
-        it deferred. ``title`` is ``None`` when ``task_titles`` has no entry (a
-        state written before titles were recorded).
+    #: The recorded reason of a dependent the transitive skip walk took with
+    #: its parent (both legs spell it ``skipped — depends on skipped task
+    #: {parent_id} ({parent_title})``); owed exactly when the parent is.
+    _DEPENDS_ON_SKIPPED = re.compile(r"^skipped — depends on skipped task (T[0-9]{3})\b")
+
+    def _deferred_to_user(self, task_id: str, seen: Optional[set] = None) -> bool:
+        """Whether *task_id*'s skip leaves the task for the user to do.
+
+        A deferral (a human task under a skip strategy, ``deferred — …``) and
+        a dependent of one are owed; a pause-and-ask "Skip" and a dependent of
+        one are not. A reason this does not recognise — none recorded, a state
+        written before reasons were — stays owed, as every skip used to be.
+        """
+        reason = str((self.state.get("task_status_reasons") or {}).get(task_id) or "")
+        if reason.startswith(self._USER_DECLINED_REASON):
+            return False
+        match = self._DEPENDS_ON_SKIPPED.match(reason)
+        seen = set() if seen is None else seen
+        if match is None or task_id in seen:
+            return True
+        seen.add(task_id)
+        return self._deferred_to_user(match.group(1), seen)
+
+    def deferred_implementation_tasks(self) -> List[Dict[str, Optional[str]]]:
+        """The implement tasks the run left for the user, as ``{id, title}``, by id.
+
+        Read from ``task_status`` (both legs record a deferred human task, and
+        a dependent ``skip-dependents`` skipped with it, as ``skipped``), never
+        by re-parsing tasks.md: what the run deferred is what state says it
+        deferred. Scoped to the decomposition ``implement`` recorded last
+        (``implement_task_ids``, when there is one) and to the skips that are
+        deferrals (:meth:`_deferred_to_user`), since 2026-10-05: an earlier
+        cycle's skip and a task the user declined are not owed. ``title`` is
+        ``None`` when ``task_titles`` has no entry (a state written before
+        titles were recorded).
         """
         titles = self.state.get("task_titles") or {}
+        current = self.state.get("implement_task_ids")
+        scope = set(current) if isinstance(current, list) else None
         return [
             {"id": task_id, "title": titles.get(task_id) or None}
             for task_id, status in sorted(self.implementation_task_statuses().items())
             if status == "skipped"
+            and (scope is None or task_id in scope)
+            and self._deferred_to_user(task_id)
         ]
 
     def track_file(self, path: str, action: str, task_id: str) -> None:

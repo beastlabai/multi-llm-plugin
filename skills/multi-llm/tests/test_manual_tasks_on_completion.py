@@ -113,6 +113,76 @@ class TestTheDeferredSetComesFromState:
         assert "manual_tasks" not in _workflow(plan)["phases"]["implement"]
 
 
+class TestOnlyTheCurrentDeferralsAreOwed:
+    """Adversarial review 2026-10-05: `task_status` is never reset on a fresh
+    implement and the titles merge forever, so after tasks.md was regenerated
+    an earlier cycle's skipped `T020` was printed as `[MANUAL_TASK]` (and the
+    Stop hook blocked the final message until the model named a task that no
+    longer exists); and a task the user declined was labelled manual."""
+
+    def test_a_skip_from_an_earlier_decomposition_is_not_owed(self, tmp_path):
+        plan = _complete_plan(tmp_path, titles=False,
+                              tasks=dict(DEFERRED, T020="skipped"))
+        state = StateManager(plan)
+        state.record_task_titles({"T020": "Old cycle's manual check"})
+        state.record_task_titles(TITLES)  # the decomposition implement ran last
+        state.save()
+        assert StateManager(plan).deferred_implementation_tasks() == MANUAL
+
+    def test_the_decomposition_is_recorded_whole_each_time(self, tmp_path):
+        plan = _complete_plan(tmp_path)
+        state = StateManager(plan)
+        assert state.record_task_titles({"T011": TITLES["T011"]}) is True
+        assert state.record_task_titles({"T011": TITLES["T011"]}) is False
+        state.save()
+        assert StateManager(plan).deferred_implementation_tasks() == MANUAL[:1]
+
+    @staticmethod
+    def _persist(plan, strategy, decisions=None):
+        """The executor leg's own reasons, through its own persistence."""
+        from utils.write_batch_scheduler import resolve_human_task_plan
+
+        tasks = [
+            {"task_id": "T010", "executor_role": "agent", "task_title": "Code"},
+            {"task_id": "T011", "executor_role": "human",
+             "task_title": TITLES["T011"]},
+            {"task_id": "T012", "executor_role": "agent", "depends_on": ["T011"],
+             "task_title": TITLES["T012"]},
+        ]
+        human = resolve_human_task_plan(tasks, strategy=strategy, decisions=decisions)
+        state = StateManager(plan)
+        state.state["task_status"] = {"T001": "completed", "T010": "completed"}
+        for task_id, reason in human.skipped.items():
+            state.update_task_status(task_id, "skipped", reason=reason)
+        state.save()
+
+    def test_a_deferred_human_task_and_its_dependent_are_owed(self, tmp_path):
+        plan = _complete_plan(tmp_path)
+        self._persist(plan, "skip-dependents")
+        assert StateManager(plan).deferred_implementation_tasks() == MANUAL
+
+    def test_a_task_the_user_declined_is_not_a_manual_task(self, tmp_path):
+        plan = _complete_plan(tmp_path)
+        self._persist(plan, "pause-and-ask", {"T011": "skip"})
+        assert StateManager(plan).deferred_implementation_tasks() == []
+
+    def test_the_native_legs_reasons_read_the_same(self, tmp_path):
+        """The reasons `instructions/implement.md` tells the host to record."""
+        text = (SKILL_ROOT / "instructions" / "implement.md").read_text(encoding="utf-8")
+        declined = "skipped by user during pause-and-ask"
+        deferred = "deferred — user chose to complete manually after implementation"
+        assert f'reason "{declined}"' in text and f'reason "{deferred}"' in text
+        assert '"skipped — depends on skipped task {parent_id} ({parent_title})"' in text
+        dependent = f"skipped — depends on skipped task T011 ({TITLES['T011']})"
+        plan = _complete_plan(tmp_path)
+        for parent_reason, owed in ((deferred, MANUAL), (declined, [])):
+            state = StateManager(plan)
+            state.update_task_status("T011", "skipped", reason=parent_reason)
+            state.update_task_status("T012", "skipped", reason=dependent)
+            state.save()
+            assert StateManager(plan).deferred_implementation_tasks() == owed
+
+
 # ---------------------------------------------------------------------------
 # The builder and the block
 # ---------------------------------------------------------------------------
