@@ -494,6 +494,11 @@ class TestTheNativeLegHoldsTheDependents:
             'A reply that says `"status": "failed"` but lists findings in its '
             '`check` and does not say `could_not_run` is a check that ran'
         ) in text
+        # Fix round 13: the record a check that changed a file cannot take.
+        assert (
+            "`batch-done` holds a check to that: when a file git sees changed "
+            "after the check's `util write-prompt`"
+        ) in text
 
 
 #: Fix round 12 (review of round 11, the leak): the PLAN with T005 (manual)

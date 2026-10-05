@@ -437,6 +437,140 @@ class TestACheckTaskRecordsWhatItFound:
 
 
 # ---------------------------------------------------------------------------
+# Fix round 13: a check whose subagent changed a file is not recorded completed
+# ---------------------------------------------------------------------------
+
+class TestACheckThatChangedAFileIsNotRecordedCompleted:
+    """Review of fix round 12 (native leg): `util batch-done --status
+    completed --check findings` verified nothing about the tree, so a host
+    following a `failed` reply that listed findings after its subagent had
+    edited a file recorded check-findings, and the edit rode along. `util
+    write-prompt` now records the files git sees when it binds a check's
+    prompt, and the `completed` record is refused while a file changed since
+    that no other task of the phase declares."""
+
+    @pytest.fixture
+    def check_repo(self, tmp_path, monkeypatch):
+        root = tmp_path
+        plan = root / "plans" / "feature.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# Feature\n\n## Step 2\n\nBody.\n", encoding="utf-8")
+        out = root / "plans" / "feature"
+        out.mkdir()
+        (root / "src").mkdir()
+        (root / "src" / "config.json").write_text('{"retries": 2}\n', encoding="utf-8")
+        (root / "src" / "b.py").write_text("b = 1\n", encoding="utf-8")
+        (root / ".gitignore").write_text("logs/\n", encoding="utf-8")
+        git = ["git", "-C", str(root), "-c", "user.email=t@example.com",
+               "-c", "user.name=t", "-c", "commit.gpgsign=false"]
+        subprocess.run(git + ["init", "-q"], check=True)
+        subprocess.run(git + ["add", "-A"], check=True)
+        subprocess.run(git + ["commit", "-qm", "base"], check=True)
+        monkeypatch.chdir(root)
+        StateManager(plan).save()
+        batches = _check_batches()
+        # A task beside the check, declaring the file it may change.
+        batches[1]["tasks"].append(
+            {"id": "T003", "title": "Edit b", "prompt": PROMPT,
+             "files_to_modify": ["src/b.py"], "depends_on": ["T001"],
+             "executor_role": "agent"})
+        phase_dir, _tasks = _materialize(plan, out, "implement", batches, "implement")
+        return root, out, phase_dir
+
+    def _bind(self, phase_dir, capsys, task_id="T002"):
+        code, _out, err, _result = _run([
+            "util", "write-prompt", "--phase-dir", str(phase_dir), "--task-id", task_id,
+        ], capsys)
+        assert code == 0, err
+
+    def _done(self, phase_dir, capsys, *extra, status="completed"):
+        return _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir), "--task-id", "T002",
+            "--status", status, *extra,
+        ], capsys)
+
+    FINDINGS = ("--check", "findings", "--finding", "retries must be 3")
+
+    @pytest.mark.parametrize("check", [
+        ("--check", "findings", "--finding", "retries must be 3"),
+        ("--check", "passed"),
+        (),
+    ])
+    def test_a_file_changed_since_the_bind_refuses_the_completed_record(
+        self, check_repo, capsys, check,
+    ):
+        root, out, phase_dir = check_repo
+        self._bind(phase_dir, capsys)
+        assert (phase_dir / "prompts" / "T002.tree.json").is_file()
+        (root / "src" / "config.json").write_text('{"retries": 3, "mode": 1}\n', encoding="utf-8")
+
+        code, _stdout, err, _result = self._done(phase_dir, capsys, *check)
+        assert code == 3
+        assert (
+            "T002 is a check task (it declares no files), and since its prompt "
+            "was bound with util write-prompt these files changed" in err
+        ), err
+        assert "src/config.json" in err
+        assert '--status failed --reason "its subagent changed src/config.json"' in err
+        assert "bind its prompt again with util write-prompt" in err
+        state = _state(out)
+        assert "T002" not in state.get("task_status", {})
+        assert "task_check_findings" not in state
+
+        # Recorded failed, as the refusal says: accepted, and the record is used up.
+        code, _stdout, err, _result = self._done(
+            phase_dir, capsys, "--reason", "its subagent changed src/config.json",
+            status="failed")
+        assert code == 0, err
+        assert _state(out)["task_status"]["T002"] == "failed"
+        assert not (phase_dir / "prompts" / "T002.tree.json").exists()
+
+    def test_nothing_changed_is_recorded_and_the_record_is_used_up(
+        self, check_repo, capsys,
+    ):
+        root, out, phase_dir = check_repo
+        self._bind(phase_dir, capsys)
+        # The plugin's own trees and gitignored paths are not the check's.
+        (out / "prior_changes.jsonl").write_text("{}\n", encoding="utf-8")
+        (root / "logs").mkdir()
+        (root / "logs" / "01-implement.jsonl").write_text("{}\n", encoding="utf-8")
+        # A task running beside it changes the file it declares.
+        (root / "src" / "b.py").write_text("b = 22\n", encoding="utf-8")
+
+        code, stdout, err, _result = self._done(phase_dir, capsys, *self.FINDINGS)
+        assert code == 0, err
+        assert "[BATCH_DONE] T002 completed" in stdout
+        assert not (phase_dir / "prompts" / "T002.tree.json").exists()
+        # A later record without a new bind has nothing to compare against.
+        (root / "src" / "config.json").write_text('{"retries": 3, "mode": 1}\n', encoding="utf-8")
+        code, _stdout, err, _result = self._done(phase_dir, capsys, "--check", "passed")
+        assert code == 0, err
+
+    def test_binding_again_takes_a_new_record(self, check_repo, capsys):
+        root, out, phase_dir = check_repo
+        self._bind(phase_dir, capsys)
+        (root / "src" / "config.json").write_text('{"retries": 3, "mode": 1}\n', encoding="utf-8")
+        assert self._done(phase_dir, capsys, *self.FINDINGS)[0] == 3
+        self._bind(phase_dir, capsys)
+        code, _stdout, err, _result = self._done(phase_dir, capsys, *self.FINDINGS)
+        assert code == 0, err
+        assert _state(out)["task_status"]["T002"] == "completed"
+
+    def test_a_check_bound_without_write_prompt_is_recorded_as_before(
+        self, check_repo, capsys,
+    ):
+        root, out, phase_dir = check_repo
+        (root / "src" / "config.json").write_text('{"retries": 3, "mode": 1}\n', encoding="utf-8")
+        code, _stdout, err, _result = self._done(phase_dir, capsys, *self.FINDINGS)
+        assert code == 0, err
+
+    def test_a_task_that_declares_files_takes_no_record(self, check_repo, capsys):
+        _root, _out, phase_dir = check_repo
+        self._bind(phase_dir, capsys, task_id="T003")
+        assert not (phase_dir / "prompts" / "T003.tree.json").exists()
+
+
+# ---------------------------------------------------------------------------
 # Fix round 8: one lock around every raw read-modify-write of state.json
 # ---------------------------------------------------------------------------
 
