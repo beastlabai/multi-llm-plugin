@@ -139,6 +139,9 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "check-reply": ("utils.check_reply", "main",
                     "Check the replies persisted for a task file's batches "
                     "parse and cover their groups."),
+    "write-prompt": ("utils.write_prompt", "main",
+                     "Write one write batch's prompt, prior-batch context "
+                     "bound now and the result contract appended."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }
 

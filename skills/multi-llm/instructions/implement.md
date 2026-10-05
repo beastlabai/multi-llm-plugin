@@ -328,13 +328,20 @@ your host.
 
    For each batch in `batches` array:
    - Execute all tasks in the batch (can be parallel if `can_parallelize` is true)
-   - For each task, spawn a subagent:
+   - For each task, bind its prompt first:
+     ```bash
+     uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
+       --phase-dir "{plan}/implement" --task-id "{task.id}"
+     ```
+     The orchestrator materialized `{plan}/implement/write_tasks.json` (printed as `[WRITE_TASKS_FILE]`) beside the task JSON, one entry per task under the task's own `id`. This rewrites the task's prompt with the prior-task context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the tasks already appended below — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch. It writes it to `{plan}/implement/prompts/{task.id}.prompt.txt` and prints `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Never hand a subagent `task["prompt"]` from the JSON: it carries a literal `{prior_changes_context}` token that must never reach a subagent. An exit 3 names the problem (no `write_tasks.json` — re-run step 2; an unknown id — the known ids are listed); do not fall back to the raw prompt.
+   - Then spawn one subagent:
      ```
      Spawn one subagent with:
      - executor_role: task["executor_role"]  (always "agent" here; a "human" task never reaches this step)
      - description: task["title"]
-     - prompt: task["prompt"]
+     - prompt: read the file at the [WRITE_PROMPT] path in full — through line [WRITE_PROMPT_LINES], paging if a single read stops short — and follow it verbatim
      ```
+     That is the entire prompt: do not paste the file's text or add to it. The subagent's reply ends with one JSON object (`{"status", "ids", "files_touched", "summary", "notes"}`); its `summary` is the task's one-line record below, and its `status` (`applied` / `no-op` / `failed`) and `files_touched` are what you record for the task.
 
    - **Wait for every task in the batch, inside this turn.** A later batch depends
      on this one, so do not start the next batch — or end your turn — with a
@@ -452,6 +459,14 @@ your host.
      state["updated_at"] = datetime.now().isoformat()
      json.dump(state, state_file)
      ```
+   - **Append to prior changes** — record the task's one-line `summary` (normalized: one line, at most 200 characters; for a failed task `(task failed — {compact reason})`) so every later task's bound prompt sees it, as the `--exec-subagents` leg records it. `--id` is the task id, `--phase` is `implement`, and `--output-dir` is the plan directory `{plan}` (the one holding `state.json`: the one log every write phase shares and the one `util write-prompt` binds from):
+     ```bash
+     uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
+       --output-dir "{plan}" --id "{task_id}" --phase "implement" --summary-stdin <<'SUMMARY_EOF'
+     {normalized_summary}
+     SUMMARY_EOF
+     ```
+     `append` is idempotent on `(id, phase)` (a repeat prints a `Notice:` and exits 0). If it fails, log a warning and continue.
    - **Record metrics**: Run the metrics utility to store the subagent's metrics:
      ```bash
      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \

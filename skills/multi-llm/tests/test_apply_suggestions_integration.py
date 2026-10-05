@@ -1317,3 +1317,30 @@ class TestOrchestratorOutputClaudeDecideShape:
         assert cfg["judge_decide_item_ids"] == ["h_marked"]
         # Per-item routing does not flip the global mode.
         assert cfg["decision_mode"] == "interactive"
+
+
+class TestTheNativeEmitMaterializesTheWriteTaskFile:
+    """The native leg writes `{phase}/write_tasks.json` — the executor's own
+    task file — so `util write-prompt` can bind each batch's prompt from the
+    same seam the executor dispatches from (2026-10-05)."""
+
+    def test_write_tasks_json_exists_and_each_batch_renders(self):
+        from utils import write_prompt
+        from utils.write_phase_bridge import WRITE_TASK_FILENAME
+
+        result = run_orchestrator("--approve-all", "--yes", "--include-high")
+        assert result.returncode == 0, result.stderr[-800:]
+        phase_dir = TEST_PLAN_DIR / "apply-suggestions"
+        assert f"[WRITE_TASKS_FILE] {phase_dir / WRITE_TASK_FILENAME}" in result.stderr
+        document = json.loads((phase_dir / WRITE_TASK_FILENAME).read_text(encoding="utf-8"))
+        output = json.loads((phase_dir / "orchestrator_output.json").read_text(encoding="utf-8"))
+        assert document["kind"] == "apply_suggestions"
+        assert len(document["batches"]) == len(output["batches"]) > 0
+        # Same batches, same order, same prior-changes ids as the host appends under.
+        assert [t["prior_changes_id"] for t in document["batches"]] == [
+            b["prior_changes_id"] for b in output["batches"]
+        ]
+        for task in document["batches"]:
+            text, _task, _info = write_prompt.render_write_prompt(phase_dir, task["task_id"])
+            assert "{prior_changes_context}" not in text
+            assert "## Result (required" in text

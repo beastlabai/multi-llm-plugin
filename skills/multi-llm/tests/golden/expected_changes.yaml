@@ -825,6 +825,14 @@ changes:
   - pointer: /state_shape/phases_started
     rationale: >
       The same two keys in the state-shape view, each a `<str>`.
+  - pointer: /phases/apply-fixes/created_paths
+    rationale: >
+      Issue 3 of the same re-run: the native emit path now materializes the
+      executor's `write_tasks.json` beside `orchestrator_output.json` (the
+      input of `util write-prompt`, which binds each batch's prior-changes
+      context from the scheduler's own seam), so the natively dispatched
+      apply-code-fixes phase writes one more path. apply-suggestions writes
+      it too, under the created-paths entry already declared for it.
 
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):

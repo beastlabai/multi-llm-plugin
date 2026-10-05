@@ -223,7 +223,10 @@ PLACEHOLDER_MANIFEST = {
     # 24 -> 20: the skill's own pytest invocation (a dogfooding special case) and
     # the inline `python -c` that inserted the summary reference are gone — the
     # latter is `util finalize-tracking --plan-file --summary-file-relative`.
-    "instructions/implement.md": (0, 20),
+    # 20 -> 24 (2026-10-05): the per-task `util write-prompt` bind and the
+    # per-task `util prior-changes append` the native leg now records, so the
+    # next task's bound prompt sees what landed (issue 3, racing re-run).
+    "instructions/implement.md": (0, 24),
     # 3 -> 2: the "substitute {SKILL_DIR} yourself" preamble is obsolete; the core
     # is served pre-substituted.
     "instructions/init-config.md": (0, 2),

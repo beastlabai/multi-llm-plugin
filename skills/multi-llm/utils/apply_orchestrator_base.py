@@ -1968,6 +1968,20 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 self.logger.warning("write outcome summary failed: %s", e)
             return scheduled
 
+        # The native leg (2026-10-05): the same materialized task file the
+        # executor leg writes, so the host's per-batch `util write-prompt`
+        # binds each batch's prior-changes context late, from the same seam,
+        # and the host loops over task ids instead of guessing the JSON shape.
+        # Reported on stderr like `[OUTPUT_FILE]` — stdout stays the contract.
+        try:
+            task_file = self._materialize_native_write_tasks()
+        except Exception as exc:  # noqa: BLE001 - the batch document is still usable
+            self.logger.warning("write task file not materialized: %s", exc)
+            print(f"WARNING: write_tasks.json not written: {exc}", file=sys.stderr)
+        else:
+            if task_file:
+                print(f"[WRITE_TASKS_FILE] {task_file}", file=sys.stderr)
+
         # The native leg: the batches are now the host's to apply, so the phase
         # is recorded *started*, never completed — completion is the host's
         # post-loop `--mark-completed`, the only place the native path records
@@ -3138,6 +3152,45 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if result.report_path:
             print(f"[write-subagents] report: {result.report_path}")
         return result.exit_code
+
+    def _materialize_native_write_tasks(self) -> Optional[str]:
+        """Write ``{phase}/write_tasks.json`` for the native leg; its path.
+
+        The executor leg's :meth:`run_write_executor` materializes the same
+        file through the same bridge before it schedules anything. On the
+        native leg it is the input of ``util write-prompt`` — one task id per
+        batch, in dispatch order, each with the `prior_changes_id` the host's
+        prior-changes append wants — and nothing else reads it. ``None`` when
+        this phase declares no write kind or emitted no batch.
+        """
+        if not self.write_kind or not self.batches:
+            return None
+        from .write_phase_bridge import (
+            materialize_write_tasks,
+            write_task_file_for_phase,
+        )
+
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        os.makedirs(phase_dir, exist_ok=True)
+        grouped_file = os.path.join(self.out_dir, self.review_subdir, "grouped.json")
+        grouped = grouped_file if os.path.exists(grouped_file) else None
+        artifact = self.write_phase_artifact()
+        tasks_file = artifact if artifact != self.plan_path else None
+        tasks = materialize_write_tasks(
+            kind=self.write_kind,
+            batches=[
+                batch if isinstance(batch, dict) else batch.to_dict()
+                for batch in self.batches
+            ],
+            phase_dir=phase_dir,
+            plan_file=self.plan_path,
+            tasks_file=tasks_file,
+            grouped_file=grouped,
+        )
+        return write_task_file_for_phase(
+            kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
+            plan_file=self.plan_path, tasks_file=tasks_file, grouped_file=grouped,
+        )
 
     def _record_pre_existing_changes(self) -> None:
         """Record the dirty-tree baseline for this write phase (D3h).

@@ -1869,3 +1869,29 @@ class TestTheNativeImplementEmitRecordsAStart:
         ]) == 0
         second = get_or_create_state(repo.plan).phase_started_at("implement")
         assert second != "2026-01-01T00:00:00" and second >= first
+
+
+class TestTheNativeImplementEmitMaterializesTheWriteTaskFile:
+    """Same file, same bytes as the executor leg would dispatch from."""
+
+    def test_write_tasks_json_matches_the_executor_s_rendering(self, repo, capsys):
+        from utils import write_prompt
+        from utils.write_batch_scheduler import WriteBatchScheduler
+        from utils.output_handler import get_output_dir
+
+        _seed_generate_tasks(repo)
+        assert implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"]) == 0
+        phase_dir = _phase_dir(repo)
+        assert f"[WRITE_TASKS_FILE] {phase_dir / WRITE_TASK_FILENAME}" in capsys.readouterr().err
+        document = json.loads((phase_dir / WRITE_TASK_FILENAME).read_text())
+        assert document["kind"] == "implement"
+        assert [t["task_id"] for t in document["batches"]] == ["T001", "T002", "T003"]
+
+        scheduler = WriteBatchScheduler.__new__(WriteBatchScheduler)
+        scheduler.kind = "implement"
+        scheduler.output_dir = str(get_output_dir(repo.plan))
+        scheduler.phase = "implement"
+        for task in document["batches"]:
+            text, _task, _info = write_prompt.render_write_prompt(phase_dir, task["task_id"])
+            assert text == scheduler._with_result_contract(
+                task, scheduler.dispatched_prompt(task))

@@ -218,9 +218,11 @@ __all__ = [
     "SchedulerResult",
     "HumanTaskPlan",
     "WriteBatchScheduler",
+    "bind_prior_changes",
     "resolve_human_task_plan",
     "run_write_phase",
     "verification_line",
+    "with_result_contract",
 ]
 
 
@@ -780,6 +782,143 @@ class UndeclaredWrites:
         return [path for path in self.paths if path not in keepable]
 
 
+def bind_prior_changes(
+    task: Dict[str, Any], *, output_dir: str, phase: Optional[str]
+) -> str:
+    """The prompt that actually goes to the runner, bound *now*.
+
+    ``{prior_changes_context}`` is substituted from the log **on disk**, so a
+    resumed batch sees the same context an uninterrupted run would have. The
+    task JSON is never rewritten: this produces the dispatched prompt only, and
+    the audit record stores its hash and length rather than its bytes.
+
+    A prompt that never contained the token is a contract error, not a
+    convenience: every batcher embeds it (``utils/suggestion_batcher.py:359``,
+    ``utils/code_fix_batcher.py:307``, ``apply_task_suggestions_orchestrator.py:543``,
+    ``prompts/implementation_task.txt``), so its absence means the producer
+    changed and every later batch would run without prior-batch context while
+    looking fine. ``implement`` used to be the one kind exempted — its prompt
+    carried no token and this fell through as a no-op — on the theory that its
+    inter-task context is the dependency section
+    ``implement_orchestrator._build_dependency_section`` renders instead. That
+    section names only the *titles* of preceding tasks (F6, 2026-09-16): a
+    verified one-line summary of what each batch actually did already exists in
+    ``prior_changes.jsonl``, so implement prompts now carry the token too and
+    get the same binding, refusal included, as every other kind.
+
+    The render is scoped to *phase* (N8, 2026-09-16): the log is one file
+    shared by every write phase this plan has ever run, and an unscoped tail
+    let another phase's older batches crowd out this phase's own recent ones.
+
+    Module-level (2026-10-05) because it has two callers that must produce
+    byte-identical text for the same state: the scheduler's
+    :meth:`WriteBatchScheduler.dispatched_prompt` on the executor leg, and
+    ``util write-prompt`` (:mod:`utils.write_prompt`) on the native leg, where
+    the host used to substitute the token by hand — and, measured on the
+    2026-10-04 Claude Code racing re-run, sometimes did not.
+    """
+    prompt = str(task.get("prompt") or "")
+    if PRIOR_CHANGES_TOKEN not in prompt:
+        raise ResultRejected(
+            f"Task {task.get('task_id')}: its prompt does not contain the "
+            f"{PRIOR_CHANGES_TOKEN} token, so there is nowhere to bind the "
+            f"prior-batch context. Every apply/implement prompt must carry it "
+            f"(utils/suggestion_batcher.py, utils/code_fix_batcher.py, "
+            f"apply_task_suggestions_orchestrator.py, "
+            f"prompts/implementation_task.txt). Nothing was dispatched.",
+            STATUS_REJECTED,
+        )
+    context = _prior_changes.render(output_dir, phase=phase)
+    return prompt.replace(PRIOR_CHANGES_TOKEN, context)
+
+
+def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
+    """Append the write-batch result contract the classification reads.
+
+    The batchers' prompts end in the prose "Return Format" the native
+    markdown flow compresses into a one-line summary; the scheduler — on
+    both invokers — validates the reply against
+    ``write_batch_result.schema.json`` instead, and reads ``ids`` against
+    the task's ``expected_ids``. A runner that was never shown that shape
+    answers in prose and fails rung 5 with its edits on disk. Measured
+    2026-09-15 on ``apply-task-suggestions``: three attempts applied the
+    batch to ``tasks.md`` and reported it as asked, every one was recorded
+    ``unparseable_result`` / ``schema-rejection``, and a fourth run's
+    runner, reading the already-applied file, replied "already addressed"
+    in prose and failed the same way.
+
+    The ids are spelled out in the order the items appear in the prompt,
+    because the prompt itself never names them; a reply that omits an id
+    for an item it found already applied would otherwise read as a partial
+    application and stop the loop.
+
+    Module-level for the same reason as :func:`bind_prior_changes`: the
+    native leg's ``util write-prompt`` appends the same contract, so a host
+    subagent's closing JSON object carries the ``summary`` the prior-changes
+    append wants and the ``status``/``files_touched`` the host's verification
+    step reads.
+    """
+    expected = [str(i) for i in (task.get("expected_ids") or [])]
+    if kind == "implement":
+        id_lines = (
+            f"- `ids`: this task's id, `{expected[0]}`, when you applied it "
+            f"or found it already implemented; leave it out on `failed`."
+            if expected else
+            "- `ids`: the task ids you applied."
+        )
+    else:
+        item = "fix" if kind == "apply_code_fixes" else "suggestion"
+        listed = ", ".join(
+            f"{item} {index} = `{member}`"
+            for index, member in enumerate(expected, 1)
+        )
+        id_lines = (
+            f"- `ids`: the ids of the {item}s you applied **or found already "
+            f"applied by a prior batch**, from this list (numbered in the "
+            f"order they appear above): {listed}. Leave out only the ones "
+            f"you could not apply."
+        )
+    return (
+        f"{prompt.rstrip()}\n\n"
+        "## Process safety (required)\n\n"
+        "Never run `kill`, `pkill`, `killall` or any process-wide signal: "
+        "the orchestrator that dispatched you is a sibling process, and a "
+        "write subagent's `killall -9 python3` ended a whole phase "
+        "(measured 2026-09-16). Do not start background servers or "
+        "browsers, and leave no process running when you finish; verify "
+        "with static checks only.\n\n"
+        "## Scratch files (advisory)\n\n"
+        "Keep scratch work (an extracted script to syntax-check, a probe) "
+        "out of the repository and out of fixed, shared names such as a "
+        "bare `check.mjs` in the system temp directory: create a fresh "
+        "directory with `mktemp -d`, work only there and delete it before "
+        "you finish. The write gate only sees the repository, so a file "
+        "left elsewhere is invisible to it (measured 2026-10-01, OpenCode "
+        "runner).\n\n"
+        "## Result (required — this is how the batch is verified)\n\n"
+        "Do the work above, then end your reply with ONE JSON object (a "
+        "fenced ```json block is fine) of exactly this shape:\n\n"
+        "```json\n"
+        '{"status": "applied", "ids": ["<id>", "..."], '
+        '"files_touched": ["<repo-relative path>"], '
+        '"summary": "<one line, at most 200 characters>", '
+        '"notes": "<the per-item summary requested above>"}\n'
+        "```\n\n"
+        "- `status`: `applied` if you edited any file; `no-op` if every "
+        "change was already present and you edited nothing; `failed` if "
+        "you could not apply the batch.\n"
+        f"{id_lines}\n"
+        "- `files_touched`: repo-root-relative paths you edited (empty for "
+        "`no-op` and `failed`).\n"
+        "- `summary`: one line; it is recorded verbatim as this batch's "
+        "entry in the prior-changes log the next batch reads.\n"
+        "- `notes`: the per-item summary the return format above asks for.\n\n"
+        "A reply without this JSON object is recorded as a FAILED batch even "
+        "when the edits landed, so send it in every case — including when "
+        "nothing needed changing.\n"
+    )
+
+
 class WriteBatchScheduler:
     """Drives one write phase's batches in ``batch_index`` order (D3n).
 
@@ -1321,123 +1460,16 @@ class WriteBatchScheduler:
     def dispatched_prompt(self, task: Dict[str, Any]) -> str:
         """The prompt that actually goes to the runner, bound *now*.
 
-        ``{prior_changes_context}`` is substituted from the log **on disk**, so a
-        resumed batch sees the same context an uninterrupted run would have. The
-        task JSON is never rewritten: this produces the dispatched prompt only, and
-        the audit record stores its hash and length rather than its bytes.
-
-        A prompt that never contained the token is a contract error, not a
-        convenience: every batcher embeds it (``utils/suggestion_batcher.py:359``,
-        ``utils/code_fix_batcher.py:307``, ``apply_task_suggestions_orchestrator.py:543``,
-        ``prompts/implementation_task.txt``), so its absence means the producer
-        changed and every later batch would run without prior-batch context while
-        looking fine. ``implement`` used to be the one kind exempted — its prompt
-        carried no token and this fell through as a no-op — on the theory that its
-        inter-task context is the dependency section
-        ``implement_orchestrator._build_dependency_section`` renders instead. That
-        section names only the *titles* of preceding tasks (F6, 2026-09-16): a
-        verified one-line summary of what each batch actually did already exists in
-        ``prior_changes.jsonl``, so implement prompts now carry the token too and
-        get the same binding, refusal included, as every other kind.
-
-        The render is scoped to ``self.phase`` (N8, 2026-09-16): the log is one
-        file shared by every write phase this plan has ever run, and an
-        unscoped tail let another phase's older batches crowd out this
-        phase's own recent ones.
+        :func:`bind_prior_changes` over this phase's log; see it for the
+        contract. Kept as a method so the dispatch site reads as before.
         """
-        prompt = str(task.get("prompt") or "")
-        if PRIOR_CHANGES_TOKEN not in prompt:
-            raise ResultRejected(
-                f"Task {task.get('task_id')}: its prompt does not contain the "
-                f"{PRIOR_CHANGES_TOKEN} token, so there is nowhere to bind the "
-                f"prior-batch context. Every apply/implement prompt must carry it "
-                f"(utils/suggestion_batcher.py, utils/code_fix_batcher.py, "
-                f"apply_task_suggestions_orchestrator.py, "
-                f"prompts/implementation_task.txt). Nothing was dispatched.",
-                STATUS_REJECTED,
-            )
-        context = _prior_changes.render(self.output_dir, phase=self.phase)
-        return prompt.replace(PRIOR_CHANGES_TOKEN, context)
+        return bind_prior_changes(
+            task, output_dir=self.output_dir, phase=self.phase
+        )
 
     def _with_result_contract(self, task: Dict[str, Any], prompt: str) -> str:
-        """Append the write-batch result contract the classification reads.
-
-        The batchers' prompts end in the prose "Return Format" the native
-        markdown flow compresses into a one-line summary; the scheduler — on
-        both invokers — validates the reply against
-        ``write_batch_result.schema.json`` instead, and reads ``ids`` against
-        the task's ``expected_ids``. A runner that was never shown that shape
-        answers in prose and fails rung 5 with its edits on disk. Measured
-        2026-09-15 on ``apply-task-suggestions``: three attempts applied the
-        batch to ``tasks.md`` and reported it as asked, every one was recorded
-        ``unparseable_result`` / ``schema-rejection``, and a fourth run's
-        runner, reading the already-applied file, replied "already addressed"
-        in prose and failed the same way.
-
-        The ids are spelled out in the order the items appear in the prompt,
-        because the prompt itself never names them; a reply that omits an id
-        for an item it found already applied would otherwise read as a partial
-        application and stop the loop.
-        """
-        expected = [str(i) for i in (task.get("expected_ids") or [])]
-        if self.kind == "implement":
-            id_lines = (
-                f"- `ids`: this task's id, `{expected[0]}`, when you applied it "
-                f"or found it already implemented; leave it out on `failed`."
-                if expected else
-                "- `ids`: the task ids you applied."
-            )
-        else:
-            item = "fix" if self.kind == "apply_code_fixes" else "suggestion"
-            listed = ", ".join(
-                f"{item} {index} = `{member}`"
-                for index, member in enumerate(expected, 1)
-            )
-            id_lines = (
-                f"- `ids`: the ids of the {item}s you applied **or found already "
-                f"applied by a prior batch**, from this list (numbered in the "
-                f"order they appear above): {listed}. Leave out only the ones "
-                f"you could not apply."
-            )
-        return (
-            f"{prompt.rstrip()}\n\n"
-            "## Process safety (required)\n\n"
-            "Never run `kill`, `pkill`, `killall` or any process-wide signal: "
-            "the orchestrator that dispatched you is a sibling process, and a "
-            "write subagent's `killall -9 python3` ended a whole phase "
-            "(measured 2026-09-16). Do not start background servers or "
-            "browsers, and leave no process running when you finish; verify "
-            "with static checks only.\n\n"
-            "## Scratch files (advisory)\n\n"
-            "Keep scratch work (an extracted script to syntax-check, a probe) "
-            "out of the repository and out of fixed, shared names such as a "
-            "bare `check.mjs` in the system temp directory: create a fresh "
-            "directory with `mktemp -d`, work only there and delete it before "
-            "you finish. The write gate only sees the repository, so a file "
-            "left elsewhere is invisible to it (measured 2026-10-01, OpenCode "
-            "runner).\n\n"
-            "## Result (required — this is how the batch is verified)\n\n"
-            "Do the work above, then end your reply with ONE JSON object (a "
-            "fenced ```json block is fine) of exactly this shape:\n\n"
-            "```json\n"
-            '{"status": "applied", "ids": ["<id>", "..."], '
-            '"files_touched": ["<repo-relative path>"], '
-            '"summary": "<one line, at most 200 characters>", '
-            '"notes": "<the per-item summary requested above>"}\n'
-            "```\n\n"
-            "- `status`: `applied` if you edited any file; `no-op` if every "
-            "change was already present and you edited nothing; `failed` if "
-            "you could not apply the batch.\n"
-            f"{id_lines}\n"
-            "- `files_touched`: repo-root-relative paths you edited (empty for "
-            "`no-op` and `failed`).\n"
-            "- `summary`: one line; it is recorded verbatim as this batch's "
-            "entry in the prior-changes log the next batch reads.\n"
-            "- `notes`: the per-item summary the return format above asks for.\n\n"
-            "A reply without this JSON object is recorded as a FAILED batch even "
-            "when the edits landed, so send it in every case — including when "
-            "nothing needed changing.\n"
-        )
+        """Append the write-batch result contract (:func:`with_result_contract`)."""
+        return with_result_contract(self.kind, task, prompt)
 
     # -- the loop -------------------------------------------------------
 
