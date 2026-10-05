@@ -59,7 +59,13 @@ def mark_phase_started_in_state(state: Dict[str, Any], phase: str) -> None:
     six minutes before its last task). ``get_workflow_status`` reads this map
     as ``in_progress``, the one status that spells ``--resume``. Re-stamped on
     every emit (a ``--resume`` is a new run of the same phase), popped by
-    :func:`mark_phase_completed_in_state` and by a skip.
+    :func:`mark_phase_completed_in_state` and by a skip. An EARLIER completion
+    of the same phase (a previous review cycle's, or the implement run this
+    one repeats) is left in ``phases_completed`` untouched — nothing rewrites
+    history — and the two stamps decide: :meth:`StateManager.is_phase_started`
+    and :meth:`StateManager.is_phase_completed` read the newer record as the
+    phase's state (reviewer repro, 2026-10-05: a cycle-2 native re-run read
+    ``completed`` on cycle 1's stamp, mid-loop).
     """
     started = state.get("phases_started")
     if not isinstance(started, dict):
@@ -82,6 +88,49 @@ def mark_phase_completed_in_state(state: Dict[str, Any], phase: str) -> None:
     started = state.get("phases_started")
     if isinstance(started, dict):
         started.pop(phase, None)
+
+
+def update_task_status_in_state(
+    state: Dict[str, Any], task_id: str, status: str, reason: Optional[str] = None
+) -> None:
+    """``StateManager.update_task_status``'s mutation on a raw state dict.
+
+    Module-level for the same reason :func:`mark_phase_completed_in_state`
+    is: the native write leg's per-batch record (``util batch-done``) edits
+    ``state.json`` as a file, mid-loop, and must not build a ``StateManager``
+    over a plan the batch just edited.
+    """
+    if "task_status" not in state:
+        state["task_status"] = {}
+    state["task_status"][task_id] = status
+    if reason is not None:
+        if "task_status_reasons" not in state:
+            state["task_status_reasons"] = {}
+        state["task_status_reasons"][task_id] = reason
+
+
+def mark_item_processed_in_state(
+    state: Dict[str, Any],
+    phase: str,
+    item_id: str,
+    status: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    """``StateManager.mark_item_processed``'s mutation on a raw state dict.
+
+    ``processed_<phase>`` is the map the apply base's ``--resume`` filters
+    its merged groups on (``apply_orchestrator_base`` step 23), keyed by the
+    group id a batch's ``expected_ids`` carry; ``phase`` is the base's own
+    ``phase_name`` (the phase DIR word — ``apply-fixes`` for apply-code-fixes).
+    """
+    key = f"processed_{phase}"
+    if key not in state or not isinstance(state[key], dict):
+        state[key] = {}
+    state[key][item_id] = {
+        "status": status,
+        "details": details or {},
+        "timestamp": datetime.now().isoformat(),
+    }
 
 
 def compute_plan_hash(plan_path: Path) -> str:
@@ -772,14 +821,7 @@ class StateManager:
             status: New status value
             reason: Optional reason for the status change (e.g., why a task was skipped)
         """
-        if "task_status" not in self.state:
-            self.state["task_status"] = {}
-        self.state["task_status"][task_id] = status
-
-        if reason is not None:
-            if "task_status_reasons" not in self.state:
-                self.state["task_status_reasons"] = {}
-            self.state["task_status_reasons"][task_id] = reason
+        update_task_status_in_state(self.state, task_id, status, reason)
 
     def get_task_status(self, task_id: str) -> Optional[str]:
         """Get status of a task."""
@@ -824,30 +866,74 @@ class StateManager:
         ``implement`` records them when it decomposes the task list, on both
         legs, so a deferred task can be named later by what it is and not only
         by its id (2026-10-04: a complete workflow said nothing about the two
-        manual tasks it left the user). Returns whether anything changed; the
-        caller saves.
+        manual tasks it left the user). *titles* is that whole decomposition:
+        the titles merge, but its id set REPLACES ``implement_task_ids``, which
+        is what :meth:`deferred_implementation_tasks` scopes to — nothing
+        resets ``task_status`` on a fresh implement, so an id an earlier
+        decomposition skipped stays ``skipped`` after tasks.md is regenerated
+        (adversarial review, 2026-10-05). Returns whether anything changed;
+        the caller saves.
         """
         recorded = dict(self.state.get("task_titles") or {})
         merged = {**recorded, **{str(k): str(v) for k, v in titles.items() if k}}
-        if merged == recorded:
+        current = sorted(str(k) for k in titles if k)
+        if merged == recorded and self.state.get("implement_task_ids") == current:
             return False
         self.state["task_titles"] = merged
+        self.state["implement_task_ids"] = current
         return True
 
-    def deferred_implementation_tasks(self) -> List[Dict[str, Optional[str]]]:
-        """The implement tasks recorded ``skipped``, as ``{id, title}``, by id.
+    #: The recorded reason of an implement task the USER declined at
+    #: pause-and-ask (``write_batch_scheduler.resolve_human_task_plan``, and
+    #: the same words ``instructions/implement.md`` gives the native host). A
+    #: decision, not a deferral: the task is not left for them to do.
+    _USER_DECLINED_REASON = "skipped by user during pause-and-ask"
 
-        Read from ``task_status`` alone (both legs record a deferred human task,
-        and a dependent ``skip-dependents`` skipped with it, as ``skipped``),
-        never by re-parsing tasks.md: what the run deferred is what state says
-        it deferred. ``title`` is ``None`` when ``task_titles`` has no entry (a
-        state written before titles were recorded).
+    #: The recorded reason of a dependent the transitive skip walk took with
+    #: its parent (both legs spell it ``skipped — depends on skipped task
+    #: {parent_id} ({parent_title})``); owed exactly when the parent is.
+    _DEPENDS_ON_SKIPPED = re.compile(r"^skipped — depends on skipped task (T[0-9]{3})\b")
+
+    def _deferred_to_user(self, task_id: str, seen: Optional[set] = None) -> bool:
+        """Whether *task_id*'s skip leaves the task for the user to do.
+
+        A deferral (a human task under a skip strategy, ``deferred — …``) and
+        a dependent of one are owed; a pause-and-ask "Skip" and a dependent of
+        one are not. A reason this does not recognise — none recorded, a state
+        written before reasons were — stays owed, as every skip used to be.
+        """
+        reason = str((self.state.get("task_status_reasons") or {}).get(task_id) or "")
+        if reason.startswith(self._USER_DECLINED_REASON):
+            return False
+        match = self._DEPENDS_ON_SKIPPED.match(reason)
+        seen = set() if seen is None else seen
+        if match is None or task_id in seen:
+            return True
+        seen.add(task_id)
+        return self._deferred_to_user(match.group(1), seen)
+
+    def deferred_implementation_tasks(self) -> List[Dict[str, Optional[str]]]:
+        """The implement tasks the run left for the user, as ``{id, title}``, by id.
+
+        Read from ``task_status`` (both legs record a deferred human task, and
+        a dependent ``skip-dependents`` skipped with it, as ``skipped``), never
+        by re-parsing tasks.md: what the run deferred is what state says it
+        deferred. Scoped to the decomposition ``implement`` recorded last
+        (``implement_task_ids``, when there is one) and to the skips that are
+        deferrals (:meth:`_deferred_to_user`), since 2026-10-05: an earlier
+        cycle's skip and a task the user declined are not owed. ``title`` is
+        ``None`` when ``task_titles`` has no entry (a state written before
+        titles were recorded).
         """
         titles = self.state.get("task_titles") or {}
+        current = self.state.get("implement_task_ids")
+        scope = set(current) if isinstance(current, list) else None
         return [
             {"id": task_id, "title": titles.get(task_id) or None}
             for task_id, status in sorted(self.implementation_task_statuses().items())
             if status == "skipped"
+            and (scope is None or task_id in scope)
+            and self._deferred_to_user(task_id)
         ]
 
     def track_file(self, path: str, action: str, task_id: str) -> None:
@@ -926,11 +1012,24 @@ class StateManager:
         mark_phase_started_in_state(self.state, phase)
 
     def is_phase_started(self, phase: str) -> bool:
-        """Whether *phase* carries a started record and no completion."""
-        if phase in self.state.get("phases_completed", {}):
+        """Whether *phase*'s newest record is a start, not a completion.
+
+        A started record beside no completion is a start. Beside one, the
+        stamps decide: a start newer than the completion is a re-run of a
+        phase that finished once before (a second review cycle, an implement
+        repeated), and the phase is mid-loop again; a start older than the
+        completion is the run that completion closed, and is ignored. A
+        stamp that does not parse keeps the completion (absence of a date
+        is not a re-run).
+        """
+        started_at = _parse_completion_time(self.phase_started_at(phase))
+        if started_at is None:
             return False
-        started = self.state.get("phases_started")
-        return isinstance(started, dict) and phase in started
+        completed_at = self.state.get("phases_completed", {}).get(phase)
+        if completed_at is None:
+            return True
+        completed = _parse_completion_time(completed_at)
+        return completed is not None and started_at > completed
 
     def phase_started_at(self, phase: str) -> Optional[str]:
         """The ISO timestamp *phase* was recorded started, or None."""
@@ -965,9 +1064,11 @@ class StateManager:
 
         A ``code-review`` or ``apply-code-fixes`` completion recorded before
         implement's latest completion is not one (see
-        :meth:`phase_completion_is_stale`): the raw record stays in
-        ``phases_completed``, but every reader — the next-step builder, the
-        completed-phase guard, ``status`` — sees the phase as pending again.
+        :meth:`phase_completion_is_stale`), and neither is a completion older
+        than the phase's own started record (see :meth:`is_phase_started`):
+        the raw record stays in ``phases_completed``, but every reader — the
+        next-step builder, the completed-phase guard, ``status`` — sees the
+        phase as pending (or ``in_progress``) again.
 
         Args:
             phase: Phase name to check
@@ -976,6 +1077,10 @@ class StateManager:
             True if the phase has been marked as completed
         """
         if phase not in self.state.get("phases_completed", {}):
+            return False
+        if self.is_phase_started(phase):
+            # A start newer than the completion: the phase is running again
+            # (its re-run's emit), and its old completion is not its state.
             return False
         return not self.phase_completion_is_stale(phase)
 
@@ -1227,15 +1332,7 @@ class StateManager:
             status: Processing status ("applied", "skipped", "failed")
             details: Optional details about the processing
         """
-        key = f"processed_{phase}"
-        if key not in self.state:
-            self.state[key] = {}
-
-        self.state[key][group_id] = {
-            "status": status,
-            "details": details or {},
-            "timestamp": datetime.now().isoformat()
-        }
+        mark_item_processed_in_state(self.state, phase, group_id, status, details)
 
     def get_processed_items(self, phase: str) -> Dict[str, Dict[str, Any]]:
         """Get all processed items for a phase."""

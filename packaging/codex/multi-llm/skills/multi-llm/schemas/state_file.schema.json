@@ -49,6 +49,11 @@
       "description": "Implement task titles by task id, recorded when implement decomposes the task list (names a deferred task on completion)",
       "additionalProperties": { "type": "string" }
     },
+    "implement_task_ids": {
+      "type": "array",
+      "description": "The task ids of the decomposition implement ran last, replaced on every run (scopes the deferred manual tasks named on completion)",
+      "items": { "type": "string" }
+    },
     "human_task_strategy": {
       "type": "string",
       "description": "Chosen strategy for handling human tasks during implementation",

@@ -661,11 +661,33 @@ def command_forms(command):
     return [command] if escaped == command else [escaped, command]
 
 
+#: A command's body: anything but a newline, a double quote or a backtick —
+#: except ``"'"``, the middle of ``cli_common._quote``'s ``'"'"'``, its only
+#: spelling of an apostrophe (an ``ask`` question holding one was cut there,
+#: 2026-10-05).
+_COMMAND_BODY = r"""(?:[^\n"`]|"'")*"""
+
+
 def runnable_pattern(surface):
     """``uv … run … <script> …``, bounded at a newline, a double quote or backtick."""
     script = re.escape(surface["dispatcher"]["script"])
     return re.compile(
-        r'[^\s"`]*\buv(?:\.exe)?\b\s+run\b[^\n"`]*' + script + r'[^\n"`]*')
+        r'[^\s"`]*\buv(?:\.exe)?\b\s+run\b' + _COMMAND_BODY + script + _COMMAND_BODY)
+
+
+def cut_mid_token(match) -> bool:
+    """Whether a ``"`` cut this match where its last token may go on.
+
+    Every command the dispatcher prints is POSIX-quoted (``cli_common._quote``),
+    so a stop right after a closing quote (or an escaping backslash) can sit
+    inside one shell word: the parse then succeeds on the part before the cut,
+    and the re-spelled command — and the option — carry a truncated value (an
+    ``ask`` question with a ``"`` in it, 2026-10-05). Such a match keeps the
+    pointer and comes back unparseable; a cut inside an open quote already
+    fails to parse. The port of ``cutMidToken``.
+    """
+    end = match.end()
+    return match.string[end:end + 1] == '"' and match.group(0)[-1:] in ("'", "\\")
 
 
 def scrub_value(value, commands, pattern, respell=None):
@@ -675,7 +697,8 @@ def scrub_value(value, commands, pattern, respell=None):
         if not pattern:
             return value
         return pattern.sub(
-            lambda match: (respell(match.group(0)) if respell else None)
+            lambda match: (respell(match.group(0))
+                           if respell and not cut_mid_token(match) else None)
             or RUNNABLE_MARKER, value)
     if isinstance(value, list):
         return [scrub_value(item, commands, pattern, respell) for item in value]
@@ -796,18 +819,23 @@ def parse_dispatcher_command(command, surface):
     return args
 
 
+def unparseable_call() -> dict:
+    """What a follow-up this tool cannot parse into a tool call comes back as."""
+    return {
+        "unparseable": True,
+        "note": "The dispatcher returned a follow-up this tool could not "
+                "parse into a tool call. It is reported rather than "
+                "executed. Do not run it in a shell.",
+    }
+
+
 def next_as_tool_call(raw, surface):
     """A ``next`` string re-spelled as tool-call args, or an unparseable note."""
     if not isinstance(raw, str) or not raw:
         return None
     parsed = parse_dispatcher_command(raw, surface)
     if parsed is None:
-        return {
-            "unparseable": True,
-            "note": "The dispatcher returned a follow-up this tool could not "
-                    "parse into a tool call. It is reported rather than "
-                    "executed. Do not run it in a shell.",
-        }
+        return unparseable_call()
     return parsed
 
 
@@ -829,9 +857,27 @@ def quote_for_reader(value: str) -> str:
 def typed_plan(plan, values):
     """*plan* as this call typed it, when it names the call's own plan file."""
     values = values or {}
-    if plan and values.get("plan_arg") and plan == values.get("plan"):
+    if plan and values.get("plan_arg") and same_plan_file(plan, values.get("plan")):
         return values["plan_arg"]
     return plan
+
+
+def same_plan_file(left, right) -> bool:
+    """Whether two plan paths name one file, symlinks followed on both sides.
+
+    The call's plan is joined to the anchor without following symlinks
+    (``normalize_plan``) and the dispatcher prints some paths through
+    ``Path.resolve()``, so under a symlinked plan directory the same file came
+    back spelled two ways and the re-spelled commands and options carried the
+    absolute real path instead of the plan as typed (2026-10-05). Two absolute
+    paths are compared by ``realpath``; anything else only by equality. The
+    port of ``samePlanFile``.
+    """
+    if left == right:
+        return True
+    if not left or not right or not os.path.isabs(left) or not os.path.isabs(right):
+        return False
+    return os.path.realpath(left) == os.path.realpath(right)
 
 
 def user_spelling(args, surface):
@@ -872,6 +918,59 @@ def respeller_for(surface, values):
             return None
         return user_spelling(dict(args, plan=typed_plan(args["plan"], values)), surface)
     return respell
+
+
+def blocked_word(values, outcome, surface):
+    """The mode ``util next-command --blocked`` is asked about, or ``None``.
+
+    The call's own when it is a phase, else the phase of the run the call
+    reported on: a ``status`` or ``abort`` call on a failed run re-spells
+    status's ``resume with:`` line into the host's command, and asking
+    ``--blocked status`` — no phase, so no answer — then put "give the user no
+    command" beside it (2026-10-05). The run is named by the result line (a
+    poll pinned to one run carries its ``mode`` and ``phase``), else by the one
+    phase the output re-invokes; several, or none, name nothing. The port of
+    ``blockedWord``.
+    """
+    def is_phase(word):
+        row = resolve_mode(word, surface) if isinstance(word, str) and word else None
+        return bool(row and row.get("phase"))
+
+    word = (values or {}).get("word")
+    if is_phase(word):
+        return word
+    result = (outcome or {}).get("result")
+    result = result if isinstance(result, dict) else {}
+    for candidate in (result.get("mode"), result.get("phase")):
+        if is_phase(candidate):
+            return candidate
+    named = {resolve_mode(option["mode"], surface)["name"]
+             for option in (outcome or {}).get("options") or []
+             if isinstance(option, dict) and is_phase(option.get("mode"))}
+    return named.pop() if len(named) == 1 else None
+
+
+def shows_a_phase_command(outcome, surface) -> bool:
+    """Whether the result's own text shows a re-spelled phase command.
+
+    An ``options`` call on a phase mode, spelled for the user
+    (:func:`user_spelling`), found in ``output`` or ``stderr`` as rendered.
+    The port of ``showsAPhaseCommand``.
+    """
+    text = "\n".join(part for part in (outcome.get("output"), outcome.get("stderr"))
+                     if isinstance(part, str))
+    if not text:
+        return False
+    for option in outcome.get("options") or []:
+        if not isinstance(option, dict) or "mode" not in option:
+            continue
+        row = resolve_mode(option.get("mode"), surface)
+        if not row or not row.get("phase"):
+            continue
+        spelled = user_spelling(option, surface)
+        if spelled and spelled in text:
+            return True
+    return False
 
 
 def pinned_run_id(tokens, surface):
@@ -1400,6 +1499,15 @@ class Server:
         outcome[USER_NEXT_STEP_KEY] = None
         if outcome.get("resume_command"):
             return outcome
+        # No reason (2026-10-05) for a result that names a run and no `exit`
+        # (`stop_report`: the run outlived the call, so "did not finish" is not
+        # yet true), nor for a `status`/`abort` call whose output shows a
+        # re-spelled command re-invoking a phase, which it would contradict.
+        row = resolve_mode(call.args.get("mode"), surface) if call.args else None
+        report = row is not None and not row.get("phase")
+        if ((outcome.get("run_id") and outcome.get("exit") is None)
+                or (report and shows_a_phase_command(outcome, surface))):
+            return outcome
         reason = surface.get("no_command_reason")
         if isinstance(reason, str):
             outcome["no_command_reason"] = reason
@@ -1927,7 +2035,8 @@ class Server:
                 # The dispatcher's `next` names the plan absolutely; when that is
                 # the plan this call was typed with, the continuation keeps the
                 # user's spelling so its own next-phase command does too.
-                "plan_arg": values.get("plan_arg") if planned == values.get("plan") else "",
+                "plan_arg": (values.get("plan_arg")
+                             if same_plan_file(planned, values.get("plan")) else ""),
                 "question": args["question"], "extra": list(args["extra_flags"])})
             if kind == "spawn-error":
                 break
@@ -2070,11 +2179,16 @@ class Server:
         """
         raw = (child.result or {}).get("next")
         commands = [raw] if isinstance(raw, str) and raw else []
-        commands.extend(runnable_pattern(self.surface).findall(
-            "{}\n{}".format(child.stdout or "", child.stderr or "")))
+        # A command a quote cut short is reported, never offered: its parse
+        # would carry the truncated value (`cut_mid_token`).
+        commands.extend(
+            None if cut_mid_token(found) else found.group(0)
+            for found in runnable_pattern(self.surface).finditer(
+                "{}\n{}".format(child.stdout or "", child.stderr or "")))
         seen, calls = set(), []
         for command in commands:
-            call_args = next_as_tool_call(command, self.surface)
+            call_args = (unparseable_call() if command is None
+                         else next_as_tool_call(command, self.surface))
             if call_args is None:
                 continue
             if not call_args.get("unparseable"):
@@ -2236,17 +2350,20 @@ class Server:
         none of it, and it is the user's to type: nothing here (or in
         ``is_mechanical``) runs it. A surface without the ``resume`` entry, a
         spawn failure, a non-zero exit or an empty answer all leave the result
-        as it was: an advisory lookup never changes what it decorates.
+        as it was: an advisory lookup never changes what it decorates. The mode
+        asked about is :func:`blocked_word`'s: a ``status``/``abort`` call
+        reports on a run and is no phase.
         """
         dispatcher = self.surface["dispatcher"]
         resume = dispatcher.get("resume")
         plan = values.get("plan_arg") or values.get("plan")
-        if (not resume or not plan or not values.get("word")
+        word = blocked_word(values, outcome, self.surface)
+        if (not resume or not plan or not word
                 or outcome.get("state") != dispatcher["states"]["needs_human"]
                 or outcome.get("exit") != dispatcher["exit_codes"]["needs_human"]):
             return
         argv = list(resume["argv"]) + [
-            plan, resume["option"], values["word"],
+            plan, resume["option"], word,
             dispatcher["host_option"], self.surface["host"]]
         spare = max(1.0, call.hard_deadline - time.monotonic() - 0.5)
         child = self.run_child(call, argv, spare)

@@ -287,7 +287,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
      --phase-dir "{plan}/apply-fixes" --task-id "{task.task_id}"
    ```
-   `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-fix-batch-0`, `apply-fix-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 6 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-fixes/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Note the path and the line count for step 2. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
+   `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-fix-batch-0`, `apply-fix-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 7 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-fixes/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Note the path and the line count for step 2. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
 
    **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report.
 
@@ -307,7 +307,14 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Normalize** the summary: collapse any newlines or multiple spaces to a single space, trim leading/trailing whitespace, and truncate to 200 characters if needed.
 
-6. **Append to prior changes (only after verification)** — This step runs **only** after step 4 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
+6. **Record the batch outcome (only after verification)** — This step runs **only** after step 4 has classified the batch as a success or a clean failure. It must **never** run for a partially-applied batch (the loop stops there). Run:
+   ```bash
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util batch-done \
+     --phase-dir "{plan}/apply-fixes" --task-id "{task.task_id}" --status {batch_status}
+   ```
+   `{batch_status}` is `completed` for a success (a verified no-op included) and `failed` for a clean failure — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task.task_id} {batch_status} (N item(s) recorded)` line and writes the batch's record into `state.json`: the same `task_status` entry the `--exec-subagents` executor writes for this batch, plus every fix in it as processed. That record is what a later `--resume` reads to skip this batch (a `failed` record keeps it eligible for another try) and what makes `status` read the phase `in_progress`. Run it **before** step 7's append: a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-apply. An exit 3 names the problem (no `write_tasks.json`, an unknown task id); treat it as a stop, not a warning.
+
+7. **Append to prior changes (only after verification)** — This step runs **only** after step 4 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
      --output-dir "{plan}" \
@@ -336,8 +343,8 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Error handling**: If `append` fails, log a warning but do not abort the batch loop.
 
-7. **Log the result** - Track success/failure for the summary
-8. **Record metrics** — Run:
+8. **Log the result** - Track success/failure for the summary
+9. **Record metrics** — Run:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-code-fixes" \
@@ -513,7 +520,7 @@ uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.p
 
 Two notes on the word this writes:
 
-- It records the **mode** name `apply-code-fixes` in `phases_completed`, not the phase-**directory** name `apply-fixes` that step 5.6 passes to `util prior-changes`. These are two different fields with two different owners (`state.json.phases_completed` vs. `prior_changes.jsonl`'s per-entry `phase`) and both spellings are deliberate; do not "unify" them here. `util prior-changes` itself is more forgiving of the *other* field: `append`/`render` treat `apply-fixes` and `apply-code-fixes` as one phase (`utils/prior_changes.PHASE_ALIASES`), because the `--exec-subagents` executor writes `prior_changes.jsonl` entries under the mode word — so passing either spelling to `util prior-changes` lands on the same entries; step 5.6 still names `"apply-fixes"` as the one to type.
+- It records the **mode** name `apply-code-fixes` in `phases_completed`, not the phase-**directory** name `apply-fixes` that step 5.7 passes to `util prior-changes`. These are two different fields with two different owners (`state.json.phases_completed` vs. `prior_changes.jsonl`'s per-entry `phase`) and both spellings are deliberate; do not "unify" them here. `util prior-changes` itself is more forgiving of the *other* field: `append`/`render` treat `apply-fixes` and `apply-code-fixes` as one phase (`utils/prior_changes.PHASE_ALIASES`), because the `--exec-subagents` executor writes `prior_changes.jsonl` entries under the mode word — so passing either spelling to `util prior-changes` lands on the same entries; step 5.6 still names `"apply-fixes"` as the one to type.
 - It is the same word `--exec-subagents` records when its executor finalizes, so the native loop and the Python executor cannot drift apart. Under `--exec-subagents` the executor has already done this and there is no separate command to run.
 
 This ensures subsequent phases (and `check_workflow_prerequisites`) recognize that the code fixes have been applied.
@@ -621,7 +628,7 @@ Agent:
 
 For each batch (sequentially):
 - Runs the batch as a subagent (batch.executor_role)
-- Uses pre-generated batch.prompt
+- Binds the batch's prompt with `util write-prompt` and hands the subagent the bound file
 - Waits for completion
 - Logs results
 
@@ -640,7 +647,7 @@ For needs-human-decision items:
 
 ## Batch Prompt Format
 
-Each batch includes a pre-generated prompt. For single-fix batches:
+Each batch carries a prompt template in its `prompt` field (unbound: `util write-prompt` is what binds it for a subagent). For single-fix batches:
 
 ```
 Fix the following code issue:
@@ -721,7 +728,7 @@ Fix 2: [What was changed]
 
 1. **SEQUENTIAL BATCHES**: Never parallelize batch processing - one batch at a time
 2. **DELEGATE EVERY BATCH**: Every batch is `executor_role: "agent"` — run it as a subagent, never inline
-3. **USE PRE-GENERATED PROMPTS**: Use the `prompt` field from each batch
+3. **USE THE BOUND PROMPT FILE**: hand each subagent only the `[WRITE_PROMPT]` file `util write-prompt` wrote — never the raw `prompt` field of the JSON, which carries an unbound `{prior_changes_context}` token
 4. **NEVER IMPLEMENT MANUALLY**: always **spawn subagents** to do the work
 5. **TRACK EVERYTHING**: Log every applied/skipped fix for the report
 6. **SECURITY IS ISOLATED**: Security and HIGH importance fixes are always in their own batch
@@ -873,6 +880,8 @@ Follow the wave-based spawning strategy in `references/wave-batching.md`.
 ### Resuming Interrupted Sessions
 
 If a session is interrupted, progress is saved automatically:
+
+`--resume` re-emits only what is left: every batch the loop recorded with `util batch-done` (step 5) is dropped, a batch recorded `failed` is dispatched again, and a batch the prior-changes log names that no record says finished is **refused** — exit 3 with a `[RESUME_REFUSED]` block naming the batch and the `util batch-done` call that records it (or `--fresh`, once the target is back at its pre-run bytes). Re-emitting such a batch would apply it twice.
 
 ```bash
 # Resume from where you left off

@@ -58,6 +58,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         host_write_posture_consent,
         WRITE_SCOPE_PLAN_FILE,
         WRITE_SCOPE_REPO_WIDE,
+        SANDBOX_RUNG_PLUGIN_LANDLOCK,
         WRITE_SCOPE_TASKS,
         WRITE_SCOPES_ON_RUNG,
         JailRequest,
@@ -126,6 +127,8 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         overlapping_pairs,
         relative_to_root,
         resolve_repo_root,
+        claim_external_safety_dir,
+        safety_dir,
     )
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import git_utils as _git_utils
@@ -138,6 +141,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         host_write_posture_consent,
         WRITE_SCOPE_PLAN_FILE,
         WRITE_SCOPE_REPO_WIDE,
+        SANDBOX_RUNG_PLUGIN_LANDLOCK,
         WRITE_SCOPE_TASKS,
         WRITE_SCOPES_ON_RUNG,
         JailRequest,
@@ -206,6 +210,8 @@ except ImportError:  # pragma: no cover - direct-script import shim
         overlapping_pairs,
         relative_to_root,
         resolve_repo_root,
+        claim_external_safety_dir,
+        safety_dir,
     )
 
 
@@ -996,7 +1002,13 @@ class WriteBatchScheduler:
         self.phase = phase or PHASE_BY_WRITE_KIND[kind]
         self.output_dir = str(output_dir)
         self.anchor = anchor or plan_file
-        self.repo_root = str(repo_root) if repo_root else resolve_repo_root(self.anchor)
+        # An explicit root is checked the way the resolver pins one (review
+        # fixes 2026-10-05): a planted `core.worktree` or a redirecting `.git`
+        # refuses the phase at construction, before any snapshot or dispatch.
+        self.repo_root = (
+            self._checked_repo_root(repo_root) if repo_root
+            else resolve_repo_root(self.anchor)
+        )
         self.state = state
         self.plan_file = plan_file
         self.summary_file = summary_file
@@ -1029,6 +1041,8 @@ class WriteBatchScheduler:
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
         self.jail_request = self._build_jail_request()
         self.audit = AuditLog(self.phase_dir)
+        #: Whether `_decide_rollback_storage` ran for this phase.
+        self._rollback_storage_decided = False
         self.snapshots: Dict[str, TaskSnapshot] = {}
         #: Task ids whose pre-batch snapshot was REUSED from an earlier
         #: dispatch of this same batch (`_snapshot`/`_reusable_snapshot`),
@@ -1160,6 +1174,67 @@ class WriteBatchScheduler:
         self._rung_noticed: set = set()
 
     # -- the write grant (plan step 3, 2026-09-30) ----------------------
+
+    @property
+    def safety_dir(self) -> str:
+        """Where this phase's pre-batch snapshots, rollback store and audit
+        log live (``write_safety.safety_dir``): the phase dir, or the
+        out-of-grant directory a jailed repo-wide run claimed."""
+        return safety_dir(self.phase_dir)
+
+    def _decide_rollback_storage(self, task: Dict[str, Any], profile: str) -> None:
+        """Once per phase, before its first snapshot: a ``repo-wide`` batch
+        that will run on the plugin's Landlock jail keeps its rollback
+        evidence outside the grant (review fixes 2026-10-05).
+
+        Under the root grant the phase dir is the batch's to write, and the
+        manifest, payloads, rollback blobs and audit log there decided what
+        ``util restore-batch`` wrote and where. The jail restricts writes
+        only, so no key could be kept from the batch; the evidence goes where
+        the jail never grants — ``write_safety.claim_external_safety_dir``,
+        under the state home — and every reader resolves it through
+        ``safety_dir``, which never falls back to the phase dir once the
+        directory exists. The rung is read the way the dispatch reads it,
+        from the executor's recorded decision after this runner's preflight
+        (cached per process there); a preflight that fails is left for the
+        dispatch's own call to report. Every other runner and scope keeps
+        the phase dir, unchanged.
+        """
+        if self._rollback_storage_decided or self.dry_run or self.respond is not None:
+            return
+        if self.write_scope != WRITE_SCOPE_REPO_WIDE:
+            self._rollback_storage_decided = True
+            return
+        self._rollback_storage_decided = True
+        try:
+            runner = self.forced_runner or resolve_task_runner(task, anchor=self.anchor)
+            self._preflight(runner, profile)
+        except Exception:  # noqa: BLE001 - the dispatch's own preflight reports it
+            return
+        if self._recorded_rung(runner, profile) != SANDBOX_RUNG_PLUGIN_LANDLOCK:
+            return
+        external = claim_external_safety_dir(self.phase_dir, self.repo_root)
+        self.log(
+            f"[write-subagents] repo-wide batches run on the plugin's jail, "
+            f"which grants the phase dir too: pre-batch snapshots, the rollback "
+            f"store and the audit log for this phase live outside it, at "
+            f"{external} (a copy inside the phase dir is never read)."
+        )
+
+    @staticmethod
+    def _checked_repo_root(raw: str) -> str:
+        """``raw`` ``realpath``-resolved, refused (exit 3) when
+        ``git_utils.pin_repo_root`` says git's view of that tree is
+        redirected — the check :func:`resolve_repo_root` makes for a root it
+        derives itself, applied to one a caller hands in."""
+        root = os.path.realpath(str(raw))
+        _pinned, problem = _git_utils.pin_repo_root(root)
+        if problem:
+            raise WriteSafetyError(
+                f"Refusing the repository root {root}: {problem}. Nothing was "
+                f"dispatched."
+            )
+        return root
 
     def _checked_write_target(self, raw: Optional[str]) -> Optional[str]:
         """``raw`` ``realpath``-resolved, or refuse the phase at construction.
@@ -1541,7 +1616,7 @@ class WriteBatchScheduler:
     def _discard_rollback_store(self) -> None:
         """Drop the sweep's staging bytes and the index that describes them."""
         shutil.rmtree(
-            os.path.join(self.phase_dir, ROLLBACK_STORE_DIRNAME), ignore_errors=True
+            os.path.join(self.safety_dir, ROLLBACK_STORE_DIRNAME), ignore_errors=True
         )
         with self._sweep_lock:
             self._retained.clear()
@@ -1898,6 +1973,7 @@ class WriteBatchScheduler:
             )
 
         try:
+            self._decide_rollback_storage(task, profile)
             snapshot = self._snapshot(task)
         except WriteSafetyError as exc:
             return TaskOutcome(
@@ -2218,7 +2294,7 @@ class WriteBatchScheduler:
     def _blob_path(self, digest: str) -> str:
         """Where the rollback store keeps ``digest``'s bytes."""
         return os.path.join(
-            self.phase_dir, ROLLBACK_STORE_DIRNAME, digest[:2], digest
+            self.safety_dir, ROLLBACK_STORE_DIRNAME, digest[:2], digest
         )
 
     def _retain(self, census: Optional[Dict[str, Tuple[int, int]]]) -> Dict[str, str]:
@@ -2271,7 +2347,7 @@ class WriteBatchScheduler:
             self.log(
                 f"[write-subagents] {len(skipped)} file(s) under {self.repo_root} "
                 f"have no rollback point in "
-                f"{os.path.join(self.phase_dir, ROLLBACK_STORE_DIRNAME)}: {named}. "
+                f"{os.path.join(self.safety_dir, ROLLBACK_STORE_DIRNAME)}: {named}. "
                 f"An undeclared write to one of them is still detected, "
                 f"policy-checked and audited — `util restore-batch` just cannot "
                 f"undo it (D3l)."
@@ -2489,7 +2565,9 @@ class WriteBatchScheduler:
         path = ""
         try:
             result = subprocess.run(
-                _git_utils.git_argv("config", "--path", "--get", "core.excludesFile"),
+                _git_utils.git_argv(
+                    "config", "--path", "--get", "core.excludesFile", cwd=self.repo_root,
+                ),
                 cwd=self.repo_root, capture_output=True, text=True,
                 encoding="utf-8", errors="replace",
             )
@@ -3875,7 +3953,9 @@ class WriteBatchScheduler:
             # `take` would copy today's bytes over it (adversarial review,
             # 2026-10-02: a `--fresh` on an un-reverted target left every
             # slot holding already-applied bytes). Set aside, never deleted.
-            existing = TaskSnapshot.load(self.phase_dir, task_id)
+            existing = TaskSnapshot.load(
+                self.phase_dir, task_id, expected_root=self.repo_root,
+            )
             if existing is not None:
                 moved_to = existing.set_aside()
                 self.log(
@@ -3920,7 +4000,9 @@ class WriteBatchScheduler:
         manifest that records no items (written before they were recorded)
         falls back to the id, as before.
         """
-        existing = TaskSnapshot.load(self.phase_dir, task_id)
+        existing = TaskSnapshot.load(
+            self.phase_dir, task_id, expected_root=self.repo_root,
+        )
         # The same cutoff `_earlier_rows` applies: a snapshot taken before
         # the review this phase applies completed belongs to the previous
         # cycle — the bytes before THAT cycle's batch, so restoring from it
@@ -4415,7 +4497,7 @@ class WriteBatchScheduler:
                 )
         lines += [
             f"Audit log: {self.audit.path}",
-            f"Snapshots: {os.path.join(self.phase_dir, 'pre_batch')}/",
+            f"Snapshots: {os.path.join(self.safety_dir, 'pre_batch')}/",
             "The half-applied state is deliberately left in place — inspect it, "
             "then either restore the batch or re-invoke with --resume, which "
             "re-dispatches only the unfinished batches and replays the "
@@ -4445,7 +4527,7 @@ class WriteBatchScheduler:
                 f"Batches already applied this run: "
                 f"{', '.join(str(i) for i in result.batches_dispatched)} — their "
                 f"pre-batch snapshots are intact under "
-                f"{os.path.join(self.phase_dir, 'pre_batch')}/, and re-invoking "
+                f"{os.path.join(self.safety_dir, 'pre_batch')}/, and re-invoking "
                 f"with --resume re-dispatches only the unfinished batches.",
                 f"Audit log: {self.audit.path}",
             ]
@@ -4776,7 +4858,7 @@ class WriteBatchScheduler:
         )
         lines += [
             f"Nothing was rolled back: {applied} and the pre-batch snapshots "
-            f"are intact under {os.path.join(self.phase_dir, 'pre_batch')}/.",
+            f"are intact under {os.path.join(self.safety_dir, 'pre_batch')}/.",
             "Fix the repository (or the fix the batches applied), then re-invoke "
             "with --resume: every batch is already done, so nothing is "
             "re-dispatched and only the check runs again.",
@@ -5100,7 +5182,7 @@ class WriteBatchScheduler:
                 "", "## Cancelled", "",
                 f"The write loop stopped at batch {result.stopped_at_batch}; later "
                 f"batches were never attempted and remain pending. Snapshots are "
-                f"intact under `{os.path.join(self.phase_dir, 'pre_batch')}/`.",
+                f"intact under `{os.path.join(self.safety_dir, 'pre_batch')}/`.",
             ]
         text = "\n".join(lines) + "\n"
         target = Path(self.summary_file)

@@ -59,6 +59,7 @@ from check_workflow_prerequisites import (
     SKIPPED_MARKER,
     SKIP_PREREQUISITES_REASON,
     build_unmet_message,
+    check_apply_suggestions_prerequisite as _shared_apply_suggestions_prerequisite,
     check_apply_task_suggestions_prerequisite,
     record_prerequisite_skip,
     upstream_skip_notices,
@@ -68,34 +69,16 @@ logger = logging.getLogger(__name__)
 
 
 def check_apply_suggestions_prerequisite(state, plan_dir: Path) -> dict:
-    """Check if apply-suggestions phase should run before proceeding."""
-    review_plan_dir = plan_dir / "review-plan"
-    validation_path = review_plan_dir / "validation.json"
+    """Row 6: whether apply-suggestions still owes work before implement runs.
 
-    # No review-plan run → no prerequisite
-    if not validation_path.exists():
-        return {"met": True, "reason": "No review-plan results"}
-
-    # Check if apply-suggestions completed or skipped
-    if state.is_phase_completed("apply-suggestions"):
-        return {"met": True, "reason": "Apply-suggestions completed"}
-    if state.is_phase_skipped("apply-suggestions"):
-        return {"met": True, "reason": "Apply-suggestions skipped"}
-
-    # Count valid suggestions
-    try:
-        with open(validation_path, 'r', encoding='utf-8') as f:
-            validation = json.load(f)
-        valid_count = sum(1 for v in validation.values() if v.get("status") == "valid")
-        if valid_count == 0:
-            return {"met": True, "reason": "No valid suggestions"}
-        return {
-            "met": False,
-            "reason": f"{valid_count} unapplied suggestions",
-            "valid_count": valid_count
-        }
-    except (json.JSONDecodeError, OSError):
-        return {"met": True, "reason": "Could not read validation"}
+    The gate is ``check_workflow_prerequisites``'s (D6a: the gates live there,
+    never in a thin orchestrator copy), which reads every ``validation.json``
+    shape and returns the ``valid_count``/``importance_breakdown`` the unmet
+    block below renders. The copy this used to be read only the v1 flat dict
+    and crashed on the v2 envelope (``validation.values()`` handed it an int)
+    whenever the gate was actually reached (fix round 6, 2026-10-05).
+    """
+    return _shared_apply_suggestions_prerequisite(state, plan_dir)
 
 
 def resolve_human_task_strategy(
@@ -830,7 +813,7 @@ def _record_implement_write_artifacts(
 
     from utils import write_safety as _write_safety
 
-    repo_root = _write_safety.resolve_repo_root(plan_file)
+    repo_root = _write_safety.repo_root_for_report(plan_file)
 
     touched: List[str] = []
     seen: set = set()
@@ -906,6 +889,8 @@ def run_implement_write_phase(
     output_dir = str(get_output_dir(plan_path))
     tasks_file_str = str(tasks_file) if tasks_file else None
 
+    from utils import write_safety as _write_safety
+
     tasks = materialize_write_tasks(
         kind="implement",
         batches=output_data.get("batches") or [],
@@ -923,21 +908,27 @@ def run_implement_write_phase(
     # function's own docstring.
     _seed_pending_task_statuses(state, tasks)
 
-    scheduler = WriteBatchScheduler(
-        tasks=tasks,
-        phase_dir=phase_dir,
-        kind="implement",
-        output_dir=output_dir,
-        state=state,
-        plan_file=plan_file,
-        summary_file=output_data.get("summary_file"),
-        summary_file_relative=output_data.get("summary_file_relative"),
-        anchor=plan_file,
-        resume=bool(getattr(args, "resume", False)),
-        dry_run=bool(getattr(args, "dry_run_subagents", False)),
-        human_task_strategy=human_task_strategy,
-        human_task_decisions=human_task_decisions,
-    )
+    try:
+        scheduler = WriteBatchScheduler(
+            tasks=tasks,
+            phase_dir=phase_dir,
+            kind="implement",
+            output_dir=output_dir,
+            state=state,
+            plan_file=plan_file,
+            summary_file=output_data.get("summary_file"),
+            summary_file_relative=output_data.get("summary_file_relative"),
+            anchor=plan_file,
+            resume=bool(getattr(args, "resume", False)),
+            dry_run=bool(getattr(args, "dry_run_subagents", False)),
+            human_task_strategy=human_task_strategy,
+            human_task_decisions=human_task_decisions,
+        )
+    except _write_safety.WriteSafetyError as exc:
+        # A repository root that cannot be pinned (a planted `core.worktree`,
+        # review fixes 2026-10-05) is exit 3 with the resolver's own words.
+        print(f"ERROR: {exc.message}", file=sys.stderr)
+        return int(getattr(exc, "exit_code", 3) or 3)
     result = scheduler.run()
     for line in result.messages:
         print(line, file=sys.stderr if result.exit_code else sys.stdout)
@@ -954,8 +945,8 @@ def run_implement_write_phase(
 
 def _materialize_native_write_tasks(
     plan_path: Path, output_data: Dict[str, Any], *, tasks_file: Optional[Path],
-) -> str:
-    """Write ``{phase}/write_tasks.json`` for the native leg; its path.
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Write ``{phase}/write_tasks.json`` for the native leg; its path and tasks.
 
     The same two bridge calls :func:`run_implement_write_phase` makes, with
     the same inputs, so the file a native host's ``util write-prompt`` reads
@@ -976,10 +967,37 @@ def _materialize_native_write_tasks(
         plan_file=plan_file,
         tasks_file=tasks_file_str,
     )
-    return write_task_file_for_phase(
+    path = write_task_file_for_phase(
         kind="implement", tasks=tasks, phase_dir=phase_dir, plan_file=plan_file,
         tasks_file=tasks_file_str,
     )
+    return path, tasks
+
+
+def _refuse_unrecorded_native_resume(
+    tasks: List[Dict[str, Any]], *, plan_path: Path, state: StateManager, resume: bool,
+) -> bool:
+    """Print the refusal block and return True when a native ``--resume`` must stop.
+
+    A task about to be handed out again whose id the implement log already
+    holds, with no ``task_status`` record (``util batch-done``) saying it
+    finished or failed, is one the host ran without recording: re-emitting
+    it would run it twice. See :func:`utils.batch_done.unrecorded_logged_batches`.
+    """
+    if not resume or not tasks:
+        return False
+    from utils.batch_done import resume_refusal_lines, unrecorded_logged_batches
+
+    output_dir = str(get_output_dir(plan_path))
+    unrecorded = unrecorded_logged_batches(
+        tasks, output_dir=output_dir, phase="implement", state=state.state,
+    )
+    if not unrecorded:
+        return False
+    phase_dir = str(get_phase_dir(plan_path, "implement"))
+    for line in resume_refusal_lines(unrecorded, phase_dir=phase_dir, mode_word="implement"):
+        print(line, file=sys.stderr)
+    return True
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1470,13 +1488,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     # by hand (measured 2026-10-04: 3-6 tool calls per subagent, and one that
     # read tasks.md instead of its prompt).
     try:
-        write_task_file = _materialize_native_write_tasks(
+        write_task_file, native_tasks = _materialize_native_write_tasks(
             plan_path, output_data, tasks_file=implement_tasks_file,
         )
     except Exception as exc:  # noqa: BLE001 - the handoff JSON is still usable
         print(f"WARNING: write_tasks.json not written: {exc}", file=sys.stderr)
     else:
         print(f"[WRITE_TASKS_FILE] {write_task_file}", file=sys.stderr)
+        # A native `--resume` promises to skip what already ran: a task the
+        # implement log already holds and no record says finished is refused
+        # rather than handed out a second time (reviewer repro, 2026-10-05).
+        if _refuse_unrecorded_native_resume(
+            native_tasks, plan_path=plan_path, state=state, resume=bool(args.resume),
+        ):
+            return 3
 
     # Print summary
     print("\n" + "=" * 60)
