@@ -138,6 +138,8 @@ relay its `models:` table once:
 uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "$PLAN_PATH" --phase review-tasks --host <host-id> --view run
 ```
 
+This call exits `2` while the run is live — `status`'s poll contract, not a failure — and a host that shows a non-zero exit as an error will show one here: read the table, not the code (only `1`, unreadable, is an error).
+
 That table is the roster: one row per model, and a row's spec *is* the CLI and
 the model it runs, so nothing has to be derived — `codex:gpt-6-astra:xhigh` is
 the codex CLI running gpt-6-astra at xhigh effort. How many models the fan-out

@@ -775,6 +775,34 @@ class TestServedCoreIsTokenFree:
         for token in FORBIDDEN_IN_RENDERED:
             assert token not in body, f"util instructions {mode}: {token} in output"
 
+    def test_status_says_its_exit_2_is_not_a_failure(self, capsys):
+        """2026-10-04 (Claude Code racing re-run): a host reading `status`
+        only to report it showed "Exit code 2" as a tool error. Exit 2 is the
+        poll contract and never moves (no run recorded — every phase a host
+        ran in the foreground — or one still live); what changes is that the
+        read step says so, since chaining `|| …` onto the call to swallow it
+        would cost the permission allow rule on Claude Code."""
+        assert multi_llm.main(["util", "instructions", "status"]) == 0
+        body = " ".join(capsys.readouterr().out.split())
+        assert "exit code 2 is not a failure" in body
+        assert "only 1 is an error" in body
+
+    @pytest.mark.parametrize("core,selector", [
+        ("review-plan", "--phase review-plan"),
+        ("review-tasks", "--phase review-tasks"),
+        ("review-code", "--phase code-review"),
+        ("ask", "--question"),
+    ])
+    def test_the_roster_read_says_its_exit_2_is_not_a_failure(self, core, selector):
+        """The one non-waiting `status` call each fan-out core makes is a read,
+        not a poll: its exit code is 2 for as long as the run lives."""
+        text = (SKILL_ROOT / "instructions" / f"{core}.md").read_text(encoding="utf-8")
+        start = text.index("Make **one** non-waiting status call")
+        window = " ".join(text[start:start + 1600].split())
+        assert selector in window
+        assert "exits `2` while the run is live" in window
+        assert "not a failure" in window
+
     @pytest.mark.parametrize("mode", [m.name for m in mode_table.MODES])
     def test_every_mode_word_is_answerable(self, mode, capsys):
         """No mode in the dispatch table may fail the shims' read step."""
