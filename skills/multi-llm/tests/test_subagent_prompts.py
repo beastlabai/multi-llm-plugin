@@ -896,3 +896,38 @@ class TestSchemaRepairPrompt:
         assert '{"status": "applied"}' in prompt
         assert "earlier characters omitted" in prompt
         assert "x" * 7000 not in prompt
+
+    def test_the_report_keys_are_the_schemas_properties(self):
+        document = json.loads(
+            (SKILL_ROOT / "schemas" / "write_batch_result.schema.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        assert set(subagent_prompts.WRITE_REPORT_KEYS) == set(document["properties"])
+
+    def test_a_report_longer_than_the_tail_is_quoted_from_its_start(self):
+        """Fix round 8: long notes pushed the report's status and ids out of a
+        fixed 6000-character tail."""
+        report = json.dumps({
+            "status": "applied", "ids": ["a1", "b2"], "files_touched": ["p.md"],
+            "notes": "checked " * 1500,
+        })
+        before = "Narration before it. " * 50
+        reply = before + report
+
+        prompt = subagent_prompts.build_schema_repair_prompt(
+            "apply_suggestions", "Q", ["x"], previous_reply=reply
+        )
+
+        assert report in prompt
+        assert f"[… {len(before)} earlier characters omitted …]\n{report}" in prompt
+
+    def test_narration_after_the_report_is_cut_after_the_report(self):
+        report = json.dumps({"status": "applied", "ids": ["a1"]})
+        reply = "Before. " + report + "\n" + "after " * 5000
+
+        quote = subagent_prompts.quote_previous_reply(reply)
+
+        assert quote.startswith("[… 8 earlier characters omitted …]\n" + report)
+        assert len(quote) < subagent_prompts.WRITE_REPORT_QUOTE_MAX_CHARS + 100
+        assert quote.endswith("later characters omitted …]")
