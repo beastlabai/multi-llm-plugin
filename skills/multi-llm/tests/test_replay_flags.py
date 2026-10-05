@@ -888,6 +888,69 @@ class TestTheWritePhasesResumeWithResume:
         assert "restore-batch" in lines[1]
         assert "reviewer panel" not in lines[1]
 
+    @staticmethod
+    def _refused_before_batch_one(mode="implement", dispatched=()):
+        return {
+            "run": {"mode": mode, "replay_flags": ["--host", "codex", "--detach"]},
+            "phase": mode_table.resolve(mode).phase,
+            "progress": {"write_subagents": {
+                "kind": mode.replace("-", "_"), "total": 2,
+                "batches_dispatched": list(dispatched),
+                "tasks": [
+                    {"task_id": "T001", "status": "rejected"},
+                    {"task_id": "T002", "status": "rejected"},
+                ],
+                "failed_task_ids": ["T001", "T002"],
+            }},
+        }
+
+    @pytest.mark.parametrize("mode", WRITE_MODES)
+    def test_a_refusal_before_the_first_batch_offers_no_resume(self, mode):
+        """Racing re-run 2026-10-04 (codex #5): implement was refused on the
+        jail before batch 1, and the tool result offered `--resume`, which
+        repeats the refusal. Nothing dispatched and nothing on record: the
+        way forward is the remedy the refusal names, so no command."""
+        view = self._refused_before_batch_one(mode)
+        workflow = {"phases": {mode_table.resolve(mode).phase: {"status": "pending"}}}
+        lines = run_status._resume_lines(view, Path(PLAN), workflow=workflow)
+        assert not any("resume with:" in line for line in lines)
+        assert not any("--resume" in line or "multi_llm.py" in line for line in lines)
+        assert lines and lines[0].strip().startswith("no resume:")
+
+    def test_progress_on_record_keeps_the_resume(self):
+        """A `--resume`d run refused before its own first batch still has the
+        earlier run's completed batches to skip: `in_progress` keeps it."""
+        view = self._refused_before_batch_one()
+        workflow = {"phases": {"implement": {"status": "in_progress"}}}
+        lines = run_status._resume_lines(view, Path(PLAN), workflow=workflow)
+        assert lines[0].strip().startswith("resume with:")
+
+    def test_a_dispatched_batch_keeps_the_resume(self):
+        view = self._refused_before_batch_one(dispatched=[0])
+        workflow = {"phases": {"implement": {"status": "pending"}}}
+        lines = run_status._resume_lines(view, Path(PLAN), workflow=workflow)
+        assert lines[0].strip().startswith("resume with:")
+
+    def test_the_status_view_of_such_a_run_names_no_resume(self, tmp_path, capsys):
+        """End to end through `status --view run`, which reads the workflow
+        itself (the tool routes poll only that view)."""
+        plan = tmp_path / "plans" / "p.md"
+        plan.parent.mkdir()
+        plan.write_text("# p\n", encoding="utf-8")
+        phase = plan.parent / "p" / "implement"
+        phase.mkdir(parents=True)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-refused-1", "state": "failed", "exit_code": 3,
+            "error": "needs_human (exit 3)", "detached": True, "mode": "implement",
+            "replay_flags": ["--host", "codex", "--detach"],
+        })
+        status_file.update_status(str(phase), {
+            "progress": self._refused_before_batch_one()["progress"]})
+        assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 3
+        out = capsys.readouterr().out
+        assert "no resume:" in out, out
+        assert "resume with:" not in out, out
+
     def test_the_review_phases_keep_their_own_cost_line(self):
         view = {
             "run": {"mode": "review-tasks", "replay_flags": []},
