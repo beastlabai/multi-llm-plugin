@@ -153,6 +153,7 @@ record = {{"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(),
           "env": {{k: os.environ.get(k) for k in (
               "MULTI_LLM_UV", "MULTI_LLM_SKILL_DIR", "STUB_PROFILE_MARK",
               "PYTHONDONTWRITEBYTECODE", "MULTI_LLM_HOST_SESSION_MODEL",
+              "UV_PROJECT_ENVIRONMENT",
               "MULTI_LLM_HOST_SANDBOX_POSTURE", {route_env_name!r})}}}}
 dargv = argv[argv.index("--") + 3:] if "--" in argv else []
 if dargv[:2] == ["util", "instructions"]:
@@ -1378,6 +1379,50 @@ class TestChildEnvironment:
         _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
                                      extra_env={"PYTHONDONTWRITEBYTECODE": "x"})
         assert {c["env"]["PYTHONDONTWRITEBYTECODE"] for c in calls} == {"x"}
+
+    def _cached_root(self, harness):
+        """A plugin root where codex installs one: inside $HOME/.codex."""
+        return make_plugin_root(harness.home / ".codex" / "plugins" / "cache" / "m"
+                                / "multi-llm" / "0.0.0")
+
+    def test_the_payload_environment_lives_outside_codex_home(self, harness):
+        """Racing re-run 3 (opencode 01): uv made `<payload>/.venv` inside the
+        plugin cache under $CODEX_HOME, and another run's `[CODEX_HOME_CHECK]`
+        listed its ~40 files. The environment goes under the user's cache
+        directory instead, named by the payload's lockfile."""
+        import hashlib
+
+        root = self._cached_root(harness)
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)], root=root)
+        lock = (root / "skills" / "multi-llm" / "uv.lock").read_bytes()
+        expected = str(harness.home / ".cache" / "multi-llm" / "uv-env"
+                       / hashlib.sha256(lock).hexdigest()[:16])
+        assert calls and {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {expected}
+        assert not expected.startswith(str(harness.home / ".codex"))
+
+    def test_a_cache_home_and_a_named_codex_home_are_honoured(self, harness, tmp_path):
+        root = make_plugin_root(tmp_path / "elsewhere-home" / "plugins" / "p")
+        _, _, calls, _ = harness.run(
+            REVIEW, [launch_step(), poll_step(0)], root=root,
+            extra_env={"CODEX_HOME": str(tmp_path / "elsewhere-home"),
+                       "XDG_CACHE_HOME": "/xdg"})
+        assert {c["env"]["UV_PROJECT_ENVIRONMENT"].rsplit("/", 1)[0] for c in calls} == {
+            "/xdg/multi-llm/uv-env"}
+
+    @pytest.mark.parametrize("extra", [
+        {"UV_PROJECT_ENVIRONMENT": "/image/venv"},
+        {"MULTI_LLM_UV_RUN_ARGS": "--frozen --no-sync"}])
+    def test_a_forwarded_environment_or_a_prebuilt_one_is_left_alone(
+        self, harness, extra
+    ):
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
+                                     root=self._cached_root(harness), extra_env=extra)
+        assert {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {
+            extra.get("UV_PROJECT_ENVIRONMENT")}
+
+    def test_a_payload_outside_codex_home_keeps_its_own_venv(self, harness):
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)])
+        assert calls and {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {None}
 
     SESSION_ENV = DISPATCHER["session_model_env"]
 
