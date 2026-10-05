@@ -5095,6 +5095,45 @@ class TestAFailedResultSaysWhatTheUserCanRun:
         assert "no_command_reason" not in result
         assert result["message"].endswith(surface["needs_human_message"]["resume"])
 
+    def test_the_resume_option_is_the_resume_command(self, built_package, uv_stub,
+                                                     tmp_path):
+        """OpenCode racing run 4 (02): a stopped `--agent-decide` apply run
+        came back with the resume offered as `--agent-decide --resume` while
+        `resume_command` read `--resume`. This tool composes `--yes`, which
+        already means `--agent-decide` in an apply phase, so the replay drops
+        it and the two agree. Both strings are built by the real Python:
+        `status`'s `resume with:` line from the launch's replay flags,
+        `resume_command` by `next_phase`."""
+        from utils import next_phase
+
+        absolute = str(tmp_path / "plans" / "racing-game.md")
+        recorded = cli_common.replay_flags("apply-suggestions", [
+            "--plan-file", absolute, "--agent-decide", "--host", "opencode",
+            "--yes", "--exec-subagents", "--detach"])
+        view = {"run": {"mode": "apply-suggestions", "replay_flags": recorded},
+                "progress": {}}
+        resume_with = run_status._resume_command(view, Path(absolute))
+        command = next_phase.resume_command(
+            self.PLAN, "opencode", "package", "apply-suggestions",
+            workflow={"phases": {"apply-suggestions": {"status": "in_progress"}}})
+        body = {"mode": "apply-suggestions", "phase": "apply-suggestions",
+                "state": "needs-human", "exit": 3, "artifacts": [], "next": None}
+        stopped = {"exit": 3, "stdout": [
+            f"      resume with: {resume_with}",
+            "MULTI_LLM_RESULT: " + json.dumps(body)]}
+        args = {"mode": "apply-suggestions", "plan": self.PLAN, "question": "",
+                "extra_flags": ["--yes", "--agent-decide"]}
+
+        result, _ = uv_stub.run(built_package, args, [self.LAUNCH, stopped],
+                                extra_env={"STUB_RESUME_COMMAND": command})
+
+        assert result["resume_command"] == command
+        calls = [option for option in result["options"] if "tool" in option]
+        assert [call["args"] for call in calls] == [{
+            "mode": "apply-suggestions", "plan": self.PLAN, "question": "",
+            "extra_flags": command.split()[3:]}]
+        assert command.split()[3:] == ["--resume"]
+
     def test_an_error_result_says_so_too(self, built_package, uv_stub):
         surface = self._surface(built_package)
         crashed = {"exit": 1, "stdout": [

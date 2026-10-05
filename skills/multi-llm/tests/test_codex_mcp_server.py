@@ -2469,6 +2469,48 @@ class TestNoCommandToCompose:
         assert "no_command_reason" not in envelope
         assert envelope["message"].endswith(SURFACE["needs_human_message"]["resume"])
 
+    def test_the_resume_option_is_the_resume_command(self, harness):
+        """OpenCode racing run 4, the same on this route: a stopped
+        `--agent-decide` apply run came back with the resume offered as
+        `--agent-decide --resume` while `resume_command` read `--resume`. The
+        server composes `--yes`, which already means `--agent-decide` in an
+        apply phase, so the replay drops it and the two agree. Both strings
+        are built by the real Python: `status`'s `resume with:` line from the
+        launch's replay flags, `resume_command` by `next_phase`."""
+        sys.path.insert(0, str(SKILL_ROOT))
+        from utils import cli_common, next_phase, run_status
+
+        plan = "plans/racing-game.md"
+        absolute = os.path.join(os.path.realpath(harness.workspace), plan)
+        host = SURFACE["host"]
+        recorded = cli_common.replay_flags("apply-suggestions", [
+            "--plan-file", absolute, "--agent-decide", "--host", host,
+            "--yes", "--exec-subagents", "--detach"])
+        view = {"run": {"mode": "apply-suggestions", "replay_flags": recorded},
+                "progress": {}}
+        resume_with = run_status._resume_command(view, Path(absolute))
+        command = next_phase.resume_command(
+            plan, host, "package", "apply-suggestions",
+            workflow={"phases": {"apply-suggestions": {"status": "in_progress"}}})
+        stopped = {"exit": CODES["needs_human"], "stdout": [
+            "      resume with: " + resume_with,
+            result_line(mode="apply-suggestions", phase="apply-suggestions",
+                        state=STATES["needs_human"], exit=CODES["needs_human"])]}
+        args = {"mode": "apply-suggestions", "plan": plan, "question": "",
+                "extra_flags": ["--agent-decide"]}
+
+        envelope, _, _, _ = harness.run(
+            args, [launch_step(), stopped],
+            meta=turn_meta(sandbox_mode="workspace-write"),
+            extra_env={"STUB_RESUME_COMMAND": command})
+
+        assert envelope["resume_command"] == command
+        calls = [option for option in envelope["options"] if "human" not in option]
+        assert calls == [{
+            "mode": "apply-suggestions", "plan": plan, "question": "",
+            "extra_flags": command.split()[3:]}]
+        assert command.split()[3:] == ["--resume"]
+
     def test_an_error_result_says_so_too(self, harness):
         envelope, _, _, _ = harness.run(REVIEW, [launch_step(), poll_step(CODES["error"])])
         assert envelope["ok"] is False
