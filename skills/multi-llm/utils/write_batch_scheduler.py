@@ -3984,6 +3984,14 @@ class WriteBatchScheduler:
         if not outcome.output_path:
             return
         path = Path(outcome.output_path)
+        if not path.is_file():
+            # `output_path` is where the result WOULD go, set before dispatch;
+            # a dispatch that persisted nothing (a prose reply, a timeout, a
+            # partial application) has no file to stamp, and the audit's
+            # `completed` line and `state.json` carry its verdict instead. A
+            # warning here named a file that was never meant to exist (fix
+            # round 8).
+            return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
