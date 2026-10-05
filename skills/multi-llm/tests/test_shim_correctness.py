@@ -574,6 +574,7 @@ class TestShim:
             # command block and reach this scan. All of them are real arguments
             # on `utils/run_status.py`'s parser.
             "wait", "timeout", "view", "run-id", "phase", "question", "abort",
+            "exit-zero",
         }
         for word in named - flags:
             assert mode_table.resolve(word) is not None, (

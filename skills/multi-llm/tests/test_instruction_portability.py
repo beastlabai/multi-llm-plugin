@@ -797,6 +797,8 @@ class TestServedCoreIsTokenFree:
         body = " ".join(capsys.readouterr().out.split())
         assert "exit code 2 is not a failure" in body
         assert "only 1 is an error" in body
+        # Fix round 7: and how to report it without the error display.
+        assert "add --exit-zero" in body
 
     @pytest.mark.parametrize("core,selector", [
         ("review-plan", "--phase review-plan"),
@@ -813,6 +815,21 @@ class TestServedCoreIsTokenFree:
         assert selector in window
         assert "exits `2` while the run is live" in window
         assert "not a failure" in window
+        # Fix round 7: the read carries the opt-in, so a host that shows a
+        # non-zero exit as an error shows none on it.
+        assert f"{selector} " in window and "--view run --exit-zero" in window
+
+    @pytest.mark.parametrize("core", ["review-plan", "review-tasks", "review-code", "ask"])
+    def test_only_a_composed_poll_adds_exit_zero(self, core):
+        """The poll block itself never carries `--exit-zero`: on a `--detach`
+        host the exit code is the loop condition and the poll is the printed
+        command. Only the line a background-mechanism host composes adds it."""
+        text = (SKILL_ROOT / "instructions" / f"{core}.md").read_text(encoding="utf-8")
+        polls = [line for line in text.splitlines()
+                 if '" status "$PLAN_PATH"' in line and "--wait" in line]
+        assert polls and not any("--exit-zero" in line for line in polls)
+        flat = " ".join(text.split())
+        assert "Add `--exit-zero` to that composed line too" in flat
 
     @pytest.mark.parametrize("mode", [m.name for m in mode_table.MODES])
     def test_every_mode_word_is_answerable(self, mode, capsys):

@@ -78,6 +78,7 @@ from .cli_common import (
     record_next,
     record_notice,
     record_progress,
+    keep_state_word,
     record_progress_lines,
     record_state,
 )
@@ -2351,6 +2352,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--force", action="store_true",
         help="With --abort: stop a run whose identity probe is inconclusive",
     )
+    parser.add_argument(
+        # Fix round 7: Claude Code shows any non-zero exit as a tool error, and
+        # on that host every phase runs in the foreground, so a plain report
+        # is exit 2 ("no run recorded") every time. Opt-in, so the exit code
+        # stays the poll-loop condition for every caller that does not ask.
+        "--exit-zero", dest="exit_zero", action="store_true",
+        help="Exit 0 whenever the status was read, whatever the run's state "
+             "(still exit 1 when it could not be read, and 3 for a bad flag): "
+             "for a call that reports and does not poll, on a host that shows "
+             "any non-zero exit as an error. The run's state stays in the text "
+             "and in the result line's `state`. Never on a poll whose loop "
+             "reads the exit code.",
+    )
     # Accepted so the pre-dispatcher spelling (`--status`) keeps working; the
     # views make it redundant.
     parser.add_argument("--status", action="store_true", help=argparse.SUPPRESS)
@@ -2770,6 +2784,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             record_state(
                 STATE_DIED if all(_died(v) for v in live_views) else STATE_RUNNING
             )
+    if getattr(args, "exit_zero", False) and exit_code in (
+        EXIT_NOTHING_TO_DO, EXIT_NEEDS_HUMAN,
+    ):
+        # Only the verdict's code moves: the word it means stays on the result
+        # line, and everything above (`next`, the notice, `user_next_step`'s
+        # exit-0 gate) was decided on the real verdict.
+        keep_state_word(exit_code)
+        return EXIT_OK
     return exit_code
 
 

@@ -918,6 +918,19 @@ def record_state(word: Optional[str]) -> None:
         _ACTIVE.state = word
 
 
+def keep_state_word(exit_code: int) -> None:
+    """Pin the word *exit_code* would give ``MULTI_LLM_RESULT.state``.
+
+    For a mode about to return a different exit code than the one its answer
+    means (``status --exit-zero``): an override already recorded
+    (``STATE_RUNNING``, ``STATE_DIED``) stays, otherwise the word the exit
+    code maps to is recorded, so the line still says ``nothing-to-do`` or
+    ``needs-human`` under its ``exit: 0``. A no-op under direct invocation.
+    """
+    if _ACTIVE is not None and _ACTIVE.state is None:
+        _ACTIVE.state = _STATE_BY_EXIT.get(exit_code, "error")
+
+
 def record_consolidation_recommended(
     recommendation: Optional[Dict[str, Any]]
 ) -> None:
