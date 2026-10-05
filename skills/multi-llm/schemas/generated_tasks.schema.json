@@ -2,7 +2,7 @@
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "generated_tasks.schema.json",
   "title": "Task-generation result document (task_generation_result.json)",
-  "description": "The document a task_generation subagent prints and the invoker persists under the phase dir. Validated before anything is written to the plan; the semantic rules utils/task_decomposer.py owns (unique T### ids, depends_on naming only declared ids, acyclic, at least one dependency-free task) run in Python immediately after this schema check. A document that fails either is a schema_invalid failure and is not retried.",
+  "description": "The document a task_generation subagent prints and the invoker persists under the phase dir. Validated before anything is written to the plan; the semantic rules utils/task_decomposer.py owns (unique T### ids, depends_on naming only declared ids, acyclic, at least one dependency-free task) run in Python immediately after this schema check. A document that fails either is a schema_invalid failure; the executor lane re-asks the runner once with the validator's errors (the retry ladder's rule 7), and nothing else retries it.",
   "type": "object",
   "additionalProperties": false,
   "required": ["schema_version", "plan_preamble", "tasks"],
