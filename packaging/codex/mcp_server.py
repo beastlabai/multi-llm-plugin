@@ -482,6 +482,20 @@ def _legal_words(surface) -> str:
     return ", ".join(words)
 
 
+def with_absent_question(args):
+    """*args* with a left-out ``question`` read as ``""``, its empty value.
+
+    Only ``ask`` takes a question, and the property's own description says it
+    is ``""`` for every other mode; a host model that left it out of an
+    ``apply-suggestions`` call got ``"question" must be a string, got
+    undefined`` and had to retry (racing re-run 3, opencode 02b). A question left out of an ``ask`` call is still refused by
+    the arity rule, which names what to send. The port of ``withAbsentQuestion``.
+    """
+    if isinstance(args, dict) and "question" not in args:
+        return dict(args, question="")
+    return args
+
+
 def validate_args(args, surface):
     """``(mode_row, None)`` or ``(None, message)``. Every rule, before any spawn."""
     if not isinstance(args, dict):
@@ -497,10 +511,15 @@ def validate_args(args, surface):
         return None, (
             'unknown mode "{}". Legal words: {}. Nothing is prefix-matched or '
             "guessed.".format(mode, _legal_words(surface)))
-    for name, value in (("plan", plan), ("question", question)):
-        if not isinstance(value, str):
-            return None, '"{}" must be a string, got {}.'.format(
-                name, _type_name(value))
+    if not isinstance(plan, str):
+        return None, '"plan" must be a string, got {}.'.format(_type_name(plan))
+    if not isinstance(question, str):
+        asking = [mode["name"] for mode in surface["modes"]
+                  if surface["positional_kinds"]["question"] in mode["positionals"]]
+        return None, (
+            '"question" must be a string: the question for {}, "" (or the key left '
+            "out) for every other mode. Got {}.".format(
+                " or ".join(asking) or "no mode", _type_name(question)))
     if not isinstance(extra, list) or not all(isinstance(t, str) for t in extra):
         return None, (
             '"extra_flags" must be an array of strings (use [] for none), got '
@@ -516,8 +535,8 @@ def validate_args(args, surface):
             'mode "{}" declares no plan positional, so "plan" must be "".'.format(
                 row["name"]))
     if takes_question and not question.strip():
-        return None, 'mode "{}" takes a question and "question" was empty.'.format(
-            row["name"])
+        return None, ('mode "{}" takes a question and "question" was empty: send '
+                      "the user's question as \"question\".".format(row["name"]))
     if not takes_question and question != "":
         return None, (
             'mode "{}" declares no question positional, so "question" must be '
@@ -1700,6 +1719,7 @@ class Server:
             return self.refusal(call, "needs_human", "{} {}".format(
                 DEGRADED_DESCRIPTION, self.surface_problem or ""))
         surface = self.surface
+        call.args = with_absent_question(call.args)
         row, problem = validate_args(call.args, surface)
         if problem:
             return self.refusal(call, "error", problem)

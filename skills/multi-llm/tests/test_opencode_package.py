@@ -997,6 +997,35 @@ class TestArguments:
         for uv_flag in unattended.DEFAULT_UV_RUN_ARGS:
             assert uv_flag not in reserved
 
+    def test_a_left_out_question_is_the_empty_one(self, built_package, uv_stub):
+        """Racing re-run 3 (opencode 02b): the host model left `question` out of
+        an apply-suggestions call and got `"question" must be a string, got
+        undefined`."""
+        launch = {"exit": 0, "stdout": [
+            "run_id: R", "log: /l", 'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+        done = {"exit": 0, "stdout": [
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"artifacts":[],"next":null}']}
+        result, calls = uv_stub.run(
+            built_package, {"mode": "apply-suggestions", "plan": "p.md",
+                            "extra_flags": []}, [launch, done])
+        assert result["ok"] is True, result
+        assert _dispatcher_argv(calls[0])[:2] == ["apply-suggestions", "p.md"]
+
+    def test_a_question_error_says_what_to_send(self, built_package):
+        out = node_json(
+            """
+            const missing = T.validateArgs(
+              T.withAbsentQuestion({mode: "ask", plan: "p.md", extra_flags: []}), surface)
+            const wrong = T.validateArgs(
+              {mode: "review-plan", plan: "p.md", question: null, extra_flags: []}, surface)
+            emit({missing: missing.error, wrong: wrong.error})
+            """,
+            built_package,
+        )
+        assert 'send the user\'s question as "question"' in out["missing"]
+        assert out["wrong"].startswith(
+            '"question" must be a string: the question for ask, "" (or the key left out)')
+
     def test_interactive_is_refused(self, built_package):
         """Interactive mode is unsupported here, and refused rather than
         substituted.
