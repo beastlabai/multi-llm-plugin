@@ -410,7 +410,7 @@ your host.
 
      **"Skip all, skip dependents too" strategy:**
      - The orchestrator already recorded every human task, and every task that depends on one, as "skipped" in state; the task JSON shows each with `status: "skipped"`. Do not dispatch them and do not record them yourself.
-     - After remaining tasks complete, include a "## Manual Tasks (Deferred)" section listing each human task and each skipped dependent (step 2 prints them under "Deferred tasks"); a task step 2 printed under "Skipped at your request" (a failed task you answered `--human-task {id}=skip`, and its dependents) goes under a `## Skipped at your request` section instead, and one it printed under "Accepted after failing" is listed as accepted after failing
+     - After remaining tasks complete, include a "## Manual Tasks (Deferred)" section listing each human task and each skipped dependent (step 2 prints them under "Deferred tasks"); a task step 2 printed under "Skipped at your request" (a failed task you answered `--human-task {id}=skip`, and its dependents) goes under a `## Skipped at your request` section instead, and one it printed under "Accepted after failing" is listed as accepted after failing, and one it printed under "Completed by hand" (a manual task answered `--human-task {id}=done`) is listed as completed by hand
 
      #### Transitive Skip Propagation Algorithm
 

@@ -313,7 +313,10 @@ def record_pre_existing_changes(state: StateManager) -> None:
 
         pre_existing = unstaged | staged
 
-        state.set("pre_existing_changes", list(pre_existing))
+        # Sorted, as the apply phases record theirs: `state.json` must not
+        # change with the set's per-process order (17 bundles of one
+        # container run held 17 orders of the same 5 paths).
+        state.set("pre_existing_changes", sorted(pre_existing))
         state.save()
 
         if pre_existing:
@@ -1080,6 +1083,8 @@ def _native_human_task_plan(
     *,
     strategy: Optional[str],
     decisions: Dict[str, str],
+    on_record: Optional[Any] = None,
+    recorded_statuses: Optional[Dict[str, str]] = None,
 ):
     """Resolve the human-task plan over the native leg's batches; annotate them.
 
@@ -1099,8 +1104,24 @@ def _native_human_task_plan(
     the native leg recorded the acceptance in ``state.json`` while handing
     the task out again as ``failed`` — whose ``util batch-done`` then
     overwrote the acceptance (reviewer repro, 2026-10-05).
+
+    *on_record* is ``write_batch_scheduler.answered_done_on_record``'s
+    ``(accepted, completed_manual)`` for the tasks this emit did not
+    materialize: an answer an earlier run recorded keeps its place in
+    ``accepted_tasks``, and a manual task answered ``done`` is named in a
+    top-level ``completed_manual_tasks`` list, on every later resume too
+    (fix round 9: both dropped out once the task was recorded completed).
+
+    A task *recorded_statuses* (``state.json``'s ``task_status``) says
+    ``skipped`` that this plan no longer skips — ``--resume --force-strategy
+    skip-continue`` after a ``skip-dependents`` run — is handed out
+    ``pending`` and recorded so (``write_batch_scheduler.mark_no_longer_skipped``),
+    never left ``skipped`` for the host to pass over (fix round 9).
     """
-    from utils.write_batch_scheduler import resolve_human_task_plan
+    from utils.write_batch_scheduler import (
+        mark_no_longer_skipped,
+        resolve_human_task_plan,
+    )
 
     batches = output_data.get("batches") or []
     entries = [task for batch in batches for task in batch.get("tasks") or []]
@@ -1125,8 +1146,32 @@ def _native_human_task_plan(
             task["skip_reason"] = plan.skipped[task_id]
         elif task_id in plan.completed:
             task["status"] = TaskStatus.COMPLETED.value
+    unskipped = set(mark_no_longer_skipped(
+        plan,
+        [str(task.get("id") or "") for task in entries],
+        {
+            **(recorded_statuses or {}),
+            **{
+                str(task.get("id") or ""): task.get("status")
+                for task in entries if task.get("status") == TaskStatus.SKIPPED.value
+            },
+        },
+    ))
+    for task in entries:
+        if str(task.get("id") or "") in unskipped:
+            task["status"] = TaskStatus.PENDING.value
+            task.pop("skip_reason", None)
+    if on_record:
+        accepted, completed_manual = on_record
+        for task_id, reason in accepted.items():
+            plan.accepted.setdefault(task_id, reason)
+        for task_id in completed_manual:
+            if task_id not in plan.completed:
+                plan.completed.append(task_id)
     if plan.skipped:
         output_data["skipped_tasks"] = dict(sorted(plan.skipped.items()))
+    if plan.completed:
+        output_data["completed_manual_tasks"] = sorted(plan.completed)
     if plan.accepted:
         kept = []
         for batch in batches:
@@ -1665,11 +1710,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     # `[HUMAN_TASK_ANSWERED]` and change nothing on this leg, because the
     # plan was only resolved for a plan holding a human task (fix round 8).
     native_human_plan = None
-    if not executor_backed and (human_task_ids or applicable_decisions):
+    answered_on_record = None
+    if not executor_backed:
+        from utils.write_batch_scheduler import answered_done_on_record
+
+        answered_on_record = answered_done_on_record(
+            state,
+            exclude=[
+                str(task.get("id") or "")
+                for batch in output_data.get("batches") or []
+                for task in batch.get("tasks") or []
+            ],
+        )
+    if not executor_backed and (
+        human_task_ids or applicable_decisions or any(answered_on_record)
+    ):
         native_human_plan = _native_human_task_plan(
             output_data,
             strategy=human_task_strategy,
             decisions=applicable_decisions,
+            on_record=answered_on_record,
+            recorded_statuses=state.get_all_task_statuses(),
         )
     if not executor_backed:
         write_native_handoff()
@@ -1779,6 +1840,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             )
             for task_id, reason in sorted(native_human_plan.accepted.items()):
                 print(f"  {_named(task_id)}: {reason}")
+        if native_human_plan.completed:
+            print(
+                "Completed by hand (manual tasks recorded completed in "
+                "state.json; do not dispatch or record them; list them in the "
+                "summary as completed by hand):"
+            )
+            for task_id in sorted(native_human_plan.completed):
+                print(f"  {_named(task_id)}: answered --human-task {task_id}=done")
 
     print("\nClaude Code should now:")
     print("  1. Read the output JSON file")
