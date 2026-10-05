@@ -123,6 +123,10 @@ Environment Variables (New - for scenario-based testing):
         mock applies no ``MOCK_LLM_EDITS`` then — unless
     MOCK_LLM_REPAIR_EDITS: is "1": the misbehaving runner that re-applies the
         batch while it was only asked to restate its report.
+    MOCK_LLM_REPAIR_RESTATE: is "1" (and MOCK_LLM_REPAIR_RESULT unset): the
+        well-behaved runner that restates its report from the previous reply
+        the re-ask QUOTES — status, ``ids`` and ``files_touched`` read off the
+        quote, so whatever the quote cut is missing from the restatement.
 
 Precedence:
     1. Legacy variables take precedence when set (backward compatibility)
@@ -527,6 +531,34 @@ def apply_mock_edits(prompt: str = "") -> List[Dict[str, Any]]:
 #: The opening of ``subagent_prompts.build_schema_repair_prompt``'s write form
 #: (a test pins the two together; the mock is standalone and imports nothing).
 REPORT_REASK_MARKER = "You are re-sending the report of a batch of edits."
+
+
+def restate_report(prompt: str) -> str:
+    """The report a runner restates from the reply its re-ask quotes.
+
+    Reads only what sits between the re-ask's ``<<<PREVIOUS REPLY`` fences —
+    a runner told to "take every value from it" has nothing else — so a quote
+    that cut the report's start restates a report without its ids.
+    """
+    opener, closer = "<<<PREVIOUS REPLY\n", "\nPREVIOUS REPLY>>>"
+    start = prompt.find(opener)
+    end = prompt.rfind(closer)
+    quoted = prompt[start + len(opener):end] if 0 <= start < end else ""
+
+    def last_list(key: str) -> List[Any]:
+        found = re.findall(r'"%s"\s*:\s*(\[[^\]]*\])' % key, quoted)
+        try:
+            return json.loads(found[-1]) if found else []
+        except json.JSONDecodeError:
+            return []
+
+    status = re.findall(r'"status"\s*:\s*"([a-z-]+)"', quoted)
+    return json.dumps({
+        "status": status[-1] if status else "applied",
+        "ids": last_list("ids"),
+        "files_touched": last_list("files_touched"),
+        "summary": "restated from the previous reply",
+    })
 
 
 def write_batch_result(applied: List[Dict[str, Any]], prompt: str = "") -> str:
@@ -1904,7 +1936,11 @@ def main() -> int:
             apply_mock_edits() if os.environ.get("MOCK_LLM_REPAIR_EDITS") == "1"
             else []
         )
-        content = os.environ.get("MOCK_LLM_REPAIR_RESULT") or write_batch_result(applied)
+        content = os.environ.get("MOCK_LLM_REPAIR_RESULT") or (
+            restate_report(prompt)
+            if os.environ.get("MOCK_LLM_REPAIR_RESTATE") == "1"
+            else write_batch_result(applied)
+        )
         print(format_output(provider, content))
         return 0
 

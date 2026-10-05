@@ -997,9 +997,75 @@ SCHEMA_REPAIR_EXAMPLES: Dict[str, Dict[str, Any]] = {
 #: states the whole contract anyway.
 SCHEMA_REPAIR_MAX_ERRORS = 12
 
-#: How much of the previous reply a write kind's re-ask quotes back. The report
-#: object closes the reply, so the tail is the part kept.
+#: How much of the previous reply a write kind's re-ask quotes back when the
+#: report starts inside it (or cannot be found): the report object usually
+#: closes the reply, so the tail is the part kept.
 WRITE_REPORT_REPLY_CHARS = 6000
+
+#: The most a re-ask quotes when the report starts earlier than that tail —
+#: long notes, or narration after the report. The quote then starts at the
+#: report, so its status and ids are always in it.
+WRITE_REPORT_QUOTE_MAX_CHARS = 20000
+
+#: A write report's own top-level keys (``write_batch_result.schema.json``'s
+#: properties; a test pins the two together). An object that opens on one of
+#: them is where a report starts.
+WRITE_REPORT_KEYS = ("status", "ids", "files_touched", "summary", "notes", "usage")
+
+
+def _last_report_opening(reply: str) -> Optional[int]:
+    """Where the last ``{`` that opens on a report key sits, or ``None``.
+
+    Walked backwards from the end, so the usual reply — the report last —
+    costs one look per ``{`` after it.
+    """
+    pos = reply.rfind("{")
+    while pos >= 0:
+        rest = reply[pos + 1:pos + 65].lstrip()
+        if rest.startswith('"'):
+            close = rest.find('"', 1)
+            if (
+                close > 0
+                and rest[1:close] in WRITE_REPORT_KEYS
+                and rest[close + 1:].lstrip().startswith(":")
+            ):
+                return pos
+        pos = reply.rfind("{", 0, pos)
+    return None
+
+
+def quote_previous_reply(reply: str) -> str:
+    """The part of a write kind's previous reply its re-ask quotes back.
+
+    The whole reply when it fits in :data:`WRITE_REPORT_REPLY_CHARS`; else its
+    tail of that size when the report starts inside the tail (or no report
+    opening is found); else — the report starts earlier — up to
+    :data:`WRITE_REPORT_QUOTE_MAX_CHARS` from the start of the **last**
+    report-shaped object (``{`` and then one of :data:`WRITE_REPORT_KEYS`).
+    A cut is always marked. Fix round 8: a
+    fixed tail cut a report followed by long narration, the runner — told
+    never to name an id the quote does not — restated it without its ids, and
+    a fully applied batch was recorded as a partial application.
+
+    One backward look per ``{``: no candidate scan, whose cost is quadratic in
+    unclosed brackets.
+    """
+    if len(reply) <= WRITE_REPORT_REPLY_CHARS:
+        return reply
+    start = _last_report_opening(reply)
+    if start is None or len(reply) - start <= WRITE_REPORT_REPLY_CHARS:
+        omitted = len(reply) - WRITE_REPORT_REPLY_CHARS
+        return (
+            f"[… {omitted} earlier characters omitted …]\n"
+            + reply[-WRITE_REPORT_REPLY_CHARS:]
+        )
+    quote = reply[start:start + WRITE_REPORT_QUOTE_MAX_CHARS]
+    later = len(reply) - start - len(quote)
+    return (
+        (f"[… {start} earlier characters omitted …]\n" if start else "")
+        + quote
+        + (f"\n[… {later} later characters omitted …]" if later else "")
+    )
 
 #: What a reply that is not valid JSON is told, after the parser's own words.
 #: Both measured causes (2026-10-05) are characters inside a text value: a
@@ -1078,8 +1144,9 @@ def build_schema_repair_prompt(
       the batch's instructions again would invite the runner to apply them a
       second time on top of the first. The runner is told the edits are done,
       not to touch any file or run any command, and is handed its own previous
-      reply (the last :data:`WRITE_REPORT_REPLY_CHARS` characters) to restate
-      as the report. What was applied is still decided by the executor's
+      reply (:func:`quote_previous_reply`: from the report's start when it
+      begins before the last :data:`WRITE_REPORT_REPLY_CHARS` characters) to
+      restate as the report. What was applied is still decided by the executor's
       byte comparison against the pre-batch snapshot, never by this report.
 
     *syntax_error* (``json_extractor.describe_syntax_error``) replaces the
@@ -1101,12 +1168,7 @@ def build_schema_repair_prompt(
             raise ValueError(
                 f"a {kind} report re-ask needs the previous reply to restate"
             )
-        if len(reply) > WRITE_REPORT_REPLY_CHARS:
-            omitted = len(reply) - WRITE_REPORT_REPLY_CHARS
-            reply = (
-                f"[… {omitted} earlier characters omitted …]\n"
-                + reply[-WRITE_REPORT_REPLY_CHARS:]
-            )
+        reply = quote_previous_reply(reply)
         return f'''You are re-sending the report of a batch of edits. A previous turn
 already made the edits — they are on disk now — but its closing report could not
 be read, so the batch cannot be checked yet.

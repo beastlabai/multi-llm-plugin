@@ -44,6 +44,7 @@ from utils import metrics  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import restore_batch  # noqa: E402
 from utils import subagent_executor as executor  # noqa: E402
+from utils import subagent_prompts  # noqa: E402
 from utils import write_safety  # noqa: E402
 from utils.providers import opencode as oc  # noqa: E402
 from utils.providers.base import PROFILE_AGENT_WRITE  # noqa: E402
@@ -726,6 +727,33 @@ class TestReportReAsk:
         second = self._calls(log)[1]["prompt"]
         assert "Your reply is not valid JSON" not in second
         assert "missing required field 'summary'" in second
+
+    def test_a_long_reply_is_quoted_from_the_start_of_its_report(self, env):
+        """Fix round 8: the re-ask quoted only the last 6000 characters of the
+        previous reply. A report followed by longer narration lost its ids from
+        the quote, the runner restated a report without them (it is told never
+        to name an id the quote does not), and a fully applied batch was
+        recorded as a partial application at exit 3."""
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)])
+        report = {"status": "applied", "ids": ["s0"], "files_touched": ["plans/p.md"]}
+        narration = "\n\nWhat I checked afterwards:\n" + (
+            "- the edited section still reads in order and names every step.\n" * 120
+        )
+        assert len(narration) > subagent_prompts.WRITE_REPORT_REPLY_CHARS
+        env.monkeypatch.setenv(
+            "MOCK_LLM_WRITE_RESULT",
+            "Done; the report:\n" + json.dumps(report) + narration,
+        )
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESTATE", "1")
+
+        result = env.scheduler([env.apply_task(0)]).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_APPLIED, outcome.reason
+        assert result.exit_code == 0
+        second = self._calls(log)[1]["prompt"]
+        assert json.dumps(report) in second
 
     def test_a_raw_control_byte_in_the_report_needs_no_re_ask(self, env):
         """The measured reply's shape: a raw control byte in a key (a NUL then;
