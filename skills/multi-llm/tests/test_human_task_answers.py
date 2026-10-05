@@ -489,6 +489,58 @@ class TestALaterResumeKeepsEveryAnsweredTask:
         assert state.get_task_status_reason("T002") is None
 
 
+# --- a strategy change on resume runs what the old one skipped ---------------
+
+class TestAStrategyChangeOnResumeRunsWhatItNoLongerSkips:
+    """Fix round 9 (review of round 8): a skipped task is materialized on
+    ``--resume`` now, and only a skip the NEW plan makes overwrote its status.
+    After a ``skip-dependents`` run, ``--resume --force-strategy
+    skip-continue`` left T006 (which depends only on the manual T005)
+    ``skipped`` in the native task JSON and in ``state.json``, with the
+    "depends on skipped task" reason: the host never dispatched it, and
+    ``[MANUAL_TASK]`` named it owed forever. A task the resolved plan no
+    longer skips is ``pending`` again, on both legs."""
+
+    def test_the_native_leg_hands_it_out_pending(self, repo_dep, tmp_path, capsys):
+        repo = repo_dep
+        out_json = tmp_path / "implement_tasks.json"
+        assert _emit(repo, out_json, "--yes") == 0
+        assert dict(_handed(out_json))["T006"] == "skipped"
+        _fail_the_check(repo)
+        capsys.readouterr()
+        assert _emit(
+            repo, out_json, "--yes", "--resume", "--force-strategy", "skip-continue",
+        ) == 0
+        handed = json.loads(out_json.read_text())
+        task = next(
+            t for b in handed["batches"] for t in b["tasks"] if t["id"] == "T006"
+        )
+        assert task["status"] == "pending" and "skip_reason" not in task
+        assert sorted(handed["skipped_tasks"]) == ["T005"]
+        state = get_or_create_state(repo.plan)
+        assert state.get_task_status("T006") == "pending"
+        assert state.get_task_status_reason("T006") is None
+        assert [t["id"] for t in state.deferred_implementation_tasks()] == ["T005"]
+
+    def test_the_executor_leg_records_it_pending_when_the_run_stops_first(
+        self, repo_dep, capsys
+    ):
+        repo = repo_dep
+        _check_fails(repo)
+        assert _implement(repo) == 3
+        assert _statuses(repo)["T006"] == "skipped"
+        capsys.readouterr()
+        # Nothing changed, so the check is not run again and the run stops
+        # before T006 is dispatched.
+        assert _implement(repo, "--resume", "--force-strategy", "skip-continue") == 3
+        state = get_or_create_state(repo.plan)
+        assert state.get_task_status("T006") == "pending"
+        assert state.get_task_status_reason("T006").startswith("not run —")
+        assert [t["id"] for t in state.deferred_implementation_tasks()] == ["T005"]
+        line = _account_line(repo)
+        assert "T006" in line.split("not run", 1)[1].split(")", 1)[0], line
+
+
 # --- every answer lands in a bucket ------------------------------------------
 
 class TestAManualTaskAnsweredDoneIsCounted:

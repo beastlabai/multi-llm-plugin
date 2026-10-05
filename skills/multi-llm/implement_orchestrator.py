@@ -1081,6 +1081,7 @@ def _native_human_task_plan(
     strategy: Optional[str],
     decisions: Dict[str, str],
     on_record: Optional[Any] = None,
+    recorded_statuses: Optional[Dict[str, str]] = None,
 ):
     """Resolve the human-task plan over the native leg's batches; annotate them.
 
@@ -1107,8 +1108,17 @@ def _native_human_task_plan(
     ``accepted_tasks``, and a manual task answered ``done`` is named in a
     top-level ``completed_manual_tasks`` list, on every later resume too
     (fix round 9: both dropped out once the task was recorded completed).
+
+    A task *recorded_statuses* (``state.json``'s ``task_status``) says
+    ``skipped`` that this plan no longer skips — ``--resume --force-strategy
+    skip-continue`` after a ``skip-dependents`` run — is handed out
+    ``pending`` and recorded so (``write_batch_scheduler.mark_no_longer_skipped``),
+    never left ``skipped`` for the host to pass over (fix round 9).
     """
-    from utils.write_batch_scheduler import resolve_human_task_plan
+    from utils.write_batch_scheduler import (
+        mark_no_longer_skipped,
+        resolve_human_task_plan,
+    )
 
     batches = output_data.get("batches") or []
     entries = [task for batch in batches for task in batch.get("tasks") or []]
@@ -1133,6 +1143,21 @@ def _native_human_task_plan(
             task["skip_reason"] = plan.skipped[task_id]
         elif task_id in plan.completed:
             task["status"] = TaskStatus.COMPLETED.value
+    unskipped = set(mark_no_longer_skipped(
+        plan,
+        [str(task.get("id") or "") for task in entries],
+        {
+            **(recorded_statuses or {}),
+            **{
+                str(task.get("id") or ""): task.get("status")
+                for task in entries if task.get("status") == TaskStatus.SKIPPED.value
+            },
+        },
+    ))
+    for task in entries:
+        if str(task.get("id") or "") in unskipped:
+            task["status"] = TaskStatus.PENDING.value
+            task.pop("skip_reason", None)
     if on_record:
         accepted, completed_manual = on_record
         for task_id, reason in accepted.items():
@@ -1702,6 +1727,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             strategy=human_task_strategy,
             decisions=applicable_decisions,
             on_record=answered_on_record,
+            recorded_statuses=state.get_all_task_statuses(),
         )
     if not executor_backed:
         write_native_handoff()
