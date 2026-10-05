@@ -4924,6 +4924,14 @@ async def run_single_model(
                 f" (no retry: the per-slot wall-clock budget of "
                 f"{effective_timeout}s is exhausted — {ladder.stop_reason})"
             )
+        elif (
+            action is not None and action.note and status != STATUS_RATE_LIMITED
+        ):
+            # The usual shape since fix round 6: `record()` applies the same
+            # admission test (rules 3 and 4) to the grant, so the refusal comes
+            # back as the action's own note. A rate limit's branch below quotes
+            # `action.reason`, which already carries it.
+            budget_note = f" ({action.note})"
 
         if status == STATUS_RATE_LIMITED:
             # Either the ≤ 3 backoffs are spent, or §7.5 rule 6(b) refused an
