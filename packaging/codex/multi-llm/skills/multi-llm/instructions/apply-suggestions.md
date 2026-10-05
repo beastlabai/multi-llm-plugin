@@ -218,6 +218,8 @@ Extract the following key fields directly from the Read output (do NOT use Bash/
 - `human_review_config`: Batch mode config for human review
 - `summary`: Counts of valid, skipped, batches, etc.
 
+Also read `{plan}/apply-suggestions/write_tasks.json` (the orchestrator printed its path as `[WRITE_TASKS_FILE]`): its `batches` array is the same batch list in the same order, one entry per batch with `task_id` (`apply-batch-0`, `apply-batch-1`, …), `batch_index`, `task_title`, `expected_ids` and the same `prior_changes_id`. The batch loop below is keyed on `task_id`; `batch.prompt` in `orchestrator_output.json` is the **unbound** template and is never handed to a subagent.
+
 ### 5. Process Batches Sequentially
 
 Use the batch data already loaded in step 4. Do NOT use Bash/python to re-parse or extract fields from the JSON file.
@@ -232,8 +234,9 @@ Where `{total_batches}` is the length of the `batches` array.
 ### The Python write executor: `--exec-subagents` (an alternative to this loop)
 
 Everything from here to the end of the batch loop is the **native-subagent** path:
-this agent substitutes `{prior_changes_context}`, snapshots the artifact, spawns a
-subagent, diffs against the snapshot and appends to the prior-changes log.
+this agent binds each batch's prompt with `util write-prompt`, snapshots the
+artifact, spawns a subagent on the bound prompt file, diffs against the snapshot
+and appends to the prior-changes log.
 
 A host with no native subagent tool runs the *same* loop in Python instead. Add
 `--exec-subagents` to the orchestrator invocation above and the phase schedules
@@ -279,18 +282,16 @@ Three flags belong to that path and are worth knowing even on this one:
 
 For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
-1. **Read prior changes** — Run:
+1. **Bind the batch prompt** — Run:
    ```bash
-   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes read \
-     --output-dir "{plan}/apply-suggestions"
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
+     --phase-dir "{plan}/apply-suggestions" --task-id "{task.task_id}"
    ```
-   Capture stdout as `prior_changes_text`.
+   `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-batch-0`, `apply-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 7 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-suggestions/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Note the path and the line count for step 3. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
 
-   **Error handling**: If `read` fails (corrupted JSONL, permission error, unexpected exception), use the default text `(none — this is the first batch)` and log a warning. Do not abort the batch loop.
+   **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report.
 
-2. **Substitute placeholder** — In `batch.prompt`, replace the literal `{prior_changes_context}` with `prior_changes_text`.
-
-3. **Read current plan state and snapshot it** — Always read the latest plan file version before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 6 **without** relying on git. (Plan files are frequently untracked — freshly created — and every `git diff` variant silently ignores fully-untracked files, so git CANNOT detect whether a batch changed the plan. Snapshot the file and diff against the snapshot instead.)
+2. **Read current plan state and snapshot it** — Always read the latest plan file version before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 5 **without** relying on git. (Plan files are frequently untracked — freshly created — and every `git diff` variant silently ignores fully-untracked files, so git CANNOT detect whether a batch changed the plan. Snapshot the file and diff against the snapshot instead.)
 
    The snapshot lives in the **workspace temp dir** at a deterministic path (each batch overwrites it; no cleanup step; the dir is self-gitignored). Resolve the project root first — if the command fails or prints nothing, STOP with the error: "multi-llm requires running inside a git repository":
    ```bash
@@ -304,20 +305,20 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    Capture the snapshot with your host's file tools, not Bash: read `{plan_abs}`, then write its exact content to the snapshot path (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md`; a host file-write that creates parent directories needs no mkdir step and no Bash copy command). If `{project_root}/.multi-llm/tmp/.gitignore` does not exist yet, also write it with content `*` so the temp dir ignores itself.
 
-   Keep the concrete absolute snapshot path and `{plan_abs}` for step 6.
+   Keep the concrete absolute snapshot path and `{plan_abs}` for step 5.
 
-4. **Spawn a subagent** using the substituted prompt
+3. **Spawn a subagent** whose whole prompt is: read the file at the `[WRITE_PROMPT]` path in full — through line `[WRITE_PROMPT_LINES]`, paging if a single read stops short — and follow it verbatim.
    - Use `general-purpose` subagent type
-   - The prompt already contains all suggestions and instructions
-5. **Wait for completion** - Do NOT parallelize batch processing
+   - That is the entire contract: do not paste the prompt text, add instructions of your own, or hand the subagent the JSON. The file already contains all suggestions, the prior-batch context and the reply format (it ends with a JSON object the steps below read)
+4. **Wait for completion** - Do NOT parallelize batch processing
 
-6. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file state rather than relying solely on the subagent's exit status.
+5. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file state rather than relying solely on the subagent's exit status.
 
-   **Do NOT use `git diff` / `git diff --stat` to detect whether the plan changed.** Plan files are frequently untracked (freshly created), and every `git diff` variant silently ignores fully-untracked files — it will report "no changes" even when the subagent edited the plan, producing a false clean-failure. Detect changes by diffing against the step-3 snapshot instead:
+   **Do NOT use `git diff` / `git diff --stat` to detect whether the plan changed.** Plan files are frequently untracked (freshly created), and every `git diff` variant silently ignores fully-untracked files — it will report "no changes" even when the subagent edited the plan, producing a false clean-failure. Detect changes by diffing against the step-2 snapshot instead:
    ```bash
    diff -u "{snapshot_path}" "{plan_path}"   # empty output = byte-identical (unchanged); non-empty = file changed
    ```
-   Substitute `{snapshot_path}` and `{plan_path}` with the **concrete absolute paths** noted in step 3 (the snapshot path and `{plan_abs}` — the same resolved absolute plan path used for the step-3 Read, not the possibly-relative plan argument). Do NOT write `$BATCH_SNAPSHOT` or `$PLAN_PATH` here — shell variables assigned in earlier Bash calls do not exist in this fresh Bash process, and an unset variable would make `diff` compare the wrong files or fail. If the snapshot path was not carried forward, recompute and diff in one single invocation, embedding the root as an inline command substitution (not as a `PROJECT_ROOT=...` assignment prefix, which the permission allowlist does not cover):
+   Substitute `{snapshot_path}` and `{plan_path}` with the **concrete absolute paths** noted in step 2 (the snapshot path and `{plan_abs}` — the same resolved absolute plan path used for the step-3 Read, not the possibly-relative plan argument). Do NOT write `$BATCH_SNAPSHOT` or `$PLAN_PATH` here — shell variables assigned in earlier Bash calls do not exist in this fresh Bash process, and an unset variable would make `diff` compare the wrong files or fail. If the snapshot path was not carried forward, recompute and diff in one single invocation, embedding the root as an inline command substitution (not as a `PROJECT_ROOT=...` assignment prefix, which the permission allowlist does not cover):
    ```bash
    diff -u "$(git rev-parse --show-toplevel)/.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md" "{plan_path}"
    ```
@@ -332,19 +333,23 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming.
 
-7. **Extract summary** — Generate a one-line summary by compressing the subagent's response into a single sentence. Do **not** require the subagent to output a special summary line.
+6. **Extract summary** — The subagent's reply ends with one JSON object (`{"status", "ids", "files_touched", "summary", "notes"}`: the result contract the prompt file carries). Take its `summary` as the one-line summary; its `status` (`applied` / `no-op` / `failed`) and `files_touched` are evidence for step 5, never a substitute for the snapshot diff. If the reply carries no such object, compress the reply into a single sentence instead.
 
    **Normalize** the summary: collapse any newlines or multiple spaces to a single space, trim leading/trailing whitespace, and truncate to 200 characters if needed.
 
-8. **Append to prior changes (only after verification)** — This step runs **only** after step 6 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
+7. **Append to prior changes (only after verification)** — This step runs **only** after step 5 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
-     --output-dir "{plan}/apply-suggestions" \
+     --output-dir "{plan}" \
      --id "{batch.prior_changes_id}" --phase "apply-suggestions" --summary-stdin <<'SUMMARY_EOF'
    {normalized_summary}
    SUMMARY_EOF
    ```
-   The `--id` is `batch.prior_changes_id` — read it off the batch, never construct one.
+   `--output-dir` is the plan directory `{plan}` (the one holding `state.json`): the one
+   log every write phase of this plan shares, the one `util write-prompt` binds the next
+   batch's prompt from, and the one the `--exec-subagents` executor appends to — scoped
+   per phase by `--phase`, never a per-phase file.
+   The `--id` is `batch.prior_changes_id` — read it off the batch (it is the same value in `write_tasks.json`), never construct one.
    The batcher emits **many** batches for the same `section_key`, and `append` is idempotent
    on `(id, phase)`: an id two batches share records the first and silently drops the
    rest (exit 0, a `Notice:` on stderr), so every later batch reads a prior-changes
@@ -356,8 +361,8 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Error handling**: If `append` fails, log a warning but do not abort the batch loop.
 
-9. **Log the result** - Track success/failure for the summary
-10. **Record metrics** — Run:
+8. **Log the result** - Track success/failure for the summary
+9. **Record metrics** — Run:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-suggestions" \
@@ -464,7 +469,17 @@ Items whose decision was offloaded to the judge agent — via `--agent-decide`, 
    ```
    Best-effort: if `report_data.json` is missing from the review dir (the review predates this feature), the command prints a notice and exits 0 without changing the report — just continue.
 
-   **Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote.
+### 8. Mark Phase Completed
+
+**Run this only if step 5's batch loop reached the end** — every batch dispatched and verified, and the human-decision items of step 6 handled. Then mark the apply-suggestions phase as completed in state.json:
+
+```bash
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --mark-completed
+```
+
+The orchestrator recorded the phase *started* when it wrote the batches (step 2), and this is the only command that records it *completed* — it also re-stamps the plan hash, so the next phase does not read this phase's own edits as a human editing the plan. **Do NOT run it if the loop stopped early** — a clean failure you aborted on, a partial application you surfaced for human review (step 5.5), or an interrupted run. The phase then stays `in_progress`, which is what makes `status` and the next-step command offer `--resume` instead of calling the phase done.
+
+**Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote.
 
 ---
 

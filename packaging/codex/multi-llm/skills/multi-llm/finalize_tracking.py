@@ -39,8 +39,8 @@ from utils import (
     list_untracked_files,
     subtract_baseline,
 )
-from utils.git_utils import ignored_paths
-from utils.state_manager import compute_plan_hash
+from utils.git_utils import get_project_root_from_dir, ignored_paths, paths_in_commit
+from utils.state_manager import compute_plan_hash, mark_phase_completed_in_state
 
 # A tracked-file dump is a reference list, not a reading; state.json holds all
 # of it. Measured 2026-09-16: a run that tracked 1 511 files spent 1 512 of its
@@ -207,6 +207,20 @@ def main(argv=None) -> int:
         help="Summary path, relative to the plan's parent directory, as printed "
              "by the orchestrator's summary_file_relative field"
     )
+    # The native leg's completion write, the counterpart of
+    # `WriteBatchScheduler._finalize`'s `mark_phase_completed("implement")`.
+    # The orchestrator records the phase *started* when it emits the task
+    # JSON; this flag, on the instruction's closing call (after every task,
+    # the verify step and the summary), is the only place the native path
+    # records it completed, so a host that stopped early leaves it
+    # `in_progress` and `--resume` is offered.
+    parser.add_argument(
+        "--mark-completed",
+        action="store_true",
+        help="Record the implement phase completed in state.json (the "
+             "instruction's closing step; never before every task has run and "
+             "the repository's own check passed)",
+    )
     args = parser.parse_args(argv)
 
     if bool(args.plan_file) != bool(args.summary_file_relative):
@@ -264,7 +278,12 @@ def main(argv=None) -> int:
         return 1
 
     if args.only_touched:
-        tracked_files = _tracked_entries(explicit_scope)
+        # No baseline on this route: a path is `created` when the base tree
+        # lacks it (`_file_actions`), never because of pre_existing_changes.
+        tracked_files = _tracked_entries(
+            explicit_scope,
+            _file_actions(explicit_scope, base_ref=state.get("head_before_implement")),
+        )
         print(
             f"Explicit scope (--only-touched): {len(tracked_files)} files "
             f"(the git census and pre_existing_changes were not consulted)"
@@ -280,6 +299,8 @@ def main(argv=None) -> int:
     # Update state
     state["tracked_files"] = tracked_files
     state["updated_at"] = datetime.now().isoformat()
+    if args.mark_completed:
+        mark_phase_completed_in_state(state, "implement")
 
     try:
         _write_state_atomic(state_path, state)
@@ -291,6 +312,8 @@ def main(argv=None) -> int:
     _print_path_list(tracked_files)
 
     print(f"\nState file updated: {state_path}")
+    if args.mark_completed:
+        print("Phase implement marked completed")
 
     if args.plan_file:
         code = _insert_summary_reference(args.plan_file, args.summary_file_relative)
@@ -318,12 +341,55 @@ def _drop_ignored(paths) -> List[str]:
     return [p for p in paths if p.strip() not in ignored]
 
 
-def _tracked_entries(paths) -> List[Dict[str, str]]:
+def _tracked_entries(paths, actions: Dict[str, str]) -> List[Dict[str, str]]:
     """``tracked_files`` entries for *paths*, in the order given."""
     return [
-        {"path": f, "action": "modified", "task_id": "implementation"}
+        {"path": f, "action": actions.get(f, "modified"), "task_id": "implementation"}
         for f in paths
     ]
+
+
+def _file_actions(paths, *, base_ref=None, baseline=()) -> Dict[str, str]:
+    """``created`` / ``modified`` / ``deleted`` for each repo-relative path.
+
+    Every entry used to say ``modified`` whatever the run did, so a file
+    ``implement`` created read as an edit (2026-10-04, Claude Code racing
+    re-run: ``index.html``). Read off the implement baseline instead:
+
+    * in the base tree (``head_before_implement``, else ``HEAD``) — still on
+      disk ``modified``, gone ``deleted``;
+    * not in it, on disk and not covered by ``pre_existing_changes`` —
+      ``created`` (untracked or staged, the phase made it);
+    * anything else ``modified``: a path the baseline covers existed before
+      the phase began (an untracked file it edited), and a path neither in
+      the tree nor on disk is nothing this can tell apart.
+
+    No readable base tree, or no repository at all, keeps the old ``modified``
+    for every path rather than guessing ``created``.
+    """
+    paths = [p for p in paths if p]
+    toplevel = get_project_root_from_dir() if paths else None
+    if toplevel is None:
+        return {p: "modified" for p in paths}
+    in_base = None
+    for ref in (base_ref, "HEAD"):
+        if ref:
+            in_base = paths_in_commit(str(ref), paths)
+            if in_base is not None:
+                break
+    if in_base is None:
+        return {p: "modified" for p in paths}
+    baseline = list(baseline or ())
+    actions: Dict[str, str] = {}
+    for path in paths:
+        exists = os.path.lexists(os.path.join(toplevel, path))
+        if path in in_base:
+            actions[path] = "modified" if exists else "deleted"
+        elif exists and not baseline_covers(path, baseline):
+            actions[path] = "created"
+        else:
+            actions[path] = "modified"
+    return actions
 
 
 def _census_tracked_files(state: dict, touched: List[str]) -> List[Dict[str, str]]:
@@ -373,7 +439,10 @@ def _census_tracked_files(state: dict, touched: List[str]) -> List[Dict[str, str
             )
         )
     print(f"Implementation changes: {len(implementation_changes)}")
-    return _tracked_entries(sorted(implementation_changes))
+    ordered = sorted(implementation_changes)
+    return _tracked_entries(ordered, _file_actions(
+        ordered, base_ref=state.get("head_before_implement"), baseline=pre_existing,
+    ))
 
 
 def _insert_summary_reference(plan_file: str, summary_relative: str) -> int:

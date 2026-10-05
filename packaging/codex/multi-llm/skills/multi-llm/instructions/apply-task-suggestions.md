@@ -227,8 +227,9 @@ Where `{total_batches}` is the length of the `batches` array.
 ### The Python write executor: `--exec-subagents` (an alternative to this loop)
 
 Everything from here to the end of the batch loop is the **native-subagent** path:
-this agent substitutes `{prior_changes_context}`, snapshots the artifact, spawns a
-subagent, diffs against the snapshot and appends to the prior-changes log.
+this agent binds each batch's prompt with `util write-prompt`, snapshots the
+artifact, spawns a subagent on the bound prompt file, diffs against the snapshot
+and appends to the prior-changes log.
 
 A host with no native subagent tool runs the *same* loop in Python instead. Add
 `--exec-subagents` to the orchestrator invocation above and the phase schedules
@@ -274,18 +275,16 @@ Three flags belong to that path and are worth knowing even on this one:
 
 For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
-1. **Read prior changes** — Run:
+1. **Bind the batch prompt** — Run:
    ```bash
-   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes read \
-     --output-dir "{plan}/apply-task-suggestions"
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
+     --phase-dir "{plan}/apply-task-suggestions" --task-id "{task.task_id}"
    ```
-   Capture stdout as `prior_changes_text`.
+   `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-task-batch-0`, `apply-task-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 7 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-task-suggestions/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Note the path and the line count for step 3. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
 
-   **Error handling**: If `read` fails (corrupted JSONL, permission error, unexpected exception), use the default text `(none — this is the first batch)` and log a warning. Do not abort the batch loop.
+   **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report.
 
-2. **Substitute placeholder** — In `batch.prompt`, replace the literal `{prior_changes_context}` with `prior_changes_text`.
-
-3. **Read current tasks.md state and snapshot it** — Always read the latest version of tasks.md before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 6 **without** relying on git. (tasks.md is frequently untracked — freshly created — and every `git diff` variant silently ignores fully-untracked files, so git CANNOT detect whether a batch changed it. Snapshot the file and diff against the snapshot instead.)
+2. **Read current tasks.md state and snapshot it** — Always read the latest version of tasks.md before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 5 **without** relying on git. (tasks.md is frequently untracked — freshly created — and every `git diff` variant silently ignores fully-untracked files, so git CANNOT detect whether a batch changed it. Snapshot the file and diff against the snapshot instead.)
 
    The snapshot lives in the **workspace temp dir** at a deterministic path (each batch overwrites it; no cleanup step; the dir is self-gitignored). Resolve the project root first — if the command fails or prints nothing, STOP with the error: "multi-llm requires running inside a git repository". Use the `tasks_file` path from `orchestrator_output.json` as `$TASKS_PATH`:
    ```bash
@@ -297,14 +296,14 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    Capture the snapshot with your host's file tools, not Bash: read `$TASKS_PATH`, then write its exact content to the snapshot path (use the absolute path — join the resolved project root with `.multi-llm/tmp/batch_snapshot_tasks_{plan_stem}.md`; a host file-write that creates parent directories needs no mkdir step and no Bash copy command). If `{PROJECT_ROOT}/.multi-llm/tmp/.gitignore` does not exist yet, also write it with content `*` so the temp dir ignores itself.
 
-   This batch only ever touches the single `tasks.md` file, so one snapshot covers it. Keep `$BATCH_SNAPSHOT` for step 6.
+   This batch only ever touches the single `tasks.md` file, so one snapshot covers it. Keep `$BATCH_SNAPSHOT` for step 5.
 
-4. **Spawn a subagent** using the substituted prompt
+3. **Spawn a subagent** whose whole prompt is: read the file at the `[WRITE_PROMPT]` path in full — through line `[WRITE_PROMPT_LINES]`, paging if a single read stops short — and follow it verbatim.
    - Use `general-purpose` subagent type
-   - The prompt already contains all suggestions and instructions
-5. **Wait for completion** - Do NOT parallelize batch processing
+   - That is the entire contract: do not paste the prompt text, add instructions of your own, or hand the subagent the JSON. The file already contains all suggestions, the prior-batch context and the reply format (it ends with a JSON object the steps below read)
+4. **Wait for completion** - Do NOT parallelize batch processing
 
-6. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file state rather than relying solely on the subagent's exit status. **Do NOT use `git diff` / `git diff --stat` as the change detector**: every `git diff` variant silently ignores fully-untracked files, and tasks.md is frequently freshly-created and untracked — so git would report "no changes" even when the subagent successfully edited it, producing a false clean-failure. Instead, diff the file against the pre-batch snapshot captured in step 3:
+5. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file state rather than relying solely on the subagent's exit status. **Do NOT use `git diff` / `git diff --stat` as the change detector**: every `git diff` variant silently ignores fully-untracked files, and tasks.md is frequently freshly-created and untracked — so git would report "no changes" even when the subagent successfully edited it, producing a false clean-failure. Instead, diff the file against the pre-batch snapshot captured in step 2:
    ```bash
    diff -u "$BATCH_SNAPSHOT" "$TASKS_PATH"
    ```
@@ -317,19 +316,23 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming.
 
-7. **Extract summary** — Generate a one-line summary by compressing the subagent's response into a single sentence. Do **not** require the subagent to output a special summary line.
+6. **Extract summary** — The subagent's reply ends with one JSON object (`{"status", "ids", "files_touched", "summary", "notes"}`: the result contract the prompt file carries). Take its `summary` as the one-line summary; its `status` (`applied` / `no-op` / `failed`) and `files_touched` are evidence for step 5, never a substitute for the snapshot diff. If the reply carries no such object, compress the reply into a single sentence instead.
 
    **Normalize** the summary: collapse any newlines or multiple spaces to a single space, trim leading/trailing whitespace, and truncate to 200 characters if needed.
 
-8. **Append to prior changes (only after verification)** — This step runs **only** after step 6 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
+7. **Append to prior changes (only after verification)** — This step runs **only** after step 5 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
-     --output-dir "{plan}/apply-task-suggestions" \
+     --output-dir "{plan}" \
      --id "{batch.prior_changes_id}" --phase "apply-task-suggestions" --summary-stdin <<'SUMMARY_EOF'
    {normalized_summary}
    SUMMARY_EOF
    ```
-   The `--id` is `batch.prior_changes_id` — read it off the batch, never construct one.
+   `--output-dir` is the plan directory `{plan}` (the one holding `state.json`): the one
+   log every write phase of this plan shares, the one `util write-prompt` binds the next
+   batch's prompt from, and the one the `--exec-subagents` executor appends to — scoped
+   per phase by `--phase`, never a per-phase file.
+   The `--id` is `batch.prior_changes_id` — read it off the batch (it is the same value in `write_tasks.json`), never construct one.
    The batcher emits **many** batches for the same `section_key`, and `append` is idempotent
    on `(id, phase)`: an id two batches share records the first and silently drops the
    rest (exit 0, a `Notice:` on stderr), so every later batch reads a prior-changes
@@ -341,8 +344,8 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Error handling**: If `append` fails, log a warning but do not abort the batch loop.
 
-9. **Log the result** - Track success/failure for the summary
-10. **Record metrics** — Run:
+8. **Log the result** - Track success/failure for the summary
+9. **Record metrics** — Run:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-task-suggestions" \

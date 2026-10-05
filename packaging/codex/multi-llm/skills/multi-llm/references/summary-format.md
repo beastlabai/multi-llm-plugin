@@ -26,7 +26,8 @@ After any mode completes, report:
   has none
 - [The next step, copied from `user_next_step` as the next-step rule below says:
   its `command` alone in a fenced block, then any optional commands under
-  "Optional, before that:" — or "Workflow complete." — or nothing]
+  "Optional, before that:" — or "Workflow complete." and any manual tasks still
+  owed — or nothing]
 ```
 
 Every mode ends with this report. Four rules, and a fifth for `ask`:
@@ -91,7 +92,10 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     then each entry in the order the key lists them — its `why` as plain text
     outside the fence, then its `command` alone in its own fenced block. When
     `complete` is `true` (its `command` is then `null`), write
-    "Workflow complete." instead. When there is no `user_next_step` at all,
+    "Workflow complete." instead, and when it carries `manual_tasks`, list
+    each one under it, its `id` and `title`, as the user's to do: implement
+    deferred them and the plugin will not run them (the `[MANUAL_TASK]` lines
+    below `[WORKFLOW_COMPLETE]` are the same tasks). When there is no `user_next_step` at all,
     write neither a command nor "Workflow complete.": an absent key is not a
     completion.
   - *A failed lookup prints no command.* When `util next-command` exits

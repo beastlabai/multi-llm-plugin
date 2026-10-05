@@ -43,6 +43,9 @@ NEXT_COMMAND_MARKER = "[NEXT_COMMAND]"
 NEXT_COMMAND_OPTIONAL_WHY_MARKER = "[NEXT_COMMAND_OPTIONAL_WHY]"
 NEXT_COMMAND_OPTIONAL_MARKER = "[NEXT_COMMAND_OPTIONAL]"
 WORKFLOW_COMPLETE_MARKER = "[WORKFLOW_COMPLETE]"
+#: One line per deferred implement task under ``[WORKFLOW_COMPLETE]``: the id,
+#: then the title when ``state.json`` recorded one. Not a command marker.
+MANUAL_TASK_MARKER = "[MANUAL_TASK]"
 #: One line above the block when the command it names is certain to be refused
 #: (``check_workflow_prerequisites.repo_wide_sandbox_warning``). Not a command
 #: marker: no consumer of the block reads it as one.
@@ -88,6 +91,21 @@ class OptionalStep:
 
 
 @dataclass(frozen=True)
+class ManualTask:
+    """One implement task the run deferred to the user (``state.json``: ``skipped``)."""
+
+    id: str
+    title: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"id": self.id, "title": self.title}
+
+    def line(self) -> str:
+        """``<id> <title>``, or the id alone when no title was recorded."""
+        return f"{self.id} {self.title}" if self.title else self.id
+
+
+@dataclass(frozen=True)
 class NextPhase:
     """The builder's answer: a command to run next, or ``complete``.
 
@@ -103,15 +121,25 @@ class NextPhase:
     #: command is certain to hit), rendered above the block and never part of
     #: ``user_next_step``.
     warning: Optional[str] = None
+    #: On a ``complete`` answer only: the implement tasks the run deferred,
+    #: which the plugin will never run and the user still owes (2026-10-04,
+    #: OpenCode: `[WORKFLOW_COMPLETE]` beside two deferred manual playthroughs
+    #: said nothing about them).
+    manual_tasks: Tuple[ManualTask, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
 
-        Complete is exactly ``{"phase": null, "command": null, "complete":
-        true}``; otherwise ``optional_before`` is present only when non-empty.
+        Complete is ``{"phase": null, "command": null, "complete": true}``,
+        plus ``manual_tasks`` (``[{id, title}]``) when the run deferred any —
+        additive, so a reader that knows only the three keys reads the same
+        completion; otherwise ``optional_before`` is present only when non-empty.
         """
         if self.complete:
-            return {"phase": None, "command": None, "complete": True}
+            payload = {"phase": None, "command": None, "complete": True}
+            if self.manual_tasks:
+                payload["manual_tasks"] = [task.to_dict() for task in self.manual_tasks]
+            return payload
         payload: Dict[str, Any] = {"phase": self.phase, "command": self.command}
         if self.optional_before:
             payload["optional_before"] = [step.to_dict() for step in self.optional_before]
@@ -119,7 +147,22 @@ class NextPhase:
         return payload
 
 
-_COMPLETE = NextPhase(phase=None, command=None, complete=True)
+def _complete(phases: Mapping[str, Mapping[str, Any]]) -> NextPhase:
+    """The ``complete`` answer, naming the implement tasks the run deferred.
+
+    Read off the workflow payload's ``implement`` entry
+    (``check_workflow_prerequisites.get_workflow_status``), which reads them
+    from ``state.json``: no status logic of this module's own.
+    """
+    entries = (phases.get("implement") or {}).get("manual_tasks") or ()
+    return NextPhase(
+        phase=None, command=None, complete=True,
+        manual_tasks=tuple(
+            ManualTask(str(entry.get("id")), entry.get("title") or None)
+            for entry in entries
+            if isinstance(entry, Mapping) and entry.get("id")
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -393,7 +436,7 @@ def next_phase_commands(
     if start is None:
         primary = workflow.get("suggested_next")
         if primary is None:
-            return _COMPLETE
+            return _complete(phases)
         return NextPhase(
             phase=primary,
             command=command_for(primary),
@@ -469,7 +512,7 @@ def next_phase_commands(
     if primary is None:
         # An optional phase never keeps a workflow open, and one the walk did
         # not reach is never suggested: no `optional_before` on completion.
-        return _COMPLETE
+        return _complete(phases)
     return NextPhase(
         phase=primary,
         command=command_for(primary),
@@ -501,6 +544,47 @@ def _optional_why(modes, phase: str, entry: Mapping[str, Any]) -> str:
 # Resuming the SAME phase after a needs-human stop
 # ---------------------------------------------------------------------------
 
+#: The phases whose way forward after a failed dispatch is the plain
+#: re-invocation, not ``--resume``: ``run_status._RESUME_VERB_BY_MODE`` gives
+#: them the dispatcher's bare ``--yes``, which a host spelling never carries.
+#: ``generate-tasks``' ``--reaggregate`` only consumes a result already on disk,
+#: so the plain re-invoke is what re-dispatches its failed task (and a test
+#: holds this tuple to that table).
+RERUN_RESUME_PHASES: Tuple[str, ...] = ("generate-tasks",)
+
+#: The in-phase word ``dispatch_subagent_tasks`` writes when a batch ended
+#: with a failed task (``review_orchestrator_base``): the one state whose
+#: re-invocation re-dispatches the failures.
+SUBAGENTS_FAILED_STATE = "subagents_failed"
+
+
+def _rerun_resumes(phase_status: Mapping[str, Any]) -> bool:
+    """Would a plain re-run of this phase's failed dispatch do anything new?
+
+    Only a dispatch that failed (:data:`SUBAGENTS_FAILED_STATE`) and whose
+    executor mirror (``progress.subagents``, rewritten with the run record by
+    ``claim_run``) names the failures; and only when none of them is one a
+    re-run repeats (``retry_ladder.RERUN_FUTILE_STATUSES``) and no runner
+    refusal closed the run out. Everything else — a refusal before the
+    dispatch, a prerequisite gate, a schema the CLI rejects — is fixed by
+    what the phase's own message names, and a command here would only repeat it.
+    """
+    from .retry_ladder import RERUN_FUTILE_STATUSES
+
+    if phase_status.get("state") != SUBAGENTS_FAILED_STATE:
+        return False
+    run = phase_status.get("run") if isinstance(phase_status.get("run"), dict) else {}
+    if run.get("reason_code") or phase_status.get("reason_code"):
+        return False
+    progress = phase_status.get("progress")
+    mirror = progress.get("subagents") if isinstance(progress, dict) else None
+    counts = mirror.get("counts") if isinstance(mirror, dict) else None
+    if not isinstance(counts, dict):
+        return False
+    failed = {str(status) for status, n in counts.items() if status != "ok" and n}
+    return bool(failed) and not failed & RERUN_FUTILE_STATUSES
+
+
 def resume_command(
     plan_arg: str,
     host_id: str,
@@ -509,6 +593,7 @@ def resume_command(
     *,
     plan_path: Optional[Union[str, Path]] = None,
     workflow: Optional[Dict[str, Any]] = None,
+    phase_status: Optional[Mapping[str, Any]] = None,
 ) -> Optional[str]:
     """The host-spelled command that resumes *mode_word*'s write phase, or ``None``.
 
@@ -535,7 +620,15 @@ def resume_command(
     Every other exit 3 is not something ``--resume`` fixes: a prerequisite
     refusal (``PREREQUISITE_UNMET``) and a stop on pending human-task
     decisions both land before anything is recorded, and the phase's own
-    message names the way forward. The servers pass through whatever this
+    message names the way forward.
+
+    One phase answers without ``--resume``: ``generate-tasks``
+    (:data:`RERUN_RESUME_PHASES`), whose recovery after a failed dispatch is
+    the plain re-invocation (racing re-run 2026-10-04: a ``schema_invalid``
+    task generation left the tool result with no command, and the host model
+    invented one). It answers from the phase dir's ``.status.json``
+    (*phase_status*, else read for the plan) through :func:`_rerun_resumes`,
+    so a failure no re-run can change gets none. The servers pass through whatever this
     says and attach nothing when it says nothing; before the adversarial
     review (2026-10-02) they attached ``--resume`` to every write-phase exit 3,
     and ``util next-command does-not-exist.md --blocked implement`` printed
@@ -550,6 +643,17 @@ def resume_command(
     from .subagent_tasks import PHASE_BY_WRITE_KIND
 
     template = _host_capabilities().next_command_template(host_id, route)
+    if mode.phase in RERUN_RESUME_PHASES:
+        if phase_status is None:
+            from .output_handler import phase_dir_path
+            from .status_file import read_status
+
+            source = plan_arg if plan_path is None else plan_path
+            phase_status = read_status(str(phase_dir_path(
+                Path(os.path.abspath(str(source))), mode.phase)))
+        if not _rerun_resumes(phase_status):
+            return None
+        return template.replace(ARGS_SLOT, f"--{mode.name} {quote_plan_arg(plan_arg)}")
     if mode.phase not in PHASE_BY_WRITE_KIND.values():
         return None
     if workflow is None:
@@ -569,13 +673,17 @@ def resume_command(
 def render_next_phase_lines(answer: NextPhase) -> List[str]:
     """The block's lines, primary first (§2.2(2), §2.1 "Primary first").
 
-    Complete renders only ``[WORKFLOW_COMPLETE]``. Otherwise the
-    ``[NEXT_COMMAND]`` line comes first, then each ``optional_before`` entry's
-    ``[NEXT_COMMAND_OPTIONAL_WHY]`` / ``[NEXT_COMMAND_OPTIONAL]`` pair in the
-    answer's order. A command line holds the command and nothing else.
+    Complete renders ``[WORKFLOW_COMPLETE]``, then one ``[MANUAL_TASK]`` line
+    per task the run deferred to the user (none when it deferred nothing).
+    Otherwise the ``[NEXT_COMMAND]`` line comes first, then each
+    ``optional_before`` entry's ``[NEXT_COMMAND_OPTIONAL_WHY]`` /
+    ``[NEXT_COMMAND_OPTIONAL]`` pair in the answer's order. A command line holds
+    the command and nothing else.
     """
     if answer.complete:
-        return [WORKFLOW_COMPLETE_MARKER]
+        return [WORKFLOW_COMPLETE_MARKER] + [
+            f"{MANUAL_TASK_MARKER} {task.line()}" for task in answer.manual_tasks
+        ]
     lines = []
     if answer.warning:
         lines.append(f"{RUNNER_WARNING_MARKER} {answer.warning}")
@@ -772,7 +880,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser.add_argument(
         "--blocked", metavar="MODE", default=None, dest="blocked",
         help="Instead of the next phase, print the command that resumes MODE's "
-             "own stopped write phase (`[RESUME_COMMAND]`, and "
+             "own stopped phase — a write phase with progress on record, or a "
+             "generate-tasks whose dispatch failed in a way a re-run can change "
+             "(`[RESUME_COMMAND]`, and "
              "MULTI_LLM_RESULT.user_resume). The tool routes ask this after an "
              "exit 3. Prints nothing for a mode that has none. Excludes --after.",
     )

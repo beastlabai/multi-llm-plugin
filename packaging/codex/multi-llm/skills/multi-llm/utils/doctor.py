@@ -1090,7 +1090,7 @@ def _agent_write_text(
 ) -> str:
     """The ``agent-write`` row (step 3, option (b); step 3b; F5). It names the
     write rung and its probe result, the scopes it serves, what a repo-wide
-    batch keeps read-only, the rung's grade and its open network, F5's clause, and
+    batch may write, the rung's grade and its open network, F5's clause, and
     restates the verdict rule: BROKEN and exit 3 because codex's own sandbox
     cannot start, whatever the write rung serves."""
     from .providers.base import SANDBOX_FALLBACK_AUTO
@@ -1101,8 +1101,10 @@ def _agent_write_text(
     )
     repo_wide = (
         "repo-wide edits (apply-code-fixes, implement) run on it too, with "
-        ".git/, .codex/, .multi-llm/ and the run's output folder kept "
-        "read-only (step 3b)"
+        "the whole repository writable — .git/, .codex/, .multi-llm/ and the "
+        "run's output folder included; the model is told to leave them alone "
+        "and the batch is checked afterwards, nothing is backed up (root "
+        "grant, 2026-10-05)"
     )
     status = write.get("status")
     rung = write.get("rung")

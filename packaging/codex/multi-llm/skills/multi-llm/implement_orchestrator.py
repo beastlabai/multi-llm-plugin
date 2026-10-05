@@ -952,6 +952,36 @@ def run_implement_write_phase(
     return result.exit_code
 
 
+def _materialize_native_write_tasks(
+    plan_path: Path, output_data: Dict[str, Any], *, tasks_file: Optional[Path],
+) -> str:
+    """Write ``{phase}/write_tasks.json`` for the native leg; its path.
+
+    The same two bridge calls :func:`run_implement_write_phase` makes, with
+    the same inputs, so the file a native host's ``util write-prompt`` reads
+    is the one the executor leg would have dispatched from.
+    """
+    from utils.write_phase_bridge import (
+        materialize_write_tasks,
+        write_task_file_for_phase,
+    )
+
+    phase_dir = str(get_phase_dir(plan_path, "implement"))
+    plan_file = str(plan_path.absolute())
+    tasks_file_str = str(tasks_file) if tasks_file else None
+    tasks = materialize_write_tasks(
+        kind="implement",
+        batches=output_data.get("batches") or [],
+        phase_dir=phase_dir,
+        plan_file=plan_file,
+        tasks_file=tasks_file_str,
+    )
+    return write_task_file_for_phase(
+        kind="implement", tasks=tasks, phase_dir=phase_dir, plan_file=plan_file,
+        tasks_file=tasks_file_str,
+    )
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     """Main entry point."""
     bootstrap_streams()
@@ -1210,6 +1240,12 @@ def main(argv: Optional[List[str]] = None) -> int:
     decomposer = TaskDecomposer()
     tasks = decomposer.parse_plan(tasks_content)
     print(f"Found {len(tasks)} tasks")
+    # Both legs pass here, so a task the run defers (a human task, or a
+    # dependent `skip-dependents` skips with it) can be named by its title
+    # once the workflow completes, not only by its id — the native leg's host
+    # records `skipped` itself and never writes a title (2026-10-04).
+    if state.record_task_titles({task.id: task.title for task in tasks}):
+        state.save()
 
     # Restore previous statuses if resuming
     if args.resume:
@@ -1427,6 +1463,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     if scheduled is not None:
         return scheduled
 
+    # The native leg (2026-10-05): the same `write_tasks.json` the executor
+    # leg materializes, so the host's per-task `util write-prompt` binds each
+    # task's prior-changes context from the same seam instead of the host
+    # fishing the prompt out of the handoff JSON and substituting the token
+    # by hand (measured 2026-10-04: 3-6 tool calls per subagent, and one that
+    # read tasks.md instead of its prompt).
+    try:
+        write_task_file = _materialize_native_write_tasks(
+            plan_path, output_data, tasks_file=implement_tasks_file,
+        )
+    except Exception as exc:  # noqa: BLE001 - the handoff JSON is still usable
+        print(f"WARNING: write_tasks.json not written: {exc}", file=sys.stderr)
+    else:
+        print(f"[WRITE_TASKS_FILE] {write_task_file}", file=sys.stderr)
+
     # Print summary
     print("\n" + "=" * 60)
     print("Tasks Prepared for Claude Code")
@@ -1444,8 +1495,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("  4. Update the state file after each task completes")
     print("  5. After all tasks complete, generate the implementation summary")
     print(f"     Summary file: {output_data['summary_file']}")
+    print("  6. Close the phase with `util finalize-tracking … --mark-completed`")
 
-    state.mark_phase_completed("implement")
+    # The batches are now the host's to run, so the phase is recorded
+    # *started*, never completed: completion is the instruction's closing
+    # `util finalize-tracking --plan-file … --mark-completed`, which runs only
+    # after every task, the verify step and the summary. Until 2026-10-05 this
+    # site wrote `mark_phase_completed("implement")`, so `status` read the
+    # phase as done minutes before its last task (racing re-run, 2026-10-04).
+    state.mark_phase_started("implement")
     state.save()
 
     return 0

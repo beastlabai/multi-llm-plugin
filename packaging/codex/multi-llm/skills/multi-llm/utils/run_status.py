@@ -530,6 +530,19 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
         lines.append(f"{prefix}suggested next: {payload['suggested_next']}{suffix}")
     for notice in payload.get("notices", []) or []:
         lines.append(f"{prefix}notice: {notice}")
+    # The implement tasks the run deferred (`phases.implement.manual_tasks`,
+    # read from state.json). A workflow with nothing left to suggest printed
+    # no trailer at all, so a finished plan with two manual playthroughs still
+    # owed read as done (2026-10-04, OpenCode racing re-run).
+    manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
+    if isinstance(manual, list) and manual:
+        named = "; ".join(
+            f"{entry['id']} {entry['title']}" if entry.get("title") else str(entry["id"])
+            for entry in manual
+            if isinstance(entry, dict) and entry.get("id")
+        )
+        if named:
+            lines.append(f"{prefix}manual tasks left for you: {named}")
     return lines
 
 
@@ -558,7 +571,11 @@ def render_run_text(
     plan_path: Path,
     workflow: Optional[Dict[str, Any]],
     scope: Optional[str] = None,
+    resume_workflow: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
+    # The workflow payload the resume block may consult without rendering the
+    # workflow lines above it (`--view run`'s terminal read); see `_resume_lines`.
+    resume_workflow = workflow if workflow is not None else resume_workflow
     lines = ["runs ({phase}/.status.json) — is a launched run still alive:"]
     if not views:
         lines.append(f"  no run recorded for {scope or 'this plan'}")
@@ -643,7 +660,10 @@ def render_run_text(
                 )
                 lines.append(f"      advance it with: {advance}")
         if view.get("progress"):
-            lines.append(f"      progress:       {_progress_text(view['progress'])}")
+            lines.append(
+                f"      progress:       "
+                f"{_progress_text(view['progress'], phase=_view_dir_name(view))}"
+            )
             # Between the counts and the table, and INSIDE this guard by
             # decision rather than by accident: the delta is computed from
             # `progress.models` (see `_attach_finished_during_wait`), so a
@@ -712,7 +732,7 @@ def render_run_text(
             # so the resume command is handed over now rather than after the
             # close-out. `reason` carries what the probe saw.
             lines.append(f"      {view.get('reason')}")
-            lines.extend(_resume_lines(view, plan_path))
+            lines.extend(_resume_lines(view, plan_path, resume_workflow))
         if view["verdict"] in (detach.VERDICT_FAILED, detach.VERDICT_ABORTED):
             lines.append(f"      exit_code: {run.get('exit_code')}")
             lines.append(f"      error:     {run.get('error')}")
@@ -720,7 +740,7 @@ def render_run_text(
             if tail:
                 lines.append("      last log lines:")
                 lines.append(tail)
-            lines.extend(_resume_lines(view, plan_path))
+            lines.extend(_resume_lines(view, plan_path, resume_workflow))
     return lines
 
 
@@ -923,7 +943,25 @@ def _high_priority_text(high_priority: Any) -> Optional[str]:
 NO_PROGRESS_RECORDED = "(none recorded)"
 
 
-def _progress_text(progress: Dict[str, Any]) -> str:
+def _generated_count(progress: Dict[str, Any], phase: Optional[str]) -> Optional[int]:
+    """How many tasks a ``generate-tasks`` run produced, or ``None``.
+
+    ``tasks_generated`` is what that phase writes; a checkpoint written before
+    the key existed carried the same count as a ``tasks_total``/``tasks_done``
+    pair, which is read the same way under that phase alone.
+    """
+    generated = progress.get("tasks_generated")
+    if isinstance(generated, int) and not isinstance(generated, bool):
+        return generated
+    total = progress.get("tasks_total")
+    if (phase == "generate-tasks" and isinstance(total, int) and total
+            and progress.get("tasks_done") == total):
+        return total
+    return None
+
+
+def _progress_text(progress: Dict[str, Any], *, phase: Optional[str] = None) -> str:
+    """The ``progress:`` line; *phase* is the view's phase dir, when known."""
     parts = []
     if progress.get("step"):
         parts.append(str(progress["step"]))
@@ -947,7 +985,13 @@ def _progress_text(progress: Dict[str, Any]) -> str:
             failed = done - succeeded if isinstance(done, int) else 0
             clause += f" done, {succeeded} ok, {max(failed, 0)} failed"
         parts.append(clause)
-    if progress.get("tasks_total"):
+    generated = _generated_count(progress, phase)
+    if generated is not None:
+        # What that run produced, labelled as such: a `tasks 10/10` pair read
+        # as a live count of tasks.md and went stale the moment
+        # apply-task-suggestions split a task (2026-10-04).
+        parts.append(f"generated {generated} task{'' if generated == 1 else 's'}")
+    elif progress.get("tasks_total"):
         parts.append(f"tasks {progress.get('tasks_done', 0)}/{progress['tasks_total']}")
     if progress.get("batches_total"):
         parts.append(
@@ -1465,7 +1509,9 @@ def _progress_lines(view: Dict[str, Any]) -> List[str]:
     roster = render_roster_line(progress.get("models"))
     if roster:
         lines.append(roster)
-    current = _current_state_text(progress)
+    current = _current_state_text(
+        progress, phase=_view_dir_name(view) if view.get("phase_dir") else None,
+    )
     if current:
         lines.append(current)
     just_finished = _just_finished_text(view)
@@ -1496,7 +1542,9 @@ def _has_live_row(models: Any) -> bool:
     )
 
 
-def _current_state_text(progress: Dict[str, Any]) -> str:
+def _current_state_text(
+    progress: Dict[str, Any], *, phase: Optional[str] = None,
+) -> str:
     """One line saying what the run is doing *now*, or ``""`` when nothing is.
 
     The third thing a reader with no agent in the loop needs, beside the roster
@@ -1533,7 +1581,7 @@ def _current_state_text(progress: Dict[str, Any]) -> str:
         line = render_progress_line(models)
         if line:
             return line
-    text = _progress_text(progress)
+    text = _progress_text(progress, phase=phase)
     return "" if text == NO_PROGRESS_RECORDED else text
 
 
@@ -1757,7 +1805,10 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             parts.append(f"{status} {count}")
     outcomes: Dict[str, int] = {}
     for row in tasks:
-        outcome = str((row or {}).get("write_outcome") or "")
+        # `outcome_label` first: a verification-only task's `no-op` reads
+        # `verified` here as on every other surface (2026-10-04).
+        row = row if isinstance(row, dict) else {}
+        outcome = str(row.get("outcome_label") or row.get("write_outcome") or "")
         if outcome:
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
     # F14: when every batch's outcome is `applied` the breakdown collapses to
@@ -1968,9 +2019,74 @@ def _reason_explanation(reason_code: Optional[str]) -> Optional[str]:
     return _REASON_EXPLANATION.get(reason_code)
 
 
-def _resume_lines(view: Dict[str, Any], plan_path: Path) -> List[str]:
+#: What a write run refused before its first batch gets in place of a
+#: ``resume with:`` command (racing re-run 2026-10-04, codex #5: implement
+#: refused on the jail before batch 1 offered ``--resume``, which repeats the
+#: refusal). No command: the way forward is the remedy the refusal names.
+NO_RESUME_BEFORE_DISPATCH = (
+    "no resume: nothing was dispatched and the phase has no progress on record, "
+    "so a resume would only repeat this stop; fix what the error above names "
+    "first, then run the phase again"
+)
+
+
+def _dispatched_nothing(view: Dict[str, Any]) -> bool:
+    """A write run whose own mirror records no dispatched and no ``ok`` batch.
+
+    ``progress.write_subagents.batches_dispatched`` is appended per dispatched
+    batch (``write_batch_scheduler``), and ``claim_run`` drops a predecessor's
+    ``progress`` with its ``run``, so an empty list beside this run record
+    means this run sent nothing. A mirror without the key says nothing.
+    """
+    progress = view.get("progress") or {}
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    if not isinstance(mirror, dict):
+        return False
+    dispatched = mirror.get("batches_dispatched")
+    if not isinstance(dispatched, list) or dispatched:
+        return False
+    rows = mirror.get("tasks") if isinstance(mirror.get("tasks"), list) else []
+    return not any((row or {}).get("status") == "ok" for row in rows)
+
+
+def _phase_in_progress(
+    view: Dict[str, Any], plan_path: Path, workflow: Optional[Dict[str, Any]],
+) -> bool:
+    """Whether the workflow view shows *view*'s phase ``in_progress``.
+
+    Read from *workflow* when the caller has it, else from ``state.json`` once
+    (this is the failure path only). A read that fails answers ``True``, which
+    keeps the ``resume with:`` line this predicate would otherwise remove.
+    """
+    if workflow is None:
+        try:
+            workflow = _workflow_payload(plan_path)
+        except Exception:  # noqa: BLE001 - advisory: keep the old line
+            return True
+    phase = view.get("phase") or cli_common._modes().phase_for(
+        str((view.get("run") or {}).get("mode") or ""))
+    entry = (workflow.get("phases") or {}).get(phase) or {}
+    return entry.get("status") == "in_progress"
+
+
+def _resume_lines(
+    view: Dict[str, Any], plan_path: Path,
+    workflow: Optional[Dict[str, Any]] = None,
+) -> List[str]:
     """The shaped resume block: the repair first when there is one, then the
-    single ``resume with:`` command, then what it costs."""
+    single ``resume with:`` command, then what it costs.
+
+    A write run that dispatched nothing, under a phase with no progress on
+    record, gets :data:`NO_RESUME_BEFORE_DISPATCH` instead: its ``--resume``
+    would repeat the refusal, and a tool route scrapes every command printed
+    here into an option.
+    """
+    mode = str(view["run"].get("mode") or view.get("phase") or "")
+    if (
+        mode in _WRITE_MODES and _dispatched_nothing(view)
+        and not _phase_in_progress(view, plan_path, workflow)
+    ):
+        return [f"      {NO_RESUME_BEFORE_DISPATCH}"]
     shape, repair, redispatch, kept = _resume_shape(view)
     lines: List[str] = []
     if shape == cli_common.SHAPE_REPAIR:
@@ -2493,7 +2609,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             lines.append("")
         lines += render_run_text(
             views, plan_path=plan_path, workflow=workflow,
-            scope=_scope_label(args),
+            scope=_scope_label(args), resume_workflow=terminal_workflow,
         )
         # Plan §7.4a2: after the phase views, never silently dropped.
         lines += _ignored_text(

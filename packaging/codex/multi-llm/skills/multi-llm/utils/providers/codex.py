@@ -366,20 +366,14 @@ CANARY_ENV_SEEDED = "MULTI_LLM_CANARY_SEEDED"
 CANARY_ENV_PYTHON = "MULTI_LLM_CANARY_PYTHON"
 CANARY_ENV_WRITE_FILE = "MULTI_LLM_CANARY_WRITE_FILE"
 CANARY_ENV_WRITE_DIR = "MULTI_LLM_CANARY_WRITE_DIR"
-#: Extra negative targets (step 3b, `repo-wide`): **newline**-separated
-#: directories in which creating a file must be denied — `.git/`, the run's
-#: output folder and the other protected roots that exist. Newline, never
-#: `os.pathsep` or a space: the script splits on it alone (`IFS`, globbing
-#: off), so a repository path holding a space or a colon stays one target —
-#: `os.pathsep`-joined and word-split, a `my repo/.git` became two nonexistent
-#: targets that read as denied (adversarial review, 2026-10-02).
-#: A target the script cannot stat as a directory is a setup failure
-#: (`LANDLOCK_CANARY_TARGET_FAILED`), never a pass; a path holding a newline
-#: cannot be handed over at all and `landlock_dispatch.canary_env` refuses it.
-CANARY_ENV_DENY_DIRS = "MULTI_LLM_CANARY_DENY_DIRS"
-LANDLOCK_CANARY_TARGET_FAILED = (
-    "multi-llm sandbox canary: setup failed (a negative target is not a directory)"
-)
+#: The canary's workdir — its negative targets' directory — when it is not
+#: the cwd-relative `LANDLOCK_CANARY_WORKDIR` (root grant, 2026-10-05): a
+#: `repo-wide` probe's root rule makes `.multi-llm/tmp` writable, so
+#: `landlock_dispatch.rung_probe` prepares a directory OUTSIDE the repository
+#: (under the parent's temp base, beside the slot `TMPDIR`) and hands it over
+#: here; the script reads it ahead of the default. Unset for every other
+#: probe, whose workdir the walk prepared inside the repository.
+CANARY_ENV_WORKDIR = "MULTI_LLM_CANARY_WORKDIR"
 
 #: What the rung's canary prints (stderr, exit 5) when a write it must be able
 #: to make — in its own $TMPDIR, or a write profile's own target — failed: a
@@ -406,35 +400,29 @@ _TRUNCATE_SNIPPET = (
 
 #: The plugin-landlock rung's canary (run by `codex sandbox` under
 #: `sandbox_mode="danger-full-access"`, inside the jail). Controls, in order:
-#: negative — creating a file in `.multi-llm/tmp` (prepared and proven writable
-#: *outside* the jail by the walk) must be denied, and so must creating one in
-#: each extra negative directory of `$MULTI_LLM_CANARY_DENY_DIRS` (step 3b: a
-#: repo-wide grant's `.git/` and output folder); truncation — the seeded file
-#: (`$MULTI_LLM_CANARY_SEEDED`, in the same negative target) must not be
-#: truncatable, and the parent compares its bytes afterwards too; positive — a
-#: file created and removed in `$TMPDIR`, and for the `plan-file` and `tasks`
-#: scopes the dispatch's own declared target (`: >> <file>` opens the plan or
-#: tasks file for writing without changing it; a tasks dir gets a file created
-#: and removed). A repo-wide grant hands over no positive target: its `$TMPDIR`
-#: write is the control, and nothing is created in the user's source tree
+#: negative — creating a file in the workdir (`.multi-llm/tmp`, prepared and
+#: proven writable *outside* the jail by the walk, or the out-of-repository
+#: directory `$MULTI_LLM_CANARY_WORKDIR` names for a repo-wide probe, whose
+#: root rule makes the in-repo one writable — root grant, 2026-10-05) must be
+#: denied; truncation — the seeded file (`$MULTI_LLM_CANARY_SEEDED`, in the
+#: same negative target) must not be truncatable, and the parent compares its
+#: bytes afterwards too; positive — a file created and removed in `$TMPDIR`,
+#: and for the `plan-file` and `tasks` scopes the dispatch's own declared
+#: target (`: >> <file>` opens the plan or tasks file for writing without
+#: changing it; a tasks dir gets a file created and removed). A repo-wide
+#: grant hands over no positive target: its `$TMPDIR` write is the control,
+#: and nothing is created in the user's source tree
 #: (`landlock_dispatch.canary_env` has the reasoning, 2026-10-02). Only when
 #: every control holds does it print SANDBOX_CANARY_DENIED (split, so an
 #: echoing CLI cannot forge it) and exit 0.
 PLUGIN_LANDLOCK_CANARY_SCRIPT = (
-    f'd={LANDLOCK_CANARY_WORKDIR}; f="$d/sandbox-canary-$$"; '
+    f'd="${{{CANARY_ENV_WORKDIR}:-{LANDLOCK_CANARY_WORKDIR}}}"; f="$d/sandbox-canary-$$"; '
     f'if [ ! -d "$d" ] || [ -z "${CANARY_ENV_SEEDED}" ] '
     f'|| [ -z "${CANARY_ENV_PYTHON}" ] || [ -z "$TMPDIR" ]; then '
     f'echo "{LANDLOCK_CANARY_SETUP_FAILED}" >&2; exit {LANDLOCK_CANARY_SETUP_EXIT}; fi; '
     'rc=0; '
     'if (: > "$f") 2>/dev/null; then rm -f "$f"; rc=3; fi; '
     '[ -e "$f" ] && rc=3; '
-    f'if [ -n "${CANARY_ENV_DENY_DIRS}" ]; then o="$IFS"; IFS=\'\n\'; set -f; '
-    f'for nd in ${CANARY_ENV_DENY_DIRS}; do '
-    f'if [ ! -d "$nd" ]; then echo "{LANDLOCK_CANARY_TARGET_FAILED}" >&2; '
-    f'exit {LANDLOCK_CANARY_SETUP_EXIT}; fi; '
-    'g="$nd/sandbox-canary-$$"; '
-    'if (: > "$g") 2>/dev/null; then rm -f "$g"; rc=3; fi; '
-    '[ -e "$g" ] && rc=3; done; IFS="$o"; set +f; fi; '
     f'"${CANARY_ENV_PYTHON}" -I -S -c \'{_TRUNCATE_SNIPPET}\' "${CANARY_ENV_SEEDED}" '
     '2>/dev/null; t=$?; '
     'if [ "$t" -eq 0 ]; then rc=3; '
@@ -506,8 +494,13 @@ _RUNGS_BY_NAME = {rung.name: rung for rung in SANDBOX_FALLBACK_RUNGS}
 #: developer message). Rendered only on the plugin-landlock rung.
 JAIL_DEVELOPER_INSTRUCTIONS = (
     "Filesystem writes are restricted, whatever your environment context says "
-    "about sandboxing. Write scratch files only under {tmpdir} (also $TMPDIR). "
-    "Every other write, including anywhere in the repository, is denied."
+    "about sandboxing. Write scratch files only under {tmpdir} (also $TMPDIR)."
+)
+#: The closing clause of the scratch sentence for the two narrow scopes
+#: (`plan-file`, `tasks`); a `repo-wide` grant says instead that the
+#: repository is writable (`JAIL_DEVELOPER_TARGET_REPO`).
+JAIL_DEVELOPER_DENIED_ELSEWHERE = (
+    " Every other write, including anywhere in the repository, is denied."
 )
 #: The write scope's sentence (step 3), appended after the scratch sentence.
 JAIL_DEVELOPER_TARGET_DIR = (
@@ -525,20 +518,21 @@ JAIL_DEVELOPER_TARGET_FILE = (
     "save through a temporary file and a rename, mv over it, or deleting and "
     "re-creating it."
 )
-#: The repo-wide grant's sentences (step 3b, 2026-10-02): what the enumeration
-#: grants, what it protects, and the two shapes a top-level entry cannot take
-#: (F1 "Protected paths": the root and each enumerated ancestor get no rule).
+#: The repo-wide grant's sentences (step 3b revised, 2026-10-05, a user
+#: decision): the whole repository is writable — one dir rule on its root —
+#: and the hands-off set (`landlock_dispatch.REPO_WIDE_HANDS_OFF_NAMES`, the
+#: run's output folder, the policy's denied paths) is an instruction, not a
+#: rule: nothing is backed up around a batch, and a write there is what the
+#: post-run sweep, `driver.write_paths` and the `[GIT_CONFIG_CHANGED]` line
+#: report afterwards.
 JAIL_DEVELOPER_TARGET_REPO = (
-    " You may edit existing files anywhere in the repository {root} and create "
-    "files inside its existing subdirectories, except these, which are denied: "
-    ".git/, .codex/, .multi-llm/, this run's output folder {output_dir}, and "
-    "the paths driver.write_paths denies; a configured git hooks directory "
-    "(core.hooksPath) and the providers config file are denied too when they "
-    "lie inside the repository. The repository root itself{ancestors} "
-    "is not writable: nothing can be created, renamed or deleted directly "
-    "there (a missing .venv, node_modules or lock file cannot be made there), "
-    "and a top-level file can only be edited in place with apply_patch or a "
-    "shell redirect, never replaced (sed -i, a temp-file save, mv)."
+    " The whole repository {root} is writable: create, edit, rename or delete "
+    "files anywhere under it as your task requires, including directly in its "
+    "root; every write outside it is denied. Do NOT modify .git/ (no git add, "
+    "commit, stash, checkout, restore, reset or fetch; no edits to .git/config "
+    "or .git/hooks/), .codex/, .multi-llm/, this run's output folder "
+    "{output_dir}, or any path driver.write_paths denies: the jail does not "
+    "enforce this, and a change there fails the batch or is flagged afterwards."
 )
 #: Step 1b's decision (measured 2026-10-02 on codex 0.160.0), for `repo-wide`
 #: only: the toolchain paths that stay denied, so the runner reads such an
@@ -557,9 +551,12 @@ JAIL_DEVELOPER_DENIED_TOOLCHAIN = (
 #: npm's cache are redirected instead (`landlock_dispatch.child_env_redirects`);
 #: git commands that write `.git/` stay denied, and npm's own EACCES advice
 #: ("sudo chown -R … ~/.npm") is wrong under the jail, hence the last sentence.
-JAIL_DEVELOPER_DENIED_PATHS = (
+JAIL_DEVELOPER_DENIED_GIT = (
     " Git commands that write .git/ (add, commit, stash, checkout, restore, "
-    "fetch) are denied. npm and npx use a per-dispatch cache under $TMPDIR. A "
+    "fetch) are denied."
+)
+JAIL_DEVELOPER_DENIED_PATHS = (
+    " npm and npx use a per-dispatch cache under $TMPDIR. A "
     "Permission denied error here comes from this restriction, not from file "
     "ownership: never try sudo or chown to work around it."
 )
@@ -578,37 +575,33 @@ def jail_developer_instructions(context: JailContext) -> str:
     fallback). The lane decided ``target_dir``; nothing is guessed here.
     """
     text = JAIL_DEVELOPER_INSTRUCTIONS.format(tmpdir=context.tmpdir)
-    if context.write_scope == WRITE_SCOPE_REPO_WIDE:
+    repo_wide = context.write_scope == WRITE_SCOPE_REPO_WIDE
+    if repo_wide:
         text += repo_wide_developer_sentences(context)
-    elif context.write_scope and context.target:
-        if context.target_dir:
-            text += JAIL_DEVELOPER_TARGET_DIR.format(target=context.target_dir)
-        else:
-            text += JAIL_DEVELOPER_TARGET_FILE.format(target=context.target)
-    if JAIL_DEVELOPER_DENIED_PATHS:
-        text += JAIL_DEVELOPER_DENIED_PATHS
-    if context.write_scope == WRITE_SCOPE_REPO_WIDE:
+    else:
+        text += JAIL_DEVELOPER_DENIED_ELSEWHERE
+        if context.write_scope and context.target:
+            if context.target_dir:
+                text += JAIL_DEVELOPER_TARGET_DIR.format(target=context.target_dir)
+            else:
+                text += JAIL_DEVELOPER_TARGET_FILE.format(target=context.target)
+        text += JAIL_DEVELOPER_DENIED_GIT
+    text += JAIL_DEVELOPER_DENIED_PATHS
+    if repo_wide:
         text += JAIL_DEVELOPER_DENIED_TOOLCHAIN
     return text
 
 
 def repo_wide_developer_sentences(context: JailContext) -> str:
-    """The ``repo-wide`` grant's sentences, naming the root, this run's output
-    folder and each enumerated ancestor (``plans/`` above the output folder),
-    from the same enumeration the allow-list is built from."""
+    """The ``repo-wide`` grant's sentences, naming the root the dir rule sits
+    on and this run's output folder (root grant, 2026-10-05)."""
     try:
-        from ..landlock_dispatch import repo_wide_plan
+        from ..landlock_dispatch import repo_wide_root
     except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.landlock_dispatch import repo_wide_plan  # type: ignore[no-redef]
-    plan = repo_wide_plan(context.request)
-    ancestors = ""
-    if plan.ancestors:
-        ancestors = " (and " + ", ".join(
-            os.path.relpath(a, plan.root) + "/" for a in plan.ancestors
-        ) + ")"
+        from utils.landlock_dispatch import repo_wide_root  # type: ignore[no-redef]
     output_dir = context.output_dir or "(none)"
     return JAIL_DEVELOPER_TARGET_REPO.format(
-        root=plan.root, output_dir=output_dir, ancestors=ancestors,
+        root=repo_wide_root(context.request), output_dir=output_dir,
     )
 
 
@@ -1010,8 +1003,8 @@ def _require_write_context(profile: str, context: Optional[JailContext]) -> None
             f"{scope!r} write scope (served: {', '.join(WRITE_SCOPES_ON_RUNG)})"
         )
     if scope == WRITE_SCOPE_REPO_WIDE:
-        # The grant is the enumeration of the repository root at dispatch
-        # (step 3b); it names no single target.
+        # The grant is one dir rule on the repository root (step 3b, revised
+        # 2026-10-05); it names no single target.
         return
     if not getattr(context, "target", None):
         raise ValueError(

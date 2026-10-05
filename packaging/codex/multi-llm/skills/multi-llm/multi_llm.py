@@ -139,6 +139,9 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "check-reply": ("utils.check_reply", "main",
                     "Check the replies persisted for a task file's batches "
                     "parse and cover their groups."),
+    "write-prompt": ("utils.write_prompt", "main",
+                     "Write one write batch's prompt, prior-batch context "
+                     "bound now and the result contract appended."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }
 
@@ -662,6 +665,18 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
         )
         print()
         print(f"  {dispatcher_command(mode.name)} --help")
+        if mode.name == "status":
+            # 2026-10-04 (Claude Code racing re-run): a host reading `status`
+            # only to report it showed "Exit code 2" as a tool error. The code
+            # is the poll contract and never moves; the read step says so.
+            print()
+            print(
+                "Read its output, not its exit code: exit code 2 is not a "
+                "failure — it means no run is recorded (every phase a host ran "
+                "in the foreground) or one is still running, the poll "
+                "contract; 0 and 3 are a finished run's verdict, and only 1 is "
+                "an error (the phase dir could not be read)."
+            )
         # The end marker is unconditional across `util instructions`, so "search
         # for the end line" is a rule with no exception for a reader to hold. This
         # branch's answer is a few hundred characters and can never be truncated;

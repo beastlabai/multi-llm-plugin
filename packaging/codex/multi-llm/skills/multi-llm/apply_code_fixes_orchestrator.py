@@ -552,16 +552,13 @@ class ApplyCodeFixesOrchestrator(ApplyOrchestratorBase[Dict[str, Any], CodeFixBa
     item_noun_plural = "fixes"
     supports_revalidation = True
     supports_skip_flag = False
-    # Stays False, deliberately: `run()` APPLIES NOTHING. It emits batch JSON and
-    # returns; the bytes are written afterwards by the host following
-    # `instructions/apply-code-fixes.md`. The base's completion write sits on the
-    # emit path, so flipping this to True would record the phase complete before
-    # a single batch had been executed or verified — a claim about work handed
-    # out, not about work done. Completion is recorded by the host's post-loop
+    # `run()` APPLIES NOTHING: it emits batch JSON and returns, and the bytes are
+    # written afterwards by the host following `instructions/apply-code-fixes.md`.
+    # The base therefore records the phase *started* at emit time, never
+    # completed. Completion is recorded by the host's post-loop
     # `apply-code-fixes --plan-file … --mark-completed` (that instruction's final
     # step), or by `WriteBatchScheduler._finalize` under `--exec-subagents`; both
     # run only once every batch is verified.
-    marks_phase_completed = False
     # Partitioned by `file_key`, so batches MAY co-schedule — subject to
     # driver.max_concurrent_write_subagents and the disjointness check (D3h).
     write_kind = "apply_code_fixes"
@@ -621,10 +618,10 @@ Finalization (run by the host AFTER every batch has been applied and verified):
         """,
             include_revalidation=True,
             include_output_format=True,
-            # The native path's completion write. `marks_phase_completed` is False
-            # (see the declaration above), so this flag is the ONLY way a native
-            # run records `apply-code-fixes` in `phases_completed` — issued by the
-            # host after the batch loop, never by the emit path.
+            # The native path's completion write: the emit path records the
+            # phase started (see above), so this flag is the ONLY way a native
+            # run records `apply-code-fixes` in `phases_completed` — issued by
+            # the host after the batch loop.
             include_mark_completed=True,
             include_base_ref=True,
             include_approve_validation_failed=True,

@@ -201,11 +201,36 @@ def load_phase_schema(
 # Transport preconditions — measured, per CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: The ``type`` names OpenAI's strict structured output accepts.
+_STRICT_TYPES = frozenset(
+    {"string", "number", "integer", "boolean", "object", "array", "null"}
+)
+
+#: Keywords OpenAI's strict structured output rejects (its "Supported schemas"
+#: section: composition other than ``anyOf``, the conditional and dependency
+#: keywords, and the object/array keywords it lists as unsupported). A schema
+#: carrying one is declined here rather than handed to the API to refuse.
+_STRICT_UNSUPPORTED_KEYWORDS = (
+    "allOf", "oneOf", "not", "if", "then", "else",
+    "dependencies", "dependentRequired", "dependentSchemas",
+    "patternProperties", "unevaluatedProperties", "propertyNames",
+    "minProperties", "maxProperties",
+    "unevaluatedItems", "contains", "minContains", "maxContains",
+    "uniqueItems", "additionalItems", "prefixItems",
+)
+
+#: The ``format`` values OpenAI's strict structured output documents.
+_STRICT_FORMATS = frozenset(
+    {"date-time", "time", "date", "duration", "email", "hostname", "ipv4",
+     "ipv6", "uuid"}
+)
+
+
 def _strict_openai_errors(
     node: Any,
     path: str = "<root>",
     root: Optional[Dict[str, Any]] = None,
-    seen: Optional[set] = None,
+    visited: Optional[set] = None,
 ) -> List[str]:
     """Where ``node`` breaks OpenAI's *strict* structured-output subset.
 
@@ -215,41 +240,88 @@ def _strict_openai_errors(
     'additionalProperties' is required to be supplied and to be false``. So the
     constraint is the vendor's, not ours.
 
-    **Necessary conditions, not a complete strict-mode validator.** It encodes
-    the two rules the measurement showed; a schema that passes here may still be
-    refused by the API for a keyword this does not model. That refusal is not a
-    silent one — it arrives as ``invalid_json_schema`` on the stream and
-    :func:`classify_attempt` turns it into :data:`FAILURE_CONFIG_ERROR`, naming
-    the file, never retried and never billed. Over-approximating the other way
-    (declaring more schemas transportable than are) is the failure mode this
-    ordering avoids.
+    **Measured again 2026-10-04 (codex-cli 0.160.0, gpt-6-luna):** this check
+    used to encode only that rule and "every property required", so
+    ``generated_tasks.schema.json``'s ``"schema_version": {"const": "1.0"}``
+    passed it, codex was handed the file, and the API refused every
+    generate-tasks dispatch with ``invalid_json_schema … In
+    context=('properties', 'schema_version'), schema must have a 'type' key``
+    (HTTP 400, rung 7, deterministic). A check that passes a schema the API
+    refuses is the expensive direction — a dead phase instead of a ``recovered``
+    one — so it now models every rule of OpenAI's documented subset it can read
+    off the document:
 
-    Local ``$ref`` pointers are followed, because that is where the real
-    violations hide: ``generated_tasks.schema.json``'s root is strict-clean and
-    its ``$defs`` are not.
+    * every schema node carries ``type`` (a name or a list of names from
+      :data:`_STRICT_TYPES`), unless it is a ``$ref`` or an ``anyOf`` of typed
+      branches — ``const`` and ``enum`` do not stand in for it;
+    * the root is an object and not an ``anyOf``;
+    * every object has ``additionalProperties: false`` and lists every property
+      in ``required`` (an optional one is spelled nullable instead);
+    * every array has a single ``items`` schema;
+    * no keyword from :data:`_STRICT_UNSUPPORTED_KEYWORDS`, no ``format``
+      outside :data:`_STRICT_FORMATS`, and only local ``$ref`` pointers that
+      resolve;
+    * every ``$defs``/``definitions`` entry is checked, referenced or not.
+
+    ``minLength``/``maxLength``/``pattern``/``minItems`` are **not** refused:
+    OpenAI's own pages disagree about them, and the same 2026-10-04 run, once
+    ``type`` was added, had ``minLength`` and ``pattern`` accepted in strict
+    mode. Still necessary conditions rather than the API's own validator — a
+    refusal this does not model arrives as ``invalid_json_schema`` and
+    :func:`classify_attempt` makes it rung 7, naming the file.
     """
     errors: List[str] = []
     if not isinstance(node, dict):
-        return errors
-    if root is None:
+        return [f"{path}: a schema must be an object, got {type(node).__name__}"]
+    top = root is None
+    if top:
         root = node
-    if seen is None:
-        seen = set()
+        visited = set()
+        if "anyOf" in node:
+            errors.append(f"{path}: the root may not be an anyOf")
 
     ref = node.get("$ref")
-    if isinstance(ref, str):
-        if ref in seen or not ref.startswith("#/"):
+    if ref is not None:
+        if not isinstance(ref, str) or not ref.startswith("#"):
+            return errors + [f"{path}: only local $ref pointers are supported ({ref!r})"]
+        if ref == "#" or ref in visited:
+            # The root is walked anyway; a visited pointer was checked once.
             return errors
-        seen = seen | {ref}
+        visited.add(ref)
         target: Any = root
         for part in ref[2:].split("/"):
+            part = part.replace("~1", "/").replace("~0", "~")
             if not isinstance(target, dict) or part not in target:
-                return errors
+                return errors + [f"{path}: $ref {ref} does not resolve"]
             target = target[part]
-        return _strict_openai_errors(target, path, root, seen)
+        return errors + _strict_openai_errors(target, path, root, visited)
 
-    node_type = node.get("type")
-    if node_type == "object" or "properties" in node:
+    for keyword in _STRICT_UNSUPPORTED_KEYWORDS:
+        if keyword in node:
+            errors.append(f"{path}: {keyword!r} is not supported")
+    fmt = node.get("format")
+    if fmt is not None and fmt not in _STRICT_FORMATS:
+        errors.append(f"{path}: format {fmt!r} is not supported")
+
+    declared = node.get("type")
+    names = declared if isinstance(declared, list) else [declared]
+    if "anyOf" in node:
+        branches = node.get("anyOf")
+        if not isinstance(branches, list) or not branches:
+            errors.append(f"{path}: anyOf must be a non-empty list")
+        else:
+            for index, sub in enumerate(branches):
+                errors.extend(_strict_openai_errors(
+                    sub, f"{path}.anyOf[{index}]", root, visited
+                ))
+    elif declared is None:
+        errors.append(f"{path}: schema must have a 'type' key")
+    else:
+        unknown = [n for n in names if n not in _STRICT_TYPES]
+        if unknown or not names:
+            errors.append(f"{path}: unsupported type {declared!r}")
+
+    if "object" in names or "properties" in node:
         if node.get("additionalProperties") is not False:
             errors.append(f"{path}: additionalProperties must be present and false")
         properties = node.get("properties") or {}
@@ -261,15 +333,24 @@ def _strict_openai_errors(
                 f"{', '.join(missing)}"
             )
         for name, sub in properties.items():
-            errors.extend(_strict_openai_errors(sub, f"{path}.{name}", root, seen))
-    items = node.get("items")
-    if isinstance(items, dict):
-        errors.extend(_strict_openai_errors(items, f"{path}[]", root, seen))
-    for keyword in ("allOf", "anyOf", "oneOf"):
-        for index, sub in enumerate(node.get(keyword) or ()):
-            errors.extend(
-                _strict_openai_errors(sub, f"{path}.{keyword}[{index}]", root, seen)
-            )
+            errors.extend(_strict_openai_errors(sub, f"{path}.{name}", root, visited))
+    if "array" in names or "items" in node:
+        items = node.get("items")
+        if not isinstance(items, dict):
+            errors.append(f"{path}: an array needs one 'items' schema")
+        else:
+            errors.extend(_strict_openai_errors(items, f"{path}[]", root, visited))
+
+    if top:
+        for container in ("$defs", "definitions"):
+            for name, sub in (node.get(container) or {}).items():
+                ref_name = f"#/{container}/{name}"
+                if ref_name in visited:
+                    continue
+                visited.add(ref_name)
+                errors.extend(_strict_openai_errors(
+                    sub, f"{path}.{container}.{name}", root, visited
+                ))
     return errors
 
 
@@ -297,7 +378,9 @@ def native_transport_error(
       consumer, not something M7 may do at a call site.
     * **codex** — ``--output-schema`` is OpenAI *strict* structured output, a
       proper subset of draft-07 (object root, ``additionalProperties: false`` on
-      every object, every property in ``required``).
+      every object, every property in ``required``, a ``type`` on every node,
+      no composition but ``anyOf`` — :func:`_strict_openai_errors` has the
+      whole list and the 2026-10-04 400 that grew it).
     """
     if not getattr(provider, "structured_output_support", False):
         return (

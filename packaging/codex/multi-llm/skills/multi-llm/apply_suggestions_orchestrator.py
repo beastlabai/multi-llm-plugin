@@ -67,7 +67,6 @@ class ApplySuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Suggest
     item_noun = "suggestion"
     supports_revalidation = True
     supports_skip_flag = True
-    marks_phase_completed = True
     guard_double_nesting = False
     # One shared artifact (the plan), so batches are strictly sequential (D3h).
     write_kind = "apply_suggestions"
@@ -113,6 +112,7 @@ Bulk Approval Examples:
             include_approve_validation_failed=True,
             include_revalidate_all_human=True,
             include_internal_revalidation=True,
+            include_mark_completed=True,
         )
         return parser.parse_args(argv)
 

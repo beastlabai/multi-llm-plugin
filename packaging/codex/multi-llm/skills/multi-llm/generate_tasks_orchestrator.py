@@ -34,7 +34,10 @@ share one implementation and every host can reach it:
    ``schemas/generated_tasks.schema.json`` plus the semantic rules
    ``utils/task_decomposer.py`` owns (unique ``T###`` ids, ``depends_on`` naming
    only declared ids, acyclic, at least one dependency-free task). A failure is
-   D3k rung 6 (``schema_invalid``, **never** retried) and nothing is written.
+   D3k rung 6 (``schema_invalid``) and nothing is written. On the executor lane
+   a reply that fails the schema first gets **one** schema-repair re-ask on the
+   same runner (the retry ladder's rule 7, ``SCHEMA_REPAIRS_BY_KIND``); nothing
+   else retries it.
 5. **The consumer is ``update_plan_tasks.py``, invoked in-process**, and the
    *outcome* is verified rather than the subagent's claim: a fresh
    ``<!-- TASKS_FILE: … -->`` marker, a rendered tasks file that exists and
@@ -530,13 +533,14 @@ def consume_document(plan_path: Path, result_path: str) -> int:
         phase_dir, tasks=str(tasks_path), plan=str(plan_path)
     )
     _update_status(phase_dir, {"state": "complete"})
-    # The count is this phase's whole output, so report it: `_progress_text`
-    # renders `tasks_total`/`tasks_done`, and a step-only report left `status`
-    # printing the one subagent that produced the list (`task_generation 1/1
-    # ok`) as the only number on screen.
-    _detach.report_progress(
-        phase_dir, step="complete", tasks_total=len(tasks), tasks_done=len(tasks)
-    )
+    # The count is this phase's whole output, so report it: a step-only report
+    # left `status` printing the one subagent that produced the list
+    # (`task_generation 1/1 ok`) as the only number on screen. It is what this
+    # run PRODUCED (`generated N tasks`), never a done/total pair: the
+    # `tasks 10/10` that pair rendered read as a live count of tasks.md, and
+    # stayed 10/10 after apply-task-suggestions split two tasks into four
+    # (2026-10-04, Claude Code racing re-run).
+    _detach.report_progress(phase_dir, step="complete", tasks_generated=len(tasks))
     print(f"\nTask generation complete: {len(tasks)} task(s) in {tasks_path}")
     # No "Next: uv run … review-tasks" line here (issue #17, 2026-10-02): it sat
     # beside `[NEXT_COMMAND]` in the log, and a dispatcher command is not a
