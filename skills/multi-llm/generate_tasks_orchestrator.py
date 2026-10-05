@@ -88,7 +88,7 @@ from utils.subagent_tasks import (
     tasks_of,
     write_task_file,
 )
-from utils.task_decomposer import TaskDecomposer, validate_generated_tasks
+from utils.task_decomposer import TaskDecomposer
 from utils import unattended as unattended_mod
 
 #: The ``state.json`` phase / phase-dir name.
@@ -330,14 +330,33 @@ def validate_document(data: Any) -> List[str]:
     The schema pins the shape; ``utils/task_decomposer.validate_generated_tasks``
     owns the four rules the *graph* has to satisfy for every later phase (batching,
     dependency walks, the human-task strategies) to mean anything. Both run before
-    a byte reaches the plan.
+    a byte reaches the plan — and both are the executor's own verdict for this
+    kind (``subagent_executor.validate_result``), so a document that fails either
+    gets the executor lane's schema-repair re-ask and is never persisted.
     """
     from utils.subagent_executor import validate_result
 
-    errors = list(validate_result(TASK_KIND, data))
-    if errors:
-        return errors
-    return validate_generated_tasks(data.get("tasks") or [])
+    return list(validate_result(TASK_KIND, data))
+
+
+def stale_result_problems(result_path: str) -> List[str]:
+    """Why the result file on disk may not be resumed from, or ``[]``.
+
+    The same verdict ``consume_document`` would reach, taken on a completed
+    *copy* (the omitted list keys it would supply), so asking changes nothing
+    on disk.
+    """
+    import copy
+
+    from utils.subagent_executor import normalize_result
+
+    try:
+        data = json.loads(Path(result_path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
+        return [f"it could not be read as JSON ({exc})"]
+    data = copy.deepcopy(data)
+    normalize_result(TASK_KIND, data)
+    return validate_document(data)
 
 
 # ---------------------------------------------------------------------------
@@ -460,13 +479,20 @@ def consume_document(plan_path: Path, result_path: str) -> int:
 
     errors = validate_document(data)
     if errors:
+        # Reached with a document the executor did not write: the executor
+        # validates the same rules before it persists anything, and re-asks
+        # its runner once first. A `--reaggregate` only consumes the reply on
+        # disk, so nothing here re-asks it.
         return _fail(
             f"ERROR: the task-generation document in {result_path} is invalid "
-            f"(schema_invalid, D3k rung 6 — deliberately NOT retried: a "
-            f"deterministic disagreement a retry would only launder):\n"
+            f"(schema_invalid, D3k rung 6):\n"
             + "\n".join(f"  - {problem}" for problem in errors[:10])
-            + "\n       Nothing was written to the plan. Fix the document, or "
-            f"re-run with --force to re-dispatch task {TASK_ID}."
+            + "\n       Nothing was written to the plan. This run only consumes "
+            f"the reply on disk, so nothing re-asked it (with --exec-subagents "
+            f"the executor re-asks its runner once with these errors before it "
+            f"fails). Re-ask the subagent once with these errors and write its "
+            f"reply over this file, or re-invoke the phase without --reaggregate: "
+            f"that archives this document and re-dispatches task {TASK_ID}."
         )
 
     tasks = data.get("tasks") or []
@@ -632,13 +658,43 @@ def run_generate_tasks(
 
     # Resume is defined by artifacts (D3i): a completed dispatch left a valid
     # result file, so re-invoking the phase consumes it instead of paying for a
-    # second dispatch. `--force` is the way to override that.
+    # second dispatch. `--force` is the way to override that. Only a VALID one:
+    # a document that fails the schema or the graph rules (a native host's
+    # reply `--reaggregate` refused, or one an older build persisted) would fail
+    # the consumer identically on every re-invoke, so it is archived and the
+    # task re-dispatched — the executor's own resume rule (`task_is_complete`)
+    # reads it the same way (fix round 6).
     if os.path.exists(result_path) and not args.force:
-        print(
-            f"[resume] {RESULT_NAME} already exists in {phase_dir}; consuming it "
-            f"instead of re-dispatching (pass --force to re-dispatch)."
+        problems = stale_result_problems(result_path)
+        if not problems:
+            print(
+                f"[resume] {RESULT_NAME} already exists in {phase_dir}; consuming "
+                f"it instead of re-dispatching (pass --force to re-dispatch)."
+            )
+            return consume_document(plan_path, result_path)
+        summary = problems[0] + (
+            f" (+{len(problems) - 1} more)" if len(problems) > 1 else ""
         )
-        return consume_document(plan_path, result_path)
+        if getattr(args, "dry_run_subagents", False):
+            print(
+                f"[dry-run-subagents] the existing {RESULT_NAME} is invalid "
+                f"({summary}); keeping it, since no child is started to replace "
+                f"it. The real run archives it and re-dispatches task {TASK_ID}."
+            )
+        else:
+            try:
+                archived = archive_file(Path(result_path))
+            except OSError as exc:
+                return _fail(
+                    f"ERROR: the existing {RESULT_NAME} in {phase_dir} is invalid "
+                    f"({summary}) and could not be moved aside: {exc}\n"
+                    f"       Remove or rename it by hand, then re-run."
+                )
+            print(
+                f"[resume] the existing {RESULT_NAME} is invalid ({summary}); "
+                f"archived it as {archived} and re-dispatching task {TASK_ID} "
+                f"instead of consuming it."
+            )
 
     if args.force and os.path.exists(result_path):
         # Skipping the branch above is not enough: the executor's resume rule is

@@ -5121,7 +5121,18 @@ def validate_result(kind: str, data: Any) -> List[str]:
     if kind == "human_decision_judge":
         return validate_human_decision_verdicts(data)
     if kind == "task_generation":
-        return validate_with_schema_file(data, "generated_tasks.schema.json")
+        # The schema pins the shape; `task_decomposer.validate_generated_tasks`
+        # owns the graph rules every later phase depends on (unique T### ids,
+        # `depends_on` naming declared ids, acyclic, a dependency-free task).
+        # Both are this kind's result shape (fix round 6): a document that only
+        # the consumer refused used to be persisted `ok`, get no schema-repair
+        # re-ask, and count as done to `task_is_complete` on the next run.
+        errors = validate_with_schema_file(data, "generated_tasks.schema.json")
+        if errors:
+            return errors
+        from .task_decomposer import validate_generated_tasks
+
+        return validate_generated_tasks(data.get("tasks") or [])
     if kind == "salvage":
         return _salvage_result_errors(data)
     if kind in WRITE_KINDS:

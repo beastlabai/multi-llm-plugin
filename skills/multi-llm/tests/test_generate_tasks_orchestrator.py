@@ -355,7 +355,7 @@ class TestDocumentValidation:
         code, before = self._run_with(plan, broken)
         err = capsys.readouterr().err
         assert code == 3
-        assert "schema_invalid" in err and "NOT retried" in err
+        assert "schema_invalid" in err and "nothing re-asked it" in err
         assert plan.read_bytes() == before
         assert not _tasks_md(plan).exists()
 
@@ -1183,3 +1183,178 @@ class TestSchemaRepairReAsk:
         assert len(prompts) == 1
         attempts = self._report(plan)["tasks"][0]["attempts"]
         assert [a.get("repair") for a in attempts] == [None]
+
+
+# ---------------------------------------------------------------------------
+# The semantic rules are part of the executor's verdict (fix round 6)
+# ---------------------------------------------------------------------------
+
+def _cyclic_document() -> dict:
+    """Schema-valid, and every task depends on another: no task can start."""
+    document = _valid_document()
+    document["tasks"][0]["depends_on"] = ["T002"]
+    document["tasks"][1]["depends_on"] = ["T001"]
+    return document
+
+
+class TestSemanticRulesOnTheExecutorLane:
+    """``validate_generated_tasks`` used to run only in ``consume_document``,
+    after the executor had persisted the document as ``ok``: a cyclic reply was
+    exit 3 with no re-ask, and a plain re-invoke then re-consumed the same bad
+    file through ``[resume]`` (only ``--force`` escaped)."""
+
+    def _report(self, plan: Path) -> dict:
+        return json.loads(
+            (_phase_dir(plan) / "subagent_batch_report.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def test_validate_result_runs_the_graph_rules(self):
+        from utils.subagent_executor import validate_result
+
+        assert validate_result("task_generation", _valid_document()) == []
+        problems = validate_result("task_generation", _cyclic_document())
+        assert any("cycle" in problem for problem in problems), problems
+
+    def test_a_cyclic_result_on_disk_is_not_complete(self, tmp_path):
+        from utils.subagent_executor import task_is_complete
+
+        plan = _plan(tmp_path)
+        task = _materialize(plan)
+        path = _phase_dir(plan) / RESULT_NAME
+        path.write_text(json.dumps(_cyclic_document()), encoding="utf-8")
+        assert task_is_complete(task, str(_phase_dir(plan))) is False
+        path.write_text(json.dumps(_valid_document()), encoding="utf-8")
+        assert task_is_complete(task, str(_phase_dir(plan))) is True
+
+    def test_a_cyclic_reply_gets_the_re_ask(
+        self, tmp_path, exec_env, scripted_runner, capsys
+    ):
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner(_cyclic_document(), _valid_document())
+        plan = _plan(tmp_path)
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--exec-subagents"])
+        out = capsys.readouterr().out
+
+        assert code == 0, out
+        assert _tasks_md(plan).exists()
+        assert len(prompts) == 2
+        assert "## Your previous reply was rejected" in prompts[1]
+        assert "cycle" in prompts[1]
+        row = self._report(plan)["tasks"][0]
+        assert [(a["attempt"], a["status"], a.get("repair")) for a in row["attempts"]] == [
+            (1, "schema_invalid", None),
+            (2, "ok", "schema_invalid"),
+        ]
+
+    def test_a_cyclic_reply_twice_persists_nothing(
+        self, tmp_path, exec_env, scripted_runner, capsys
+    ):
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner(_cyclic_document(), _cyclic_document())
+        plan = _plan(tmp_path)
+        before = plan.read_bytes()
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--exec-subagents"])
+        capsys.readouterr()
+
+        assert code == 3
+        assert len(prompts) == 2
+        assert plan.read_bytes() == before
+        assert not (_phase_dir(plan) / RESULT_NAME).exists(), (
+            "a rule-invalid document reached the result path"
+        )
+        row = self._report(plan)["tasks"][0]
+        assert row["status"] == "schema_invalid"
+        assert "cycle" in row["reason"]
+
+    def test_a_stale_invalid_result_is_archived_and_re_dispatched(
+        self, tmp_path, exec_env, scripted_runner, capsys
+    ):
+        """A plain re-invoke never resumes from a document that fails
+        validation: it sets the file aside and dispatches again."""
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner(_valid_document())
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        stale = _phase_dir(plan) / RESULT_NAME
+        stale.write_text(json.dumps(_cyclic_document()), encoding="utf-8")
+        capsys.readouterr()
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--exec-subagents"])
+        out = capsys.readouterr().out
+
+        assert code == 0, out
+        assert "[resume] " in out and "is invalid" in out
+        assert "consuming it instead of re-dispatching" not in out
+        assert len(prompts) == 1, "the task was dispatched again"
+        assert _tasks_md(plan).exists()
+        archived = [
+            p for p in _phase_dir(plan).iterdir()
+            if p.name.startswith(Path(RESULT_NAME).stem) and p.name != RESULT_NAME
+        ]
+        assert len(archived) == 1, archived
+        assert json.loads(archived[0].read_text(encoding="utf-8")) == _cyclic_document()
+
+    def test_the_native_path_re_materializes_instead_of_consuming(
+        self, tmp_path, capsys
+    ):
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        (_phase_dir(plan) / RESULT_NAME).write_text(
+            json.dumps(_cyclic_document()), encoding="utf-8"
+        )
+        capsys.readouterr()
+
+        assert multi_llm.main(["generate-tasks", str(plan)]) == 0
+        out = capsys.readouterr().out
+
+        assert gto.PENDING_MARKER in out
+        assert not (_phase_dir(plan) / RESULT_NAME).exists()
+        assert not _tasks_md(plan).exists()
+
+    def test_dry_run_subagents_keeps_the_invalid_result(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        stale = _phase_dir(plan) / RESULT_NAME
+        stale.write_text(json.dumps(_cyclic_document()), encoding="utf-8")
+        capsys.readouterr()
+
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--dry-run-subagents"]
+        ) == 0
+        out = capsys.readouterr().out
+
+        assert "[dry-run-subagents]" in out and "is invalid" in out
+        assert stale.exists()
+        assert not _tasks_md(plan).exists()
+
+    def test_a_valid_result_on_disk_still_resumes(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        document = _valid_document()
+        for task in document["tasks"]:
+            task.pop("files_to_create")  # completed on consume, so still valid
+        (_phase_dir(plan) / RESULT_NAME).write_text(
+            json.dumps(document), encoding="utf-8"
+        )
+        assert multi_llm.main(["generate-tasks", str(plan)]) == 0
+        out = capsys.readouterr().out
+        assert "consuming it instead of re-dispatching" in out
+        assert _tasks_md(plan).exists()
+
+    def test_the_reaggregate_failure_says_what_each_lane_does(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        _materialize(plan)
+        (_phase_dir(plan) / RESULT_NAME).write_text(
+            json.dumps(_cyclic_document()), encoding="utf-8"
+        )
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--yes", "--reaggregate"]
+        ) == 3
+        err = capsys.readouterr().err
+        assert "NOT retried" not in err
+        assert "--exec-subagents" in err and "re-asks" in err
+        assert "without --reaggregate" in err
