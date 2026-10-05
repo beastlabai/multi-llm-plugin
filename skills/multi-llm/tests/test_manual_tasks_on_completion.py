@@ -137,6 +137,33 @@ class TestOnlyTheCurrentDeferralsAreOwed:
         state.save()
         assert StateManager(plan).deferred_implementation_tasks() == MANUAL[:1]
 
+    def test_the_recorded_graph_does_not_depend_on_the_task_lists_order(
+        self, tmp_path,
+    ):
+        """Fix round 13: each task's dependency list was stored in the order
+        tasks.md happened to list it, so the same graph recorded two ways
+        (and the container goldens that record `implement_task_depends_on`)
+        differed. Each list is sorted and de-duplicated now."""
+        plan = _complete_plan(tmp_path)
+        state = StateManager(plan)
+        assert state.record_task_titles(
+            TITLES, depends_on={
+                "T012": ["T011", "T003", "T011", "", "T001"],
+                "T011": ("T002", "T001"),
+                "T001": None,
+            },
+        ) is True
+        assert state.get("implement_task_depends_on") == {
+            "T001": [], "T011": ["T001", "T002"], "T012": ["T001", "T003", "T011"],
+        }
+        # The same graph in another order is no change.
+        assert state.record_task_titles(
+            TITLES, depends_on={
+                "T011": ["T001", "T002"], "T001": [],
+                "T012": ["T001", "T011", "T003"],
+            },
+        ) is False
+
     @staticmethod
     def _persist(plan, strategy, decisions=None):
         """The executor leg's own reasons, through its own persistence."""
