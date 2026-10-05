@@ -58,6 +58,9 @@ __all__ = [
     "build_salvage_prompt",
     "build_human_decision_judge_prompt",
     "build_task_generation_prompt",
+    "build_schema_repair_prompt",
+    "SCHEMA_REPAIR_SHAPES",
+    "TASK_GENERATION_REPLY_SHAPE",
     "render_reference_section",
     "reference_section_targets",
 ]
@@ -812,6 +815,40 @@ Acceptance criteria are **task-scoped, specific and verifiable**: each one descr
 `plan_preamble` is 3-5 sentences (roughly 200 tokens) of shared context injected into every task prompt: the overall goal/outcome, key architectural decisions, technology/library choices and global conventions.'''
 
 
+#: The reply contract the ``task_generation`` prompt ends with: the document
+#: skeleton and its four rules. A constant rather than inline text because two
+#: prompts carry it — :func:`build_task_generation_prompt` and the one
+#: schema-repair re-ask (:func:`build_schema_repair_prompt`) — and a repair that
+#: restated the shape in other words would be asking for a second document.
+TASK_GENERATION_REPLY_SHAPE = '''{
+  "schema_version": "1.0",
+  "plan_preamble": "<3-5 sentences of shared context>",
+  "tasks": [
+    {
+      "id": "T001",
+      "title": "<5-10 words>",
+      "description": "<what, how, interface contracts>",
+      "depends_on": [],
+      "files_to_create": ["path/from/repo/root"],
+      "files_to_modify": ["path/from/repo/root"],
+      "acceptance_criteria": ["<specific, verifiable outcome>"],
+      "estimated_complexity": "low|medium|high",
+      "executor_role": "agent|human"
+    }
+  ]
+}
+
+Rules:
+1. Ids are `T001`, `T002`, … — unique, zero-padded, in order.
+2. `depends_on` names only ids declared in this document, forms no cycle, and at
+   least one task has an empty `depends_on`.
+3. `executor_role` is "agent" for anything an agent can do and "human" only for
+   the manual cases listed in the rules above.
+4. `depends_on`, `files_to_create` and `files_to_modify` are always present —
+   `[]` when a task has none. Never drop a key because its list is empty.
+'''
+
+
 def build_task_generation_prompt(
     *,
     plan_text: str,
@@ -862,33 +899,61 @@ every task on what the code actually contains — never on the plan's prose alon
 Print ONE JSON object and nothing else — no prose, no markdown fences, no
 explanation. Do not write any file; whoever invoked you persists your reply.
 
-{{
-  "schema_version": "1.0",
-  "plan_preamble": "<3-5 sentences of shared context>",
-  "tasks": [
-    {{
-      "id": "T001",
-      "title": "<5-10 words>",
-      "description": "<what, how, interface contracts>",
-      "depends_on": [],
-      "files_to_create": ["path/from/repo/root"],
-      "files_to_modify": ["path/from/repo/root"],
-      "acceptance_criteria": ["<specific, verifiable outcome>"],
-      "estimated_complexity": "low|medium|high",
-      "executor_role": "agent|human"
-    }}
-  ]
-}}
+{TASK_GENERATION_REPLY_SHAPE}'''
 
-Rules:
-1. Ids are `T001`, `T002`, … — unique, zero-padded, in order.
-2. `depends_on` names only ids declared in this document, forms no cycle, and at
-   least one task has an empty `depends_on`.
-3. `executor_role` is "agent" for anything an agent can do and "human" only for
-   the manual cases listed in the rules above.
-4. `depends_on`, `files_to_create` and `files_to_modify` are always present —
-   `[]` when a task has none. Never drop a key because its list is empty.
-'''
+
+# ===========================================================================
+# the one schema-repair re-ask
+# ===========================================================================
+
+#: The reply shape a schema-repair re-ask restates, per kind. A kind absent here
+#: has no repair prompt — which is also why the executor's grant
+#: (``subagent_executor.SCHEMA_REPAIRS_BY_KIND``) can name only kinds listed
+#: here (a test pins it).
+SCHEMA_REPAIR_SHAPES: Dict[str, str] = {
+    "task_generation": TASK_GENERATION_REPLY_SHAPE,
+}
+
+#: How many validator errors a re-ask quotes. A wrong-shaped document can fail
+#: on every task; the first few name the mistake, and the shape below them
+#: states the whole contract anyway.
+SCHEMA_REPAIR_MAX_ERRORS = 12
+
+
+def build_schema_repair_prompt(
+    kind: str, original_prompt: str, errors: Sequence[str]
+) -> str:
+    """The original prompt, then why its reply was rejected and what to send.
+
+    Pure, like every generator here. The original prompt is kept whole — the
+    runner is re-asked the same question, not a shorter one, so a workspace-read
+    kind still explores what it needs — and the appendix quotes the validator's
+    own errors (never a paraphrase) followed by the kind's reply shape, verbatim.
+
+    Raises:
+        KeyError: ``kind`` has no entry in :data:`SCHEMA_REPAIR_SHAPES`.
+    """
+    shape = SCHEMA_REPAIR_SHAPES[kind]
+    listed = [str(error) for error in errors][:SCHEMA_REPAIR_MAX_ERRORS] or [
+        "(the validator gave no detail)"
+    ]
+    more = len(errors) - len(listed) if len(errors) > len(listed) else 0
+    bullets = "\n".join(f"- {line}" for line in listed)
+    if more:
+        bullets += f"\n- … and {more} more"
+    return f'''{original_prompt.rstrip()}
+
+## Your previous reply was rejected
+
+Your previous reply did not match the required JSON shape, so nothing was
+written. The validator reported:
+
+{bullets}
+
+Reply again with the corrected document: ONE JSON object of exactly this shape
+and nothing else — no prose, no markdown fences, no keys of your own.
+
+{shape}'''
 
 
 # ===========================================================================

@@ -34,7 +34,10 @@ share one implementation and every host can reach it:
    ``schemas/generated_tasks.schema.json`` plus the semantic rules
    ``utils/task_decomposer.py`` owns (unique ``T###`` ids, ``depends_on`` naming
    only declared ids, acyclic, at least one dependency-free task). A failure is
-   D3k rung 6 (``schema_invalid``, **never** retried) and nothing is written.
+   D3k rung 6 (``schema_invalid``) and nothing is written. On the executor lane
+   a reply that fails the schema first gets **one** schema-repair re-ask on the
+   same runner (the retry ladder's rule 7, ``SCHEMA_REPAIRS_BY_KIND``); nothing
+   else retries it.
 5. **The consumer is ``update_plan_tasks.py``, invoked in-process**, and the
    *outcome* is verified rather than the subagent's claim: a fresh
    ``<!-- TASKS_FILE: … -->`` marker, a rendered tasks file that exists and

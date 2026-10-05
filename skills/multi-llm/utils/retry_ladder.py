@@ -31,6 +31,15 @@ three-line loop:
 rule 2's two counters and rule 6's composition tests live. The only lane-specific
 lines are the dispatch call and the sleep.
 
+Rule 7 is this module's own, not §7.5's (2026-10-05): a caller may grant
+``schema_repairs`` — at most that many re-asks after a ``schema_invalid`` attempt,
+each returned as ``Action(retry=True, repair=True)`` and charged to the same
+deadline. The re-ask is a different request (the original prompt plus the
+validator's errors), so it is not the identical retry rung 6 forbids; what the
+caller sends is the caller's business, and the default of ``0`` leaves rung 6
+exactly as terminal as it was. Lane B grants one, for ``task_generation`` only
+(``subagent_executor.SCHEMA_REPAIRS_BY_KIND``).
+
 The status vocabulary and the D3k rung table live here rather than in
 ``subagent_executor`` because the ladder is now their only consumer;
 ``subagent_executor`` re-exports every name it used to define, so nothing that
@@ -186,6 +195,10 @@ STOP_FATAL = "fatal"
 STOP_TERMINAL = "terminal_status"
 STOP_VENDOR_ALREADY_RETRIED = "vendor_already_retried_rate_limit"
 
+#: The reason an :class:`Action` carries when it grants the schema-repair
+#: re-ask, and the value a lane records on the attempt that re-ask produces.
+REPAIR_SCHEMA_INVALID = "schema_invalid"
+
 
 @dataclass(frozen=True)
 class Action:
@@ -199,6 +212,10 @@ class Action:
     retry: bool
     delay: float = 0.0
     reason: Optional[str] = None
+    #: The next attempt is the one schema-repair re-ask (rule 7 below): the
+    #: caller re-sends the *same* runner its original prompt plus the
+    #: validator's errors, rather than the identical dispatch.
+    repair: bool = False
 
 
 class RetryLadder:
@@ -218,6 +235,7 @@ class RetryLadder:
         jitter: Callable[[], float] = random.random,
         max_rate_limit_backoffs: int = MAX_RATE_LIMIT_BACKOFFS,
         min_attempt_budget_s: float = MIN_ATTEMPT_BUDGET_S,
+        schema_repairs: int = 0,
     ) -> None:
         if now is None:  # pragma: no cover - the default is the real clock
             import time
@@ -241,6 +259,14 @@ class RetryLadder:
         # added to them.
         self._transport_retries_left = int(retries)
         self._rate_limit_attempts = 0
+        # Rule 7: a THIRD counter, zero unless the caller grants it. Rung 6 is
+        # "a deterministic disagreement a retry would only launder" when the
+        # retry is the identical dispatch; a re-ask that hands the runner the
+        # validator's own errors is a different request. Granted per kind by the
+        # lane (Lane B: `task_generation` only), never by the ladder, and it
+        # spends neither the transport budget nor the rate-limit allowance.
+        self._schema_repairs_left = max(0, int(schema_repairs))
+        self._schema_repairs_used = 0
 
         self.attempt_index = 0
         self.stop_reason: Optional[str] = None
@@ -291,8 +317,14 @@ class RetryLadder:
 
     # -- rule 2 and rule 6 ------------------------------------------------
 
-    def record(self, status: str) -> Action:
-        """Report an attempt's classified status; get the next move."""
+    def record(self, status: str, *, repairable: bool = True) -> Action:
+        """Report an attempt's classified status; get the next move.
+
+        ``repairable`` is the caller's word on whether a ``schema_invalid``
+        attempt left anything a re-ask could quote (rule 7): ``False`` when no
+        document came back at all — a CLI whose own structured-output budget ran
+        out — keeps rung 6 terminal even inside a granted allowance.
+        """
         self._last_status = status
 
         if status == STATUS_OK:
@@ -311,9 +343,34 @@ class RetryLadder:
         if status in RETRYABLE_STATUSES:
             return self._record_transport(status)
 
-        # Rungs 6 and 7, and the terminal §7.6(a) status: never retried.
+        if (
+            status == STATUS_SCHEMA_INVALID
+            and repairable
+            and self._schema_repairs_left > 0
+        ):
+            return self._record_schema_repair()
+
+        # Rungs 6 and 7, and the terminal §7.6(a) status: never retried — rung 6
+        # only once a caller's schema-repair allowance (rule 7) is spent or was
+        # never granted.
         self.stop_reason = STOP_TERMINAL
         return Action(retry=False, reason=f"{status} is never retried")
+
+    def _record_schema_repair(self) -> Action:
+        # Rule 3 again: the re-ask runs inside the SAME deadline as every other
+        # attempt of this slot, never on a fresh copy of it.
+        if self.remaining() < self._min_attempt_budget_s:
+            self.stop_reason = STOP_DEADLINE
+            return Action(
+                retry=False,
+                reason=(
+                    f"{STATUS_SCHEMA_INVALID} (no schema-repair re-ask: the "
+                    f"per-slot wall-clock budget of {self.timeout}s is exhausted)"
+                ),
+            )
+        self._schema_repairs_left -= 1
+        self._schema_repairs_used += 1
+        return Action(retry=True, reason=REPAIR_SCHEMA_INVALID, repair=True)
 
     def _record_rate_limited(self) -> Action:
         # Rule 6(b): a rate-limit rung may not re-issue an identical dispatch
@@ -387,6 +444,11 @@ class RetryLadder:
     @property
     def rate_limit_attempts(self) -> int:
         return self._rate_limit_attempts
+
+    @property
+    def schema_repairs_used(self) -> int:
+        """Schema-repair re-asks granted so far (rule 7)."""
+        return self._schema_repairs_used
 
     @property
     def spawns(self) -> int:

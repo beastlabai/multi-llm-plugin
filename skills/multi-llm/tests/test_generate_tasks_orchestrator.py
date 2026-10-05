@@ -876,3 +876,165 @@ class TestAForegroundRunNamesItsArtifactsOnTheResultLine:
         assert result is not None and result["exit"] == 0
         assert str(_tasks_md(plan)) in result["artifacts"]
         assert str(plan) in result["artifacts"]
+
+
+# ---------------------------------------------------------------------------
+# The one schema-repair re-ask (2026-10-05)
+# ---------------------------------------------------------------------------
+
+#: What `opencode/big-pickle` returned on 2026-10-04, twice, for this phase: one
+#: task's fields at the top level, none of the document's own keys.
+WRONG_SHAPE = {
+    "id": "T001",
+    "title": "Build the game",
+    "acceptance_criteria": ["the game loads"],
+    "depends_on": [],
+}
+
+
+def _codex_stream(document) -> str:
+    """A ``codex exec --json`` stream whose final agent message is *document*."""
+    events = [
+        {"type": "thread.started", "thread_id": "t-1"},
+        {"type": "turn.started"},
+        {"type": "item.completed", "item": {
+            "id": "item_1", "type": "agent_message", "text": json.dumps(document),
+        }},
+        {"type": "turn.completed", "usage": {
+            "input_tokens": 10, "cached_input_tokens": 0,
+            "output_tokens": 12, "reasoning_output_tokens": 0,
+        }},
+    ]
+    return "\n".join(json.dumps(event) for event in events)
+
+
+@pytest.fixture
+def scripted_runner(monkeypatch):
+    """Replace the dispatch spawn with a runner that answers from a script.
+
+    Each task-generation dispatch takes the next reply in order; anything else
+    the executor spawns (a nested-exec preflight probe) gets the probe token.
+    Returns the list of prompts the task-generation dispatches were sent.
+    """
+    from utils import subagent_executor as executor
+
+    prompts = []
+    script = []
+
+    def fake_spawn(**kwargs):
+        prompt = kwargs.get("prompt") or ""
+        if "You are decomposing" not in prompt:
+            return executor._Capture(
+                stdout=_codex_stream(executor.NESTED_PROBE_TOKEN),
+                exit_code=0, duration=0.01, argv=["codex", "exec"],
+            )
+        prompts.append(prompt)
+        reply = script[min(len(prompts), len(script)) - 1]
+        return executor._Capture(
+            stdout=_codex_stream(reply), stderr="", exit_code=0,
+            duration=0.01, argv=["codex", "exec", "--json"],
+        )
+
+    monkeypatch.setattr(executor, "_spawn", fake_spawn)
+
+    def play(*replies):
+        script[:] = list(replies)
+        return prompts
+
+    return play
+
+
+class TestSchemaRepairReAsk:
+    """A task-generation reply in the wrong shape gets ONE re-ask with the
+    validator's errors before the phase gives up (FINDINGS-opencode issue 2:
+    a free model answered the wrong shape twice and generate-tasks dead-ended
+    at exit 3, rung 6 never retried)."""
+
+    def _report(self, plan: Path) -> dict:
+        return json.loads(
+            (_phase_dir(plan) / "subagent_batch_report.json").read_text(
+                encoding="utf-8"
+            )
+        )
+
+    def test_wrong_then_right_succeeds_with_both_attempts_recorded(
+        self, tmp_path, exec_env, scripted_runner, capsys
+    ):
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner(WRONG_SHAPE, _valid_document())
+        plan = _plan(tmp_path)
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--exec-subagents"])
+        out = capsys.readouterr().out
+
+        assert code == 0, out
+        assert "<!-- TASKS_FILE:" in plan.read_text(encoding="utf-8")
+        assert _tasks_md(plan).exists()
+        assert "schema repair" in out
+
+        # The re-ask is the original question plus the validator's own words
+        # and the reply shape, sent to the same runner.
+        assert len(prompts) == 2
+        original, repair = prompts
+        assert repair.startswith(original.rstrip())
+        assert "## Your previous reply was rejected" in repair
+        assert "missing required field 'tasks'" in repair
+        assert "unexpected field 'acceptance_criteria'" in repair
+        from utils.subagent_prompts import TASK_GENERATION_REPLY_SHAPE
+        assert repair.rstrip().endswith(TASK_GENERATION_REPLY_SHAPE.rstrip())
+
+        # Both attempts are on record: the rejected one as a failure capture,
+        # the re-ask in the batch report under its own name.
+        capture = _phase_dir(plan) / "failed" / "task_generation.attempt1.json"
+        assert json.loads(capture.read_text(encoding="utf-8"))["status"] == (
+            "schema_invalid"
+        )
+        row = self._report(plan)["tasks"][0]
+        assert row["status"] == "ok"
+        assert row["attempt_count"] == 2
+        assert [(a["attempt"], a["status"], a.get("repair")) for a in row["attempts"]] == [
+            (1, "schema_invalid", None),
+            (2, "ok", "schema_invalid"),
+        ]
+
+    def test_wrong_twice_is_exit_three_with_the_plan_untouched(
+        self, tmp_path, exec_env, scripted_runner, capsys
+    ):
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner(WRONG_SHAPE, WRONG_SHAPE)
+        plan = _plan(tmp_path)
+        before = plan.read_bytes()
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--exec-subagents"])
+        capsys.readouterr()
+
+        assert code == 3
+        assert plan.read_bytes() == before
+        assert not _tasks_md(plan).exists()
+        assert len(prompts) == 2, "exactly one re-ask, never a second"
+        failed = _phase_dir(plan) / "failed"
+        second = json.loads(
+            (failed / "task_generation.attempt2.json").read_text(encoding="utf-8")
+        )
+        assert second["status"] == "schema_invalid"
+        assert second["repair"] == "schema_invalid"
+        assert (failed / "task_generation.attempt1.json").exists()
+        row = self._report(plan)["tasks"][0]
+        assert row["status"] == "schema_invalid"
+        assert row["attempt_count"] == 2
+        assert "after the one schema-repair re-ask" in row["reason"]
+
+    def test_a_right_first_reply_is_never_re_asked(
+        self, tmp_path, exec_env, scripted_runner, capsys
+    ):
+        exec_env("codex:gpt-5.5")
+        prompts = scripted_runner(_valid_document())
+        plan = _plan(tmp_path)
+
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
+        ) == 0
+        assert "schema repair" not in capsys.readouterr().out
+        assert len(prompts) == 1
+        attempts = self._report(plan)["tasks"][0]["attempts"]
+        assert [a.get("repair") for a in attempts] == [None]

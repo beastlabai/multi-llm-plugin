@@ -161,9 +161,11 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STATUS_UNPARSEABLE,
         STOP_BUDGET,
         STOP_DEADLINE,
+        REPAIR_SCHEMA_INVALID,
         RetryLadder,
         budget_exhausted_reason,
     )
+    from .subagent_prompts import build_schema_repair_prompt
     from .schema_validator import (
         validate_human_decision_verdicts,
         validate_with_schema_file,
@@ -282,9 +284,11 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STATUS_UNPARSEABLE,
         STOP_BUDGET,
         STOP_DEADLINE,
+        REPAIR_SCHEMA_INVALID,
         RetryLadder,
         budget_exhausted_reason,
     )
+    from utils.subagent_prompts import build_schema_repair_prompt
     from utils.schema_validator import (
         validate_human_decision_verdicts,
         validate_with_schema_file,
@@ -548,6 +552,23 @@ SCHEMA_PHASE_BY_KIND = {
 }
 
 
+#: The ladder's rule 7, granted per kind: how many schema-repair re-asks a
+#: ``schema_invalid`` attempt of that kind gets before rung 6 is terminal. One,
+#: for ``task_generation`` alone (2026-10-05): it is the one kind whose prompt is
+#: the *only* contract on a runner with no structured output (opencode declares
+#: none), and the one whose rung-6 failure dead-ends a whole phase — measured
+#: 2026-10-04, ``opencode/big-pickle`` answered twice with
+#: ``acceptance_criteria``/``depends_on`` at the top level and no
+#: ``schema_version``/``plan_preamble``/``tasks``, and generate-tasks exited 3
+#: both times. Every other kind keeps rung 6 terminal: a validation or
+#: consolidation batch is one of many and fails alone, and a write kind's
+#: result describes edits already made. A kind listed here must have a shape in
+#: ``subagent_prompts.SCHEMA_REPAIR_SHAPES``.
+SCHEMA_REPAIRS_BY_KIND = {
+    "task_generation": 1,
+}
+
+
 def schema_phase_for_kind(kind: str) -> Optional[str]:
     """The §4.2.2 phase whose schema governs ``kind``'s result, or ``None``."""
     return SCHEMA_PHASE_BY_KIND.get(kind)
@@ -733,6 +754,10 @@ class Attempt:
     error: Optional[str] = None
     usage: Optional[Dict[str, Any]] = None
     capture_path: Optional[str] = None
+    #: Set on an attempt that carried the schema-repair re-ask (the ladder's
+    #: rule 7) — :data:`REPAIR_SCHEMA_INVALID` — so the batch report says which
+    #: attempt was the second question rather than a second try of the first.
+    repair: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -748,6 +773,8 @@ class Attempt:
             out["usage"] = dict(self.usage)
         if self.capture_path:
             out["capture"] = self.capture_path
+        if self.repair:
+            out["repair"] = self.repair
         return out
 
 
@@ -5254,6 +5281,7 @@ def _write_failure_capture(
     duration: float,
     status: str,
     error: str,
+    repair: Optional[str] = None,
 ) -> Optional[str]:
     """Persist one failed attempt's bounded capture (D3k). Best-effort.
 
@@ -5296,6 +5324,9 @@ def _write_failure_capture(
             # first would keep a value whose key name the cut had just removed.
             "stdout_tail": _tail(_redact(stdout)),
             "stderr_tail": _tail(_redact(stderr)),
+            # Only on the schema-repair re-ask, so every other capture keeps
+            # exactly the keys it always had.
+            **({"repair": repair} if repair else {}),
         }))
         return str(capture_dir / name)
     except OSError:  # pragma: no cover - diagnostics must never fail a run
@@ -6443,12 +6474,24 @@ def dispatch_task(
     # `getattr` rather than an attribute read: the eleven unmeasured adapters
     # declare `None`, which rule 6(c) reads as "assume one request" — never
     # "assume the worst".
+    #
+    # Rule 7 (the ladder's own): `SCHEMA_REPAIRS_BY_KIND` grants a kind its
+    # schema-repair re-asks — `task_generation` one, every other kind none, so
+    # rung 6 stays terminal for them exactly as before. A granted re-ask is an
+    # attempt like any other: same deadline, its own `failed/` capture and its
+    # own row in the batch report.
     ladder = RetryLadder(
         timeout=effective_timeout,
         retries=budget,
         envelope=getattr(provider, "internal_retries", None),
         now=time.monotonic,
+        schema_repairs=SCHEMA_REPAIRS_BY_KIND.get(kind, 0),
     )
+    # What this attempt sends: the task's prompt, until the ladder grants the
+    # schema-repair re-ask and it becomes that prompt plus the validator's
+    # errors. A transport retry after the re-ask re-sends the re-ask.
+    attempt_prompt = prompt
+    attempt_repair: Optional[str] = None
 
     def elapsed() -> float:
         # D3j: wall-clock across *every* attempt, including the backoff sleeps
@@ -6498,7 +6541,7 @@ def dispatch_task(
                     "model": model,
                     "cwd": cwd,
                     "attempt": attempt_index,
-                    "prompt": prompt,
+                    "prompt": attempt_prompt,
                     "transport": transport,
                     "outcome": outcome,
                 })
@@ -6521,7 +6564,7 @@ def dispatch_task(
             capture = _spawn(
                 provider=provider,
                 model=model,
-                prompt=prompt,
+                prompt=attempt_prompt,
                 profile=profile,
                 transport=transport,
                 timeout=attempt_budget,
@@ -6562,6 +6605,9 @@ def dispatch_task(
             break
         usage = _safe_parse_usage(provider, capture)
         _report_jail_outcome(task_id, capture)
+        # The document this attempt extracted, if any — what a schema-repair
+        # re-ask quotes the validator's errors about.
+        data = None
         denied_line = getattr(capture, "jail_denied_line", None)
         if denied_line:
             # A jail failure (plan F1 item 6): not a model error, never
@@ -6593,6 +6639,7 @@ def dispatch_task(
                         exit_code=capture.exit_code,
                         duration_seconds=capture.duration,
                         usage=usage,
+                        repair=attempt_repair,
                     ))
                     _notify_after_attempt(after_attempt, outcome.attempts[-1])
                     outcome.status = STATUS_OK
@@ -6611,7 +6658,7 @@ def dispatch_task(
                             "runner": runner,
                             "cwd": cwd,
                             "attempt": attempt_index,
-                            "prompt": prompt,
+                            "prompt": attempt_prompt,
                             "result": data,
                             "exit_code": capture.exit_code,
                             # Not an `outcome` field: this one leaves the module
@@ -6693,13 +6740,16 @@ def dispatch_task(
             task=task,
             attempt_index=attempt_index,
             argv=capture.argv,
-            prompt=prompt,
+            # The prompt this attempt really sent, so the argv elision below
+            # still finds it on an argv-transport runner's re-ask.
+            prompt=attempt_prompt,
             stdout=capture.stdout,
             stderr=capture.stderr,
             exit_code=capture.exit_code,
             duration=capture.duration,
             status=status,
             error=error,
+            repair=attempt_repair,
         )
         outcome.attempts.append(Attempt(
             index=attempt_index,
@@ -6709,6 +6759,7 @@ def dispatch_task(
             error=error,
             usage=usage,
             capture_path=capture_path,
+            repair=attempt_repair,
         ))
         _accumulate_usage(outcome, usage)
         # Before the ladder decides and before any backoff sleep: a caller that
@@ -6718,11 +6769,41 @@ def dispatch_task(
         # One `record` call is the whole decision (D3k, §7.5 rules 2/3/6): rung 1
         # is fatal to the batch; rung 3 backs off with jitter, at most three
         # times, without consuming the transport budget; rungs 2/4/5 spend
-        # `driver.subagent_retries`; rungs 6/7 are never retried. Every one of
-        # those decisions is taken against the same deadline the spawns are
-        # charged to, which is what keeps the counters a ceiling the wall clock
-        # usually reaches first.
-        action = ladder.record(status)
+        # `driver.subagent_retries`; rungs 6/7 are never retried — rung 6 only
+        # once the kind's schema-repair allowance (rule 7) is spent or was never
+        # granted. Every one of those decisions is taken against the same
+        # deadline the spawns are charged to, which is what keeps the counters a
+        # ceiling the wall clock usually reaches first.
+        # A schema-invalid attempt with no extracted document is the CLI's own
+        # exhausted structured-output budget (§4.2.1: the CLI already spent the
+        # pinned re-ask), so it is not repairable here either.
+        action = ladder.record(status, repairable=data is not None)
+        if action.retry and action.repair:
+            # The one schema-repair re-ask: same runner, same deadline, the
+            # original prompt plus the validator's own errors and the kind's
+            # reply shape. The errors are re-read from the extracted document,
+            # because the status line keeps only five.
+            problems = validate_result(kind, data)
+            repair_prompt = build_schema_repair_prompt(
+                kind, prompt, problems or [error]
+            )
+            too_long = _prompt_over_budget(
+                provider, model, repair_prompt, transport, profile,
+                **({"sandbox_fallback": fallback, "jail_request": jail_request}
+                   if wrapping is not None else {}),
+            )
+            if too_long is not None:
+                error = f"{error} (no schema-repair re-ask: {too_long})"
+                break
+            attempt_prompt = repair_prompt
+            attempt_repair = REPAIR_SCHEMA_INVALID
+            print(
+                f"[exec-subagents] {task_id}: the reply does not match the "
+                f"{kind} result shape ({len(problems) or 1} problem(s)); "
+                f"re-asking {runner} once with the validator's errors "
+                f"(schema repair, attempt {attempt_index + 1})."
+            )
+            continue
         if action.retry:
             if action.delay:
                 # The ladder computes the delay — it is pure, so the test switch
@@ -6744,6 +6825,8 @@ def dispatch_task(
             )
         break
 
+    if attempt_repair and status == STATUS_SCHEMA_INVALID:
+        error = f"{error} (after the one schema-repair re-ask)"
     outcome.status = status
     outcome.reason = error
     outcome.duration_seconds = elapsed()
