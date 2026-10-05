@@ -75,6 +75,7 @@ try:
         with_result_contract,
     )
     from .write_phase_bridge import WRITE_TASK_FILENAME
+    from .write_safety import PolicyViolation, WritePolicy, relative_to_root
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils.git_utils import pin_repo_root, worktree_file_stats  # type: ignore
@@ -93,10 +94,15 @@ except ImportError:  # pragma: no cover - direct script invocation
         with_result_contract,
     )
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
+    from utils.write_safety import (  # type: ignore
+        PolicyViolation, WritePolicy, relative_to_root,
+    )
 
 
 __all__ = [
+    "MARKER_REFUSED",
     "PROMPTS_SUBDIR",
+    "policy_refusal",
     "WritePromptError",
     "check_tree_path",
     "changed_since_bound",
@@ -229,6 +235,41 @@ MARKER_ORDER = "[WRITE_PROMPT_ORDER]"
 
 #: The refusal for a task a check with findings holds back (stderr, exit 3).
 MARKER_BLOCKED = "[WRITE_PROMPT_BLOCKED]"
+
+#: The refusal for a task the write policy forbids (stderr, exit 3).
+MARKER_REFUSED = "[WRITE_PROMPT_REFUSED]"
+
+
+def policy_refusal(phase_dir: Path, task_id: str) -> Optional[str]:
+    """The executor's pre-dispatch write-policy check, for the native leg.
+
+    Fix round 13 (the check-gate fixture): ``driver.write_paths`` refuses a
+    task whose declared files it does not allow before the executor starts
+    a runner, and the native leg handed the same task to the host to run.
+    The same check, on the same declared set (``declared_file_set``) against
+    the same merged policy (``WritePolicy.load``, anchored on the task
+    file's plan); the refusal's text, or ``None`` when the policy allows the
+    task or cannot be read (the prompt step is never refused on a guess).
+    """
+    phase_dir = Path(os.path.abspath(str(phase_dir)))
+    try:
+        document, task = load_write_task(phase_dir, task_id)
+        declared = declared_file_set(task)
+        if not declared:
+            return None
+        root, problem = pin_repo_root(str(phase_dir))
+        if root is None or problem:
+            return None
+        anchor = str(document.get("plan_file") or "") or None
+        policy = WritePolicy.load(root, anchor=anchor)
+        policy.check(
+            [relative_to_root(path, root) for path in declared], when="pre-dispatch",
+        )
+    except PolicyViolation as exc:
+        return exc.message
+    except Exception:  # noqa: BLE001 - never refuse on a policy that cannot be read
+        return None
+    return None
 
 
 def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str]]]:
@@ -537,6 +578,32 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"and report the way forward: fix what {check_id} reported and "
             f"re-run implement with --resume (the check runs again), or accept "
             f"its findings with --resume --human-task {check_id}=done.",
+            file=sys.stderr,
+        )
+        return 3
+
+    refused = policy_refusal(Path(args.phase_dir), args.task_id)
+    if refused is not None:
+        task_id = args.task_id
+        implement = info.get("kind") == "implement"
+        print(
+            f"{MARKER_REFUSED} {task_id} is refused before dispatch: {refused} "
+            f"Do not dispatch {task_id}. Record it with util batch-done "
+            f"--phase-dir \"{os.path.abspath(args.phase_dir)}\" --task-id {task_id} "
+            f"--status failed --reason \"refused before dispatch: the write "
+            f"policy (driver.write_paths) does not allow a file it declares\""
+            + (
+                f", skip the tasks that depend on it, run the others, close "
+                f"the phase without --mark-completed, and report the way "
+                f"forward: allow the file in driver.write_paths "
+                f"(.multi-llm/providers.yaml) and re-run implement with "
+                f"--resume, or leave it and the tasks after it undone with "
+                f"--resume --human-task {task_id}=skip."
+                if implement else
+                f", stop, and report the way forward: allow the file in "
+                f"driver.write_paths (.multi-llm/providers.yaml) and re-run "
+                f"this phase with --resume."
+            ),
             file=sys.stderr,
         )
         return 3

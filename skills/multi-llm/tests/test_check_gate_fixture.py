@@ -299,3 +299,72 @@ class TestTheFixPath:
         state = get_or_create_state(repo.plan)
         assert state.is_phase_completed("implement")
         assert "task_check_findings" not in state.state
+
+
+class TestTheNativeLeg:
+    """The same stop on the native leg (Claude Code): the host gets each
+    prompt from `util write-prompt`, which handed T005 out although the
+    executor refuses it before dispatch. It refuses it now, the host records
+    it failed with `util batch-done`, and the accept answers work there too."""
+
+    def _emit(self, repo, capsys, *flags) -> dict:
+        import implement_orchestrator
+
+        assert implement_orchestrator.main(
+            ["--plan-file", str(repo.plan), "--yes", *flags]
+        ) == 0
+        out = capsys.readouterr().out
+        path = next(
+            line.split(": ", 1)[1] for line in out.splitlines()
+            if line.startswith("Output file: ")
+        )
+        return json.loads(open(path, encoding="utf-8").read())
+
+    def _util(self, capsys, *argv):
+        code = multi_llm.main(["util", *argv])
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def test_write_prompt_refuses_the_task_the_policy_denies(self, repo, capsys):
+        self._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        code, _out, err = self._util(
+            capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T005")
+        assert code == 3
+        assert (
+            "[WRITE_PROMPT_REFUSED] T005 is refused before dispatch: Write "
+            "policy violation (pre-dispatch): src/vendor/stamp.js" in err
+        ), err
+        assert "--task-id T005 --status failed --reason" in err
+        assert "--resume --human-task T005=skip" in err
+        assert not (repo.phase_dir / "prompts" / "T005.prompt.txt").exists()
+        # A task the policy allows is bound as before.
+        assert self._util(
+            capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T004")[0] == 0
+
+    def test_the_accept_answers_after_the_refusal_is_recorded(self, repo, capsys):
+        self._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        for task_id in ("T001", "T003", "T004"):
+            assert self._util(
+                capsys, "batch-done", "--phase-dir", phase, "--task-id", task_id,
+                "--status", "completed")[0] == 0
+        assert self._util(
+            capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
+            "--status", "completed", "--check", "findings",
+            "--finding", FINDINGS[0])[0] == 0
+        assert self._util(
+            capsys, "batch-done", "--phase-dir", phase, "--task-id", "T005",
+            "--status", "failed", "--reason", "refused before dispatch")[0] == 0
+
+        handoff = self._emit(
+            repo, capsys, "--resume", "--human-task", "T002=done",
+            "--human-task", "T005=skip",
+        )
+        emitted = {t["id"]: t for b in handoff["batches"] for t in b["tasks"]}
+        assert "T002" not in emitted, "accepted: not handed out again"
+        assert emitted["T005"]["status"] == "skipped"
+        assert emitted["T006"]["status"] == "skipped"
+        assert emitted["T007"]["status"] == "pending"
+        assert self._util(
+            capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T007")[0] == 0
