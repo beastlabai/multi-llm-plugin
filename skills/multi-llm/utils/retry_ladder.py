@@ -44,6 +44,14 @@ exactly as terminal as it was. Lane B grants one, for ``task_generation`` and
 the three apply kinds (``subagent_executor.SCHEMA_REPAIRS_BY_KIND``; an apply
 kind's re-ask restates the batch's report and must move no file).
 
+Rule 8 is this module's own too (fix round 8): ``record(..., repeatable=False)``
+is the caller's word that the identical dispatch must not be sent again — a write
+attempt that already changed files, which a retry would apply a second time on
+top of its own edits. A transport or rate-limit status then earns no retry and no
+backoff: the slot stops (``not_repeatable``), unless the attempt is
+``repairable`` and the rule-7 allowance has a re-ask left, which is a different
+request (the runner restates its report and edits nothing).
+
 The status vocabulary and the D3k rung table live here rather than in
 ``subagent_executor`` because the ladder is now their only consumer;
 ``subagent_executor`` re-exports every name it used to define, so nothing that
@@ -214,6 +222,8 @@ STOP_DEADLINE = "deadline_reached"
 STOP_FATAL = "fatal"
 STOP_TERMINAL = "terminal_status"
 STOP_VENDOR_ALREADY_RETRIED = "vendor_already_retried_rate_limit"
+#: Rule 8: the caller said the identical dispatch must not be re-sent.
+STOP_NOT_REPEATABLE = "not_repeatable"
 
 #: The reason an :class:`Action` carries when it grants the schema-repair
 #: re-ask, and the value a lane records on the attempt that re-ask produces.
@@ -376,13 +386,21 @@ class RetryLadder:
 
     # -- rule 2 and rule 6 ------------------------------------------------
 
-    def record(self, status: str, *, repairable: bool = True) -> Action:
+    def record(
+        self, status: str, *, repairable: bool = True, repeatable: bool = True
+    ) -> Action:
         """Report an attempt's classified status; get the next move.
 
         ``repairable`` is the caller's word on whether a ``schema_invalid``
         attempt left anything a re-ask could quote (rule 7): ``False`` when no
         document came back at all — a CLI whose own structured-output budget ran
         out — keeps rung 6 terminal even inside a granted allowance.
+
+        ``repeatable`` (rule 8) is the caller's word on whether the identical
+        dispatch may be sent again. ``False`` — a write attempt that already
+        changed files — turns a transport retry or a rate-limit backoff into a
+        stop, or into the rule-7 re-ask when the attempt is ``repairable`` and
+        the allowance has one left.
         """
         self._last_status = status
 
@@ -395,6 +413,22 @@ class RetryLadder:
             # retry budget N times.
             self.stop_reason = STOP_FATAL
             return Action(retry=False, reason=f"{status} is fatal to the batch")
+
+        if not repeatable and (
+            status in BACKOFF_STATUSES or status in RETRYABLE_STATUSES
+        ):
+            # Rule 8: never the identical dispatch again. The re-ask is a
+            # different request, so it stays available inside the allowance.
+            if repairable and self._schema_repairs_left > 0:
+                return self._record_schema_repair(status)
+            self.stop_reason = STOP_NOT_REPEATABLE
+            return Action(
+                retry=False,
+                reason=(
+                    f"{status}, and the attempt changed files, so the same "
+                    f"dispatch is not sent again"
+                ),
+            )
 
         if status in BACKOFF_STATUSES:
             return self._record_rate_limited()
@@ -415,7 +449,7 @@ class RetryLadder:
         self.stop_reason = STOP_TERMINAL
         return Action(retry=False, reason=f"{status} is never retried")
 
-    def _record_schema_repair(self) -> Action:
+    def _record_schema_repair(self, status: str = STATUS_SCHEMA_INVALID) -> Action:
         # Rules 3 and 4 again: the re-ask runs inside the SAME deadline as every
         # other attempt of this slot, never on a fresh copy of it, and is only
         # granted when `next_attempt()` will admit it.
@@ -423,9 +457,7 @@ class RetryLadder:
         if refusal is not None:
             self.stop_reason = refusal
             note = f"no schema-repair re-ask: {self._refusal_text(refusal)}"
-            return Action(
-                retry=False, reason=f"{STATUS_SCHEMA_INVALID} ({note})", note=note
-            )
+            return Action(retry=False, reason=f"{status} ({note})", note=note)
         self._schema_repairs_left -= 1
         self._schema_repairs_used += 1
         return Action(retry=True, reason=REPAIR_SCHEMA_INVALID, repair=True)
@@ -510,6 +542,11 @@ class RetryLadder:
     def schema_repairs_used(self) -> int:
         """Schema-repair re-asks granted so far (rule 7)."""
         return self._schema_repairs_used
+
+    @property
+    def schema_repairs_left(self) -> int:
+        """Schema-repair re-asks the allowance still holds (rule 7)."""
+        return self._schema_repairs_left
 
     @property
     def spawns(self) -> int:

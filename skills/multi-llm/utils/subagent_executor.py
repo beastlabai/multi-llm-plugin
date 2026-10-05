@@ -6881,26 +6881,46 @@ def dispatch_task(
                 reclassified = _classify_failed_run(provider, capture, model)
                 if reclassified is not None:
                     status, error = reclassified
-                    # `_classify_failed_run` returns `runner_error` from the
-                    # adapter's structural hook and from nowhere else, so this is
-                    # exactly "the structural check fired" (§4.4 step 4).
-                    if (
-                        status == STATUS_RUNNER_ERROR
-                        and profile == PROFILE_AGENT_WRITE
-                        and changed_files is not None
-                    ):
-                        status, error = _denied_write_turn(
-                            changed_files, error,
-                            {
-                                "task": task,
-                                "task_id": task_id,
-                                "kind": kind,
-                                "attempt": attempt_index,
-                                "cwd": cwd,
-                                "outcome": outcome,
-                                **_jail_hook_context(capture, jail_request, fallback),
-                            },
-                        )
+
+        # The pre-retry check (T4.8, widened in fix round 8): a write attempt
+        # the ladder could answer by sending the batch's own prompt again — a
+        # timeout, a runner error, a prose reply, a rate limit — is asked first
+        # whether it already moved bytes. If it did, the batch is never sent
+        # again on top of its own edits: the attempt is a partial application,
+        # or, for an apply kind whose reply could not be read, the one report
+        # re-ask (rule 7), which restates the report and edits nothing. A re-ask
+        # in flight is exempt: its retry re-sends the re-ask, and
+        # `repair_baseline` above already fails one that moved a file.
+        repeatable = True
+        partial_if_refused: Optional[str] = None
+        reply_text: Optional[str] = None
+        if (
+            (status in RETRYABLE_STATUSES or status in BACKOFF_STATUSES)
+            and profile == PROFILE_AGENT_WRITE
+            and changed_files is not None
+            and attempt_repair is None
+        ):
+            checked_status, checked_error = _denied_write_turn(
+                changed_files, error,
+                {
+                    "task": task,
+                    "task_id": task_id,
+                    "kind": kind,
+                    "attempt": attempt_index,
+                    "cwd": cwd,
+                    "outcome": outcome,
+                    **_jail_hook_context(capture, jail_request, fallback),
+                },
+                status=status,
+            )
+            if checked_status == STATUS_PARTIAL:
+                repeatable = False
+                if status == STATUS_UNPARSEABLE and ladder.schema_repairs_left > 0:
+                    reply_text = _reply_text(provider, capture.stdout)
+                    if _write_report_repairable(capture, reply_text, tree_fingerprint):
+                        partial_if_refused = checked_error
+                if partial_if_refused is None:
+                    status, error = checked_status, checked_error
 
         evidence = getattr(capture, "jail_evidence", None) or {}
         if (
@@ -6959,7 +6979,6 @@ def dispatch_task(
         # pinned re-ask), so it is not repairable here either; nor is a valid
         # document `persist_result` refused for its size (`data` dropped above).
         repairable = data is not None
-        reply_text: Optional[str] = None
         if repairable and status == STATUS_SCHEMA_INVALID and kind in WRITE_KINDS:
             # A write kind's re-ask restates the runner's own previous reply, so
             # it needs that reply, the hook that proves it moved nothing, and an
@@ -6969,7 +6988,21 @@ def dispatch_task(
             repairable = _write_report_repairable(
                 capture, reply_text, tree_fingerprint
             )
-        action = ladder.record(status, repairable=repairable)
+        if partial_if_refused is not None:
+            # A prose reply after edits (the pre-retry check above): the same
+            # re-ask an unreadable report gets, never the batch again.
+            repairable = True
+        action = ladder.record(
+            status, repairable=repairable, repeatable=repeatable
+        )
+        if partial_if_refused is not None and not action.retry:
+            # The re-ask was refused for want of budget: the edits stay
+            # unverified, so the attempt ends as the partial application the
+            # check found, with the ladder's reason appended.
+            status, error = STATUS_PARTIAL, partial_if_refused
+            if action.note:
+                error = f"{error} ({action.note})"
+            break
         if action.retry and action.repair:
             # The one schema-repair re-ask: same runner, same deadline. A read
             # kind gets the original prompt plus what was wrong and the reply
@@ -6977,8 +7010,9 @@ def dispatch_task(
             # never the batch's instructions again. The errors are re-read from
             # the extracted document, because the status line keeps only five,
             # and a reply that is not valid JSON is told so instead of being
-            # handed the errors of a fragment from inside it.
-            problems = validate_result(kind, data)
+            # handed the errors of a fragment from inside it. A prose reply has
+            # no document: its own error is the one problem.
+            problems = validate_result(kind, data) if data is not None else []
             syntax = capture.reply_syntax_error
             repair_prompt = build_schema_repair_prompt(
                 kind, prompt, problems or [error], syntax_error=syntax,
@@ -6990,12 +7024,16 @@ def dispatch_task(
                    if wrapping is not None else {}),
             )
             if too_long is not None:
+                if partial_if_refused is not None:
+                    status, error = STATUS_PARTIAL, partial_if_refused
                 error = f"{error} (no schema-repair re-ask: {too_long})"
                 break
             if kind in WRITE_KINDS:
                 try:
                     repair_baseline = tree_fingerprint(fingerprint_context)
                 except Exception as exc:  # noqa: BLE001 - fail closed: no re-ask
+                    if partial_if_refused is not None:
+                        status, error = STATUS_PARTIAL, partial_if_refused
                     error = (
                         f"{error} (no report re-ask: the files' state before it "
                         f"could not be recorded, {type(exc).__name__})"
@@ -7038,7 +7076,7 @@ def dispatch_task(
             error = f"{error} ({action.note})"
         break
 
-    if attempt_repair and status == STATUS_SCHEMA_INVALID:
+    if attempt_repair and status in (STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE):
         error = f"{error} (after the one schema-repair re-ask)"
     outcome.status = status
     outcome.reason = error
@@ -7050,32 +7088,39 @@ def _denied_write_turn(
     changed_files: Callable[[Dict[str, Any]], Sequence[str]],
     error: str,
     context: Dict[str, Any],
+    *,
+    status: str = STATUS_RUNNER_ERROR,
 ) -> Tuple[str, str]:
-    """``(status, reason)`` for a write attempt whose turn a denial ended (T4.8).
+    """``(status, reason)`` for a failed write attempt a retry would re-send.
 
-    With changed files, ``partial_application`` in the scheduler's own words
-    (``PARTIAL APPLICATION: …``, stop the loop, keep the snapshot, do not
-    complete the phase), never retried because the status is on no rung. With
-    none, ``runner_error`` unchanged, retried from the transport budget.
+    T4.8 asked it for a turn a denial ended (``runner_error``); since fix
+    round 8 it is asked for every write attempt whose ``status`` the ladder
+    could answer with the batch's own prompt again (a timeout, a prose reply,
+    a rate limit). With changed files, ``partial_application`` in the
+    scheduler's own words (``PARTIAL APPLICATION: …``, stop the loop, keep the
+    snapshot, do not complete the phase), never retried because the status is
+    on no rung. With none, ``status`` and ``error`` unchanged, retried as
+    before.
     """
     try:
         changed = [str(path) for path in (changed_files(context) or ())]
     except Exception as exc:  # noqa: BLE001 - fail closed, never retry blind
         return STATUS_PARTIAL, (
-            f"PARTIAL APPLICATION (unverified): {error}, and the working tree "
-            f"could not be compared with the pre-batch snapshot "
-            f"({type(exc).__name__}), so no further attempt is started — a "
-            f"retry on top of a half-applied edit is unsafe. The batch loop "
-            f"stops here and the phase is NOT marked completed."
+            f"PARTIAL APPLICATION (unverified): the attempt failed ({error}), "
+            f"and the working tree could not be compared with the pre-batch "
+            f"snapshot ({type(exc).__name__}), so no further attempt is "
+            f"started — a retry would send the whole batch again on top of "
+            f"whatever it already edited. The batch loop stops here and the "
+            f"phase is NOT marked completed."
         )
     if not changed:
-        return STATUS_RUNNER_ERROR, error
+        return status, error
     shown = ", ".join(changed[:5]) + (", …" if len(changed) > 5 else "")
     return STATUS_PARTIAL, (
-        f"PARTIAL APPLICATION: {len(changed)} file(s) changed ({shown}) but "
-        f"{error}. No further attempt is started — a retry on top of a "
-        f"half-applied edit is unsafe. The batch loop stops here and the phase "
-        f"is NOT marked completed."
+        f"PARTIAL APPLICATION: {len(changed)} file(s) changed ({shown}), but "
+        f"the attempt failed ({error}). No further attempt is started — a "
+        f"retry would send the whole batch again on top of those edits. The "
+        f"batch loop stops here and the phase is NOT marked completed."
     )
 
 

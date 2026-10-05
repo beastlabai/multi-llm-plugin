@@ -562,6 +562,9 @@ class TestFourWriteOutcomes:
         consumer, "narrated" and "returned the wrong object" are one failure.
         """
         env.edits([_patch_edit(env.plan)], prose=True)
+        # Since fix round 8 a prose reply after an edit gets the report re-ask
+        # rather than the batch again; this runner narrates there too.
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", "Done, all good!")
         result = env.scheduler([env.apply_task(0)]).run()
         outcome = result.outcomes[0]
         assert outcome.status == executor.STATUS_UNPARSEABLE

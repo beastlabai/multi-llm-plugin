@@ -610,3 +610,64 @@ class TestAGrantIsNeverTakenBackByAdmission:
         reason = budget_exhausted_reason(ladder, target="codex:gpt-5.5", timeout=10.0)
         assert "Nothing was dispatched" in reason
 
+
+
+class TestRule8AnAttemptThatChangedFilesIsNotSentAgain:
+    """Fix round 8 (review 7, r5): a write batch that replied in prose after
+    editing was granted a transport retry, and the executor re-sent the whole
+    batch on top of its own edits. ``repeatable=False`` is the caller's word
+    that the identical dispatch must not go out again: no retry and no backoff,
+    only the rule-7 re-ask when the attempt is repairable and the allowance
+    has one."""
+
+    @pytest.mark.parametrize("status", [
+        STATUS_TIMEOUT, STATUS_RUNNER_ERROR, STATUS_UNPARSEABLE, STATUS_RATE_LIMITED,
+    ])
+    def test_no_retry_and_no_backoff(self, status):
+        from utils.retry_ladder import STOP_NOT_REPEATABLE
+
+        ladder = _ladder(Clock(), retries=3)
+        ladder.next_attempt()
+        action = ladder.record(status, repairable=False, repeatable=False)
+        assert action.retry is False and action.delay == 0.0
+        assert ladder.stop_reason == STOP_NOT_REPEATABLE
+        assert ladder.transport_retries_left == 3
+        assert ladder.rate_limit_attempts == 0
+        assert "not sent again" in action.reason
+        assert ladder.next_attempt() is None
+
+    def test_a_repairable_reply_gets_the_re_ask_instead(self):
+        ladder = RetryLadder(timeout=1200.0, retries=1, now=Clock(), schema_repairs=1)
+        ladder.next_attempt()
+        action = ladder.record(STATUS_UNPARSEABLE, repairable=True, repeatable=False)
+        assert action.retry is True and action.repair is True
+        assert ladder.schema_repairs_used == 1
+        assert ladder.transport_retries_left == 1, "the re-ask spends no retry"
+
+    def test_without_an_allowance_it_stops(self):
+        ladder = _ladder(Clock(), retries=1)
+        ladder.next_attempt()
+        action = ladder.record(STATUS_UNPARSEABLE, repairable=True, repeatable=False)
+        assert action.retry is False
+
+    def test_the_re_ask_still_takes_the_admission_test(self):
+        clock = Clock()
+        ladder = RetryLadder(timeout=100.0, retries=1, now=clock, schema_repairs=1)
+        ladder.next_attempt()
+        clock.advance(100.0 - MIN_ATTEMPT_BUDGET_S / 2)
+        action = ladder.record(STATUS_UNPARSEABLE, repairable=True, repeatable=False)
+        assert action.retry is False
+        assert action.note.startswith("no schema-repair re-ask: ")
+        assert action.reason.startswith(STATUS_UNPARSEABLE)
+
+    def test_fatal_and_terminal_statuses_are_unchanged(self):
+        ladder = _ladder(Clock(), retries=1)
+        ladder.next_attempt()
+        assert ladder.record(STATUS_AUTH_FAILED, repeatable=False).retry is False
+        assert ladder.stop_reason == STOP_FATAL
+
+    def test_the_default_is_repeatable(self):
+        ladder = _ladder(Clock(), retries=1)
+        ladder.next_attempt()
+        assert ladder.record(STATUS_UNPARSEABLE).retry is True
+        assert ladder.schema_repairs_left == 0
