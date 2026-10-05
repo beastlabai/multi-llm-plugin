@@ -1,6 +1,7 @@
 """Unit tests for finalize_tracking.py module."""
 
 import json
+import subprocess
 import sys
 import tempfile
 from datetime import datetime
@@ -1069,3 +1070,84 @@ class TestOnlyTouchedIsTheExactScope:
         help_text = " ".join(capsys.readouterr().out.split())
         assert "never removes a dirty one" in help_text
         assert "--only-touched" in help_text
+
+
+class TestTrackedFilesSayWhatHappenedToEachFile:
+    """2026-10-04 (Claude Code racing re-run): `implement` created
+    `index.html` and `tracked_files` recorded it as `modified` — every entry
+    was `modified`, whatever the run did. The action is now read off the
+    implement baseline: a path absent from `head_before_implement`'s tree and
+    not in `pre_existing_changes` is `created`, a path in that tree and gone
+    from disk `deleted`, everything else `modified`."""
+
+    @pytest.fixture
+    def repo(self, tmp_path, monkeypatch):
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        _git(repo, "init", "--quiet")
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "config", "commit.gpgsign", "false")
+        for name in ("kept.py", "gone.py"):
+            (repo / name).write_text("x = 1\n", encoding="utf-8")
+        _git(repo, "add", "kept.py", "gone.py")
+        _git(repo, "commit", "--quiet", "-m", "init")
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=repo, capture_output=True,
+            text=True, check=True,
+        ).stdout.strip()
+        # Dirty before the phase started: an untracked file it later edits.
+        (repo / "notes.txt").write_text("before\n", encoding="utf-8")
+        state_path = tmp_path / "state.json"
+        state_path.write_text(json.dumps({
+            "head_before_implement": head,
+            "pre_existing_changes": ["notes.txt"],
+        }), encoding="utf-8")
+        monkeypatch.chdir(repo)
+        # What the phase did.
+        (repo / "index.html").write_text("<p>new</p>\n", encoding="utf-8")
+        (repo / "kept.py").write_text("x = 2\n", encoding="utf-8")
+        (repo / "gone.py").unlink()
+        (repo / "notes.txt").write_text("after\n", encoding="utf-8")
+        (repo / "staged_new.py").write_text("z = 1\n", encoding="utf-8")
+        _git(repo, "add", "staged_new.py")
+        return repo, state_path
+
+    @staticmethod
+    def _actions(state_path):
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        return {entry["path"]: entry["action"] for entry in state["tracked_files"]}
+
+    def test_the_census_records_created_modified_and_deleted(self, repo):
+        _repo, state_path = repo
+        assert main([
+            "--state-file", str(state_path), "--touched", "notes.txt",
+        ]) == 0
+        assert self._actions(state_path) == {
+            "index.html": "created",
+            "staged_new.py": "created",
+            "kept.py": "modified",
+            "gone.py": "deleted",
+            # Untracked before the phase began: it existed, so an edit.
+            "notes.txt": "modified",
+        }
+
+    def test_only_touched_records_a_new_file_as_created(self, repo):
+        _repo, state_path = repo
+        assert main([
+            "--state-file", str(state_path), "--only-touched",
+            "--touched", "index.html", "--touched", "kept.py",
+        ]) == 0
+        assert self._actions(state_path) == {
+            "index.html": "created", "kept.py": "modified",
+        }
+
+    def test_without_head_before_implement_head_is_the_base(self, repo):
+        _repo, state_path = repo
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state.pop("head_before_implement")
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        assert main(["--state-file", str(state_path)]) == 0
+        actions = self._actions(state_path)
+        assert actions["index.html"] == "created"
+        assert actions["kept.py"] == "modified"
