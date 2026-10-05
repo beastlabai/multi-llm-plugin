@@ -62,6 +62,7 @@ sys.path.insert(0, str(Path(os.path.abspath(__file__)).parent))
 
 import modes as mode_table
 from utils.cli_common import (
+    CONTINUATION_VERBS,
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
     EXIT_NOTHING_TO_DO,
@@ -75,6 +76,7 @@ from utils.cli_common import (
     flag_present,
     flag_value,
     invocation,
+    invocation_plan_arg,
     record_invocation,
     render_instruction_text,
     skill_dir,
@@ -589,7 +591,10 @@ def _run_mode(word: str, rest: Sequence[str], ctx: ResultContext) -> int:
         _require_executor_capability(argv)
         # What a detached child re-executes: the mode word plus this normalized
         # argv, never a remembered sys.argv (see utils/detach.build_child_command).
-        record_invocation(mode.name, argv)
+        # A continuation also carries the plan spelling its hand-off recorded.
+        record_invocation(
+            mode.name, argv, plan_arg=_continued_plan_arg(mode, argv)
+        )
         return _call_target(
             _load_target(mode.target_module, mode.target_attr), argv
         )
@@ -979,6 +984,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             crash = _crash_summary()
             exit_code = EXIT_ERROR
         try:
+            _remember_plan_spelling(ctx)
+        except Exception as exc:  # noqa: BLE001 - advisory, never the exit code
+            print(
+                f"multi-llm: could not save the plan path as you typed it ({exc}); "
+                "the next command may name the plan by its absolute path.",
+                file=sys.stderr,
+            )
+        try:
             _emit_user_next_step(ctx, exit_code)
         except Exception as exc:  # noqa: BLE001 - advisory, never the exit code
             from utils.next_phase import lookup_failure_line
@@ -1031,9 +1044,11 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
     re-run because they always append ``--detach`` — launched nothing, so no
     poll will ever answer for it, and it goes through the builder like any
     foreground exit. The builder's gate decides the rest. ``plan_arg`` is the
-    ``--plan-file`` value as received; a detached worker, whose argv holds it
-    absolute, takes the run record's ``plan_arg`` (else its ``plan_file``). The
-    block goes to stderr when the invocation asked for JSON output.
+    ``--plan-file`` value as received — or, for a continuation, the spelling its
+    hand-off recorded (:func:`_continued_plan_arg`); a detached worker, whose
+    argv holds it absolute, takes the run record's ``plan_arg`` (else its
+    ``plan_file``). The block goes to stderr when the invocation asked for JSON
+    output.
     """
     record = invocation()
     if not record or ctx.next:
@@ -1047,7 +1062,6 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
     elif not (mode.is_workflow_phase and exit_code in (EXIT_OK, EXIT_NOTHING_TO_DO)):
         return
     argv = list(record.get("argv") or [])
-    worker = flag_present(argv, "--internal-worker")
     # No `--detach` test here: a launched or re-attached run already returned
     # above on its recorded `next`, and keying on the flag instead silenced a
     # completed phase's exit 2 that launched no run and so has no poll to
@@ -1068,13 +1082,7 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
         and not flag_present(argv, "--mark-completed")
     ):
         return
-    plan_arg = flag_value(argv, "--plan-file")
-    plan_path = os.path.abspath(plan_arg) if plan_arg else None
-    detach = sys.modules.get("utils.detach") if worker else None
-    handle = detach.active_run() if detach is not None else None
-    if handle is not None:
-        plan_path = handle.plan_file
-        plan_arg = handle.plan_arg or handle.plan_file
+    plan_arg, plan_path = _typed_plan(argv)
     if not plan_arg:
         return
     from utils import next_phase
@@ -1087,6 +1095,128 @@ def _emit_user_next_step(ctx: ResultContext, exit_code: int) -> None:
         plan_path=plan_path,
         stream=sys.stderr if as_json else sys.stdout,
     )
+
+
+def _typed_plan(argv: Sequence[str]) -> Tuple[Optional[str], Optional[str]]:
+    """``(plan as the user typed it, absolute plan path)`` for this invocation.
+
+    The typed spelling is :func:`utils.cli_common.invocation_plan_arg` (the
+    ``--plan-file`` value as received, or a continuation's recovered one); a
+    detached worker, whose argv holds the plan absolute, takes its run record's
+    ``plan_arg`` (else its ``plan_file``) instead.
+    """
+    plan_file = flag_value(argv, "--plan-file")
+    plan_arg = invocation_plan_arg() or plan_file
+    plan_path = os.path.abspath(plan_file) if plan_file else None
+    worker = flag_present(argv, "--internal-worker")
+    detach = sys.modules.get("utils.detach") if worker else None
+    handle = detach.active_run() if detach is not None else None
+    if handle is not None:
+        plan_path = handle.plan_file
+        plan_arg = handle.plan_arg or handle.plan_file
+    return plan_arg, plan_path
+
+
+def _continuation_target(command: str) -> Optional[Tuple["mode_table.Mode", str]]:
+    """``(mode, plan)`` of a printed continuation command, else ``None``.
+
+    A continuation is a dispatcher command (``… multi_llm.py <mode> <plan> …``,
+    or ``--plan-file <plan>``) carrying one of
+    :data:`utils.cli_common.CONTINUATION_VERBS`; its *mode* is a workflow phase.
+    """
+    import shlex
+
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return None
+    if not CONTINUATION_VERBS.intersection(t.split("=", 1)[0] for t in tokens):
+        return None
+    script = next(
+        (i for i, token in enumerate(tokens)
+         if os.path.basename(token) == "multi_llm.py"),
+        None,
+    )
+    if script is None or script + 1 >= len(tokens):
+        return None
+    mode = mode_table.resolve(tokens[script + 1])
+    if mode is None or not mode.is_workflow_phase or not mode.phase:
+        return None
+    rest = tokens[script + 2:]
+    plan = flag_value(rest, "--plan-file")
+    if plan is None and rest and not rest[0].startswith("-"):
+        plan = rest[0]
+    if not plan:
+        return None
+    return mode, plan
+
+
+def _continued_phase_dir(mode: "mode_table.Mode", plan: str) -> Path:
+    from utils.output_handler import phase_dir_path
+
+    return phase_dir_path(Path(os.path.abspath(plan)), str(mode.phase))
+
+
+def _remember_plan_spelling(ctx: ResultContext) -> None:
+    """Record, for the continuation this run hands back, how its plan was typed.
+
+    A native leg's ``next`` (``generate-tasks <plan> --reaggregate``, a review's
+    ``--reaggregate``) names the plan absolutely, like every printed follow-up,
+    and the host runs it verbatim — so the run that finishes the phase would
+    otherwise print its next-phase command with the absolute path although the
+    user typed a relative one (racing re-run 4, Claude Code phase 03). This
+    writes the plan as this invocation received it into the continued phase's
+    ``.status.json`` as ``plan_arg``, beside the ``plan_file`` the checkpoint
+    already holds; :func:`_continued_plan_arg` reads it back. Only when the
+    command names the same file and its phase dir exists; best-effort.
+    """
+    record = invocation()
+    if not record or not ctx.next:
+        return
+    target = _continuation_target(str(ctx.next))
+    if target is None:
+        return
+    mode, plan = target
+    typed, _plan_path = _typed_plan(list(record.get("argv") or []))
+    if not typed or os.path.realpath(typed) != os.path.realpath(plan):
+        return
+    phase_dir = _continued_phase_dir(mode, plan)
+    if not phase_dir.is_dir():
+        return
+    from utils import status_file
+
+    status_file.update_status(str(phase_dir), {"plan_arg": str(typed)})
+
+
+def _continued_plan_arg(
+    mode: "mode_table.Mode", argv: Sequence[str]
+) -> Optional[str]:
+    """The typed plan a continuation's hand-off recorded, when it names this plan.
+
+    For a workflow-phase invocation carrying a continuation verb: the
+    ``plan_arg`` :func:`_remember_plan_spelling` wrote into the phase dir's
+    ``.status.json``, provided it differs from the ``--plan-file`` received and,
+    resolved from this process's cwd, names the same file — a spelling that no
+    longer resolves here is never printed. Else ``None``, and the plan is
+    printed as received.
+    """
+    if not mode.is_workflow_phase or not mode.phase:
+        return None
+    if not flag_present(argv, *sorted(CONTINUATION_VERBS)):
+        return None
+    plan = flag_value(argv, "--plan-file")
+    if not plan:
+        return None
+    from utils import status_file
+
+    recorded = status_file.read_status(str(_continued_phase_dir(mode, plan))).get(
+        "plan_arg"
+    )
+    if not isinstance(recorded, str) or not recorded or recorded == plan:
+        return None
+    if os.path.realpath(recorded) != os.path.realpath(plan):
+        return None
+    return recorded
 
 
 def _raise_on_sigterm(signum, frame):  # pragma: no cover - exercised in a subprocess

@@ -2023,11 +2023,15 @@ def _invoker_plan_arg(argv: Sequence[str]) -> Optional[str]:
     same list :func:`maybe_detach` hands in from that record — for a caller that
     reached :func:`launch` without one. ``launch`` makes its own ``plan_file``
     absolute before this matters, so this is the only place the typed spelling
-    survives (:data:`PLAN_ARG_ENV`).
+    survives (:data:`PLAN_ARG_ENV`). A continuation launched with the absolute
+    path its hand-off printed ships the spelling the dispatcher recovered for it
+    (the record's ``plan_arg``, ``cli_common.invocation_plan_arg``).
     """
     from .cli_common import flag_value, invocation
 
     record = invocation()
+    if record and record.get("plan_arg"):
+        return str(record["plan_arg"])
     source = record.get("argv") if record else None
     value = flag_value(list(source or argv), "--plan-file")
     return value or None
