@@ -35,10 +35,14 @@ from typing import Dict, List, Optional, Sequence
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .stream_bootstrap import bootstrap_streams
-    from .write_safety import AuditLog, TaskSnapshot
+    from .write_safety import (
+        AuditLog, TaskSnapshot, WriteSafetyError, resolve_repo_root, safety_dir,
+    )
 except ImportError:  # pragma: no cover - direct-script invocation
     from stream_bootstrap import bootstrap_streams
-    from write_safety import AuditLog, TaskSnapshot
+    from write_safety import (  # type: ignore[no-redef]
+        AuditLog, TaskSnapshot, WriteSafetyError, resolve_repo_root, safety_dir,
+    )
 
 
 EXIT_OK = 0
@@ -83,13 +87,25 @@ def restore(
     """
     audit = AuditLog(phase_dir)
     results: Dict[str, Dict[str, str]] = {}
+    # The root a snapshot may be restored under is this phase dir's own
+    # repository, pinned independently of git's configuration; a manifest
+    # naming another root is refused by `TaskSnapshot.load` (review fixes
+    # 2026-10-05). A root that cannot be pinned refuses every restore.
+    try:
+        repo_root = resolve_repo_root(phase_dir)
+    except WriteSafetyError as exc:
+        return {task_id: {"*": f"skipped: {exc.message}"} for task_id in task_ids}
     for task_id in task_ids:
-        snapshot = TaskSnapshot.load(phase_dir, task_id)
+        try:
+            snapshot = TaskSnapshot.load(phase_dir, task_id, expected_root=repo_root)
+        except WriteSafetyError as exc:
+            results[task_id] = {"*": f"skipped: {exc.message}"}
+            continue
         if snapshot is None:
             results[task_id] = {
                 "*": (
                     "skipped: no pre-batch snapshot under "
-                    f"{Path(phase_dir) / 'pre_batch' / task_id}"
+                    f"{Path(safety_dir(phase_dir)) / 'pre_batch' / task_id}"
                 )
             }
             continue

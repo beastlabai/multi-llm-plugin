@@ -2876,6 +2876,95 @@ class TestSnapshotReuseOnResume:
 
 
 # ===========================================================================
+# The rollback evidence cannot be forged (review fixes 2026-10-05)
+# ===========================================================================
+
+class TestTheRollbackEvidenceCannotBeForged:
+    """Under the root grant the phase dir is the batch's to write. A planted
+    manifest, payload, rollback blob or audit line must never make
+    ``util restore-batch`` write batch-chosen bytes anywhere."""
+
+    @staticmethod
+    def _forge(env, *, root: Path, victim: Path, evil: bytes, task_id: str = "forged") -> None:
+        """A manifest naming ``root``, a payload of ``evil`` whose hash the
+        manifest records, and an audit completion naming the victim as
+        touched with its CURRENT hash (so the post-run check passes)."""
+        from utils.write_safety import file_sha256
+        slot = env.phase_dir / "pre_batch" / task_id
+        (slot / "files").mkdir(parents=True)
+        (slot / "files" / "000-victim.txt").write_bytes(evil)
+        evil_sha = write_safety._sha256_text(evil.decode())
+        (slot / "manifest.json").write_text(json.dumps({
+            "snapshot_version": 1, "task_id": task_id, "root": str(root),
+            "taken_at": "2026-10-05T00:00:00",
+            "files": [{"path": "victim.txt", "absolute": str(victim), "existed": True,
+                       "sha256_before": evil_sha, "size_before": len(evil),
+                       "payload": "000-victim.txt", "declared": True}],
+            "expected_ids": ["x"],
+        }), encoding="utf-8")
+        write_safety.AuditLog(str(env.phase_dir)).completed(
+            task_id=task_id, kind="implement", attempt=1, runner="codex:x",
+            profile=PROFILE_AGENT_WRITE, status="partial", write_outcome="partial-application",
+            exit_code=0, files_touched=["victim.txt"],
+            observed={"victim.txt": {"sha256_after": file_sha256(str(victim))}},
+            duration_seconds=1.0, expected_ids=["x"],
+        )
+
+    def test_a_manifest_naming_another_root_is_refused(self, env, tmp_path):
+        elsewhere = tmp_path / "elsewhere"
+        elsewhere.mkdir()
+        victim = elsewhere / "victim.txt"
+        victim.write_bytes(b"theirs\n")
+        self._forge(env, root=elsewhere, victim=victim, evil=b"planted\n")
+        results = restore_batch.restore(
+            phase_dir=str(env.phase_dir), task_ids=["forged"], force=True, dry_run=False,
+        )
+        assert victim.read_bytes() == b"theirs\n"
+        assert results["forged"]["*"].startswith("skipped:")
+        assert str(elsewhere) in results["forged"]["*"]
+
+    def test_a_manifest_naming_the_right_root_still_restores(self, env):
+        victim = env.root / "victim.txt"
+        victim.write_bytes(b"after\n")
+        self._forge(env, root=env.root, victim=victim, evil=b"before\n")
+        results = restore_batch.restore(
+            phase_dir=str(env.phase_dir), task_ids=["forged"], force=False, dry_run=False,
+        )
+        assert results["forged"] == {"victim.txt": "restored"}
+        assert victim.read_bytes() == b"before\n"
+
+    def test_a_payload_altered_after_the_snapshot_is_never_written(self, env):
+        original = env.plan.read_bytes()
+        env.edits([_patch_edit(env.plan, "half\n")], prose=True)
+        assert env.scheduler([env.apply_task(0)]).run().exit_code == 3
+        edited = env.plan.read_bytes()
+        payload = next((env.phase_dir / "pre_batch" / "apply-batch-0" / "files").iterdir())
+        assert payload.read_bytes() == original
+        payload.write_bytes(b"planted rollback\n")
+        results = restore_batch.restore(
+            phase_dir=str(env.phase_dir), task_ids=["apply-batch-0"], force=True, dry_run=False,
+        )
+        assert env.plan.read_bytes() == edited
+        assert "no longer matches the manifest" in results["apply-batch-0"]["plans/p.md"]
+
+    def test_a_rollback_blob_whose_bytes_moved_is_no_rollback_point(self, env, tmp_path):
+        from utils.write_safety import TaskSnapshot, file_sha256
+        target = env.root / "src" / "a.py"
+        snapshot = TaskSnapshot.take(
+            phase_dir=str(env.phase_dir), task_id="t", files=[str(target)], root=str(env.root),
+        )
+        blob = tmp_path / "blob"
+        blob.write_bytes(b"retained\n")
+        good = snapshot.adopt("src/b.py", existed=True, sha256=file_sha256(str(blob)),
+                              size=9, payload_source=str(blob), save=False)
+        assert good is not None
+        blob.write_bytes(b"rewritten\n")
+        bad = snapshot.adopt("src/c.py", existed=True, sha256=file_sha256(str(target)),
+                             size=9, payload_source=str(blob), save=False)
+        assert bad is None
+
+
+# ===========================================================================
 # The empty-diff branch has three verdicts, not one (measured 2026-09-16)
 # ===========================================================================
 
