@@ -546,12 +546,21 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
         if named:
             lines.append(f"{prefix}manual tasks left for you: {named}")
     # The implement check tasks that ran and reported problems
-    # (`phases.implement.check_findings`, from state.json), until review-code
-    # — which is given them — has completed (racing re-run 4, 2026-10-05).
+    # (`phases.implement.check_findings`, from state.json; racing re-run 4,
+    # 2026-10-05). Shown while implement is unfinished — its findings are
+    # newer than any review on record — and, once it has completed, until a
+    # review-code that judged it has completed or the review was skipped.
+    # Fix round 11 (review finding 5): keyed on review-code alone, an
+    # `implement --resume` that recorded new findings beside an older
+    # completed review hid them until implement finished, and a skipped
+    # review kept them on screen for good.
     phases = payload.get("phases", {}) or {}
     findings = (phases.get("implement") or {}).get("check_findings")
-    review_done = (phases.get("code-review") or {}).get("status") == "completed"
-    if isinstance(findings, list) and findings and not review_done:
+    implement_done = (phases.get("implement") or {}).get("status") == "completed"
+    review_settled = (phases.get("code-review") or {}).get("status") in (
+        "completed", "skipped",
+    )
+    if isinstance(findings, list) and findings and not (implement_done and review_settled):
         named = "; ".join(
             f"{entry['id']} ({len(entry.get('findings') or [])} problem(s): "
             f"{(entry.get('findings') or [''])[0][:120]}"
@@ -561,8 +570,8 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
         )
         if named:
             lines.append(
-                f"{prefix}check findings for review-code (implement "
-                f"continued; see implement/summary.md): {named}"
+                f"{prefix}check findings for review-code (see "
+                f"implement/summary.md): {named}"
             )
     return lines
 
@@ -1859,8 +1868,17 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
-    if not_run:
-        parts.append(f"not run {', '.join(map(str, not_run))}")
+    # Fix round 11: a task a check with findings kept from running says so,
+    # naming the check (from the run's first such check on, not only at its end).
+    blocked = mirror.get("blocked_by_check") if isinstance(mirror.get("blocked_by_check"), dict) else {}
+    stopped = [task_id for task_id in not_run if str(task_id) not in blocked]
+    if stopped:
+        parts.append(f"not run {', '.join(map(str, stopped))}")
+    for check_id in sorted({str(value) for value in blocked.values()}):
+        waiting = sorted(str(t) for t, c in blocked.items() if str(c) == check_id)
+        parts.append(
+            f"not run (upstream check {check_id} reported problems) {', '.join(waiting)}"
+        )
     accepted = mirror.get("accepted_task_ids") if isinstance(mirror.get("accepted_task_ids"), list) else []
     if accepted:
         parts.append(f"accepted after failing {', '.join(map(str, accepted))}")
@@ -2857,8 +2875,10 @@ def _emit_user_next_step(
     Inputs per §2.1 "Where each emitter gets its inputs": ``finished_mode`` is
     the pinned run's own mode (its record's ``mode``, else its phase dir — the
     pair ``record_mode_phase`` reports); ``plan_arg`` is the record's
-    ``plan_arg`` — the plan as the launcher typed it — else its absolute
-    ``plan_file``, never this poll's own argv, which ``main`` made absolute;
+    ``plan_arg`` — the plan as the launcher typed it — when
+    ``next_phase.recorded_plan_spelling`` passes it (the record sits in a
+    folder every jailed batch can write), else this poll's absolute plan path,
+    never the record's ``plan_file`` and never this poll's argv spelling;
     the host is this poll's (``--host``, ``$MULTI_LLM_HOST``, the default). The
     workflow is read now, after any ``--wait``; *workflow* is such a read when
     the caller already took one. A failed read or builder raise prints one
@@ -2872,7 +2892,9 @@ def _emit_user_next_step(
     mode = _modes().resolve(finished_mode) if finished_mode else None
     if mode is None or not (mode.is_workflow_phase or mode.runs_workflow):
         return  # an ask, or no mode on record: no phase finished, no answer
-    plan_arg = str(run.get("plan_arg") or run.get("plan_file") or plan_path)
+    plan_arg = next_phase.recorded_plan_spelling(
+        run.get("plan_arg"), str(plan_path)
+    ) or str(plan_path)
     try:
         if workflow is None:
             workflow = _workflow_payload(plan_path, host_id=_reader_host(args))
