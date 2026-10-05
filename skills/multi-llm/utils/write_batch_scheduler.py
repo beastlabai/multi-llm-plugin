@@ -239,6 +239,8 @@ __all__ = [
     "bind_prior_changes",
     "blocked_by_check_reason",
     "rerunnable_checks",
+    "transitive_dependents",
+    "upstream_held_check",
     "mark_no_longer_skipped",
     "persist_human_task_plan",
     "resolve_human_task_plan",
@@ -651,6 +653,59 @@ def rerunnable_checks(state: Any) -> List[str]:
         and statuses.get(task_id) == "completed"
         and not str(reasons.get(task_id) or "").startswith(ACCEPTED_REASON_PREFIX)
     )
+
+
+def transitive_dependents(tasks: Sequence[Dict[str, Any]], task_id: str) -> List[str]:
+    """Every task of *tasks* that depends on *task_id*, transitively, sorted.
+
+    Over each task's ``depends_on``; the one graph walk both legs use for
+    the tasks a check with findings holds back (the scheduler's
+    ``_dependents_of``, ``util batch-done --check findings``).
+    """
+    dependents: Dict[str, List[str]] = {}
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        for dep in task.get("depends_on") or []:
+            dependents.setdefault(str(dep), []).append(str(task.get("task_id", "")))
+    seen: List[str] = []
+    queue = [str(task_id)]
+    while queue:
+        parent = queue.pop(0)
+        for child in sorted(dependents.get(parent, [])):
+            if child and child not in seen:
+                seen.append(child)
+                queue.append(child)
+    return sorted(seen)
+
+
+def upstream_held_check(
+    tasks: Sequence[Dict[str, Any]], task_id: str, held: Sequence[str],
+) -> Optional[str]:
+    """The check in *held* that *task_id* depends on, transitively, or ``None``.
+
+    *held* is :func:`rerunnable_checks`: checks whose findings hold back the
+    tasks after them. Walks ``depends_on`` upward through *tasks*; an id a
+    task depends on that *tasks* does not hold (a task a resume did not
+    materialize) is still compared, just not walked further.
+    """
+    held_set = {str(item) for item in held}
+    if not held_set:
+        return None
+    by_id = {
+        str(task.get("task_id", "")): task for task in tasks if isinstance(task, dict)
+    }
+    seen: set = set()
+    queue = [str(dep) for dep in (by_id.get(str(task_id), {}).get("depends_on") or [])]
+    while queue:
+        dep = queue.pop(0)
+        if dep in seen:
+            continue
+        seen.add(dep)
+        if dep in held_set:
+            return dep
+        queue.extend(str(d) for d in (by_id.get(dep, {}).get("depends_on") or []))
+    return None
 
 
 def _deferred_reason(strategy: Optional[str]) -> str:
@@ -5671,19 +5726,7 @@ class WriteBatchScheduler:
 
     def _dependents_of(self, task_id: str) -> List[str]:
         """Every task that depends on *task_id*, transitively, in id order."""
-        dependents: Dict[str, List[str]] = {}
-        for task in self.tasks:
-            for dep in task.get("depends_on") or []:
-                dependents.setdefault(str(dep), []).append(str(task.get("task_id", "")))
-        seen: List[str] = []
-        queue = [task_id]
-        while queue:
-            parent = queue.pop(0)
-            for child in sorted(dependents.get(parent, [])):
-                if child and child not in seen:
-                    seen.append(child)
-                    queue.append(child)
-        return sorted(seen)
+        return transitive_dependents(self.tasks, task_id)
 
     def _accounting(self, result: SchedulerResult) -> Dict[str, Any]:
         """Every task of the decomposition in exactly one bucket.

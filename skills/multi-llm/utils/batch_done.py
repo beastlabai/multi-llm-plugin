@@ -55,7 +55,14 @@ Usage::
 declares no files; its reply's ``check`` object): ``findings`` records each
 ``--finding`` in ``state.json``'s ``task_check_findings`` beside a
 ``completed`` status, which ``status``, the result notice and review-code's
-implementation record read (racing re-run 4, 2026-10-05).
+implementation record read (racing re-run 4, 2026-10-05). It also holds back
+the tasks that depend on the check (fix round 11): each one with no record
+yet is recorded ``pending`` with ``not run — upstream check <id> reported
+problems``, the ``[CHECK_BLOCKED]`` line names them, ``util write-prompt``
+refuses them, and ``util finalize-tracking --mark-completed`` refuses while
+one is left — the plugin's enforcement of what the instructions tell the
+host, as the executor leg enforces it in its loop. Any later record of the
+check (``--check passed``, ``--status failed``) releases them.
 
 Import is side-effect free: argparse and all I/O live inside :func:`main`.
 """
@@ -80,7 +87,12 @@ try:
     from .subagent_executor import check_findings_from
     from .subagent_tasks import PHASE_BY_WRITE_KIND
     from .write_phase_bridge import WRITE_TASK_FILENAME
-    from .write_batch_scheduler import is_check_task
+    from .write_batch_scheduler import (
+        BLOCKED_BY_CHECK_PREFIX,
+        blocked_by_check_reason,
+        is_check_task,
+        transitive_dependents,
+    )
     from .write_prompt import WritePromptError, load_write_task
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
@@ -94,11 +106,17 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.subagent_executor import check_findings_from  # type: ignore
     from utils.subagent_tasks import PHASE_BY_WRITE_KIND  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
-    from utils.write_batch_scheduler import is_check_task  # type: ignore
+    from utils.write_batch_scheduler import (  # type: ignore
+        BLOCKED_BY_CHECK_PREFIX,
+        blocked_by_check_reason,
+        is_check_task,
+        transitive_dependents,
+    )
     from utils.write_prompt import WritePromptError, load_write_task  # type: ignore
 
 
 __all__ = [
+    "CHECK_BLOCKED_MARKER",
     "CHECK_RESULTS",
     "MARKER",
     "RESUME_REFUSED_MARKER",
@@ -111,6 +129,9 @@ __all__ = [
 
 #: The one stdout line a successful record prints.
 MARKER = "[BATCH_DONE]"
+
+#: The line naming the tasks a check with findings holds back (stdout).
+CHECK_BLOCKED_MARKER = "[CHECK_BLOCKED]"
 
 #: The first line of a refused native ``--resume`` (stderr).
 RESUME_REFUSED_MARKER = "[RESUME_REFUSED]"
@@ -262,8 +283,12 @@ def record_batch(
             raise WritePromptError(f"{target} is not a JSON object.")
 
         update_task_status_in_state(state, task_id, status, reason)
+        blocked: List[str] = []
         if kind == "implement":
             set_task_check_findings_in_state(state, task_id, check_findings)
+            blocked = _hold_or_release_dependents(
+                state, document, task_id, held=bool(check_findings),
+            )
         tracked = _tracked_after_batch(state, target, kind)
         if tracked is not None:
             state["tracked_files"] = tracked
@@ -287,7 +312,46 @@ def record_batch(
     return {
         "task_id": task_id, "status": status, "items": items,
         "state_file": str(target), "check_findings": check_findings or [],
+        "blocked": blocked,
     }
+
+
+def _hold_or_release_dependents(
+    state: Dict[str, Any], document: Dict[str, Any], task_id: str, *, held: bool,
+) -> List[str]:
+    """Record (or release) the tasks a check with findings holds back.
+
+    *held*: the check was just recorded with findings, so every transitive
+    dependent in the task file with no status yet, or a ``pending`` one, is
+    recorded ``pending`` with :func:`blocked_by_check_reason` — the reason
+    the executor leg writes for the same tasks. Otherwise each dependent
+    still ``pending`` under this check's reason loses the reason: the check
+    passed, failed or was recorded again, and is no longer why it waits.
+    Returns the tasks held (empty on a release).
+    """
+    tasks = document.get("batches") or document.get("tasks") or []
+    statuses = state.get("task_status") or {}
+    reasons = state.get("task_status_reasons") or {}
+    mine = f"{BLOCKED_BY_CHECK_PREFIX}{task_id} "
+    held_ids: List[str] = []
+    for dependent in transitive_dependents(tasks, task_id):
+        task = next(
+            (t for t in tasks if isinstance(t, dict)
+             and str(t.get("task_id") or "") == dependent),
+            {},
+        )
+        if task.get("is_human") or str(task.get("executor_role") or "") == "human":
+            continue
+        status = statuses.get(dependent)
+        if held:
+            if status in (None, "pending"):
+                update_task_status_in_state(
+                    state, dependent, "pending", blocked_by_check_reason(task_id),
+                )
+                held_ids.append(dependent)
+        elif status == "pending" and str(reasons.get(dependent) or "").startswith(mine):
+            update_task_status_in_state(state, dependent, "pending")
+    return held_ids
 
 
 def _logged_ids(output_dir: str, phase: Optional[str]) -> set:
@@ -443,6 +507,21 @@ def main(argv: Optional[List[str]] = None) -> int:
     if found:
         suffix += f" ({len(found)} check finding(s) recorded)"
     print(f"{MARKER} {written['task_id']} {written['status']}{suffix}")
+    blocked = written.get("blocked") or []
+    if blocked:
+        task_id = written["task_id"]
+        print(
+            f"{CHECK_BLOCKED_MARKER} {', '.join(blocked)} "
+            f"{'depends' if len(blocked) == 1 else 'depend'} on {task_id}, "
+            f"whose check reported problems: do not dispatch them (their "
+            f"`util write-prompt` refuses) and record nothing for them — they "
+            f"stay pending. Run the tasks that do not depend on {task_id}, then "
+            f"close the phase without --mark-completed and report the way "
+            f"forward: fix what {task_id} reported and re-run implement with "
+            f"--resume (the check runs again), or accept its findings with "
+            f"--resume --human-task {task_id}=done, or leave it and them "
+            f"undone with --resume --human-task {task_id}=skip."
+        )
     return 0
 
 

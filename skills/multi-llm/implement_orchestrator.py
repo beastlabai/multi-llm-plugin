@@ -743,10 +743,19 @@ def format_batches_for_output(
         if not tasks_to_include:
             continue
 
+        entries = [
+            format_task_for_output(t, plan_preamble, plan_path, all_tasks=all_tasks)
+            for t in tasks_to_include
+        ]
+        for entry in entries:
+            if entry.get("id") in rerun:
+                # Handed out to run again: never `completed` in the JSON a
+                # native host reads, or it would pass the check over.
+                entry["status"] = TaskStatus.PENDING.value
         output_batches.append({
             "batch_index": batch_idx,
             "can_parallelize": len(tasks_to_include) > 1,
-            "tasks": [format_task_for_output(t, plan_preamble, plan_path, all_tasks=all_tasks) for t in tasks_to_include]
+            "tasks": entries,
         })
 
     return output_batches
