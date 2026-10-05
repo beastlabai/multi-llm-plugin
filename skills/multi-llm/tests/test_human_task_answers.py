@@ -127,6 +127,114 @@ def _fail_the_check(repo) -> None:
     state.save()
 
 
+class TestAnAnswerOnTheNativeLeg:
+
+    def test_done_is_applied_with_no_manual_task_in_the_plan(
+        self, repo_nohuman, tmp_path, capsys
+    ):
+        """No manual task, so nothing used to resolve the plan: the accept was
+        recorded, ``[HUMAN_TASK_ANSWERED]`` printed, and T002 was handed to the
+        host again as ``failed``."""
+        repo = repo_nohuman
+        out_json = tmp_path / "implement_tasks.json"
+        assert _emit(repo, out_json, "--yes") == 0
+        _fail_the_check(repo)
+        capsys.readouterr()
+        assert _emit(repo, out_json, "--yes", "--resume", "--human-task", "T002=done") == 0
+        out = capsys.readouterr().out
+        assert "[HUMAN_TASK_ANSWERED] T002=done" in out
+        assert _statuses(repo)["T002"] == "completed"
+        reason = get_or_create_state(repo.plan).get_task_status_reason("T002")
+        assert reason.startswith("accepted — you answered --human-task T002=done")
+        handed = _handed(out_json)
+        assert "T002" not in [tid for tid, _ in handed]
+        assert ("T004", "pending") in handed, "the accepted task's dependent runs"
+        data = json.loads(out_json.read_text())
+        assert data["accepted_tasks"] == {"T002": reason}
+        assert data["pending_tasks"] == len(handed)
+        assert "Accepted after failing (recorded completed in state.json" in out
+        assert "T002 Check the module: accepted —" in out
+        # A later resume keeps it out: the answer applied once, and the record
+        # it left is what `--resume` reads.
+        capsys.readouterr()
+        assert _emit(repo, out_json, "--yes", "--resume") == 0
+        assert "T002" not in [tid for tid, _ in _handed(out_json)]
+        assert _statuses(repo)["T002"] == "completed"
+
+    def test_done_with_a_manual_task_present_takes_the_task_out_of_the_batches(
+        self, repo, tmp_path, capsys
+    ):
+        """With a manual task the plan WAS resolved, so state said T002
+        completed ("accepted …") while the task JSON still handed it out as
+        ``failed`` — and the host's ``batch-done`` then overwrote the accept."""
+        out_json = tmp_path / "implement_tasks.json"
+        assert _emit(repo, out_json, "--yes") == 0
+        _fail_the_check(repo)
+        capsys.readouterr()
+        assert _emit(repo, out_json, "--yes", "--resume", "--human-task", "T002=done") == 0
+        handed = _handed(out_json)
+        assert "T002" not in [tid for tid, _ in handed], handed
+        assert ("T005", "skipped") in handed
+        assert _statuses(repo)["T002"] == "completed"
+        data = json.loads(out_json.read_text())
+        assert list(data["accepted_tasks"]) == ["T002"]
+        assert list(data["skipped_tasks"]) == ["T005"]
+        # `write_tasks.json`, which `util write-prompt` reads, has no prompt
+        # for a task the host must not dispatch.
+        write_tasks = json.loads((repo.phase_dir / "write_tasks.json").read_text())
+        assert "T002" not in [t["task_id"] for t in write_tasks["batches"]]
+
+    def test_skip_is_applied_and_takes_the_dependents(
+        self, repo_nohuman, tmp_path, capsys
+    ):
+        repo = repo_nohuman
+        out_json = tmp_path / "implement_tasks.json"
+        assert _emit(repo, out_json, "--yes") == 0
+        _fail_the_check(repo)
+        capsys.readouterr()
+        assert _emit(repo, out_json, "--yes", "--resume", "--human-task", "T002=skip") == 0
+        out = capsys.readouterr().out
+        handed = dict(_handed(out_json))
+        assert handed["T002"] == "skipped" and handed["T004"] == "skipped"
+        assert handed["T003"] == "pending"
+        data = json.loads(out_json.read_text())
+        assert sorted(data["skipped_tasks"]) == ["T002", "T004"]
+        assert data["skipped_tasks"]["T002"].startswith(
+            "skipped — you answered --human-task T002=skip"
+        )
+        statuses = _statuses(repo)
+        assert statuses["T002"] == "skipped" and statuses["T004"] == "skipped"
+        # Both are the user's decision, not deferred work.
+        assert "Skipped at your request" in out
+        assert "T002 Check the module: skipped — you answered" in out
+        assert "T004 Edit: wire the fallback: skipped — depends on skipped task T002" in out
+        assert "Manual Tasks (Deferred) section" not in out.split("Skipped at your request")[0]
+        assert get_or_create_state(repo.plan).deferred_implementation_tasks() == []
+        # A second resume keeps both skipped rather than handing them out pending.
+        capsys.readouterr()
+        assert _emit(repo, out_json, "--yes", "--resume") == 0
+        handed = dict(_handed(out_json))
+        assert handed.get("T002") == "skipped" and handed.get("T004") == "skipped"
+        statuses = _statuses(repo)
+        assert statuses["T002"] == "skipped" and statuses["T004"] == "skipped"
+
+    def test_a_declined_manual_task_is_named_apart_from_the_deferred_ones(
+        self, repo, tmp_path, capsys
+    ):
+        """A pause-and-ask "Skip" is not owed: the emit header must not tell
+        the host to list it under Manual Tasks (Deferred), which is where
+        ``[WORKFLOW_COMPLETE]``'s ``[MANUAL_TASK]`` lines would disagree."""
+        out_json = tmp_path / "implement_tasks.json"
+        assert _emit(
+            repo, out_json, "--no-confirm", "--force-strategy", "pause-and-ask",
+            "--human-task", "T005=skip",
+        ) == 0
+        out = capsys.readouterr().out
+        assert "Skipped at your request" in out
+        assert "T005 Play through by hand: skipped by user during pause-and-ask" in out
+        assert "Deferred tasks (" not in out
+        assert get_or_create_state(repo.plan).deferred_implementation_tasks() == []
+
 
 # --- skip takes the dependents under every strategy --------------------------
 
@@ -187,6 +295,15 @@ class TestSkipTakesTheDependentsUnderEveryStrategy:
         assert sorted(plan.skipped) == ["T002", "T004", "T005"]
         assert sorted(plan.declined()) == ["T002", "T004"]
         assert list(plan.deferred()) == ["T005"]
+
+    def test_the_native_leg_skips_them_too(self, repo_nohuman, tmp_path, capsys):
+        repo = repo_nohuman
+        out_json = tmp_path / "implement_tasks.json"
+        assert _emit(repo, out_json, "--yes", "--force-strategy", "skip-continue") == 0
+        _fail_the_check(repo)
+        capsys.readouterr()
+        assert _emit(repo, out_json, "--yes", "--resume", "--human-task", "T002=skip") == 0
+        assert dict(_handed(out_json))["T004"] == "skipped"
 
 
 # --- the resumed account keeps every skipped task ----------------------------
