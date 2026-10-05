@@ -1985,10 +1985,8 @@ class WriteBatchScheduler:
             return
         digests = {digest for _stamp, digest in self._retained.values() if digest}
         shards = {digest[:2] for digest in digests}
-        # The directory named in full: a jailed repo-wide batch keeps its
-        # snapshots under the state home, not the phase dir (Codex racing run
-        # 4: "restore points live in pre_batch/" read as the phase dir's copy,
-        # which the line before says is never read).
+        # The files the deny list kept out, named here once rather than in a
+        # warning at the start of every write phase (see `_retain`).
         denied = sorted(
             path for path, is_denied in self._unretained_denied.items() if is_denied)
         kept_out = (
@@ -1999,6 +1997,10 @@ class WriteBatchScheduler:
             f"{f', … {len(denied) - 5} more' if len(denied) > 5 else ''}"
             if denied else ""
         )
+        # The snapshot directory named in full: a jailed repo-wide batch keeps
+        # its snapshots under the state home, not the phase dir (Codex racing
+        # run 4: "restore points live in pre_batch/" read as the phase dir's
+        # copy, which the line before says is never read).
         self.log(
             f"[write-subagents] rollback store peaked at "
             f"{self._retained_bytes / (1024 * 1024):.1f} MB of the "
