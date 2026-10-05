@@ -269,7 +269,7 @@ class TestStatusNamesThem:
 class TestImplementsResultLine:
     def test_the_notice_names_each_task_and_its_first_problem(self):
         notice = implement_orchestrator.check_findings_notice({"T007": FINDINGS})
-        assert notice.startswith("check findings (the tasks that depend on these checks wait")
+        assert notice.startswith("check findings (review-code is told about them;")
         assert "implement continued" not in notice
         assert f"T007: {FINDINGS[0]} (+1 more)" in notice
         assert "implement/summary.md" in notice
