@@ -1176,7 +1176,7 @@ def test_step_1b_implement_turn_runs_its_toolchain_under_the_repo_wide_grant(tmp
     assert (tree / "AGENTS.md").read_text() == AGENTS_TEXT + "appended\n"
     assert (tree / ".codex" / "x").read_text() == "z\n"
     assert (tree / ".multi-llm" / "x").read_text() == "z\n"
-    assert "?? newtop.txt" in attempts and "?? newtop/" in attempts
+    assert "?? newtop.txt" in attempts and "?? .codex/x" in attempts  # (an empty dir is not listed)
     # Nothing in the turn wrote `.git/`: HEAD and the metadata are as they were.
     assert _git(tree, "rev-parse", "HEAD") == head
     assert {
