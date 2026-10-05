@@ -935,6 +935,10 @@ def scripted_runner(monkeypatch):
             )
         prompts.append(prompt)
         reply = script[min(len(prompts), len(script)) - 1]
+        if isinstance(reply, executor._Capture):
+            # A scripted transport failure (a timeout, a crash) rather than a
+            # reply.
+            return reply
         return executor._Capture(
             stdout=_codex_stream(reply), stderr="", exit_code=0,
             duration=0.01, argv=["codex", "exec", "--json"],
@@ -1040,14 +1044,44 @@ class TestSchemaRepairReAsk:
         assert row["repair"] == "schema_invalid"
         assert "after the one schema-repair re-ask" in row["reason"]
 
+    def test_a_re_run_after_a_reply_shape_failure_takes_the_new_runner(
+        self, tmp_path, exec_env, scripted_runner, capsys
+    ):
+        """2026-10-05, OpenCode run 3: generate-tasks failed twice on the
+        runner's reply shape, the host switched model, and the re-run stayed on
+        the failed runner because its batch-report row pinned it. A
+        reply-quality failure is not a pin (fix round 8)."""
+        exec_env("codex:gpt-5.5")
+        scripted_runner(WRONG_SHAPE, WRONG_SHAPE, _valid_document())
+        plan = _plan(tmp_path)
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
+        ) == 3
+        capsys.readouterr()
+
+        exec_env("codex:gpt-5.4")
+        assert multi_llm.main(
+            ["generate-tasks", str(plan), "--yes", "--exec-subagents"]
+        ) == 0
+        second = capsys.readouterr().out
+
+        assert "task_generation -> codex:gpt-5.4 (version" in second
+        assert "kept from subagent_batch_report.json" not in second
+
     def test_a_re_run_names_why_it_kept_the_earlier_runner(
         self, tmp_path, exec_env, scripted_runner, capsys
     ):
-        """2026-10-05, OpenCode run 3: generate-tasks re-run after a model switch
-        stayed on the runner the failed first run recorded, and the dispatch line
-        named the runner but not why."""
+        """2026-10-05, OpenCode run 3: the dispatch line named a pinned runner
+        but not why. A transport failure (here a timeout, twice) keeps the
+        pin, and the line says where it came from."""
+        from utils import subagent_executor as executor
+
         exec_env("codex:gpt-5.5")
-        scripted_runner(WRONG_SHAPE, WRONG_SHAPE, _valid_document())
+        timed_out = executor._Capture(
+            timed_out=True, exit_code=None, duration=0.01,
+            argv=["codex", "exec", "--json"],
+        )
+        scripted_runner(timed_out, timed_out, _valid_document())
         plan = _plan(tmp_path)
         assert multi_llm.main(
             ["generate-tasks", str(plan), "--yes", "--exec-subagents"]

@@ -8046,6 +8046,10 @@ def _dispatch_order(tasks: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 #: of the same task recorded.
 _RECORDED_RUNNER_SUFFIX = "(recorded from a previous attempt)"
 
+#: Row statuses whose recorded runner is not a pin for a re-run (fix round 8):
+#: the reply-quality failures, rungs 5 and 6. See :func:`_recorded_runners`.
+UNPINNED_ROW_STATUSES = frozenset({STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE})
+
 
 def _pinned_runner_note(key: str, kind: str = "") -> str:
     """The dispatch line's reason when the runner is a recorded pin, else ``""``.
@@ -8086,7 +8090,9 @@ def run_tasks(
     Runners are resolved **once per task at batch start** and pinned into the
     report, so a re-dispatch under ``--resume`` or ``--retry-failed-subagents``
     uses the runner the first attempt did rather than re-resolving against a
-    config that may have changed mid-run. The effective ceilings are logged once
+    config that may have changed mid-run — except a task whose attempt failed
+    fatally or on its reply's shape (:func:`_recorded_runners`). The effective
+    ceilings are logged once
     at batch start alongside each task's runner, so a slow batch is diagnosable
     from the log rather than inferred.
 
@@ -8777,6 +8783,18 @@ def _recorded_runners(
     collide (``_authoritative_validator_runner``, always a validation-family
     kind), where it defaults to the bare name exactly as before.
 
+    **A row whose own status is a reply-quality failure is not a pin either**
+    (:data:`UNPINNED_ROW_STATUSES`, fix round 8): the runner was reached and
+    answered, in a shape nobody could use, so a re-run is the moment to try
+    another runner — the session model the host switched to, or a repaired
+    ``driver.subagent_runner`` — not to repeat it. Row-level, unlike the fatal
+    rule: the spec itself works. A transport failure (timeout, rate limit,
+    runner error) or an ``incomplete`` row keeps its pin, so a re-run of a
+    batch that merely ran out of time stays on the runner its siblings used.
+    Measured 2026-10-05, OpenCode run 3: generate-tasks failed twice on
+    ``opencode/big-pickle``'s reply shape, the host switched model, and the
+    re-run dispatched big-pickle again on the strength of that failed row.
+
     ``pin_sha256`` (2026-10-02, #29): the current batch's :func:`_pin_sha256`. A
     report that recorded a *different* digest was written for another round or other
     inputs, and its runners are not pins for this batch. Measured on a Codex
@@ -8806,7 +8824,7 @@ def _recorded_runners(
     recorded = {}
     for row in rows:
         spec = str(row["runner"])
-        if spec in rejected_specs:
+        if spec in rejected_specs or row.get("status") in UNPINNED_ROW_STATUSES:
             continue
         recorded[str(row["task_id"])] = spec
     return recorded
