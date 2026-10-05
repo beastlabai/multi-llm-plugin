@@ -1004,6 +1004,9 @@ class TestSchemaRepairReAsk:
         row = self._report(plan)["tasks"][0]
         assert row["status"] == "ok"
         assert row["attempt_count"] == 2
+        # The row itself names the re-ask (the round-5 report's
+        # `repair: schema_invalid`), not only its second attempt.
+        assert row["repair"] == "schema_invalid"
         assert [(a["attempt"], a["status"], a.get("repair")) for a in row["attempts"]] == [
             (1, "schema_invalid", None),
             (2, "ok", "schema_invalid"),
@@ -1034,6 +1037,7 @@ class TestSchemaRepairReAsk:
         row = self._report(plan)["tasks"][0]
         assert row["status"] == "schema_invalid"
         assert row["attempt_count"] == 2
+        assert row["repair"] == "schema_invalid"
         assert "after the one schema-repair re-ask" in row["reason"]
 
     def test_a_reply_over_the_byte_cap_is_not_re_asked(
@@ -1063,6 +1067,7 @@ class TestSchemaRepairReAsk:
         assert "over the 512-byte cap" in row["reason"]
         assert "schema-repair re-ask" not in row["reason"]
         assert [a.get("repair") for a in row["attempts"]] == [None]
+        assert "repair" not in row
 
     @staticmethod
     def _slot_clock(monkeypatch, *, wall_below_timeout=None):
