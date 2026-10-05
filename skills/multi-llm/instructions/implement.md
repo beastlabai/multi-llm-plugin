@@ -260,14 +260,7 @@ After reading the task JSON, scan all batches for tasks with `is_human: true`. I
   3. **"Skip all, skip dependents too"** — Skip all human tasks AND skip any code tasks that depend on them. List everything skipped in the implementation summary.
   4. **"Cancel"** — Stop implementation.
 
-**Persist the strategy**: After resolving (whether from flag, saved state, or user prompt), save it to state.json:
-```python
-state = json.load(state_file)
-state["human_task_strategy"] = "pause-and-ask"  # or "skip-continue", "skip-dependents"
-state["updated_at"] = datetime.now().isoformat()
-json.dump(state, state_file)
-```
-This ensures `--resume` can recover the strategy without re-prompting.
+**The orchestrator records the strategy and every skip; you never write them.** With a strategy resolved (rungs 1-3), step 2 already saved it in `state.json`, recorded every task it skips there (each manual task, and under `skip-dependents` every task that depends on one) and listed them in the task JSON: each such task has `status: "skipped"` and a `skip_reason`, and the top-level `skipped_tasks` map names them all. When `human_task_strategy` in the task JSON is `null` (rung 4) and the user picks a strategy, re-run step 2 with `--force-strategy <answer>` added (`pause-and-ask`, `skip-continue` or `skip-dependents`; "Cancel" stops here) and read the task JSON that run prints instead: that run records the strategy and the skips. Never edit `state.json` by hand — a manual task with no record is still named as owed when the workflow completes, but its dependents are not.
 
 #### 4b. The Python write executor: `--exec-subagents` (an alternative to steps 5-10)
 
@@ -379,23 +372,16 @@ your host.
      - **Ask the user**, presenting the task:
        - Question: "Task {id}: {title} requires manual action. Please complete the following and confirm when done:\n\n{description}\n\nAcceptance criteria:\n{acceptance_criteria}"
        - Options: "Done — I've completed this task", "Skip this task", "Cancel implementation"
-     - Handle each response:
-       - **Done**: Mark task as "completed" in state, continue
-       - **Skip**: Mark task as "skipped" in state with reason "skipped by user during pause-and-ask". Run the **transitive skip propagation** algorithm (see below) to skip dependent tasks.
+     - Handle each response by recording it through step 2, never by hand:
+       - **Done**: re-run step 2 with `--resume --human-task {id}=done` added; it records the task completed.
+       - **Skip**: re-run step 2 with `--resume --human-task {id}=skip` added; it records the task skipped with reason "skipped by user during pause-and-ask" and skips every task that depends on it (the **transitive skip propagation** below).
+       - Then read the task JSON that run prints and continue with its batches.
        - **Cancel**: Execute **cancellation semantics** (see below)
      - Human tasks within a parallelizable batch: execute all non-human tasks in parallel first, then present human tasks sequentially
 
      **"Skip all, continue anyway" strategy:**
-     - Mark all human tasks as "skipped" in state with reason "deferred — user chose to complete manually after implementation"
+     - The orchestrator already recorded every human task as "skipped" in state (its `skip_reason` starts "deferred — manual task") and a dependency override for each code task that depends on one. Do not record either yourself.
      - Treat human task dependencies as satisfied — dependent code tasks proceed as normal
-     - For each code task that has a skipped human task in its dependency chain, record a dependency override in state:
-       ```python
-       state["dependency_overrides"] = state.get("dependency_overrides", {})
-       state["dependency_overrides"][code_task_id] = {
-           "overridden_deps": [human_task_id_1, human_task_id_2],
-           "timestamp": datetime.now().isoformat()
-       }
-       ```
      - After all tasks complete, include a "## Manual Tasks (Deferred)" section in the implementation summary
      - Also include a "## Dependency Override Warnings" section listing each code task that ran with overridden human dependencies:
        ```markdown
@@ -410,19 +396,18 @@ your host.
        ```
 
      **"Skip all, skip dependents too" strategy:**
-     - Mark all human tasks as "skipped" in state with reason "deferred — user chose to complete manually after implementation"
-     - Run the **transitive skip propagation** algorithm to find and skip all dependent tasks
+     - The orchestrator already recorded every human task, and every task that depends on one, as "skipped" in state; the task JSON shows each with `status: "skipped"`. Do not dispatch them and do not record them yourself.
      - After remaining tasks complete, include a "## Manual Tasks (Deferred)" section listing each human task and each skipped dependent
 
      #### Transitive Skip Propagation Algorithm
 
-     When a human task is skipped (either via "skip dependents too" strategy or individual skip during "pause-and-ask"), propagate the skip forward through the dependency graph:
+     The orchestrator runs this walk itself (under "skip dependents too", and for a "Skip" answered with `--human-task {id}=skip`); it is described here so the summary can report it:
 
      1. Start with the set of skipped human task IDs as the **seed set**
      2. Use BFS forward walk: for each task in the seed set, find all tasks that have it in their `depends_on`
-     3. Mark each discovered dependent as "skipped" with reason: "skipped — depends on skipped task {parent_id} ({parent_title})"
+     3. Each discovered dependent is recorded "skipped" with reason: "skipped — depends on skipped task {parent_id} ({parent_title})"
      4. Add the newly skipped task to the queue and continue until no more dependents are found
-     5. Track the full skip chain for reporting: `T001 (human, skipped) → T003 (skipped, depends on T001) → T005 (skipped, depends on T003)`
+     5. Report the full skip chain: `T001 (human, skipped) → T003 (skipped, depends on T001) → T005 (skipped, depends on T003)`
 
      #### Cancellation Semantics
 
