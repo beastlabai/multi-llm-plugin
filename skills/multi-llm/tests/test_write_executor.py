@@ -1233,7 +1233,7 @@ class TestVerificationOnlyImplementTask:
         assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
         assert outcome.outcome_label != "check-findings"
 
-    @pytest.mark.parametrize("could_not_run", [True, "true", "yes", 1])
+    @pytest.mark.parametrize("could_not_run", [True, "true", "yes", 1, "1"])
     def test_could_not_run_beside_any_claim_stops(self, env, could_not_run):
         """`could_not_run` is the one word for a check that did not run,
         whatever status the reply picked."""

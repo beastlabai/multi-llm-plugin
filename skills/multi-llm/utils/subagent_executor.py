@@ -650,10 +650,12 @@ CHECK_RESULT_UNKNOWN = (
     "no usable `passed` value and no findings); see the runner notes"
 )
 
-#: The words ``check.passed`` may be spelled in, besides the JSON booleans
-#: (a near-miss reply: ``"false"``, ``0``). Anything else is an unknown result.
-_CHECK_PASSED_WORDS = frozenset({"true", "yes", "pass", "passed"})
-_CHECK_FAILED_WORDS = frozenset({"false", "no", "fail", "failed"})
+#: The words ``check.passed`` (and ``check.could_not_run``) may be spelled
+#: in, besides the JSON booleans (a near-miss reply: ``"false"``, ``0``, and
+#: since fix round 13 the strings ``"1"``/``"0"``, which read as the numbers
+#: do). Anything else is an unknown result.
+_CHECK_PASSED_WORDS = frozenset({"true", "yes", "pass", "passed", "1"})
+_CHECK_FAILED_WORDS = frozenset({"false", "no", "fail", "failed", "0"})
 
 #: A bare ``findings`` value that says "nothing found" (any case, a trailing
 #: ``.``/``!`` ignored), read as ``[]`` only beside a ``passed`` that reads
@@ -690,7 +692,7 @@ def write_outcome_label(
 def _check_passed(value: Any) -> Optional[bool]:
     """``check.passed`` read leniently: ``True``/``False``, else ``None``.
 
-    The JSON booleans, ``1``/``0`` and the words in
+    The JSON booleans, ``1``/``0`` (numbers or strings) and the words in
     :data:`_CHECK_PASSED_WORDS` / :data:`_CHECK_FAILED_WORDS` (any case);
     anything else (``null``, a missing key, ``"maybe"``) is unknown.
     """
@@ -728,7 +730,8 @@ class CheckReply(NamedTuple):
     whether the reply listed at least one finding of its own (not one this
     reader supplied: :data:`CHECK_FAILED_WITHOUT_FINDINGS`,
     :data:`CHECK_RESULT_UNKNOWN`). ``could_not_run`` is ``check.could_not_run``
-    read leniently (``true``, ``1``, ``"true"``/``"yes"``): the runner says
+    read as leniently as ``passed`` (``true``, ``1``, ``"1"``,
+    ``"true"``/``"yes"``; :func:`_check_passed`): the runner says
     a check could not run (fix round 12).
     """
 

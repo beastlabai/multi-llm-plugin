@@ -154,12 +154,35 @@ class TestTheReplyField:
         else:
             assert found == expected
 
-    @pytest.mark.parametrize("passed", [True, "true", "Yes", 1, "passed"])
+    @pytest.mark.parametrize("passed", [True, "true", "Yes", 1, "1", "passed"])
     def test_a_clear_pass_with_nothing_listed_is_a_pass(self, passed):
         from utils.subagent_executor import check_findings_from
 
         assert check_findings_from({"check": {"passed": passed, "findings": []}}) == []
         assert check_findings_from({"check": {"passed": passed}}) == []
+
+    @pytest.mark.parametrize("value,expected", [
+        (True, True), (1, True), ("1", True), (" 1 ", True), ("true", True),
+        ("yes", True), (False, False), (0, False), ("0", False), ("no", False),
+        (None, False), ("maybe", False), (2, False), ("2", False),
+    ])
+    def test_could_not_run_reads_as_leniently_as_passed(self, value, expected):
+        """Fix round 13: `could_not_run` read int 1 as true but not the
+        string "1"; both fields share one reading now."""
+        from utils.subagent_executor import read_check_reply
+
+        reply = read_check_reply({"check": {
+            "passed": False, "could_not_run": value, "findings": ["x"]}})
+        assert reply.could_not_run is expected
+
+    def test_a_string_zero_or_one_reads_as_passed_does(self):
+        from utils.subagent_executor import (
+            CHECK_FAILED_WITHOUT_FINDINGS, check_findings_from,
+        )
+
+        assert check_findings_from({"check": {"passed": "0"}}) == [
+            CHECK_FAILED_WITHOUT_FINDINGS]
+        assert check_findings_from({"check": {"passed": "1", "findings": "none"}}) == []
 
     def test_only_a_missing_check_key_is_no_result(self):
         from utils.subagent_executor import CHECK_RESULT_UNKNOWN, check_findings_from
