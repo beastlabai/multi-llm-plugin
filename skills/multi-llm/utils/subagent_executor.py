@@ -7098,12 +7098,19 @@ def dispatch_task(
             # the extracted document, because the status line keeps only five,
             # and a reply that is not valid JSON is told so instead of being
             # handed the errors of a fragment from inside it. A prose reply has
-            # no document: its own error is the one problem.
+            # no document: its own error is the one problem. A write kind's
+            # re-ask lists the batch's ids in prompt order, so a reply that
+            # numbered its items ("Suggestion 1: …") restates them by id.
             problems = validate_result(kind, data) if data is not None else []
             syntax = capture.reply_syntax_error
             repair_prompt = build_schema_repair_prompt(
                 kind, prompt, problems or [error], syntax_error=syntax,
-                **({"previous_reply": reply_text} if kind in WRITE_KINDS else {}),
+                **({
+                    "previous_reply": reply_text,
+                    "expected_ids": [
+                        str(item) for item in task.get("expected_ids") or []
+                    ],
+                } if kind in WRITE_KINDS else {}),
             )
             too_long = _prompt_over_budget(
                 provider, model, repair_prompt, transport, profile,

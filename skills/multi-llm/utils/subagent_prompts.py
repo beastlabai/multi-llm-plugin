@@ -1124,6 +1124,33 @@ def _repair_rules(kind: str) -> str:
     return "\n".join(lines)
 
 
+def _batch_ids_block(kind: str, ids: Sequence[str]) -> str:
+    """The write re-ask's list of the batch's ids, numbered in prompt order.
+
+    Spelled the way the dispatched prompt's result contract numbers them
+    (``write_batch_scheduler.with_result_contract``: "suggestion 1 = `<id>`"),
+    so a reply that named its items by position maps back by that number.
+    """
+    item = "fix" if kind == "apply_code_fixes" else "suggestion"
+    held = f"1 {item}" if len(ids) == 1 else (
+        f"{len(ids)} {item}es" if item == "fix" else f"{len(ids)} {item}s"
+    )
+    lines = "\n".join(
+        f"- {item} {index} = `{member}`" for index, member in enumerate(ids, 1)
+    )
+    return f'''
+## The batch's ids
+
+The batch held {held}, numbered in the order its instructions listed them:
+
+{lines}
+
+`ids` must use these spellings. Where the previous reply names an item by its
+number ("{item.capitalize()} 1", "{item} 2", …), write the id listed beside
+that number. Name no id outside this list.
+'''
+
+
 def build_schema_repair_prompt(
     kind: str,
     original_prompt: str,
@@ -1131,6 +1158,7 @@ def build_schema_repair_prompt(
     *,
     syntax_error: Optional[str] = None,
     previous_reply: Optional[str] = None,
+    expected_ids: Optional[Sequence[str]] = None,
 ) -> str:
     """The one schema-repair re-ask: why the reply was rejected and what to send.
 
@@ -1150,6 +1178,11 @@ def build_schema_repair_prompt(
       begins before the last :data:`WRITE_REPORT_REPLY_CHARS` characters) to
       restate as the report. What was applied is still decided by the executor's
       byte comparison against the pre-batch snapshot, never by this report.
+      *expected_ids* (the task's, in prompt order) are listed in the re-ask
+      (:func:`_batch_ids_block`): the batch prompts' own Return Format asks
+      for "Suggestion 1: …", and a re-ask that never named the ids got back
+      ``ids: ["Suggestion 1", "Suggestion 2"]`` for a fully applied batch
+      (OpenCode racing run 4, 2026-10-05) — a partial application at exit 3.
 
     *syntax_error* (``json_extractor.describe_syntax_error``) replaces the
     validator's errors when the reply's document did not parse: those errors
@@ -1171,6 +1204,21 @@ def build_schema_repair_prompt(
                 f"a {kind} report re-ask needs the previous reply to restate"
             )
         reply = quote_previous_reply(reply)
+        ids = [str(item) for item in expected_ids or []]
+        if ids:
+            listed = _batch_ids_block(kind, ids)
+            take = (
+                "Restate that reply's report. Take every value from it, with the\n"
+                "ids spelled as listed above; never claim an id for an item it does\n"
+                "not say it applied or found already applied, and never name a file\n"
+                "it does not name."
+            )
+        else:
+            listed = ""
+            take = (
+                "Restate that reply's report. Take every value from it; never name "
+                "an id or a\nfile it does not name."
+            )
         return f'''You are re-sending the report of a batch of edits. A previous turn
 already made the edits — they are on disk now — but its closing report could not
 be read, so the batch cannot be checked yet.
@@ -1188,11 +1236,10 @@ checked against the files on disk, never against what the report says.
 <<<PREVIOUS REPLY
 {reply}
 PREVIOUS REPLY>>>
-
+{listed}
 ## Reply
 
-Restate that reply's report. Take every value from it; never name an id or a
-file it does not name.
+{take}
 
 {rules}
 

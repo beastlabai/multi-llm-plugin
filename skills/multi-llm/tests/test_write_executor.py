@@ -811,6 +811,71 @@ class TestReportReAsk:
         second = self._calls(log)[1]["prompt"]
         assert json.dumps(report) in second
 
+    BATCH_IDS = ["ec8092961e62a151", "7f1f3c58776954ff"]
+
+    def test_a_reply_that_numbered_its_items_is_restated_with_the_batchs_ids(
+        self, env
+    ):
+        """Fix round 11 (OpenCode racing run 4, 2026-10-05): the batch prompt's
+        own Return Format asks for "Suggestion 1: …", the runner answered in
+        that prose, and the re-ask — which never named the batch's ids and said
+        "never name an id … it does not name" — got back `ids: ["Suggestion 1",
+        "Suggestion 2"]`: a fully applied batch recorded as a partial
+        application at exit 3. The re-ask now lists the ids in prompt order."""
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)])
+        env.monkeypatch.setenv(
+            "MOCK_LLM_WRITE_RESULT",
+            "Suggestion 1: added the CDN note to the Goal.\n"
+            "Suggestion 2: added the import-failure error to Testing.",
+        )
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESTATE", "1")
+
+        result = env.scheduler(
+            [env.apply_task(0, expected_ids=self.BATCH_IDS)]
+        ).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_APPLIED, outcome.reason
+        assert result.exit_code == 0
+        second = self._calls(log)[1]["prompt"]
+        assert (
+            "- suggestion 1 = `ec8092961e62a151`\n"
+            "- suggestion 2 = `7f1f3c58776954ff`"
+        ) in second
+        report = json.loads(
+            (env.phase_dir / "apply_batch_0.json").read_text(encoding="utf-8")
+        )
+        assert report["ids"] == self.BATCH_IDS
+
+    @pytest.mark.parametrize("previous,foreign", [
+        ("Suggestion 1: added the CDN note.\nSuggestion 3: reworded Testing.",
+         "Suggestion 3"),
+        (json.dumps({"status": "applied", "ids": ["ec8092961e62a151", "s9"],
+                     "files_touched": ["plans/p.md"]}),
+         "s9"),
+    ], ids=["a-position-past-the-list", "another-batchs-id"])
+    def test_an_id_outside_the_batch_still_attests_nothing(
+        self, env, previous, foreign
+    ):
+        """Naming the batch's ids lets a positional name be spelled right; it
+        does not let a name the batch does not hold stand in for one it does."""
+        env.edits([_patch_edit(env.plan)])
+        env.monkeypatch.setenv("MOCK_LLM_WRITE_RESULT", previous)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESTATE", "1")
+
+        result = env.scheduler(
+            [env.apply_task(0, expected_ids=self.BATCH_IDS)]
+        ).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert result.exit_code == 3
+        assert "only 1 of 2 expected id(s) came back (missing: 7f1f3c58776954ff)" in (
+            outcome.reason
+        )
+        assert repr(foreign) in outcome.reason
+
     def test_a_raw_control_byte_in_the_report_needs_no_re_ask(self, env):
         """The measured reply's shape: a raw control byte in a key (a NUL then;
         a tab here, because an environment variable cannot carry a NUL) used to

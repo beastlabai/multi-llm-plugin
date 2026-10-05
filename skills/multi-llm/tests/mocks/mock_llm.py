@@ -126,7 +126,9 @@ Environment Variables (New - for scenario-based testing):
     MOCK_LLM_REPAIR_RESTATE: is "1" (and MOCK_LLM_REPAIR_RESULT unset): the
         well-behaved runner that restates its report from the previous reply
         the re-ask QUOTES — status, ``ids`` and ``files_touched`` read off the
-        quote, so whatever the quote cut is missing from the restatement.
+        quote, so whatever the quote cut is missing from the restatement. An
+        item the quote names by position ("Suggestion 1") is restated as the
+        id the re-ask lists beside that number, when it lists any.
 
 Precedence:
     1. Legacy variables take precedence when set (backward compatibility)
@@ -533,17 +535,34 @@ def apply_mock_edits(prompt: str = "") -> List[Dict[str, Any]]:
 REPORT_REASK_MARKER = "You are re-sending the report of a batch of edits."
 
 
+#: A line of the re-ask's "The batch's ids" block: ``- suggestion 1 = `<id>```.
+_LISTED_ID = re.compile(r"^- (?:suggestion|fix) (\d+) = `([^`]+)`$", re.MULTILINE)
+
+#: An item named by its position, the way the batch prompts' own "Return
+#: Format" asks for ("Suggestion 1: …").
+_POSITIONAL_ID = re.compile(r"^\s*(?:suggestion|fix|item)\s*#?\s*(\d+)\s*$", re.I)
+_POSITIONAL_LINE = re.compile(
+    r"^[\s*#-]*((?:suggestion|fix)\s+\d+)\s*\**\s*:", re.I | re.MULTILINE
+)
+
+
 def restate_report(prompt: str) -> str:
     """The report a runner restates from the reply its re-ask quotes.
 
     Reads only what sits between the re-ask's ``<<<PREVIOUS REPLY`` fences —
     a runner told to "take every value from it" has nothing else — so a quote
-    that cut the report's start restates a report without its ids.
+    that cut the report's start restates a report without its ids. A prose
+    reply with no ``ids`` list restates the items it numbered ("Suggestion 1:
+    …") under those names, as opencode/big-pickle did (racing run 4,
+    2026-10-05). When the re-ask lists the batch's ids, a name that is a
+    position is written as the id listed beside that number; any other name
+    is kept as it was quoted.
     """
     opener, closer = "<<<PREVIOUS REPLY\n", "\nPREVIOUS REPLY>>>"
     start = prompt.find(opener)
     end = prompt.rfind(closer)
     quoted = prompt[start + len(opener):end] if 0 <= start < end else ""
+    after = prompt[end:] if 0 <= start < end else ""
 
     def last_list(key: str) -> List[Any]:
         found = re.findall(r'"%s"\s*:\s*(\[[^\]]*\])' % key, quoted)
@@ -552,10 +571,21 @@ def restate_report(prompt: str) -> str:
         except json.JSONDecodeError:
             return []
 
+    ids = last_list("ids") or _POSITIONAL_LINE.findall(quoted)
+    listed = {int(n): item for n, item in _LISTED_ID.findall(after)}
+
+    def spelled(name: Any) -> Any:
+        if str(name) in listed.values():
+            return name
+        position = _POSITIONAL_ID.match(str(name))
+        if position and int(position.group(1)) in listed:
+            return listed[int(position.group(1))]
+        return name
+
     status = re.findall(r'"status"\s*:\s*"([a-z-]+)"', quoted)
     return json.dumps({
         "status": status[-1] if status else "applied",
-        "ids": last_list("ids"),
+        "ids": [spelled(name) for name in ids],
         "files_touched": last_list("files_touched"),
         "summary": "restated from the previous reply",
     })
