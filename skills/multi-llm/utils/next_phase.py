@@ -212,6 +212,47 @@ def quote_plan_arg(plan_arg: str) -> str:
     return plan_arg
 
 
+#: What a plan spelling read back from a file may be made of: the characters
+#: ``shlex.quote`` leaves bare, plus a plain space — which
+#: :func:`quote_plan_arg` wraps in double quotes, inside which none of these is
+#: special. No control character, quote, ``$``, backtick, ``\``, ``;``, ``&``,
+#: ``|``, redirection, glob or ``~``.
+_RECORDED_SPELLING = re.compile(r"[\w@%+=:,./ -]+", re.ASCII)
+
+
+def recorded_plan_spelling(recorded: Any, plan: str) -> Optional[str]:
+    """A typed plan spelling read back from a phase's ``.status.json``, or ``None``.
+
+    The run's output folder is writable by every jailed batch (a standing
+    user decision), so a ``plan_arg`` read from it — a continuation hand-off's
+    (``multi_llm._remember_plan_spelling``) or a detached run record's — is
+    untrusted, and it reaches a printed command verbatim. It is returned only
+    when it
+
+    * is a non-empty string, does not start with ``-``, and is made only of
+      :data:`_RECORDED_SPELLING`'s characters, so a printed command can
+      neither run a substitution nor split into two lines; and
+    * resolves, from this process's cwd and with ``strict=True``, to the same
+      existing file as *plan*. Non-strict ``realpath`` collapses a component
+      that does not exist against a later ``..``, so
+      ``plans/$(touch${IFS}pwned)/../foo.md`` "named" ``plans/foo.md``
+      (hooks review of fix round 10).
+
+    Otherwise the caller prints the plan as it received it.
+    """
+    if not isinstance(recorded, str) or not recorded or recorded.startswith("-"):
+        return None
+    if not _RECORDED_SPELLING.fullmatch(recorded):
+        return None
+    try:
+        same = os.path.realpath(recorded, strict=True) == os.path.realpath(
+            plan, strict=True
+        )
+    except (OSError, ValueError):
+        return None
+    return recorded if same else None
+
+
 # ---------------------------------------------------------------------------
 # The route
 # ---------------------------------------------------------------------------

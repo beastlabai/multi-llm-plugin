@@ -784,6 +784,28 @@ class TestTheTerminalPoll:
             f"{PLUGIN}--apply-suggestions {plan}"
         )
 
+    @pytest.mark.parametrize("planted", [
+        "plans/$(touch${IFS}pwned)/../foo.md",
+        "plans/`id`/../foo.md",
+        "plans/x\nrm -rf ~/../foo.md",
+    ], ids=["substitution", "backticks", "newline"])
+    def test_a_planted_record_spelling_is_never_printed(
+        self, workdir, capsys, planted
+    ):
+        """Hooks review of fix round 10: the run record sits in a folder every
+        jailed batch can write, and a non-strict realpath let these "name" the
+        plan; the poll prints its own absolute plan instead — never the
+        record's `plan_file`, which a batch can plant just as well."""
+        plan = build(workdir, S(("review-plan",), files=RP_VALID))
+        _terminal_record(plan, "review-plan", mode="review-plan",
+                         plan_file="plans/$(id).md", plan_arg=planted)
+        code, out, err, result = _run(_poll(str(plan), "--view", "run"), capsys)
+        assert code == 0, err
+        expected = f"{PLUGIN}--apply-suggestions {plan}"
+        assert result["user_next_step"]["command"] == expected
+        assert _block(out) == [f"{NEXT_COMMAND_MARKER} {expected}"]
+        assert "pwned" not in out and "$(id)" not in out and "rm -rf" not in out
+
     def test_a_live_poll_carries_neither(self, workdir, capsys):
         plan = build(workdir, S(("review-plan",), files=RP_VALID))
         _terminal_record(
