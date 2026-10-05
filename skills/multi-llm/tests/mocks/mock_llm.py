@@ -95,6 +95,15 @@ Environment Variables (New - for scenario-based testing):
         An entry resolving outside the invocation cwd is a **test-authoring error**
         the mock rejects loudly (exit 9): the sandbox assertions must never be
         satisfied by a mock that simply could not escape.
+    MOCK_LLM_EDITS_IF_PROMPT_HAS: a substring; when set, MOCK_LLM_EDITS apply
+        only to an invocation whose prompt contains it (a check task and an
+        edit task in one resumed run: the check must move nothing while the
+        task after it edits for real). The derived batch result follows what
+        was actually applied, so a gated-off call reports ``no-op``.
+    MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS: a substring; an invocation whose prompt
+        contains it prints a ``status: failed`` batch result (summary from
+        MOCK_LLM_WRITE_FAIL_SUMMARY, notes from MOCK_LLM_WRITE_FAIL_NOTES)
+        while every other invocation keeps the derived result.
     MOCK_LLM_WRITE_RESULT: JSON object the mock prints as the D3g batch result
         (``status``/``ids``/``files_touched``/``summary``/``notes``). Defaults are
         derived from MOCK_LLM_EDITS so the common case needs only that.
@@ -431,7 +440,7 @@ EXIT_TEST_AUTHORING_ERROR = 9
 EXIT_UNMATCHED_PROMPT = 8
 
 
-def apply_mock_edits() -> List[Dict[str, Any]]:
+def apply_mock_edits(prompt: str = "") -> List[Dict[str, Any]]:
     """Apply ``MOCK_LLM_EDITS`` relative to the invocation cwd, before answering.
 
     Returns the list of applied entries (empty when the variable is unset), so the
@@ -445,6 +454,9 @@ def apply_mock_edits() -> List[Dict[str, Any]]:
     """
     raw = os.environ.get("MOCK_LLM_EDITS")
     if not raw:
+        return []
+    gate = os.environ.get("MOCK_LLM_EDITS_IF_PROMPT_HAS")
+    if gate and gate not in (prompt or ""):
         return []
     try:
         edits = json.loads(raw)
@@ -517,7 +529,7 @@ def apply_mock_edits() -> List[Dict[str, Any]]:
 REPORT_REASK_MARKER = "You are re-sending the report of a batch of edits."
 
 
-def write_batch_result(applied: List[Dict[str, Any]]) -> str:
+def write_batch_result(applied: List[Dict[str, Any]], prompt: str = "") -> str:
     """The D3g batch result JSON this invocation prints on stdout.
 
     ``MOCK_LLM_WRITE_RESULT`` wins entirely (so a test can claim ``applied`` while
@@ -529,6 +541,19 @@ def write_batch_result(applied: List[Dict[str, Any]]) -> str:
     override = os.environ.get("MOCK_LLM_WRITE_RESULT")
     if override:
         return override
+    failing = os.environ.get("MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS")
+    if failing and failing in (prompt or ""):
+        # One batch of a multi-batch run fails (a check that found errors)
+        # while its siblings keep the derived result: the shape a stopped
+        # implement is tested against.
+        return json.dumps({
+            "status": "failed",
+            "ids": [],
+            "files_touched": [],
+            "summary": os.environ.get("MOCK_LLM_WRITE_FAIL_SUMMARY")
+            or "the check found errors",
+            "notes": os.environ.get("MOCK_LLM_WRITE_FAIL_NOTES") or "",
+        })
     touched = [entry["path"] for entry in applied if entry["mode"] != "delete"]
     touched += [entry["path"] for entry in applied if entry["mode"] == "delete"]
     try:
@@ -1886,8 +1911,12 @@ def main() -> int:
     # The write path (D3g): edits land BEFORE the result is printed, so the
     # executor's post-run snapshot comparison sees exactly what a real
     # edit-capable dispatch would have left behind.
-    applied_edits = apply_mock_edits()
-    if applied_edits or os.environ.get("MOCK_LLM_WRITE_RESULT") or os.environ.get(
+    applied_edits = apply_mock_edits(prompt)
+    gated_write = bool(
+        (os.environ.get("MOCK_LLM_EDITS") and os.environ.get("MOCK_LLM_EDITS_IF_PROMPT_HAS"))
+        or os.environ.get("MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS")
+    )
+    if applied_edits or gated_write or os.environ.get("MOCK_LLM_WRITE_RESULT") or os.environ.get(
         "MOCK_LLM_PROSE"
     ):
         if os.environ.get("MOCK_LLM_PROSE") == "1":
@@ -1898,7 +1927,7 @@ def main() -> int:
                 "looks good now! Let me know if you want anything else."
             )
         else:
-            content = write_batch_result(applied_edits)
+            content = write_batch_result(applied_edits, prompt)
         print(format_output(provider, content))
         return 0
 
