@@ -4123,8 +4123,11 @@ class TestTheRollbackStoreWarningNamesItsFiles:
     was a problem (measured 2026-09-16: three under `.multi-llm/`, denied by
     design)."""
 
-    def test_a_denied_file_is_named_with_its_reason(self, env):
-        (env.root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    def test_a_file_past_the_cap_is_named_with_its_reason(self, env, monkeypatch):
+        import utils.write_batch_scheduler as scheduler_module
+
+        (env.root / "big.bin").write_bytes(b"x" * 64)
+        monkeypatch.setattr(scheduler_module, "MAX_SNAPSHOT_BYTES", 32)
         lines = []
         env.edits([_patch_edit(env.plan)],
                   result={"status": "applied", "ids": ["s0"],
@@ -4133,8 +4136,32 @@ class TestTheRollbackStoreWarningNamesItsFiles:
         assert result.exit_code == 0, result.messages
         warning = [l for l in lines if "no rollback point" in l]
         assert len(warning) == 1, lines
-        assert ".env (denied by driver.write_paths)" in warning[0]
+        assert "big.bin (over the 32-byte per-file cap)" in warning[0]
         assert "1 file(s)" in warning[0]
+
+    def test_a_denied_file_is_named_once_on_the_closing_line(self, env):
+        """Codex racing run 4: `.multi-llm/providers.yaml (denied by
+        driver.write_paths)` opened every write phase of the run with the same
+        warning. A file the deny list keeps out has no rollback point by
+        design, and a write to it fails the batch on the policy check, which
+        says it was not restored; it is named on the closing line instead,
+        once, beside the store's own utilisation."""
+        (env.root / ".env").write_text("SECRET=1\n", encoding="utf-8")
+        (env.root / ".multi-llm").mkdir(exist_ok=True)
+        (env.root / ".multi-llm" / "providers.yaml").write_text(
+            "defaults: {}\n", encoding="utf-8")
+        lines = []
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        result = env.scheduler([env.apply_task(0)], log=lines.append).run()
+        assert result.exit_code == 0, result.messages
+        assert not [l for l in lines if "no rollback point" in l], lines
+        closing = [l for l in lines if "rollback store peaked at" in l]
+        assert len(closing) == 1, lines
+        assert ("; never copied, as driver.write_paths denies them (a write to "
+                "one fails the batch and cannot be undone): .env, "
+                ".multi-llm/providers.yaml); discarded now") in closing[0]
 
     def test_the_rollback_store_utilization_is_reported_once_per_run(self, env):
         """F15: the only visible signal toward ``SWEEP_RETAIN_MAX_BYTES`` was

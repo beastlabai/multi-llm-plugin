@@ -1464,6 +1464,12 @@ class WriteBatchScheduler:
         self._retained_bytes = 0
         self._counted_digests: set = set()
         self._retain_warned = False
+        #: ``relative -> denied by driver.write_paths?`` for every path the
+        #: sweep kept no bytes for (the policy does not change during a run,
+        #: so each path is asked once). The denied ones are named once, on the
+        #: closing utilisation line, rather than in a warning of their own
+        #: (see :meth:`_retain`).
+        self._unretained_denied: Dict[str, bool] = {}
         #: ``{spec: version}`` for every distinct runner this run actually
         #: preflighted (F12), populated as ``_dispatch_executor`` dispatches —
         #: the read path fills the same-shaped field from
@@ -1946,11 +1952,21 @@ class WriteBatchScheduler:
         # snapshots under the state home, not the phase dir (Codex racing run
         # 4: "restore points live in pre_batch/" read as the phase dir's copy,
         # which the line before says is never read).
+        denied = sorted(
+            path for path, is_denied in self._unretained_denied.items() if is_denied)
+        kept_out = (
+            f"; never copied, as driver.write_paths denies "
+            f"{'it' if len(denied) == 1 else 'them'} (a write to "
+            f"{'it' if len(denied) == 1 else 'one'} fails the batch and "
+            f"cannot be undone): {', '.join(denied[:5])}"
+            f"{f', … {len(denied) - 5} more' if len(denied) > 5 else ''}"
+            if denied else ""
+        )
         self.log(
             f"[write-subagents] rollback store peaked at "
             f"{self._retained_bytes / (1024 * 1024):.1f} MB of the "
             f"{SWEEP_RETAIN_MAX_BYTES // (1024 * 1024)} MB budget "
-            f"({len(digests)} files, {len(shards)} shards); discarded now "
+            f"({len(digests)} files, {len(shards)} shards{kept_out}); discarded now "
             f"— the restore points are the pre-batch snapshots in "
             f"{os.path.join(self.safety_dir, 'pre_batch')}/"
         )
@@ -2885,6 +2901,18 @@ class WriteBatchScheduler:
                 kept[relative] = cached[1]
             else:
                 skipped.append(relative)
+        # A path the deny list keeps out is out by design, and a write to it
+        # fails the batch (the post-run policy check) whose reason says it
+        # could not be restored. Announced up front it was the same line on
+        # every write phase of a run (Codex racing run 4: `.multi-llm/
+        # providers.yaml` four times), so it is named once, on the closing
+        # utilisation line, and the warning keeps the gaps that are not by
+        # design: a file over the per-file cap or past the budget.
+        for path in skipped:
+            if path not in self._unretained_denied:
+                self._unretained_denied[path] = self.policy.violation(
+                    os.path.join(self.repo_root, path)) is not None
+        skipped = [path for path in skipped if not self._unretained_denied[path]]
         if skipped and not self._retain_warned:
             self._retain_warned = True
             # Named, with the reason each one was skipped: a count alone
