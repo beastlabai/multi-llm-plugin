@@ -3456,7 +3456,9 @@ class TestResolveChangedFiles:
         }.get(k, d))
 
         assert sorted(cro.resolve_changed_files(state, "abc123")) == ["a.py", "b.py"]
-        assert "Using 4 tracked files from implementation phase" in capsys.readouterr().out
+        # The count is the files used, not the raw entries (a duplicate and an
+        # empty entry are not two more files under review).
+        assert "Using 2 tracked files from implementation phase" in capsys.readouterr().out
 
     def test_no_tracked_files_and_no_base_ref_is_an_empty_list_with_a_warning(
         self, capsys
@@ -3563,6 +3565,79 @@ def _fallback_output(capsys, diffed, untracked, *, pre_existing=None, base_ref="
          patch.object(cro, "list_worktree_untracked_files", return_value=untracked):
         scope = cro.resolve_review_scope(_dict_state(values), base_ref)
     return scope, capsys.readouterr().out
+
+
+class TestTheWorkflowsOwnFilesAreNeverReviewed:
+    """2026-10-05, Codex racing run 3: review-code said "Using 2 tracked files
+    from implementation phase" — the plan and `tasks.md`, which an earlier
+    apply phase had recorded — and reviewed `tasks.md` as code (two duplicate
+    findings). The plan, its task list and its output folder are never in the
+    scope, from `tracked_files` or from the git-diff fallback."""
+
+    @pytest.fixture
+    def layout(self, tmp_path):
+        import subprocess
+
+        subprocess.run(["git", "init", "-q"], cwd=str(tmp_path), check=True)
+        plan = tmp_path / "plans" / "racing-game.md"
+        tasks = tmp_path / "plans" / "racing-game" / "tasks" / "tasks.md"
+        tasks.parent.mkdir(parents=True)
+        plan.write_text(
+            "# Plan\n\n<!-- TASKS_FILE: racing-game/tasks/tasks.md -->\n",
+            encoding="utf-8",
+        )
+        tasks.write_text("## T001\n", encoding="utf-8")
+        return tmp_path, plan
+
+    def test_tracked_files_lose_the_plan_and_the_task_list(self, layout, capsys):
+        root, plan = layout
+        state = _dict_state({"tracked_files": [
+            {"path": "plans/racing-game.md", "task_id": "implementation"},
+            {"path": "plans/racing-game/tasks/tasks.md", "task_id": "implementation"},
+            {"path": "index.html", "task_id": "implementation"},
+        ]})
+
+        scope = cro.resolve_review_scope(
+            state, "abc123", anchor=str(plan), repo_root=str(root),
+        )
+
+        assert scope.source == "tracked_files"
+        assert scope.paths == ["index.html"]
+        out = capsys.readouterr().out
+        assert "Left out 2 of the workflow's own file(s)" in out
+        assert "Using 1 tracked files from implementation phase" in out
+
+    def test_a_list_of_only_workflow_files_falls_back_to_the_diff_without_them(
+        self, layout, capsys
+    ):
+        root, plan = layout
+        state = _dict_state({
+            "tracked_files": [
+                {"path": "plans/racing-game.md", "task_id": "implementation"},
+                {"path": "plans/racing-game/tasks/tasks.md",
+                 "task_id": "implementation"},
+            ],
+            "pre_existing_changes": [],
+        })
+        with patch.object(
+            cro, "get_files_changed_since_ref",
+            return_value=["plans/racing-game.md", "src/game.js"],
+        ), patch.object(cro, "list_worktree_untracked_files", return_value=[
+            "index.html", "plans/racing-game/state.json",
+            "plans/racing-game/code-review/report.md",
+        ]):
+            scope = cro.resolve_review_scope(
+                state, "abc123", anchor=str(plan), repo_root=str(root),
+            )
+
+        assert scope.source == "git_diff"
+        assert scope.paths == ["src/game.js"]
+        # The untracked sample names the new source file, not the plugin's own
+        # phase artifacts (which buried it among 213 others in the run).
+        out = capsys.readouterr().out
+        assert "untracked in worktree, not reviewed: 1 " in out
+        assert "  - index.html" in out
+        assert "state.json" not in out
 
 
 class TestTheFallbackScopeIsLoud:
