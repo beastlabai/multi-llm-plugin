@@ -59,6 +59,7 @@ from check_workflow_prerequisites import (
     SKIPPED_MARKER,
     SKIP_PREREQUISITES_REASON,
     build_unmet_message,
+    check_apply_suggestions_prerequisite as _shared_apply_suggestions_prerequisite,
     check_apply_task_suggestions_prerequisite,
     record_prerequisite_skip,
     upstream_skip_notices,
@@ -68,34 +69,16 @@ logger = logging.getLogger(__name__)
 
 
 def check_apply_suggestions_prerequisite(state, plan_dir: Path) -> dict:
-    """Check if apply-suggestions phase should run before proceeding."""
-    review_plan_dir = plan_dir / "review-plan"
-    validation_path = review_plan_dir / "validation.json"
+    """Row 6: whether apply-suggestions still owes work before implement runs.
 
-    # No review-plan run → no prerequisite
-    if not validation_path.exists():
-        return {"met": True, "reason": "No review-plan results"}
-
-    # Check if apply-suggestions completed or skipped
-    if state.is_phase_completed("apply-suggestions"):
-        return {"met": True, "reason": "Apply-suggestions completed"}
-    if state.is_phase_skipped("apply-suggestions"):
-        return {"met": True, "reason": "Apply-suggestions skipped"}
-
-    # Count valid suggestions
-    try:
-        with open(validation_path, 'r', encoding='utf-8') as f:
-            validation = json.load(f)
-        valid_count = sum(1 for v in validation.values() if v.get("status") == "valid")
-        if valid_count == 0:
-            return {"met": True, "reason": "No valid suggestions"}
-        return {
-            "met": False,
-            "reason": f"{valid_count} unapplied suggestions",
-            "valid_count": valid_count
-        }
-    except (json.JSONDecodeError, OSError):
-        return {"met": True, "reason": "Could not read validation"}
+    The gate is ``check_workflow_prerequisites``'s (D6a: the gates live there,
+    never in a thin orchestrator copy), which reads every ``validation.json``
+    shape and returns the ``valid_count``/``importance_breakdown`` the unmet
+    block below renders. The copy this used to be read only the v1 flat dict
+    and crashed on the v2 envelope (``validation.values()`` handed it an int)
+    whenever the gate was actually reached (fix round 6, 2026-10-05).
+    """
+    return _shared_apply_suggestions_prerequisite(state, plan_dir)
 
 
 def resolve_human_task_strategy(

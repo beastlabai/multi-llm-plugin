@@ -333,6 +333,22 @@ def _result_line(text: str, root: str) -> Any:
     return None
 
 
+def _seed_completed(state: Dict[str, Any], phase: str) -> None:
+    """Stand in for the host's closing step: a fixed completion stamp.
+
+    The write phases' native emit records the phase *started* and leaves
+    completion to the host's closing ``--mark-completed`` call, which pops
+    that started record in the same write (``mark_phase_completed_in_state``).
+    A seed that stamped the completion alone left the emit's fresh start
+    beside a 2025 completion, which reads — correctly — as a re-run in
+    progress (fix round 6, 2026-10-05), so the seed pops the start too.
+    """
+    state.setdefault("phases_completed", {})[phase] = "2025-01-01T00:00:00"
+    started = state.get("phases_started")
+    if isinstance(started, dict):
+        started.pop(phase, None)
+
+
 def capture(skill_dir: Path, workdir: Path) -> Dict[str, Any]:
     """Run the guard fixture and return the normalized bundle.
 
@@ -400,16 +416,14 @@ def capture(skill_dir: Path, workdir: Path) -> Dict[str, Any]:
     state_path = plan.output_dir / "state.json"
     state = _load_json(state_path) if state_path.exists() else {}
     if isinstance(state, dict):
-        state.setdefault("phases_completed", {})["apply-suggestions"] = (
-            "2025-01-01T00:00:00"
-        )
+        _seed_completed(state, "apply-suggestions")
         state_path.write_text(json.dumps(state, indent=2), encoding="utf-8")
     _dispatch("implement", "--dry-run")
 
     # -- review-code ----------------------------------------------------
     state = _load_json(state_path) if state_path.exists() else {}
     if isinstance(state, dict):
-        state.setdefault("phases_completed", {})["implement"] = "2025-01-01T00:00:00"
+        _seed_completed(state, "implement")
         state["head_at_start"] = "0" * 40
         state["tracked_files"] = [
             {"path": "src/services/auth_service.py", "task_id": "T001",

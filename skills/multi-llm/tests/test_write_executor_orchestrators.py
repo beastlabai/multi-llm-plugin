@@ -1875,6 +1875,49 @@ class TestTheNativeImplementEmitRecordsAStart:
         assert second != "2026-01-01T00:00:00" and second >= first
 
 
+class TestImplementsApplySuggestionsGateReadsEveryValidationShape:
+    """`implement` carried its own copy of the row-6 gate that read only the
+    v1 flat-dict `validation.json`: on the v2 envelope (`{"format_version",
+    "groups", …}`) `validation.values()` handed it an int and it crashed
+    (exit 1, `state: error`) instead of refusing (exit 3) — surfaced by the
+    instruction-refactor guard once a start newer than a hand-seeded
+    completion stopped reading as completed (fix round 6, 2026-10-05). The
+    gate is `check_workflow_prerequisites`'s, which reads every shape."""
+
+    def _review_plan_with_valid_groups(self, repo):
+        from utils.output_handler import get_output_dir
+
+        review = get_output_dir(repo.plan) / "review-plan"
+        review.mkdir(parents=True, exist_ok=True)
+        (review / "validation.json").write_text(json.dumps({
+            "format_version": 2,
+            "metadata": {"model": "mock"},
+            "groups": [
+                {"group_index": 0, "status": "valid", "importance": "HIGH"},
+                {"group_index": 1, "status": "invalid", "importance": "LOW"},
+            ],
+        }), encoding="utf-8")
+
+    def test_a_v2_validation_file_is_an_unmet_gate_not_a_crash(self, repo, capsys):
+        from utils.state_manager import get_or_create_state
+
+        state = get_or_create_state(repo.plan)
+        state.mark_phase_completed("generate-tasks")
+        state.save()
+        self._review_plan_with_valid_groups(repo)
+        with pytest.raises(SystemExit) as exc:
+            implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"])
+        out = capsys.readouterr().out
+        assert exc.value.code == 3, out
+        assert "PREREQUISITE_UNMET" in out
+        assert "1 valid suggestions not yet applied" in out
+
+    def test_a_gate_met_by_a_completed_apply_suggestions_still_passes(self, repo, capsys):
+        _seed_generate_tasks(repo)
+        self._review_plan_with_valid_groups(repo)
+        assert implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"]) == 0
+
+
 class TestTheNativeImplementResumeHonoursTheBatchRecord:
     """`util batch-done` is the native leg's per-task record (reviewer
     finding 1, fix round 6, 2026-10-05): a `--resume` skips a task recorded
