@@ -1018,7 +1018,9 @@ class StateManager:
 
         ``[{id, title, findings}]`` from :data:`TASK_CHECK_FINDINGS_KEY`, for
         tasks recorded ``completed`` (a check with findings is a completed
-        task; a later failure or re-run clears its entry) and scoped to the
+        task; a later failure or re-run clears its entry) or ``skipped`` (the
+        user answered ``--human-task <id>=skip`` to a check with findings: the
+        problems are still in the code, fix round 11) and scoped to the
         decomposition implement ran last, as
         :meth:`deferred_implementation_tasks` is.
         """
@@ -1034,7 +1036,7 @@ class StateManager:
             findings = recorded.get(task_id)
             if not isinstance(findings, list) or not findings:
                 continue
-            if statuses.get(task_id) != "completed":
+            if statuses.get(task_id) not in ("completed", "skipped"):
                 continue
             if scope is not None and task_id not in scope:
                 continue

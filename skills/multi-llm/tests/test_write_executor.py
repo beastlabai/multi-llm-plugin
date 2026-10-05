@@ -1306,6 +1306,54 @@ class TestVerificationOnlyImplementTask:
         assert "Not run (they depend on check T009, which reported problems): T010." in account
         assert "Not run (the stop came before they were dispatched): T013." in account
 
+    def test_a_resumed_check_with_findings_runs_again_on_retry_or_a_changed_tree(
+        self, env,
+    ):
+        """Fix round 11 (review T2): a check with findings was skipped as done
+        on every --resume and `--human-task <id>=retry` was ignored, so after
+        the user fixed the code the only way to re-check was another phase or
+        editing state.json. Its findings now count as a failed stamp does."""
+        log = env.enable_call_log()
+        env.edits([], result=self._check_reply())
+        state = FakeState(env.tmp_path / "state.json")
+        env.scheduler([self._task(env)], kind="implement", state=state,
+                      finalize=False).run()
+
+        def calls():
+            return len(log.read_text().splitlines())
+
+        # Nothing changed: not run again, the findings stand.
+        kept = env.scheduler([self._task(env)], kind="implement", state=state,
+                             finalize=False, resume=True).run()
+        assert calls() == 1
+        assert kept.outcomes[0].skipped
+        assert kept.outcomes[0].outcome_label == "check-findings"
+        assert kept.outcomes[0].reason.startswith("NOT RE-RUN")
+
+        # `--human-task T009=retry`: run again on the same tree.
+        env.edits([], result=self._check_reply(passed=True, findings=[]))
+        retried = env.scheduler(
+            [self._task(env)], kind="implement", state=state, finalize=False,
+            resume=True, human_task_decisions={"T009": "retry"},
+        ).run()
+        assert calls() == 2
+        assert retried.outcomes[0].outcome_label == "verified"
+
+        # Findings again (a fresh run), then the user fixes the code: a plain
+        # resume runs it.
+        env.edits([], result=self._check_reply())
+        env.scheduler([self._task(env)], kind="implement", state=state,
+                      finalize=False, resume=False).run()
+        assert calls() == 3
+        (env.root / "index.html").write_text("<!doctype html>\n", encoding="utf-8")
+        env.edits([], result=self._check_reply(passed=True, findings=[]))
+        fixed = env.scheduler([self._task(env)], kind="implement", state=state,
+                              finalize=False, resume=True).run()
+        assert calls() == 4
+        assert fixed.outcomes[0].outcome_label == "verified"
+        state.reload()
+        assert "task_check_findings" not in state.state
+
     def test_a_task_that_declares_files_gets_no_check_contract(self, env):
         from utils.write_batch_scheduler import CHECK_RESULT_CONTRACT, with_result_contract
 
