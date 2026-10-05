@@ -6,6 +6,7 @@ to ensure mock LLM binaries are used instead of real providers.
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -252,6 +253,27 @@ class SkillRunner:
                 # the one definition of what a scenario means travels with it.
                 matcher = self.mock_llm_path.parent.parent / "scenario_matcher.py"
                 shutil.copyfile(matcher, self.bin_dir / matcher.name)
+        self._setup_posix_interpreter()
+
+    def _setup_posix_interpreter(self) -> None:
+        """Put this suite's own interpreter in bin/ as ``python3`` and ``python``.
+
+        A launcher runs through ``#!/usr/bin/env python3``, so it is whatever
+        ``python3`` the runner's ``PATH`` names, and a scenario needs PyYAML.
+        That used to be the skill's environment, because uv puts its ``bin``
+        first on ``PATH`` and runners inherited it. ``build_child_env`` now
+        takes that entry off a runner's ``PATH`` (fix round 9), so the mocks
+        get their interpreter here instead: bin/ is the harness's own entry,
+        which the builder leaves alone. Without it a machine whose system
+        ``python3`` has no PyYAML ran every scenario-driven mock dry.
+        """
+        for name in ("python3", "python"):
+            shim = self.bin_dir / name
+            shim.write_text(
+                f"#!/bin/sh\nexec {shlex.quote(sys.executable)} \"$@\"\n",
+                encoding="utf-8",
+            )
+            shim.chmod(shim.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
 
     def _setup_windows_launchers(self) -> None:
         """Install each mock provider the way an npm-installed CLI looks on Windows.
