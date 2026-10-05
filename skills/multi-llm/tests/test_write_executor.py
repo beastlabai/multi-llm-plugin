@@ -1193,6 +1193,18 @@ class TestVerificationOnlyImplementTask:
         ).run()
         assert result.outcomes[0].outcome_label == "check-findings"
 
+    def test_a_null_check_is_never_verified(self, env):
+        """Fix round 12 (review item 2): `check: null` read as no result at
+        all, so the task was VERIFIED; only a reply without the key is."""
+        env.edits([], result=self._check_reply(check=None))
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert outcome.outcome_label == "check-findings"
+        assert outcome.check_findings == [
+            f"{executor.CHECK_RESULT_UNKNOWN} (its `check` was null)"]
+
     def test_passed_false_without_findings_is_not_verified(self, env):
         env.edits([], result=self._check_reply(findings=[]))
         result = env.scheduler(
