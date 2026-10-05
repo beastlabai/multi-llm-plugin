@@ -129,7 +129,7 @@ entries:
     options:
       "--allowed-tools": "Read,Grep,Glob,TodoWrite"
       "--disallowed-tools": "Edit,MultiEdit,Write,NotebookEdit,Bash,Task,WebFetch,WebSearch"
-      "--json-schema": "<prompt:sha256:fbef302b:len=2560>"
+      "--json-schema": "<prompt:sha256:ba9613ec:len=2608>"
       "--model": "<model>"
       "--output-format": "json"
       "-p": null
