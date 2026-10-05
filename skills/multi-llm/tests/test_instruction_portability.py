@@ -192,10 +192,13 @@ PLACEHOLDER_MANIFEST = {
     # (adversarial review, 2026-10-02). apply-suggestions 30 -> 32: its own
     # post-loop `apply-suggestions --mark-completed` step (§8), now that the
     # emit path records the phase started rather than completed (2026-10-05).
-    "instructions/apply-code-fixes.md": (0, 32),
-    "instructions/apply-suggestions.md": (0, 32),
+    # +2 on all three (32 -> 34, 32 -> 34, 28 -> 30): the per-batch `util
+    # batch-done` record, the native leg's progress record that a `--resume`
+    # skips and `status` counts (reviewer finding 1, fix round 6, 2026-10-05).
+    "instructions/apply-code-fixes.md": (0, 34),
+    "instructions/apply-suggestions.md": (0, 34),
     # 26 -> 28: the post-loop `util check-tasks` graph check (issue 10).
-    "instructions/apply-task-suggestions.md": (0, 28),
+    "instructions/apply-task-suggestions.md": (0, 30),
     # 4 -> 6: the hand-rolled question-file dance (write the file, re-resolve the
     # git root inline, launch) collapsed into the dispatcher's two positionals,
     # and the mode gained its `--detach` + `status` poll pair. 6 -> 8: the roster
@@ -226,7 +229,10 @@ PLACEHOLDER_MANIFEST = {
     # 20 -> 24 (2026-10-05): the per-task `util write-prompt` bind and the
     # per-task `util prior-changes append` the native leg now records, so the
     # next task's bound prompt sees what landed (issue 3, racing re-run).
-    "instructions/implement.md": (0, 24),
+    # 24 -> 26: the per-task `util batch-done` record replaced the inline
+    # `state["task_status"][task_id] = …` Python block the host used to retype
+    # (reviewer finding 1, fix round 6, 2026-10-05).
+    "instructions/implement.md": (0, 26),
     # 3 -> 2: the "substitute {SKILL_DIR} yourself" preamble is obsolete; the core
     # is served pre-substituted.
     "instructions/init-config.md": (0, 2),

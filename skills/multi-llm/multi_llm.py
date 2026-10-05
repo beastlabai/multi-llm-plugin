@@ -142,6 +142,9 @@ UTIL_COMMANDS: Dict[str, Tuple[Optional[str], str, str]] = {
     "write-prompt": ("utils.write_prompt", "main",
                      "Write one write batch's prompt, prior-batch context "
                      "bound now and the result contract appended."),
+    "batch-done": ("utils.batch_done", "main",
+                   "Record one write batch's outcome in state.json (the "
+                   "native leg's per-batch progress record)."),
     "instructions": (None, "", "Print a mode's core instruction file with every path resolved."),
 }
 

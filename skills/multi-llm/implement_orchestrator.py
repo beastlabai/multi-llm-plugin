@@ -954,8 +954,8 @@ def run_implement_write_phase(
 
 def _materialize_native_write_tasks(
     plan_path: Path, output_data: Dict[str, Any], *, tasks_file: Optional[Path],
-) -> str:
-    """Write ``{phase}/write_tasks.json`` for the native leg; its path.
+) -> Tuple[str, List[Dict[str, Any]]]:
+    """Write ``{phase}/write_tasks.json`` for the native leg; its path and tasks.
 
     The same two bridge calls :func:`run_implement_write_phase` makes, with
     the same inputs, so the file a native host's ``util write-prompt`` reads
@@ -976,10 +976,37 @@ def _materialize_native_write_tasks(
         plan_file=plan_file,
         tasks_file=tasks_file_str,
     )
-    return write_task_file_for_phase(
+    path = write_task_file_for_phase(
         kind="implement", tasks=tasks, phase_dir=phase_dir, plan_file=plan_file,
         tasks_file=tasks_file_str,
     )
+    return path, tasks
+
+
+def _refuse_unrecorded_native_resume(
+    tasks: List[Dict[str, Any]], *, plan_path: Path, state: StateManager, resume: bool,
+) -> bool:
+    """Print the refusal block and return True when a native ``--resume`` must stop.
+
+    A task about to be handed out again whose id the implement log already
+    holds, with no ``task_status`` record (``util batch-done``) saying it
+    finished or failed, is one the host ran without recording: re-emitting
+    it would run it twice. See :func:`utils.batch_done.unrecorded_logged_batches`.
+    """
+    if not resume or not tasks:
+        return False
+    from utils.batch_done import resume_refusal_lines, unrecorded_logged_batches
+
+    output_dir = str(get_output_dir(plan_path))
+    unrecorded = unrecorded_logged_batches(
+        tasks, output_dir=output_dir, phase="implement", state=state.state,
+    )
+    if not unrecorded:
+        return False
+    phase_dir = str(get_phase_dir(plan_path, "implement"))
+    for line in resume_refusal_lines(unrecorded, phase_dir=phase_dir, mode_word="implement"):
+        print(line, file=sys.stderr)
+    return True
 
 
 def main(argv: Optional[List[str]] = None) -> int:
@@ -1470,13 +1497,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     # by hand (measured 2026-10-04: 3-6 tool calls per subagent, and one that
     # read tasks.md instead of its prompt).
     try:
-        write_task_file = _materialize_native_write_tasks(
+        write_task_file, native_tasks = _materialize_native_write_tasks(
             plan_path, output_data, tasks_file=implement_tasks_file,
         )
     except Exception as exc:  # noqa: BLE001 - the handoff JSON is still usable
         print(f"WARNING: write_tasks.json not written: {exc}", file=sys.stderr)
     else:
         print(f"[WRITE_TASKS_FILE] {write_task_file}", file=sys.stderr)
+        # A native `--resume` promises to skip what already ran: a task the
+        # implement log already holds and no record says finished is refused
+        # rather than handed out a second time (reviewer repro, 2026-10-05).
+        if _refuse_unrecorded_native_resume(
+            native_tasks, plan_path=plan_path, state=state, resume=bool(args.resume),
+        ):
+            return 3
 
     # Print summary
     print("\n" + "=" * 60)

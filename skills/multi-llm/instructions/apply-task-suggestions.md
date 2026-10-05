@@ -280,7 +280,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
      --phase-dir "{plan}/apply-task-suggestions" --task-id "{task.task_id}"
    ```
-   `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-task-batch-0`, `apply-task-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 7 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-task-suggestions/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Note the path and the line count for step 3. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
+   `{task.task_id}` is this batch's `task_id` from `write_tasks.json` (`apply-task-batch-0`, `apply-task-batch-1`, … in dispatch order). The command rewrites the batch's prompt with the prior-batch context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the batches step 8 has already appended — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch for this batch. It writes it to `{plan}/apply-task-suggestions/prompts/{task.task_id}.prompt.txt` and prints three lines: `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Note the path and the line count for step 3. Never substitute `{prior_changes_context}` yourself and never hand the subagent `batch.prompt` from the JSON: the literal token must never reach a subagent.
 
    **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report.
 
@@ -320,7 +320,14 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Normalize** the summary: collapse any newlines or multiple spaces to a single space, trim leading/trailing whitespace, and truncate to 200 characters if needed.
 
-7. **Append to prior changes (only after verification)** — This step runs **only** after step 5 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
+7. **Record the batch outcome (only after verification)** — This step runs **only** after step 5 has classified the batch as a success or a clean failure. It must **never** run for a partially-applied batch (the loop stops there). Run:
+   ```bash
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util batch-done \
+     --phase-dir "{plan}/apply-task-suggestions" --task-id "{task.task_id}" --status {batch_status}
+   ```
+   `{batch_status}` is `completed` for a success (a verified no-op included) and `failed` for a clean failure — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task.task_id} {batch_status} (N item(s) recorded)` line and writes the batch's record into `state.json`: the same `task_status` entry the `--exec-subagents` executor writes for this batch, plus every suggestion in it as processed. That record is what a later `--resume` reads to skip this batch (a `failed` record keeps it eligible for another try) and what makes `status` read the phase `in_progress`. Run it **before** step 8's append: a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-apply. An exit 3 names the problem (no `write_tasks.json`, an unknown task id); treat it as a stop, not a warning.
+
+8. **Append to prior changes (only after verification)** — This step runs **only** after step 5 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
      --output-dir "{plan}" \
@@ -344,8 +351,8 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Error handling**: If `append` fails, log a warning but do not abort the batch loop.
 
-8. **Log the result** - Track success/failure for the summary
-9. **Record metrics** — Run:
+9. **Log the result** - Track success/failure for the summary
+10. **Record metrics** — Run:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
      --state-file "$STATE_FILE" --phase "apply-task-suggestions" \
@@ -749,6 +756,8 @@ This is useful for:
 ### Resuming Interrupted Sessions
 
 If a session is interrupted, progress is saved automatically:
+
+`--resume` re-emits only what is left: every batch the loop recorded with `util batch-done` (step 5) is dropped, a batch recorded `failed` is dispatched again, and a batch the prior-changes log names that no record says finished is **refused** — exit 3 with a `[RESUME_REFUSED]` block naming the batch and the `util batch-done` call that records it (or `--fresh`, once the target is back at its pre-run bytes). Re-emitting such a batch would apply it twice.
 
 ```bash
 # Resume from where you left off
