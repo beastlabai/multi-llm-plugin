@@ -924,7 +924,8 @@ class StateManager:
         the same way — the key is absent when there are none, so a plan with
         no manual task gains no key (fix round 7: the backstop in
         :meth:`deferred_implementation_tasks`). *depends_on*, when given, is
-        that decomposition's graph (every task's ``depends_on``) and REPLACES
+        that decomposition's graph (every task's ``depends_on``, each list
+        stored sorted and de-duplicated) and REPLACES
         :data:`IMPLEMENT_TASK_GRAPH_KEY` (fix round 12). Returns whether
         anything changed; the caller saves.
         """
@@ -939,10 +940,12 @@ class StateManager:
             human_ids is not None
             and self.state.get("implement_human_task_ids") != human
         )
+        # Each list sorted and de-duplicated (fix round 13), so the record
+        # does not depend on the order tasks.md lists a task's dependencies.
         graph = (
             None if depends_on is None
             else {
-                str(task_id): [str(dep) for dep in (deps or []) if dep]
+                str(task_id): sorted({str(dep) for dep in (deps or []) if dep})
                 for task_id, deps in sorted(depends_on.items()) if task_id
             }
         )
