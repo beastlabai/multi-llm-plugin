@@ -903,6 +903,20 @@ class TaskOutcome:
         return RUNG_BY_STATUS.get(self.status)
 
     @property
+    def repair(self) -> Optional[str]:
+        """The re-ask this task's dispatch sent (the ladder's rule 7), if any.
+
+        The attempt that carried it already says so; the row says it too, so a
+        reader of ``subagent_batch_report.json`` sees ``repair:
+        schema_invalid`` beside the task's final status without walking its
+        attempts (2026-10-05: only ``attempt_count: 2`` showed it).
+        """
+        for attempt in self.attempts:
+            if attempt.repair:
+                return attempt.repair
+        return None
+
+    @property
     def fatal(self) -> bool:
         return self.status in FATAL_STATUSES
 
@@ -916,6 +930,8 @@ class TaskOutcome:
             "attempt_count": len(self.attempts),
             "duration_seconds": round(self.duration_seconds, 3),
         }
+        if self.repair:
+            out["repair"] = self.repair
         if self.rung is not None:
             out["rung"] = self.rung
         if self.output_path:
