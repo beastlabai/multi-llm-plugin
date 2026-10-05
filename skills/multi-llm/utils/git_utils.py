@@ -333,6 +333,46 @@ def list_untracked_files(directory: str) -> List[str]:
         return []
     return [path for path in stdout.split("\0") if path]
 
+def paths_in_commit(
+    ref: str, paths: Iterable[str], *, cwd: Optional[str] = None,
+) -> Optional[Set[str]]:
+    """The subset of repo-root-relative *paths* present in *ref*'s tree.
+
+    ``None`` when *ref* does not resolve to a commit (an unborn ``HEAD``, a
+    pruned ``head_before_implement``), so the caller can tell "absent from
+    the tree" from "no tree to ask". One ``git cat-file --batch-check`` over
+    ``<sha>:<path>`` lines: exact paths, never pathspec patterns (a ``*`` in a
+    filename is a filename). A path holding a newline cannot be asked and is
+    reported absent.
+    """
+    candidates = [path for path in paths if path and "\n" not in path]
+    stdout, _, rc = _run_git(
+        "rev-parse", "--verify", "--quiet", f"{ref}^{{commit}}",
+        check=False, cwd=cwd,
+    )
+    sha = stdout.strip()
+    if rc != 0 or not sha:
+        return None
+    if not candidates:
+        return set()
+    where: Dict[str, str] = {"cwd": cwd} if cwd is not None else {}
+    result = subprocess.run(
+        ["git", "cat-file", "--batch-check=%(objecttype)"],
+        input="".join(f"{sha}:{path}\n" for path in candidates),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        **where,
+    )
+    if result.returncode != 0:
+        return None
+    answers = result.stdout.splitlines()
+    if len(answers) != len(candidates):
+        return None
+    return {
+        path for path, answer in zip(candidates, answers)
+        if not answer.endswith(" missing")
+    }
+
+
 def ignored_paths(paths: Iterable[str], *, cwd: Optional[str] = None) -> Set[str]:
     """The subset of ``paths`` git ignores, as the strings given.
 
