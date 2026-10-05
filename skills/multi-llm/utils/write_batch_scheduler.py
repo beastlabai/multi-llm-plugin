@@ -2425,7 +2425,7 @@ class WriteBatchScheduler:
         went_on = (
             f"the tasks that do not depend on them went on, and the ones that "
             f"do were not run ({', '.join(blocked)})"
-            if blocked else "no task depends on them, so implement went on"
+            if blocked else "no task waits for them, so implement went on"
         )
         lines.append(
             f"Check findings: {', '.join(found)} ran, changed no file and "
@@ -6829,7 +6829,7 @@ class WriteBatchScheduler:
                     "The tasks that do not depend on them went on; the tasks "
                     "that do were not run (see below). "
                     if result.blocked_by_check else
-                    "No task depends on them, so implement went on. "
+                    "No task waits for them, so implement went on. "
                 )
                 + "Review-code is told about them, and apply-code-fixes "
                 "applies the fixes review-code validates.", "",
