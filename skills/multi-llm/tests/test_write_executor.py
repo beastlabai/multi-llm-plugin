@@ -3999,6 +3999,48 @@ class TestOnlyACodePhaseRecordsTrackedFiles:
             for line in lines
         ), lines
 
+    def test_apply_code_fixes_records_a_file_it_creates_beside_implements(
+        self, env, monkeypatch
+    ):
+        """Codex racing run 4 (08): apply-code-fixes added no `tracked_files`
+        entry, because every batch edited only the `index.html` implement
+        already holds (a held path is not claimed again). A file the phase
+        creates itself still gets its own entry, on the executor leg too."""
+        from implement_orchestrator import record_pre_existing_changes
+
+        head = _commit_baseline(env.root)
+        monkeypatch.chdir(env.root)
+        state = FakeState(env.out_dir / "state.json")
+        record_pre_existing_changes(state)
+        state.set("head_before_implement", head)
+        (env.root / "index.html").write_text("<p>v1</p>\n", encoding="utf-8")
+        state.set("tracked_files", [
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+        ])
+        state.save()
+        env.edits([_patch_edit(env.root / "index.html", "<p>fix</p>\n"),
+                   {"path": "fix.js", "mode": "create", "content": "// fix\n"}],
+                  result={"status": "applied", "ids": ["f0"],
+                          "files_touched": ["index.html", "fix.js"],
+                          "summary": "fixed"})
+        task = make_write_task(
+            kind="apply_code_fixes", task_id="apply-fix-batch-0",
+            prompt=f"Fix index.html\n\n{PRIOR_CHANGES_TOKEN}\n",
+            inputs=build_inputs(plan_file=str(env.plan)), batch_index=0,
+            prior_changes_id="index.html#abcd1234", phase_dir=str(env.phase_dir),
+            declared_files=[str(env.root / "index.html"), str(env.root / "fix.js")],
+            expected_ids=["f0"], output_name=write_output_name("apply_code_fixes", 0),
+        )
+
+        result = env.scheduler([task], kind="apply_code_fixes", state=state).run()
+
+        assert result.exit_code == 0, result.messages
+        on_disk = json.loads(Path(state.state_file).read_text(encoding="utf-8"))
+        assert on_disk["tracked_files"] == [
+            {"path": "fix.js", "action": "created", "task_id": "apply-code-fixes"},
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+        ]
+
 
 # ===========================================================================
 # N1: the `[ETA]` line is this run's own dispatch order and dispatchable
