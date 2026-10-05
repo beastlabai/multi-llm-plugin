@@ -319,6 +319,191 @@ class TestTheUtilRecordsABatch:
 
 
 # ---------------------------------------------------------------------------
+# Fix round 8: one lock around every raw read-modify-write of state.json
+# ---------------------------------------------------------------------------
+
+SKILL_DIR = Path(__file__).parent.parent
+
+
+def _parallel_batches():
+    """One implement batch whose two tasks run in parallel (implement.md lets
+    a host dispatch same-batch tasks together, and record each as it lands)."""
+    return [{"batch_index": 0, "can_parallelize": True, "tasks": [
+        {"id": "T001", "title": "Left", "prompt": PROMPT,
+         "files_to_create": ["src/a.py"], "depends_on": [], "executor_role": "agent"},
+        {"id": "T002", "title": "Right", "prompt": PROMPT,
+         "files_to_create": ["src/b.py"], "depends_on": [], "executor_role": "agent"},
+    ]}]
+
+
+def _child(code: str, *args: str, cwd) -> subprocess.Popen:
+    """A separate process (the host runs each util call as its own command)."""
+    return subprocess.Popen(
+        [sys.executable, "-c", code, str(SKILL_DIR), *map(str, args)],
+        cwd=str(cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+
+
+#: `util batch-done` with a rendezvous inside its read-modify-write: each
+#: record says it got there, then waits (bounded) for the other one.
+_RENDEZVOUS_RECORD = r"""
+import os, sys, time
+sys.path.insert(0, sys.argv[1])
+from utils import batch_done
+sync_dir, phase_dir, task_id = sys.argv[2:5]
+census = batch_done._tracked_after_batch
+def at_the_census(*args, **kwargs):
+    open(os.path.join(sync_dir, task_id), "w").close()
+    deadline = time.monotonic() + 3.0
+    while len(os.listdir(sync_dir)) < 2 and time.monotonic() < deadline:
+        time.sleep(0.02)
+    return census(*args, **kwargs)
+batch_done._tracked_after_batch = at_the_census
+sys.exit(batch_done.main(["--phase-dir", phase_dir, "--task-id", task_id,
+                          "--status", "completed"]))
+"""
+
+#: Each raw writer of state.json, as the host runs it.
+_WRITERS = {
+    "batch-done": (
+        "from utils import batch_done as m",
+        ["--phase-dir", "{phase_dir}", "--task-id", "T001", "--status", "completed"],
+        lambda state: state.get("task_status", {}).get("T001") == "completed",
+    ),
+    "metrics record": (
+        "from utils import metrics as m",
+        ["record", "--state-file", "{state}", "--phase", "implement",
+         "--label", "T001: Left", "--no-eta"],
+        lambda state: len(state.get("metrics", {}).get("implement", [])) == 1,
+    ),
+    "metrics start": (
+        "from utils import metrics as m",
+        ["start", "--state-file", "{state}", "--phase", "apply-suggestions",
+         "--total-batches", "2"],
+        lambda state: "apply-suggestions" in state.get("metrics_progress", {}),
+    ),
+    "metrics finish": (
+        "from utils import metrics as m",
+        ["finish", "--state-file", "{state}", "--phase", "implement"],
+        lambda state: "implement" not in state.get("metrics_progress", {}),
+    ),
+    "finalize-tracking": (
+        "import finalize_tracking as m",
+        ["--state-file", "{state}", "--mark-completed"],
+        lambda state: "implement" in state.get("phases_completed", {}),
+    ),
+}
+
+
+class TestStateWritesAreSerialized:
+    """`util batch-done` read `state.json`, ran the dirty-tree census (git
+    status, ls-files, diff: seconds on a real repository since fix round 7)
+    and wrote the whole file back, unlocked. implement.md lets same-batch
+    tasks run in parallel and a host issues the records in parallel too, so
+    two records read the same file and the second write dropped the first
+    one's `task_status` (fix round 8, reviewer finding 3; measured: two
+    records started together left only `T001`). Every raw read-modify-write
+    of `state.json` now holds one lock, `<state dir>/.state.lock`."""
+
+    @pytest.fixture
+    def implement_phase(self, plan_dir):
+        plan, out = plan_dir
+        state = StateManager(plan)
+        state.mark_phase_started("implement")
+        state.save()
+        phase_dir, _tasks = _materialize(
+            plan, out, "implement", _parallel_batches(), "implement")
+        return out / "state.json", phase_dir
+
+    def test_two_parallel_records_keep_both_task_statuses(
+        self, implement_phase, tmp_path
+    ):
+        state_path, phase_dir = implement_phase
+        sync = tmp_path / "sync"
+        sync.mkdir()
+
+        children = [
+            _child(_RENDEZVOUS_RECORD, sync, phase_dir, task, cwd=tmp_path)
+            for task in ("T001", "T002")
+        ]
+        for child in children:
+            _out, err = child.communicate(timeout=60)
+            assert child.returncode == 0, err
+
+        assert json.loads(state_path.read_text(encoding="utf-8"))["task_status"] == {
+            "T001": "completed", "T002": "completed",
+        }
+
+    @pytest.mark.parametrize("writer", sorted(_WRITERS))
+    def test_every_raw_state_writer_waits_for_the_lock(
+        self, writer, implement_phase, tmp_path
+    ):
+        from utils import metrics
+
+        state_path, phase_dir = implement_phase
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        metrics.start_phase_in_state(state, "implement", 2)
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        load, argv, wrote = _WRITERS[writer]
+        argv = [a.format(state=state_path, phase_dir=phase_dir) for a in argv]
+        code = (
+            "import sys; sys.path.insert(0, sys.argv[1]); " + load
+            + "; sys.exit(m.main(sys.argv[2:]))"
+        )
+
+        with metrics.state_file_lock(state_path):
+            child = _child(code, *argv, cwd=tmp_path)
+            try:
+                child.wait(timeout=1.5)
+            except subprocess.TimeoutExpired:
+                pass
+            assert child.poll() is None, (
+                f"{writer} wrote state.json while the lock was held: "
+                f"{child.communicate()}"
+            )
+            held = json.loads(state_path.read_text(encoding="utf-8"))
+            held["written_while_locked"] = True
+            state_path.write_text(json.dumps(held), encoding="utf-8")
+
+        _out, err = child.communicate(timeout=60)
+        assert child.returncode == 0, err
+        after = json.loads(state_path.read_text(encoding="utf-8"))
+        assert after.get("written_while_locked") is True
+        assert wrote(after)
+
+    def test_a_lock_never_released_fails_the_record_and_writes_nothing(
+        self, implement_phase, tmp_path, monkeypatch, capsys
+    ):
+        from utils import metrics
+
+        state_path, phase_dir = implement_phase
+        before = state_path.read_text(encoding="utf-8")
+        holder = _child(
+            "import sys, time; sys.path.insert(0, sys.argv[1]); "
+            "from utils import metrics; "
+            "lock = metrics.state_file_lock(sys.argv[2]); lock.__enter__(); "
+            "print('held', flush=True); time.sleep(30)",
+            state_path, cwd=tmp_path,
+        )
+        try:
+            assert holder.stdout.readline().strip() == "held"
+            monkeypatch.setattr(metrics, "STATE_LOCK_TIMEOUT_S", 0.3)
+
+            code = batch_done.main([
+                "--phase-dir", str(phase_dir), "--task-id", "T001",
+                "--status", "completed",
+            ])
+        finally:
+            holder.kill()
+            holder.communicate()
+
+        assert code == 1
+        err = capsys.readouterr().err
+        assert ".state.lock" in err and "nothing was written" in err
+        assert state_path.read_text(encoding="utf-8") == before
+
+
+# ---------------------------------------------------------------------------
 # The reviewer's repro: a real apply-suggestions run, then --resume
 # ---------------------------------------------------------------------------
 
