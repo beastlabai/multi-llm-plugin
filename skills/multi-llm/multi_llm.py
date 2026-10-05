@@ -1195,10 +1195,12 @@ def _continued_plan_arg(
 
     For a workflow-phase invocation carrying a continuation verb: the
     ``plan_arg`` :func:`_remember_plan_spelling` wrote into the phase dir's
-    ``.status.json``, provided it differs from the ``--plan-file`` received and,
-    resolved from this process's cwd, names the same file — a spelling that no
-    longer resolves here is never printed. Else ``None``, and the plan is
-    printed as received.
+    ``.status.json``, printed only when ``next_phase.recorded_plan_spelling``
+    passes it — the folder is writable by every jailed batch, so a spelling
+    that does not resolve strictly to this plan from this cwd, or that holds a
+    character a shell would act on, is never printed (hooks review of fix
+    round 10). A passing spelling equal to the ``--plan-file`` received is
+    ``None`` too, and the plan is printed as received.
     """
     if not mode.is_workflow_phase or not mode.phase:
         return None
@@ -1207,16 +1209,13 @@ def _continued_plan_arg(
     plan = flag_value(argv, "--plan-file")
     if not plan:
         return None
-    from utils import status_file
+    from utils import next_phase, status_file
 
-    recorded = status_file.read_status(str(_continued_phase_dir(mode, plan))).get(
-        "plan_arg"
-    )
-    if not isinstance(recorded, str) or not recorded or recorded == plan:
+    status = status_file.read_status(str(_continued_phase_dir(mode, plan)))
+    spelling = next_phase.recorded_plan_spelling(status.get("plan_arg"), plan)
+    if spelling is None or spelling == plan:
         return None
-    if os.path.realpath(recorded) != os.path.realpath(plan):
-        return None
-    return recorded
+    return spelling
 
 
 def _raise_on_sigterm(signum, frame):  # pragma: no cover - exercised in a subprocess

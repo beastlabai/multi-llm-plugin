@@ -315,6 +315,81 @@ class TestTheRecordedSpelling:
         assert shipped["plan_arg"] == P
 
 
+#: Spellings a batch could plant in the phase dir's `.status.json` (the run's
+#: output folder is writable by every jailed batch). Each "names" plans/foo.md
+#: to a non-strict `realpath`, which collapses the missing component against
+#: the `..` after it; printed, the first two run a command substitution and the
+#: third splits the command line in two (hooks review of fix round 10).
+PLANTED = [
+    "plans/$(touch${IFS}pwned)/../foo.md",
+    "plans/`id`/../foo.md",
+    "plans/x\nrm -rf ~/../foo.md",
+]
+PLANTED_IDS = ["substitution", "backticks", "newline"]
+
+
+def _assert_nothing_planted_printed(out, result, expected):
+    assert result["user_next_step"]["command"] == expected
+    assert _printed_commands(out) == [expected]
+    for fragment in ("pwned", "`id`", "rm -rf"):
+        assert fragment not in out
+
+
+class TestAPlantedSpellingIsNeverPrinted:
+    @pytest.mark.parametrize("planted", PLANTED, ids=PLANTED_IDS)
+    def test_a_planted_hand_off_spelling_prints_the_plan_as_received(
+        self, workdir, capsys, monkeypatch, planted
+    ):
+        plan = build(workdir, S(("review-plan",), files=RP_VALID))
+        _target(monkeypatch, _hand_off(str, "--reaggregate"))
+        _code, _out, _err, first = _run(["review-plan", P], capsys)
+        assert os.path.realpath(planted) == os.path.realpath(P), "the trap"
+        status_file.update_status(
+            str(phase_dir_path(plan, "review-plan")), {"plan_arg": planted}
+        )
+        _target(monkeypatch)
+        code, out, err, result = _run(_verbatim(first["next"]), capsys)
+        assert code == 0, err
+        _assert_nothing_planted_printed(
+            out, result, f"{PLUGIN}--apply-suggestions {plan}"
+        )
+
+    @pytest.mark.parametrize("planted", PLANTED, ids=PLANTED_IDS)
+    def test_a_planted_spelling_never_ships_to_a_detached_worker(
+        self, workdir, capsys, monkeypatch, planted
+    ):
+        plan = build(workdir, S(UP_TO_TASKS))
+        _target(monkeypatch, _hand_off(str, "--reaggregate", mode="generate-tasks"))
+        _code, _out, _err, first = _run(["generate-tasks", P], capsys)
+        status_file.update_status(
+            str(phase_dir_path(plan, "generate-tasks")), {"plan_arg": planted}
+        )
+        shipped = {}
+        _target(
+            monkeypatch,
+            lambda argv: shipped.setdefault("plan_arg", detach._invoker_plan_arg(argv)),
+        )
+        _run(_verbatim(first["next"]), capsys)
+        assert shipped["plan_arg"] == str(plan)
+
+    def test_a_spelling_through_a_directory_that_exists_still_prints(
+        self, workdir, capsys, monkeypatch
+    ):
+        """Strict resolution refuses only a component that does not exist."""
+        plan = build(workdir, S(("review-plan",), files=RP_VALID))
+        _target(monkeypatch, _hand_off(str, "--reaggregate"))
+        _code, _out, _err, first = _run(["review-plan", P], capsys)
+        status_file.update_status(
+            str(phase_dir_path(plan, "review-plan")),
+            {"plan_arg": "plans/../plans/foo.md"},
+        )
+        _target(monkeypatch)
+        _code, _out, _err, result = _run(_verbatim(first["next"]), capsys)
+        assert result["user_next_step"]["command"] == (
+            f"{PLUGIN}--apply-suggestions plans/../plans/foo.md"
+        )
+
+
 class TestEveryBuilderHandsBackAContinuation:
     """The writer recognises a hand-off by parsing the command it printed, so
     each builder's output must parse to its own mode and plan."""

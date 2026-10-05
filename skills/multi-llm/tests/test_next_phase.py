@@ -545,6 +545,81 @@ def test_quote_plan_arg(plan_arg, printed):
     assert np_.quote_plan_arg(plan_arg) == printed
 
 
+class TestARecordedSpelling:
+    """`recorded_plan_spelling`: a plan spelling read back from a file every
+    jailed batch can write (hooks review of fix round 10)."""
+
+    @pytest.fixture
+    def here(self, tmp_path, monkeypatch):
+        (tmp_path / "plans" / "sub").mkdir(parents=True)
+        for name in ("foo.md", "my plan.md", "a$b.md", "-x.md"):
+            (tmp_path / "plans" / name).write_text("# p\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        return tmp_path
+
+    @pytest.mark.parametrize("recorded", [
+        "plans/foo.md", "./plans/foo.md", "plans/sub/../foo.md",
+    ])
+    def test_a_spelling_of_the_plan_made_of_plain_characters_passes(
+        self, here, recorded
+    ):
+        assert np_.recorded_plan_spelling(
+            recorded, str(here / "plans" / "foo.md")
+        ) == recorded
+
+    def test_a_plain_space_passes_and_is_quoted_when_printed(self, here):
+        plan = str(here / "plans" / "my plan.md")
+        spelling = np_.recorded_plan_spelling("plans/my plan.md", plan)
+        assert spelling == "plans/my plan.md"
+        assert np_.quote_plan_arg(spelling) == '"plans/my plan.md"'
+
+    @pytest.mark.parametrize("recorded", [
+        "plans/$(touch${IFS}pwned)/../foo.md",
+        "plans/`id`/../foo.md",
+        "plans/x\nrm -rf ~/../foo.md",
+        "plans/missing/../foo.md",
+    ], ids=["substitution", "backticks", "newline", "missing-component"])
+    def test_a_spelling_through_a_component_that_does_not_exist_is_refused(
+        self, here, recorded
+    ):
+        plan = str(here / "plans" / "foo.md")
+        assert os.path.realpath(recorded) == os.path.realpath(plan), "the trap"
+        assert np_.recorded_plan_spelling(recorded, plan) is None
+
+    @pytest.mark.parametrize("recorded,plan_name", [
+        ("plans/a$b.md", "a$b.md"),
+        ("plans/foo.md\t", "foo.md"),
+        ("~/plans/foo.md", "foo.md"),
+    ], ids=["dollar", "tab", "tilde"])
+    def test_a_character_a_shell_acts_on_is_refused_even_for_a_real_file(
+        self, here, recorded, plan_name
+    ):
+        plan = str(here / "plans" / plan_name)
+        assert np_.recorded_plan_spelling(recorded, plan) is None
+
+    def test_only_a_leading_dash_is_refused(self, here):
+        """It would read as a flag once the command is run."""
+        os.chdir(here / "plans")
+        plan = str(here / "plans" / "-x.md")
+        assert np_.recorded_plan_spelling("-x.md", plan) is None
+        os.chdir(here)
+        assert np_.recorded_plan_spelling("plans/-x.md", plan) == "plans/-x.md"
+
+    @pytest.mark.parametrize("recorded", [None, "", 3, ["plans/foo.md"]])
+    def test_anything_but_a_non_empty_string_is_refused(self, here, recorded):
+        assert np_.recorded_plan_spelling(
+            recorded, str(here / "plans" / "foo.md")
+        ) is None
+
+    def test_another_file_or_a_missing_plan_is_refused(self, here):
+        assert np_.recorded_plan_spelling(
+            "plans/my plan.md", str(here / "plans" / "foo.md")
+        ) is None
+        assert np_.recorded_plan_spelling(
+            "plans/foo.md", str(here / "plans" / "gone.md")
+        ) is None
+
+
 @pytest.fixture(scope="module")
 def after_tasks_workflow(tmp_path_factory):
     plan = _build(tmp_path_factory.mktemp("quoting"), S(UP_TO_TASKS))

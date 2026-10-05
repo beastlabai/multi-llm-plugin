@@ -2857,8 +2857,10 @@ def _emit_user_next_step(
     Inputs per §2.1 "Where each emitter gets its inputs": ``finished_mode`` is
     the pinned run's own mode (its record's ``mode``, else its phase dir — the
     pair ``record_mode_phase`` reports); ``plan_arg`` is the record's
-    ``plan_arg`` — the plan as the launcher typed it — else its absolute
-    ``plan_file``, never this poll's own argv, which ``main`` made absolute;
+    ``plan_arg`` — the plan as the launcher typed it — when
+    ``next_phase.recorded_plan_spelling`` passes it (the record sits in a
+    folder every jailed batch can write), else this poll's absolute plan path,
+    never the record's ``plan_file`` and never this poll's argv spelling;
     the host is this poll's (``--host``, ``$MULTI_LLM_HOST``, the default). The
     workflow is read now, after any ``--wait``; *workflow* is such a read when
     the caller already took one. A failed read or builder raise prints one
@@ -2872,7 +2874,9 @@ def _emit_user_next_step(
     mode = _modes().resolve(finished_mode) if finished_mode else None
     if mode is None or not (mode.is_workflow_phase or mode.runs_workflow):
         return  # an ask, or no mode on record: no phase finished, no answer
-    plan_arg = str(run.get("plan_arg") or run.get("plan_file") or plan_path)
+    plan_arg = next_phase.recorded_plan_spelling(
+        run.get("plan_arg"), str(plan_path)
+    ) or str(plan_path)
     try:
         if workflow is None:
             workflow = _workflow_payload(plan_path, host_id=_reader_host(args))
