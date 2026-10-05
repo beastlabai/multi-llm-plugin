@@ -64,6 +64,7 @@ try:
     from .subagent_tasks import PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION
     from .write_batch_scheduler import (
         bind_prior_changes,
+        decomposition_graph,
         rerunnable_checks,
         upstream_held_check,
         with_result_contract,
@@ -76,6 +77,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.subagent_tasks import PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         bind_prior_changes,
+        decomposition_graph,
         rerunnable_checks,
         upstream_held_check,
         with_result_contract,
@@ -225,7 +227,10 @@ def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str
     checks are ``state.json``'s (``write_batch_scheduler.rerunnable_checks``:
     findings on record, recorded completed, not accepted with
     ``--human-task <id>=done``); the graph is ``write_tasks.json``'s
-    ``depends_on``. ``None`` for an implement task nothing holds, any other
+    ``depends_on`` plus ``state.json``'s recorded decomposition
+    (``write_batch_scheduler.decomposition_graph``, fix round 12: a
+    ``--resume`` leaves a finished task out of the file, and a chain through
+    it used to end there). ``None`` for an implement task nothing holds, any other
     kind, or a state or task file that cannot be read (the prompt step is
     never refused on a guess).
     """
@@ -239,7 +244,9 @@ def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str
         return None
     if not isinstance(state, dict):
         return None
-    tasks = document.get("batches") or document.get("tasks") or []
+    tasks = decomposition_graph(
+        document.get("batches") or document.get("tasks") or [], state,
+    )
     check_id = upstream_held_check(tasks, task_id, rerunnable_checks(state))
     if check_id is None:
         return None

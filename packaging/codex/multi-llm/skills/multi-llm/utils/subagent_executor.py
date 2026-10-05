@@ -655,6 +655,27 @@ CHECK_RESULT_UNKNOWN = (
 _CHECK_PASSED_WORDS = frozenset({"true", "yes", "pass", "passed"})
 _CHECK_FAILED_WORDS = frozenset({"false", "no", "fail", "failed"})
 
+#: A bare ``findings`` value that says "nothing found" (any case, a trailing
+#: ``.``/``!`` ignored), read as ``[]`` only beside a ``passed`` that reads
+#: true (fix round 12: ``{"passed": true, "findings": "none"}`` was one
+#: finding, "none", which held back every task after the check). Kept
+#: short on purpose: any other text is a finding.
+_EMPTY_FINDINGS_WORDS = frozenset({
+    "", "none", "n/a", "na", "no problems", "no problems found", "no findings", "0",
+})
+
+
+def _says_nothing_found(value: Any) -> bool:
+    """Whether a bare (non-list) ``findings`` value is an empty-ish marker."""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value == 0
+    if isinstance(value, str):
+        word = " ".join(value.strip().lower().rstrip(".!").split())
+        return word in _EMPTY_FINDINGS_WORDS
+    return False
+
 
 def write_outcome_label(
     write_outcome: Optional[str], verification_only: bool = False,
@@ -700,12 +721,49 @@ def _finding_text(item: Any) -> str:
     return " ".join(str(item).split())
 
 
+class CheckReply(NamedTuple):
+    """What a check task's reply says in its ``check`` object.
+
+    ``findings`` is :func:`check_findings_from`'s answer. ``listed`` is
+    whether the reply listed at least one finding of its own (not one this
+    reader supplied: :data:`CHECK_FAILED_WITHOUT_FINDINGS`,
+    :data:`CHECK_RESULT_UNKNOWN`). ``could_not_run`` is ``check.could_not_run``
+    read leniently (``true``, ``1``, ``"true"``/``"yes"``): the runner says
+    a check could not run (fix round 12).
+    """
+
+    findings: Optional[List[str]]
+    listed: bool
+    could_not_run: bool
+
+
+def read_check_reply(result: Any) -> CheckReply:
+    """The reply's ``check`` object, read (:class:`CheckReply`).
+
+    Fix round 12 (a coordinator decision after racing run 3: real runners
+    answer ``failed`` for a check that ran and found problems): a check
+    that could not run says so with ``check.could_not_run: true``, and only
+    that, or a crash, is a check that did not run. ``_verification_verdict``
+    reads a ``failed`` reply whose ``check`` lists findings, and does not
+    say it could not run, as findings.
+    """
+    findings = check_findings_from(result)
+    check = result.get("check") if isinstance(result, dict) else None
+    if not isinstance(check, dict):
+        return CheckReply(findings, False, False)
+    could_not_run = _check_passed(check.get("could_not_run")) is True
+    listed = bool(findings) and findings[0] not in (
+        CHECK_FAILED_WITHOUT_FINDINGS, CHECK_RESULT_UNKNOWN,
+    )
+    return CheckReply(findings, listed, could_not_run)
+
+
 def check_findings_from(result: Any) -> Optional[List[str]]:
     """The structured check result of a write reply, as a findings list.
 
-    ``None`` when the reply carries no ``check`` at all (an older reply, a
-    task that is not a check, or ``check: null``); ``[]`` when it says the
-    check passed and lists nothing; otherwise the findings, one line each
+    ``None`` when the reply carries no ``check`` key at all (an older reply,
+    a task that is not a check); ``[]`` when it says the check passed and
+    lists nothing; otherwise the findings, one line each
     and bounded (:data:`CHECK_FINDINGS_MAX`, :data:`CHECK_FINDING_MAX_CHARS`).
     Read from the reply's own field, never from its notes.
 
@@ -717,12 +775,19 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     instead, and only a clear pass with nothing listed is a pass: a finding
     beside ``passed: true`` still counts, ``passed: false`` with none listed
     gets :data:`CHECK_FAILED_WITHOUT_FINDINGS`, and a ``check`` that says
-    neither (``{}``, ``passed: null``, a ``check`` that is not an object)
-    gets :data:`CHECK_RESULT_UNKNOWN` — never a pass.
+    neither (``{}``, ``passed: null``, ``check: null``, a ``check`` that is
+    not an object) gets :data:`CHECK_RESULT_UNKNOWN` — never a pass. Fix
+    round 12: ``check: null`` read as no result, so a check task's reply
+    carrying it was VERIFIED; only a missing key is no result now. A bare
+    ``findings`` that says "nothing found" (``"none"``, ``"N/A"``, ``"No
+    problems found."``, ``0``) beside a ``passed`` that reads true is
+    ``[]`` (:data:`_EMPTY_FINDINGS_WORDS`).
     """
-    if not isinstance(result, dict) or result.get("check") is None:
+    if not isinstance(result, dict) or "check" not in result:
         return None
     check = result.get("check")
+    if check is None:
+        return [f"{CHECK_RESULT_UNKNOWN} (its `check` was null)"]
     if not isinstance(check, dict):
         shown = " ".join(str(check).split())[:80]
         return [
@@ -730,9 +795,13 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
             f"{type(check).__name__} {shown!r}, not an object)"
         ]
     raw = check.get("findings")
+    passed = _check_passed(check.get("passed"))
     if isinstance(raw, list):
         items = raw
     elif raw is None:
+        items = []
+    elif passed is True and _says_nothing_found(raw):
+        # "findings": "none" beside a pass says there is none (fix round 12).
         items = []
     else:
         # One finding given bare (a string, an object, a number).
@@ -749,7 +818,6 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
         ]
     if findings:
         return findings
-    passed = _check_passed(check.get("passed"))
     if passed is True:
         return []
     if passed is False:

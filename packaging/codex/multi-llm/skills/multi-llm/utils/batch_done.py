@@ -49,7 +49,7 @@ Usage::
 
     multi_llm.py util batch-done --phase-dir <dir> --task-id <id> \\
         --status completed|failed [--reason TEXT] [--state-file PATH] \\
-        [--check passed|findings [--finding TEXT ...]]
+        [--check passed|findings|could-not-run [--finding TEXT ...]]
 
 ``--check`` is a check task's structured result (an implement task that
 declares no files; its reply's ``check`` object): ``findings`` records each
@@ -63,6 +63,11 @@ refuses them, and ``util finalize-tracking --mark-completed`` refuses while
 one is left — the plugin's enforcement of what the instructions tell the
 host, as the executor leg enforces it in its loop. Any later record of the
 check (``--check passed``, ``--status failed``) releases them.
+``could-not-run`` (fix round 12) is a check whose reply said
+``check.could_not_run: true``: recorded ``--status failed`` (its reason
+defaults to saying so), never as findings; a ``failed`` reply that lists
+findings without it ran, and is recorded ``--status completed --check
+findings``.
 
 Import is side-effect free: argparse and all I/O live inside :func:`main`.
 """
@@ -90,8 +95,11 @@ try:
     from .write_batch_scheduler import (
         BLOCKED_BY_CHECK_PREFIX,
         blocked_by_check_reason,
+        decomposition_graph,
         is_check_task,
+        rerunnable_checks,
         transitive_dependents,
+        upstream_held_check,
     )
     from .write_prompt import WritePromptError, load_write_task
 except ImportError:  # pragma: no cover - direct script invocation
@@ -109,8 +117,11 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.write_batch_scheduler import (  # type: ignore
         BLOCKED_BY_CHECK_PREFIX,
         blocked_by_check_reason,
+        decomposition_graph,
         is_check_task,
+        rerunnable_checks,
         transitive_dependents,
+        upstream_held_check,
     )
     from utils.write_prompt import WritePromptError, load_write_task  # type: ignore
 
@@ -147,9 +158,16 @@ _RECORDED_TASK_STATUSES = frozenset({"completed", "failed", "skipped"})
 #: ``processed_<phase>`` status per recorded outcome.
 _ITEM_STATUS = {"completed": "applied", "failed": "failed"}
 
-#: ``--check``'s two words: what a check task's reply said in its ``check``
-#: object (``passed: true`` and no finding, or problems found).
-CHECK_RESULTS = ("passed", "findings")
+#: ``--check``'s words: what a check task's reply said in its ``check``
+#: object (``passed: true`` and no finding, problems found, or — fix round
+#: 12 — ``could_not_run: true``).
+CHECK_RESULTS = ("passed", "findings", "could-not-run")
+
+#: The reason ``--check could-not-run`` records when ``--reason`` gives none.
+COULD_NOT_RUN_REASON = (
+    "its check could not run (the reply said check.could_not_run); fix the "
+    "cause and run implement with --resume"
+)
 
 
 def _processed_phase_word(phase_dir: Path) -> str:
@@ -236,11 +254,20 @@ def record_batch(
     if check == "findings" and status != "completed":
         raise WritePromptError(
             "A check that ran and reported problems is recorded "
-            "--status completed with --check findings: implement continues "
-            "past it and review-code is told about the findings. Use "
-            "--status failed (without --check) for a check task whose reply "
-            "said failed (a check that could not run) or whose subagent "
-            "changed a file."
+            "--status completed with --check findings, also when its reply "
+            "said \"status\": \"failed\" but listed findings and did not say "
+            "\"could_not_run\": true: the tasks that do not depend on it go "
+            "on and review-code is told about the findings. Use --status "
+            "failed --check could-not-run for a check whose reply said "
+            "\"could_not_run\": true, and --status failed (without --check) "
+            "for one that failed listing no finding or whose subagent changed "
+            "a file."
+        )
+    if check == "could-not-run" and status != "failed":
+        raise WritePromptError(
+            "A check that could not run is recorded --status failed with "
+            "--check could-not-run: it says nothing about the code, so it is "
+            "never a pass or a finding, and implement stops on it."
         )
     phase_dir = Path(phase_dir).resolve()
     document, task = load_write_task(phase_dir, task_id)
@@ -263,7 +290,9 @@ def record_batch(
             f"it without --check."
         )
     check_findings: Optional[List[str]] = None
-    if check is not None:
+    if check == "could-not-run":
+        reason = reason or COULD_NOT_RUN_REASON
+    elif check is not None:
         check_findings = check_findings_from({
             "check": {"passed": check == "passed", "findings": list(findings or [])}
         }) or []
@@ -322,24 +351,32 @@ def _hold_or_release_dependents(
     """Record (or release) the tasks a check with findings holds back.
 
     *held*: the check was just recorded with findings, so every transitive
-    dependent in the task file with no status yet, or a ``pending`` one, is
-    recorded ``pending`` with :func:`blocked_by_check_reason` — the reason
-    the executor leg writes for the same tasks. Otherwise each dependent
-    still ``pending`` under this check's reason loses the reason: the check
-    passed, failed or was recorded again, and is no longer why it waits.
-    Returns the tasks held (empty on a release).
+    dependent with no status yet, or a ``pending`` one, is recorded
+    ``pending`` with :func:`blocked_by_check_reason` — the reason the
+    executor leg writes for the same tasks. Otherwise each dependent still
+    ``pending`` under this check's reason loses it: the check passed, failed
+    or was recorded again, and is no longer why it waits — unless another
+    check with findings is still upstream of it, whose reason it then
+    carries (fix round 12: with two checks holding D, recording the first
+    passed cleared D's reason while the second's findings stood). The walk
+    is over the whole decomposition (``write_batch_scheduler.decomposition_graph``:
+    the task file plus ``state.json``'s recorded graph), not only the tasks
+    a resume put in the file (fix round 12). Returns the tasks held (empty
+    on a release).
     """
-    tasks = document.get("batches") or document.get("tasks") or []
+    tasks = decomposition_graph(
+        document.get("batches") or document.get("tasks") or [], state,
+    )
+    by_id = {
+        str(t.get("task_id") or ""): t for t in tasks if isinstance(t, dict)
+    }
     statuses = state.get("task_status") or {}
     reasons = state.get("task_status_reasons") or {}
     mine = f"{BLOCKED_BY_CHECK_PREFIX}{task_id} "
+    still_held = [] if held else [c for c in rerunnable_checks(state) if c != task_id]
     held_ids: List[str] = []
     for dependent in transitive_dependents(tasks, task_id):
-        task = next(
-            (t for t in tasks if isinstance(t, dict)
-             and str(t.get("task_id") or "") == dependent),
-            {},
-        )
+        task = by_id.get(dependent, {})
         if task.get("is_human") or str(task.get("executor_role") or "") == "human":
             continue
         status = statuses.get(dependent)
@@ -350,7 +387,11 @@ def _hold_or_release_dependents(
                 )
                 held_ids.append(dependent)
         elif status == "pending" and str(reasons.get(dependent) or "").startswith(mine):
-            update_task_status_in_state(state, dependent, "pending")
+            other = upstream_held_check(tasks, dependent, still_held)
+            update_task_status_in_state(
+                state, dependent, "pending",
+                blocked_by_check_reason(other) if other else None,
+            )
     return held_ids
 
 
@@ -473,8 +514,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--check", default=None, choices=CHECK_RESULTS,
         help="For a check task (an implement task that declares no files): "
-             "its reply's check result — passed, or findings (the check ran "
-             "and reported problems; recorded with --status completed).",
+             "its reply's check result — passed, findings (the check ran "
+             "and reported problems; recorded with --status completed), or "
+             "could-not-run (its check said could_not_run: true; recorded "
+             "with --status failed).",
     )
     parser.add_argument(
         "--finding", action="append", default=None, metavar="TEXT",
