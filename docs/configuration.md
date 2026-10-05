@@ -170,13 +170,19 @@ run on rung 2 alone, and only under `auto`: `apply-suggestions` (scope
 `plan-file`: the jail lets codex write the plan file and nothing else in the
 repository, in place), `apply-task-suggestions` (scope `tasks`: the default
 `plans/<stem>/tasks/` directory, else the tasks file) and, since 2026-10-02,
-`apply-code-fixes` and `implement` (scope `repo-wide`: every existing
-repository entry outside `.git`, `.codex`, `.multi-llm` and the run's own
-output folder, enumerated at each dispatch — a batch can edit any file and
-create files inside existing subdirectories, but cannot create, rename or
-delete a top-level entry, cannot write the protected set, and can edit a
-top-level file only in place; a task declaring a new top-level file is refused
-before dispatch, naming the non-Codex runner). Each batch on the rung prints
+`apply-code-fixes` and `implement` (scope `repo-wide`: since 2026-10-05 one
+rule on the repository root, so the whole repository is writable inside the
+jail — `.git`, `.codex`, `.multi-llm` and the run's own output folder
+included. Nothing is backed up or restored around a batch; the model is told
+to leave those alone, `driver.write_paths` is still enforced before and after
+each batch, the sweep names undeclared writes, and one warn-only
+`[GIT_CONFIG_CHANGED]` line says when `.git/config` or `.git/hooks/` changed
+during a batch — inspect them before your next git command, since your own
+git honours whatever was planted; the plugin's own git calls do not. Until
+then the grant enumerated entries outside that protected set and refused a
+task declaring a new top-level file before dispatch, which is why a plan whose
+whole deliverable was one root-level `index.html` never ran on Codex). Each
+batch on the rung prints
 the stray-writes-only line first, which also says network access is not
 confined there (codex's own `workspace-write` confines it). `contained` and
 `off` refuse them, and a write never falls to rung 1 or to rung 3 — with one
@@ -230,8 +236,9 @@ temp directory (and removed afterwards), `/dev/null` and, where they exist,
 there, so `uv run pytest` and `npm test` complete inside the jail, while
 `/tmp` and `/dev/shm` stay denied. A write phase adds its grant: the plan
 file, the tasks directory or file, or — for `apply-code-fixes` and
-`implement` — one rule per repository entry outside the protected set, never
-a rule on the repository root. The allow-list is not configurable.
+`implement` — one rule on the repository root (since 2026-10-05; Landlock is
+allow-only and a rule inherits down the tree, so that rule covers `.git` and
+`.multi-llm` too). The allow-list is not configurable.
 
 - **When it is used.** Only after codex's own sandbox probe says `unavailable`;
   a sandbox that starts is used unchanged. The kernel must offer Landlock ABI 3
