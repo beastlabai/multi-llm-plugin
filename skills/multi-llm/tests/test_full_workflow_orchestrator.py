@@ -813,3 +813,44 @@ class TestAnInterruptedPhaseSweepsItsClis:
         assert workflow.run_mode("review-plan", []) == 0
         assert swept == []
         assert "[INTERRUPT_SWEEP]" not in capsys.readouterr().err
+
+
+class TestANativeWritePhaseInsideFullIsNotProgress:
+    """A write phase that exits 0 recorded *started* with its batch document
+    written is the row-14 case: inside `full` nobody runs the loop. Before
+    2026-10-05 the check keyed on the completion two phases stamped at emit
+    time; the started record is the evidence now, and the message still
+    names the pending document rather than the generic "records no
+    completion"."""
+
+    def test_started_with_pending_batches_stops_at_write_phase_not_executed(
+        self, tmp_path, stub_phases, monkeypatch, capsys
+    ):
+        calls = stub_phases()
+        plan = _plan(tmp_path)
+        original = fwo.FullWorkflow.run_mode
+
+        def run_mode(self, mode_word, extra):
+            if mode_word != "apply-suggestions":
+                return original(self, mode_word, extra)
+            calls.append((mode_word, list(extra)))
+            manager = StateManager(self.plan_path)
+            manager.mark_phase_started("apply-suggestions")
+            manager.save()
+            document = _phase_dir(plan, "apply-suggestions") / "orchestrator_output.json"
+            document.parent.mkdir(parents=True, exist_ok=True)
+            document.write_text(json.dumps({
+                "plan_file": str(plan),
+                "batches": [{"prompt": "apply 1"}, {"prompt": "apply 2"}],
+            }), encoding="utf-8")
+            return 0
+
+        monkeypatch.setattr(fwo.FullWorkflow, "run_mode", run_mode)
+        code = multi_llm.main(["full", str(plan), "--yes"])
+        captured = capsys.readouterr()
+        assert code == 3
+        assert "[WRITE_PHASE_NOT_EXECUTED] apply-suggestions exited 0 after writing 2 batch(es)" in captured.err
+        assert "recorded itself completed" not in captured.err
+        assert "records no completion" not in captured.err
+        assert _modes_called(calls) == ["review-plan", "apply-suggestions"]
+        assert not StateManager(plan).is_phase_completed("apply-suggestions")

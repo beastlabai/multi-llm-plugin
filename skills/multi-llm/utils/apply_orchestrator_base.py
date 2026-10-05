@@ -482,7 +482,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     * ``item_noun`` — e.g. ``"suggestion"``
     * ``supports_revalidation`` — ``True`` / ``False``
     * ``supports_skip_flag`` — ``True`` / ``False``
-    * ``marks_phase_completed`` — ``True`` / ``False``
 
     And implement all 11 abstract methods (see the *Abstract methods*
     section below).
@@ -507,7 +506,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     item_noun_plural: str = ""
     supports_revalidation: bool = False
     supports_skip_flag: bool = False
-    marks_phase_completed: bool = False
     # Override to emit a different phase identifier in confirmation_needed output.
     # When empty, defaults to phase_name.
     confirmation_phase_name: str = ""
@@ -564,7 +562,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             cls.item_noun_plural = f"{cls.item_noun}s"
 
         # Validate boolean config attributes are explicitly set (not inherited defaults)
-        for attr in ("supports_revalidation", "supports_skip_flag", "marks_phase_completed"):
+        for attr in ("supports_revalidation", "supports_skip_flag"):
             # Check that the attribute is defined directly on the subclass, not inherited
             if attr not in cls.__dict__:
                 raise TypeError(
@@ -816,9 +814,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         # Handle --mark-completed: the host's POST-LOOP finalization command, the
         # native counterpart of `WriteBatchScheduler._finalize`. It is the only
-        # place the native path records completion — the emit path deliberately
-        # does not (see `marks_phase_completed`) — so a host whose batch loop
-        # stopped early simply never reaches it and the phase stays incomplete.
+        # place the native path records completion — the emit path records the
+        # phase *started* instead — so a host whose batch loop stopped early
+        # simply never reaches it and the phase stays `in_progress`.
         #
         # The word persisted is `confirmation_phase_name or phase_name`, the same
         # fallback already used for the confirmation-needed output and for
@@ -1970,8 +1968,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 self.logger.warning("write outcome summary failed: %s", e)
             return scheduled
 
-        if self.marks_phase_completed and self.state is not None:
-            self.state.mark_phase_completed(self.phase_name)
+        # The native leg: the batches are now the host's to apply, so the phase
+        # is recorded *started*, never completed — completion is the host's
+        # post-loop `--mark-completed`, the only place the native path records
+        # it (the word it persists is the same `confirmation_phase_name or
+        # phase_name`). Until 2026-10-05 apply-suggestions marked itself
+        # completed right here, before a single edit existed, so `status`
+        # and the next-step builder read a phase as done while the host was
+        # still applying its batches — or after it had died halfway.
+        if self.state is not None:
+            self.state.mark_phase_started(
+                self.confirmation_phase_name or self.phase_name
+            )
             self.state.save()
 
         # Step 34: Print summary

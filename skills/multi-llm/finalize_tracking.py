@@ -40,7 +40,7 @@ from utils import (
     subtract_baseline,
 )
 from utils.git_utils import get_project_root_from_dir, ignored_paths, paths_in_commit
-from utils.state_manager import compute_plan_hash
+from utils.state_manager import compute_plan_hash, mark_phase_completed_in_state
 
 # A tracked-file dump is a reference list, not a reading; state.json holds all
 # of it. Measured 2026-09-16: a run that tracked 1 511 files spent 1 512 of its
@@ -207,6 +207,20 @@ def main(argv=None) -> int:
         help="Summary path, relative to the plan's parent directory, as printed "
              "by the orchestrator's summary_file_relative field"
     )
+    # The native leg's completion write, the counterpart of
+    # `WriteBatchScheduler._finalize`'s `mark_phase_completed("implement")`.
+    # The orchestrator records the phase *started* when it emits the task
+    # JSON; this flag, on the instruction's closing call (after every task,
+    # the verify step and the summary), is the only place the native path
+    # records it completed, so a host that stopped early leaves it
+    # `in_progress` and `--resume` is offered.
+    parser.add_argument(
+        "--mark-completed",
+        action="store_true",
+        help="Record the implement phase completed in state.json (the "
+             "instruction's closing step; never before every task has run and "
+             "the repository's own check passed)",
+    )
     args = parser.parse_args(argv)
 
     if bool(args.plan_file) != bool(args.summary_file_relative):
@@ -285,6 +299,8 @@ def main(argv=None) -> int:
     # Update state
     state["tracked_files"] = tracked_files
     state["updated_at"] = datetime.now().isoformat()
+    if args.mark_completed:
+        mark_phase_completed_in_state(state, "implement")
 
     try:
         _write_state_atomic(state_path, state)
@@ -296,6 +312,8 @@ def main(argv=None) -> int:
     _print_path_list(tracked_files)
 
     print(f"\nState file updated: {state_path}")
+    if args.mark_completed:
+        print("Phase implement marked completed")
 
     if args.plan_file:
         code = _insert_summary_reference(args.plan_file, args.summary_file_relative)

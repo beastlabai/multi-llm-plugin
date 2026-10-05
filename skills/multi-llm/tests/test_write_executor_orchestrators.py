@@ -1823,3 +1823,49 @@ class TestFreshDispatchesEveryApplyBatchAgain(_ApplyRig):
         assert [(r["task_id"], bool(r.get("from_earlier_run"))) for r in rows] == [
             ("apply-batch-0", True), ("apply-batch-1", False),
             ("apply-batch-2", False)]
+
+
+class TestTheNativeImplementEmitRecordsAStart:
+    """`implement` without `--exec-subagents` hands its batches to the host.
+
+    It used to stamp `phases_completed.implement` right there (2026-10-04
+    racing re-run: 10:43:30, six minutes before the last task), so `status`
+    said completed while the host was still working. It records the phase
+    *started* now; `util finalize-tracking --mark-completed` — the
+    instruction's closing step — completes it.
+    """
+
+    def test_emit_records_started_and_the_closing_step_completes(self, repo):
+        from utils.state_manager import get_or_create_state
+        import finalize_tracking
+
+        _seed_generate_tasks(repo)
+        code = implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"])
+        assert code == 0
+        state = get_or_create_state(repo.plan)
+        assert state.is_phase_started("implement")
+        assert not state.is_phase_completed("implement")
+
+        # The host's closing write.
+        assert finalize_tracking.main([
+            "--state-file", str(state.state_file), "--mark-completed",
+        ]) == 0
+        state = get_or_create_state(repo.plan)
+        assert state.is_phase_completed("implement")
+        assert not state.is_phase_started("implement")
+
+    def test_a_second_emit_restamps_the_start(self, repo):
+        """`--resume` is a new run of the same phase: the start moves with it."""
+        from utils.state_manager import get_or_create_state
+
+        _seed_generate_tasks(repo)
+        assert implement_orchestrator.main(["--plan-file", str(repo.plan), "--yes"]) == 0
+        first = get_or_create_state(repo.plan).phase_started_at("implement")
+        state = get_or_create_state(repo.plan)
+        state.state["phases_started"]["implement"] = "2026-01-01T00:00:00"
+        state.save()
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--resume",
+        ]) == 0
+        second = get_or_create_state(repo.plan).phase_started_at("implement")
+        assert second != "2026-01-01T00:00:00" and second >= first

@@ -424,7 +424,7 @@ your host.
      1. Mark all already-completed tasks as "completed" (preserve their status)
      2. Mark all not-yet-attempted tasks as "pending" (NOT "skipped" — they were never reached)
      3. Mark the current task (if any) as "pending"
-     4. Do NOT mark the implement phase as completed (`mark_phase_completed("implement")` is NOT called)
+     4. Do NOT mark the implement phase as completed (step 10 runs without `--mark-completed`, so the phase stays `in_progress`)
      5. Write a partial implementation summary with a "## Cancelled" header:
         ```markdown
         ## Cancelled
@@ -512,9 +512,10 @@ your host.
    - Record pass/fail results for inclusion in the implementation summary, naming
      the command you ran (or `not configured` when nothing was)
    - A failing **`driver.verify_command`** is the repo's own contract failing: do
-     not revert anything, do not mark the phase completed, and hand it to a human
-     with the command and the tail of its output. That is what the
-     `--exec-subagents` leg does (exit 3), and the two legs must agree.
+     not revert anything, do not mark the phase completed (run step 10 without
+     `--mark-completed`), and hand it to a human with the command and the tail
+     of its output. That is what the `--exec-subagents` leg does (exit 3), and
+     the two legs must agree.
    - A failing **detected** runner is a guess, not a contract: record the results
      and continue to summary.
 
@@ -573,9 +574,9 @@ your host.
    Any important context for the code review phase...
    ```
 
-10. **Update the original plan:**
+10. **Update the original plan and mark the phase completed:**
    Add a reference to the implementation summary in the original plan. This is the
-   same command as step 7 with two more flags — it is deterministic, so it is
+   same command as step 7 with three more flags — it is deterministic, so it is
    Python's job and not a block of inline code for you to retype. Pass the
    absolute `plan_file` and the `summary_file_relative` value exactly as the
    orchestrator printed them; the insertion is idempotent, so re-running it on an
@@ -583,8 +584,15 @@ your host.
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking \
      --state-file "$STATE_FILE" --plan-file "$PLAN_FILE" \
-     --summary-file-relative "$SUMMARY_FILE_RELATIVE"
+     --summary-file-relative "$SUMMARY_FILE_RELATIVE" --mark-completed
    ```
+   `--mark-completed` is the phase's completion record. The orchestrator recorded
+   the phase *started* when it wrote the task JSON (step 2), and this is the only
+   command that records it *completed* — **pass it only when every task ran and
+   step 8's `driver.verify_command` (if configured) passed**; on a cancelled run,
+   a failed contract check or a loop that stopped early, run the command without
+   it, so the phase stays `in_progress` and `status` offers `--resume` instead of
+   calling it done.
 
 11. **Report results** following `references/summary-format.md`, including:
    - Number of tasks completed/failed

@@ -1936,3 +1936,123 @@ class TestImplementWithEveryTaskDoneIsInProgress:
         entry = _status(self._plan(tmp_path, {"T001": "pending", "T002": "failed"}))
         assert entry["phases"]["implement"]["status"] == "pending"
         assert entry["phases"]["implement"]["tasks_total"] == 2
+
+
+class TestStartedPhaseReadsInProgress:
+    """The native leg's started record (`StateManager.mark_phase_started`).
+
+    A write phase's orchestrator records the phase *started* when it emits its
+    batch document; nothing else is on record until the host's first batch
+    completes. Until 2026-10-05 apply-suggestions and implement recorded
+    themselves *completed* there instead (racing re-run, 2026-10-04: implement
+    stamped 10:43:30, six minutes before its last task), and the other two
+    read `pending` — a bare re-invocation, not the `--resume` a host that died
+    before its first batch needs.
+    """
+
+    def _started(self, plan, *phases):
+        state = StateManager(plan)
+        for phase in phases:
+            state.mark_phase_started(phase)
+        state.save()
+
+    def test_the_api_round_trips_and_completion_clears_it(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        state = StateManager(plan)
+        assert not state.is_phase_started("implement")
+        state.mark_phase_started("implement")
+        state.save()
+        reloaded = StateManager(plan)
+        assert reloaded.is_phase_started("implement")
+        assert reloaded.phase_started_at("implement")
+        reloaded.mark_phase_completed("implement")
+        assert not reloaded.is_phase_started("implement")
+        assert "implement" not in reloaded.state["phases_started"]
+        assert reloaded.is_phase_completed("implement")
+
+    def test_a_skip_clears_it_too(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        state = StateManager(plan)
+        state.mark_phase_started("apply-suggestions")
+        state.mark_phase_skipped("apply-suggestions", "user chose to skip")
+        assert not state.is_phase_started("apply-suggestions")
+        assert state.is_phase_skipped("apply-suggestions")
+
+    def test_a_started_implement_with_no_task_done_is_in_progress(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"),
+                tasks={"T001": "pending", "T002": "pending"})
+        self._started(plan, "implement")
+        entry = _status(plan)["phases"]["implement"]
+        assert entry["status"] == "in_progress"
+        assert entry["started_at"]
+        assert _status(plan)["suggested_next"] == "implement"
+
+    @pytest.mark.parametrize(
+        "phase,batch_id,fixture,completed",
+        APPLY_PHASE_BATCH_ROWS,
+        ids=[row[0] for row in APPLY_PHASE_BATCH_ROWS],
+    )
+    def test_a_started_apply_phase_with_no_batch_done_is_in_progress(
+        self, tmp_path, phase, batch_id, fixture, completed
+    ):
+        plan = _workflow_plan(tmp_path)
+        fixture(plan)
+        _record(plan, completed=completed)
+        assert _status(plan)["phases"][phase]["status"] == "pending"
+        self._started(plan, phase)
+        entry = _status(plan)["phases"][phase]
+        assert entry["status"] == "in_progress"
+        assert entry["started_at"]
+        others = {p for p, _b, _f, _c in APPLY_PHASE_BATCH_ROWS} - {phase}
+        for other in others:
+            assert _status(plan)["phases"][other]["status"] != "in_progress"
+
+    def test_the_next_command_for_a_started_phase_carries_resume(self, tmp_path):
+        from utils import next_phase
+        plan = _workflow_plan(tmp_path)
+        _put(plan, "review-plan", "validation.json", {
+            "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]})
+        _record(plan, completed=("review-plan",))
+        self._started(plan, "apply-suggestions")
+        answer = next_phase.next_phase_commands(
+            "plans/x.md", "claude-code", None, None, plan_path=plan)
+        assert answer.phase == "apply-suggestions"
+        assert answer.command.endswith("--apply-suggestions plans/x.md --resume")
+
+    @pytest.mark.parametrize(
+        "phase,batch_id,fixture,completed",
+        APPLY_PHASE_BATCH_ROWS,
+        ids=[row[0] for row in APPLY_PHASE_BATCH_ROWS],
+    )
+    def test_a_start_older_than_the_review_marks_nothing(
+        self, tmp_path, phase, batch_id, fixture, completed
+    ):
+        """An abandoned run from before a review re-run is that cycle's."""
+        plan = _workflow_plan(tmp_path)
+        fixture(plan)
+        _record(plan, completed=completed)
+        self._started(plan, phase)
+        review = prereq.PHASE_PREREQUISITES[phase][0]
+        _date_cycle(plan, phase, review, _NEW)
+        state = StateManager(plan)
+        state.state["phases_started"][phase] = _OLD
+        state.save()
+        assert _status(plan)["phases"][phase]["status"] == "pending"
+        state.state["phases_started"][phase] = "2026-01-03T10:00:00"
+        state.save()
+        assert _status(plan)["phases"][phase]["status"] == "in_progress"
+
+    def test_a_completed_phase_never_reads_started(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        state = StateManager(plan)
+        state.mark_phase_started("apply-suggestions")
+        # A stale started key left by hand beside a completion is ignored.
+        state.state.setdefault("phases_completed", {})["apply-suggestions"] = (
+            "2026-01-02T10:00:00")
+        state.save()
+        assert not StateManager(plan).is_phase_started("apply-suggestions")
+        _put(plan, "review-plan", "validation.json", {
+            "format_version": 2, "groups": [{"group_index": 0, "status": "valid"}]})
+        _record(plan, completed=("review-plan",))
+        assert _status(plan)["phases"]["apply-suggestions"]["status"] == "completed"

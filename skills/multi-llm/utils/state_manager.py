@@ -45,6 +45,45 @@ def _parse_completion_time(value) -> Optional[datetime]:
     return parsed
 
 
+def mark_phase_started_in_state(state: Dict[str, Any], phase: str) -> None:
+    """Record *phase* as handed out and not yet finished (``phases_started``).
+
+    The native leg's record: a write phase's orchestrator writes this when it
+    emits its batch document, and the host's closing step
+    (``--mark-completed``, ``util finalize-tracking --mark-completed``) turns
+    it into a completion. Until 2026-10-05 ``apply-suggestions`` and
+    ``implement`` recorded themselves *completed* at that emit site, so
+    ``status``, the next-step builder and the completed-phase guard read a
+    phase as done while the host was still applying its batches — or after it
+    had died halfway (racing re-run, 2026-10-04: implement stamped 10:43:30,
+    six minutes before its last task). ``get_workflow_status`` reads this map
+    as ``in_progress``, the one status that spells ``--resume``. Re-stamped on
+    every emit (a ``--resume`` is a new run of the same phase), popped by
+    :func:`mark_phase_completed_in_state` and by a skip.
+    """
+    started = state.get("phases_started")
+    if not isinstance(started, dict):
+        started = {}
+        state["phases_started"] = started
+    started[phase] = datetime.now().isoformat()
+
+
+def mark_phase_completed_in_state(state: Dict[str, Any], phase: str) -> None:
+    """``StateManager.mark_phase_completed``'s mutation on a raw state dict.
+
+    Module-level, like :func:`compute_plan_hash`, for the file-level writers
+    (``finalize_tracking``) that must not build a ``StateManager`` over a plan
+    the native leg has just edited. The started record is cleared in the same
+    write, so a phase is never both.
+    """
+    if "phases_completed" not in state:
+        state["phases_completed"] = {}
+    state["phases_completed"][phase] = datetime.now().isoformat()
+    started = state.get("phases_started")
+    if isinstance(started, dict):
+        started.pop(phase, None)
+
+
 def compute_plan_hash(plan_path: Path) -> str:
     """Hash a plan's content the way ``state.json``'s ``plan_hash`` records it.
 
@@ -866,9 +905,7 @@ class StateManager:
             phase: Phase name (review-plan, apply-suggestions, generate-tasks,
                    implement, review-code, apply-code-fixes)
         """
-        if "phases_completed" not in self.state:
-            self.state["phases_completed"] = {}
-        self.state["phases_completed"][phase] = datetime.now().isoformat()
+        mark_phase_completed_in_state(self.state, phase)
         # `review_phase_completed` predates this general map and nothing ever
         # set it (F11): a fully completed review-plan phase left it `False`
         # forever, contradicting `phases_completed["review-plan"]` in the same
@@ -876,6 +913,32 @@ class StateManager:
         # review phase", so this is the one phase name that flips it.
         if phase == "review-plan":
             self.mark_review_phase_completed()
+
+    def mark_phase_started(self, phase: str) -> None:
+        """Record *phase* handed to an invoker and not yet finished.
+
+        See :func:`mark_phase_started_in_state`. The write phases' native
+        emit path calls this where it used to call (or not call)
+        :meth:`mark_phase_completed`; the executor leg never does, because
+        ``WriteBatchScheduler._finalize`` completes the phase in the same
+        process.
+        """
+        mark_phase_started_in_state(self.state, phase)
+
+    def is_phase_started(self, phase: str) -> bool:
+        """Whether *phase* carries a started record and no completion."""
+        if phase in self.state.get("phases_completed", {}):
+            return False
+        started = self.state.get("phases_started")
+        return isinstance(started, dict) and phase in started
+
+    def phase_started_at(self, phase: str) -> Optional[str]:
+        """The ISO timestamp *phase* was recorded started, or None."""
+        started = self.state.get("phases_started")
+        if not isinstance(started, dict):
+            return None
+        value = started.get(phase)
+        return value if isinstance(value, str) else None
 
     def phase_completion_is_stale(self, phase: str) -> bool:
         """Whether *phase*'s recorded completion predates implement's.
@@ -930,6 +993,12 @@ class StateManager:
             "skipped_at": datetime.now().isoformat(),
             "reason": reason
         }
+        # An explicit skip ends a run the host abandoned: a started record
+        # left beside it would keep offering `--resume` for a phase the user
+        # chose not to finish.
+        started = self.state.get("phases_started")
+        if isinstance(started, dict):
+            started.pop(phase, None)
 
     def is_phase_skipped(self, phase: str) -> bool:
         """

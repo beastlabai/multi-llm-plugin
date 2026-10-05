@@ -1450,8 +1450,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("  4. Update the state file after each task completes")
     print("  5. After all tasks complete, generate the implementation summary")
     print(f"     Summary file: {output_data['summary_file']}")
+    print("  6. Close the phase with `util finalize-tracking … --mark-completed`")
 
-    state.mark_phase_completed("implement")
+    # The batches are now the host's to run, so the phase is recorded
+    # *started*, never completed: completion is the instruction's closing
+    # `util finalize-tracking --plan-file … --mark-completed`, which runs only
+    # after every task, the verify step and the summary. Until 2026-10-05 this
+    # site wrote `mark_phase_completed("implement")`, so `status` read the
+    # phase as done minutes before its last task (racing re-run, 2026-10-04).
+    state.mark_phase_started("implement")
     state.save()
 
     return 0

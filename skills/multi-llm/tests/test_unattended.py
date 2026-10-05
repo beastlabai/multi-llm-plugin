@@ -1194,7 +1194,6 @@ class _StubApplyOrchestrator(ApplyOrchestratorBase):
     item_noun = "suggestion"
     supports_revalidation = False
     supports_skip_flag = False
-    marks_phase_completed = False
 
     GROUPS = [
         {

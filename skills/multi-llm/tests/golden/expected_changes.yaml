@@ -804,6 +804,28 @@ changes:
       The same rename in apply-suggestions' output, from the shared
       `ApplyOrchestratorBase.build_human_review_config`.
 
+  # ---------------------------------------------------------------------------
+  # Issue 4 of the 2026-10-04 racing re-run (Claude Code host): a write phase's
+  # orchestrator used to record itself COMPLETED when it emitted its batch
+  # document (apply-suggestions, implement), minutes before the host had
+  # applied anything. The native emit path now records the phase STARTED
+  # (`StateManager.mark_phase_started`, `phases_started.{phase}`), and only
+  # the host's closing `--mark-completed` turns that into a completion. The
+  # fixture dispatches apply-suggestions and apply-code-fixes natively (no
+  # `--exec-subagents`) and never runs their batch loops, so both carry a
+  # started record now; the capture's own completion stamps are untouched.
+  # ---------------------------------------------------------------------------
+  - pointer: /state/phases_started
+    rationale: >
+      The two natively dispatched apply phases (apply-suggestions,
+      apply-code-fixes) record `phases_started.<phase>` at emit time, where
+      the baseline recorded nothing (apply-code-fixes) or a completion the
+      capture then overwrote (apply-suggestions). Timestamps normalize to
+      `<timestamp>`.
+  - pointer: /state_shape/phases_started
+    rationale: >
+      The same two keys in the state-shape view, each a `<str>`.
+
 # Example of the shape an entry takes, kept as documentation only (commented, so
 # it is not an active row that would have to match something):
 #

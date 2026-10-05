@@ -65,7 +65,6 @@ class ApplyTaskSuggestionsOrchestrator(ApplyOrchestratorBase[Dict[str, Any], Sug
     item_noun = "task suggestion"
     supports_revalidation = False
     supports_skip_flag = True
-    marks_phase_completed = False
     guard_double_nesting = False
     # One shared artifact (the tasks file), so batches are strictly sequential.
     write_kind = "apply_task_suggestions"

@@ -23,6 +23,7 @@ usage: apply_suggestions_orchestrator.py [-h] [--host ID] [--yes]
                                          [--approve-validation-failed]
                                          [--revalidate-all-human]
                                          [--internal-revalidation]
+                                         [--mark-completed]
 
 Prepare validated suggestions for application to a plan
 
@@ -104,6 +105,8 @@ options:
   --internal-revalidation
                         Run revalidation inside orchestrator (legacy mode)
                         instead of delegating to Claude Code subagent
+  --mark-completed      Mark the phase as completed (call after all batches
+                        are processed)
 
 cross-cutting options:
   --host ID             Host harness driving this run (e.g. claude-code,

@@ -381,7 +381,6 @@ class TestPriorChangesIntegration:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
         # Set up a plan file and output directory that match the orchestrator's
         # derive_prefix / find_output_dir conventions.
