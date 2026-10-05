@@ -4029,13 +4029,14 @@ def merge_home_checks(records: Sequence[Any]) -> Optional[Dict[str, Any]]:
 
 
 def _describe_home_change(record: Dict[str, Any]) -> str:
-    parts: List[str] = []
-    for name in record.get("changed") or ():
-        if name == "config.toml" and record.get("config_keys"):
-            parts.append(f"{name} ({', '.join(record['config_keys'])})")
-        else:
-            parts.append(str(name))
-    return ", ".join(parts)
+    """``landlock_dispatch.describe_changed`` over a slot's merged record, so
+    both lanes name and summarize a change the same way."""
+    from .landlock_dispatch import describe_changed
+
+    return describe_changed(
+        [str(name) for name in record.get("changed") or ()],
+        record.get("config_keys") or (),
+    )
 
 
 def home_check_line(provider_name: str, record: Dict[str, Any], *, kept: bool) -> str:

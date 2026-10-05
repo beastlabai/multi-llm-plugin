@@ -45,6 +45,7 @@ import stat
 import sys
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
@@ -1586,13 +1587,81 @@ class HomeChange:
         }
 
     def describe(self) -> str:
-        parts: List[str] = []
-        for name in self.changed:
-            if name == HOME_CONFIG and self.config_keys:
-                parts.append(f"{name} ({', '.join(self.config_keys)})")
-            else:
-                parts.append(name)
+        return describe_changed(self.changed, self.config_keys)
+
+
+#: A ``[CODEX_HOME_CHECK]`` line names at most this many changed paths. A
+#: longer change is summarized — the count, the directory they share, the first
+#: :data:`HOME_CHANGE_EXAMPLES` — and listed in full in a file under the state
+#: directory, which the line names. Racing re-run 3 (opencode 01, 2026-10-05):
+#: one line listed the ~40 files of a newly created uv ``.venv``, and the slot's
+#: progress warning carried it into a 9 700-character tool result.
+HOME_CHANGE_LISTED = 5
+HOME_CHANGE_EXAMPLES = 3
+
+#: Where :func:`describe_changed` writes a full list, under the state home.
+HOME_CHANGE_LIST_DIR = "codex-home-check"
+
+_LIST_SEQ = {"n": 0}
+_LIST_LOCK = threading.Lock()
+
+
+def _write_change_list(lines: Sequence[str]) -> Optional[str]:
+    """Write *lines* to a new file under ``<state home>/codex-home-check/``;
+    its path, or ``None`` when it cannot be written (the line then says so)."""
+    try:
+        from .write_safety import state_home
+    except ImportError:  # pragma: no cover - direct-script import shim
+        from utils.write_safety import state_home  # type: ignore[no-redef]
+    with _LIST_LOCK:
+        _LIST_SEQ["n"] += 1
+        seq = _LIST_SEQ["n"]
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    directory = os.path.join(state_home(), HOME_CHANGE_LIST_DIR)
+    path = os.path.join(directory, f"{stamp}-{os.getpid()}-{seq}.txt")
+    try:
+        os.makedirs(directory, mode=0o700, exist_ok=True)
+        with open(path, "x", encoding="utf-8") as handle:
+            handle.write("\n".join(lines) + "\n")
+    except OSError:
+        return None
+    return path
+
+
+def describe_changed(names: Sequence[str], config_keys: Sequence[str] = ()) -> str:
+    """The changed-file part of a ``[CODEX_HOME_CHECK]`` line.
+
+    Each home-relative name, with ``config.toml``'s changed key names after it
+    (never a value), while there are at most :data:`HOME_CHANGE_LISTED`;
+    otherwise ``N paths under <shared dir>/, e.g. a, b, c and K more (full
+    list: <file>)``. Only the line is shortened: the check's verdict and the
+    record it returns are unchanged.
+    """
+    parts: List[str] = []
+    for name in names:
+        if name == HOME_CONFIG and config_keys:
+            parts.append(f"{name} ({', '.join(config_keys)})")
+        else:
+            parts.append(str(name))
+    if len(parts) <= HOME_CHANGE_LISTED:
         return ", ".join(parts)
+    try:
+        shared = os.path.commonpath([str(name) for name in names])
+    except ValueError:
+        shared = ""
+    if shared in [str(name) for name in names]:
+        shared = os.path.dirname(shared)
+    prefix = shared + os.sep if shared else ""
+    examples = [
+        part[len(prefix):] if prefix and part.startswith(prefix) else part
+        for part in parts[:HOME_CHANGE_EXAMPLES]
+    ]
+    where = _write_change_list(parts)
+    head = f"{len(parts)} paths" + (f" under {prefix}" if prefix else "")
+    tail = (f"full list: {render_home(where)}" if where
+            else "the full list could not be written")
+    return (f"{head}, e.g. {', '.join(examples)} and "
+            f"{len(parts) - len(examples)} more ({tail})")
 
 
 def compare_home(before: Optional[HomeSnapshot], after: Optional[HomeSnapshot]) -> Optional[HomeChange]:

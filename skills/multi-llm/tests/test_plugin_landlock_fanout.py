@@ -202,6 +202,16 @@ elif mode == "link-write":
         handle.seek(0)
         handle.write(data.replace(b"6.0.3", b"6.6.6"))
     os.utime(src, ns=(info.st_atime_ns, info.st_mtime_ns))
+elif mode == "venv":
+    # What uv does to a plugin cache on its first `uv run` there: a new
+    # `.venv` of ~40 files (racing re-run 3, opencode 01).
+    venv = os.path.join(home, "plugins", "cache", "market", "multi-llm", "0.1.0",
+                        "skills", "multi-llm", ".venv")
+    for n in range(40):
+        target = os.path.join(venv, "lib", "f%02d.py" % n)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "w", encoding="utf-8") as handle:
+            handle.write("x = %d\n" % n)
 elif mode == "eacces":
     sys.stderr.write(
         "Error: failed to write %s: Permission denied (os error 13)\n"
@@ -509,6 +519,29 @@ class TestTheHomeCheck:
         assert len(lines) == 1
         assert "/elsewhere/other-repo" in lines[0] and "not a failure" in lines[0]
         assert _result_file(phase_dir).exists()
+
+    def test_a_long_change_is_summarized_and_listed_in_full_elsewhere(
+        self, fake_codex, monkeypatch, capsys
+    ):
+        """Racing re-run 3 (opencode 01): a new uv `.venv` in the plugin cache
+        put ~40 paths on one line, and the slot's progress warning carried it
+        into a 9 700-character tool result."""
+        _pin_verdict(monkeypatch, RUNG)
+        monkeypatch.setenv("FAKE_CODEX_MODE", "venv")
+        _phase_dir, status = _run_review_plan(fake_codex, expect_exit=3)
+        out = capsys.readouterr().out
+
+        (line,) = _slot_lines(out, CODEX_HOME_CHECK_MARKER)
+        venv = os.path.join("plugins", "cache", "market", "multi-llm", "0.1.0",
+                            "skills", "multi-llm", ".venv", "lib")
+        assert f"40 paths under {venv}{os.sep}, e.g. f00.py, f01.py, f02.py and 37 more" in line
+        assert "fails closed" in line and len(line) < 900
+        listed = line.split("full list: ")[1].split(")")[0]
+        listed = os.path.expanduser(listed)
+        assert listed.startswith(str(os.environ["XDG_STATE_HOME"]))
+        names = open(listed, encoding="utf-8").read().split()
+        assert names == [os.path.join(venv, "f%02d.py" % n) for n in range(40)]
+        assert line[len(f"[{SPEC}] "):] in status["models_failed"][SPEC]
 
     def _seed_linked_venv(self, scratch):
         """A plugin's uv ``.venv`` under the home whose package file is a
