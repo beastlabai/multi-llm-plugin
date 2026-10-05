@@ -4329,11 +4329,17 @@ def _probe_nested_exec(
     streams = f"{capture.stdout or ''}\n{capture.stderr or ''}".lower()
 
     if capture.timed_out:
+        # A note, not a warning (2026-10-05, run 3): nothing here is the
+        # user's to act on. A slow model's first turn routinely outlives the
+        # probe (opencode/big-pickle, every run), the batch is dispatched anyway,
+        # and a host that really blocks nested runs fails that batch with its
+        # own timeout, which is where the user is told.
         print(
-            f"multi-llm warning: the nested-exec probe for {spec} on host "
-            f"{host_id} did not finish within {NESTED_PROBE_TIMEOUT_S:.0f}s — "
-            f"recording nested_exec 'unknown' for {opened}. A wedged sandbox "
-            f"will resurface as a per-task timeout (D3k rung 2).",
+            f"[exec-subagents] note: the start-up check for {spec} (a one-word "
+            f"test turn) did not answer within {NESTED_PROBE_TIMEOUT_S:.0f}s, so "
+            f"it is unconfirmed that host {host_id} lets the runner start its "
+            f"own model turn; dispatching anyway (nested_exec 'unknown' for "
+            f"{opened}). Nothing to do unless a batch then times out.",
             file=sys.stderr,
         )
         return "unknown"

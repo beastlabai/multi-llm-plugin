@@ -3249,10 +3249,16 @@ class TestNestedExecPreflight:
     def test_a_timed_out_probe_names_the_deadline_it_waited(
         self, monkeypatch, capsys
     ):
-        """The warning renders the constant, so the log never claims a stale 120s."""
+        """The note renders the constant, so the log never claims a stale 120s.
+
+        A note, not a warning (2026-10-05): the batch runs anyway and a real
+        block fails it visibly, so there is nothing for the user to do here."""
         state, _ = self._probe(monkeypatch, timed_out=True)
         assert state == "unknown"
-        assert "did not finish within 30s" in capsys.readouterr().err
+        err = capsys.readouterr().err
+        assert "did not answer within 30s" in err
+        assert err.startswith("[exec-subagents] note:")
+        assert "warning" not in err.lower()
 
     def test_a_fast_runner_is_untouched_by_the_shorter_deadline(
         self, runner_env, monkeypatch
