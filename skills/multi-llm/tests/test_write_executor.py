@@ -3563,6 +3563,10 @@ class TestFinalizeTrackingSeesTheVerifiedFiles:
             {"path": "stale.md", "action": "modified", "task_id": "implementation"}
         ])
         state.save()
+        # Each entry's action is read off the tree of the cwd's repository, and
+        # a `--touched` file found on no disk is left out (fix round 8): read
+        # it in the repository the batch edited, not in this checkout.
+        monkeypatch.chdir(env.root)
 
         summary = env.out_dir / "implement" / "implementation_summary.md"
         result = env.scheduler(
