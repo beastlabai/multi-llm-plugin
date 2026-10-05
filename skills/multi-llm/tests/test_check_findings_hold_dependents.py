@@ -494,6 +494,8 @@ class TestTheNativeLegHoldsTheDependents:
             'A reply that says `"status": "failed"` but lists findings in its '
             '`check` and does not say `could_not_run` is a check that ran'
         ) in text
+        # Fix round 13: the task the write policy refuses before dispatch.
+        assert "`[WRITE_PROMPT_REFUSED]` — the write policy (`driver.write_paths`)" in text
         # Fix round 13: the record a check that changed a file cannot take.
         assert (
             "`batch-done` holds a check to that: when a file git sees changed "
