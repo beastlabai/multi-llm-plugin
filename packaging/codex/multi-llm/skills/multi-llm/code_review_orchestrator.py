@@ -4254,6 +4254,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
 
     # Guard against re-running already-completed phase (expensive LLM calls)
     state_guard = get_or_create_state(plan_path)
+    # First run on this plan: materialize `state.json` now, for the same
+    # reason `review_orchestrator_base` does (the instructions' `util metrics
+    # start --state-file` runs before the phase completes, and a standalone
+    # review-code on a fresh plan used to find no file).
+    if not state_guard.state_file.exists():
+        state_guard.save()
     if not args.force and state_guard.phase_completion_is_stale("code-review"):
         # Implement completed after this review did, so the review judged an
         # earlier state of the code (2026-10-02: the empty repository, before

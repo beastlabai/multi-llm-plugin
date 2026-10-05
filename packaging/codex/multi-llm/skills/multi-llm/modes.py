@@ -415,9 +415,55 @@ TOOL_OUTCOMES_LINE = (
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
     "call to make: copy its `command`, and each `optional_before` command, into your "
-    "report, each in its own fenced block, and stop. Only `next` is a call. A "
+    "report, each in its own fenced block, and stop; when it is `complete`, say "
+    "\"Workflow complete.\" and list each of its `manual_tasks` (id and title): "
+    "tasks the run deferred to the user, which no phase will run. Only `next` is "
+    "a call. A "
     "needs-human result's `resume_command` is the same kind of thing: the user's to "
     "type, never a call."
+)
+
+#: The user-next-step line's sibling (racing re-run 2026-10-04): after a failed
+#: generate-tasks whose result carried no command at all, an OpenCode host model
+#: printed a "next phase" it composed itself, in the tool-call spelling
+#: (``multi_llm --mode review-tasks --plan …``) and for a phase a failed run
+#: does not lead to. The line above says what the two command keys are; this
+#: one says they are the only commands, and what a result carrying neither
+#: means — every failed or needs-human result now says so explicitly, with
+#: ``user_next_step: null`` and :data:`NO_COMMAND_REASON`. Rendered directly
+#: after :data:`TOOL_USER_NEXT_STEP_LINE` on both package hosts.
+TOOL_NO_COMPOSED_COMMAND_LINE = (
+    "Never compose a command for the user yourself, and never spell one from "
+    "this tool's arguments: the only commands you may give them are "
+    "`user_next_step.command`, its `optional_before` commands and "
+    "`resume_command`, each copied verbatim. A result whose `user_next_step` is "
+    "null and that carries no `resume_command` has no command to give "
+    "(`no_command_reason` says why): name no command and no next phase."
+)
+
+#: The value of ``no_command_reason``, the key both package servers set beside
+#: ``user_next_step: null`` on a failed or needs-human result that carries no
+#: ``resume_command`` (the explicit "there is nothing to type" the line above
+#: refers to). Read off the surface; a server whose surface lacks it still
+#: sets ``user_next_step: null`` and simply omits the sentence.
+NO_COMMAND_REASON = (
+    "There is no command for the user to type: this phase did not finish, so no "
+    "next phase follows it, and nothing names a re-run that would get past this "
+    "stop as it stands. Report what happened and what its error names; do not "
+    "compose a command."
+)
+
+#: The note a package server returns when ``extra_flags`` restated a flag it
+#: already composes with the same meaning (``--yes`` and its spellings,
+#: ``--exec-subagents``, ``--host`` naming this host): the token is dropped and
+#: the call runs, where it used to be refused and cost the model a call (racing
+#: re-run 2026-10-04: four refusals in one session). ``{flags}`` is the dropped
+#: tokens, comma-joined, by plain substitution. A flag whose meaning would
+#: differ — ``--interactive``, ``--detach``, ``--host`` naming another host, the
+#: ``--internal-`` prefix — is still refused.
+REDUNDANT_FLAG_NOTE = (
+    "Dropped from extra_flags because this tool already composes them with the "
+    "same meaning: {flags}. Nothing else changed; leave them out next time."
 )
 
 #: The route signal's one owner (plans/next-phase-command.md §2.1, "Knowing the
@@ -503,10 +549,13 @@ NEEDS_HUMAN_MESSAGE = {
         "Report to the user what was being run (`argv`), that line, and the "
         "`options`; an `options` entry is a tool call for you, never a command "
         "for the user to type, so do not print one as a command. The "
-        "dispatcher's output is included as it was rendered, "
-        "except that every runnable command in it was replaced by a pointer and "
-        "spelled as a tool call in `options`, in the order it appeared, and its "
-        "result line is in `result` instead; do not paraphrase the output. Do "
+        "dispatcher's output is included as it was rendered, except that every "
+        "runnable dispatcher command in it was re-spelled the way this host's "
+        "user would type it (or replaced by a pointer where it could not be) "
+        "and also comes back as a tool call in `options`, in the order it "
+        "appeared, and its result line is in `result` instead; do not "
+        "paraphrase the output, and do not lift a command out of it for the "
+        "user: only `resume_command` is theirs to type. Do "
         "not run a different mode. " + NEEDS_HUMAN_WORK_SENTENCE + " Send back "
         "an `options` entry only after the user has picked one."
     ),
@@ -526,6 +575,14 @@ NEEDS_HUMAN_MESSAGE = {
         "cause above is fixed. Give it to the user verbatim in its own fenced "
         "block, as the way forward. It is never a tool call and never a shell "
         "command: do not run it, and do not offer to run it for them."
+    ),
+    # Appended instead of `resume` when the result carries no
+    # `resume_command` (racing re-run 2026-10-04: a result with neither command
+    # key, and the host model composed a "next phase" of its own).
+    "no_command": (
+        "`user_next_step` is null and there is no `resume_command`: give the "
+        "user no command to type and name no next phase; `no_command_reason` "
+        "says why."
     ),
     "phase_unnamed": "Nothing in the result line names the phase that was running.",
     "phase_unknown": (

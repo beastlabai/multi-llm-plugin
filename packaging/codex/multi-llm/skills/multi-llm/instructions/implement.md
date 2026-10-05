@@ -328,13 +328,20 @@ your host.
 
    For each batch in `batches` array:
    - Execute all tasks in the batch (can be parallel if `can_parallelize` is true)
-   - For each task, spawn a subagent:
+   - For each task, bind its prompt first:
+     ```bash
+     uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
+       --phase-dir "{plan}/implement" --task-id "{task.id}"
+     ```
+     The orchestrator materialized `{plan}/implement/write_tasks.json` (printed as `[WRITE_TASKS_FILE]`) beside the task JSON, one entry per task under the task's own `id`. This rewrites the task's prompt with the prior-task context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the tasks already appended below — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch. It writes it to `{plan}/implement/prompts/{task.id}.prompt.txt` and prints `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Never hand a subagent `task["prompt"]` from the JSON: it carries a literal `{prior_changes_context}` token that must never reach a subagent. An exit 3 names the problem (no `write_tasks.json` — re-run step 2; an unknown id — the known ids are listed); do not fall back to the raw prompt.
+   - Then spawn one subagent:
      ```
      Spawn one subagent with:
      - executor_role: task["executor_role"]  (always "agent" here; a "human" task never reaches this step)
      - description: task["title"]
-     - prompt: task["prompt"]
+     - prompt: read the file at the [WRITE_PROMPT] path in full — through line [WRITE_PROMPT_LINES], paging if a single read stops short — and follow it verbatim
      ```
+     That is the entire prompt: do not paste the file's text or add to it. The subagent's reply ends with one JSON object (`{"status", "ids", "files_touched", "summary", "notes"}`); its `summary` is the task's one-line record below, and its `status` (`applied` / `no-op` / `failed`) and `files_touched` are what you record for the task.
 
    - **Wait for every task in the batch, inside this turn.** A later batch depends
      on this one, so do not start the next batch — or end your turn — with a
@@ -424,7 +431,7 @@ your host.
      1. Mark all already-completed tasks as "completed" (preserve their status)
      2. Mark all not-yet-attempted tasks as "pending" (NOT "skipped" — they were never reached)
      3. Mark the current task (if any) as "pending"
-     4. Do NOT mark the implement phase as completed (`mark_phase_completed("implement")` is NOT called)
+     4. Do NOT mark the implement phase as completed (step 10 runs without `--mark-completed`, so the phase stays `in_progress`)
      5. Write a partial implementation summary with a "## Cancelled" header:
         ```markdown
         ## Cancelled
@@ -452,6 +459,14 @@ your host.
      state["updated_at"] = datetime.now().isoformat()
      json.dump(state, state_file)
      ```
+   - **Append to prior changes** — record the task's one-line `summary` (normalized: one line, at most 200 characters; for a failed task `(task failed — {compact reason})`) so every later task's bound prompt sees it, as the `--exec-subagents` leg records it. `--id` is the task id, `--phase` is `implement`, and `--output-dir` is the plan directory `{plan}` (the one holding `state.json`: the one log every write phase shares and the one `util write-prompt` binds from):
+     ```bash
+     uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \
+       --output-dir "{plan}" --id "{task_id}" --phase "implement" --summary-stdin <<'SUMMARY_EOF'
+     {normalized_summary}
+     SUMMARY_EOF
+     ```
+     `append` is idempotent on `(id, phase)` (a repeat prints a `Notice:` and exits 0). If it fails, log a warning and continue.
    - **Record metrics**: Run the metrics utility to store the subagent's metrics:
      ```bash
      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
@@ -512,15 +527,17 @@ your host.
    - Record pass/fail results for inclusion in the implementation summary, naming
      the command you ran (or `not configured` when nothing was)
    - A failing **`driver.verify_command`** is the repo's own contract failing: do
-     not revert anything, do not mark the phase completed, and hand it to a human
-     with the command and the tail of its output. That is what the
-     `--exec-subagents` leg does (exit 3), and the two legs must agree.
+     not revert anything, do not mark the phase completed (run step 10 without
+     `--mark-completed`), and hand it to a human with the command and the tail
+     of its output. That is what the `--exec-subagents` leg does (exit 3), and
+     the two legs must agree.
    - A failing **detected** runner is a guess, not a contract: record the results
      and continue to summary.
 
 9. **Generate implementation summary:**
    After all tasks complete, create the implementation summary file using the `summary_file` path from the JSON output.
    Use `summary_file_relative` for links within the file (relative to plan's parent directory).
+   In `## Task Results`, an agent task that declares no files (`Files to modify` and `Files to create` both none) is a verification-only check: its Status is `Verified` when its subagent changed no file and `Partial` when it changed one (name the files), the words the executor leg's summary uses (`verified` / `partial-application`); a human task is not one of these, it is deferred.
 
    Write the summary to the path specified in `summary_file` from the JSON:
    ```markdown
@@ -572,9 +589,9 @@ your host.
    Any important context for the code review phase...
    ```
 
-10. **Update the original plan:**
+10. **Update the original plan and mark the phase completed:**
    Add a reference to the implementation summary in the original plan. This is the
-   same command as step 7 with two more flags — it is deterministic, so it is
+   same command as step 7 with three more flags — it is deterministic, so it is
    Python's job and not a block of inline code for you to retype. Pass the
    absolute `plan_file` and the `summary_file_relative` value exactly as the
    orchestrator printed them; the insertion is idempotent, so re-running it on an
@@ -582,8 +599,15 @@ your host.
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking \
      --state-file "$STATE_FILE" --plan-file "$PLAN_FILE" \
-     --summary-file-relative "$SUMMARY_FILE_RELATIVE"
+     --summary-file-relative "$SUMMARY_FILE_RELATIVE" --mark-completed
    ```
+   `--mark-completed` is the phase's completion record. The orchestrator recorded
+   the phase *started* when it wrote the task JSON (step 2), and this is the only
+   command that records it *completed* — **pass it only when every task ran and
+   step 8's `driver.verify_command` (if configured) passed**; on a cancelled run,
+   a failed contract check or a loop that stopped early, run the command without
+   it, so the phase stays `in_progress` and `status` offers `--resume` instead of
+   calling it done.
 
 11. **Report results** following `references/summary-format.md`, including:
    - Number of tasks completed/failed

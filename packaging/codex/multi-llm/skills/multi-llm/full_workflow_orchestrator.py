@@ -98,19 +98,20 @@ ALREADY = "already-complete"
 FAILED = "failed"
 
 #: The phases whose real work is a **batch loop an invoker runs**, mapped to the
-#: directory each leaves that loop's instruction document in. They are the one
-#: place ``state.json`` cannot answer "did it happen?" on its own:
-#: ``apply-suggestions`` (``marks_phase_completed = True``) and ``implement``
-#: record themselves completed the moment the document is written — before a
-#: single edit exists — so a recorded completion here is a *claim about work
-#: handed out*, not about work done. ``apply-code-fixes``'s mode word is not its
-#: phase dir: the orchestrator's own ``phase_name`` is ``apply-fixes``. Its
-#: completion record is the exception to the sentence above — it is written by the
-#: invoker *after* the loop, by the ``apply-code-fixes --plan-file …
-#: --mark-completed`` command that closes ``instructions/apply-code-fixes.md``, so
-#: it IS a claim about work done: a loop that stopped early never reaches it. That
-#: record uses the **mode** word (``apply-code-fixes``), not the dir word, because
-#: it is what ``PHASE_PREREQUISITES`` and the executor's ``_finalize`` both use.
+#: directory each leaves that loop's instruction document in. Every one of
+#: them records itself *started* the moment the document is written — before a
+#: single edit exists — and completed only by the invoker's closing command
+#: (``<mode> --plan-file … --mark-completed``, ``util finalize-tracking
+#: --mark-completed`` for implement), so a recorded completion IS a claim about
+#: work done and a loop that stopped early never reaches it. Until 2026-10-05
+#: ``apply-suggestions`` and ``implement`` recorded themselves *completed* at
+#: emit time, which is why this driver checks the document itself: inside
+#: ``full`` there is no invoker to run the loop, and the exit-0 phase that
+#: handed its batches to nobody must not count as progress.
+#: ``apply-code-fixes``'s mode word is not its phase dir: the orchestrator's own
+#: ``phase_name`` is ``apply-fixes``. Its completion record uses the **mode**
+#: word (``apply-code-fixes``), not the dir word, because it is what
+#: ``PHASE_PREREQUISITES`` and the executor's ``_finalize`` both use.
 WRITE_PHASE_DIRS: Dict[str, str] = {
     "apply-suggestions": "apply-suggestions",
     "apply-task-suggestions": "apply-task-suggestions",
@@ -690,8 +691,8 @@ class FullWorkflow:
         write phase's batches here is the write scheduler under
         ``--exec-subagents`` (which finalizes — and therefore completes the phase —
         only after every batch verified, D3n). Without it the batches are handed to
-        an invoker that never arrives, and the two phases that mark themselves
-        completed at emit time would otherwise report that as progress.
+        an invoker that never arrives: the phase exits 0 recorded *started*, and
+        this is what tells that apart from a phase that never emitted anything.
 
         Zero is the answer whenever there is no evidence of a pending loop — no
         document, an unreadable one, one belonging to another plan, or one
@@ -727,8 +728,8 @@ class FullWorkflow:
         document = self._write_phase_document(phase)
         print(
             "\n".join([
-                f"[WRITE_PHASE_NOT_EXECUTED] {phase} recorded itself completed "
-                f"after writing {pending} batch(es) to",
+                f"[WRITE_PHASE_NOT_EXECUTED] {phase} exited 0 after writing "
+                f"{pending} batch(es) to",
                 f"       {document}",
                 "       — but nothing applied them: `full` runs every phase "
                 "inside this one process,",
@@ -744,8 +745,8 @@ class FullWorkflow:
         )
         record_next(follow_up)
         return (
-            f"exited 0 and recorded itself completed, but the {pending} batch(es) "
-            f"it emitted were never executed"
+            f"exited 0, but the {pending} batch(es) it emitted were never "
+            f"executed"
         )
 
     def _verify(self, phase: str, code: int) -> Tuple[str, str, Optional[int]]:
@@ -758,18 +759,22 @@ class FullWorkflow:
         output nobody produced.
 
         A write phase needs the *second* artifact check
-        (:meth:`_unexecuted_batches`), because its record is not that evidence: two
-        of the four mark themselves completed when they emit their batch document,
-        which is before any edit exists. Trusting it there would generate tasks
-        from a plan whose suggestions were never applied and code-review an
-        unimplemented tree — the same claim-vs-artifact failure, one phase further
-        on.
+        (:meth:`_unexecuted_batches`): on the native leg it exits 0 recorded
+        *started* with its batch document written and nobody to run it, and
+        until 2026-10-05 two of the four recorded themselves *completed* there.
+        Trusting either would generate tasks from a plan whose suggestions were
+        never applied and code-review an unimplemented tree — the same
+        claim-vs-artifact failure, one phase further on. The check runs before
+        the completion test so a stale completion record cannot mask it, and
+        the explanation names the pending document rather than the generic
+        "records no completion".
         """
         recorded = self._recorded(phase)
-        if code in (EXIT_OK, EXIT_NOTHING_TO_DO) and recorded:
+        if code in (EXIT_OK, EXIT_NOTHING_TO_DO):
             pending = self._unexecuted_batches(phase)
-            if pending:
+            if pending and (recorded or self.state.is_phase_started(phase)):
                 return FAILED, self._unexecuted_write_phase(phase, pending), code
+        if code in (EXIT_OK, EXIT_NOTHING_TO_DO) and recorded:
             return DONE, recorded, code
         if code in (EXIT_OK, EXIT_NOTHING_TO_DO):
             return (

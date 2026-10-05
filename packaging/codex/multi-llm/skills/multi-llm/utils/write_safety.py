@@ -64,9 +64,11 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
+    from .git_utils import git_argv
     from .provider_registry import get_write_paths
     from .subagent_tasks import declared_file_set
 except ImportError:  # pragma: no cover - direct-script import shim
+    from utils.git_utils import git_argv
     from utils.provider_registry import get_write_paths
     from utils.subagent_tasks import declared_file_set
 
@@ -162,7 +164,7 @@ def resolve_repo_root(anchor: Optional[str]) -> str:
     probe_dir = str(start if start.is_dir() else start.parent)
     try:
         completed = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
+            git_argv("rev-parse", "--show-toplevel"),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             cwd=probe_dir, timeout=30, stdin=subprocess.DEVNULL,
         )

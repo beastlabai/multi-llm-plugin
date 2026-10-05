@@ -390,7 +390,8 @@ with the next step its `### Next Steps` rule gives, copied from
   says: `user_next_step.command` in a fenced block, with any optional commands
   after it under "Optional, before that:", each optional command in its own
   fenced block; "Workflow complete." when
-  `complete` is true; nothing when there is no `user_next_step`, or one line
+  `complete` is true, with each of its `manual_tasks` listed under it;
+  nothing when there is no `user_next_step`, or one line
   quoting a failed lookup]
 ```
 

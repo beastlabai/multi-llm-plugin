@@ -482,7 +482,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     * ``item_noun`` — e.g. ``"suggestion"``
     * ``supports_revalidation`` — ``True`` / ``False``
     * ``supports_skip_flag`` — ``True`` / ``False``
-    * ``marks_phase_completed`` — ``True`` / ``False``
 
     And implement all 11 abstract methods (see the *Abstract methods*
     section below).
@@ -507,7 +506,6 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     item_noun_plural: str = ""
     supports_revalidation: bool = False
     supports_skip_flag: bool = False
-    marks_phase_completed: bool = False
     # Override to emit a different phase identifier in confirmation_needed output.
     # When empty, defaults to phase_name.
     confirmation_phase_name: str = ""
@@ -564,7 +562,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             cls.item_noun_plural = f"{cls.item_noun}s"
 
         # Validate boolean config attributes are explicitly set (not inherited defaults)
-        for attr in ("supports_revalidation", "supports_skip_flag", "marks_phase_completed"):
+        for attr in ("supports_revalidation", "supports_skip_flag"):
             # Check that the attribute is defined directly on the subclass, not inherited
             if attr not in cls.__dict__:
                 raise TypeError(
@@ -816,9 +814,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
 
         # Handle --mark-completed: the host's POST-LOOP finalization command, the
         # native counterpart of `WriteBatchScheduler._finalize`. It is the only
-        # place the native path records completion — the emit path deliberately
-        # does not (see `marks_phase_completed`) — so a host whose batch loop
-        # stopped early simply never reaches it and the phase stays incomplete.
+        # place the native path records completion — the emit path records the
+        # phase *started* instead — so a host whose batch loop stopped early
+        # simply never reaches it and the phase stays `in_progress`.
         #
         # The word persisted is `confirmation_phase_name or phase_name`, the same
         # fallback already used for the confirmation-needed output and for
@@ -1970,8 +1968,38 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 self.logger.warning("write outcome summary failed: %s", e)
             return scheduled
 
-        if self.marks_phase_completed and self.state is not None:
-            self.state.mark_phase_completed(self.phase_name)
+        # The native leg (2026-10-05): the same materialized task file the
+        # executor leg writes, so the host's per-batch `util write-prompt`
+        # binds each batch's prior-changes context late, from the same seam,
+        # and the host loops over task ids instead of guessing the JSON shape.
+        # Reported on stderr like `[OUTPUT_FILE]` — stdout stays the contract.
+        try:
+            task_file = self._materialize_native_write_tasks()
+        except Exception as exc:  # noqa: BLE001 - the batch document is still usable
+            self.logger.warning("write task file not materialized: %s", exc)
+            print(f"WARNING: write_tasks.json not written: {exc}", file=sys.stderr)
+        else:
+            if task_file:
+                print(f"[WRITE_TASKS_FILE] {task_file}", file=sys.stderr)
+
+        # The native leg: the batches are now the host's to apply, so the phase
+        # is recorded *started*, never completed — completion is the host's
+        # post-loop `--mark-completed`, the only place the native path records
+        # it (the word it persists is the same `confirmation_phase_name or
+        # phase_name`). Until 2026-10-05 apply-suggestions marked itself
+        # completed right here, before a single edit existed, so `status`
+        # and the next-step builder read a phase as done while the host was
+        # still applying its batches — or after it had died halfway.
+        if self.state is not None:
+            word = self.confirmation_phase_name or self.phase_name
+            if not self.batches and not self.needs_human:
+                # Nothing handed out and nothing left to decide (every item
+                # invalid or skipped): the phase's work is done at emit, so
+                # the record says so — a started record here would wait for
+                # a closing step over an empty loop.
+                self.state.mark_phase_completed(word)
+            else:
+                self.state.mark_phase_started(word)
             self.state.save()
 
         # Step 34: Print summary
@@ -2537,7 +2565,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print("\nBatches:")
             for row in rows:
                 count = len(self._row_item_ids(row))
-                verdict = row.get("write_outcome") or "-"
+                # `subagent_executor.row_outcome_label`'s reading order.
+                verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
                 print(
                     f"  {row.get('task_id')}{self._row_provenance(row)}: "
                     f"{row.get('status')} ({verdict}), "
@@ -2830,7 +2859,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if rows:
             for row in rows:
                 item_ids = self._row_item_ids(row)
-                verdict = row.get("write_outcome") or "-"
+                # `subagent_executor.row_outcome_label`'s reading order.
+                verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
                 lines.append(
                     f"### {row.get('task_id')}{self._row_provenance(row)} — "
                     f"{row.get('status')} ({verdict})"
@@ -3086,8 +3116,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         # target — the plan, or the tasks file — is the grant a dispatch on
         # the plugin-landlock rung carries, and every task's declared set is
         # checked against it. A phase with no single target (apply-code-fixes,
-        # `repo-wide`) passes none; its entries come from step 3b's
-        # enumeration, never from a target.
+        # `repo-wide`) passes none; its grant is one rule on the repository
+        # root (step 3b, revised 2026-10-05), never a target.
         write_target = artifact if self.has_single_write_target else None
         # Every run resumes — a re-run must never apply a landed batch twice —
         # except `--fresh`, which declares prior progress void (`_setup` has
@@ -3128,6 +3158,45 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if result.report_path:
             print(f"[write-subagents] report: {result.report_path}")
         return result.exit_code
+
+    def _materialize_native_write_tasks(self) -> Optional[str]:
+        """Write ``{phase}/write_tasks.json`` for the native leg; its path.
+
+        The executor leg's :meth:`run_write_executor` materializes the same
+        file through the same bridge before it schedules anything. On the
+        native leg it is the input of ``util write-prompt`` — one task id per
+        batch, in dispatch order, each with the `prior_changes_id` the host's
+        prior-changes append wants — and nothing else reads it. ``None`` when
+        this phase declares no write kind or emitted no batch.
+        """
+        if not self.write_kind or not self.batches:
+            return None
+        from .write_phase_bridge import (
+            materialize_write_tasks,
+            write_task_file_for_phase,
+        )
+
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        os.makedirs(phase_dir, exist_ok=True)
+        grouped_file = os.path.join(self.out_dir, self.review_subdir, "grouped.json")
+        grouped = grouped_file if os.path.exists(grouped_file) else None
+        artifact = self.write_phase_artifact()
+        tasks_file = artifact if artifact != self.plan_path else None
+        tasks = materialize_write_tasks(
+            kind=self.write_kind,
+            batches=[
+                batch if isinstance(batch, dict) else batch.to_dict()
+                for batch in self.batches
+            ],
+            phase_dir=phase_dir,
+            plan_file=self.plan_path,
+            tasks_file=tasks_file,
+            grouped_file=grouped,
+        )
+        return write_task_file_for_phase(
+            kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
+            plan_file=self.plan_path, tasks_file=tasks_file, grouped_file=grouped,
+        )
 
     def _record_pre_existing_changes(self) -> None:
         """Record the dirty-tree baseline for this write phase (D3h).
