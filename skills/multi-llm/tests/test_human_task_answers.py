@@ -191,6 +191,77 @@ class TestSkipTakesTheDependentsUnderEveryStrategy:
 
 # --- the resumed account keeps every skipped task ----------------------------
 
+class TestAResumeKeepsEverySkippedTask:
+
+    def test_a_skipped_code_dependent_stays_in_the_resumed_account(
+        self, repo_dep, capsys
+    ):
+        """T006 depends on the deferred manual task, so ``skip-dependents``
+        skips it; a resume dropped it from the materialized list, and the
+        resumed summary read ``5 — …`` for a six-task plan."""
+        repo = repo_dep
+        _check_fails(repo)
+        assert _implement(repo) == 3
+        first = _account_line(repo)
+        assert "6 —" in first and "T006" in first
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "# fixed\n", encoding="utf-8")
+        _check_passes(repo)
+        capsys.readouterr()
+        assert _implement(repo, "--resume") == 0
+        second = _account_line(repo)
+        assert "6 —" in second, second
+        assert "1 skipped with a skipped task (T006)" in second, second
+        assert "1 deferred manual (T005)" in second
+        assert sorted(_report(repo)["skipped_tasks"]) == ["T005", "T006"]
+        assert "| T006 |" in _section(_summary(repo), "## Manual Tasks (Deferred)")
+
+    def test_a_resume_after_skip_keeps_the_skip_and_dispatches_nothing(
+        self, repo, capsys
+    ):
+        _run_one_that_stops(repo, capsys)
+        repo.log.unlink(missing_ok=True)
+        assert _implement(repo, "--resume", "--human-task", "T002=skip") == 0
+        repo.log.unlink(missing_ok=True)
+        capsys.readouterr()
+        assert _implement(repo, "--resume") == 0
+        assert _dispatched_titles(repo) == []
+        assert _statuses(repo) == {
+            "T001": "completed", "T002": "skipped", "T003": "completed",
+            "T004": "skipped", "T005": "skipped",
+        }
+        line = _account_line(repo)
+        assert "5 —" in line
+        assert "1 skipped at your request (T002)" in line
+        assert "1 skipped with a skipped task (T004)" in line
+        assert "1 deferred manual (T005)" in line
+
+    def test_format_batches_for_output_carries_a_skipped_code_task(self):
+        done = Task(id="T001", title="Task 1", description="d",
+                    status=TaskStatus.COMPLETED)
+        skipped = Task(id="T006", title="After the manual step", description="d",
+                       status=TaskStatus.SKIPPED)
+        result = implement_orchestrator.format_batches_for_output(
+            [[done, skipped]], skip_completed=True,
+        )
+        assert [t["id"] for t in result[0]["tasks"]] == ["T006"]
+
+    def test_a_recorded_skip_still_applies_once_the_task_is_skipped(self, tmp_path):
+        """``_applicable_task_decisions`` keeps a ``skip`` for a task whose
+        state says ``skipped`` (it is materialized again now) and drops a
+        ``done`` once the task is no longer ``failed``."""
+        plan = tmp_path / "plans" / "p.md"
+        plan.parent.mkdir()
+        plan.write_text("# p\n", encoding="utf-8")
+        state = StateManager(plan)
+        state.set("human_task_decisions", {"T002": "skip", "T003": "done", "T005": "done"})
+        state.update_task_status("T002", "skipped", reason="skipped — you answered")
+        state.update_task_status("T003", "completed", reason="accepted —")
+        applicable = implement_orchestrator._applicable_task_decisions(
+            state, ["T005"], {},
+        )
+        assert applicable == {"T002": "skip", "T005": "done"}
+
 
 # --- every answer lands in a bucket ------------------------------------------
 

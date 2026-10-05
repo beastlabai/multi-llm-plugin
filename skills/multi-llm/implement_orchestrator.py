@@ -687,6 +687,16 @@ def format_batches_for_output(
     only place the finished run tells the reader what is still owed by hand
     (measured 2026-09-16). A human task is never dispatched by either invoker,
     so carrying it through costs the resume nothing.
+
+    A **skipped code task** rides along for the same reason (fix round 8): a
+    dependent skipped with a deferred manual task, or a failed task answered
+    ``--human-task <id>=skip`` and its dependents, is ``skipped`` too, and
+    dropping it put it in no bucket of the resumed run's account — the
+    summary read ``5 — 4 done, 1 deferred manual`` for a six-task plan, the
+    stop block's "that is every one of the N task(s)" was false, and
+    ``write_batch_report.json``'s ``skipped_tasks`` lost the chain. The
+    scheduler re-resolves the same plan from the recorded strategy and
+    answers, so the task is skipped again, never dispatched.
     """
     output_batches = []
 
@@ -703,7 +713,7 @@ def format_batches_for_output(
             tasks_to_include = [
                 t for t in batch
                 if t.status in (TaskStatus.PENDING, TaskStatus.FAILED,
-                                TaskStatus.IN_PROGRESS)
+                                TaskStatus.IN_PROGRESS, TaskStatus.SKIPPED)
                 or (t.executor_role == "human"
                     and t.status != TaskStatus.COMPLETED)
             ]
@@ -770,15 +780,19 @@ def _applicable_task_decisions(
     Every recorded answer for a human task (they persist, so ``--resume``
     never re-asks), plus this run's ``retry`` answers (one-shot, never
     recorded) and a recorded ``done``/``skip`` for a code task only while
-    the state still says that task ``failed``: once it ran again or was
-    accepted, a stale answer must not mark it done behind the user's back.
+    the state still says that task ``failed`` — or, for ``skip``, ``skipped``:
+    the answer that skipped it is what keeps it skipped on the next resume,
+    now that a skipped code task is materialized again (fix round 8). Once
+    it ran again or was accepted, a stale answer must not mark it done
+    behind the user's back.
     """
     recorded = dict(state.get("human_task_decisions") or {})
     decisions: Dict[str, str] = {}
     for task_id, action in recorded.items():
+        status = state.get_task_status(task_id)
         if task_id in human_task_ids:
             decisions[task_id] = action
-        elif state.get_task_status(task_id) == "failed":
+        elif status == "failed" or (action == "skip" and status == "skipped"):
             decisions[task_id] = action
     for task_id, action in this_run.items():
         if action == "retry" and task_id not in human_task_ids:
