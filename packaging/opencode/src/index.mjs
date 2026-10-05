@@ -3049,6 +3049,10 @@ async function execute(args, ctx, surface, client) {
  * call whose `extra_flags` restated a flag this tool composes gets the
  * surface's note naming what was dropped. Every sentence is the surface's; a
  * surface lacking one only loses that sentence.
+ *
+ * A result that names a run and no `exit` gets no reason (2026-10-05):
+ * `abortAndReport` and `orphanReport` — the run outlived the call, so "did not
+ * finish" is not yet true.
  */
 function finishOutcome(outcome, checked, surface) {
   const dropped = checked?.dropped ?? []
@@ -3059,6 +3063,7 @@ function finishOutcome(outcome, checked, surface) {
   if (outcome.ok !== false) return outcome
   outcome.user_next_step = null
   if (outcome.resume_command) return outcome
+  if (outcome.run_id && (outcome.exit ?? null) === null) return outcome
   if (typeof surface?.no_command_reason === "string") {
     outcome.no_command_reason = surface.no_command_reason
   }

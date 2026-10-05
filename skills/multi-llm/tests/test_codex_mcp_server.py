@@ -2314,6 +2314,26 @@ def _server_module(name="mcp_server_under_test"):
     return module
 
 
+class TestARunStillAliveIsNoFinishedStop:
+    """Adversarial review 2026-10-05: `stop_report` is `ok: false` with no
+    `exit` — the run outlived the call, or its abort is unconfirmed — and still
+    got "this phase did not finish … nothing names a re-run" as its
+    `no_command_reason`."""
+
+    def test_the_continuation_cap_stop_carries_no_reason(self, harness):
+        done = poll_step(0, next="uv run -- python multi_llm.py review-plan p.md "
+                                 "--reaggregate --host codex --yes")
+        envelope, _, calls, _ = harness.run(
+            REVIEW, [launch_step(run_id="R1"), done, launch_step(run_id="R2"), done,
+                     ABORT_CONFIRMED],
+            extra_env={"MLLM_TEST_NEXT_CAP": "1"})
+        assert envelope["ok"] is False and envelope["run_id"] == "R2"
+        assert envelope["exit"] is None
+        assert [c for c in calls if DISPATCHER["abort"][1] in dispatcher_argv(c)]
+        assert "no_command_reason" not in envelope
+        assert envelope["user_next_step"] is None
+
+
 class TestARedactedCommandCutAtAQuote:
     """Adversarial review 2026-10-05: the runnable pattern stops at a `"`, and
     `shlex.quote` spells an apostrophe `'"'"'`, so an `ask` retry whose question

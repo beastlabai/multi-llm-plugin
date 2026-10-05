@@ -1446,6 +1446,11 @@ class Server:
         outcome[USER_NEXT_STEP_KEY] = None
         if outcome.get("resume_command"):
             return outcome
+        # No reason (2026-10-05) for a result that names a run and no `exit`
+        # (`stop_report`: the run outlived the call, so "did not finish" is not
+        # yet true).
+        if outcome.get("run_id") and outcome.get("exit") is None:
+            return outcome
         reason = surface.get("no_command_reason")
         if isinstance(reason, str):
             outcome["no_command_reason"] = reason
