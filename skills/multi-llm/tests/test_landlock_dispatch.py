@@ -1335,6 +1335,28 @@ class TestTheHomeCheck:
         for secret in ("evil-cmd", "tok-SECRET", "curl evil", "never", "acct-", "evil |"):
             assert secret not in blob, secret
 
+    def test_a_short_change_is_named_in_full_and_writes_no_list(self):
+        names = ["config.toml", "AGENTS.md", "skills/x/SKILL.md"]
+        text = ld.HomeChange(changed=names, config_keys=["mcp_servers.x"]).describe()
+        assert text == "config.toml (mcp_servers.x), AGENTS.md, skills/x/SKILL.md"
+        assert not os.path.exists(os.path.join(
+            os.environ["XDG_STATE_HOME"], "multi-llm", ld.HOME_CHANGE_LIST_DIR))
+
+    def test_a_long_change_is_counted_and_listed_in_a_file(self):
+        """Racing re-run 3 (opencode 01): ~40 paths of a new uv `.venv`."""
+        venv = os.path.join("plugins", "cache", "m", "multi-llm", "0.1.0", ".venv")
+        names = [os.path.join(venv, "f%02d" % n) for n in range(40)] + ["config.toml"]
+        text = ld.HomeChange(changed=names, config_keys=["projects.x"]).describe()
+        assert text.startswith(
+            "41 paths, e.g. {0}/f00, {0}/f01, {0}/f02 and 38 more (full list: ".format(venv))
+        listed = os.path.expanduser(text.split("full list: ")[1].rstrip(")"))
+        assert open(listed, encoding="utf-8").read().splitlines() == (
+            names[:-1] + ["config.toml (projects.x)"])
+        shared = ld.describe_changed(names[:-1])
+        assert shared.startswith("40 paths under {}{}, e.g. f00, f01, f02 and 37 more".format(
+            venv, os.sep))
+        assert ld.describe_changed(names[:-1]) != shared  # one new file per line
+
     WATCHED_FILES = ["AGENTS.md", "AGENTS.override.md", ".env", "config.toml", "auth.json"]
     WATCHED_NAMES = {"auth.json": "auth.json (account identity)"}
 
