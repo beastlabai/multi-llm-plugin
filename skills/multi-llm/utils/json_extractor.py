@@ -365,7 +365,10 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
 
     1. **Top-level first.** A candidate contained in another candidate's span is
        ranked *after* every top-level one rather than dropped, so an inner
-       structure is still salvageable when the outer one does not parse.
+       structure is still salvageable when the outer one does not parse. Among
+       contained candidates an outer one is tried before the pieces inside it,
+       so a document that a stray bracket in the prose happens to enclose is
+       still served whole.
     2. **Shape before position.** ``prefer_arrays`` still tries every array
        before every object; last-wins applies *within* each group, so a trailing
        illustrative object never displaces a preceding array.
@@ -449,13 +452,20 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
             furthest_end = end
 
     # Clause 1: within each group, every top-level candidate ranks ahead of
-    # every contained one; within each tier the LAST by position ranks first.
+    # every contained one; within each tier the LAST by end position ranks
+    # first. Balanced runs nest or are disjoint, so ordering by where a run
+    # ENDS is "last wins" between disjoint candidates and "outer before inner"
+    # between nested ones: a candidate that parses is never passed over for a
+    # piece of itself. That matters only in the contained tier, where a stray
+    # `{` in the prose before a document and a `}` after it make the whole
+    # document "contained" — ordered by start, its last task object was served
+    # instead of the document (fix round 8).
     candidates: List[str] = []
     for group in groups:
         for contained in (False, True):
             candidates.extend(
                 span[2]
-                for span in sorted(group, key=lambda s: s[0], reverse=True)
+                for span in sorted(group, key=lambda s: s[1], reverse=True)
                 if ((span[0], span[1]) in contained_spans) is contained
             )
 
