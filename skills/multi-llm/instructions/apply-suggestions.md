@@ -318,7 +318,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    ```bash
    diff -u "{snapshot_path}" "{plan_path}"   # empty output = byte-identical (unchanged); non-empty = file changed
    ```
-   Substitute `{snapshot_path}` and `{plan_path}` with the **concrete absolute paths** noted in step 2 (the snapshot path and `{plan_abs}` — the same resolved absolute plan path used for the step-3 Read, not the possibly-relative plan argument). Do NOT write `$BATCH_SNAPSHOT` or `$PLAN_PATH` here — shell variables assigned in earlier Bash calls do not exist in this fresh Bash process, and an unset variable would make `diff` compare the wrong files or fail. If the snapshot path was not carried forward, recompute and diff in one single invocation, embedding the root as an inline command substitution (not as a `PROJECT_ROOT=...` assignment prefix, which the permission allowlist does not cover):
+   Substitute `{snapshot_path}` and `{plan_path}` with the **concrete absolute paths** noted in step 2 (the snapshot path and `{plan_abs}` — the same resolved absolute plan path used for the step-2 Read, not the possibly-relative plan argument). Do NOT write `$BATCH_SNAPSHOT` or `$PLAN_PATH` here — shell variables assigned in earlier Bash calls do not exist in this fresh Bash process, and an unset variable would make `diff` compare the wrong files or fail. If the snapshot path was not carried forward, recompute and diff in one single invocation, embedding the root as an inline command substitution (not as a `PROJECT_ROOT=...` assignment prefix, which the permission allowlist does not cover):
    ```bash
    diff -u "$(git rev-parse --show-toplevel)/.multi-llm/tmp/batch_snapshot_plan_{plan_stem}.md" "{plan_path}"
    ```
@@ -587,7 +587,7 @@ Agent:
 
 For each batch (sequentially):
 - Reads current plan
-- Spawns one subagent with batch.prompt
+- Binds the batch's prompt with `util write-prompt` and spawns one subagent on the bound file
 - Waits for completion
 - Logs results
 
@@ -603,7 +603,7 @@ For needs-human-decision items:
 
 ## Batch Prompt Format
 
-Each batch includes a pre-generated prompt. For single-suggestion batches:
+Each batch carries a prompt template in its `prompt` field (unbound: `util write-prompt` is what binds it for a subagent). For single-suggestion batches:
 
 ```
 Apply the following suggestion to the plan file:
@@ -680,7 +680,7 @@ Suggestion N: Already addressed by prior changes - skipped
 
 1. **SEQUENTIAL BATCHES**: Never parallelize batch processing - one batch at a time
 2. **ALWAYS READ FIRST**: Read the plan before each batch to get latest state
-3. **USE PRE-GENERATED PROMPTS**: Use the `prompt` field from each batch
+3. **USE THE BOUND PROMPT FILE**: hand each subagent only the `[WRITE_PROMPT]` file `util write-prompt` wrote — never the raw `prompt` field of the JSON, which carries an unbound `{prior_changes_context}` token
 4. **USE SUBAGENTS**: always **spawn subagents** to do the work
 5. **PRESERVE BACKUP**: The original plan backup from review-plan should not be overwritten
 6. **TRACK EVERYTHING**: Log every applied/skipped suggestion for the report
