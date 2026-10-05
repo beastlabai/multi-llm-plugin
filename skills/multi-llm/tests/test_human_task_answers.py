@@ -415,6 +415,30 @@ class TestTheReviewRecordNamesAnAcceptedFailure:
         assert "did not pass" in line
 
 
+class TestTheStatusPollRelaysTheStopLineUnderExitZero:
+
+    def test_exit_zero_keeps_the_error_on_the_result_line(self, tmp_path, capsys, monkeypatch):
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "sh"))
+        plan = tmp_path / "plans" / "p.md"
+        plan.parent.mkdir()
+        plan.write_text("# p\n", encoding="utf-8")
+        phase = plan.parent / "p" / "implement"
+        phase.mkdir(parents=True)
+        headline = "implement stopped at T009 (check: x): the check failed. Not run: T012, T013."
+        status_file.claim_run(str(phase), {
+            "run_id": "run-stop-1", "state": "failed", "exit_code": 3,
+            "error": headline, "detached": True, "mode": "implement",
+            "replay_flags": ["--host", "codex", "--detach"],
+        })
+        assert multi_llm.main([
+            "status", str(plan), "--view", "run", "--run-id", "run-stop-1", "--exit-zero",
+        ]) == 0
+        out = capsys.readouterr().out
+        line = [l for l in out.splitlines() if l.startswith("MULTI_LLM_RESULT:")][-1]
+        payload = json.loads(line.split(" ", 1)[1])
+        assert payload["exit"] == 0 and payload["state"] == "needs-human"
+        assert payload["error"] == headline
+
 
 # --- a skip the user chose is not deferred work -------------------------------
 
