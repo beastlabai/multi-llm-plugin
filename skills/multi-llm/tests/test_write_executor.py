@@ -560,25 +560,21 @@ class TestFourWriteOutcomes:
         (``unparseable_result``) rather than rung 6 — a *different rung* for the
         same D3g bucket, which is why the write outcome is its own axis: to a
         consumer, "narrated" and "returned the wrong object" are one failure.
+        Nothing moved here: a narrating runner that DID edit is a partial
+        application (fix round 9, below).
         """
-        env.edits([_patch_edit(env.plan)], prose=True)
-        # Since fix round 8 a prose reply after an edit gets the report re-ask
-        # rather than the batch again; this runner narrates there too.
-        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", "Done, all good!")
+        env.edits([], prose=True)
         result = env.scheduler([env.apply_task(0)]).run()
         outcome = result.outcomes[0]
         assert outcome.status == executor.STATUS_UNPARSEABLE
         assert outcome.rung == 5
         assert outcome.write_outcome == executor.WRITE_SCHEMA_REJECTED
         assert result.exit_code == 3
-        # Nothing was persisted as a batch result — the edit it DID make is left
-        # in place and reported, never laundered into "probably applied".
         assert not (env.phase_dir / "apply_batch_0.json").exists()
 
     def test_schema_rejection_is_also_well_formed_json_of_the_wrong_shape(self, env):
         """Rung 6: it parsed, it is just not the batch-result contract."""
-        env.edits([_patch_edit(env.plan)],
-                  result={"verdict": "looks good", "groups": []})
+        env.edits([], result={"verdict": "looks good", "groups": []})
         result = env.scheduler([env.apply_task(0)]).run()
         outcome = result.outcomes[0]
         assert outcome.status == executor.STATUS_SCHEMA_INVALID
@@ -588,10 +584,34 @@ class TestFourWriteOutcomes:
 
     def test_a_result_missing_summary_is_a_schema_rejection(self, env):
         """`summary` is contract, not decoration: prior_changes reads it verbatim."""
-        env.edits([_patch_edit(env.plan)],
-                  result={"status": "applied", "files_touched": []})
+        env.edits([], result={"status": "applied", "files_touched": []})
         result = env.scheduler([env.apply_task(0)]).run()
         assert result.outcomes[0].status == executor.STATUS_SCHEMA_INVALID
+
+    @pytest.mark.parametrize("reply", [
+        {"prose": True},
+        {"result": {"verdict": "looks good", "groups": []}},
+        {"result": {"status": "applied", "files_touched": []}},
+    ], ids=["prose", "wrong-shape", "missing-summary"])
+    def test_an_unreadable_reply_after_an_edit_is_a_partial_application(
+        self, env, reply
+    ):
+        """Fix round 9 (review of round 8): the reply failed the contract, but
+        the bytes moved, so the outcome is the partial application, never a
+        schema rejection that reads as "nothing happened". The edit it made is
+        left in place and reported, never laundered into "probably applied";
+        the one report re-ask fails the same way here."""
+        env.edits([_patch_edit(env.plan)], **reply)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", "Done, all good!")
+        result = env.scheduler([env.apply_task(0)]).run()
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert outcome.files_touched == ["plans/p.md"]
+        assert outcome.reason.startswith("PARTIAL APPLICATION: 1 file(s) changed")
+        assert "(after the one schema-repair re-ask)" in outcome.reason
+        assert result.exit_code == 3
+        assert not (env.phase_dir / "apply_batch_0.json").exists()
 
 
 class TestReportReAsk:
@@ -668,15 +688,17 @@ class TestReportReAsk:
         assert not (env.phase_dir / "apply_batch_0.json").exists()
 
     def test_a_second_unreadable_report_stops_as_before(self, env):
+        """The re-ask is spent once; the batch's edit makes the stop a
+        partial application (fix round 9), with what failed in the reason."""
         log = env.enable_call_log()
         env.edits([_patch_edit(env.plan)], result=self.BAD)
 
         result = env.scheduler([env.apply_task(0)]).run()
 
         outcome = result.outcomes[0]
-        assert outcome.status == executor.STATUS_SCHEMA_INVALID
-        assert outcome.write_outcome == executor.WRITE_SCHEMA_REJECTED
-        assert outcome.reason.endswith("(after the one schema-repair re-ask)")
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert "(after the one schema-repair re-ask)" in outcome.reason
         assert len(self._calls(log)) == 2, "exactly one re-ask"
         assert result.exit_code == 3
 
@@ -700,7 +722,11 @@ class TestReportReAsk:
         )
         result = env.scheduler([env.apply_task(0)]).run()
 
-        assert result.outcomes[0].status == executor.STATUS_SCHEMA_INVALID
+        # Rung 6 is terminal; the edit on disk makes it a partial (fix round 9).
+        assert result.outcomes[0].status == executor.STATUS_PARTIAL
+        assert "does not match the apply_suggestions result shape" in (
+            result.outcomes[0].reason
+        )
         assert len(self._calls(log)) == 1
 
     def test_a_whole_report_inside_stray_braces_is_told_what_it_lacks(self, env):
