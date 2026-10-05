@@ -289,7 +289,15 @@ def pin_repo_root(start_dir: str) -> Tuple[Optional[str], Optional[str]]:
     :data:`GIT_ENV_REDIRECTS` variable is set nothing is pinned at all.
     ``(None, None)`` outside any repository.
     """
-    redirected = [name for name in GIT_ENV_REDIRECTS if os.environ.get(name)]
+    # Spelled out rather than iterated: the codex package's environment
+    # census resolves literal reads and module constants only.
+    redirected = [
+        name for name, value in (
+            ("GIT_DIR", os.environ.get("GIT_DIR")),
+            ("GIT_WORK_TREE", os.environ.get("GIT_WORK_TREE")),
+            ("GIT_COMMON_DIR", os.environ.get("GIT_COMMON_DIR")),
+        ) if value
+    ]
     if redirected:
         return None, (
             f"{', '.join(redirected)} is set in the environment, so git would act "
