@@ -290,8 +290,15 @@ class TestStateFileUpdates:
         assert "existing_file1.py" not in tracked_paths
 
     @patch("finalize_tracking.get_all_modified_files")
-    def test_tracked_files_have_correct_structure(self, mock_get_files, valid_state):
+    def test_tracked_files_have_correct_structure(
+        self, mock_get_files, valid_state, tmp_path, monkeypatch
+    ):
         """Each tracked file entry has correct structure."""
+        # Outside any repository: inside this checkout the made-up census
+        # path is on no disk, and a path git names that is gone reads
+        # `deleted` (fix round 9); here no tree is read and it keeps the
+        # default `modified`.
+        monkeypatch.chdir(tmp_path)
         mock_get_files.return_value = {"new_file.py"}
 
         with patch("sys.argv", ["finalize_tracking.py", "--state-file", str(valid_state)]):
@@ -1339,6 +1346,62 @@ class TestAKeptEntryFollowsTheTree:
         assert code == 0
         assert [e["path"] for e in _entries(state_path)] == ["index.html"]
         assert "scratch.js (implementation)" in capsys.readouterr().out
+
+
+class TestADeletionGitSeesIsKept:
+    """Fix round 9 (review of round 8): implement created ``index.html``, the
+    user committed it, and apply-code-fixes deleted it. ``git status`` says
+    ``D index.html``, but the kept ``implementation`` entry was neither on
+    disk nor in the base commit, so it was dropped as created-then-removed
+    before git's census could keep it, and review-code never saw the
+    deletion. A path git's own census names is a change git sees: it is kept
+    as ``deleted``, labelled by the phase whose census found it (implement's
+    creation is in a commit; the change left in the tree is this phase's)."""
+
+    def _commit_index_html(self, repo, state_path):
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["tracked_files"] = [
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+        ]
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+        _git(repo, "add", "index.html")
+        _git(repo, "commit", "--quiet", "-m", "implement work")
+        (repo / "index.html").unlink()
+
+    @pytest.mark.parametrize("touched", [[], ["--touched", "index.html"]])
+    def test_a_committed_file_a_later_phase_deleted_stays_in_scope(
+        self, racing_repo, capsys, touched
+    ):
+        repo, state_path = racing_repo
+        self._commit_index_html(repo, state_path)
+
+        code = main([
+            "--state-file", str(state_path), "--phase", "apply-code-fixes",
+            *touched,
+        ])
+
+        assert code == 0
+        assert _entries(state_path) == [
+            {"path": "index.html", "action": "deleted", "task_id": "apply-code-fixes"},
+        ]
+        assert "Left out 1 file(s) that no longer exist" not in capsys.readouterr().out
+
+    def test_a_census_path_the_phase_also_touched_is_kept(self, racing_repo):
+        """The executor's ``--touched`` names the file the batch deleted; git's
+        census names it too, so the record does not make it a
+        created-then-removed file."""
+        repo, state_path = racing_repo
+        (repo / "gone.js").write_text("// x\n", encoding="utf-8")
+        _git(repo, "add", "gone.js")
+        _git(repo, "commit", "--quiet", "-m", "user work")
+        (repo / "gone.js").unlink()
+
+        code = main(["--state-file", str(state_path), "--touched", "gone.js"])
+
+        assert code == 0
+        assert {e["path"]: e["action"] for e in _entries(state_path)} == {
+            "gone.js": "deleted", "index.html": "created",
+        }
 
 
 class TestOnlyTouchedIsTheExactScope:
