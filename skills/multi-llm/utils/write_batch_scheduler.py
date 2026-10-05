@@ -1902,11 +1902,48 @@ class WriteBatchScheduler:
         """
         jail_lines_before = self._jail_line_count()
         try:
-            return self._run()
+            result = self._run()
+            self._report_resume_tally(result)
+            return result
         finally:
             self._report_rollback_store_utilization()
             self._discard_rollback_store()
             self._repeat_jail_lines(jail_lines_before)
+
+    def _report_resume_tally(self, result: SchedulerResult) -> None:
+        """One line on a run that kept earlier batches: what it kept and what
+        it dispatched.
+
+        Only this loop knows which batches an earlier run finished (their
+        result file, ``_done_evidence``); the apply base's own ``[resume]``
+        line is printed before any batch exists, and on this leg it used to
+        say "0 already processed, 12 remaining" while the run then kept
+        batch 0 as an earlier run's (OpenCode racing run 4).
+        """
+        kept = [o for o in result.outcomes if o.skipped]
+        # Every apply run resumes unless `--fresh`, so a first run (nothing
+        # kept) says nothing here; its batch lines already say what ran.
+        if not self.resume or self.dry_run or not kept:
+            return
+        dispatched = [o for o in result.outcomes if not o.skipped]
+        items = {
+            str(task.get("task_id", "")): len(task.get("expected_ids") or [])
+            for task in self.tasks
+        }
+
+        def counted(outcomes: Sequence[TaskOutcome]) -> str:
+            # An implement task is one item; the count would only repeat it.
+            if self.kind == "implement":
+                return ""
+            return f" ({sum(items.get(o.task_id, 0) for o in outcomes)} item(s))"
+
+        names = ", ".join(o.task_id for o in kept[:5]) + (", …" if len(kept) > 5 else "")
+        self.log(
+            f"[write-subagents] resume: kept {len(kept)} task(s) an earlier run "
+            f"finished — {names}{counted(kept)}; "
+            f"dispatched {len(dispatched)}{counted(dispatched)}"
+            + (f"; not reached {len(result.not_run)}" if result.not_run else "")
+        )
 
     @staticmethod
     def _jail_line_count() -> int:
