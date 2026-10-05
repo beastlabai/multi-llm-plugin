@@ -5,7 +5,7 @@ Executes implementation tasks from a plan by spawning subagents.
 ## Usage
 
 ```bash
-<dispatcher> implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip] [--skip-prerequisites]
+<dispatcher> implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip|retry] [--skip-prerequisites]
 ```
 
 ## Options
@@ -15,7 +15,7 @@ Executes implementation tasks from a plan by spawning subagents.
 - `--dry-run`: Show task summary without executing
 - `--yes` / `--no-confirm`: Skip all advisory prompts (e.g., unapplied task suggestions) and proceed silently. `--yes` additionally resolves every gate this mode reaches from flags and config: the plan-review prerequisite becomes exit 3 rather than a question (D6 row 6), the task-suggestion advisory resolves to "skip, recorded" (row 7), and the human-task strategy resolves to `skip-dependents` (row 8).
 - `--force-strategy <strategy>`: Skip the human task strategy prompt and use the given strategy directly. Valid values: `pause-and-ask`, `skip-continue`, `skip-dependents`. Useful for scripted/non-interactive runs. `pause-and-ask` together with `--yes` is exit 3 at parse time — it promises a gate that an unattended run can never render.
-- `--human-task ID=done|skip` (repeatable): Answer one human task without a prompt (D6 row 9), e.g. `--human-task T004=done`. Recorded in `state.json` under `human_task_decisions`. An empty or unrecognized value is exit 3 at parse time.
+- `--human-task ID=done|skip|retry` (repeatable): Answer one human task without a prompt (D6 row 9), e.g. `--human-task T004=done`. Recorded in `state.json` under `human_task_decisions`. An empty or unrecognized value is exit 3 at parse time. With `--resume` it also answers a code task the last run recorded `failed` (a check that failed, say): `done` treats it as satisfied and the tasks after it run, `skip` leaves it and the tasks that depend on it undone, `retry` runs a check again even though nothing in the repository changed since it failed (`retry` is never recorded).
 - `--skip-prerequisites`: Proceed even though plan-review suggestions were never applied. Loud and recorded; **never implied by `--yes`**.
 
 ## Process
@@ -260,14 +260,7 @@ After reading the task JSON, scan all batches for tasks with `is_human: true`. I
   3. **"Skip all, skip dependents too"** — Skip all human tasks AND skip any code tasks that depend on them. List everything skipped in the implementation summary.
   4. **"Cancel"** — Stop implementation.
 
-**Persist the strategy**: After resolving (whether from flag, saved state, or user prompt), save it to state.json:
-```python
-state = json.load(state_file)
-state["human_task_strategy"] = "pause-and-ask"  # or "skip-continue", "skip-dependents"
-state["updated_at"] = datetime.now().isoformat()
-json.dump(state, state_file)
-```
-This ensures `--resume` can recover the strategy without re-prompting.
+**The orchestrator records the strategy and every skip; you never write them.** With a strategy resolved (rungs 1-3), step 2 already saved it in `state.json`, recorded every task it skips there (each manual task, and under `skip-dependents` every task that depends on one) and listed them in the task JSON: each such task has `status: "skipped"` and a `skip_reason`, and the top-level `skipped_tasks` map names them all. When `human_task_strategy` in the task JSON is `null` (rung 4) and the user picks a strategy, re-run step 2 with `--force-strategy <answer>` added (`pause-and-ask`, `skip-continue` or `skip-dependents`; "Cancel" stops here) and read the task JSON that run prints instead: that run records the strategy and the skips. Never edit `state.json` by hand — a manual task with no record is still named as owed when the workflow completes, but its dependents are not.
 
 #### 4b. The Python write executor: `--exec-subagents` (an alternative to steps 5-10)
 
@@ -309,7 +302,18 @@ and exits 3 naming the exact re-invocation plus the rollback command
 (`multi_llm.py util restore-batch --phase-dir <dir> --task-id <id>`, which refuses a
 file that changed after the run unless `--force`). `--resume` then re-dispatches only
 the unfinished batches, replaying the prior-changes log from disk so the resumed
-batch sees the context an uninterrupted run would have.
+batch sees the context an uninterrupted run would have. The stop message, the
+`## Cancelled` section of `summary.md`, `write_batch_report.json` (`not_run_tasks`,
+`stop`) and the status mirror (`not_run_task_ids`) account for every task of the
+decomposition — done, failed, not run (the stop came before they were dispatched),
+accepted, deferred manual — and the message names the way forward: for a failed
+check (a task that declares no files), fix what it reported (by hand, or review-code
+then apply-code-fixes) and `--resume`, which runs the check again and the tasks after
+it; or accept the failure with `--human-task <id>=done` (`skip` leaves it and its
+dependents undone). A `--resume` that changes nothing does not run a failed check
+again: when the files git sees have the same sizes and timestamps as when it failed
+(`verdict.tree_fingerprint` on its result file), the stop is repeated with the remedy
+and no dispatch is spent; `--human-task <id>=retry` runs it anyway.
 
 `--dry-run-subagents` renders every command, applies every admission and policy
 check, writes `{phase}/subagent_dry_run.json` and starts no child.
@@ -333,7 +337,7 @@ your host.
      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util write-prompt \
        --phase-dir "{plan}/implement" --task-id "{task.id}"
      ```
-     The orchestrator materialized `{plan}/implement/write_tasks.json` (printed as `[WRITE_TASKS_FILE]`) beside the task JSON, one entry per task under the task's own `id`. This rewrites the task's prompt with the prior-task context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the tasks already appended below — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch. It writes it to `{plan}/implement/prompts/{task.id}.prompt.txt` and prints `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Never hand a subagent `task["prompt"]` from the JSON: it carries a literal `{prior_changes_context}` token that must never reach a subagent. An exit 3 names the problem (no `write_tasks.json` — re-run step 2; an unknown id — the known ids are listed); do not fall back to the raw prompt.
+     The orchestrator materialized `{plan}/implement/write_tasks.json` (printed as `[WRITE_TASKS_FILE]`) beside the task JSON, one entry per task under the task's own `id`. This rewrites the task's prompt with the prior-task context bound **now** — from `{plan}/prior_changes.jsonl` as it is at this moment, i.e. the tasks already appended below — and the result contract appended: exactly the text the `--exec-subagents` executor would dispatch. It writes it to `{plan}/implement/prompts/{task.id}.prompt.txt` and prints `[WRITE_PROMPT] <path>`, `[WRITE_PROMPT_LINES] <n>` and `[WRITE_PROMPT_CONTEXT] …`. Never hand a subagent `task["prompt"]` from the JSON: it carries a literal `{prior_changes_context}` token that must never reach a subagent. An exit 3 names the problem (no `write_tasks.json` — re-run step 2; an unknown id — the known ids are listed); do not fall back to the raw prompt. A `[WRITE_PROMPT_ORDER]` line (on stderr; the prompt is still written) names an earlier task whose summary this prompt does not carry — recorded but not appended yet, or not finished: do what it says, then run this `util write-prompt` again before spawning the subagent.
    - Then spawn one subagent:
      ```
      Spawn one subagent with:
@@ -379,23 +383,16 @@ your host.
      - **Ask the user**, presenting the task:
        - Question: "Task {id}: {title} requires manual action. Please complete the following and confirm when done:\n\n{description}\n\nAcceptance criteria:\n{acceptance_criteria}"
        - Options: "Done — I've completed this task", "Skip this task", "Cancel implementation"
-     - Handle each response:
-       - **Done**: Mark task as "completed" in state, continue
-       - **Skip**: Mark task as "skipped" in state with reason "skipped by user during pause-and-ask". Run the **transitive skip propagation** algorithm (see below) to skip dependent tasks.
+     - Handle each response by recording it through step 2, never by hand:
+       - **Done**: re-run step 2 with `--resume --human-task {id}=done` added; it records the task completed.
+       - **Skip**: re-run step 2 with `--resume --human-task {id}=skip` added; it records the task skipped with reason "skipped by user during pause-and-ask" and skips every task that depends on it (the **transitive skip propagation** below).
+       - Then read the task JSON that run prints and continue with its batches.
        - **Cancel**: Execute **cancellation semantics** (see below)
      - Human tasks within a parallelizable batch: execute all non-human tasks in parallel first, then present human tasks sequentially
 
      **"Skip all, continue anyway" strategy:**
-     - Mark all human tasks as "skipped" in state with reason "deferred — user chose to complete manually after implementation"
+     - The orchestrator already recorded every human task as "skipped" in state (its `skip_reason` starts "deferred — manual task") and a dependency override for each code task that depends on one. Do not record either yourself.
      - Treat human task dependencies as satisfied — dependent code tasks proceed as normal
-     - For each code task that has a skipped human task in its dependency chain, record a dependency override in state:
-       ```python
-       state["dependency_overrides"] = state.get("dependency_overrides", {})
-       state["dependency_overrides"][code_task_id] = {
-           "overridden_deps": [human_task_id_1, human_task_id_2],
-           "timestamp": datetime.now().isoformat()
-       }
-       ```
      - After all tasks complete, include a "## Manual Tasks (Deferred)" section in the implementation summary
      - Also include a "## Dependency Override Warnings" section listing each code task that ran with overridden human dependencies:
        ```markdown
@@ -410,19 +407,18 @@ your host.
        ```
 
      **"Skip all, skip dependents too" strategy:**
-     - Mark all human tasks as "skipped" in state with reason "deferred — user chose to complete manually after implementation"
-     - Run the **transitive skip propagation** algorithm to find and skip all dependent tasks
+     - The orchestrator already recorded every human task, and every task that depends on one, as "skipped" in state; the task JSON shows each with `status: "skipped"`. Do not dispatch them and do not record them yourself.
      - After remaining tasks complete, include a "## Manual Tasks (Deferred)" section listing each human task and each skipped dependent
 
      #### Transitive Skip Propagation Algorithm
 
-     When a human task is skipped (either via "skip dependents too" strategy or individual skip during "pause-and-ask"), propagate the skip forward through the dependency graph:
+     The orchestrator runs this walk itself (under "skip dependents too", and for a "Skip" answered with `--human-task {id}=skip`); it is described here so the summary can report it:
 
      1. Start with the set of skipped human task IDs as the **seed set**
      2. Use BFS forward walk: for each task in the seed set, find all tasks that have it in their `depends_on`
-     3. Mark each discovered dependent as "skipped" with reason: "skipped — depends on skipped task {parent_id} ({parent_title})"
+     3. Each discovered dependent is recorded "skipped" with reason: "skipped — depends on skipped task {parent_id} ({parent_title})"
      4. Add the newly skipped task to the queue and continue until no more dependents are found
-     5. Track the full skip chain for reporting: `T001 (human, skipped) → T003 (skipped, depends on T001) → T005 (skipped, depends on T003)`
+     5. Report the full skip chain: `T001 (human, skipped) → T003 (skipped, depends on T001) → T005 (skipped, depends on T003)`
 
      #### Cancellation Semantics
 

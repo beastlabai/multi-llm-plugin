@@ -250,6 +250,66 @@ def phase_dir_path(plan_path: Path, phase: str) -> Path:
     return output_dir_path(plan_path) / PHASE_DIRECTORIES.get(phase, phase)
 
 
+def workflow_file_entries(plan_path, *, root, output_dirs=()) -> list:
+    """The workflow's own files for *plan_path*, relative to the repository *root*.
+
+    The plan, its output folder (``state.json``, every phase folder, the
+    generated task list) and the task list the plan's ``TASKS_FILE`` marker
+    names. None of them is code: ``tracked_files`` must never record them and
+    ``review-code`` must never review them. Measured 2026-10-05 (Codex racing
+    run 3): apply-task-suggestions recorded the plan and ``tasks.md`` as
+    tracked files, implement stopped part-way without recording anything, and
+    review-code reviewed ``tasks.md`` as code — two duplicate findings — while
+    the ``index.html`` implement created was not in its scope at all.
+
+    A folder entry ends in ``/``, the shape ``git_utils.subtract_baseline``
+    reads as "this folder and everything beneath it". *output_dirs* adds
+    folders the caller knows hold the run's files (the state file's folder);
+    the computed output folder is always included (a ``None`` *plan_path*
+    leaves only *output_dirs*). A path outside *root*, or
+    *root* itself, is never an entry: excluding the whole repository would
+    empty every scope.
+    """
+    if not root:
+        return []
+    try:
+        real_root = os.path.realpath(str(root))
+        plan = Path(os.path.realpath(str(plan_path))) if plan_path else None
+    except (OSError, ValueError):
+        return []
+
+    def relative(path, folder: bool):
+        try:
+            rel = os.path.relpath(os.path.realpath(str(path)), real_root)
+        except (OSError, ValueError):
+            return None
+        if rel == "." or rel == ".." or rel.startswith(".." + os.sep):
+            return None
+        rel = rel.replace(os.sep, "/")
+        return rel + "/" if folder else rel
+
+    candidates = [(Path(folder), True) for folder in output_dirs if folder]
+    if plan is not None:
+        candidates[:0] = [(plan, False), (output_dir_path(plan), True)]
+        try:
+            from .plan_updater import get_tasks_file_path
+        except ImportError:  # pragma: no cover - direct-script import shim
+            from utils.plan_updater import get_tasks_file_path  # type: ignore
+        try:
+            named = get_tasks_file_path(plan.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError):
+            named = None
+        if named:
+            candidates.append((plan.parent / named, False))
+
+    entries = []
+    for path, folder in candidates:
+        entry = relative(path, folder)
+        if entry and entry not in entries:
+            entries.append(entry)
+    return entries
+
+
 def _mode_phase_names() -> tuple:
     """``modes.phase_names()``, importable from ``utils/`` and from a script run."""
     try:

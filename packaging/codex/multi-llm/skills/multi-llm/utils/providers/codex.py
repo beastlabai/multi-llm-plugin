@@ -1856,6 +1856,28 @@ class CodexProvider(LLMProvider):
             )
         return result
 
+    def native_structured_output(self, stdout: str) -> Any:
+        """The ``--output-schema`` document: the last ``agent_message``, whole.
+
+        codex never emits a ``structured_output`` key. Measured 2026-10-05 on
+        codex-cli 0.160.0 against a localhost Responses stub (zero spend): with
+        ``--output-schema`` the request carries ``text.format = {type:
+        json_schema, strict: true, name: codex_output_schema}`` — the API's
+        strict structured output — and the document comes back as the final
+        ``item.completed`` ``agent_message``'s ``text``, a JSON string and
+        nothing else. So that text is the native answer when, and only when,
+        the whole of it parses; a message with prose around a document is not
+        what strict output produces, and stays on the recovery path. The caller
+        validates the value against the schema before marking it ``native``.
+        """
+        try:
+            scan = _scan_codex_stream(stdout or "")
+            if not scan.messages:
+                return None
+            return json.loads(scan.messages[-1].strip())
+        except Exception:  # noqa: BLE001 - the hook must never raise
+            return None
+
     def salvage_text(self, stdout: str) -> Optional[str]:
         """The last ``agent_message``'s text, for the salvage gate (D4.1/D4.4).
 

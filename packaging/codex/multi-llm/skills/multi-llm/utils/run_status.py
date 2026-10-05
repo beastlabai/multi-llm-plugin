@@ -78,6 +78,8 @@ from .cli_common import (
     record_next,
     record_notice,
     record_progress,
+    keep_state_word,
+    record_error,
     record_progress_lines,
     record_state,
 )
@@ -1745,6 +1747,11 @@ def _attach_finished_during_wait(
             view["finished_during_wait"] = finished
 
 
+#: The close-out's own word for a needs-human exit with no reason recorded
+#: (`detach.RunHandle.finish`): not a "last line" worth relaying.
+GENERIC_NEEDS_HUMAN_ERROR = "needs_human (exit 3)"
+
+
 def _mirror_text(key: str, mirror: Any) -> List[str]:
     """One clause per executor mirror: ``<kind> <ok>/<total> ok`` and, when any
     task did not end ``ok``, the non-ok statuses and the failed ids."""
@@ -1825,6 +1832,14 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     failed = mirror.get("failed_task_ids") or []
     if failed:
         parts.append(f"failed {', '.join(map(str, failed))}")
+    # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
+    # on no surface at all; a failed task the user accepted is named too.
+    not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
+    if not_run:
+        parts.append(f"not run {', '.join(map(str, not_run))}")
+    accepted = mirror.get("accepted_task_ids") if isinstance(mirror.get("accepted_task_ids"), list) else []
+    if accepted:
+        parts.append(f"accepted after failing {', '.join(map(str, accepted))}")
     # F9: `skipped_task_ids`/`human_task_strategy` (resolved before dispatch,
     # `write_batch_scheduler._mirror_status`) were on `.status.json` already
     # but rendered nowhere, so the one task `--yes`'s default strategy defers
@@ -2351,6 +2366,19 @@ def parse_args(argv: Optional[Sequence[str]] = None) -> argparse.Namespace:
         "--force", action="store_true",
         help="With --abort: stop a run whose identity probe is inconclusive",
     )
+    parser.add_argument(
+        # Fix round 7: Claude Code shows any non-zero exit as a tool error, and
+        # on that host every phase runs in the foreground, so a plain report
+        # is exit 2 ("no run recorded") every time. Opt-in, so the exit code
+        # stays the poll-loop condition for every caller that does not ask.
+        "--exit-zero", dest="exit_zero", action="store_true",
+        help="Exit 0 whenever the status was read, whatever the run's state "
+             "(still exit 1 when it could not be read, and 3 for a bad flag): "
+             "for a call that reports and does not poll, on a host that shows "
+             "any non-zero exit as an error. The run's state stays in the text "
+             "and in the result line's `state`. Never on a poll whose loop "
+             "reads the exit code.",
+    )
     # Accepted so the pre-dispatcher spelling (`--status`) keeps working; the
     # views make it redundant.
     parser.add_argument("--status", action="store_true", help=argparse.SUPPRESS)
@@ -2544,6 +2572,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # separate key rather than one more key inside `progress`, so that
         # object stays what the status file wrote.
         record_progress_lines(_progress_lines(watched))
+        # The run's own stop line (`run.error`, written by the worker from
+        # the result context's `error`): the hosts read a terminal poll's
+        # `payload.error` as "the last line it left", so a stopped implement's
+        # reason and remedy reach the message (racing re-run 3, 2026-10-05).
+        # The generic close-out word is not a reason and is left off.
+        recorded_error = watched_run.get("error")
+        if (
+            isinstance(recorded_error, str) and recorded_error.strip()
+            and recorded_error.strip() != GENERIC_NEEDS_HUMAN_ERROR
+            and watched.get("verdict") in (detach.VERDICT_FAILED,)
+        ):
+            record_error(recorded_error.strip())
 
     exit_code = exit_code_for(views)
 
@@ -2770,6 +2810,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             record_state(
                 STATE_DIED if all(_died(v) for v in live_views) else STATE_RUNNING
             )
+    if getattr(args, "exit_zero", False) and exit_code in (
+        EXIT_NOTHING_TO_DO, EXIT_NEEDS_HUMAN,
+    ):
+        # Only the verdict's code moves: the word it means stays on the result
+        # line, and everything above (`next`, the notice, `user_next_step`'s
+        # exit-0 gate) was decided on the real verdict.
+        keep_state_word(exit_code)
+        return EXIT_OK
     return exit_code
 
 

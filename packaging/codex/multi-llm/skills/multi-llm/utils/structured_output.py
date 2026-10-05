@@ -73,6 +73,7 @@ __all__ = [
     "StructuredResult",
     "classify_attempt",
     "load_phase_schema",
+    "native_document_for",
     "native_transport_error",
     "schema_for_dispatch",
     "schema_sidecar",
@@ -577,6 +578,17 @@ def _envelope(stdout: str) -> Optional[Dict[str, Any]]:
     return found
 
 
+def native_document_for(provider: Any, stdout: str) -> Any:
+    """``provider.native_structured_output(stdout)``, or ``None``; never raises."""
+    hook = getattr(provider, "native_structured_output", None)
+    if not callable(hook):
+        return None
+    try:
+        return hook(stdout or "")
+    except Exception:  # noqa: BLE001 - an adapter hook may not fail a dispatch
+        return None
+
+
 def _validate(document: Any, schema: StructuredSchema) -> List[str]:
     return validate_document(document, dict(schema.document))
 
@@ -590,6 +602,7 @@ def classify_attempt(
     timed_out: bool = False,
     phase: str = "",
     model: str = "",
+    native_document: Any = None,
 ) -> StructuredResult:
     """§4.2.1's decision, applied to one attempt's captured streams.
 
@@ -597,6 +610,14 @@ def classify_attempt(
     streams (case 5), and a configuration error before anything reads the
     envelope (case 4), because both would otherwise be laundered into the
     ``structured_output``-absent branch and re-run by the ladder.
+
+    ``native_document`` is the adapter's own reading of where its CLI put the
+    schema-constrained answer (:meth:`LLMProvider.native_structured_output`;
+    codex's final ``agent_message``), used when no ``structured_output`` key
+    exists. It is validated here exactly like the key, so it can only ever
+    become ``native`` by conforming. Before it existed every codex
+    task generation was marked ``recovered`` under a WARN, although codex had
+    carried the schema and answered in it (2026-10-05).
     """
     if timed_out:
         return StructuredResult(
@@ -641,6 +662,8 @@ def classify_attempt(
         return StructuredResult(failure_reason=FAILURE_SCHEMA_VIOLATION)
 
     native = envelope.get("structured_output") if envelope else None
+    if native is None:
+        native = native_document
     if native is not None:
         # Case 4: defence in depth. The CLI validates client-side, so this
         # should be unreachable — and if it is reached it takes case 2's failure
@@ -651,8 +674,9 @@ def classify_attempt(
         return StructuredResult(
             failure_reason=FAILURE_SCHEMA_VIOLATION,
             warning=(
-                f"structured output: `structured_output` was present but did "
-                f"not validate against {schema.name}: {errors[0]}"
+                f"structured output: the CLI's schema-constrained answer was "
+                f"present but did not validate against {schema.name}: "
+                f"{errors[0]}"
             ),
         )
 

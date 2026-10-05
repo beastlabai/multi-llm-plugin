@@ -685,6 +685,38 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         _unattended.record_resolution(None, site_id, decision)
         self._pending_resolutions.append((site_id, decision))
 
+    def _loaded_groups_tally(self) -> str:
+        """What row 11's "apply all valid items" covers, in counts.
+
+        ``11 task suggestion group(s) loaded: 10 valid (applied), 1 invalid
+        (left out)``. The record used to name only the loaded count — "11
+        loaded task suggestion group(s)" beside a review that reported 10
+        valid and 1 invalid (2026-10-05, Codex racing run 3) — which read as
+        all eleven being applied. The statuses are the review's verdicts as
+        loaded; a later override or the priority floor can still move a
+        group, and the ``Filtered …`` block printed next states the final
+        split.
+        """
+        counts: Dict[str, int] = {}
+        for group in merge_validation_with_groups(
+            self.groups, self.validation or []
+        ):
+            status = str(group.get("validation_status") or "needs-human-decision")
+            counts[status] = counts.get(status, 0) + 1
+        parts = [f"{counts.pop('valid', 0)} valid (applied)"]
+        invalid = counts.pop("invalid", 0)
+        if invalid:
+            parts.append(f"{invalid} invalid (left out)")
+        undecided = sum(counts.values())
+        if undecided:
+            parts.append(
+                f"{undecided} awaiting a decision (applied only if decided valid)"
+            )
+        return (
+            f"{len(self.groups)} {self.item_noun} group(s) loaded: "
+            + ", ".join(parts)
+        )
+
     def _no_selection_bypass_flags(self) -> str:
         """Which flag(s) made row 11's bypass deliberate, for the record.
 
@@ -1289,9 +1321,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             if not getattr(self.args, "dry_run", False):
                 self._record_resolution(
                     _unattended.row(11).site_id,
-                    f"apply all valid items of {len(self.groups)} loaded "
-                    f"{self.item_noun} group(s); bypassed by "
-                    f"{self._no_selection_bypass_flags()}",
+                    f"apply all valid items: {self._loaded_groups_tally()}; "
+                    f"bypassed by {self._no_selection_bypass_flags()}",
                 )
 
         # Step 21: Handle revalidation (if supports_revalidation)

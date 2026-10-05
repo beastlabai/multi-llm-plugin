@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import codecs
 import collections
+import hashlib
 import json
 import os
 import re
@@ -161,6 +162,18 @@ NO_BYTECODE_ENV = "PYTHONDONTWRITEBYTECODE"
 #: What this server exports for the child (D9 layer 2), beside the resolved uv.
 SKILL_DIR_ENV = "MULTI_LLM_SKILL_DIR"
 
+#: D9 layer 2: where ``uv run`` keeps the payload's environment, set for the
+#: child unless the user's environment already sets it (the container image
+#: does). Left to uv, the environment is ``<payload>/.venv`` — inside the plugin
+#: cache under ``$CODEX_HOME``, a tree the plugin's own ``[CODEX_HOME_CHECK]``
+#: watches because codex loads it as code. The first call after an install
+#: created it there, and a codex slot of another run that was live in that
+#: window reported its ~40 new files as a change to ``$CODEX_HOME`` (racing
+#: re-run 3, opencode 01). Kept under the user's cache directory instead,
+#: outside ``$CODEX_HOME`` and outside every grant of the plugin's jail, named
+#: by the payload's lockfile so installs that pin the same packages share one.
+UV_PROJECT_ENV = "UV_PROJECT_ENVIRONMENT"
+
 #: Plan codex-sandbox-unavailable step 6 (F5, user decision 2026-09-30): the
 #: chat's own sandbox posture — the turn metadata's ``sandbox_mode`` — exported
 #: to the dispatcher per call, so a write job whose Codex children cannot get
@@ -193,6 +206,21 @@ DEGRADED_STATE = "needs-human"
 #: never a call — ``is_mechanical`` reads ``next`` alone, so the continuation
 #: loop never follows it, and the tool description (surface data) says so.
 USER_NEXT_STEP_KEY = "user_next_step"
+
+#: The keys that tell the user what to type, placed right after ``ok`` and
+#: ``state`` in every result. Codex shows the model only part of a large tool
+#: result: measured on codex 0.160.0 (racing re-run 3, 06b), the session model
+#: read the result through its code-mode ``exec`` cell, which kept the first and
+#: the last tokens of a 50 355-character result and dropped the middle ("…7996
+#: tokens truncated…"). ``resume_command`` sat just before the 39 722-character
+#: runbook, inside the dropped middle, while the trailing ``"user_next_step":
+#: null`` survived, and the model told the user there was no resume command.
+WAY_FORWARD_KEYS = (USER_NEXT_STEP_KEY, "resume_command", "no_command_reason")
+
+#: The keys placed last: the long runbook (Open question 20 of
+#: plans/codex-native-plugin.md: a cut must lose runbook text, never the
+#: envelope).
+LAST_KEYS = ("runbook",)
 
 #: Where a redacted ``next`` went, and where any other removed command went.
 NEXT_MARKER = "<see the `next` field of this result for the tool call>"
@@ -467,6 +495,20 @@ def _legal_words(surface) -> str:
     return ", ".join(words)
 
 
+def with_absent_question(args):
+    """*args* with a left-out ``question`` read as ``""``, its empty value.
+
+    Only ``ask`` takes a question, and the property's own description says it
+    is ``""`` for every other mode; a host model that left it out of an
+    ``apply-suggestions`` call got ``"question" must be a string, got
+    undefined`` and had to retry (racing re-run 3, opencode 02b). A question left out of an ``ask`` call is still refused by
+    the arity rule, which names what to send. The port of ``withAbsentQuestion``.
+    """
+    if isinstance(args, dict) and "question" not in args:
+        return dict(args, question="")
+    return args
+
+
 def validate_args(args, surface):
     """``(mode_row, None)`` or ``(None, message)``. Every rule, before any spawn."""
     if not isinstance(args, dict):
@@ -482,10 +524,15 @@ def validate_args(args, surface):
         return None, (
             'unknown mode "{}". Legal words: {}. Nothing is prefix-matched or '
             "guessed.".format(mode, _legal_words(surface)))
-    for name, value in (("plan", plan), ("question", question)):
-        if not isinstance(value, str):
-            return None, '"{}" must be a string, got {}.'.format(
-                name, _type_name(value))
+    if not isinstance(plan, str):
+        return None, '"plan" must be a string, got {}.'.format(_type_name(plan))
+    if not isinstance(question, str):
+        asking = [mode["name"] for mode in surface["modes"]
+                  if surface["positional_kinds"]["question"] in mode["positionals"]]
+        return None, (
+            '"question" must be a string: the question for {}, "" (or the key left '
+            "out) for every other mode. Got {}.".format(
+                " or ".join(asking) or "no mode", _type_name(question)))
     if not isinstance(extra, list) or not all(isinstance(t, str) for t in extra):
         return None, (
             '"extra_flags" must be an array of strings (use [] for none), got '
@@ -501,8 +548,8 @@ def validate_args(args, surface):
             'mode "{}" declares no plan positional, so "plan" must be "".'.format(
                 row["name"]))
     if takes_question and not question.strip():
-        return None, 'mode "{}" takes a question and "question" was empty.'.format(
-            row["name"])
+        return None, ('mode "{}" takes a question and "question" was empty: send '
+                      "the user's question as \"question\".".format(row["name"]))
     if not takes_question and question != "":
         return None, (
             'mode "{}" declares no question positional, so "question" must be '
@@ -620,6 +667,45 @@ def find_uv(surface, env):
 #: D5's health contract, row 2: the payload files every spawn needs, beside the
 #: surface's dispatcher script. Checked at call time, never at start (rule 7).
 PAYLOAD_INVENTORY = ("pyproject.toml", "uv.lock")
+
+
+def _inside(path, root) -> bool:
+    """Whether *path* is *root* or under it, compared as given and resolved."""
+    for left, right in ((os.path.abspath(path), os.path.abspath(root)),
+                        (os.path.realpath(path), os.path.realpath(root))):
+        if left == right or left.startswith(right.rstrip(os.sep) + os.sep):
+            return True
+    return False
+
+
+def project_environment(environ, run_args):
+    """The ``UV_PROJECT_ENVIRONMENT`` to export, or ``None`` to leave it alone.
+
+    Only for a payload inside ``$CODEX_HOME`` (default ``$HOME/.codex``), the
+    one place its ``.venv`` is a watched tree; and never when *environ*
+    (layer 1) already names one, when *run_args* carry ``--no-sync`` (the
+    posture that runs against an environment something else already built), or
+    when the lockfile cannot be read (the payload check reports that).
+    Otherwise ``<cache>/multi-llm/uv-env/<lockfile sha256, 16 hex>``, the cache
+    being ``$XDG_CACHE_HOME``, else ``$HOME/.cache`` (``%LOCALAPPDATA%`` on
+    Windows). See :data:`UV_PROJECT_ENV`.
+    """
+    if environ.get(UV_PROJECT_ENV) or "--no-sync" in run_args:
+        return None
+    home = environ.get("HOME") or os.path.expanduser("~")
+    codex_home = environ.get("CODEX_HOME") or os.path.join(home, ".codex")
+    if not _inside(str(SKILL_DIR), codex_home):
+        return None
+    try:
+        lock = (SKILL_DIR / "uv.lock").read_bytes()
+    except OSError:
+        return None
+    if os.name == "nt" and environ.get("LOCALAPPDATA"):
+        base = environ["LOCALAPPDATA"]
+    else:
+        base = environ.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
+    digest = hashlib.sha256(lock).hexdigest()[:16]
+    return os.path.join(base, "multi-llm", "uv-env", digest)
 
 
 def missing_payload(surface):
@@ -860,6 +946,30 @@ def typed_plan(plan, values):
     if plan and values.get("plan_arg") and same_plan_file(plan, values.get("plan")):
         return values["plan_arg"]
     return plan
+
+
+#: The result keys that hand the model a tool call to send back.
+HANDED_BACK_CALLS = ("next", "abort_command")
+
+
+def hand_back_typed(outcome, values) -> None:
+    """Every tool call *outcome* hands back names the plan as this call typed it.
+
+    The server names the plan absolutely inside its own loop (the polls, the
+    abort dispatch, a mechanical continuation), and those spellings used to
+    leave in the re-attach ``next`` and the ``abort_command``. The call the
+    model sent back then *typed* the absolute path, so its resume command and
+    its re-spelled output lines carried it too (racing re-run 3, 2026-10-05:
+    ``--implement <absolute path>/plans/racing-game.md --resume`` for a plan
+    the user typed ``plans/racing-game.md``). The call runs in the
+    same anchor, so the typed spelling names the same file. The port of
+    ``handBackTyped``.
+    """
+    for key in HANDED_BACK_CALLS:
+        call_args = outcome.get(key)
+        if (isinstance(call_args, dict) and not call_args.get("unparseable")
+                and isinstance(call_args.get("plan"), str)):
+            outcome[key] = dict(call_args, plan=typed_plan(call_args["plan"], values))
 
 
 def same_plan_file(left, right) -> bool:
@@ -1449,17 +1559,31 @@ class Server:
         }
 
     def envelope(self, call: Call, fields: dict) -> dict:
-        """Rule 5's one shape: the fields every branch carries, then the rest."""
-        out = {"ok": bool(fields.get("ok")), "state": fields.get("state"),
-               "message": fields.get("message"), "exit": fields.get("exit"),
-               "anchor": call.anchor, "anchor_source": call.anchor_source,
-               "environment": self.environment(call), "relays": dict(call.relays),
-               "progress_lines": call.progress_lines}
-        for key, value in fields.items():
+        """Rule 5's one shape: the fields every branch carries, then the rest.
+
+        Ordered for a reader that sees only part of it (:data:`WAY_FORWARD_KEYS`,
+        :data:`LAST_KEYS`): ``ok`` and ``state``, then the way forward, then
+        ``message`` and the other fields, and the runbook last.
+        """
+        def kept(key, value):
             # A null `user_next_step` is the answer "no next phase", set on
             # purpose by `finish`; every other null is an absent key.
-            if key not in out and (value is not None or key == USER_NEXT_STEP_KEY):
+            return value is not None or key == USER_NEXT_STEP_KEY
+
+        out = {"ok": bool(fields.get("ok")), "state": fields.get("state")}
+        for key in WAY_FORWARD_KEYS:
+            if key in fields and kept(key, fields[key]):
+                out[key] = fields[key]
+        out.update({"message": fields.get("message"), "exit": fields.get("exit"),
+                    "anchor": call.anchor, "anchor_source": call.anchor_source,
+                    "environment": self.environment(call),
+                    "relays": dict(call.relays), "progress_lines": call.progress_lines})
+        for key, value in fields.items():
+            if key not in out and key not in LAST_KEYS and kept(key, value):
                 out[key] = value
+        for key in LAST_KEYS:
+            if fields.get(key) is not None:
+                out[key] = fields[key]
         return out
 
     def refusal(self, call: Call, state_key: str, message: str) -> dict:
@@ -1647,6 +1771,7 @@ class Server:
             return self.refusal(call, "needs_human", "{} {}".format(
                 DEGRADED_DESCRIPTION, self.surface_problem or ""))
         surface = self.surface
+        call.args = with_absent_question(call.args)
         row, problem = validate_args(call.args, surface)
         if problem:
             return self.refusal(call, "error", problem)
@@ -1690,6 +1815,9 @@ class Server:
         # this call spawns — launch, polls, abort, runbook — carries all three.
         os.environ[surface["uv"]["env"]] = uv
         os.environ[SKILL_DIR_ENV] = str(SKILL_DIR)
+        environment = project_environment(self.layer1, self.uv_run_args())
+        if environment is not None:
+            os.environ[UV_PROJECT_ENV] = environment
         route_env = surface["dispatcher"]["route_env"]
         os.environ[route_env["name"]] = route_env["value"]
         if NO_BYTECODE_ENV not in os.environ:
@@ -1702,6 +1830,7 @@ class Server:
                   # dropped (`split_extra_flags`) and named in the note.
                   "question": args["question"], "extra": list(kept_flags)}
         outcome = self.run_workflow(call, row, values)
+        hand_back_typed(outcome, values)
         if not call.cancel.is_set():
             self.attach_resume(call, values, outcome)
         if not call.cancel.is_set() and self.unfinished(row, outcome):
@@ -1771,7 +1900,9 @@ class Server:
         user who typed ``plans/racing-game.md`` was told to type ``$multi-llm:
         multi-llm --implement <absolute path>/plans/racing-game.md``). The child runs in
         the anchor, so a relative spelling names the same file there, and the
-        launch passes this one; the polls and the abort keep the absolute path.
+        launch passes this one; the polls and the abort keep the absolute path
+        inside this server, and the tool calls it hands back carry this one
+        (:func:`hand_back_typed`).
         """
         return expand_home(plan, self.layer1) if plan else ""
 

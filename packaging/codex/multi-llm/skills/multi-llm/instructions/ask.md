@@ -141,10 +141,10 @@ with the offending token named.
    relay its `models:` table once:
 
    ```bash
-   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "$PLAN_PATH" --question "$RAW_QUESTION" --host <host-id> --view run
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "$PLAN_PATH" --question "$RAW_QUESTION" --host <host-id> --view run --exit-zero
    ```
 
-   This call exits `2` while the run is live — `status`'s poll contract, not a failure — and a host that shows a non-zero exit as an error will show one here: read the table, not the code (only `1`, unreadable, is an error).
+   `--exit-zero` makes this read exit `0` whenever the status was read, so a host that shows a non-zero exit as an error shows none here; without it the call exits `2` while the run is live — `status`'s poll contract, not a failure. Read the table, not the code (only `1`, unreadable, is an error), and keep the flag off any poll whose loop reads the exit code.
 
    That table is the roster: one row per model, and a row's spec *is* the CLI and
    the model it runs, so nothing has to be derived — `codex:gpt-6-astra:xhigh` is
@@ -210,7 +210,9 @@ with the offending token named.
    printed a command, so compose the line above, and keep `--host` on it — the
    wait is clamped under the shell ceiling that flag names, and without it the
    clamp falls back to the tightest ceiling on record and silently shortens
-   every poll. Then give the **call itself** a timeout of at least `<interval>`
+   every poll. Add `--exit-zero` to that composed line too: on such a host
+   only exit `1` decides anything (rule 2), and the flag keeps every normal
+   poll from showing as an error. Then give the **call itself** a timeout of at least `<interval>`
    plus 30 seconds, **in whatever unit that parameter takes** — your host's
    *run detached* answer states it, and a host whose unit is not seconds needs
    that number scaled to it rather than copied. Get it wrong and the call asks
