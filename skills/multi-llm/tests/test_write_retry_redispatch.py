@@ -51,6 +51,296 @@ def _prompts(log: Path):
 
 
 # ===========================================================================
+# The apply kinds: a prose reply after edits gets the report re-ask
+# ===========================================================================
+
+class TestAnApplyBatchThatRepliedInProse:
+
+    def test_edits_then_prose_get_the_report_re_ask_not_the_batch(self, env):
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)], prose=True)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(GOOD))
+
+        result = env.scheduler([env.apply_task(0)]).run()
+
+        first, second = _prompts(log)
+        assert "Apply batch 0" in first
+        assert second.startswith(REASK_MARKER)
+        assert "Apply batch 0" not in second, "the batch is never sent twice"
+        assert PROSE.split(".")[0] in second or "made the changes" in second, (
+            "the re-ask quotes the prose reply it asks to restate"
+        )
+        assert env.plan.read_text(encoding="utf-8").count("edit\n") == 1
+        outcome = result.outcomes[0]
+        assert [(a.status, a.repair) for a in outcome.attempts] == [
+            (executor.STATUS_UNPARSEABLE, None),
+            (executor.STATUS_OK, executor.REPAIR_SCHEMA_INVALID),
+        ]
+        # What was applied is still the snapshot comparison's verdict.
+        assert outcome.write_outcome == executor.WRITE_APPLIED
+        assert result.exit_code == 0
+
+    def test_a_prose_re_ask_is_retried_as_the_re_ask_never_as_the_batch(self, env):
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)], prose=True)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", PROSE)
+        lines = []
+
+        result = env.scheduler([env.apply_task(0)], log=lines.append).run()
+
+        prompts = _prompts(log)
+        assert sum("Apply batch 0" in p for p in prompts) == 1
+        assert all(p.startswith(REASK_MARKER) for p in prompts[1:])
+        assert env.plan.read_text(encoding="utf-8").count("edit\n") == 1
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_UNPARSEABLE
+        assert outcome.write_outcome == executor.WRITE_SCHEMA_REJECTED
+        assert outcome.reason.endswith("(after the one schema-repair re-ask)")
+        assert outcome.files_touched == ["plans/p.md"]
+        assert result.exit_code == 3
+        assert not (env.phase_dir / "apply_batch_0.json").exists()
+        assert not [line for line in lines if VERDICT_WARNING in line], lines
+
+    def test_prose_with_nothing_moved_is_retried_as_before(self, env):
+        """No edit on disk: re-sending the batch applies nothing twice."""
+        log = env.enable_call_log()
+        env.edits([], prose=True)
+        lines = []
+
+        result = env.scheduler([env.apply_task(0)], log=lines.append).run()
+
+        prompts = _prompts(log)
+        assert len(prompts) == 2 and all("Apply batch 0" in p for p in prompts)
+        assert result.outcomes[0].status == executor.STATUS_UNPARSEABLE
+        assert result.exit_code == 3
+        # No result file was ever persisted, so there is no verdict to stamp
+        # and nothing to warn about.
+        assert not [line for line in lines if VERDICT_WARNING in line], lines
+
+
+# ===========================================================================
+# Every retryable rung: the check runs before the batch is re-sent
+# ===========================================================================
+
+def _capture(name: str) -> "executor._Capture":
+    return {
+        executor.STATUS_TIMEOUT: executor._Capture(
+            timed_out=True, argv=["opencode"], duration=0.01,
+        ),
+        executor.STATUS_RUNNER_ERROR: executor._Capture(
+            stderr="boom\n", exit_code=1, argv=["opencode"], duration=0.01,
+        ),
+        executor.STATUS_UNPARSEABLE: executor._Capture(
+            stdout=PROSE + "\n", exit_code=0, argv=["opencode"], duration=0.01,
+        ),
+        executor.STATUS_RATE_LIMITED: executor._Capture(
+            stderr="Error: 429 Too Many Requests: rate limit exceeded\n",
+            exit_code=1, argv=["opencode"], duration=0.01,
+        ),
+    }[name]
+
+
+RETRYABLE = [
+    executor.STATUS_TIMEOUT, executor.STATUS_RUNNER_ERROR,
+    executor.STATUS_UNPARSEABLE, executor.STATUS_RATE_LIMITED,
+]
+
+
+class TestEveryRetryableRungAsksFirst:
+
+    def _dispatch(self, env, monkeypatch, status, moved, **extra):
+        spawns = []
+
+        def fake_spawn(**kwargs):
+            spawns.append(kwargs.get("prompt"))
+            return _capture(status)
+
+        monkeypatch.setattr(executor, "_spawn", fake_spawn)
+        asked = []
+        task = env.apply_task(0)
+        outcome = executor.dispatch_task(
+            task,
+            phase_dir=str(env.phase_dir),
+            runner="opencode:opencode/big-pickle",
+            cwd=str(env.root),
+            retries=1,
+            prompt=task["prompt"].replace(PRIOR_CHANGES_TOKEN, "(none)"),
+            changed_files=lambda context: asked.append(context) or list(moved),
+            **extra,
+        )
+        return outcome, spawns, asked
+
+    @pytest.mark.parametrize("status", RETRYABLE)
+    def test_bytes_moved_is_a_partial_application_with_one_spawn(
+        self, env, monkeypatch, status
+    ):
+        outcome, spawns, asked = self._dispatch(
+            env, monkeypatch, status, ["plans/p.md"]
+        )
+        assert len(spawns) == 1, f"{status}: the batch was sent again"
+        assert len(asked) == 1 and asked[0]["attempt"] == 1
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert [a.status for a in outcome.attempts] == [executor.STATUS_PARTIAL]
+        assert outcome.reason.startswith("PARTIAL APPLICATION: 1 file(s) changed")
+        assert "plans/p.md" in outcome.reason
+        assert "No further attempt is started" in outcome.reason
+
+    @pytest.mark.parametrize("status", RETRYABLE)
+    def test_nothing_moved_keeps_the_rung(self, env, monkeypatch, status):
+        outcome, spawns, _asked = self._dispatch(env, monkeypatch, status, [])
+        assert len(spawns) >= 2, f"{status}: a clean attempt is retried as before"
+        assert outcome.status == status
+        assert len(set(spawns)) == 1, "a transport retry re-sends the same batch"
+
+    def test_a_hook_that_cannot_tell_fails_closed(self, env, monkeypatch):
+        def broken(context):
+            raise OSError("gone")
+
+        monkeypatch.setattr(
+            executor, "_spawn",
+            lambda **kwargs: _capture(executor.STATUS_TIMEOUT),
+        )
+        task = env.apply_task(0)
+        outcome = executor.dispatch_task(
+            task, phase_dir=str(env.phase_dir),
+            runner="opencode:opencode/big-pickle", cwd=str(env.root), retries=1,
+            prompt=task["prompt"].replace(PRIOR_CHANGES_TOKEN, "(none)"),
+            changed_files=broken,
+        )
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert "could not be compared" in outcome.reason
+        assert len(outcome.attempts) == 1
+
+    def test_prose_without_the_file_guard_stops_as_partial(self, env, monkeypatch):
+        """No ``tree_fingerprint`` hook, no proof a re-ask would move nothing:
+        the apply kind's prose reply ends as the partial application."""
+        outcome, spawns, _asked = self._dispatch(
+            env, monkeypatch, executor.STATUS_UNPARSEABLE, ["plans/p.md"]
+        )
+        assert len(spawns) == 1
+        assert outcome.status == executor.STATUS_PARTIAL
+
+    def test_prose_with_the_file_guard_is_re_asked(self, env, monkeypatch):
+        outcome, spawns, _asked = self._dispatch(
+            env, monkeypatch, executor.STATUS_UNPARSEABLE, ["plans/p.md"],
+            tree_fingerprint=lambda context: {"plans/p.md": "same"},
+        )
+        assert len(spawns) == 3, "the batch once, then the re-ask and its retry"
+        assert spawns[1].startswith(REASK_MARKER)
+        assert spawns[2] == spawns[1], "a re-ask's retry re-sends the re-ask"
+        assert outcome.status == executor.STATUS_UNPARSEABLE
+        assert [a.repair for a in outcome.attempts] == [
+            None, executor.REPAIR_SCHEMA_INVALID, executor.REPAIR_SCHEMA_INVALID,
+        ]
+
+
+# ===========================================================================
+# implement (no re-ask): the measured r5 shape, end to end
+# ===========================================================================
+
+PLAN = """# Two edits
+
+## Overview
+Two edits in a row.
+
+## Tasks
+
+### T001: Edit: create the module
+Create the module file.
+- Depends on: none
+- Files to modify: src/main.py
+
+### T002: Edit: extend the module
+Extend it.
+- Depends on: T001
+- Files to modify: src/main.py
+"""
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    (root / "plans").mkdir()
+    plan = root / "plans" / "two.md"
+    plan.write_text(PLAN, encoding="utf-8")
+    (root / "src").mkdir()
+    (root / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
+    git_env = {
+        **os.environ,
+        "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.invalid",
+    }
+    subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=root, check=True, env=git_env)
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    target = bin_dir / "codex"
+    try:
+        target.symlink_to(MOCK_LLM)
+    except (OSError, NotImplementedError):  # pragma: no cover
+        shutil.copyfile(MOCK_LLM, target)
+        target.chmod(target.stat().st_mode | stat.S_IXUSR)
+    monkeypatch.setenv("PATH", os.pathsep.join(
+        [str(bin_dir), str(Path(sys.executable).parent), "/usr/bin", "/bin"]
+    ))
+    monkeypatch.setenv("MULTI_LLM_TEST_MODE", "1")
+    monkeypatch.setenv("MULTI_LLM_TEST_FAST_BACKOFF", "1")
+    config = tmp_path / "driver.yaml"
+    config.write_text("driver:\n  subagent_runner: codex:gpt-5.5\n", encoding="utf-8")
+    monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
+    monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+        {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+    ]))
+    monkeypatch.setenv("MOCK_LLM_PROSE", "1")
+    log = tmp_path / "calls.jsonl"
+    monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
+    registry._RUN_ANCHOR = None
+    registry._config = None
+    registry._config_key = None
+    executor.reset_version_cache()
+    monkeypatch.chdir(root)
+
+    state = get_or_create_state(plan)
+    state.mark_phase_completed("generate-tasks")
+    state.mark_phase_completed("apply-suggestions")
+    state.save()
+    yield {"root": root, "plan": plan, "log": log}
+    registry._RUN_ANCHOR = None
+    registry._config = None
+    registry._config_key = None
+
+
+def test_an_implement_batch_that_replied_in_prose_is_not_sent_again(repo, capsys):
+    code = implement_orchestrator.main(
+        ["--plan-file", str(repo["plan"]), "--yes", "--exec-subagents"]
+    )
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+
+    assert code == 3
+    prompts = _prompts(repo["log"])
+    assert len(prompts) == 1, "T001 was dispatched again on top of its own edit"
+    main = (repo["root"] / "src" / "main.py").read_text(encoding="utf-8")
+    assert main.count("# edited\n") == 1
+
+    phase_dir = Path(get_phase_dir(repo["plan"], "implement"))
+    report = json.loads((phase_dir / "write_batch_report.json").read_text())
+    rows = {row["task_id"]: row for row in report["tasks"]}
+    assert rows["T001"]["status"] == executor.STATUS_PARTIAL
+    assert rows["T001"]["write_outcome"] == executor.WRITE_PARTIAL
+    assert "src/main.py" in rows["T001"]["reason"]
+    assert "pre-batch snapshot is kept at" in rows["T001"]["reason"]
+    assert "T002" in report["not_run_tasks"]
+    # The stop names the remedy for a half-applied batch.
+    assert "util restore-batch" in text and "--task-id T001" in text
+    assert VERDICT_WARNING not in text
+    assert get_or_create_state(repo["plan"]).get_task_status("T001") == "failed"
+
+
+# ===========================================================================
 # A dispatch that persisted no result file has no verdict to stamp
 # ===========================================================================
 
