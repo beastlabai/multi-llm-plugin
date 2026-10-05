@@ -883,6 +883,15 @@ class TaskOutcome:
     #: ``_verification_only``): its write outcome reads as
     #: :func:`write_outcome_label` says — ``verified`` for a ``no-op``.
     verification_only: bool = False
+    #: The runner's own ``notes`` for a write batch (what a check reported:
+    #: the validator's lines, the failing command), bounded. Carried so the
+    #: stop message and a later ``--resume`` can say what failed rather than
+    #: only that it did (racing re-run 3, 2026-10-05).
+    runner_notes: Optional[str] = None
+    #: A resumed verification-only task that was NOT dispatched again because
+    #: nothing in the repository changed since it failed (the scheduler's
+    #: unchanged-tree guard). No child ran, so no metric is recorded for it.
+    not_rerun: bool = False
 
     @property
     def ok(self) -> bool:
@@ -948,6 +957,10 @@ class TaskOutcome:
                 # Additive and only here, so every other row is unchanged.
                 out["verification_only"] = True
                 out["outcome_label"] = self.outcome_label
+            if self.runner_notes:
+                out["runner_notes"] = self.runner_notes
+            if self.not_rerun:
+                out["not_rerun"] = True
             out["files_touched"] = list(self.files_touched)
             if self.summary:
                 out["summary"] = self.summary
