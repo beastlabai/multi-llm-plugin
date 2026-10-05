@@ -1095,10 +1095,12 @@ def _refused(harness, args, **kwargs):
 
 class TestArguments:
     @pytest.mark.parametrize("token", [
-        "--host", "--ho", "--host=codex", "--yes", "-y", "--det", "--exec-subagents",
-        "--non-interactive", "--if-not-running", "--max-det", "--internal-worker",
-        "--internal-run-id=x"])
+        "--host", "--ho", "--host=opencode", "--det", "--yes=1",
+        "--if-not-running", "--max-det", "--internal-worker", "--internal-run-id=x"])
     def test_reserved_flags_are_refused_by_option_head(self, harness, token):
+        """Every composed flag a call restates with another meaning — a bare or
+        foreign `--host`, `--detach`, a detach control, `--internal-*` — is
+        refused; the no-op restatements are `TestRestatedComposedFlags`'."""
         envelope = _refused(harness, dict(REVIEW, extra_flags=[token]))
         assert envelope["state"] == STATES["error"]
         assert token in envelope["message"]
@@ -2080,11 +2082,13 @@ class TestUserNextStep:
         assert "user_next_step" not in envelope
 
     def test_exit_3_and_1_lift_nothing(self, harness):
+        """Nothing is lifted from a failed payload: the top-level key is the
+        explicit null a failed result carries (`TestNoCommandToCompose`)."""
         step = next_step("/multi-llm --implement /w/plans/p.md")
         for code in (CODES["needs_human"], CODES["error"]):
             envelope, _, _, _ = harness.run(
                 REVIEW, [launch_step(), poll_step(code, user_next_step=step)])
-            assert "user_next_step" not in envelope, code
+            assert "user_next_step" in envelope and envelope["user_next_step"] is None, code
 
     def test_the_continuation_loop_never_follows_it(self, harness):
         """Zero follows for a result carrying only ``user_next_step`` — even one
@@ -2192,6 +2196,151 @@ class TestResumeCommand:
         assert [dispatcher_argv(c)[1] for c in launches] == ["plans/p.md", "plans/p.md"]
         polls = [c for c in calls if dispatcher_argv(c)[0] == DISPATCHER["poll"][0]]
         assert all(dispatcher_argv(c)[1] == absolute for c in polls)
+
+
+# ===========================================================================
+# What a failed result says the user can run (racing re-run 2026-10-04)
+# ===========================================================================
+
+GENERATE = {"mode": "generate-tasks", "plan": "plans/racing-game.md", "question": "",
+            "extra_flags": []}
+UV_PREFIX = "uv run --frozen --no-dev --project /skill -- python /skill/multi_llm.py"
+
+
+def failed_generate_tasks(harness) -> dict:
+    """The poll a failed detached generate-tasks answers with: the worker's own
+    retry hint (`--yes`) and status's `resume with:` line (the launcher's
+    `--detach`), both naming the plan absolutely (codex #4)."""
+    absolute = os.path.join(os.path.realpath(harness.workspace), "plans",
+                            "racing-game.md")
+    host = SURFACE["host"]
+    return {"exit": CODES["needs_human"], "stdout": [
+        "Re-invoke to retry only the failures (task_generation):",
+        "  {} generate-tasks {} --host {} --yes".format(UV_PREFIX, absolute, host),
+        "      resume with: {} generate-tasks {} --host {} --detach --yes".format(
+            UV_PREFIX, absolute, host),
+        result_line(mode="generate-tasks", state=STATES["needs_human"],
+                    exit=CODES["needs_human"])]}
+
+
+class TestNoCommandToCompose:
+    """Codex #4 and OpenCode #3/#4: the same re-invoke option twice, its plan
+    absolute, the dispatcher's own lines replaced by a removal note and no
+    command key at all — after which a host model composed one."""
+
+    def _run(self, harness, **kwargs):
+        return harness.run(GENERATE, [launch_step(), failed_generate_tasks(harness)],
+                           **kwargs)
+
+    def test_one_option_per_call_with_the_plan_as_typed(self, harness):
+        envelope, _, _, _ = self._run(harness, extra_env={"STUB_RESUME_FAIL": "1"})
+        calls = [option for option in envelope["options"] if "human" not in option]
+        assert calls == [dict(GENERATE)]
+        assert envelope["options"][-1] == {"human": SURFACE["needs_human_option"]}
+
+    def test_the_redacted_lines_name_the_hosts_own_command(self, harness):
+        envelope, _, _, _ = self._run(harness, extra_env={"STUB_RESUME_FAIL": "1"})
+        spelled = "$multi-llm:multi-llm --generate-tasks plans/racing-game.md"
+        lines = envelope["output"].split("\n")
+        assert "  " + spelled in lines
+        assert "      resume with: " + spelled in lines
+        blob = json.dumps({key: envelope.get(key) for key in
+                           ("output", "result", "options", "stderr", "message")})
+        assert "uv run" not in blob and "multi_llm.py" not in blob
+        assert RUNNABLE_MARKER not in blob
+
+    def test_no_resume_means_an_explicit_no_command(self, harness):
+        envelope, _, _, _ = self._run(harness, extra_env={"STUB_RESUME_FAIL": "1"})
+        assert "user_next_step" in envelope and envelope["user_next_step"] is None
+        assert envelope["no_command_reason"] == SURFACE["no_command_reason"]
+        assert "resume_command" not in envelope
+        assert envelope["message"].endswith(SURFACE["needs_human_message"]["no_command"])
+
+    def test_a_resume_command_replaces_the_no_command(self, harness):
+        command = "$multi-llm:multi-llm --generate-tasks plans/racing-game.md"
+        envelope, _, _, _ = self._run(harness, extra_env={"STUB_RESUME_COMMAND": command})
+        assert envelope["resume_command"] == command
+        assert envelope["user_next_step"] is None
+        assert "no_command_reason" not in envelope
+        assert envelope["message"].endswith(SURFACE["needs_human_message"]["resume"])
+
+    def test_an_error_result_says_so_too(self, harness):
+        envelope, _, _, _ = harness.run(REVIEW, [launch_step(), poll_step(CODES["error"])])
+        assert envelope["ok"] is False
+        assert envelope["user_next_step"] is None
+        assert envelope["no_command_reason"] == SURFACE["no_command_reason"]
+
+    def test_a_needs_human_refusal_says_so_and_an_argument_error_does_not(self, harness):
+        refused = _refused(harness, dict(IMPLEMENT),
+                           meta=turn_meta(sandbox_mode="read-only"))
+        assert refused["user_next_step"] is None
+        assert refused["no_command_reason"] == SURFACE["no_command_reason"]
+        bad = _refused(harness, dict(REVIEW, extra_flags=["--detach"]))
+        assert "user_next_step" not in bad and "no_command_reason" not in bad
+
+    def test_a_finished_run_carries_neither(self, harness):
+        envelope, _, _, _ = harness.run(REVIEW, [launch_step(), poll_step(CODES["ok"])])
+        assert "user_next_step" not in envelope and "no_command_reason" not in envelope
+
+    def test_an_older_surface_keeps_the_pointer_and_drops_only_the_sentences(
+        self, tmp_path_factory, monkeypatch
+    ):
+        """Additive within schema v5, through the module's own functions."""
+        import importlib.util
+
+        spec = importlib.util.spec_from_file_location("mcp_server_under_test", SERVER_SRC)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        bare = json.loads(json.dumps(SURFACE))
+        del bare["dispatcher"]["user_command"]
+        assert module.respeller_for(bare, {"plan": "/w/p.md", "plan_arg": "p.md"}) is None
+        text = "  {} generate-tasks /w/p.md --yes".format(UV_PREFIX)
+        assert module.redact(text, None, bare, None).strip() == RUNNABLE_MARKER
+        respell = module.respeller_for(SURFACE, {"plan": "/w/p.md", "plan_arg": "p.md"})
+        assert module.redact(text, None, SURFACE, respell).strip() == \
+            "$multi-llm:multi-llm --generate-tasks p.md"
+
+
+#: Values the plan quoting must agree on with `next_phase.quote_plan_arg`.
+QUOTE_CASES = [
+    "plans/x.md", "plans/my plan.md", "plans/it's.md", 'plans/a"b.md',
+    "plans/a\"b'c.md", "C:\\skill\\x.md", "tab\there", "--quick", "a,b", "",
+]
+
+
+class TestRestatedComposedFlags:
+    """OpenCode #1 (and codex #6): a restated `--yes` was refused as reserved.
+    A composed flag restated with the same meaning is now dropped with a note."""
+
+    @pytest.mark.parametrize("flags, shown", [
+        (["--yes"], "--yes"), (["-y"], "-y"), (["--non-interactive"], "--non-interactive"),
+        (["--exec-subagents"], "--exec-subagents"), (["--ye"], "--ye"),
+        (["--host", "codex"], "--host codex"), (["--host=codex"], "--host=codex"),
+    ])
+    def test_a_restated_flag_runs_and_is_named_in_a_note(self, harness, flags, shown):
+        envelope, result, calls, _ = harness.run(
+            dict(REVIEW, extra_flags=[*flags, "--quick"]),
+            [launch_step(), poll_step(CODES["ok"])])
+        assert not result["isError"] and envelope["ok"] is True, envelope
+        launch = dispatcher_argv(calls[0])
+        for baked in SURFACE["baked_flags"]:
+            if baked.startswith("-"):
+                assert launch.count(baked) == 1, launch
+        assert "--quick" in launch
+        note = SURFACE["reserved_flags"]["redundant"]["note"]
+        assert envelope["extra_flags_note"] == note.replace("{flags}", shown)
+
+    def test_the_quoting_agrees_with_the_dispatchers(self):
+        import importlib.util
+
+        sys.path.insert(0, str(SKILL_ROOT))
+        from utils import next_phase
+
+        spec = importlib.util.spec_from_file_location("mcp_server_quote", SERVER_SRC)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert [module.quote_for_reader(v) for v in QUOTE_CASES] == [
+            next_phase.quote_plan_arg(v) for v in QUOTE_CASES]
 
 
 # ===========================================================================
