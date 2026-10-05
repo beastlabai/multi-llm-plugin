@@ -300,6 +300,19 @@ def _pin_opencode_model_catalog(request, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_state_home(tmp_path, monkeypatch):
+    """Keep every test's out-of-grant rollback evidence under its own tmp dir.
+
+    A repo-wide write batch on the plugin's jail keeps its pre-batch
+    snapshots, rollback store and audit log under ``$XDG_STATE_HOME/multi-llm``
+    (``write_safety.claim_external_safety_dir``, review fixes 2026-10-05); with
+    the variable unset that is the developer's own ``~/.local/state``.
+    """
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _pin_opencode_debug_config(request, monkeypatch):
     """Keep the default suite from spawning `opencode debug config` (plan §8).
 

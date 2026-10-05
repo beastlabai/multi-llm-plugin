@@ -1252,3 +1252,92 @@ class TestAChangedGitConfigIsReportedWarnOnly:
                                 write_target=None, lines=lines, finalize=False).run()
         assert result.exit_code == 0, result.messages
         assert not [line for line in lines if "[GIT_CONFIG_CHANGED]" in line]
+
+
+# ===========================================================================
+# A jailed repo-wide run keeps its rollback evidence outside the grant
+# (review fixes 2026-10-05)
+# ===========================================================================
+
+def edit_file(path: Path, text: str = "edited\n"):
+    def step(repo: Repo):
+        path.write_text(text, encoding="utf-8")
+        return claim("applied"), stream()
+    return step
+
+
+class TestTheRollbackEvidenceOfAJailedRepoWideRunLivesOutsideTheGrant:
+    """The root grant makes the phase dir writable, so the manifests,
+    payloads, rollback blobs and audit log there were the batch's to forge
+    and ``util restore-batch`` wrote what they said. For a repo-wide batch on
+    the rung they live under the state home instead, where the jail never
+    grants a write; nothing inside the phase dir is read for them."""
+
+    def _implement_task(self, repo, target: Path):
+        return repo.task(0, kind="implement", task_id="T001", target=target,
+                         expected_ids=["T001"], prior_changes_id="T001")
+
+    def _run(self, repo, monkeypatch, *, rung):
+        src = repo.root / "src"
+        src.mkdir(exist_ok=True)
+        target = src / "app.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        fake = FakeExecutor(repo, monkeypatch, rung=rung).script(edit_file(target))
+        scheduler = repo.scheduler([self._implement_task(repo, target)], kind="implement",
+                                   write_target=None)
+        result = scheduler.run()
+        assert result.exit_code == 0, result.messages
+        return target
+
+    def test_on_the_rung_the_evidence_is_outside_the_phase_dir(self, repo, monkeypatch, tmp_path):
+        from utils import write_safety
+        target = self._run(repo, monkeypatch, rung=RUNG)
+        external = Path(write_safety.external_safety_dir(str(repo.phase_dir)))
+        assert external.is_dir()
+        assert external.is_relative_to(tmp_path / "xdg-state")
+        assert not external.is_relative_to(repo.root)
+        assert (external / "pre_batch" / "T001" / "manifest.json").is_file()
+        assert (external / "subagent_audit.jsonl").is_file()
+        assert (external / "phase_dir.txt").read_text().strip() == os.path.realpath(repo.phase_dir)
+        assert not (repo.phase_dir / "pre_batch").exists()
+        assert not (repo.phase_dir / "subagent_audit.jsonl").exists()
+        assert not (repo.phase_dir / "rollback_store").exists()
+        assert write_safety.AuditLog(str(repo.phase_dir)).path == str(external / "subagent_audit.jsonl")
+        # A forged in-phase copy is never read: restore lands the real bytes.
+        forged = repo.phase_dir / "pre_batch" / "T001"
+        (forged / "files").mkdir(parents=True)
+        (forged / "files" / "000-src_app.py").write_text("planted\n")
+        (forged / "manifest.json").write_text(json.dumps({
+            "snapshot_version": 1, "task_id": "T001", "root": str(repo.root),
+            "files": [{"path": "src/app.py", "absolute": str(target), "existed": True,
+                       "sha256_before": "0" * 64, "size_before": 8,
+                       "payload": "000-src_app.py", "declared": True}],
+            "expected_ids": ["T001"],
+        }))
+        from utils import restore_batch
+        results = restore_batch.restore(
+            phase_dir=str(repo.phase_dir), task_ids=["T001"], force=True, dry_run=False,
+        )
+        assert results["T001"] == {"src/app.py": "restored"}
+        assert target.read_text(encoding="utf-8") == "x = 1\n"
+
+    def test_on_codex_own_sandbox_the_phase_dir_is_unchanged(self, repo, monkeypatch):
+        from utils import write_safety
+        self._run(repo, monkeypatch, rung=None)
+        assert (repo.phase_dir / "pre_batch" / "T001" / "manifest.json").is_file()
+        assert (repo.phase_dir / "subagent_audit.jsonl").is_file()
+        assert not Path(write_safety.external_safety_dir(str(repo.phase_dir))).exists()
+
+    def test_a_state_home_inside_the_repository_refuses_the_batch(self, repo, monkeypatch):
+        monkeypatch.setenv("XDG_STATE_HOME", str(repo.root / ".multi-llm" / "state"))
+        src = repo.root / "src"
+        src.mkdir(exist_ok=True)
+        target = src / "app.py"
+        target.write_text("x = 1\n", encoding="utf-8")
+        FakeExecutor(repo, monkeypatch, rung=RUNG).script(edit_file(target))
+        result = repo.scheduler([self._implement_task(repo, target)], kind="implement",
+                                write_target=None).run()
+        assert result.exit_code != 0
+        assert result.outcomes[0].status == executor.STATUS_REJECTED
+        assert "XDG_STATE_HOME" in result.outcomes[0].reason
+        assert target.read_text(encoding="utf-8") == "x = 1\n"

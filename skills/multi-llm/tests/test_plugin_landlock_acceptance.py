@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import json
 import os
+import shlex
 import shutil
 import stat
 import subprocess
@@ -1540,6 +1541,76 @@ class TestTheRealJailThroughTheScheduler:
         assert ".multi-llm/providers.yaml" in text and "driver.write_paths.deny" in text
         assert not jailed.completed(mode)
         assert len(jailed.write_calls()) == 1
+
+
+    def test_a_forged_in_phase_rollback_point_is_inert_on_the_real_jail(self, jailed, capsys):
+        """Review fixes 2026-10-05: under the root grant the batch CAN write
+        the phase dir's `pre_batch/`, `rollback_store/` and audit log — and
+        does, here — but the run's own evidence lives under the state home,
+        which the jail denies, and `util restore-batch` reads only that."""
+        from utils import write_safety
+        from utils.write_safety import AuditLog, TaskSnapshot
+        mode = "implement"
+        root = jailed.root
+        phase_dir = jailed.phase_dir(mode)
+        external = Path(write_safety.external_safety_dir(str(phase_dir)))
+        assert not external.is_relative_to(root)
+        jailed.script(mode)
+        script = json.loads(jailed.script_path.read_text(encoding="utf-8"))
+        forged_manifest = json.dumps({
+            "snapshot_version": 1, "task_id": "T001", "root": str(root),
+            "files": [{"path": "src/main.py", "absolute": str(jailed.main_py), "existed": True,
+                       "sha256_before": "0" * 64, "size_before": 8,
+                       "payload": "000-src_main.py", "declared": True}],
+            "expected_ids": ["T001"],
+        })
+        forged_audit = json.dumps({
+            "event": "completed", "task_id": "T001", "kind": "implement", "status": "partial",
+            "write_outcome": "partial-application", "files_touched": ["src/main.py"],
+            "observed": {"src/main.py": {"sha256_after": "0" * 64}}, "expected_ids": ["T001"],
+        })
+        shell = {
+            "forge_dir": "mkdir -p plans/p/implement/pre_batch/T001/files plans/p/implement/rollback_store/ab",
+            "forge_payload": "echo planted > plans/p/implement/pre_batch/T001/files/000-src_main.py",
+            "forge_manifest": f"printf %s {shlex.quote(forged_manifest)} > plans/p/implement/pre_batch/T001/manifest.json",
+            "forge_audit": f"printf '%s\\n' {shlex.quote(forged_audit)} >> plans/p/implement/subagent_audit.jsonl",
+            "forge_blob": "echo planted > plans/p/implement/rollback_store/ab/abcd",
+            "outside": f"echo planted > {shlex.quote(str(external / 'subagent_audit.jsonl'))}",
+        }
+        script["rules"] = [{
+            "match": BATCH_TEXT[mode][0],
+            "steps": [{"shell": shell, "append": {str(jailed.main_py): marker("{id}")}}],
+        }]
+        jailed.script_path.write_text(json.dumps(script), encoding="utf-8")
+
+        code = jailed.run(mode)
+        cap = capsys.readouterr()
+        text = cap.out + cap.err
+        assert code == 0, text[-6000:]
+        results = jailed.shell_results()
+        assert {name for name in shell if results[name] == 0} == set(shell) - {"outside"}, results
+        assert results["outside"] != 0
+        # The in-phase forgeries landed (the root grant covers them) …
+        assert (phase_dir / "pre_batch" / "T001" / "manifest.json").is_file()
+        assert "planted" in (phase_dir / "pre_batch" / "T001" / "files" / "000-src_main.py").read_text()
+        assert '"sha256_after": "000' in (phase_dir / "subagent_audit.jsonl").read_text(encoding="utf-8")
+        # … and the run's own evidence is elsewhere, untouched by them.
+        assert external.is_dir()
+        assert (external / "pre_batch" / "T001" / "manifest.json").is_file()
+        assert str(external) in text and "live outside it" in text
+        real = TaskSnapshot.load(str(phase_dir), "T001", expected_root=str(root))
+        assert real is not None and os.path.realpath(real.root) == str(root)
+        assert [e.existed for e in real.entries] == [False], "main.py did not exist before T001"
+        records = AuditLog(str(phase_dir)).records()
+        assert all(r.get("observed", {}).get("src/main.py", {}).get("sha256_after") != "0" * 64
+                   for r in records if r.get("event") == "completed")
+        # The restore the stop message would name lands the REAL rollback:
+        # the file is removed (absent before T001), never written "planted".
+        code = multi_llm.main(["util", "restore-batch", "--phase-dir", str(phase_dir),
+                               "--task-id", "T001", "--force"])
+        restored = capsys.readouterr()
+        assert code == 0, restored.out + restored.err
+        assert not jailed.main_py.exists()
 
 
 # ---------------------------------------------------------------------------

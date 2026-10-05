@@ -87,6 +87,10 @@ __all__ = [
     "SnapshotEntry",
     "resolve_repo_root",
     "repo_root_for_report",
+    "safety_dir",
+    "external_safety_dir",
+    "claim_external_safety_dir",
+    "state_home",
     "contain_under_root",
     "relative_to_root",
     "admit_disjoint_groups",
@@ -119,6 +123,67 @@ PAYLOAD_DIRNAME = "files"
 #: snapshot that silently did not happen is worse than a refused batch: the
 #: classification would read "unchanged" for a file with no rollback point.
 MAX_SNAPSHOT_BYTES = 16 * 1024 * 1024
+
+#: Where the rollback evidence of a repo-wide batch on the plugin's Landlock
+#: jail lives instead of the phase dir (review fixes 2026-10-05): under the
+#: user's state home, outside the root grant. The jail handles only write
+#: rights, so a key the batch could not read does not exist — an HMAC over
+#: in-grant files would be forgeable by the very batch it guards against —
+#: while a directory the jail never grants cannot be written at all. The
+#: pre-batch snapshots, the rollback store and the audit log of such a run
+#: are what ``util restore-batch`` and ``--resume`` trust; a copy of any of
+#: them inside the phase dir is the batch's to write and is never read once
+#: this directory exists for the phase.
+STATE_SUBDIR = "write-safety"
+#: The pointer file the out-of-grant directory carries for a human reader.
+STATE_POINTER_NAME = "phase_dir.txt"
+
+
+def state_home() -> str:
+    """``$XDG_STATE_HOME/multi-llm`` (default ``~/.local/state/multi-llm``)."""
+    base = os.environ.get("XDG_STATE_HOME") or os.path.join(
+        os.path.expanduser("~"), ".local", "state"
+    )
+    return os.path.join(base, "multi-llm")
+
+
+def external_safety_dir(phase_dir: str) -> str:
+    """The out-of-grant directory for ``phase_dir``'s rollback evidence —
+    a function of the phase dir's real path alone, so a reader needs
+    nothing inside the grant to find it."""
+    digest = hashlib.sha256(
+        os.path.realpath(str(phase_dir)).encode("utf-8", "surrogateescape")
+    ).hexdigest()[:32]
+    return os.path.join(state_home(), STATE_SUBDIR, digest)
+
+
+def safety_dir(phase_dir: str) -> str:
+    """Where ``phase_dir``'s pre-batch snapshots, rollback store and audit
+    log live: the out-of-grant directory once a jailed repo-wide run claimed
+    it (:func:`claim_external_safety_dir`), else the phase dir itself — every
+    other runner's behaviour, unchanged."""
+    external = external_safety_dir(phase_dir)
+    return external if os.path.isdir(external) else str(phase_dir)
+
+
+def claim_external_safety_dir(phase_dir: str, repo_root: str) -> str:
+    """Create (0700) and return the out-of-grant directory for ``phase_dir``,
+    refusing one that would sit inside ``repo_root`` — inside the grant it
+    protects nothing."""
+    external = external_safety_dir(phase_dir)
+    root = os.path.realpath(repo_root).rstrip(os.sep) + os.sep
+    if os.path.realpath(external).startswith(root):
+        raise WriteSafetyError(
+            f"The rollback evidence of a repo-wide batch on the plugin's jail "
+            f"must live outside the repository, but the state home "
+            f"{state_home()} is inside {repo_root}; set XDG_STATE_HOME to a "
+            f"directory outside it. Nothing was dispatched."
+        )
+    os.makedirs(external, mode=0o700, exist_ok=True)
+    pointer = os.path.join(external, STATE_POINTER_NAME)
+    if not os.path.exists(pointer):
+        _atomic_write(pointer, os.path.realpath(str(phase_dir)) + "\n")
+    return external
 
 
 class WriteSafetyError(Exception):
@@ -501,7 +566,7 @@ class TaskSnapshot:
         before, present after" is the creation case, and recording the absence is
         what lets ``util restore-batch`` delete a file the batch created.
         """
-        directory = Path(phase_dir) / PRE_BATCH_DIRNAME / _safe_component(task_id)
+        directory = Path(safety_dir(phase_dir)) / PRE_BATCH_DIRNAME / _safe_component(task_id)
         payload_dir = directory / PAYLOAD_DIRNAME
         payload_dir.mkdir(parents=True, exist_ok=True)
         entries: List[SnapshotEntry] = []
@@ -582,6 +647,12 @@ class TaskSnapshot:
         if existed:
             if not payload_source or not Path(payload_source).is_file():
                 return None
+            # The retained bytes are content-addressed by `sha256`; a blob
+            # whose bytes no longer hash to it was rewritten after the sweep
+            # retained it (the store sits where the batch can write) and is
+            # no rollback point (review fixes 2026-10-05).
+            if sha256 and file_sha256(payload_source) != sha256:
+                return None
             payload = f"{len(self.entries):03d}-{_safe_component(key)}"
             payload_dir = Path(self.directory) / PAYLOAD_DIRNAME
             payload_dir.mkdir(parents=True, exist_ok=True)
@@ -623,9 +694,18 @@ class TaskSnapshot:
         return str(path)
 
     @classmethod
-    def load(cls, phase_dir: str, task_id: str) -> Optional["TaskSnapshot"]:
-        """Re-read a snapshot from disk (resume, and ``util restore-batch``)."""
-        directory = Path(phase_dir) / PRE_BATCH_DIRNAME / _safe_component(task_id)
+    def load(
+        cls, phase_dir: str, task_id: str, *, expected_root: Optional[str] = None,
+    ) -> Optional["TaskSnapshot"]:
+        """Re-read a snapshot from disk (resume, and ``util restore-batch``).
+
+        With ``expected_root``, a manifest naming another repository root is
+        **refused** (``WriteSafetyError``) rather than loaded: the manifest's
+        ``root`` is where :meth:`restore` writes, and a batch that can write
+        the phase dir could plant one naming any directory (review fixes
+        2026-10-05).
+        """
+        directory = Path(safety_dir(phase_dir)) / PRE_BATCH_DIRNAME / _safe_component(task_id)
         manifest = directory / MANIFEST_NAME
         if not manifest.is_file():
             return None
@@ -633,6 +713,19 @@ class TaskSnapshot:
             data = json.loads(manifest.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError):
             return None
+        recorded_root = str(data.get("root", ""))
+        if expected_root is not None and (
+            not recorded_root
+            or os.path.realpath(recorded_root) != os.path.realpath(expected_root)
+        ):
+            raise WriteSafetyError(
+                f"Refusing the pre-batch snapshot {manifest}: its manifest names "
+                f"{recorded_root or 'no repository root'} as the repository root, "
+                f"but this phase belongs to {os.path.realpath(expected_root)}. A "
+                f"snapshot is restored only under the root it was taken in; a "
+                f"manifest naming another one is a planted or moved rollback "
+                f"point, and nothing is written from it."
+            )
         recorded_ids = data.get("expected_ids")
         return cls(
             task_id=str(data.get("task_id", task_id)),
@@ -712,7 +805,7 @@ class TaskSnapshot:
         cycle's pre-first-dispatch bytes.
         """
         base = f"{_safe_component(task_id)}.items-{cls.items_digest(expected_ids)}"
-        parent = Path(phase_dir) / PRE_BATCH_DIRNAME
+        parent = Path(safety_dir(phase_dir)) / PRE_BATCH_DIRNAME
         found: List[Tuple[int, Path]] = []
         for candidate in parent.glob(f"{base}*"):
             if not (candidate / MANIFEST_NAME).is_file():
@@ -739,7 +832,7 @@ class TaskSnapshot:
         before ``not_before`` (the current review cycle's completion) is a
         previous cycle's and stays aside.
         """
-        slot = Path(phase_dir) / PRE_BATCH_DIRNAME / _safe_component(task_id)
+        slot = Path(safety_dir(phase_dir)) / PRE_BATCH_DIRNAME / _safe_component(task_id)
         if slot.exists():
             return None
         for candidate in cls.set_aside_dirs(phase_dir, task_id, expected_ids):
@@ -883,6 +976,18 @@ class TaskSnapshot:
                 source = Path(self.directory) / PAYLOAD_DIRNAME / entry.payload
                 if not source.is_file():
                     report[relative] = "skipped: snapshot payload is missing"
+                    continue
+                # The payload must still be the bytes the manifest hashed at
+                # snapshot time; a payload rewritten since is not a rollback
+                # point and is never written (review fixes 2026-10-05).
+                payload_hash = file_sha256(str(source))
+                if payload_hash != entry.sha256:
+                    report[relative] = (
+                        "skipped: the snapshot payload no longer matches the "
+                        f"manifest (recorded {_short(entry.sha256)}, payload "
+                        f"{_short(payload_hash)}) — the rollback point was "
+                        "altered after it was taken; nothing written"
+                    )
                     continue
                 try:
                     _replace_with_payload(source, target)
@@ -1149,7 +1254,14 @@ class AuditLog:
     SECRET_FLAG_HINTS = ("key", "token", "secret", "password", "credential", "auth")
 
     def __init__(self, phase_dir: str) -> None:
-        self.path = str(Path(phase_dir) / AUDIT_FILENAME)
+        self.phase_dir = str(phase_dir)
+
+    @property
+    def path(self) -> str:
+        """Resolved on every access: a jailed repo-wide run claims its
+        out-of-grant directory after the scheduler's own ``AuditLog`` exists
+        (:func:`safety_dir`)."""
+        return str(Path(safety_dir(self.phase_dir)) / AUDIT_FILENAME)
 
     # -- writing --------------------------------------------------------
 
