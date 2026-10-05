@@ -816,3 +816,53 @@ class TestCodexNativeAnswer:
         assert outcome.status == executor.STATUS_OK
         assert outcome.structured_output == so.MARKER_NATIVE
         assert "no `structured_output` key" not in capsys.readouterr().err
+
+    def test_an_answer_without_subagent_type_is_completed_then_native(
+        self, lane, capsys
+    ):
+        """Fix round 8: `subagent_type` is required-but-nullable and most
+        replies leave it out. The native answer was validated before the
+        executor filled it in, so it printed "present but did not validate",
+        fell through and was accepted as `recovered` — wrong twice."""
+        document = copy.deepcopy(GENERATED_TASKS_DOC)
+        del document["tasks"][0]["subagent_type"]
+        lane.respond(_codex_stream(json.dumps(document)))
+
+        outcome = lane.dispatch("task_generation", runner="codex:gpt-5.5", timeout=600)
+
+        assert outcome.status == executor.STATUS_OK
+        assert outcome.structured_output == so.MARKER_NATIVE
+        streams = capsys.readouterr()
+        assert "[WARN]" not in streams.err, streams.err
+        assert "the reply omitted 'subagent_type' on 1 task(s)" in streams.out
+        written = json.loads(
+            (lane.phase_dir / "task_generation_result.json").read_text()
+        )
+        assert written["tasks"][0]["subagent_type"] is None
+
+    def test_a_raw_control_character_in_the_answer_is_still_native(
+        self, lane, capsys
+    ):
+        """Fix round 8: the lane reads replies with `strict=False`, the native
+        hook used a strict `json.loads` — so a line break typed raw inside a
+        text value lost the native answer, and codex's own parse then served
+        the document's `tasks` array (an object was expected)."""
+        document = copy.deepcopy(GENERATED_TASKS_DOC)
+        document["plan_preamble"] = "line one\nline two"
+        raw = json.dumps(document).replace("\\n", "\n")
+        lane.respond(_codex_stream(raw))
+
+        outcome = lane.dispatch("task_generation", runner="codex:gpt-5.5", timeout=600)
+
+        assert outcome.status == executor.STATUS_OK, outcome.reason
+        assert outcome.structured_output == so.MARKER_NATIVE
+        assert "[WARN]" not in capsys.readouterr().err
+
+    def test_codex_reads_an_answer_with_a_raw_control_character_whole(self):
+        document = {"status": "applied", "tasks": [{"id": "T001"}], "note": "a\tb"}
+        raw = json.dumps(document).replace("\\t", "\t")
+
+        parsed = get_provider("codex").parse_output(_codex_stream(raw), "")
+
+        assert parsed["success"]
+        assert parsed["data"] == document

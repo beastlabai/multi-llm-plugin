@@ -4,7 +4,7 @@ import os
 import shutil
 from typing import Any, Dict, List, NamedTuple, Optional, Tuple
 
-from ..json_extractor import extract_json_from_text
+from ..json_extractor import _loads_reply, extract_json_from_text
 from .base import (
     PROFILE_AGENT_READONLY,
     PROFILE_AGENT_WRITE,
@@ -1789,10 +1789,17 @@ class CodexProvider(LLMProvider):
 
     @staticmethod
     def _extract_json(text: str) -> Dict[str, Any]:
-        """Parse ``text`` as JSON, falling back to embedded-JSON extraction."""
+        """Parse ``text`` as JSON, falling back to embedded-JSON extraction.
+
+        Read the way the extractor reads a reply (``_loads_reply``: a raw
+        control character inside a string is kept, not fatal). The strict
+        parse failed a whole document over one typed line break, and the
+        array-preferring fallback then served the document's own ``tasks``
+        array where an object was expected (fix round 8).
+        """
         if text.startswith(('[', '{')):
             try:
-                return {"success": True, "data": json.loads(text)}
+                return {"success": True, "data": _loads_reply(text)}
             except json.JSONDecodeError:
                 pass
 
@@ -1869,12 +1876,15 @@ class CodexProvider(LLMProvider):
         the whole of it parses; a message with prose around a document is not
         what strict output produces, and stays on the recovery path. The caller
         validates the value against the schema before marking it ``native``.
+        It parses as the rest of the lane does (``_loads_reply``), so a raw
+        control character inside a string does not lose the native answer
+        (fix round 8).
         """
         try:
             scan = _scan_codex_stream(stdout or "")
             if not scan.messages:
                 return None
-            return json.loads(scan.messages[-1].strip())
+            return _loads_reply(scan.messages[-1].strip())
         except Exception:  # noqa: BLE001 - the hook must never raise
             return None
 
