@@ -590,6 +590,133 @@ class TestFourWriteOutcomes:
         assert result.outcomes[0].status == executor.STATUS_SCHEMA_INVALID
 
 
+class TestReportReAsk:
+    """An apply batch whose closing report cannot be read gets ONE re-ask to
+    restate it (2026-10-05, run 3: an opencode/big-pickle apply batch stopped the
+    phase at exit 3 over its report alone). The re-ask never carries the batch's
+    instructions, must not move a byte, and what was applied is still the
+    snapshot comparison's verdict."""
+
+    GOOD = {"status": "applied", "ids": ["s0"], "files_touched": ["plans/p.md"],
+            "summary": "added the step"}
+    BAD = {"verdict": "looks good"}
+
+    def _calls(self, log):
+        return [json.loads(line) for line in log.read_text().splitlines()]
+
+    def test_an_unreadable_report_is_restated_and_the_batch_is_applied(self, env):
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)], result=self.BAD)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(self.GOOD))
+
+        result = env.scheduler([env.apply_task(0)]).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_OK
+        assert outcome.write_outcome == executor.WRITE_APPLIED
+        assert result.exit_code == 0
+        assert [(a.status, a.repair) for a in outcome.attempts] == [
+            (executor.STATUS_SCHEMA_INVALID, None),
+            (executor.STATUS_OK, executor.REPAIR_SCHEMA_INVALID),
+        ]
+        # The edit landed once: the re-ask restated, it did not re-apply.
+        assert env.plan.read_text(encoding="utf-8").count("edit\n") == 1
+        first, second = [c["prompt"] for c in self._calls(log)]
+        assert "Apply batch 0" in first
+        assert "Apply batch 0" not in second, "the batch's instructions are never re-sent"
+        assert second.startswith("You are re-sending the report of a batch of edits.")
+        assert "Do NOT open, edit, create or delete any file" in second
+        assert '"verdict": "looks good"' in second, "its own previous reply is quoted"
+        assert (env.phase_dir / "apply_batch_0.json").exists()
+
+    def test_the_audit_records_the_prompt_the_re_ask_really_sent(self, env):
+        env.edits([_patch_edit(env.plan)], result=self.BAD)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(self.GOOD))
+
+        env.scheduler([env.apply_task(0)]).run()
+
+        rows = [
+            json.loads(line) for line in
+            (env.phase_dir / "subagent_audit.jsonl").read_text().splitlines()
+        ]
+        dispatched = [r for r in rows if r.get("event") == "dispatched"]
+        assert [r.get("attempt") for r in dispatched] == [1, 2]
+        digests = {json.dumps(r, sort_keys=True) for r in dispatched}
+        assert len(digests) == 2
+
+    def test_a_re_ask_that_moves_a_file_is_a_partial_application(self, env):
+        """Told only to restate its report, the runner re-applied the batch: the
+        re-ask's own edit is unverified, so nothing it did counts as applied."""
+        env.edits([_patch_edit(env.plan)], result=self.BAD)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(self.GOOD))
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_EDITS", "1")
+
+        result = env.scheduler([env.apply_task(0), env.apply_task(1)]).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert outcome.stops_the_loop
+        assert "plans/p.md" in outcome.reason
+        assert "report re-ask" in outcome.reason
+        assert result.exit_code == 3
+        assert len(result.outcomes) == 1, "the loop stopped at the boundary"
+        assert not (env.phase_dir / "apply_batch_0.json").exists()
+
+    def test_a_second_unreadable_report_stops_as_before(self, env):
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)], result=self.BAD)
+
+        result = env.scheduler([env.apply_task(0)]).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_SCHEMA_INVALID
+        assert outcome.write_outcome == executor.WRITE_SCHEMA_REJECTED
+        assert outcome.reason.endswith("(after the one schema-repair re-ask)")
+        assert len(self._calls(log)) == 2, "exactly one re-ask"
+        assert result.exit_code == 3
+
+    def test_the_implement_kind_gets_no_re_ask(self, env):
+        assert "implement" not in executor.SCHEMA_REPAIRS_BY_KIND
+
+    def test_a_dispatch_without_the_file_guard_gets_no_re_ask(self, env, monkeypatch):
+        """No `tree_fingerprint` hook, no proof the re-ask moved nothing: rung 6
+        stays terminal, exactly as it was."""
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)], result=self.BAD)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(self.GOOD))
+        real = executor.dispatch_task
+
+        def without_guard(task, **kwargs):
+            kwargs.pop("tree_fingerprint", None)
+            return real(task, **kwargs)
+
+        monkeypatch.setattr(
+            "utils.write_batch_scheduler.dispatch_task", without_guard
+        )
+        result = env.scheduler([env.apply_task(0)]).run()
+
+        assert result.outcomes[0].status == executor.STATUS_SCHEMA_INVALID
+        assert len(self._calls(log)) == 1
+
+    def test_a_raw_control_byte_in_the_report_needs_no_re_ask(self, env):
+        """The measured reply's shape: a raw control byte in a key (a NUL then;
+        a tab here, because an environment variable cannot carry a NUL) used to
+        fail the object and serve its `files_touched` array as the report."""
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)])
+        env.monkeypatch.setenv(
+            "MOCK_LLM_WRITE_RESULT",
+            '{"status": "applied", "ids\t": ["s0"], "ids": ["s0"], '
+            '"files_touched": ["plans/p.md"], "summary": "added the step"}',
+        )
+
+        result = env.scheduler([env.apply_task(0)]).run()
+
+        assert result.outcomes[0].write_outcome == executor.WRITE_APPLIED
+        assert len(self._calls(log)) == 1
+
+
 class TestVerificationOnlyImplementTask:
     """#2/#33 (2026-10-01 three-host run): generate-tasks emitted T009 "Inline
     module syntax gate" with `Files to modify: none`, and the write loop's D3h

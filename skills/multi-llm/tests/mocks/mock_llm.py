@@ -108,6 +108,12 @@ Environment Variables (New - for scenario-based testing):
     MOCK_LLM_PROSE: When "1", print prose instead of result JSON — the negative
         case for "a runner that returns prose fails the task instead of being
         counted as applied".
+    MOCK_LLM_REPAIR_RESULT: The text the mock prints when the prompt is a write
+        batch's report re-ask (``REPORT_REASK_MARKER``, the ladder's rule 7 for an
+        apply kind). A well-behaved runner edits nothing on that turn, so the
+        mock applies no ``MOCK_LLM_EDITS`` then — unless
+    MOCK_LLM_REPAIR_EDITS: is "1": the misbehaving runner that re-applies the
+        batch while it was only asked to restate its report.
 
 Precedence:
     1. Legacy variables take precedence when set (backward compatibility)
@@ -504,6 +510,11 @@ def apply_mock_edits() -> List[Dict[str, Any]]:
             "mode": mode,
         })
     return applied
+
+
+#: The opening of ``subagent_prompts.build_schema_repair_prompt``'s write form
+#: (a test pins the two together; the mock is standalone and imports nothing).
+REPORT_REASK_MARKER = "You are re-sending the report of a batch of edits."
 
 
 def write_batch_result(applied: List[Dict[str, Any]]) -> str:
@@ -1860,6 +1871,17 @@ def main() -> int:
 
     # Log the call (always, regardless of mode)
     log_call(provider, sys.argv[1:], prompt)
+
+    # A write batch's report re-ask (the ladder's rule 7): a well-behaved
+    # runner restates its report and edits nothing.
+    if REPORT_REASK_MARKER in (prompt or "") and os.environ.get("MOCK_LLM_EDITS"):
+        applied = (
+            apply_mock_edits() if os.environ.get("MOCK_LLM_REPAIR_EDITS") == "1"
+            else []
+        )
+        content = os.environ.get("MOCK_LLM_REPAIR_RESULT") or write_batch_result(applied)
+        print(format_output(provider, content))
+        return 0
 
     # The write path (D3g): edits land BEFORE the result is printed, so the
     # executor's post-run snapshot comparison sees exactly what a real

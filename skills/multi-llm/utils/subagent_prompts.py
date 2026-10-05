@@ -59,8 +59,12 @@ __all__ = [
     "build_human_decision_judge_prompt",
     "build_task_generation_prompt",
     "build_schema_repair_prompt",
+    "SCHEMA_REPAIR_EXAMPLES",
     "SCHEMA_REPAIR_SHAPES",
+    "SCHEMA_REPAIR_TOP_KEYS",
     "TASK_GENERATION_REPLY_SHAPE",
+    "WRITE_REPORT_REPAIR_KINDS",
+    "WRITE_REPORT_REPLY_SHAPE",
     "render_reference_section",
     "reference_section_targets",
 ]
@@ -906,12 +910,86 @@ explanation. Do not write any file; whoever invoked you persists your reply.
 # the one schema-repair re-ask
 # ===========================================================================
 
+#: The reply shape the write kinds' re-ask restates: the batch result contract
+#: (``schemas/write_batch_result.schema.json``) in the spelling the dispatched
+#: prompt already used (``write_batch_scheduler.with_result_contract``).
+WRITE_REPORT_REPLY_SHAPE = '''{"status": "applied", "ids": ["<id>"], "files_touched": ["<repo-relative path>"], "summary": "<one line, at most 200 characters>", "notes": "<optional detail>"}
+
+- `status`: "applied" if the previous turn edited any file, "no-op" if it edited
+  nothing because every change was already present, "failed" if it could not
+  apply the batch.
+- `ids`: the ids the previous reply said it applied (or found already applied).
+- `files_touched`: the repo-relative paths the previous reply said it edited.
+- `summary`: one line, at most 200 characters. Required.
+'''
+
+#: The write kinds a schema-repair re-ask may restate the report of: the three
+#: apply phases (2026-10-05). ``implement`` is deliberately absent — its grant
+#: would be the same mechanism, but it was not part of the measured failure.
+WRITE_REPORT_REPAIR_KINDS = (
+    "apply_suggestions",
+    "apply_task_suggestions",
+    "apply_code_fixes",
+)
+
 #: The reply shape a schema-repair re-ask restates, per kind. A kind absent here
 #: has no repair prompt — which is also why the executor's grant
 #: (``subagent_executor.SCHEMA_REPAIRS_BY_KIND``) can name only kinds listed
 #: here (a test pins it).
 SCHEMA_REPAIR_SHAPES: Dict[str, str] = {
     "task_generation": TASK_GENERATION_REPLY_SHAPE,
+    **{kind: WRITE_REPORT_REPLY_SHAPE for kind in WRITE_REPORT_REPAIR_KINDS},
+}
+
+#: The document's top-level keys, per kind, named in the re-ask as a plain list:
+#: the 2026-10-04 and 2026-10-05 ``opencode/big-pickle`` failures were all
+#: "keys at the wrong level", and a weaker model follows a list more reliably
+#: than it reads one off a skeleton. Pinned against each schema's ``required``
+#: by a test.
+SCHEMA_REPAIR_TOP_KEYS: Dict[str, Sequence[str]] = {
+    "task_generation": ("schema_version", "plan_preamble", "tasks"),
+    **{kind: ("status", "summary") for kind in WRITE_REPORT_REPAIR_KINDS},
+}
+
+#: A minimal reply that passes the kind's whole validation (a test runs it
+#: through ``subagent_executor.validate_result``), shown after the shape so the
+#: re-ask carries one concrete, parseable document and not only placeholders.
+SCHEMA_REPAIR_EXAMPLES: Dict[str, Dict[str, Any]] = {
+    "task_generation": {
+        "schema_version": "1.0",
+        "plan_preamble": (
+            "Build a one-file counter page, index.html, with inline JavaScript "
+            "and no build step."
+        ),
+        "tasks": [
+            {
+                "id": "T001",
+                "title": "Create the counter page",
+                "description": (
+                    "Create index.html with a button and a number; clicking "
+                    "the button shows \"Clicked\" and adds 1 to the number."
+                ),
+                "depends_on": [],
+                "files_to_create": ["index.html"],
+                "files_to_modify": [],
+                "acceptance_criteria": [
+                    "Clicking the button once changes the number from 0 to 1",
+                ],
+                "estimated_complexity": "low",
+                "executor_role": "agent",
+            }
+        ],
+    },
+    **{
+        kind: {
+            "status": "applied",
+            "ids": ["0123456789abcdef"],
+            "files_touched": ["plans/example.md"],
+            "summary": "Added the \"Countdown\" rule to the Race logic section.",
+            "notes": "",
+        }
+        for kind in WRITE_REPORT_REPAIR_KINDS
+    },
 }
 
 #: How many validator errors a re-ask quotes. A wrong-shaped document can fail
@@ -919,21 +997,35 @@ SCHEMA_REPAIR_SHAPES: Dict[str, str] = {
 #: states the whole contract anyway.
 SCHEMA_REPAIR_MAX_ERRORS = 12
 
+#: How much of the previous reply a write kind's re-ask quotes back. The report
+#: object closes the reply, so the tail is the part kept.
+WRITE_REPORT_REPLY_CHARS = 6000
 
-def build_schema_repair_prompt(
-    kind: str, original_prompt: str, errors: Sequence[str]
+#: What a reply that is not valid JSON is told, after the parser's own words.
+#: Both measured causes (2026-10-05) are characters inside a text value: a
+#: double quote left unescaped (`"3", "2", "1" and "GO"` in a description,
+#: twice) and a raw control byte.
+_SYNTAX_HINT = (
+    "The usual cause is a double quote inside a text value: write it as \\\" "
+    "(for example \"the overlay shows \\\"GO\\\"\"), or use single quotes inside "
+    "the text. A line break inside a text value must be written as \\n."
+)
+
+
+def _repair_problems(
+    errors: Sequence[str], syntax_error: Optional[str]
 ) -> str:
-    """The original prompt, then why its reply was rejected and what to send.
-
-    Pure, like every generator here. The original prompt is kept whole — the
-    runner is re-asked the same question, not a shorter one, so a workspace-read
-    kind still explores what it needs — and the appendix quotes the validator's
-    own errors (never a paraphrase) followed by the kind's reply shape, verbatim.
-
-    Raises:
-        KeyError: ``kind`` has no entry in :data:`SCHEMA_REPAIR_SHAPES`.
-    """
-    shape = SCHEMA_REPAIR_SHAPES[kind]
+    """The "what was wrong" paragraph both re-asks share."""
+    if syntax_error:
+        # The validator's errors describe whatever fragment the extractor could
+        # salvage from inside the broken document, not the reply — quoting them
+        # told a model whose keys were right that its keys were wrong.
+        return (
+            "Your reply is not valid JSON, so it could not be read as one "
+            "document:\n\n"
+            f"- {syntax_error}\n\n"
+            f"{_SYNTAX_HINT}"
+        )
     listed = [str(error) for error in errors][:SCHEMA_REPAIR_MAX_ERRORS] or [
         "(the validator gave no detail)"
     ]
@@ -941,19 +1033,128 @@ def build_schema_repair_prompt(
     bullets = "\n".join(f"- {line}" for line in listed)
     if more:
         bullets += f"\n- … and {more} more"
+    return f"The checker reported:\n\n{bullets}"
+
+
+def _repair_rules(kind: str) -> str:
+    keys = ", ".join(f'"{key}"' for key in SCHEMA_REPAIR_TOP_KEYS[kind])
+    lines = [
+        "- ONE JSON object and nothing else: no prose, no markdown fences, no "
+        "text before or after it.",
+        f"- Its top-level keys include {keys}."
+        if kind in WRITE_REPORT_REPAIR_KINDS
+        else f"- Its top-level keys are exactly {keys}.",
+    ]
+    if kind == "task_generation":
+        lines.append(
+            '- Every task goes inside the "tasks" array, never at the top level.'
+        )
+    lines.append(
+        '- Inside a text value, write a double quote as \\" and a line break '
+        "as \\n."
+    )
+    return "\n".join(lines)
+
+
+def build_schema_repair_prompt(
+    kind: str,
+    original_prompt: str,
+    errors: Sequence[str],
+    *,
+    syntax_error: Optional[str] = None,
+    previous_reply: Optional[str] = None,
+) -> str:
+    """The one schema-repair re-ask: why the reply was rejected and what to send.
+
+    Pure, like every generator here. Two forms:
+
+    * **A read kind** (``task_generation``): the original prompt kept whole —
+      the runner is re-asked the same question, not a shorter one, so a
+      workspace-read kind still explores what it needs — then what was wrong,
+      the reply rules, the kind's reply shape verbatim and one minimal valid
+      document.
+    * **A write kind** (:data:`WRITE_REPORT_REPAIR_KINDS`): the original prompt
+      is **not** sent. Its edits are already on disk, and a re-ask that carried
+      the batch's instructions again would invite the runner to apply them a
+      second time on top of the first. The runner is told the edits are done,
+      not to touch any file or run any command, and is handed its own previous
+      reply (the last :data:`WRITE_REPORT_REPLY_CHARS` characters) to restate
+      as the report. What was applied is still decided by the executor's
+      byte comparison against the pre-batch snapshot, never by this report.
+
+    *syntax_error* (``json_extractor.describe_syntax_error``) replaces the
+    validator's errors when the reply's document did not parse: those errors
+    describe a fragment from inside it, not the reply.
+
+    Raises:
+        KeyError: ``kind`` has no entry in :data:`SCHEMA_REPAIR_SHAPES`.
+        ValueError: a write kind with no previous reply to restate.
+    """
+    shape = SCHEMA_REPAIR_SHAPES[kind]
+    problems = _repair_problems(errors, syntax_error)
+    rules = _repair_rules(kind)
+    example = json.dumps(SCHEMA_REPAIR_EXAMPLES[kind], indent=2, ensure_ascii=False)
+
+    if kind in WRITE_REPORT_REPAIR_KINDS:
+        reply = (previous_reply or "").strip()
+        if not reply:
+            raise ValueError(
+                f"a {kind} report re-ask needs the previous reply to restate"
+            )
+        if len(reply) > WRITE_REPORT_REPLY_CHARS:
+            omitted = len(reply) - WRITE_REPORT_REPLY_CHARS
+            reply = (
+                f"[… {omitted} earlier characters omitted …]\n"
+                + reply[-WRITE_REPORT_REPLY_CHARS:]
+            )
+        return f'''You are re-sending the report of a batch of edits. A previous turn
+already made the edits — they are on disk now — but its closing report could not
+be read, so the batch cannot be checked yet.
+
+Do NOT open, edit, create or delete any file, and do not run any command. Do not
+redo or add to the edits. This turn only re-sends the report; the edits are
+checked against the files on disk, never against what the report says.
+
+## What was wrong with the report
+
+{problems}
+
+## The previous turn's reply
+
+<<<PREVIOUS REPLY
+{reply}
+PREVIOUS REPLY>>>
+
+## Reply
+
+Restate that reply's report. Take every value from it; never name an id or a
+file it does not name.
+
+{rules}
+
+The shape:
+
+{shape}
+A complete example of the format (not its content):
+
+{example}'''
+
     return f'''{original_prompt.rstrip()}
 
 ## Your previous reply was rejected
 
-Your previous reply did not match the required JSON shape, so nothing was
-written. The validator reported:
+Nothing was written. {problems}
 
-{bullets}
+## Reply again with the whole document, corrected
 
-Reply again with the corrected document: ONE JSON object of exactly this shape
-and nothing else — no prose, no markdown fences, no keys of your own.
+{rules}
 
-{shape}'''
+The shape:
+
+{shape}
+A minimal complete reply with one task — copy its format, not its content:
+
+{example}'''
 
 
 # ===========================================================================

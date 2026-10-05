@@ -985,8 +985,15 @@ class TestSchemaRepairReAsk:
         assert "## Your previous reply was rejected" in repair
         assert "missing required field 'tasks'" in repair
         assert "unexpected field 'acceptance_criteria'" in repair
-        from utils.subagent_prompts import TASK_GENERATION_REPLY_SHAPE
-        assert repair.rstrip().endswith(TASK_GENERATION_REPLY_SHAPE.rstrip())
+        from utils.subagent_prompts import (
+            SCHEMA_REPAIR_EXAMPLES,
+            TASK_GENERATION_REPLY_SHAPE,
+        )
+        assert TASK_GENERATION_REPLY_SHAPE.rstrip() in repair
+        # It closes on one complete, parseable document of the right shape.
+        assert repair.rstrip().endswith(
+            json.dumps(SCHEMA_REPAIR_EXAMPLES["task_generation"], indent=2)
+        )
 
         # Both attempts are on record: the rejected one as a failure capture,
         # the re-ask in the batch report under its own name.
