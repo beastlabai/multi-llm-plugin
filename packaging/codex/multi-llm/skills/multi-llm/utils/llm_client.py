@@ -2458,6 +2458,9 @@ def invoke_with_provider(
                 exit_code=result.returncode,
                 phase=schema_phase,
                 model=f"{provider_name}:{model}",
+                native_document=structured_output.native_document_for(
+                    provider, result.stdout
+                ),
             )
             if verdict.warning:
                 print(f"[WARN] {verdict.warning}", file=sys.stderr)

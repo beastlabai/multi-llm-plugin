@@ -1928,6 +1928,50 @@ def count_review_groups(groups: Mapping[str, str]) -> Dict[str, int]:
     return counts
 
 
+def worktree_fingerprint(
+    repo_root: str, *, exclude_prefixes: Iterable[str] = ()
+) -> Optional[str]:
+    """One digest over the files git sees in the worktree: tracked plus
+    untracked-not-ignored, each as ``path``, size and ``mtime_ns``.
+
+    What a resumed ``implement`` asks before re-running a verification-only
+    task that failed: has anything the check could have read changed since?
+    (racing re-run 3, 2026-10-05: ``--resume`` re-ran a read-only
+    ``html-validate`` check on an unchanged page, 148 s for the same
+    failure). Cheap on purpose — one ``git ls-files`` plus an ``lstat`` per
+    path, no content hashing — and a ``mtime`` move counts as a change, so
+    the answer errs towards re-running. Gitignored paths are left out, since
+    a host's transcript or a build log growing beside the code is not a code
+    change. *exclude_prefixes* are repo-relative directories (the plugin's
+    own output trees) whose files are left out too. ``None`` when git cannot
+    answer, so a caller re-runs rather than guesses.
+    """
+    try:
+        stdout, _, returncode = _run_git(
+            "ls-files", "--cached", "--others", "--exclude-standard", "-z",
+            "--full-name", "--", ":/",
+            check=False, cwd=repo_root,
+        )
+    except OSError:
+        return None
+    if returncode != 0:
+        return None
+    excluded = tuple(
+        prefix.strip("/").replace(os.sep, "/") + "/"
+        for prefix in exclude_prefixes if prefix and prefix.strip("/")
+    )
+    digest = hashlib.sha256()
+    for path in sorted(p for p in stdout.split("\0") if p):
+        if path.startswith(excluded):
+            continue
+        try:
+            info = os.lstat(os.path.join(repo_root, path))
+        except OSError:
+            continue
+        digest.update(f"{path}\0{info.st_size}\0{info.st_mtime_ns}\n".encode("utf-8"))
+    return digest.hexdigest()
+
+
 def list_worktree_untracked_files() -> Optional[List[str]]:
     """Every untracked, not-ignored file in the whole worktree, root-relative.
 

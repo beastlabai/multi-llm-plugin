@@ -678,7 +678,11 @@ def _run_util_instructions(args: Sequence[str], ctx: ResultContext) -> int:
                 "failure — it means no run is recorded (every phase a host ran "
                 "in the foreground) or one is still running, the poll "
                 "contract; 0 and 3 are a finished run's verdict, and only 1 is "
-                "an error (the phase dir could not be read)."
+                "an error (the phase dir could not be read). To report it to "
+                "the user on a host that shows any non-zero exit as an error, "
+                "add --exit-zero: the call then exits 0 whenever the status was "
+                "read, and the run's state is still in its text. Keep that flag "
+                "off a poll whose loop reads the exit code."
             )
         # The end marker is unconditional across `util instructions`, so "search
         # for the end line" is a rule with no exception for a reader to hold. This
@@ -995,7 +999,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # ever observe its own exit status (after the double-spawn nothing is its
         # parent), so it records its own outcome before exiting. A no-op in every
         # other invocation.
-        _close_detached_run(exit_code, crash, ctx.state)
+        _close_detached_run(exit_code, crash or ctx.error, ctx.state)
         deactivate_result()
         clear_invocation()
 

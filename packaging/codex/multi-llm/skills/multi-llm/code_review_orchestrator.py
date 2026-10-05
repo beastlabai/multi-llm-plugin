@@ -69,7 +69,9 @@ from utils.state_manager import (
     stamp_stable_ids,
     CURRENT_FORMAT_VERSION,
 )
-from utils.output_handler import get_phase_dir, output_dir_path, phase_dir_path
+from utils.output_handler import (
+    get_phase_dir, output_dir_path, phase_dir_path, workflow_file_entries,
+)
 from utils.detach import record_output_files, report_progress
 from utils.progress_tracker import DEADLINE_ERROR, FanoutProgress, PhaseProgress
 from utils.readonly_audit import combine_audits
@@ -616,10 +618,25 @@ def resolve_review_scope(
             )
             return ReviewScope(explicit, SCOPE_SOURCE_FILES_FLAG, {})
 
+    # The plan, its task list and the output folder are never code under
+    # review, whichever branch below names them: an older `tracked_files`
+    # holds the plan and `tasks.md` an apply phase recorded, and the git-diff
+    # fallback sees the plan the planning phases edited (2026-10-05, Codex
+    # racing run 3: `tasks.md` reviewed as code, two duplicate findings).
+    workflow = review_workflow_entries(state, anchor, repo_root)
+
     tracked_files = state.get("tracked_files", [])
-    if tracked_files:
-        print(f"Using {len(tracked_files)} tracked files from implementation phase")
-        entries = [entry for entry in tracked_files if isinstance(entry, dict)]
+    entries = [
+        entry for entry in (tracked_files or [])
+        if isinstance(entry, dict) and entry.get("path")
+    ]
+    kept_paths = set(_drop_workflow_paths(
+        [entry["path"] for entry in entries], workflow,
+    ))
+    entries = [entry for entry in entries if entry["path"] in kept_paths]
+    if entries:
+        paths = list(dict.fromkeys(entry["path"] for entry in entries))
+        print(f"Using {len(paths)} tracked files from implementation phase")
         # First entry wins for a path listed twice. The paths themselves stay
         # a de-duplicated *set*: the review order is `order_review_paths`'s
         # job, and nobody may take one from here.
@@ -628,7 +645,6 @@ def resolve_review_scope(
             path, task_id = entry.get("path"), entry.get("task_id")
             if path and task_id and path not in task_ids:
                 task_ids[path] = str(task_id)
-        paths = list(set(entry.get("path", "") for entry in entries if entry.get("path")))
         return ReviewScope(paths, SCOPE_SOURCE_TRACKED, task_ids)
 
     # Fallback to git diff (legacy behavior or no implement phase run)
@@ -645,6 +661,7 @@ def resolve_review_scope(
         changed_files = get_files_changed_since_ref(base_ref)
     except Exception:
         changed_files = []
+    changed_files = _drop_workflow_paths(changed_files, workflow)
 
     # Filter out pre-existing changes that were present before implementation.
     # Through `subtract_baseline`, so a baseline entry that is an untracked
@@ -667,8 +684,48 @@ def resolve_review_scope(
         subtracted=filtered_count,
         anchor=anchor,
         repo_root=repo_root,
+        workflow=workflow,
     )
     return ReviewScope(changed_files, SCOPE_SOURCE_GIT_DIFF, {})
+
+
+def review_workflow_entries(
+    state: Any, anchor: Optional[str], repo_root: Optional[str],
+) -> List[str]:
+    """The workflow's own files for this review, relative to *repo_root*.
+
+    ``output_handler.workflow_file_entries`` for the plan (*anchor*, else the
+    state's ``plan_path``), with the folder the state file lives in added
+    when the state object has one. Empty when no plan or no repository is
+    known: nothing is left out on a guess.
+    """
+    plan = anchor or (state.get("plan_path") if hasattr(state, "get") else None)
+    root = repo_root or get_project_root_from_dir()
+    if not root:
+        return []
+    state_file = getattr(state, "state_file", None)
+    folders = (
+        [Path(state_file).parent]
+        if isinstance(state_file, (str, os.PathLike)) else []
+    )
+    return workflow_file_entries(plan, root=root, output_dirs=folders)
+
+
+def _drop_workflow_paths(paths: List[str], workflow: List[str]) -> List[str]:
+    """*paths* without the workflow's own files, saying once what went."""
+    if not workflow or not paths:
+        return list(paths)
+    kept = subtract_baseline(paths, workflow)
+    kept_set = set(kept)
+    dropped = sorted({path for path in paths if path not in kept_set})
+    if dropped:
+        print(
+            f"Left out {len(dropped)} of the workflow's own file(s) (the plan, "
+            f"its task list and its output folder are never code under "
+            f"review): {', '.join(dropped[:5])}"
+            f"{', …' if len(dropped) > 5 else ''}"
+        )
+    return kept
 
 
 def _announce_fallback_scope(
@@ -680,6 +737,7 @@ def _announce_fallback_scope(
     subtracted: int,
     anchor: Optional[str],
     repo_root: Optional[str] = None,
+    workflow: List[str] = (),
 ) -> None:
     """Print ``[SCOPE_FALLBACK]`` (and ``[SCOPE_LARGE]``) for a git-diff scope.
 
@@ -713,6 +771,11 @@ def _announce_fallback_scope(
     )
 
     untracked = list_worktree_untracked_files()
+    if untracked and workflow:
+        # The plugin's own output folder is not a file the diff "left out":
+        # naming its 200 phase artifacts buried the one new source file
+        # (2026-10-05, Codex racing run 3: `index.html` among them).
+        untracked = subtract_baseline(untracked, list(workflow))
     if untracked is None:
         print(
             "[SCOPE_FALLBACK] untracked in worktree, not reviewed: unknown "
@@ -1245,7 +1308,14 @@ def build_implementation_record(plan_path: Path) -> str:
         for task_id, status in unfinished:
             reason = state.get_task_status_reason(task_id)
             rendered = f"{task_id} ({status}{f': {reason}' if reason else ''})"
-            if status in ("skipped", "deferred") or (status == "pending" and reason):
+            # A `pending` task whose reason says the implement run stopped
+            # before dispatching it (`not run — …`, racing re-run 3,
+            # 2026-10-05) was never decided against: its missing work is
+            # exactly the gap to report.
+            not_run = bool(reason) and str(reason).startswith("not run")
+            if status in ("skipped", "deferred") or (
+                status == "pending" and reason and not not_run
+            ):
                 decided.append(rendered)
             else:
                 unfinished_gaps.append(rendered)

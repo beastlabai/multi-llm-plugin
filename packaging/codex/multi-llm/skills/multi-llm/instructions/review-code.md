@@ -212,10 +212,10 @@ to bare `python`.
    relay its `models:` table once:
 
    ```bash
-   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "$PLAN_PATH" --phase code-review --host <host-id> --view run
+   uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" status "$PLAN_PATH" --phase code-review --host <host-id> --view run --exit-zero
    ```
 
-   This call exits `2` while the run is live — `status`'s poll contract, not a failure — and a host that shows a non-zero exit as an error will show one here: read the table, not the code (only `1`, unreadable, is an error).
+   `--exit-zero` makes this read exit `0` whenever the status was read, so a host that shows a non-zero exit as an error shows none here; without it the call exits `2` while the run is live — `status`'s poll contract, not a failure. Read the table, not the code (only `1`, unreadable, is an error), and keep the flag off any poll whose loop reads the exit code.
 
    That table is the roster: one row per model, and a row's spec *is* the CLI and
    the model it runs, so nothing has to be derived — `codex:gpt-6-astra:xhigh` is
@@ -272,7 +272,9 @@ to bare `python`.
    printed a command, so compose the line above, and keep `--host` on it — the
    wait is clamped under the shell ceiling that flag names, and without it the
    clamp falls back to the tightest ceiling on record and silently shortens
-   every poll. Then give the **call itself** a timeout of at least `<interval>`
+   every poll. Add `--exit-zero` to that composed line too: on such a host
+   only exit `1` decides anything (rule 2), and the flag keeps every normal
+   poll from showing as an error. Then give the **call itself** a timeout of at least `<interval>`
    plus 30 seconds, **in whatever unit that parameter takes** — your host's
    *run detached* answer states it, and a host whose unit is not seconds needs
    that number scaled to it rather than copied. Get it wrong and the call asks
@@ -397,6 +399,8 @@ to bare `python`.
      with a sample) and, above 200 source and test files, `[SCOPE_LARGE]` with
      its remedy. Relay a `[SCOPE_FALLBACK]` or `[SCOPE_LARGE]` line to the user:
      the review is over a guessed scope.
+   - `Left out N of the workflow's own file(s) …` - the plan, its task list and
+     its output folder are never reviewed as code, whichever source named them.
    - `Files to review: N` - the resolved scope every reviewer is given, source
      files first
    - `Review scope written (scope <id>, coverage complete|partial, …)` - the

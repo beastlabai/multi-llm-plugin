@@ -4123,6 +4123,21 @@ class LLMProvider(ABC):
         """
         return None
 
+    def native_structured_output(self, stdout: str) -> Any:
+        """The document the CLI's own schema enforcement produced, or ``None``.
+
+        Only meaningful on a dispatch that carried a schema
+        (:attr:`structured_output_support`): the caller —
+        ``structured_output.classify_attempt`` — validates whatever this returns
+        against the same schema file before calling it ``native``, so an
+        override can never upgrade prose to validated output. The default has
+        no opinion: claude's ``structured_output`` key is read off its result
+        envelope by the caller itself. An adapter whose CLI delivers the
+        constrained document somewhere else (codex: the final
+        ``agent_message``'s whole text) says where. Must never raise.
+        """
+        return None
+
     def parse_version(self, stdout: str, stderr: str) -> Optional[str]:
         """Recover the CLI version from ``version_cmd`` output (D3m).
 

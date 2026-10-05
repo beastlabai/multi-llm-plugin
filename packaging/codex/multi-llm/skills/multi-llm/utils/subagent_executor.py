@@ -58,7 +58,12 @@ from typing import (
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
     from . import structured_output
-    from .json_extractor import extract_json_from_text, is_answer_shaped
+    from .json_extractor import (
+        describe_syntax_error,
+        enclosing_syntax_error,
+        extract_json_from_text,
+        is_answer_shaped,
+    )
     from .llm_client import (
         SALVAGE_FAILURE_KEY,
         SALVAGE_FAILURE_TIMEOUT,
@@ -181,7 +186,12 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import process_control
     from utils import structured_output
-    from utils.json_extractor import extract_json_from_text, is_answer_shaped
+    from utils.json_extractor import (
+        describe_syntax_error,
+        enclosing_syntax_error,
+        extract_json_from_text,
+        is_answer_shaped,
+    )
     from utils.llm_client import (
         SALVAGE_FAILURE_KEY,
         SALVAGE_FAILURE_TIMEOUT,
@@ -553,19 +563,31 @@ SCHEMA_PHASE_BY_KIND = {
 
 
 #: The ladder's rule 7, granted per kind: how many schema-repair re-asks a
-#: ``schema_invalid`` attempt of that kind gets before rung 6 is terminal. One,
-#: for ``task_generation`` alone (2026-10-05): it is the one kind whose prompt is
-#: the *only* contract on a runner with no structured output (opencode declares
-#: none), and the one whose rung-6 failure dead-ends a whole phase — measured
-#: 2026-10-04, ``opencode/big-pickle`` answered twice with
-#: ``acceptance_criteria``/``depends_on`` at the top level and no
-#: ``schema_version``/``plan_preamble``/``tasks``, and generate-tasks exited 3
-#: both times. Every other kind keeps rung 6 terminal: a validation or
-#: consolidation batch is one of many and fails alone, and a write kind's
-#: result describes edits already made. A kind listed here must have a shape in
+#: ``schema_invalid`` attempt of that kind gets before rung 6 is terminal.
+#:
+#: * ``task_generation`` (2026-10-05): the one kind whose prompt is the *only*
+#:   contract on a runner with no structured output (opencode declares none),
+#:   and the one whose rung-6 failure dead-ends a whole phase — measured
+#:   2026-10-04, ``opencode/big-pickle`` answered the wrong shape twice and
+#:   generate-tasks exited 3 both times.
+#: * the three apply kinds (2026-10-05, run 3): one big-pickle apply batch's
+#:   report was unreadable and the whole phase stopped at exit 3 until a
+#:   ``--resume`` re-ran the batch. A write kind's reply is the report of edits
+#:   already on disk, so its re-ask is a different question
+#:   (``subagent_prompts.build_schema_repair_prompt``'s write form): the
+#:   original prompt is not re-sent, the runner restates its own previous
+#:   reply without touching a file, and the dispatch fails as a partial
+#:   application if any file moved during it (``tree_fingerprint``).
+#:   ``implement`` keeps rung 6 terminal.
+#:
+#: Validation and consolidation keep rung 6 terminal: a batch is one of many
+#: and fails alone. A kind listed here must have a shape in
 #: ``subagent_prompts.SCHEMA_REPAIR_SHAPES``.
 SCHEMA_REPAIRS_BY_KIND = {
     "task_generation": 1,
+    "apply_suggestions": 1,
+    "apply_task_suggestions": 1,
+    "apply_code_fixes": 1,
 }
 
 
@@ -861,6 +883,15 @@ class TaskOutcome:
     #: ``_verification_only``): its write outcome reads as
     #: :func:`write_outcome_label` says — ``verified`` for a ``no-op``.
     verification_only: bool = False
+    #: The runner's own ``notes`` for a write batch (what a check reported:
+    #: the validator's lines, the failing command), bounded. Carried so the
+    #: stop message and a later ``--resume`` can say what failed rather than
+    #: only that it did (racing re-run 3, 2026-10-05).
+    runner_notes: Optional[str] = None
+    #: A resumed verification-only task that was NOT dispatched again because
+    #: nothing in the repository changed since it failed (the scheduler's
+    #: unchanged-tree guard). No child ran, so no metric is recorded for it.
+    not_rerun: bool = False
 
     @property
     def ok(self) -> bool:
@@ -881,6 +912,20 @@ class TaskOutcome:
         return RUNG_BY_STATUS.get(self.status)
 
     @property
+    def repair(self) -> Optional[str]:
+        """The re-ask this task's dispatch sent (the ladder's rule 7), if any.
+
+        The attempt that carried it already says so; the row says it too, so a
+        reader of ``subagent_batch_report.json`` sees ``repair:
+        schema_invalid`` beside the task's final status without walking its
+        attempts (2026-10-05: only ``attempt_count: 2`` showed it).
+        """
+        for attempt in self.attempts:
+            if attempt.repair:
+                return attempt.repair
+        return None
+
+    @property
     def fatal(self) -> bool:
         return self.status in FATAL_STATUSES
 
@@ -894,6 +939,8 @@ class TaskOutcome:
             "attempt_count": len(self.attempts),
             "duration_seconds": round(self.duration_seconds, 3),
         }
+        if self.repair:
+            out["repair"] = self.repair
         if self.rung is not None:
             out["rung"] = self.rung
         if self.output_path:
@@ -910,6 +957,10 @@ class TaskOutcome:
                 # Additive and only here, so every other row is unchanged.
                 out["verification_only"] = True
                 out["outcome_label"] = self.outcome_label
+            if self.runner_notes:
+                out["runner_notes"] = self.runner_notes
+            if self.not_rerun:
+                out["not_rerun"] = True
             out["files_touched"] = list(self.files_touched)
             if self.summary:
                 out["summary"] = self.summary
@@ -1395,7 +1446,7 @@ def _resolve_task_source(
     if recorded and task_id in recorded:
         return (
             recorded[task_id],
-            f"tasks[{task_id}].runner (recorded from a previous attempt)",
+            f"tasks[{task_id}].runner {_RECORDED_RUNNER_SUFFIX}",
             "",
         )
     hint = task.get("model_hint")
@@ -4291,11 +4342,17 @@ def _probe_nested_exec(
     streams = f"{capture.stdout or ''}\n{capture.stderr or ''}".lower()
 
     if capture.timed_out:
+        # A note, not a warning (2026-10-05, run 3): nothing here is the
+        # user's to act on. A slow model's first turn routinely outlives the
+        # probe (opencode/big-pickle, every run), the batch is dispatched anyway,
+        # and a host that really blocks nested runs fails that batch with its
+        # own timeout, which is where the user is told.
         print(
-            f"multi-llm warning: the nested-exec probe for {spec} on host "
-            f"{host_id} did not finish within {NESTED_PROBE_TIMEOUT_S:.0f}s — "
-            f"recording nested_exec 'unknown' for {opened}. A wedged sandbox "
-            f"will resurface as a per-task timeout (D3k rung 2).",
+            f"[exec-subagents] note: the start-up check for {spec} (a one-word "
+            f"test turn) did not answer within {NESTED_PROBE_TIMEOUT_S:.0f}s, so "
+            f"it is unconfirmed that host {host_id} lets the runner start its "
+            f"own model turn; dispatching anyway (nested_exec 'unknown' for "
+            f"{opened}). Nothing to do unless a batch then times out.",
             file=sys.stderr,
         )
         return "unknown"
@@ -6286,6 +6343,7 @@ def dispatch_task(
     after_attempt: Optional[Callable[[Attempt], None]] = None,
     changed_files: Optional[Callable[[Dict[str, Any]], Sequence[str]]] = None,
     jail_request: Optional[JailRequest] = None,
+    tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]] = None,
 ) -> TaskOutcome:
     """Dispatch one task and return its :class:`TaskOutcome` (D3k classified).
 
@@ -6368,6 +6426,15 @@ def dispatch_task(
             EACCES the parent classifies as the jail's — is recorded rejected
             with one ``[JAIL_DENIED]`` line, never retried and never moved to
             another rung.
+        tree_fingerprint: The write lane's guard on a report re-ask (the
+            ladder's rule 7 for an apply kind, :data:`SCHEMA_REPAIRS_BY_KIND`).
+            Called with ``{task, task_id, kind, cwd, outcome}`` just before the
+            re-ask and again after it; it returns a comparable value naming the
+            current bytes of every file the batch may have moved (a dict keyed
+            by path, so a difference can be named). Any difference — or a hook
+            that raises — records the re-ask ``partial_application``: it was
+            asked only to restate the batch's report, so a file it moved is an
+            edit nobody verified. Without the hook a write kind gets no re-ask.
     """
     task_id = str(task.get("task_id", ""))
     kind = str(task.get("kind", ""))
@@ -6545,6 +6612,13 @@ def dispatch_task(
     # errors. A transport retry after the re-ask re-sends the re-ask.
     attempt_prompt = prompt
     attempt_repair: Optional[str] = None
+    # A write kind's report re-ask: the files' state when it was granted, which
+    # the re-ask must leave exactly as it found it (`tree_fingerprint`).
+    repair_baseline: Any = None
+    fingerprint_context = {
+        "task": task, "task_id": task_id, "kind": kind, "cwd": cwd,
+        "outcome": outcome,
+    }
 
     def elapsed() -> float:
         # D3j: wall-clock across *every* attempt, including the backoff sleeps
@@ -6605,6 +6679,7 @@ def dispatch_task(
                     "cwd": cwd,
                     "attempt": attempt_index,
                     "prompt": attempt_prompt,
+                    "repair": attempt_repair,
                     "transport": transport,
                     "outcome": outcome,
                 })
@@ -6678,6 +6753,20 @@ def dispatch_task(
             status, error = STATUS_REJECTED, denied_line
         else:
             status, error = _classify_pre_parse(capture)
+        if repair_baseline is not None:
+            moved = _moved_during_repair(
+                tree_fingerprint, fingerprint_context, repair_baseline
+            )
+            if moved is not None:
+                shown = ", ".join(moved[:5]) + (", …" if len(moved) > 5 else "")
+                status, error = STATUS_PARTIAL, (
+                    f"PARTIAL APPLICATION: the report re-ask (attempt "
+                    f"{attempt_index}) was asked only to restate this batch's "
+                    f"report, but files changed while it ran ({shown}). Nothing "
+                    f"it did is recorded as applied, no further attempt is "
+                    f"started, the batch loop stops here and the phase is NOT "
+                    f"marked completed."
+                )
 
         if status == STATUS_OK:
             status, error, data, marker = _parse_with_schema_policy(
@@ -6846,15 +6935,31 @@ def dispatch_task(
         # exhausted structured-output budget (§4.2.1: the CLI already spent the
         # pinned re-ask), so it is not repairable here either; nor is a valid
         # document `persist_result` refused for its size (`data` dropped above).
-        action = ladder.record(status, repairable=data is not None)
+        repairable = data is not None
+        reply_text: Optional[str] = None
+        if repairable and status == STATUS_SCHEMA_INVALID and kind in WRITE_KINDS:
+            # A write kind's re-ask restates the runner's own previous reply, so
+            # it needs that reply, the hook that proves it moved nothing, and an
+            # attempt the jail denied nothing in (its verdict would otherwise
+            # be read off the re-ask's clean stream instead).
+            reply_text = _reply_text(provider, capture.stdout)
+            repairable = _write_report_repairable(
+                capture, reply_text, tree_fingerprint
+            )
+        action = ladder.record(status, repairable=repairable)
         if action.retry and action.repair:
-            # The one schema-repair re-ask: same runner, same deadline, the
-            # original prompt plus the validator's own errors and the kind's
-            # reply shape. The errors are re-read from the extracted document,
-            # because the status line keeps only five.
+            # The one schema-repair re-ask: same runner, same deadline. A read
+            # kind gets the original prompt plus what was wrong and the reply
+            # shape; a write kind gets only its own previous reply to restate,
+            # never the batch's instructions again. The errors are re-read from
+            # the extracted document, because the status line keeps only five,
+            # and a reply that is not valid JSON is told so instead of being
+            # handed the errors of a fragment from inside it.
             problems = validate_result(kind, data)
+            syntax = _reply_syntax_error(provider, capture, data)
             repair_prompt = build_schema_repair_prompt(
-                kind, prompt, problems or [error]
+                kind, prompt, problems or [error], syntax_error=syntax,
+                **({"previous_reply": reply_text} if kind in WRITE_KINDS else {}),
             )
             too_long = _prompt_over_budget(
                 provider, model, repair_prompt, transport, profile,
@@ -6864,14 +6969,34 @@ def dispatch_task(
             if too_long is not None:
                 error = f"{error} (no schema-repair re-ask: {too_long})"
                 break
+            if kind in WRITE_KINDS:
+                try:
+                    repair_baseline = tree_fingerprint(fingerprint_context)
+                except Exception as exc:  # noqa: BLE001 - fail closed: no re-ask
+                    error = (
+                        f"{error} (no report re-ask: the files' state before it "
+                        f"could not be recorded, {type(exc).__name__})"
+                    )
+                    break
             attempt_prompt = repair_prompt
             attempt_repair = REPAIR_SCHEMA_INVALID
-            print(
-                f"[exec-subagents] {task_id}: the reply does not match the "
-                f"{kind} result shape ({len(problems) or 1} problem(s)); "
-                f"re-asking {runner} once with the validator's errors "
-                f"(schema repair, attempt {attempt_index + 1})."
-            )
+            if kind in WRITE_KINDS:
+                print(
+                    f"[exec-subagents] {task_id}: the batch's closing report "
+                    f"could not be read; asking {runner} once to restate it "
+                    f"without touching any file (report re-ask, attempt "
+                    f"{attempt_index + 1}). What was applied is still decided "
+                    f"by comparing the files with the pre-batch snapshot."
+                )
+            else:
+                print(
+                    f"[exec-subagents] {task_id}: the reply "
+                    + ("is not valid JSON" if syntax else
+                       f"does not match the {kind} result shape "
+                       f"({len(problems) or 1} problem(s))")
+                    + f"; re-asking {runner} once with what was wrong "
+                    f"(schema repair, attempt {attempt_index + 1})."
+                )
             continue
         if action.retry:
             if action.delay:
@@ -6929,6 +7054,52 @@ def _denied_write_turn(
         f"half-applied edit is unsafe. The batch loop stops here and the phase "
         f"is NOT marked completed."
     )
+
+
+def _write_report_repairable(
+    capture: Any,
+    reply_text: Optional[str],
+    tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]],
+) -> bool:
+    """Whether a write attempt's unreadable report may be re-asked (rule 7).
+
+    All three, or rung 6 stays terminal exactly as before: a previous reply to
+    restate, the hook that proves the re-ask moved nothing, and a stream the
+    plugin's jail recorded no denial on — the jail's verdict is read off the
+    attempt's own stream, so a re-ask with a clean stream would launder it.
+    """
+    if tree_fingerprint is None or not (reply_text or "").strip():
+        return False
+    denials = getattr(capture, "jail_denials", None)
+    if denials is not None and getattr(denials, "total", 0):
+        return False
+    return True
+
+
+def _moved_during_repair(
+    tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]],
+    context: Dict[str, Any],
+    baseline: Any,
+) -> Optional[List[str]]:
+    """The paths a report re-ask moved, or ``None`` when it moved nothing.
+
+    A hook that raises is "could not tell", which fails closed as a move.
+    """
+    if tree_fingerprint is None:  # pragma: no cover - a baseline needs the hook
+        return ["<the files could not be compared>"]
+    try:
+        after = tree_fingerprint(context)
+    except Exception as exc:  # noqa: BLE001 - fail closed
+        return [f"<the files could not be compared: {type(exc).__name__}>"]
+    if after == baseline:
+        return None
+    if isinstance(after, dict) and isinstance(baseline, dict):
+        moved = sorted(
+            str(path) for path in set(after) | set(baseline)
+            if after.get(path) != baseline.get(path)
+        )
+        return moved or ["<the files could not be compared>"]
+    return ["<the files could not be compared>"]
 
 
 def _prompt_over_budget(
@@ -7145,6 +7316,47 @@ def _classify_pre_parse(capture: _Capture) -> Tuple[str, str]:
     return STATUS_OK, ""
 
 
+def _reply_text(provider: Any, stdout: str) -> Optional[str]:
+    """The runner's own reply text, or ``None`` when there is none to quote.
+
+    The adapter's :meth:`salvage_text` when it has an opinion (the assistant's
+    own words, never tool output or event framing); else the ``result`` string
+    of a one-object result envelope; else the stream itself, which for a CLI
+    that prints its answer as plain text is the reply. Never raises.
+    """
+    try:
+        text = provider.salvage_text(stdout or "")
+    except Exception:  # noqa: BLE001 - a diagnosis must never fail a dispatch
+        text = None
+    if isinstance(text, str):
+        return text if text.strip() else None
+    body = (stdout or "").strip()
+    if body.startswith("{"):
+        try:
+            envelope = json.loads(body)
+        except json.JSONDecodeError:
+            envelope = None
+        if isinstance(envelope, dict) and isinstance(envelope.get("result"), str):
+            return envelope["result"] if envelope["result"].strip() else None
+    return body or None
+
+
+def _reply_syntax_error(provider: Any, capture: _Capture, data: Any) -> Optional[str]:
+    """Why the reply's JSON did not parse, when ``data`` is a fragment of it.
+
+    ``json_extractor.enclosing_syntax_error`` on the runner's reply text,
+    rendered as one redacted line; ``None`` when ``data`` is the whole document
+    (its validation errors are then the reply's own) or nothing can tell.
+    """
+    if data is None:
+        return None
+    text = _reply_text(provider, capture.stdout)
+    if not text:
+        return None
+    found = enclosing_syntax_error(text, data)
+    return _redact(describe_syntax_error(found)) if found else None
+
+
 def _parse_and_validate(
     provider: Any,
     capture: _Capture,
@@ -7178,6 +7390,18 @@ def _parse_and_validate(
     _report_normalized(kind, normalize_result(kind, data))
     errors = validate_result(kind, data)
     if errors:
+        syntax = _reply_syntax_error(provider, capture, data)
+        if syntax:
+            # The errors are the fragment's, not the reply's: say so first
+            # (2026-10-05, a task-generation reply with the right keys was
+            # reported "missing schema_version" over one unescaped quote).
+            return (
+                STATUS_SCHEMA_INVALID,
+                f"the reply is not valid JSON ({syntax}); only a fragment of "
+                f"it could be read, and that fragment does not match the "
+                f"{kind} result shape: " + "; ".join(errors[:5]),
+                data,
+            )
         return (
             STATUS_SCHEMA_INVALID,
             f"the extracted result does not match the {kind} result shape: "
@@ -7262,6 +7486,9 @@ def _parse_with_schema_policy(
         exit_code=capture.exit_code,
         phase=schema_phase,
         model=model,
+        native_document=structured_output.native_document_for(
+            provider, capture.stdout
+        ),
     )
     if verdict.warning:
         print(f"[WARN] {verdict.warning}", file=sys.stderr)
@@ -7755,6 +7982,29 @@ def _dispatch_order(tasks: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return [task for _index, task in ordered]
 
 
+#: The suffix :func:`_resolve_task_source` puts on a runner a previous attempt
+#: of the same task recorded.
+_RECORDED_RUNNER_SUFFIX = "(recorded from a previous attempt)"
+
+
+def _pinned_runner_note(key: str) -> str:
+    """The dispatch line's reason when the runner is a recorded pin, else ``""``.
+
+    A pin outranks every rung of the ladder — the session model and
+    ``driver.subagent_runner`` included — so without this the line named a
+    runner the user had just tried to move away from and gave no reason
+    (2026-10-05, run 3: generate-tasks re-run after a host-model switch stayed
+    on ``opencode/big-pickle``, the runner its failed first run recorded).
+    """
+    if not key.endswith(_RECORDED_RUNNER_SUFFIX):
+        return ""
+    return (
+        "; the runner this task's earlier attempt used, kept from "
+        "subagent_batch_report.json so a re-run repeats it — the session model "
+        "and driver.subagent_runner do not change it"
+    )
+
+
 def run_tasks(
     tasks: Sequence[Dict[str, Any]],
     *,
@@ -7838,7 +8088,10 @@ def run_tasks(
     # The schedule is the separate line `_dispatch_order` prints when it differs.
     for task_id, spec in runners.items():
         version = report.runner_versions.get(spec, "unknown")
-        print(f"[exec-subagents]   {task_id} -> {spec} (version {version})")
+        print(
+            f"[exec-subagents]   {task_id} -> {spec} (version {version}"
+            f"{_pinned_runner_note(resolved[task_id][1])})"
+        )
 
     # D4a, the *during* half: a batch of eleven validation tasks ran for a
     # minute behind a status line that said nothing had started, because the

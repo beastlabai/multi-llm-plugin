@@ -327,7 +327,13 @@ class FlagSpec:
     aliases: Tuple[str, ...] = ()
 
 
-HUMAN_TASK_ACTIONS: Tuple[str, ...] = ("done", "skip")
+#: ``done`` and ``skip`` answer a paused human task; all three answer a task
+#: the last ``implement`` run recorded ``failed`` (a check that failed, racing
+#: re-run 3, 2026-10-05): ``done`` treats it as satisfied, ``skip`` leaves it
+#: and its dependents undone, ``retry`` re-runs a check the unchanged-tree
+#: guard would otherwise refuse. The orchestrator decides which task may take
+#: which; this is the closed value set the dispatcher validates at parse time.
+HUMAN_TASK_ACTIONS: Tuple[str, ...] = ("done", "skip", "retry")
 HUMAN_TASK_STRATEGIES: Tuple[str, ...] = (
     "pause-and-ask", "skip-continue", "skip-dependents",
 )
@@ -476,7 +482,7 @@ def _legal_values(spec: FlagSpec) -> str:
 
 
 def parse_human_task_decision(value: str) -> Tuple[str, str]:
-    """Parse one ``--human-task <task_id>=done|skip`` value (row 9).
+    """Parse one ``--human-task <task_id>=done|skip|retry`` value (row 9).
 
     The only genuinely new answer channel in D5a, because it is per-task and
     mid-run: the pause becomes a process boundary (exit, print the two
@@ -486,7 +492,7 @@ def parse_human_task_decision(value: str) -> Tuple[str, str]:
     site = row(9).site_id
     if not sep or not task_id.strip() or not action.strip():
         raise NeedsHuman(
-            f"ERROR: --human-task expects <task_id>=done|skip, got {value!r}.\n"
+            f"ERROR: --human-task expects <task_id>=done|skip|retry, got {value!r}.\n"
             "       An empty or malformed decision value is never a default "
             "(D6 row 15).",
             site=site,

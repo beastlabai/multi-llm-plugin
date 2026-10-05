@@ -44,6 +44,7 @@ from utils.cli_common import (
     build_parent_parser,
     dispatcher_command,
     record_artifacts,
+    record_error,
 )
 from utils.output_handler import get_phase_dir, get_output_dir
 from utils.git_utils import get_project_root
@@ -188,10 +189,14 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         '--human-task',
         action='append',
         default=None,
-        metavar='ID=done|skip',
+        metavar='ID=done|skip|retry',
         help='Answer one human task (D6 row 9), repeatable: --human-task '
              'T004=done. Turns the pause-and-ask pause into a process boundary '
-             'instead of a blocked stdin.'
+             'instead of a blocked stdin. With --resume it also answers a code '
+             'task the last run recorded failed (a check that failed): done '
+             'treats it as satisfied and runs the tasks after it, skip leaves '
+             'it and its dependents undone, retry runs a check again even '
+             'though nothing in the repository changed since it failed.'
     )
 
     return parser.parse_args(argv)
@@ -283,10 +288,22 @@ def record_pre_existing_changes(state: StateManager) -> None:
     Args:
         state: StateManager instance to store the pre-existing changes
     """
-    # Only record if not already recorded (avoid overwriting on --resume)
+    # Only record if not already recorded (avoid overwriting on --resume) —
+    # by implement. `head_before_implement` is recorded right after this on
+    # implement's first run, so a baseline without it was left by a planning
+    # phase (apply-suggestions records one at its own start), before that
+    # phase edited the plan: kept, it counted the plan edit as implement's
+    # change (2026-10-05, OpenCode racing run 3: the plan listed `modified`
+    # by implementation). Implement's first run takes its own.
     if state.get("pre_existing_changes") is not None:
-        print(f"Pre-existing changes already recorded ({len(state.get('pre_existing_changes', []))} paths)")
-        return
+        if state.get("head_before_implement") is not None:
+            print(f"Pre-existing changes already recorded ({len(state.get('pre_existing_changes', []))} paths)")
+            return
+        print(
+            f"Replacing the dirty-tree baseline an earlier phase recorded "
+            f"({len(state.get('pre_existing_changes') or [])} paths) with "
+            f"implement's own"
+        )
 
     # Get all modified files (staged and unstaged)
     # Filter empty strings before set union for robustness
@@ -743,6 +760,70 @@ def maybe_detach_implement_phase(
     )
 
 
+def _applicable_task_decisions(
+    state: StateManager,
+    human_task_ids: List[str],
+    this_run: Dict[str, str],
+) -> Dict[str, str]:
+    """The ``--human-task`` answers the scheduler applies this run.
+
+    Every recorded answer for a human task (they persist, so ``--resume``
+    never re-asks), plus this run's ``retry`` answers (one-shot, never
+    recorded) and a recorded ``done``/``skip`` for a code task only while
+    the state still says that task ``failed``: once it ran again or was
+    accepted, a stale answer must not mark it done behind the user's back.
+    """
+    recorded = dict(state.get("human_task_decisions") or {})
+    decisions: Dict[str, str] = {}
+    for task_id, action in recorded.items():
+        if task_id in human_task_ids:
+            decisions[task_id] = action
+        elif state.get_task_status(task_id) == "failed":
+            decisions[task_id] = action
+    for task_id, action in this_run.items():
+        if action == "retry" and task_id not in human_task_ids:
+            decisions[task_id] = action
+    return decisions
+
+
+def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
+    """The way forward after a stop, in this host's own command spelling.
+
+    Built from the host's ``next_command`` template the way the result line's
+    ``user_next_step`` and ``resume_command`` are (``next_phase.phase_command``),
+    with the plan as the user typed it (the run record's ``plan_arg``, else
+    the ``--plan-file`` value). Empty when nothing can be spelled (no template
+    for this host and route): the stop message then names the flags.
+    """
+    try:
+        from utils import detach as _detach
+        from utils import host_capabilities as _hosts
+        from utils import next_phase as _next
+
+        host_id = _hosts.resolve_host_id(explicit=getattr(args, "host", None))
+        route = _next.resolve_route(host_id)
+        handle = _detach.active_run()
+        plan_arg = (
+            (handle.plan_arg if handle is not None else None)
+            or os.environ.get(_detach.PLAN_ARG_ENV)
+            or str(args.plan_file)
+        )
+
+        def command(mode: str, *flags: str) -> str:
+            return _next.phase_command(plan_arg, host_id, route, mode, *flags)
+
+        return {
+            "resume": command("implement", "--resume"),
+            "review": command("review-code"),
+            "fix": command("apply-code-fixes"),
+            "accept": command("implement", "--resume", "--human-task", "{task_id}=done"),
+            "skip": command("implement", "--resume", "--human-task", "{task_id}=skip"),
+            "retry": command("implement", "--resume", "--human-task", "{task_id}=retry"),
+        }
+    except Exception:  # noqa: BLE001 - advisory: the flags are named instead
+        return {}
+
+
 def _seed_pending_task_statuses(state: StateManager, tasks: List[Dict[str, Any]]) -> None:
     """F5: give every materialized task a ``pending`` status before dispatch.
 
@@ -923,6 +1004,7 @@ def run_implement_write_phase(
             dry_run=bool(getattr(args, "dry_run_subagents", False)),
             human_task_strategy=human_task_strategy,
             human_task_decisions=human_task_decisions,
+            user_commands=_stop_user_commands(args),
         )
     except _write_safety.WriteSafetyError as exc:
         # A repository root that cannot be pinned (a planted `core.worktree`,
@@ -932,6 +1014,11 @@ def run_implement_write_phase(
     result = scheduler.run()
     for line in result.messages:
         print(line, file=sys.stderr if result.exit_code else sys.stdout)
+    stop = getattr(result, "stop", None) or {}
+    if stop.get("headline"):
+        # The result line's `error`: the one line the hosts relay as "the
+        # last line it left", and the detached close-out's `run.error`.
+        record_error(stop["headline"])
     if result.report_path:
         print(f"[write-subagents] report: {result.report_path}")
     if result.summary_file:
@@ -972,6 +1059,56 @@ def _materialize_native_write_tasks(
         tasks_file=tasks_file_str,
     )
     return path, tasks
+
+
+def _native_human_task_plan(
+    output_data: Dict[str, Any],
+    *,
+    strategy: Optional[str],
+    decisions: Dict[str, str],
+):
+    """Resolve the human-task plan over the native leg's batches; annotate them.
+
+    The same ``resolve_human_task_plan`` the executor runs over the same
+    tasks. Every task the plan skips (a deferred manual task, and under
+    ``skip-dependents`` each task that depends on one) gets
+    ``status: "skipped"`` and its ``skip_reason`` in the task JSON, a manual
+    task answered ``done`` gets ``status: "completed"``, and the JSON gains a
+    top-level ``skipped_tasks`` map: the host reads that it must not
+    dispatch them instead of re-deriving the walk. With no strategy yet (an
+    attended run, before the host asks) nothing is skipped.
+    """
+    from utils.write_batch_scheduler import resolve_human_task_plan
+
+    entries = [
+        task
+        for batch in output_data.get("batches") or []
+        for task in batch.get("tasks") or []
+    ]
+    plan = resolve_human_task_plan(
+        [
+            {
+                "task_id": task.get("id"),
+                "task_title": task.get("title"),
+                "executor_role": task.get("executor_role"),
+                "is_human": task.get("is_human"),
+                "depends_on": list(task.get("depends_on") or []),
+            }
+            for task in entries
+        ],
+        strategy=strategy,
+        decisions=decisions,
+    )
+    for task in entries:
+        task_id = str(task.get("id") or "")
+        if task_id in plan.skipped:
+            task["status"] = TaskStatus.SKIPPED.value
+            task["skip_reason"] = plan.skipped[task_id]
+        elif task_id in plan.completed:
+            task["status"] = TaskStatus.COMPLETED.value
+    if plan.skipped:
+        output_data["skipped_tasks"] = dict(sorted(plan.skipped.items()))
+    return plan
 
 
 def _refuse_unrecorded_native_resume(
@@ -1262,7 +1399,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     # dependent `skip-dependents` skips with it) can be named by its title
     # once the workflow completes, not only by its id — the native leg's host
     # records `skipped` itself and never writes a title (2026-10-04).
-    if state.record_task_titles({task.id: task.title for task in tasks}):
+    # The manual tasks ride along (`implement_human_task_ids`), so a finished
+    # implement whose manual task nobody answered still names it as owed.
+    if state.record_task_titles(
+        {task.id: task.title for task in tasks},
+        human_ids=[
+            task.id for task in tasks
+            if getattr(task, "executor_role", "") == "human"
+        ],
+    ):
         state.save()
 
     # Restore previous statuses if resuming
@@ -1310,14 +1455,43 @@ def main(argv: Optional[List[str]] = None) -> int:
                 site_id=unattended_mod.row(9).site_id,
             )
         not_human = [tid for tid in human_task_decisions if tid not in human_task_ids]
-        if not_human:
+        # A code task is answerable only once it FAILED and only on a resume
+        # (racing re-run 3, 2026-10-05: a failed check blocked implement for
+        # good; `done` accepts the failure, `skip` leaves it and its dependents
+        # undone, `retry` re-runs a check the unchanged-tree guard refuses).
+        failed_ids = {
+            tid for tid in not_human if state.get_task_status(tid) == "failed"
+        }
+        if not_human and not args.resume:
             return unattended_mod.fail_closed(
-                "ERROR: --human-task only answers tasks with executor_role "
-                f"'human'; these are code tasks: {', '.join(sorted(not_human))}.",
+                "ERROR: --human-task answers a code task only with --resume, "
+                "after a run recorded it failed; these are code tasks: "
+                f"{', '.join(sorted(not_human))}.",
+                site_id=unattended_mod.row(9).site_id,
+            )
+        unanswerable = sorted(set(not_human) - failed_ids)
+        if unanswerable:
+            return unattended_mod.fail_closed(
+                "ERROR: --human-task answers a human task, or a code task the "
+                "last run recorded failed; these are code tasks that did not "
+                f"fail: {', '.join(unanswerable)}.",
+                site_id=unattended_mod.row(9).site_id,
+            )
+        retried_human = sorted(
+            tid for tid, action in human_task_decisions.items()
+            if action == "retry" and tid in human_task_ids
+        )
+        if retried_human:
+            return unattended_mod.fail_closed(
+                "ERROR: --human-task <id>=retry re-runs a failed code task; a "
+                f"human task is answered done or skip: {', '.join(retried_human)}.",
                 site_id=unattended_mod.row(9).site_id,
             )
         recorded = dict(state.get("human_task_decisions") or {})
-        recorded.update(human_task_decisions)
+        recorded.update({
+            tid: action for tid, action in human_task_decisions.items()
+            if action != "retry"  # one-shot: never carried into a later run
+        })
         state.set("human_task_decisions", recorded)
         state.save()
         for task_id, action in sorted(human_task_decisions.items()):
@@ -1442,6 +1616,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         getattr(args, "exec_subagents", False)
         or getattr(args, "dry_run_subagents", False)
     )
+    # The native leg resolves the human-task plan here, from the strategy and
+    # the answers it already holds, exactly as the executor resolves it before
+    # its first batch — so the skips are in the task JSON the host reads and
+    # are written to state.json below, not left for the host to record.
+    native_human_plan = None
+    if not executor_backed and human_task_ids:
+        native_human_plan = _native_human_task_plan(
+            output_data,
+            strategy=human_task_strategy,
+            decisions=dict(state.get("human_task_decisions") or {}),
+        )
     if not executor_backed:
         write_native_handoff()
 
@@ -1475,7 +1660,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         state=state,
         output_data=output_data,
         human_task_strategy=human_task_strategy,
-        human_task_decisions=dict(state.get("human_task_decisions") or {}),
+        human_task_decisions=_applicable_task_decisions(
+            state, human_task_ids, human_task_decisions,
+        ),
         tasks_file=implement_tasks_file,
     )
     if scheduled is not None:
@@ -1513,6 +1700,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Pending tasks: {output_data.get('pending_tasks', output_data['total_tasks'])}")
     print(f"Batches: {len(output_data['batches'])}")
 
+    if native_human_plan is not None and native_human_plan.skipped:
+        print(
+            "Skipped tasks (recorded in state.json; do not dispatch them, and "
+            "list them in the summary's Manual Tasks (Deferred) section):"
+        )
+        titles = dict(state.get("task_titles") or {})
+        for task_id, reason in sorted(native_human_plan.skipped.items()):
+            title = titles.get(task_id)
+            print(f"  {task_id}{' ' + title if title else ''}: {reason}")
+
     print("\nClaude Code should now:")
     print("  1. Read the output JSON file")
     print("  2. Execute each batch sequentially (batches have dependencies)")
@@ -1528,6 +1725,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     # after every task, the verify step and the summary. Until 2026-10-05 this
     # site wrote `mark_phase_completed("implement")`, so `status` read the
     # phase as done minutes before its last task (racing re-run, 2026-10-04).
+    if native_human_plan is not None:
+        # What the executor's `_persist_human_plan` writes before its first
+        # batch: the deferred manual tasks (and the dependents skipped with
+        # them) as `skipped` with their reasons, a `done` answer as completed,
+        # the skip-continue overrides. Until fix round 7 the native leg left
+        # these writes to the host, which never made them, so `task_status`
+        # had no T010 and the finished workflow named no manual task.
+        from utils.write_batch_scheduler import persist_human_task_plan
+
+        persist_human_task_plan(state, native_human_plan)
     state.mark_phase_started("implement")
     state.save()
 

@@ -604,6 +604,28 @@ def _prerequisites_unmet(plan_path: Path, phase: str) -> bool:
     return bool(prereq.collect_missing(state, output_dir_path(plan_path), phase))
 
 
+def phase_command(
+    plan_arg: str, host_id: str, route: Optional[str], mode_word: str,
+    *flags: str,
+) -> str:
+    """``<host spelling> --<mode> <plan as typed> [flags…]``, from the same
+    ``next_command`` template and the same quoting as :func:`resume_command`.
+
+    What a write phase's stop message prints as the way forward (racing
+    re-run 3, 2026-10-05): the resume, the review-code / apply-code-fixes pair
+    that fixes what a failed check reported, and the ``--human-task`` variants
+    that accept the failure. No gate: the caller has just stopped the phase
+    it names. Raises ``ValueError`` for a (host, route) pair with no template.
+    """
+    modes = _skill_module("modes")
+    mode = modes.resolve(mode_word)
+    if mode is None:
+        raise ValueError(f"unknown mode {mode_word!r}")
+    template = _host_capabilities().next_command_template(host_id, route)
+    args = " ".join([f"--{mode.name}", quote_plan_arg(plan_arg), *flags])
+    return template.replace(ARGS_SLOT, args)
+
+
 def resume_command(
     plan_arg: str,
     host_id: str,

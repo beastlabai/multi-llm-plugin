@@ -10,7 +10,7 @@ import tempfile
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from .git_utils import get_current_head, get_branch_name
 from .judge_vocab import upgrade_legacy
@@ -860,7 +860,9 @@ class StateManager:
             if self._IMPLEMENT_TASK_ID_PATTERN.match(task_id)
         }
 
-    def record_task_titles(self, titles: Dict[str, str]) -> bool:
+    def record_task_titles(
+        self, titles: Dict[str, str], *, human_ids: Optional[Iterable[str]] = None,
+    ) -> bool:
         """Remember each implement task's title by id, under ``task_titles``.
 
         ``implement`` records them when it decomposes the task list, on both
@@ -871,16 +873,36 @@ class StateManager:
         is what :meth:`deferred_implementation_tasks` scopes to — nothing
         resets ``task_status`` on a fresh implement, so an id an earlier
         decomposition skipped stays ``skipped`` after tasks.md is regenerated
-        (adversarial review, 2026-10-05). Returns whether anything changed;
-        the caller saves.
+        (adversarial review, 2026-10-05). *human_ids*, when given, are that
+        decomposition's manual tasks and REPLACE ``implement_human_task_ids``
+        the same way — the key is absent when there are none, so a plan with
+        no manual task gains no key (fix round 7: the backstop in
+        :meth:`deferred_implementation_tasks`). Returns whether anything
+        changed; the caller saves.
         """
         recorded = dict(self.state.get("task_titles") or {})
         merged = {**recorded, **{str(k): str(v) for k, v in titles.items() if k}}
         current = sorted(str(k) for k in titles if k)
-        if merged == recorded and self.state.get("implement_task_ids") == current:
+        human = (
+            None if human_ids is None
+            else sorted(str(k) for k in human_ids if k) or None
+        )
+        human_changed = (
+            human_ids is not None
+            and self.state.get("implement_human_task_ids") != human
+        )
+        if (
+            merged == recorded
+            and self.state.get("implement_task_ids") == current
+            and not human_changed
+        ):
             return False
         self.state["task_titles"] = merged
         self.state["implement_task_ids"] = current
+        if human is not None:
+            self.state["implement_human_task_ids"] = human
+        elif human_ids is not None:
+            self.state.pop("implement_human_task_ids", None)
         return True
 
     #: The recorded reason of an implement task the USER declined at
@@ -928,12 +950,24 @@ class StateManager:
         titles = self.state.get("task_titles") or {}
         current = self.state.get("implement_task_ids")
         scope = set(current) if isinstance(current, list) else None
+        statuses = self.implementation_task_statuses()
+        owed = {
+            task_id for task_id, status in statuses.items()
+            if status == "skipped" and self._deferred_to_user(task_id)
+        }
+        # The backstop (fix round 7): implement is on record as completed and
+        # a manual task of its decomposition has no answer at all — neither
+        # `completed` (done) nor a recorded skip. Nobody did it, so it is
+        # owed: a host that resolved the strategy itself and recorded nothing
+        # must never turn a deferred task into a clean `[WORKFLOW_COMPLETE]`.
+        if self.is_phase_completed("implement"):
+            for task_id in self.state.get("implement_human_task_ids") or []:
+                if statuses.get(task_id) not in ("completed", "skipped"):
+                    owed.add(str(task_id))
         return [
             {"id": task_id, "title": titles.get(task_id) or None}
-            for task_id, status in sorted(self.implementation_task_statuses().items())
-            if status == "skipped"
-            and (scope is None or task_id in scope)
-            and self._deferred_to_user(task_id)
+            for task_id in sorted(owed)
+            if scope is None or task_id in scope
         ]
 
     def track_file(self, path: str, action: str, task_id: str) -> None:
