@@ -7213,6 +7213,12 @@ async def reaggregate_from_existing_files(
 # Main orchestration flow
 # ---------------------------------------------------------------------------
 
+def _ensure_state_file(state) -> None:
+    """Write ``state.json`` if the plan has none yet (see the guard site)."""
+    if not state.state_file.exists():
+        state.save()
+
+
 async def run_review_orchestration(
     args: argparse.Namespace,
     phase_name: str,
@@ -7367,6 +7373,15 @@ async def run_review_orchestration(
 
     # Guard against re-running already-completed phase
     state_guard = get_or_create_state(Path(plan_path))
+    # Materialize `state.json` on the phase's first run (2026-10-05). Nothing
+    # else writes it before the phase completes, so on a plan's first phase
+    # the instructions' `util metrics start --state-file {plan}/state.json`
+    # (run between the fan-out and the validation subagents) failed with
+    # "state file not found" (racing re-run, 2026-10-04, review-plan); the
+    # host shrugged it off and the phase lost its ETA baseline. Written here,
+    # after the completed-phase guard would have refused and before any
+    # model runs, so the record of the run exists as soon as the run does.
+    _ensure_state_file(state_guard)
     if state_guard.is_phase_completed(phase_name) and not args.force:
         print(f"ERROR: Phase '{phase_name}' has already been completed for this plan.")
         print(f"Output directory: {phase_dir}")

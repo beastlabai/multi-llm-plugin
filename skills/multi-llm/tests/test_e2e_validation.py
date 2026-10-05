@@ -647,3 +647,87 @@ Do something.
         if result.call_log_path:
             assert str(result.call_log_path).startswith(str(tmp_path)), \
                 f"call_log_path {result.call_log_path} should be within {tmp_path}"
+
+
+class TestStateFileExistsFromThePhasesFirstRun:
+    """Issue 2 of the 2026-10-04 Claude Code racing re-run: on a plan's first
+    phase, `util metrics start --state-file {plan}/state.json` failed with
+    "state file not found", because nothing wrote `state.json` before the
+    phase completed — and the instructions run it between the fan-out and the
+    validation subagents. The review orchestrators now materialize it at
+    pre-flight, so every `util` step the instructions name works from the
+    first run on."""
+
+    PLAN = """# Metrics Start Plan
+
+## Overview
+Add a login endpoint with rate limiting.
+
+## Implementation
+1. Create the auth service
+2. Add the endpoint
+"""
+
+    def test_review_plan_leaves_state_json_at_validation_pending(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        from utils import metrics
+
+        mock_provider.set_scenario("happy_path")
+        skill_runner.extra_env.update(mock_provider.get_env())
+        plan = fixture_manager.create_plan("metrics-start-plan", self.PLAN)
+        state_file = plan.output_dir / "state.json"
+        assert not state_file.exists()
+
+        result = skill_runner.run_orchestrator(
+            "review_plan", plan.plan_path, "--models", "cursor-agent", timeout=120,
+        )
+        assert result.exit_code == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        assert ("[VALIDATION_PENDING]" in result.stdout
+                or "[VALIDATION_BATCHES_PENDING]" in result.stdout), result.stdout
+
+        # The phase is deliberately NOT complete at this point...
+        assert state_file.exists(), "state.json must exist as soon as the run does"
+        state = json.loads(state_file.read_text(encoding="utf-8"))
+        assert "review-plan" not in state.get("phases_completed", {})
+        assert state["plan_path"] and state["plan_hash"]
+
+        # ...and the instructions' next step works instead of "state file not found".
+        code = metrics.main([
+            "start", "--state-file", str(state_file),
+            "--phase", "review-plan", "--total-batches", "1",
+        ])
+        assert code == 0
+        after = json.loads(state_file.read_text(encoding="utf-8"))
+        assert after["metrics_progress"]["review-plan"]["total_batches"] == 1
+        assert "review-plan" not in after.get("phases_completed", {})
+
+    def test_review_code_on_a_fresh_plan_leaves_state_json_too(
+        self,
+        skill_runner: SkillRunner,
+        fixture_manager: FixtureManager,
+        mock_provider: MockProvider,
+    ):
+        """A standalone review-code on a plan no phase has touched."""
+        from utils import metrics
+
+        mock_provider.set_scenario("happy_path")
+        skill_runner.extra_env.update(mock_provider.get_env())
+        plan = fixture_manager.create_plan("metrics-start-code", self.PLAN)
+        state_file = plan.output_dir / "state.json"
+        assert not state_file.exists()
+
+        result = skill_runner.run_orchestrator(
+            "code_review", plan.plan_path, "--models", "cursor-agent",
+            "--skip-prerequisites", timeout=120,
+        )
+        assert result.exit_code == 0, f"stdout:\n{result.stdout}\nstderr:\n{result.stderr}"
+        assert state_file.exists(), "state.json must exist as soon as the run does"
+        code = metrics.main([
+            "start", "--state-file", str(state_file),
+            "--phase", "code-review", "--total-batches", "1",
+        ])
+        assert code == 0
