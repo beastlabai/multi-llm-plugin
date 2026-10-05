@@ -355,6 +355,28 @@ class TestAPlantedSpellingIsNeverPrinted:
         )
 
     @pytest.mark.parametrize("planted", PLANTED, ids=PLANTED_IDS)
+    def test_a_planted_run_record_spelling_is_no_fallback_either(
+        self, workdir, capsys, monkeypatch, planted
+    ):
+        plan = build(workdir, S(("review-plan",), files=RP_VALID))
+        phase = phase_dir_path(plan, "review-plan")
+        phase.mkdir(parents=True, exist_ok=True)
+        status_file.claim_run(str(phase), {
+            "run_id": "run-planted-0001", "state": "done", "exit_code": 0,
+            "detached": True, "mode": "review-plan", "plan_file": str(plan),
+            "plan_arg": planted,
+        })
+        _target(monkeypatch)
+        code, out, err, result = _run(
+            ["review-plan", str(plan), "--reaggregate", "--host", "claude-code"],
+            capsys,
+        )
+        assert code == 0, err
+        _assert_nothing_planted_printed(
+            out, result, f"{PLUGIN}--apply-suggestions {plan}"
+        )
+
+    @pytest.mark.parametrize("planted", PLANTED, ids=PLANTED_IDS)
     def test_a_planted_spelling_never_ships_to_a_detached_worker(
         self, workdir, capsys, monkeypatch, planted
     ):
@@ -388,6 +410,58 @@ class TestAPlantedSpellingIsNeverPrinted:
         assert result["user_next_step"]["command"] == (
             f"{PLUGIN}--apply-suggestions plans/../plans/foo.md"
         )
+
+
+class TestTheStatusRecoveryCommand:
+    """Hooks review of fix round 10: a detached run's poll prints "advance it
+    with: … --reaggregate <absolute plan>" when the run finished but the phase
+    is not yet marked completed. A detached launch records no hand-off
+    spelling, so running that line printed the next phase with the absolute
+    path although the run record holds the plan as the launcher typed it."""
+
+    def test_running_the_advance_line_ends_with_the_launchers_spelling(
+        self, workdir, capsys, monkeypatch
+    ):
+        from utils import process_control
+        from utils.state_manager import StateManager
+
+        plan = build(workdir, S((), files=RP_VALID))
+        phase = phase_dir_path(plan, "review-plan")
+        phase.mkdir(parents=True, exist_ok=True)
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "validation_pending",
+            "reaggregate_mode": "review-plan", "plan_file": str(plan),
+        })
+        status_file.claim_run(str(phase), {
+            "run_id": "run-done-0001", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "state": "done", "exit_code": 0, "detached": True,
+            "mode": "review-plan", "plan_file": str(plan), "plan_arg": P,
+        })
+        # The status read, with the plan absolute as the launcher's banner
+        # names it: its run block carries the workflow phase and the line.
+        _code, out, _err, _poll = _run(
+            ["status", str(plan), "--phase", "review-plan", "--host", "claude-code"],
+            capsys,
+        )
+        advance = [
+            line.split("advance it with: ", 1)[1]
+            for line in out.splitlines() if "advance it with: " in line
+        ]
+        assert len(advance) == 1 and "--reaggregate" in advance[0], out
+        assert str(plan) in _verbatim(advance[0])
+
+        def finish(_argv):
+            state = StateManager(plan)
+            state.mark_phase_completed("review-plan")
+            state.save()
+
+        _target(monkeypatch, finish)
+        code, out, err, result = _run(_verbatim(advance[0]), capsys)
+        assert code == 0, err
+        expected = f"{PLUGIN}--apply-suggestions {P}"
+        assert result["user_next_step"]["command"] == expected
+        assert _printed_commands(out) == [expected]
 
 
 class TestEveryBuilderHandsBackAContinuation:

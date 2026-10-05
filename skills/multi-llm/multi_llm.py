@@ -1195,11 +1195,15 @@ def _continued_plan_arg(
 
     For a workflow-phase invocation carrying a continuation verb: the
     ``plan_arg`` :func:`_remember_plan_spelling` wrote into the phase dir's
-    ``.status.json``, printed only when ``next_phase.recorded_plan_spelling``
-    passes it — the folder is writable by every jailed batch, so a spelling
-    that does not resolve strictly to this plan from this cwd, or that holds a
-    character a shell would act on, is never printed (hooks review of fix
-    round 10). A passing spelling equal to the ``--plan-file`` received is
+    ``.status.json`` — else, when the hand-off recorded none (or one that does
+    not pass), the phase's detached run record's ``plan_arg``, the plan as its
+    launcher typed it: a detached launch records no hand-off spelling, and its
+    status read's "advance it with: … --reaggregate" names the plan absolutely
+    (hooks review of fix round 10). Either is printed only when
+    ``next_phase.recorded_plan_spelling`` passes it — the folder is writable by
+    every jailed batch, so a spelling that does not resolve strictly to this
+    plan from this cwd, or that holds a character a shell would act on, is
+    never printed. A passing spelling equal to the ``--plan-file`` received is
     ``None`` too, and the plan is printed as received.
     """
     if not mode.is_workflow_phase or not mode.phase:
@@ -1212,10 +1216,15 @@ def _continued_plan_arg(
     from utils import next_phase, status_file
 
     status = status_file.read_status(str(_continued_phase_dir(mode, plan)))
-    spelling = next_phase.recorded_plan_spelling(status.get("plan_arg"), plan)
-    if spelling is None or spelling == plan:
-        return None
-    return spelling
+    run = status.get("run")
+    for recorded in (
+        status.get("plan_arg"),
+        run.get("plan_arg") if isinstance(run, dict) else None,
+    ):
+        spelling = next_phase.recorded_plan_spelling(recorded, plan)
+        if spelling is not None:
+            return None if spelling == plan else spelling
+    return None
 
 
 def _raise_on_sigterm(signum, frame):  # pragma: no cover - exercised in a subprocess
