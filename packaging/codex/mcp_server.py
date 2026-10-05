@@ -661,11 +661,33 @@ def command_forms(command):
     return [command] if escaped == command else [escaped, command]
 
 
+#: A command's body: anything but a newline, a double quote or a backtick —
+#: except ``"'"``, the middle of ``cli_common._quote``'s ``'"'"'``, its only
+#: spelling of an apostrophe (an ``ask`` question holding one was cut there,
+#: 2026-10-05).
+_COMMAND_BODY = r"""(?:[^\n"`]|"'")*"""
+
+
 def runnable_pattern(surface):
     """``uv … run … <script> …``, bounded at a newline, a double quote or backtick."""
     script = re.escape(surface["dispatcher"]["script"])
     return re.compile(
-        r'[^\s"`]*\buv(?:\.exe)?\b\s+run\b[^\n"`]*' + script + r'[^\n"`]*')
+        r'[^\s"`]*\buv(?:\.exe)?\b\s+run\b' + _COMMAND_BODY + script + _COMMAND_BODY)
+
+
+def cut_mid_token(match) -> bool:
+    """Whether a ``"`` cut this match where its last token may go on.
+
+    Every command the dispatcher prints is POSIX-quoted (``cli_common._quote``),
+    so a stop right after a closing quote (or an escaping backslash) can sit
+    inside one shell word: the parse then succeeds on the part before the cut,
+    and the re-spelled command — and the option — carry a truncated value (an
+    ``ask`` question with a ``"`` in it, 2026-10-05). Such a match keeps the
+    pointer and comes back unparseable; a cut inside an open quote already
+    fails to parse. The port of ``cutMidToken``.
+    """
+    end = match.end()
+    return match.string[end:end + 1] == '"' and match.group(0)[-1:] in ("'", "\\")
 
 
 def scrub_value(value, commands, pattern, respell=None):
@@ -675,7 +697,8 @@ def scrub_value(value, commands, pattern, respell=None):
         if not pattern:
             return value
         return pattern.sub(
-            lambda match: (respell(match.group(0)) if respell else None)
+            lambda match: (respell(match.group(0))
+                           if respell and not cut_mid_token(match) else None)
             or RUNNABLE_MARKER, value)
     if isinstance(value, list):
         return [scrub_value(item, commands, pattern, respell) for item in value]
@@ -796,18 +819,23 @@ def parse_dispatcher_command(command, surface):
     return args
 
 
+def unparseable_call() -> dict:
+    """What a follow-up this tool cannot parse into a tool call comes back as."""
+    return {
+        "unparseable": True,
+        "note": "The dispatcher returned a follow-up this tool could not "
+                "parse into a tool call. It is reported rather than "
+                "executed. Do not run it in a shell.",
+    }
+
+
 def next_as_tool_call(raw, surface):
     """A ``next`` string re-spelled as tool-call args, or an unparseable note."""
     if not isinstance(raw, str) or not raw:
         return None
     parsed = parse_dispatcher_command(raw, surface)
     if parsed is None:
-        return {
-            "unparseable": True,
-            "note": "The dispatcher returned a follow-up this tool could not "
-                    "parse into a tool call. It is reported rather than "
-                    "executed. Do not run it in a shell.",
-        }
+        return unparseable_call()
     return parsed
 
 
@@ -829,9 +857,27 @@ def quote_for_reader(value: str) -> str:
 def typed_plan(plan, values):
     """*plan* as this call typed it, when it names the call's own plan file."""
     values = values or {}
-    if plan and values.get("plan_arg") and plan == values.get("plan"):
+    if plan and values.get("plan_arg") and same_plan_file(plan, values.get("plan")):
         return values["plan_arg"]
     return plan
+
+
+def same_plan_file(left, right) -> bool:
+    """Whether two plan paths name one file, symlinks followed on both sides.
+
+    The call's plan is joined to the anchor without following symlinks
+    (``normalize_plan``) and the dispatcher prints some paths through
+    ``Path.resolve()``, so under a symlinked plan directory the same file came
+    back spelled two ways and the re-spelled commands and options carried the
+    absolute real path instead of the plan as typed (2026-10-05). Two absolute
+    paths are compared by ``realpath``; anything else only by equality. The
+    port of ``samePlanFile``.
+    """
+    if left == right:
+        return True
+    if not left or not right or not os.path.isabs(left) or not os.path.isabs(right):
+        return False
+    return os.path.realpath(left) == os.path.realpath(right)
 
 
 def user_spelling(args, surface):
@@ -1927,7 +1973,8 @@ class Server:
                 # The dispatcher's `next` names the plan absolutely; when that is
                 # the plan this call was typed with, the continuation keeps the
                 # user's spelling so its own next-phase command does too.
-                "plan_arg": values.get("plan_arg") if planned == values.get("plan") else "",
+                "plan_arg": (values.get("plan_arg")
+                             if same_plan_file(planned, values.get("plan")) else ""),
                 "question": args["question"], "extra": list(args["extra_flags"])})
             if kind == "spawn-error":
                 break
@@ -2070,11 +2117,16 @@ class Server:
         """
         raw = (child.result or {}).get("next")
         commands = [raw] if isinstance(raw, str) and raw else []
-        commands.extend(runnable_pattern(self.surface).findall(
-            "{}\n{}".format(child.stdout or "", child.stderr or "")))
+        # A command a quote cut short is reported, never offered: its parse
+        # would carry the truncated value (`cut_mid_token`).
+        commands.extend(
+            None if cut_mid_token(found) else found.group(0)
+            for found in runnable_pattern(self.surface).finditer(
+                "{}\n{}".format(child.stdout or "", child.stderr or "")))
         seen, calls = set(), []
         for command in commands:
-            call_args = next_as_tool_call(command, self.surface)
+            call_args = (unparseable_call() if command is None
+                         else next_as_tool_call(command, self.surface))
             if call_args is None:
                 continue
             if not call_args.get("unparseable"):

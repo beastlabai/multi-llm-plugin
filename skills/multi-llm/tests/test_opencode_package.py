@@ -4960,6 +4960,106 @@ class TestAFailedResultSaysWhatTheUserCanRun:
         assert finished["message"] == out["terminal"]["message"]
 
 
+UV_PREFIX = "uv run --frozen --no-dev --project /skill -- python /skill/multi_llm.py"
+
+
+class TestARedactedCommandCutAtAQuote:
+    """Adversarial review 2026-10-05: the runnable pattern stops at a `"`, and
+    `shlex.quote` spells an apostrophe `'"'"'`, so an `ask` retry whose question
+    held one was matched up to the first `"`, parsed as question `what`, and
+    re-spelled — and offered as an option — mangled."""
+
+    PLAN = "plans/racing game.md"
+
+    def _probe(self, package, tmp_path, question):
+        absolute = str(tmp_path / "plans" / "racing game.md")
+        command = cli_common.retry_command("ask", absolute, question, "--reaggregate",
+                                           flags=[])
+        return node_json(
+            f"""
+            const values = {{ word: "ask", plan: {json.dumps(absolute)},
+                             planArg: {json.dumps(self.PLAN)}, question: "",
+                             extraFlags: [] }}
+            const child = {{ result: null, stderr: "",
+                            stdout: "ask: " + {json.dumps(command)} + "\\n" }}
+            emit({{
+              output: T.redactCommand(child.stdout, null, surface,
+                                      T.respellerFor(surface, values)),
+              calls: T.toolCallsFor(child, surface, values),
+            }})
+            """,
+            package,
+        )
+
+    def test_an_apostrophe_is_re_spelled_whole(self, built_package, tmp_path):
+        out = self._probe(built_package, tmp_path, "what's next")
+        assert out["output"].strip() == \
+            f'ask: /multi-llm --ask "{self.PLAN}" "what\'s next" --reaggregate'
+        (call,) = out["calls"]
+        assert call["args"]["question"] == "what's next"
+
+    def test_a_double_quote_keeps_the_pointer(self, built_package, tmp_path):
+        out = self._probe(built_package, tmp_path, 'what\'s "up"')
+        assert "a runnable command was removed" in out["output"]
+        assert "/multi-llm --ask" not in out["output"]
+        assert "uv run" not in out["output"]
+        assert all(call.get("args", {}).get("question") != "what"
+                   for call in out["calls"])
+        assert [call.get("unparseable") for call in out["calls"]] == [True]
+
+    def test_a_cut_after_a_closing_quote_is_refused(self, built_package):
+        """The guard itself: a match that a `"` cut right after a closing
+        quote may have lost the rest of its last token."""
+        out = node_json(
+            """
+            const values = { word: "ask", plan: "/w/p.md", planArg: "p.md",
+                             question: "", extraFlags: [] }
+            const text = "uv run -- python /s/multi_llm.py ask /w/p.md 'a'\\"x\\"\\n"
+            emit({
+              output: T.redactCommand(text, null, surface, T.respellerFor(surface, values)),
+              calls: T.toolCallsFor({ result: null, stderr: "", stdout: text },
+                                    surface, values),
+            })
+            """,
+            built_package,
+        )
+        assert out["output"].startswith("<a runnable command was removed")
+        assert [call.get("unparseable") for call in out["calls"]] == [True]
+
+
+class TestASymlinkedAnchor:
+    """Adversarial review 2026-10-05: the call's plan is resolved without
+    following symlinks, the dispatcher prints `Path(…).resolve()`, so under a
+    symlinked workspace the two never compared equal and every re-spelled
+    command and option carried the absolute real path instead of the plan as
+    typed."""
+
+    def test_the_real_path_is_put_back_as_typed(self, built_package, uv_stub, tmp_path):
+        real = tmp_path / "real"
+        (real / "plans").mkdir(parents=True)
+        (real / "plans" / "x.md").write_text("# x\n", encoding="utf-8")
+        link = tmp_path / "link"
+        link.symlink_to(real, target_is_directory=True)
+        resolved = str((link / "plans" / "x.md").resolve())
+        assert resolved.startswith(str(real.resolve()))
+        launch = {"exit": 0, "stdout": [
+            "run_id: R", "log: /l",
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+        failed = {"exit": 3, "stdout": [
+            f"  {UV_PREFIX} generate-tasks {resolved} --host opencode --yes",
+            'MULTI_LLM_RESULT: {"state":"needs-human","exit":3,"next":null}']}
+        result, _ = uv_stub.run(
+            built_package,
+            {"mode": "generate-tasks", "plan": "plans/x.md", "question": "",
+             "extra_flags": []},
+            [launch, failed], ctx={"directory": str(link)},
+            extra_env={"STUB_RESUME_FAIL": "1"})
+        assert "  /multi-llm --generate-tasks plans/x.md" in result["output"].split("\n")
+        calls = [option for option in result["options"] if "args" in option]
+        assert [call["args"]["plan"] for call in calls] == ["plans/x.md"]
+        assert str(real.resolve()) not in json.dumps(result)
+
+
 #: Values the plan quoting must agree on with `next_phase.quote_plan_arg`.
 QUOTE_CASES = [
     "plans/x.md", "plans/my plan.md", "plans/it's.md", 'plans/a"b.md',

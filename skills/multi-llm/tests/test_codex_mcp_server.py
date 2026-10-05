@@ -2305,6 +2305,98 @@ class TestNoCommandToCompose:
         assert module.split_extra_flags(["--yes"], SURFACE) == ([], ["--yes"], None)
 
 
+def _server_module(name="mcp_server_under_test"):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(name, SERVER_SRC)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class TestARedactedCommandCutAtAQuote:
+    """Adversarial review 2026-10-05: the runnable pattern stops at a `"`, and
+    `shlex.quote` spells an apostrophe `'"'"'`, so an `ask` retry whose question
+    held one was matched up to the first `"`, parsed as question `what`, and
+    re-spelled — and offered as an option — mangled."""
+
+    PLAN = "plans/racing game.md"
+
+    def _probe(self, question):
+        import types
+
+        from utils import cli_common
+
+        module = _server_module()
+        absolute = "/work/plans/racing game.md"
+        command = cli_common.retry_command("ask", absolute, question, "--reaggregate",
+                                           flags=[])
+        values = {"word": "ask", "plan": absolute, "plan_arg": self.PLAN,
+                  "question": "", "extra": []}
+        child = types.SimpleNamespace(result=None, stdout="ask: " + command + "\n",
+                                      stderr="")
+        server = types.SimpleNamespace(surface=SURFACE)
+        return (module.redact(child.stdout, None, SURFACE,
+                              module.respeller_for(SURFACE, values)),
+                module.Server.tool_calls_for(server, child, values))
+
+    def test_an_apostrophe_is_re_spelled_whole(self):
+        output, calls = self._probe("what's next")
+        assert output.strip() == \
+            'ask: $multi-llm:multi-llm --ask "{}" "what\'s next" --reaggregate'.format(
+                self.PLAN)
+        (call,) = calls
+        assert call["question"] == "what's next"
+
+    def test_a_double_quote_keeps_the_pointer(self):
+        output, calls = self._probe('what\'s "up"')
+        assert RUNNABLE_MARKER in output
+        assert "$multi-llm:multi-llm --ask" not in output and "uv run" not in output
+        assert all(call.get("question") != "what" for call in calls)
+        assert [call.get("unparseable") for call in calls] == [True]
+
+    def test_a_cut_after_a_closing_quote_is_refused(self):
+        import types
+
+        module = _server_module()
+        values = {"word": "ask", "plan": "/w/p.md", "plan_arg": "p.md"}
+        text = "uv run -- python /s/multi_llm.py ask /w/p.md 'a'\"x\"\n"
+        output = module.redact(text, None, SURFACE, module.respeller_for(SURFACE, values))
+        assert output.startswith(RUNNABLE_MARKER)
+        child = types.SimpleNamespace(result=None, stdout=text, stderr="")
+        calls = module.Server.tool_calls_for(
+            types.SimpleNamespace(surface=SURFACE), child, values)
+        assert [call.get("unparseable") for call in calls] == [True]
+
+
+class TestASymlinkedPlanDir:
+    """Adversarial review 2026-10-05: the call's plan is joined to the anchor
+    without following symlinks, the dispatcher prints `Path(…).resolve()`, so
+    under a symlinked plan directory the two never compared equal and every
+    re-spelled command and option carried the absolute real path instead of
+    the plan as typed."""
+
+    def test_the_real_path_is_put_back_as_typed(self, harness, tmp_path):
+        shared = tmp_path / "shared-plans"
+        shared.mkdir()
+        (shared / "x.md").write_text("# x\n", encoding="utf-8")
+        (harness.workspace / "plans").symlink_to(shared, target_is_directory=True)
+        real = os.path.realpath(shared / "x.md")
+        failed = {"exit": CODES["needs_human"], "stdout": [
+            "  {} generate-tasks {} --host {} --yes".format(
+                UV_PREFIX, real, SURFACE["host"]),
+            result_line(mode="generate-tasks", state=STATES["needs_human"],
+                        exit=CODES["needs_human"])]}
+        envelope, _, _, _ = harness.run(
+            dict(GENERATE, plan="plans/x.md"), [launch_step(), failed],
+            extra_env={"STUB_RESUME_FAIL": "1"})
+        assert "  $multi-llm:multi-llm --generate-tasks plans/x.md" in \
+            envelope["output"].split("\n")
+        calls = [option for option in envelope["options"] if "human" not in option]
+        assert [call["plan"] for call in calls] == ["plans/x.md"]
+        assert real not in json.dumps(envelope)
+
+
 #: Values the plan quoting must agree on with `next_phase.quote_plan_arg`.
 QUOTE_CASES = [
     "plans/x.md", "plans/my plan.md", "plans/it's.md", 'plans/a"b.md',
