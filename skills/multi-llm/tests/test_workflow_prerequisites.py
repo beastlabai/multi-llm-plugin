@@ -2134,3 +2134,66 @@ class TestStartedPhaseReadsInProgress:
         reloaded = StateManager(plan, read_only=True)
         assert reloaded.is_phase_completed("apply-suggestions")
         assert not reloaded.is_phase_started("apply-suggestions")
+
+
+class TestImplementCountsTheWholeDecomposition:
+    """Racing re-run 3 (2026-10-05): mid-implement, `status` read
+    `implement in_progress (6/6 tasks)` on Claude Code's native leg with ten
+    tasks generated — the native host records a task only once it ran — while
+    Codex's executor leg, which seeds every task `pending`, read `8/13`. The
+    count is now done/total of the decomposition implement ran last
+    (`implement_task_ids`) on both legs."""
+
+    TEN = [f"T{n:03d}" for n in range(1, 11)]
+
+    def _plan(self, tmp_path, tasks, *, started=True, ids=None):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"),
+                tasks=tasks)
+        state = StateManager(plan)
+        state.record_task_titles({task_id: task_id for task_id in (ids or self.TEN)})
+        if started:
+            state.mark_phase_started("implement")
+        state.save()
+        return plan
+
+    def test_the_native_leg_mid_run_reads_done_of_all(self, tmp_path):
+        plan = self._plan(tmp_path, {f"T{n:03d}": "completed" for n in range(1, 7)})
+        entry = _status(plan)["phases"]["implement"]
+        assert entry["status"] == "in_progress"
+        assert (entry["tasks_done"], entry["tasks_total"]) == (6, 10)
+
+    def test_the_status_text_prints_it(self, tmp_path, capsys):
+        from utils import run_status
+
+        plan = self._plan(tmp_path, {f"T{n:03d}": "completed" for n in range(1, 7)})
+        run_status.main(["--plan-file", str(plan)])
+        out = capsys.readouterr().out
+        assert "implement               in_progress  (6/10 tasks)" in out
+
+    def test_a_started_emit_with_nothing_run_yet_reads_zero_of_all(self, tmp_path):
+        entry = _status(self._plan(tmp_path, {}))["phases"]["implement"]
+        assert (entry["status"], entry["tasks_done"], entry["tasks_total"]) == (
+            "in_progress", 0, 10,
+        )
+
+    def test_the_executor_legs_seeded_count_is_unchanged(self, tmp_path):
+        tasks = {task_id: "pending" for task_id in self.TEN}
+        tasks.update({"T001": "completed", "T002": "completed", "T010": "skipped"})
+        entry = _status(self._plan(tmp_path, tasks, started=False))["phases"]["implement"]
+        assert (entry["tasks_done"], entry["tasks_total"]) == (2, 10)
+
+    def test_an_earlier_decompositions_ids_are_not_counted(self, tmp_path):
+        plan = self._plan(
+            tmp_path, {"T001": "completed", "T020": "completed"},
+            ids=["T001", "T002"],
+        )
+        entry = _status(plan)["phases"]["implement"]
+        assert (entry["tasks_done"], entry["tasks_total"]) == (1, 2)
+
+    def test_a_dry_run_record_alone_shows_no_count(self, tmp_path):
+        """`implement --dry-run` records the decomposition and starts nothing;
+        a count would make the next-step walk read implement as started."""
+        entry = _status(self._plan(tmp_path, {}, started=False))["phases"]["implement"]
+        assert entry["status"] == "pending"
+        assert "tasks_total" not in entry
