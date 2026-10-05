@@ -1068,7 +1068,6 @@ class TestWorkspaceSafety:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
         probe = Probe.__new__(Probe)
         probe.state = FakeState(env.tmp_path / "state.json")
@@ -2192,7 +2191,6 @@ class TestAdditivityAndDetach:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
             write_kind = "apply_suggestions"
 
         probe = Probe.__new__(Probe)

@@ -977,11 +977,15 @@ class TestStatusPhaseListing:
         output = run_status_check(plan_ready_for_apply)
 
         phase = output["phases"]["apply-task-suggestions"]
-        assert phase["status"] == "pending", (
-            f"apply-task-suggestions should still be pending after orchestrator run "
+        # Handed to the host and not completed: `in_progress` (the started
+        # record, 2026-10-05), never `completed` — completion is deferred to
+        # the instruction file's `--mark-completed`.
+        assert phase["status"] == "in_progress", (
+            f"apply-task-suggestions should be in_progress after orchestrator run "
             f"(completion deferred to instruction file).\n"
             f"Phase: {json.dumps(phase, indent=2)}"
         )
+        assert phase.get("started_at")
 
     def test_status_shows_skipped_after_skip(self, plan_ready_for_apply):
         """--status shows apply-task-suggestions as skipped after --skip."""

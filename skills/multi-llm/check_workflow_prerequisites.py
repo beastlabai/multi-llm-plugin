@@ -140,9 +140,11 @@ def _latest_phase_activity(state: StateManager, phase: str) -> Optional[datetime
     records the scheduler writes beside it: ``metrics_progress.{phase}.started_at``
     (stamped before a run's first dispatch, popped only when the phase is marked
     completed) and each ``metrics.{phase}`` entry's ``timestamp`` (saved with
-    the batch's status). None when neither holds a readable time.
+    the batch's status) — plus ``phases_started.{phase}``, the native leg's
+    own record of a run handed to the host (re-stamped on every emit). None
+    when none holds a readable time.
     """
-    stamps = []
+    stamps = [_parse_timestamp(state.phase_started_at(phase))]
     progress = state.state.get("metrics_progress")
     if isinstance(progress, dict) and isinstance(progress.get(phase), dict):
         stamps.append(_parse_timestamp(progress[phase].get("started_at")))
@@ -1003,6 +1005,14 @@ def get_workflow_status(
             # phase rule routed a later phase's answer to the bare command.
             if tasks_done > 0:
                 phases["implement"]["status"] = "in_progress"
+        # The native leg's own record (`StateManager.mark_phase_started`): the
+        # orchestrator handed the batches to the host and nothing has
+        # completed the phase since. A host that died before its first task
+        # recorded leaves exactly this and no completed task, and the phase
+        # must still read `in_progress` so `--resume` is offered.
+        if state.is_phase_started("implement"):
+            phases["implement"]["status"] = "in_progress"
+            phases["implement"]["started_at"] = state.phase_started_at("implement")
 
     # The implement tasks the run deferred (a human task, and the dependents
     # `skip-dependents` skipped with it): read from `task_status`, never by
@@ -1040,23 +1050,31 @@ def get_workflow_status(
             phases["apply-task-suggestions"]["notice"] = notice
 
     # An apply phase with some of its own write batches recorded `completed`
-    # has progress on record: it is `in_progress`, not `pending`, so a command
-    # for it carries `--resume` (a bare re-invocation starts the phase over).
+    # — or with a started record, the native leg's note that its batches were
+    # handed to the host (`StateManager.mark_phase_started`) — has progress
+    # on record: it is `in_progress`, not `pending`, so a command for it
+    # carries `--resume` (a bare re-invocation starts the phase over).
     # It records itself completed only once every batch verified
-    # (`write_batch_scheduler._finalize`), and a phase this payload already
-    # shows as completed or skipped is left alone. Batches whose phase last
-    # ran before its review last completed are an earlier cycle's and mark
-    # nothing: `--resume` there would replay that cycle's recorded decisions
-    # against the new review's findings.
+    # (`write_batch_scheduler._finalize`, or the host's `--mark-completed`),
+    # and a phase this payload already shows as completed or skipped is left
+    # alone. Batches whose phase last ran before its review last completed
+    # are an earlier cycle's and mark nothing: `--resume` there would replay
+    # that cycle's recorded decisions against the new review's findings. The
+    # started record is dated the same way (`_latest_phase_activity`), so an
+    # abandoned run from before a review re-run marks nothing either.
     task_statuses = state.get_all_task_statuses()
     for phase, pattern in APPLY_BATCH_ID_PATTERNS.items():
         if phases[phase]["status"] in DONE_STATUSES:
             continue
-        if any(
+        has_progress = state.is_phase_started(phase) or any(
             pattern.match(task_id) and status == "completed"
             for task_id, status in task_statuses.items()
-        ) and not _apply_batches_predate_review(state, phases, phase):
+        )
+        if has_progress and not _apply_batches_predate_review(state, phases, phase):
             phases[phase]["status"] = "in_progress"
+            started_at = state.phase_started_at(phase)
+            if started_at:
+                phases[phase]["started_at"] = started_at
 
     # Picked once, after every post-loop change above: the first non-optional
     # phase that is neither completed nor skipped. `in_progress` counts as

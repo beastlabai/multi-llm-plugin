@@ -604,11 +604,15 @@ class TestPhase3cHasFindings:
         output = run_status_check(plan_path)
 
         phase = output["phases"]["apply-task-suggestions"]
-        assert phase["status"] == "pending", (
-            f"Phase should still be pending after orchestrator run "
+        # Handed to the host and not completed: `in_progress` (the started
+        # record, 2026-10-05), never `completed` — completion is deferred to
+        # the instruction file's `--mark-completed`.
+        assert phase["status"] == "in_progress", (
+            f"Phase should be in_progress after orchestrator run "
             f"(completion deferred to instruction file).\n"
             f"Phase: {json.dumps(phase, indent=2)}"
         )
+        assert phase.get("started_at")
 
 
 # ===========================================================================
@@ -1103,10 +1107,11 @@ class TestPhase3cEndToEnd:
         output_file = temp_dir / prefix / "apply-task-suggestions" / "orchestrator_output.json"
         assert output_file.exists(), f"Output file should exist: {output_file}"
 
-        # Step 5: Verify status shows pending (awaiting batch processing)
+        # Step 5: Verify status shows in_progress (awaiting batch processing;
+        # the emit path records the phase started, never completed)
         status = run_status_check(plan_path)
-        assert status["phases"]["apply-task-suggestions"]["status"] == "pending", (
-            f"Phase should be pending (awaiting batch processing).\n"
+        assert status["phases"]["apply-task-suggestions"]["status"] == "in_progress", (
+            f"Phase should be in_progress (awaiting batch processing).\n"
             f"Phase: {json.dumps(status['phases']['apply-task-suggestions'], indent=2)}"
         )
 

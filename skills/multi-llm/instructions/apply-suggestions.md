@@ -464,7 +464,17 @@ Items whose decision was offloaded to the judge agent — via `--agent-decide`, 
    ```
    Best-effort: if `report_data.json` is missing from the review dir (the review predates this feature), the command prints a notice and exits 0 without changing the report — just continue.
 
-   **Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote.
+### 8. Mark Phase Completed
+
+**Run this only if step 5's batch loop reached the end** — every batch dispatched and verified, and the human-decision items of step 6 handled. Then mark the apply-suggestions phase as completed in state.json:
+
+```bash
+uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" apply-suggestions --plan-file "$PLAN_PATH" --mark-completed
+```
+
+The orchestrator recorded the phase *started* when it wrote the batches (step 2), and this is the only command that records it *completed* — it also re-stamps the plan hash, so the next phase does not read this phase's own edits as a human editing the plan. **Do NOT run it if the loop stopped early** — a clean failure you aborted on, a partial application you surfaced for human review (step 5.6), or an interrupted run. The phase then stays `in_progress`, which is what makes `status` and the next-step command offer `--resume` instead of calling the phase done.
+
+**Then report to the user** following `references/summary-format.md`, naming the summary report and every other file this phase wrote.
 
 ---
 

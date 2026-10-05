@@ -627,7 +627,6 @@ class TestOrchestratorHook:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def get_output_path(self):
                 return str(phase_dir / "orchestrator_output.json")

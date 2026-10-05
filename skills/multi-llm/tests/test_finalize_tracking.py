@@ -1151,3 +1151,66 @@ class TestTrackedFilesSayWhatHappenedToEachFile:
         actions = self._actions(state_path)
         assert actions["index.html"] == "created"
         assert actions["kept.py"] == "modified"
+
+
+class TestMarkCompletedIsTheNativeLegsClosingWrite:
+    """`--mark-completed` records implement completed and clears its start.
+
+    The orchestrator records the phase *started* when it emits the task JSON
+    (2026-10-05); this flag on the instruction's closing call is the only
+    place the native path records it completed, the counterpart of
+    `WriteBatchScheduler._finalize`.
+    """
+
+    def _state(self, temp_dir, **extra):
+        state = {
+            "pre_existing_changes": [],
+            "created_at": "2025-01-01T00:00:00",
+            "plan_path": "/path/to/plan.md",
+            "phases_started": {"implement": "2026-10-05T10:43:30"},
+            **extra,
+        }
+        path = temp_dir / "state.json"
+        path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+        return path
+
+    def test_without_the_flag_the_phase_stays_started(self, temp_dir, capsys):
+        path = self._state(temp_dir)
+        with patch("finalize_tracking.get_all_modified_files", return_value=[]):
+            assert main(["--state-file", str(path)]) == 0
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert "implement" in saved["phases_started"]
+        assert "implement" not in saved.get("phases_completed", {})
+        assert "marked completed" not in capsys.readouterr().out
+
+    def test_with_the_flag_the_start_becomes_a_completion(self, temp_dir, capsys):
+        path = self._state(temp_dir)
+        with patch("finalize_tracking.get_all_modified_files", return_value=[]):
+            assert main(["--state-file", str(path), "--mark-completed"]) == 0
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert isinstance(saved["phases_completed"]["implement"], str)
+        assert "implement" not in saved["phases_started"]
+        assert "Phase implement marked completed" in capsys.readouterr().out
+
+    def test_the_flag_reads_back_through_the_state_manager(self, temp_dir):
+        """`is_phase_completed` sees the raw write, so `status`, the next-step
+        builder and the completed-phase guard agree with it."""
+        from utils.state_manager import StateManager
+
+        plan = temp_dir / "plan.md"
+        plan.write_text("# plan\n", encoding="utf-8")
+        state = StateManager(plan)
+        state.mark_phase_started("implement")
+        state.save()
+        with patch("finalize_tracking.get_all_modified_files", return_value=[]):
+            assert main(["--state-file", str(state.state_file), "--mark-completed"]) == 0
+        reloaded = StateManager(plan)
+        assert reloaded.is_phase_completed("implement")
+        assert not reloaded.is_phase_started("implement")
+
+    def test_a_dry_run_never_marks(self, temp_dir):
+        path = self._state(temp_dir)
+        with patch("finalize_tracking.get_all_modified_files", return_value=[]):
+            assert main(["--state-file", str(path), "--mark-completed", "--dry-run"]) == 0
+        saved = json.loads(path.read_text(encoding="utf-8"))
+        assert "implement" not in saved.get("phases_completed", {})

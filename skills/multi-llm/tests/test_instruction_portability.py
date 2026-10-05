@@ -189,9 +189,11 @@ PLACEHOLDER_MANIFEST = {
     # one more instance of the invariant two-token prefix. +2 on apply-code-fixes
     # (30 -> 32) and apply-suggestions (28 -> 30): the `util check-reply` command
     # each revalidation batch runs, as the review cores' validation does
-    # (adversarial review, 2026-10-02).
+    # (adversarial review, 2026-10-02). apply-suggestions 30 -> 32: its own
+    # post-loop `apply-suggestions --mark-completed` step (§8), now that the
+    # emit path records the phase started rather than completed (2026-10-05).
     "instructions/apply-code-fixes.md": (0, 32),
-    "instructions/apply-suggestions.md": (0, 30),
+    "instructions/apply-suggestions.md": (0, 32),
     # 26 -> 28: the post-loop `util check-tasks` graph check (issue 10).
     "instructions/apply-task-suggestions.md": (0, 28),
     # 4 -> 6: the hand-rolled question-file dance (write the file, re-resolve the

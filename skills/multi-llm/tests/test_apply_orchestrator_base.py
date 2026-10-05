@@ -4,7 +4,7 @@ Covers:
 - Helper module functions (path, selection, output helpers)
 - Template method sequencing (lifecycle phase call order)
 - Abstract method contracts (NotImplementedError on base class)
-- Config-driven branching (supports_revalidation, marks_phase_completed, supports_skip_flag)
+- Config-driven branching (supports_revalidation, supports_skip_flag)
 - __init_subclass__ validation
 - build_common_arg_parser flag toggles
 - Edge-case matrix from the refactoring plan (lines 422-442)
@@ -61,7 +61,6 @@ class MockApplyOrchestrator(ApplyOrchestratorBase):
     item_noun = "suggestion"
     supports_revalidation = False
     supports_skip_flag = False
-    marks_phase_completed = False
 
     def __init__(self, args: argparse.Namespace):
         # Track method call order
@@ -463,7 +462,6 @@ class TestInitSubclassValidation:
                 item_noun = "item"
                 supports_revalidation = False
                 supports_skip_flag = False
-                marks_phase_completed = False
 
     def test_missing_review_subdir(self):
         """TypeError raised when review_subdir is empty."""
@@ -474,7 +472,6 @@ class TestInitSubclassValidation:
                 item_noun = "item"
                 supports_revalidation = False
                 supports_skip_flag = False
-                marks_phase_completed = False
 
     def test_missing_item_noun(self):
         """TypeError raised when item_noun is empty."""
@@ -485,7 +482,6 @@ class TestInitSubclassValidation:
                 item_noun = ""
                 supports_revalidation = False
                 supports_skip_flag = False
-                marks_phase_completed = False
 
     def test_missing_bool_config(self):
         """TypeError raised when boolean config not explicitly set."""
@@ -496,7 +492,6 @@ class TestInitSubclassValidation:
                 item_noun = "item"
                 # supports_revalidation intentionally omitted
                 supports_skip_flag = False
-                marks_phase_completed = False
 
     def test_invalid_bool_type(self):
         """TypeError raised when boolean config is not a bool."""
@@ -507,7 +502,6 @@ class TestInitSubclassValidation:
                 item_noun = "item"
                 supports_revalidation = "yes"  # type: ignore
                 supports_skip_flag = False
-                marks_phase_completed = False
 
     def test_non_string_phase_name(self):
         """TypeError raised when phase_name is not a string."""
@@ -518,7 +512,6 @@ class TestInitSubclassValidation:
                 item_noun = "item"
                 supports_revalidation = False
                 supports_skip_flag = False
-                marks_phase_completed = False
 
     def test_valid_subclass_passes(self):
         """A properly configured subclass does not raise."""
@@ -529,7 +522,6 @@ class TestInitSubclassValidation:
             item_noun = "item"
             supports_revalidation = True
             supports_skip_flag = True
-            marks_phase_completed = True
 
             def load_data(self):
                 return ([], [])
@@ -581,7 +573,6 @@ class TestItemNounPlural:
             item_noun = "widget"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 return ([], [])
@@ -829,7 +820,6 @@ class TestConfigDrivenBranching:
             item_noun = "suggestion"
             supports_revalidation = True
             supports_skip_flag = False
-            marks_phase_completed = False
 
         args = _make_args()
         orch = RevalidatingOrch(args)
@@ -837,38 +827,21 @@ class TestConfigDrivenBranching:
         # Currently a stub, just verify no crash
         orch.handle_revalidation()
 
-    def test_marks_phase_completed_false_skips_marking(self, tmp_path):
-        """When marks_phase_completed=False, state is not marked completed."""
+    def test_emit_records_the_phase_started_never_completed(self, tmp_path):
+        """The native emit path hands the batches out: started, not completed.
+
+        Until 2026-10-05 apply-suggestions (`marks_phase_completed = True`)
+        recorded itself completed here, before a single edit existed.
+        """
         plan_path = _setup_plan_with_output(tmp_path)
         args = _make_args(plan_file=str(plan_path))
 
         orch = MockApplyOrchestrator(args)
-        assert orch.marks_phase_completed is False
-
         exit_code = orch.run()
         assert exit_code == 0
 
-        # State should NOT have mark_phase_completed called
-        # (MockApplyOrchestrator has marks_phase_completed=False)
-
-    def test_marks_phase_completed_true_marks_state(self, tmp_path):
-        """When marks_phase_completed=True, state is marked completed on success."""
-
-        class MarkingOrch(MockApplyOrchestrator):
-            phase_name = "apply-marking"
-            review_subdir = "review-plan"
-            item_noun = "suggestion"
-            supports_revalidation = False
-            supports_skip_flag = False
-            marks_phase_completed = True
-
-        plan_path = _setup_plan_with_output(tmp_path)
-        args = _make_args(plan_file=str(plan_path))
-
-        orch = MarkingOrch(args)
-        exit_code = orch.run()
-        assert exit_code == 0
-        # State should have been marked completed via state.mark_phase_completed
+        assert orch.state.is_phase_started(orch.phase_name)
+        assert not orch.state.is_phase_completed(orch.phase_name)
 
     def test_supports_skip_flag_false_ignores_skip(self, tmp_path):
         """When supports_skip_flag=False, --skip flag has no effect."""
@@ -891,7 +864,6 @@ class TestConfigDrivenBranching:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = True
-            marks_phase_completed = False
 
         plan_path = _setup_plan_with_output(tmp_path)
         args = _make_args(plan_file=str(plan_path), skip=True)
@@ -1102,7 +1074,6 @@ class TestOrchestratorError:
             item_noun = "item"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 raise OrchestratorError(
@@ -1152,7 +1123,6 @@ class TestEdgeCaseMatrix:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def parse_validation_overrides_from_report(self, report_path):
                 # Return badly typed data - base class handles gracefully
@@ -1531,7 +1501,6 @@ class TestLoggingAndErrorContext:
             item_noun = "fix"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
         args = _make_args()
         orch = OtherOrch(args)
@@ -1577,7 +1546,6 @@ class TestLoggingAndErrorContext:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 self.call_log.append("load_data")
@@ -1629,7 +1597,6 @@ class TestLoggingAndErrorContext:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 raise ValueError("data corrupted")
@@ -1671,7 +1638,6 @@ class TestRunIntegration:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 self.call_log.append("load_data")
@@ -1717,7 +1683,6 @@ class TestRunIntegration:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 raise RuntimeError("unexpected crash")
@@ -1738,7 +1703,6 @@ class TestRunIntegration:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 self.call_log.append("load_data")
@@ -1790,7 +1754,6 @@ class TestRunIntegration:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 self.call_log.append("load_data")
@@ -1894,7 +1857,6 @@ class TestMachineParseableMarkers:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = True
-            marks_phase_completed = False
 
         return SkippableOrch
 
@@ -1908,7 +1870,6 @@ class TestMachineParseableMarkers:
             item_noun = "suggestion"
             supports_revalidation = True
             supports_skip_flag = False
-            marks_phase_completed = False
 
         return RevalOrch
 
@@ -1927,7 +1888,6 @@ class TestMachineParseableMarkers:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 self.call_log.append("load_data")
@@ -2686,11 +2646,11 @@ class TestStateTransitionParity:
     Tests cover:
     1. Fresh run (no prior state) for all three orchestrators
     2. Resume (prior partial state exists)
-    3. Phase completion (marks_phase_completed=True for apply_suggestions,
-       False for the others)
+    3. Phase completion: the emit path records every phase *started*, never
+       completed (completion is the host's post-loop ``--mark-completed``)
     4. --fresh correctly resets StateManager state
     5. --resume with prior state produces identical resume_info dicts
-    6. mark_phase_completed called exactly when marks_phase_completed=True
+    6. mark_phase_started called on the emit path, mark_phase_completed never
     7. State file field names, structure, and transition sequences
     """
 
@@ -2712,7 +2672,6 @@ class TestStateTransitionParity:
             "item_noun": "suggestion",
             "supports_revalidation": True,
             "supports_skip_flag": True,
-            "marks_phase_completed": True,
         },
         "apply-fixes": {
             "phase_name": "apply-fixes",
@@ -2721,11 +2680,6 @@ class TestStateTransitionParity:
             "item_noun": "fix",
             "supports_revalidation": True,
             "supports_skip_flag": False,
-            # Stays False: this phase's `run()` only EMITS batches. Completion is
-            # the host's post-loop `--mark-completed` (or, under
-            # `--exec-subagents`, the executor's `_finalize`) — never the emit
-            # path. See `test_apply_code_fixes_does_not_mark_phase_completed`.
-            "marks_phase_completed": False,
         },
         "apply-task-suggestions": {
             "phase_name": "apply-task-suggestions",
@@ -2734,7 +2688,6 @@ class TestStateTransitionParity:
             "item_noun": "task suggestion",
             "supports_revalidation": False,
             "supports_skip_flag": True,
-            "marks_phase_completed": False,
         },
     }
 
@@ -2758,7 +2711,6 @@ class TestStateTransitionParity:
         _noun = config["item_noun"]
         _reval = config["supports_revalidation"]
         _skip = config["supports_skip_flag"]
-        _marks = config["marks_phase_completed"]
 
         class ConfiguredOrch(MockApplyOrchestrator):
             phase_name = _phase
@@ -2767,7 +2719,6 @@ class TestStateTransitionParity:
             item_noun = _noun
             supports_revalidation = _reval
             supports_skip_flag = _skip
-            marks_phase_completed = _marks
 
             def load_data(self):
                 self.call_log.append("load_data")
@@ -3143,87 +3094,25 @@ class TestStateTransitionParity:
         assert "[orchestrator] Fresh start requested" in captured.err
 
     # ------------------------------------------------------------------
-    # 4. mark_phase_completed called only when marks_phase_completed=True
+    # 4. the emit path records the phase started, never completed
     # ------------------------------------------------------------------
 
-    def test_apply_suggestions_marks_phase_completed(self, tmp_path):
-        """apply-suggestions (marks_phase_completed=True) marks phase completed."""
-        config = self.ORCHESTRATOR_CONFIGS["apply-suggestions"]
-        plan_path = self._setup_plan_for_config(tmp_path, config)
-        groups = self._sample_groups()
-        validation = self._sample_validation()
-
-        OrchClass = self._make_orchestrator_class(config, groups, validation)
-        args = _make_args(plan_file=str(plan_path))
-        orch = OrchClass(args)
-        exit_code = orch.run()
-        assert exit_code == 0
-
-        # Phase should be marked completed in state
-        assert orch.state.is_phase_completed("apply-suggestions"), (
-            "apply-suggestions should mark phase completed"
-        )
-
-    def test_apply_code_fixes_does_not_mark_phase_completed(self, tmp_path):
-        """apply-fixes (marks_phase_completed=False) does NOT mark phase completed.
-
-        **This silence is the contract, not a bug — do not "fix" it by flipping
-        `marks_phase_completed` to True.** `run()` on this phase applies nothing:
-        it emits batch JSON and returns, and the bytes are written afterwards by
-        the host following `instructions/apply-code-fixes.md`. The base's
-        completion write sits on that *emit* path, so a True here would record the
-        phase complete before a single batch had been executed or verified — a
-        claim about work handed out, not about work done.
-
-        Completion is recorded elsewhere, and only once every batch has verified:
-        by the host's post-loop `apply-code-fixes … --mark-completed` on the
-        native path (see `TestApplyCodeFixesCompletionContract`), or by
-        `WriteBatchScheduler._finalize` under `--exec-subagents`. Both write
-        `apply-code-fixes`; neither is this method.
-        """
-        config = self.ORCHESTRATOR_CONFIGS["apply-fixes"]
-        plan_path = self._setup_plan_for_config(tmp_path, config)
-        groups = self._sample_groups()
-        validation = self._sample_validation()
-
-        OrchClass = self._make_orchestrator_class(config, groups, validation)
-        args = _make_args(plan_file=str(plan_path))
-        orch = OrchClass(args)
-        exit_code = orch.run()
-        assert exit_code == 0
-
-        # Phase should NOT be marked completed
-        assert not orch.state.is_phase_completed("apply-fixes"), (
-            "apply-fixes should NOT mark phase completed"
-        )
-
-    def test_apply_task_suggestions_does_not_mark_phase_completed(self, tmp_path):
-        """apply-task-suggestions (marks_phase_completed=False) does NOT mark phase completed."""
-        config = self.ORCHESTRATOR_CONFIGS["apply-task-suggestions"]
-        plan_path = self._setup_plan_for_config(tmp_path, config)
-        groups = self._sample_groups()
-        validation = self._sample_validation()
-
-        OrchClass = self._make_orchestrator_class(config, groups, validation)
-        args = _make_args(plan_file=str(plan_path))
-        orch = OrchClass(args)
-        exit_code = orch.run()
-        assert exit_code == 0
-
-        # Phase should NOT be marked completed
-        assert not orch.state.is_phase_completed("apply-task-suggestions"), (
-            "apply-task-suggestions should NOT mark phase completed"
-        )
-
-    @pytest.mark.parametrize("config_name,expected_marks", [
-        ("apply-suggestions", True),
-        ("apply-fixes", False),
-        ("apply-task-suggestions", False),
+    @pytest.mark.parametrize("config_name", [
+        "apply-suggestions", "apply-fixes", "apply-task-suggestions",
     ])
-    def test_mark_phase_completed_parity_matrix(
-        self, tmp_path, config_name, expected_marks
-    ):
-        """Parametrized: mark_phase_completed matches expected behavior per orchestrator."""
+    def test_emit_records_started_not_completed(self, tmp_path, config_name):
+        """`run()` APPLIES NOTHING: it emits batch JSON and returns, and the
+        bytes are written afterwards by the host following the instruction.
+        So the emit path records the phase *started* — under the same
+        `confirmation_phase_name or phase_name` word `--mark-completed` later
+        persists — and never completed. Completion is the host's post-loop
+        `--mark-completed` (see `TestApplyCodeFixesCompletionContract`), or
+        `WriteBatchScheduler._finalize` under `--exec-subagents`.
+
+        Until 2026-10-05 apply-suggestions marked itself completed here, so
+        `status` and the next-step builder read the phase as done while the
+        host was still applying its batches (racing re-run, 2026-10-04).
+        """
         config = self.ORCHESTRATOR_CONFIGS[config_name]
         plan_path = self._setup_plan_for_config(tmp_path, config)
         groups = self._sample_groups()
@@ -3235,14 +3124,19 @@ class TestStateTransitionParity:
         exit_code = orch.run()
         assert exit_code == 0
 
-        is_completed = orch.state.is_phase_completed(config["phase_name"])
-        assert is_completed == expected_marks, (
-            f"{config_name}: expected marks_phase_completed={expected_marks}, "
-            f"got is_phase_completed={is_completed}"
+        word = self._completion_word(config)
+        assert orch.state.is_phase_started(word), (
+            f"{config_name}: the emit path must record {word!r} started"
         )
+        assert not orch.state.is_phase_completed(word), (
+            f"{config_name}: the emit path must never record {word!r} completed"
+        )
+        assert word in orch.state.state.get("phases_started", {})
+        assert not orch.state.state.get("phases_completed", {})
 
-    def test_mark_phase_completed_persisted_to_state_file(self, tmp_path):
-        """marks_phase_completed=True persists to the state file on disk."""
+    def test_started_record_persisted_to_state_file(self, tmp_path):
+        """The started record is saved on disk at emit time, so a host that
+        dies before its first batch leaves the phase `in_progress`."""
         config = self.ORCHESTRATOR_CONFIGS["apply-suggestions"]
         plan_path = self._setup_plan_for_config(tmp_path, config)
         groups = self._sample_groups()
@@ -3253,26 +3147,36 @@ class TestStateTransitionParity:
         orch = OrchClass(args)
         orch.run()
 
-        # Read the state file directly from disk
         state_file = orch.state.state_file
         assert state_file.exists(), "State file should exist on disk"
-
         with open(state_file, encoding="utf-8") as f:
             saved_state = json.load(f)
 
-        assert "phases_completed" in saved_state
-        assert "apply-suggestions" in saved_state["phases_completed"]
-        # Value should be an ISO timestamp string
-        assert isinstance(
-            saved_state["phases_completed"]["apply-suggestions"], str
-        )
+        assert isinstance(saved_state["phases_started"]["apply-suggestions"], str)
+        assert "apply-suggestions" not in saved_state.get("phases_completed", {})
+
+    def test_mark_completed_clears_the_started_record(self, tmp_path):
+        """The host's `--mark-completed` turns the start into a completion."""
+        from utils.state_manager import StateManager
+
+        config = self.ORCHESTRATOR_CONFIGS["apply-suggestions"]
+        plan_path = self._setup_plan_for_config(tmp_path, config)
+        groups = self._sample_groups()
+        validation = self._sample_validation()
+
+        OrchClass = self._make_orchestrator_class(config, groups, validation)
+        OrchClass(_make_args(plan_file=str(plan_path))).run()
+
+        with pytest.raises(SystemExit) as exc:
+            OrchClass(_make_args(plan_file=str(plan_path), mark_completed=True)).run()
+        assert exc.value.code == 0
+        state = StateManager(Path(plan_path))
+        assert state.is_phase_completed("apply-suggestions")
+        assert not state.is_phase_started("apply-suggestions")
+        assert "apply-suggestions" not in state.state.get("phases_started", {})
 
     def test_mark_phase_not_completed_absent_from_state(self, tmp_path):
-        """marks_phase_completed=False means phase absent from phases_completed.
-
-        When marks_phase_completed=False, the base class does not call
-        state.save() in _write_outputs, so we check in-memory state.
-        """
+        """The emit path leaves the phase absent from phases_completed."""
         config = self.ORCHESTRATOR_CONFIGS["apply-fixes"]
         plan_path = self._setup_plan_for_config(tmp_path, config)
         groups = self._sample_groups()
@@ -3324,7 +3228,6 @@ class TestStateTransitionParity:
             item_noun = "suggestion"
             supports_revalidation = True
             supports_skip_flag = True
-            marks_phase_completed = True
 
             def build_output_json(self, batches, *, resume_info=None):
                 self.call_log.append("build_output_json")
@@ -3360,7 +3263,6 @@ class TestStateTransitionParity:
             item_noun = "task suggestion"
             supports_revalidation = False
             supports_skip_flag = True
-            marks_phase_completed = False
 
             def build_output_json(self, batches, *, resume_info=None):
                 self.call_log.append("build_output_json")
@@ -3406,7 +3308,6 @@ class TestStateTransitionParity:
             item_noun = "fix"
             supports_revalidation = True
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def build_output_json(self, batches, *, resume_info=None):
                 self.call_log.append("build_output_json")
@@ -3634,9 +3535,10 @@ class TestStateTransitionParity:
 
         assert phase_sequence == ["setup", "load", "feedback", "batches", "write"]
 
-        # After full run: state was initialized and (for apply-suggestions) phase completed
+        # After full run: state was initialized and the phase recorded started
         assert orch.state is not None
-        assert orch.state.is_phase_completed("apply-suggestions")
+        assert orch.state.is_phase_started("apply-suggestions")
+        assert not orch.state.is_phase_completed("apply-suggestions")
 
     def test_state_transition_sequence_fresh_then_resume(self, tmp_path):
         """Two-run sequence: fresh -> resume preserves and continues state."""
@@ -3838,12 +3740,10 @@ class TestExitCodeAndPromptParity:
     migrated orchestrators.
 
     The three orchestrator configurations mirror the concrete subclasses:
-    - apply-suggestions (supports_revalidation=True, supports_skip_flag=True,
-      marks_phase_completed=True)
-    - apply-fixes (supports_revalidation=True, supports_skip_flag=False,
-      marks_phase_completed=False)
+    - apply-suggestions (supports_revalidation=True, supports_skip_flag=True)
+    - apply-fixes (supports_revalidation=True, supports_skip_flag=False)
     - apply-task-suggestions (supports_revalidation=False,
-      supports_skip_flag=True, marks_phase_completed=False)
+      supports_skip_flag=True)
 
     All exit codes and prompt behaviors are owned by the base class template
     method, so they must be identical for each orchestrator under the same
@@ -3914,7 +3814,6 @@ class TestExitCodeAndPromptParity:
             "item_noun": "suggestion",
             "supports_revalidation": True,
             "supports_skip_flag": True,
-            "marks_phase_completed": True,
         },
         "apply-fixes": {
             "phase_name": "apply-fixes",
@@ -3922,7 +3821,6 @@ class TestExitCodeAndPromptParity:
             "item_noun": "fix",
             "supports_revalidation": True,
             "supports_skip_flag": False,
-            "marks_phase_completed": False,
         },
         "apply-task-suggestions": {
             "phase_name": "apply-task-suggestions",
@@ -3930,7 +3828,6 @@ class TestExitCodeAndPromptParity:
             "item_noun": "task suggestion",
             "supports_revalidation": False,
             "supports_skip_flag": True,
-            "marks_phase_completed": False,
         },
     }
 
@@ -3957,7 +3854,6 @@ class TestExitCodeAndPromptParity:
         _noun = config["item_noun"]
         _reval = config["supports_revalidation"]
         _skip = config["supports_skip_flag"]
-        _marks = config["marks_phase_completed"]
 
         class ConfiguredOrch(MockApplyOrchestrator):
             phase_name = _phase
@@ -3965,7 +3861,6 @@ class TestExitCodeAndPromptParity:
             item_noun = _noun
             supports_revalidation = _reval
             supports_skip_flag = _skip
-            marks_phase_completed = _marks
 
             def load_data(self):
                 self.call_log.append("load_data")
@@ -3981,7 +3876,6 @@ class TestExitCodeAndPromptParity:
         _noun = config["item_noun"]
         _reval = config["supports_revalidation"]
         _skip = config["supports_skip_flag"]
-        _marks = config["marks_phase_completed"]
         _error_cls = error_cls
         _msg = msg
 
@@ -3991,7 +3885,6 @@ class TestExitCodeAndPromptParity:
             item_noun = _noun
             supports_revalidation = _reval
             supports_skip_flag = _skip
-            marks_phase_completed = _marks
 
             def load_data(self):
                 raise _error_cls(_msg)
@@ -4007,7 +3900,6 @@ class TestExitCodeAndPromptParity:
         _noun = config["item_noun"]
         _reval = config["supports_revalidation"]
         _skip = config["supports_skip_flag"]
-        _marks = config["marks_phase_completed"]
         _exit_code = exit_code
 
         class CustomExitOrch(MockApplyOrchestrator):
@@ -4016,7 +3908,6 @@ class TestExitCodeAndPromptParity:
             item_noun = _noun
             supports_revalidation = _reval
             supports_skip_flag = _skip
-            marks_phase_completed = _marks
 
             def load_data(self):
                 raise OrchestratorError(
@@ -4036,7 +3927,6 @@ class TestExitCodeAndPromptParity:
         _noun = config["item_noun"]
         _reval = config["supports_revalidation"]
         _skip = config["supports_skip_flag"]
-        _marks = config["marks_phase_completed"]
 
         class NoItemsOrch(MockApplyOrchestrator):
             phase_name = _phase
@@ -4044,7 +3934,6 @@ class TestExitCodeAndPromptParity:
             item_noun = _noun
             supports_revalidation = _reval
             supports_skip_flag = _skip
-            marks_phase_completed = _marks
 
             def load_data(self):
                 self.call_log.append("load_data")
@@ -5340,9 +5229,9 @@ class TestApplyCodeFixesCompletionContract:
     ``ApplyCodeFixesOrchestrator.run()`` applies nothing: it emits batch JSON and
     returns, and the bytes are written afterwards by the host following
     ``instructions/apply-code-fixes.md``. So the *emit* path must never record
-    completion (``marks_phase_completed = False``, and see
-    ``TestStateTransitionParity.test_apply_code_fixes_does_not_mark_phase_completed``
-    for why that must stay). The record instead comes from the post-loop
+    completion (it records the phase *started*; see
+    ``TestStateTransitionParity.test_emit_records_started_not_completed``).
+    The record instead comes from the post-loop
     ``apply-code-fixes --plan-file … --mark-completed`` command that closes that
     instruction — a command a host whose loop stopped early never reaches.
 
@@ -5960,7 +5849,6 @@ class TestTheExecutorLegReportsItsOutcome:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def run_write_executor(self):
                 self.write_tasks = [
@@ -6012,7 +5900,6 @@ class TestTheExecutorLegReportsItsOutcome:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def run_write_executor(self):
                 self.write_tasks = [
@@ -6055,7 +5942,6 @@ class TestTheExecutorLegReportsItsOutcome:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def run_write_executor(self):
                 self.write_result = _FakeSchedulerResult([])
@@ -6093,7 +5979,6 @@ class TestASkipCanBeTracedBackToItsReportEntry:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def load_data(self):
                 return (groups, validation)
@@ -6216,7 +6101,6 @@ class TestAJudgedSkipReachesEveryOutputThePhaseWrites:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def _handle_human_decisions(self):
                 # Exactly what the real one does to the work set.
@@ -6421,7 +6305,6 @@ class TestTheExecutorLegRunsStepSeven:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def run_write_executor(self):
                 self.write_tasks = [
@@ -6459,7 +6342,6 @@ class TestTheExecutorLegRunsStepSeven:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def run_write_executor(self):
                 self.write_result = _FakeSchedulerResult([])
@@ -6868,7 +6750,6 @@ class TestTheSummaryFileIsPatchedIntoTheWriteBatchReport:
             item_noun = "suggestion"
             supports_revalidation = False
             supports_skip_flag = False
-            marks_phase_completed = False
 
             def run_write_executor(self):
                 phase_dir = Path(self.out_dir) / self.phase_name
