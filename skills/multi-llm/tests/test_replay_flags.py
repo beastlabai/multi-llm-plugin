@@ -852,6 +852,35 @@ class TestTheWritePhasesResumeWithResume:
         assert command.count("--agent-decide") == 1
         assert "--claude-decide" not in command
 
+    @pytest.mark.parametrize("mode", [
+        "apply-suggestions", "apply-task-suggestions", "apply-code-fixes"])
+    @pytest.mark.parametrize("unattended", [["--yes"], ["--detach"]])
+    def test_the_judge_flag_yes_implies_is_not_replayed(self, mode, unattended):
+        """OpenCode racing run 4: the tool route composes `--yes`, which
+        already means `--agent-decide` in an apply phase, and `--resume`
+        replays the judge's recorded verdicts from state.json. Replayed, the
+        flag made `status`'s `resume with:` (offered as the tool call
+        `--agent-decide --resume`) disagree with `resume_command`
+        (`--resume`)."""
+        launcher = _argv("--yes", "--agent-decide", "--host", "opencode",
+                         *unattended)
+        recorded = replay_flags(mode, launcher)
+        assert "--agent-decide" not in recorded
+        tokens = self._resume(mode, recorded)
+        assert "--agent-decide" not in tokens
+        assert tokens[-1] == "--resume"
+
+    def test_a_judge_flag_recorded_beside_detach_is_dropped_when_read_back(self):
+        """A run recorded before the drop reads the same as one after it."""
+        tokens = self._resume(
+            "apply-suggestions", ["--agent-decide", "--host", "opencode", "--detach"])
+        assert tokens[-4:] == ["--host", "opencode", "--detach", "--resume"]
+        assert "--agent-decide" not in tokens
+
+    def test_without_yes_the_judge_flag_is_the_callers_choice(self):
+        recorded = replay_flags("apply-suggestions", _argv("--agent-decide"))
+        assert recorded == ["--agent-decide"]
+
     def test_a_recorded_resume_or_force_is_not_doubled(self):
         tokens = self._resume(
             "apply-task-suggestions", ["--host", "opencode", "--resume", "--force"]
