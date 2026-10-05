@@ -586,7 +586,35 @@ WRITE_CLEAN_FAILURE = "clean-failure"
 #: log and the summary table told the next batch, and the reader, that the
 #: work had failed. Measured 2026-09-16 on two verification-only tasks.
 WRITE_NO_OP = "no-op"
+#: What a verification-only ``implement`` task (one declaring no files) reads as
+#: when nothing moved: the check ran and left the repository as it was. A
+#: *label*, never a ``write_outcome`` value — the outcome stays ``no-op``, which
+#: resume, ``util restore-batch`` and every older reader key on — so it rides
+#: beside it as ``outcome_label`` (2026-10-04: the reason said VERIFIED while the
+#: summary cell, the batch log line, the status breakdown and both reports said
+#: ``no-op``). A verification-only task that moved bytes reads
+#: ``partial-application`` like any other partial, so the pair is VERIFIED or
+#: PARTIAL on every surface.
+WRITE_LABEL_VERIFIED = "verified"
 WRITE_PARTIAL = "partial-application"
+
+
+def write_outcome_label(
+    write_outcome: Optional[str], verification_only: bool = False,
+) -> Optional[str]:
+    """The word every report shows for a write outcome (:data:`WRITE_LABEL_VERIFIED`)."""
+    if verification_only and write_outcome == WRITE_NO_OP:
+        return WRITE_LABEL_VERIFIED
+    return write_outcome
+
+
+def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
+    """A serialized row's label: ``outcome_label`` when present, else ``write_outcome``.
+
+    Only a verification-only row carries ``outcome_label`` (every other row
+    is byte-identical to before), so a reader asks this rather than either key.
+    """
+    return row.get("outcome_label") or row.get("write_outcome")
 WRITE_SCHEMA_REJECTED = "schema-rejection"
 WRITE_POLICY_VIOLATION = "policy-violation"
 
@@ -829,10 +857,19 @@ class TaskOutcome:
     #: from the report row — for every kind with no schema phase, which is what
     #: keeps ``subagent_batch_report.json`` byte-identical off this path.
     structured_output: Optional[str] = None
+    #: An ``implement`` dispatch that declared no files (the scheduler's
+    #: ``_verification_only``): its write outcome reads as
+    #: :func:`write_outcome_label` says — ``verified`` for a ``no-op``.
+    verification_only: bool = False
 
     @property
     def ok(self) -> bool:
         return self.status == STATUS_OK
+
+    @property
+    def outcome_label(self) -> Optional[str]:
+        """The word every surface shows for this outcome (:func:`write_outcome_label`)."""
+        return write_outcome_label(self.write_outcome, self.verification_only)
 
     @property
     def stops_the_loop(self) -> bool:
@@ -869,6 +906,10 @@ class TaskOutcome:
             out["structured_output"] = self.structured_output
         if self.write_outcome:
             out["write_outcome"] = self.write_outcome
+            if self.verification_only:
+                # Additive and only here, so every other row is unchanged.
+                out["verification_only"] = True
+                out["outcome_label"] = self.outcome_label
             out["files_touched"] = list(self.files_touched)
             if self.summary:
                 out["summary"] = self.summary

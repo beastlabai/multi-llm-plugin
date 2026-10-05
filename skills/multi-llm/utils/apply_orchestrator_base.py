@@ -2537,7 +2537,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print("\nBatches:")
             for row in rows:
                 count = len(self._row_item_ids(row))
-                verdict = row.get("write_outcome") or "-"
+                # `subagent_executor.row_outcome_label`'s reading order.
+                verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
                 print(
                     f"  {row.get('task_id')}{self._row_provenance(row)}: "
                     f"{row.get('status')} ({verdict}), "
@@ -2830,7 +2831,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         if rows:
             for row in rows:
                 item_ids = self._row_item_ids(row)
-                verdict = row.get("write_outcome") or "-"
+                # `subagent_executor.row_outcome_label`'s reading order.
+                verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
                 lines.append(
                     f"### {row.get('task_id')}{self._row_provenance(row)} — "
                     f"{row.get('status')} ({verdict})"

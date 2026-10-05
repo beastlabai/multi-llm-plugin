@@ -521,6 +521,7 @@ your host.
 9. **Generate implementation summary:**
    After all tasks complete, create the implementation summary file using the `summary_file` path from the JSON output.
    Use `summary_file_relative` for links within the file (relative to plan's parent directory).
+   In `## Task Results`, an agent task that declares no files (`Files to modify` and `Files to create` both none) is a verification-only check: its Status is `Verified` when its subagent changed no file and `Partial` when it changed one (name the files), the words the executor leg's summary uses (`verified` / `partial-application`); a human task is not one of these, it is deferred.
 
    Write the summary to the path specified in `summary_file` from the JSON:
    ```markdown

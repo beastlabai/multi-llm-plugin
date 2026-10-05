@@ -629,6 +629,85 @@ class TestVerificationOnlyImplementTask:
         assert "Files to modify" in outcome.reason
         assert "index.html" in outcome.files_touched
         assert result.exit_code == 3
+        # PARTIAL reads PARTIAL wherever VERIFIED would have read VERIFIED.
+        row = result.to_dict()["tasks"][0]
+        assert row["verification_only"] is True
+        assert row["outcome_label"] == executor.WRITE_PARTIAL
+
+    def test_a_verified_check_reads_verified_on_every_surface(self, env):
+        """2026-10-04 racing re-run: the verdict's reason said VERIFIED while
+        every label beside it — the summary's Outcome cell, the batch log
+        line, the status mirror's breakdown, both reports' rows — said
+        `no-op`. `write_outcome` keeps `no-op` (resume, `util restore-batch`
+        and older readers key on it); the rows gain `verification_only` and
+        `outcome_label: verified`, and every surface shows the label."""
+        from utils import run_status
+
+        env.edits([], result={"status": "no-op", "ids": ["T009"],
+                              "files_touched": [], "summary": "node --check ok"})
+        state = FakeState(env.tmp_path / "state.json")
+        summary = env.out_dir / "implement" / "implementation_summary.md"
+        lines = []
+        result = env.scheduler(
+            [self._task(env)], kind="implement", state=state,
+            summary_file=str(summary), log=lines.append,
+        ).run()
+        assert result.exit_code == 0, result.messages
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_NO_OP
+        assert outcome.outcome_label == executor.WRITE_LABEL_VERIFIED == "verified"
+
+        for name in ("write_batch_report.json", "subagent_batch_report.json"):
+            row = json.loads((env.phase_dir / name).read_text())["tasks"][0]
+            assert row["write_outcome"] == "no-op", name
+            assert row["verification_only"] is True, name
+            assert row["outcome_label"] == "verified", name
+        verdict = json.loads(
+            (env.phase_dir / "implement_batch_T009.json").read_text()
+        )["verdict"]
+        assert verdict["write_outcome"] == "no-op"
+        assert verdict["outcome_label"] == "verified"
+        assert "| T009 | verified |" in Path(result.summary_file).read_text()
+        batch_lines = [l for l in lines if "batch 0: T009" in l]
+        assert batch_lines and "T009 verified in" in batch_lines[0], lines
+
+        mirror = json.loads(
+            (env.phase_dir / ".status.json").read_text()
+        )["progress"]["write_subagents"]
+        assert mirror["tasks"][0]["outcome_label"] == "verified"
+        text = ", ".join(run_status._mirror_text("write_subagents", mirror))
+        assert "verified 1" in text and "no-op" not in text, text
+
+    def test_a_resume_skip_keeps_the_verified_label(self, env):
+        env.edits([], result={"status": "no-op", "ids": ["T009"],
+                              "files_touched": [], "summary": "node --check ok"})
+        env.scheduler([self._task(env)], kind="implement", finalize=False).run()
+        again = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False, resume=True,
+        ).run()
+        outcome = again.outcomes[0]
+        assert outcome.skipped is True
+        assert outcome.outcome_label == "verified"
+
+    def test_a_task_that_declares_files_keeps_its_no_op_row_unchanged(self, env):
+        """Only a verification-only row grows the two keys: every other row is
+        byte-identical, so no reader of the report has to learn them."""
+        env.edits([], result={"status": "no-op", "ids": ["s0"],
+                              "files_touched": [], "summary": "already there"})
+        result = env.scheduler([env.apply_task(0)], finalize=False).run()
+        row = result.to_dict()["tasks"][0]
+        assert row["write_outcome"] == "no-op"
+        assert "outcome_label" not in row and "verification_only" not in row
+        assert result.outcomes[0].outcome_label == "no-op"
+
+    def test_the_native_leg_is_told_the_same_words(self):
+        """Claude Code writes its own summary.md: the instruction names the
+        verification-only rows' words so its table reads like the executor's."""
+        text = (Path(__file__).parent.parent / "instructions" / "implement.md").read_text(
+            encoding="utf-8"
+        )
+        assert "verification-only check: its Status is `Verified`" in text
+        assert "`Partial` when it changed one" in text
 
     def test_a_failing_check_is_still_a_failed_batch(self, env):
         env.edits([], result={"status": "failed", "ids": [],
