@@ -444,6 +444,19 @@ def test_the_tool_routes_are_told_to_list_them():
     assert "Workflow complete." in line
 
 
+def test_the_tool_routes_say_workflow_complete_only_on_a_complete_result():
+    """OpenCode racing run 4, phase 06: after implement, with a `command`
+    naming review-code and a notice listing the manual tasks left, the host
+    wrote "Workflow complete. Manual tasks left …". The line now says when
+    the sentence belongs, and that it never does otherwise."""
+    import modes
+
+    line = modes.TOOL_USER_NEXT_STEP_LINE
+    assert "when it is `complete`, and only then, say \"Workflow complete.\"" in line
+    assert "Never say \"Workflow complete.\" otherwise" in line
+    assert "even when a notice lists manual tasks" in line
+
+
 # ---------------------------------------------------------------------------
 # The native leg records its own deferrals (fix round 7)
 # ---------------------------------------------------------------------------
