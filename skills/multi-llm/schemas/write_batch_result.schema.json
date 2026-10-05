@@ -44,7 +44,7 @@
           "description": "true only when every check the task names ran and met its acceptance criteria. Read leniently (true/false, 1/0, \"true\"/\"false\"); anything else is an unknown result, never a pass."
         },
         "findings": {
-          "description": "One string per problem a check reported; empty when passed is true. A check that could not run is not a finding: the reply is `failed`. An object is read as its values, a bare string or number as one finding."
+          "description": "One string per problem a check reported; empty when passed is true. A check that could not run is not a finding: the reply is `failed`. An object is read as its values, a bare string or number as one finding — except a bare \"none\", \"n/a\", \"no problems found\", \"\" or 0 beside a passed that reads true, which is no finding (fix round 12)."
         }
       }
     }

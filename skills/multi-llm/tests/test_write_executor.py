@@ -1205,6 +1205,18 @@ class TestVerificationOnlyImplementTask:
         assert outcome.check_findings == [
             f"{executor.CHECK_RESULT_UNKNOWN} (its `check` was null)"]
 
+    @pytest.mark.parametrize("bare", ["none", "No problems found.", "N/A", 0])
+    def test_a_pass_that_says_none_bare_is_verified(self, env, bare):
+        """Fix round 12 (review item 4): `findings: "none"` beside a pass was
+        one finding, and held back every task after the check."""
+        env.edits([], result=self._check_reply(passed=True, findings=bare))
+        result = env.scheduler(
+            [self._task(env)], kind="implement", finalize=False,
+        ).run()
+        outcome = result.outcomes[0]
+        assert outcome.outcome_label == "verified", outcome.reason
+        assert result.exit_code == 0
+
     def test_passed_false_without_findings_is_not_verified(self, env):
         env.edits([], result=self._check_reply(findings=[]))
         result = env.scheduler(
