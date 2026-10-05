@@ -1051,6 +1051,17 @@ _REPLAY_DROP_ALWAYS = _option_table(("internal_worker", "internal_run_id"))
 _REPLAY_DROP_IMPLIED = _option_table(("yes", "exec_subagents"))
 _REPLAY_IMPLIERS = _option_table(("detach", "internal_worker"))
 
+#: What ``--internal-worker`` is replayed as: the ``--detach`` it replaced
+#: (``detach.build_worker_argv`` swaps one for the other). Dropping it like the
+#: other re-entry flag dropped the implier *and* the pair it implies, so a
+#: detached worker's own retry line lost both ``--detach`` and
+#: ``--exec-subagents`` — racing re-run 2026-10-04: a failed ``generate-tasks``
+#: printed ``… generate-tasks <plan> --host codex --yes``, which run as printed
+#: stops at ``[TASK_GENERATION_PENDING]`` and exits 0 having dispatched nothing,
+#: while ``status``'s line (the launcher's list) said ``--detach``.
+_REPLAY_WORKER = _option_table(("internal_worker",))
+_DETACH_SPELLING = _REPLAY_IMPLIERS["detach"][0][0]
+
 #: The positional-derived flags. Not parent-parser options, so named here next
 #: to the derived half, pointing at their single producer:
 #: ``multi_llm._normalize_positionals`` turns ``POS_PLAN`` into ``--plan-file``
@@ -1085,7 +1096,8 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
     ``build_worker_argv`` appended. A naive slice yields a command with the plan
     named twice and an internal flag left in. This drops exactly:
 
-    * the two re-entry flags (``--internal-run-id`` with its value);
+    * the two re-entry flags (``--internal-run-id`` with its value), with
+      ``--internal-worker`` replayed as the ``--detach`` it stands for;
     * the positional-derived flags, which every replay re-emits from its own
       arguments (``--plan-file``, ``--question``, ``--question-file``);
     * the dispatcher's own injections for this mode (``modes.injected_flags``
@@ -1116,6 +1128,13 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
     while index < len(tokens):
         token = tokens[index]
         head = token.split("=", 1)[0]
+        if _matches_any(head, _REPLAY_WORKER) is not None:
+            # The worker's stand-in for the launcher's `--detach`: replayed as
+            # that flag, which re-implies the dropped pair (see _REPLAY_WORKER).
+            if _DETACH_SPELLING not in out:
+                out.append(_DETACH_SPELLING)
+            index += 1
+            continue
         takes_value = _matches_any(head, _REPLAY_DROP_ALWAYS)
         if takes_value is None:
             takes_value = _matches_any(head, _REPLAY_DROP_POSITIONAL)
