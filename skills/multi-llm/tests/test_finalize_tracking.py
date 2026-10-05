@@ -1047,6 +1047,127 @@ def _entries(state_path):
     return json.loads(state_path.read_text(encoding="utf-8"))["tracked_files"]
 
 
+class TestOnlyTheWorkflowsOwnFilesAreLeftOut:
+    """Fix round 8 (review of round 7): ``workflow_file_entries`` always left
+    out the plan's computed output folder (``<plan dir>/<plan stem>/``) and
+    whatever the ``TASKS_FILE`` marker named. A plan kept beside code of the
+    same name (``src/feature.md`` + ``src/feature/``) or a marker naming a
+    code file took real code out of ``tracked_files`` and review-code's scope.
+    A folder is left out whole only when everything in it is the workflow's;
+    beside code, only the workflow's own files in it are; and the marker's
+    target counts only when it is a Markdown task list."""
+
+    @pytest.fixture
+    def repo(self, tmp_path):
+        repo = tmp_path / "repo"
+        (repo / "src" / "feature").mkdir(parents=True)
+        _git(repo, "init", "--quiet")
+        (repo / "src" / "feature.md").write_text("# Feature\n", encoding="utf-8")
+        (repo / "src" / "feature" / "core.py").write_text("c = 1\n", encoding="utf-8")
+        (repo / "src" / "app.py").write_text("a = 1\n", encoding="utf-8")
+        return repo
+
+    @staticmethod
+    def _workflow_state(folder):
+        (folder / "state.json").write_text("{}", encoding="utf-8")
+        (folder / "prior_changes.jsonl").write_text("", encoding="utf-8")
+        (folder / "review-plan").mkdir()
+        (folder / "review-plan" / "report.md").write_text("r\n", encoding="utf-8")
+        (folder / "tasks").mkdir()
+        (folder / "tasks" / "tasks.md").write_text("## T001\n", encoding="utf-8")
+
+    def test_a_code_folder_that_shares_the_plans_name_is_not_left_out(self, repo):
+        from utils.output_handler import workflow_file_entries
+
+        entries = workflow_file_entries(repo / "src" / "feature.md", root=repo)
+
+        assert entries == ["src/feature.md"]
+
+    def test_beside_code_only_the_workflows_own_files_are_left_out(self, repo):
+        from utils.git_utils import subtract_baseline
+        from utils.output_handler import workflow_file_entries
+
+        folder = repo / "src" / "feature"
+        self._workflow_state(folder)
+
+        for entries in (
+            workflow_file_entries(repo / "src" / "feature.md", root=repo),
+            # The state file's own folder, as finalize-tracking and
+            # review-code pass it.
+            workflow_file_entries(None, root=repo, output_dirs=[folder]),
+        ):
+            assert "src/feature/" not in entries
+            assert subtract_baseline([
+                "src/feature/core.py",
+                "src/feature/state.json",
+                "src/feature/prior_changes.jsonl",
+                "src/feature/review-plan/report.md",
+                "src/feature/tasks/tasks.md",
+            ], entries) == ["src/feature/core.py"]
+
+    def test_the_workflows_own_output_folder_is_left_out_whole(self, repo):
+        from utils.output_handler import workflow_file_entries
+
+        plan = repo / "plans" / "feature.md"
+        plan.parent.mkdir()
+        plan.write_text("# Feature\n", encoding="utf-8")
+        (repo / "plans" / "feature").mkdir()
+        self._workflow_state(repo / "plans" / "feature")
+
+        assert workflow_file_entries(plan, root=repo) == [
+            "plans/feature.md", "plans/feature/",
+        ]
+
+    def test_a_task_list_marker_naming_a_code_file_is_not_followed(self, repo):
+        from utils.output_handler import workflow_file_entries
+
+        plan = repo / "src" / "feature.md"
+        plan.write_text("# Feature\n<!-- TASKS_FILE: app.py -->\n", encoding="utf-8")
+        assert "src/app.py" not in workflow_file_entries(plan, root=repo)
+
+        (repo / "docs").mkdir()
+        (repo / "docs" / "tasks.md").write_text("## T001\n", encoding="utf-8")
+        plan.write_text(
+            "# Feature\n<!-- TASKS_FILE: ../docs/tasks.md -->\n", encoding="utf-8")
+        assert "docs/tasks.md" in workflow_file_entries(plan, root=repo)
+
+    def test_the_census_keeps_code_in_a_folder_named_like_the_plan(
+        self, repo, monkeypatch, capsys
+    ):
+        """End to end: the state lives in the code folder (the workflow puts
+        it at ``<plan dir>/<plan stem>/``), and implement edited the code
+        beside it."""
+        _git(repo, "config", "user.email", "test@example.com")
+        _git(repo, "config", "user.name", "Test")
+        _git(repo, "config", "commit.gpgsign", "false")
+        _git(repo, "add", "-A")
+        _git(repo, "commit", "--quiet", "-m", "code")
+        head = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True,
+            capture_output=True, text=True,
+        ).stdout.strip()
+        folder = repo / "src" / "feature"
+        self._workflow_state(folder)
+        state_path = folder / "state.json"
+        state_path.write_text(json.dumps({
+            "plan_path": str(repo / "src" / "feature.md"),
+            "pre_existing_changes": [
+                "src/feature/prior_changes.jsonl", "src/feature/review-plan/",
+                "src/feature/state.json", "src/feature/tasks/",
+            ],
+            "head_before_implement": head,
+        }), encoding="utf-8")
+        (folder / "core.py").write_text("c = 2\n", encoding="utf-8")
+        monkeypatch.chdir(repo)
+
+        assert main(["--state-file", str(state_path)]) == 0
+
+        assert _entries(state_path) == [
+            {"path": "src/feature/core.py", "action": "modified",
+             "task_id": "implementation"},
+        ]
+
+
 class TestTheWorkflowsOwnFilesAreNeverTracked:
     """2026-10-05, Codex racing run 3: ``tracked_files`` held the plan and
     ``tasks.md`` (apply-task-suggestions' census) and review-code reviewed
