@@ -60,7 +60,6 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import structured_output
     from .json_extractor import (
         describe_syntax_error,
-        enclosing_syntax_error,
         extract_json_from_text,
         is_answer_shaped,
     )
@@ -188,7 +187,6 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils import structured_output
     from utils.json_extractor import (
         describe_syntax_error,
-        enclosing_syntax_error,
         extract_json_from_text,
         is_answer_shaped,
     )
@@ -4782,6 +4780,25 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
 def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool) -> Any:
     """Recover the subagent's answer: ``parse_output`` first, then extraction.
 
+    :func:`_extract_result_and_syntax` without the syntax diagnosis.
+    """
+    return _extract_result_and_syntax(
+        provider, stdout, stderr, prefer_arrays=prefer_arrays
+    )[0]
+
+
+def _extract_result_and_syntax(
+    provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool
+) -> Tuple[Any, Optional[Dict[str, Any]]]:
+    """Recover the subagent's answer: ``parse_output`` first, then extraction.
+
+    Returns ``(data, enclosing_syntax_error)``: the second is the extractor's
+    own report (``json_extractor.extract_json_from_text``) that ``data`` is a
+    piece of a larger document which does not parse, else ``None``. It comes
+    from whichever extraction served ``data`` — the adapter's, handed back on
+    its ``parse_output`` dict, or this function's own for an adapter that
+    returns text — so nothing scans the reply a second time to rediscover it.
+
     The ordering is **mandatory, not an optimization** (D3): provider CLIs emit
     structured event streams, so running ``json_extractor`` over raw stdout would
     match an event envelope or a reasoning item instead of the answer, and
@@ -4834,6 +4851,7 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
         raise ResultRejected(str(error), STATUS_RUNNER_ERROR)
 
     data = parsed.get("data")
+    syntax = parsed.get("enclosing_syntax_error")
     if isinstance(data, str):
         extracted = extract_json_from_text(data, prefer_arrays=prefer_arrays)
         if not extracted.get("success"):
@@ -4842,6 +4860,7 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
                 STATUS_UNPARSEABLE,
             )
         data = extracted.get("data")
+        syntax = extracted.get("enclosing_syntax_error")
     if data is None or (isinstance(data, dict) and set(data.keys()) == {"raw"}):
         raise ResultRejected(
             "the adapter recovered no result object from the stream",
@@ -4853,7 +4872,7 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
             f"or array",
             STATUS_UNPARSEABLE,
         )
-    return data
+    return data, syntax if isinstance(syntax, dict) else None
 
 
 def _validation_result_errors(data: Any) -> List[str]:
@@ -5469,6 +5488,10 @@ class _Capture:
     #: ``HomeChange.to_dict()`` when ``$CODEX_HOME``'s security-relevant set
     #: changed during the attempt (warn-only in this lane).
     home_change: Optional[Dict[str, Any]] = None
+    #: Why the reply's JSON did not parse, as one redacted line, when the
+    #: extractor served only a piece of a broken document and that piece failed
+    #: validation; set by :func:`_parse_and_validate`, read by the re-ask.
+    reply_syntax_error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -6956,7 +6979,7 @@ def dispatch_task(
             # and a reply that is not valid JSON is told so instead of being
             # handed the errors of a fragment from inside it.
             problems = validate_result(kind, data)
-            syntax = _reply_syntax_error(provider, capture, data)
+            syntax = capture.reply_syntax_error
             repair_prompt = build_schema_repair_prompt(
                 kind, prompt, problems or [error], syntax_error=syntax,
                 **({"previous_reply": reply_text} if kind in WRITE_KINDS else {}),
@@ -7341,22 +7364,6 @@ def _reply_text(provider: Any, stdout: str) -> Optional[str]:
     return body or None
 
 
-def _reply_syntax_error(provider: Any, capture: _Capture, data: Any) -> Optional[str]:
-    """Why the reply's JSON did not parse, when ``data`` is a fragment of it.
-
-    ``json_extractor.enclosing_syntax_error`` on the runner's reply text,
-    rendered as one redacted line; ``None`` when ``data`` is the whole document
-    (its validation errors are then the reply's own) or nothing can tell.
-    """
-    if data is None:
-        return None
-    text = _reply_text(provider, capture.stdout)
-    if not text:
-        return None
-    found = enclosing_syntax_error(text, data)
-    return _redact(describe_syntax_error(found)) if found else None
-
-
 def _parse_and_validate(
     provider: Any,
     capture: _Capture,
@@ -7379,7 +7386,7 @@ def _parse_and_validate(
     retried": the same raw output through the same prompt has the same answer.
     """
     try:
-        data = extract_result(
+        data, fragment = _extract_result_and_syntax(
             provider, capture.stdout, capture.stderr, prefer_arrays=prefer_arrays
         )
     except ResultRejected as exc:
@@ -7390,7 +7397,8 @@ def _parse_and_validate(
     _report_normalized(kind, normalize_result(kind, data))
     errors = validate_result(kind, data)
     if errors:
-        syntax = _reply_syntax_error(provider, capture, data)
+        syntax = _redact(describe_syntax_error(fragment)) if fragment else None
+        capture.reply_syntax_error = syntax
         if syntax:
             # The errors are the fragment's, not the reply's: say so first
             # (2026-10-05, a task-generation reply with the right keys was

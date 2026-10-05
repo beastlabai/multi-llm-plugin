@@ -659,6 +659,31 @@ class TestSchemaRepairIsTaskGenerationOnly:
         assert outcome.reason.endswith("(after the one schema-repair re-ask)")
 
 
+#: A whole, parseable task-generation document the validator rejects for one
+#: missing key, so a case built on it always has real errors to report.
+_MISSING_PREAMBLE = json.dumps(
+    {k: v for k, v in GENERATED_TASKS_DOC.items() if k != "plan_preamble"}
+)
+
+
+def _parse_text(kind, text):
+    """``_parse_and_validate`` over a runner whose whole reply is ``text``."""
+
+    class _Provider:
+        name = "stub"
+
+        def parse_output(self, stdout, stderr=""):
+            return {"success": True, "data": stdout}
+
+        def salvage_text(self, stdout):
+            return stdout
+
+    capture = executor._Capture(stdout=text, stderr="", exit_code=0, duration=1.0)
+    return executor._parse_and_validate(
+        _Provider(), capture, kind=kind, prefer_arrays=False
+    )
+
+
 class TestAReplyThatIsNotJson:
     """2026-10-05, opencode/big-pickle, generate-tasks, twice: the reply had the
     right keys, but a description held unescaped double quotes, so the extractor
@@ -716,6 +741,67 @@ class TestAReplyThatIsNotJson:
         assert outcome.reason.startswith(
             "the extracted result does not match the task_generation result shape"
         )
+
+    @pytest.mark.parametrize("text", [
+        # The whole document, then the same document quoted again inside a
+        # wrapper that is not JSON.
+        _MISSING_PREAMBLE + "\n\nFor reference, my earlier draft was: {draft: "
+        + _MISSING_PREAMBLE + "}",
+        # A stray brace in the prose before a fenced document and one after it.
+        "The object looks like { and then the fields.\n```json\n"
+        + _MISSING_PREAMBLE + "\n```\nand closes with }",
+        # The same, around the bare document.
+        "Opening brace here { and the document follows:\n"
+        + _MISSING_PREAMBLE + "\nclosing }",
+    ], ids=["quoted-again-in-a-wrapper", "stray-braces-around-a-fence",
+            "stray-braces-around-the-document"])
+    def test_a_whole_document_inside_prose_brackets_is_told_its_own_errors(
+        self, text
+    ):
+        """Fix round 8: the diagnosis looked for the LAST span equal to the
+        served document and asked whether THAT one was top-level, so a
+        document that also sat inside a broken span was reported "not valid
+        JSON" and the real problem (a missing key) was never named."""
+        status, error, _ = _parse_text("task_generation", text)
+
+        assert status == executor.STATUS_SCHEMA_INVALID
+        assert error.startswith(
+            "the extracted result does not match the task_generation result shape"
+        ), error
+        assert "plan_preamble" in error
+
+    def test_the_diagnosis_scans_the_reply_no_more_than_extraction_does(
+        self, lane, monkeypatch
+    ):
+        """Fix round 8: the diagnosis re-ran the candidate scan over the whole
+        reply — twice per attempt, once for the reason and once for the
+        re-ask — and that scan is quadratic on unclosed brackets (a 300 KB
+        reply took 43 s, charged to the task's deadline)."""
+        from utils import json_extractor
+
+        scans = []
+        real = json_extractor.find_json_candidates
+
+        def counting(text, char_type="array"):
+            scans.append(len(text))
+            return real(text, char_type)
+
+        monkeypatch.setattr(json_extractor, "find_json_candidates", counting)
+        stream = _opencode_stream(self.BROKEN)
+        executor.extract_result(
+            get_provider("opencode"), stream, "", prefer_arrays=False
+        )
+        per_extraction = len(scans)
+        scans.clear()
+        lane.respond(stream)
+
+        outcome = lane.dispatch(
+            "task_generation", runner="opencode:opencode/big-pickle", timeout=600
+        )
+
+        assert outcome.reason.startswith("the reply is not valid JSON")
+        assert len(outcome.attempts) == 2
+        assert len(scans) == 2 * per_extraction
 
 
 class TestCodexNativeAnswer:
