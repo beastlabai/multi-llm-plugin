@@ -320,6 +320,24 @@ class TestRecordPreExistingChanges:
         assert call_args[0] == "pre_existing_changes"
         assert set(call_args[1]) == {'file1.py', 'file2.py', 'file3.py'}
 
+    def test_the_baseline_is_recorded_sorted(self, mock_state_manager):
+        """`state.json` is deterministic: the baseline was `list()` of a set,
+        so the same dirty paths came out in a different order every process
+        (17 bundles of one container run held 17 orders of the same 5 paths),
+        while the apply phases record theirs sorted."""
+        from implement_orchestrator import record_pre_existing_changes
+
+        unstaged = [f"src/module_{name}.py" for name in "qwertyuiop"]
+        staged = ["docs/z.md", "assets/a.png", "plans/x/"]
+        with patch('implement_orchestrator.get_modified_files',
+                   return_value=list(reversed(unstaged))), \
+             patch('implement_orchestrator.get_staged_files', return_value=staged):
+            record_pre_existing_changes(mock_state_manager)
+
+        key, value = mock_state_manager.set.call_args[0]
+        assert key == "pre_existing_changes"
+        assert value == sorted(set(unstaged) | set(staged))
+
     def test_skips_if_already_recorded(self, mock_state_manager):
         """Test skipping if pre-existing changes already recorded."""
         from implement_orchestrator import record_pre_existing_changes

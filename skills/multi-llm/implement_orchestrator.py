@@ -313,7 +313,10 @@ def record_pre_existing_changes(state: StateManager) -> None:
 
         pre_existing = unstaged | staged
 
-        state.set("pre_existing_changes", list(pre_existing))
+        # Sorted, as the apply phases record theirs: `state.json` must not
+        # change with the set's per-process order (17 bundles of one
+        # container run held 17 orders of the same 5 paths).
+        state.set("pre_existing_changes", sorted(pre_existing))
         state.save()
 
         if pre_existing:
