@@ -11,7 +11,6 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from utils.json_extractor import (
     build_unsanitize_map,
     describe_syntax_error,
-    enclosing_syntax_error,
     extract_json_from_text,
     generate_output_path,
     has_salvageable_json,
@@ -910,12 +909,11 @@ class TestEnclosingSyntaxError:
     )
 
     def test_a_fragment_of_a_broken_document_gets_the_documents_error(self):
-        served = extract_json_from_text(self.BROKEN, prefer_arrays=True)["data"]
-        assert "schema_version" not in served  # the extractor served a fragment
+        result = extract_json_from_text(self.BROKEN, prefer_arrays=True)
+        assert "schema_version" not in result["data"]  # a fragment was served
 
-        found = enclosing_syntax_error(self.BROKEN, served)
+        found = result["enclosing_syntax_error"]
 
-        assert found is not None
         assert found["line"] == 7
         assert found["message"] == "Expecting ',' delimiter"
         assert '"<<HERE>>3", "2"' in found["excerpt"]
@@ -923,13 +921,44 @@ class TestEnclosingSyntaxError:
             "line 7, column 42: Expecting ',' delimiter — the text there reads:"
         )
 
+    def test_a_broken_document_inside_prose_brackets_is_still_named(self):
+        """The stray bracket is skipped, the broken document under it is not."""
+        text = "Opening brace here { the tasks:\n" + self.BROKEN + "\nclosing }"
+
+        found = extract_json_from_text(text)["enclosing_syntax_error"]
+
+        assert (found["line"], found["message"]) == (7, "Expecting ',' delimiter")
+        assert '"<<HERE>>3", "2"' in found["excerpt"]
+
     def test_a_whole_document_has_no_enclosing_error(self):
-        text = 'Here it is: {"a": [1, 2]}'
-        assert enclosing_syntax_error(text, {"a": [1, 2]}) is None
+        result = extract_json_from_text('Here it is: {"a": [1, 2]}', prefer_arrays=False)
+        assert result["data"] == {"a": [1, 2]}
+        assert "enclosing_syntax_error" not in result
 
     def test_a_piece_of_a_valid_document_has_none_either(self):
-        assert enclosing_syntax_error('{"a": [{"b": 1}]}', [{"b": 1}]) is None
+        result = extract_json_from_text('{"a": [{"b": 1}]}', prefer_arrays=True)
+        assert result["data"] == [{"b": 1}]
+        assert "enclosing_syntax_error" not in result
 
-    def test_data_that_is_not_in_the_text_has_none(self):
-        assert enclosing_syntax_error(self.BROKEN, {"never": "there"}) is None
-        assert enclosing_syntax_error("", None) is None
+    DOC = '{"status": "applied", "ids": ["s0"], "files_touched": ["p.md"]}'
+
+    @pytest.mark.parametrize("text", [
+        DOC + "\n\nMy earlier draft was: {draft: " + DOC + "}",
+        "The object looks like { and then the fields.\n```json\n" + DOC
+        + "\n```\nand closes with }",
+        "Opening brace here { and the report follows:\n" + DOC + "\nclosing }",
+        "[see the report: " + DOC + " ]",
+    ], ids=["quoted-again-in-a-wrapper", "stray-braces-around-a-fence",
+            "stray-braces-around-the-document", "stray-bracket-around-the-document"])
+    @pytest.mark.parametrize("prefer_arrays", [True, False])
+    def test_a_whole_document_inside_prose_brackets_has_none(self, text, prefer_arrays):
+        """Fix round 8: the old search found the LAST span equal to the served
+        value and asked whether that one was top-level, so each of these was
+        reported "not valid JSON" at the stray bracket."""
+        result = extract_json_from_text(text, prefer_arrays=prefer_arrays)
+
+        assert result["data"] == json.loads(self.DOC)
+        assert "enclosing_syntax_error" not in result
+
+    def test_a_reply_with_no_json_has_none(self):
+        assert "enclosing_syntax_error" not in extract_json_from_text("")

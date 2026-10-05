@@ -699,6 +699,34 @@ class TestReportReAsk:
         assert result.outcomes[0].status == executor.STATUS_SCHEMA_INVALID
         assert len(self._calls(log)) == 1
 
+    def test_a_whole_report_inside_stray_braces_is_told_what_it_lacks(self, env):
+        """Fix round 8: a valid report that only lacks `summary`, with a stray
+        `{` in the prose before it and a `}` after, was reported "not valid
+        JSON (line 1, column 3 …)", and the re-ask told the runner its JSON was
+        broken instead of naming the missing key."""
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)])
+        report = {"status": "applied", "ids": ["s0"], "files_touched": ["plans/p.md"]}
+        env.monkeypatch.setenv(
+            "MOCK_LLM_WRITE_RESULT",
+            "Opening brace here { and the report follows:\n"
+            + json.dumps(report) + "\nclosing }",
+        )
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(self.GOOD))
+
+        result = env.scheduler([env.apply_task(0)]).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_APPLIED
+        first_error = outcome.attempts[0].error
+        assert first_error.startswith(
+            "the extracted result does not match the apply_suggestions result shape"
+        ), first_error
+        assert "summary" in first_error
+        second = self._calls(log)[1]["prompt"]
+        assert "Your reply is not valid JSON" not in second
+        assert "missing required field 'summary'" in second
+
     def test_a_raw_control_byte_in_the_report_needs_no_re_ask(self, env):
         """The measured reply's shape: a raw control byte in a key (a NUL then;
         a tab here, because an environment variable cannot carry a NUL) used to
