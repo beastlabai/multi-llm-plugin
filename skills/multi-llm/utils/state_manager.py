@@ -911,6 +911,12 @@ class StateManager:
     #: decision, not a deferral: the task is not left for them to do.
     _USER_DECLINED_REASON = "skipped by user during pause-and-ask"
 
+    #: The recorded reason's prefix for a failed code task the user answered
+    #: ``--human-task <id>=skip`` (``write_batch_scheduler.ANSWERED_SKIP_PREFIX``
+    #: spells it). A decision too: the user gave the task up, so it is not
+    #: owed as manual work, and neither is a dependent skipped with it.
+    _ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
+
     #: The recorded reason of a dependent the transitive skip walk took with
     #: its parent (both legs spell it ``skipped — depends on skipped task
     #: {parent_id} ({parent_title})``); owed exactly when the parent is.
@@ -920,12 +926,13 @@ class StateManager:
         """Whether *task_id*'s skip leaves the task for the user to do.
 
         A deferral (a human task under a skip strategy, ``deferred — …``) and
-        a dependent of one are owed; a pause-and-ask "Skip" and a dependent of
-        one are not. A reason this does not recognise — none recorded, a state
+        a dependent of one are owed; a pause-and-ask "Skip", a failed code
+        task answered ``--human-task <id>=skip``, and a dependent of either
+        are not. A reason this does not recognise — none recorded, a state
         written before reasons were — stays owed, as every skip used to be.
         """
         reason = str((self.state.get("task_status_reasons") or {}).get(task_id) or "")
-        if reason.startswith(self._USER_DECLINED_REASON):
+        if reason.startswith((self._USER_DECLINED_REASON, self._ANSWERED_SKIP_PREFIX)):
             return False
         match = self._DEPENDS_ON_SKIPPED.match(reason)
         seen = set() if seen is None else seen

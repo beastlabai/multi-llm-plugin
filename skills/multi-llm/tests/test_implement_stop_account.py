@@ -90,14 +90,16 @@ CHECK_NOTES = (
 )
 
 
-@pytest.fixture
-def repo(tmp_path, monkeypatch):
+def make_repo(tmp_path, monkeypatch, plan_text: str = PLAN):
+    """The fixture's body, with the plan text a parameter: shared with
+    ``test_human_task_answers.py`` (fix round 8), whose plans add a code task
+    after the manual one or drop the manual one."""
     root = tmp_path / "repo"
     root.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=root, check=True)
     (root / "plans").mkdir()
     plan = root / "plans" / "checked.md"
-    plan.write_text(PLAN, encoding="utf-8")
+    plan.write_text(plan_text, encoding="utf-8")
     (root / "src").mkdir()
     (root / "src" / "main.py").write_text("x = 1\n", encoding="utf-8")
     env = {
@@ -155,7 +157,12 @@ def repo(tmp_path, monkeypatch):
     obj.monkeypatch = monkeypatch
     obj.log = log
     obj.phase_dir = Path(get_phase_dir(plan, "implement"))
-    yield obj
+    return obj
+
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    yield make_repo(tmp_path, monkeypatch)
     registry._config = None
     registry._config_key = None
 
