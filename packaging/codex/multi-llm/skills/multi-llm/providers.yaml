@@ -1192,6 +1192,9 @@ driver:
   # Re-dispatches for TRANSPORT-shaped failures only (timeout, no parsed text,
   # parse_output failure). A result that parsed but failed schema validation is
   # never retried — that is a deterministic disagreement a retry would launder.
+  # A write batch that already changed files is never re-dispatched: a retry
+  # would apply it twice. It stops as a partial application, or, in an apply
+  # phase whose closing report was unreadable, is asked once to restate it.
   subagent_retries: 1
   # The repository's OWN post-write check, run ONCE by the executor after a
   # code-editing phase (implement, apply-code-fixes) applied at least one batch.

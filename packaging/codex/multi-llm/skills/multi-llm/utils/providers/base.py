@@ -1448,6 +1448,50 @@ def env_allowlist_column_is_green(
     )
 
 
+# ── the skill's own Python environment stays with the skill ──────────────────
+
+#: Names that would carry the skill's own virtual environment into a runner.
+#: Every host starts the dispatcher with ``uv run --project <skill dir>``, which
+#: exports ``VIRTUAL_ENV`` naming the skill's environment, and a forwarded or
+#: image-wide ``UV_PROJECT_ENVIRONMENT`` can name it too. A runner works in the
+#: user's repository, where the first makes ``uv pip``, ``poetry`` and friends
+#: install into the skill's environment and the second makes every ``uv run``
+#: use it: fix round 8 measured that a jailed ``uv run`` failed with Permission
+#: denied (exit 2) and an unjailed one installed the repository's dependencies
+#: into the skill's environment, after round 7 (3b9cf25, reverted) exported the
+#: second from the codex MCP server. :func:`build_child_env` drops each one
+#: that names the running interpreter's environment; a value naming any other
+#: environment is the user's and stays. The venv's ``bin`` still leads
+#: ``PATH`` (uv puts it there, and the fake runners of the suite rely on it).
+SKILL_ENVIRONMENT_NAMES: Tuple[str, ...] = ("VIRTUAL_ENV", "UV_PROJECT_ENVIRONMENT")
+
+
+def _same_path(left: str, right: str) -> bool:
+    """Whether two directory spellings name one directory, as given or resolved."""
+    for a, b in ((os.path.abspath(left), os.path.abspath(right)),
+                 (os.path.realpath(left), os.path.realpath(right))):
+        if os.path.normcase(a) == os.path.normcase(b):
+            return True
+    return False
+
+
+def skill_environment_names(env: Mapping[str, str]) -> Tuple[str, ...]:
+    """The names in ``env`` whose value is this interpreter's own virtual
+    environment (``sys.prefix``), in :data:`SKILL_ENVIRONMENT_NAMES` order.
+
+    Empty outside a virtual environment: then there is no environment of the
+    skill's to keep a runner out of. A relative value is left alone, since uv
+    resolves it against the child's own project.
+    """
+    own = sys.prefix
+    if own == getattr(sys, "base_prefix", own):
+        return ()
+    return tuple(
+        name for name in SKILL_ENVIRONMENT_NAMES
+        if env.get(name) and os.path.isabs(env[name]) and _same_path(env[name], own)
+    )
+
+
 # ── the builder both lanes go through ────────────────────────────────────────
 
 
@@ -1548,7 +1592,8 @@ def build_child_env(
         if name not in passthrough
     ]
     allowlist = env_allowlist_enabled(anchor)
-    if not provider_env and not removals and not allowlist:
+    if (not provider_env and not removals and not allowlist
+            and not skill_environment_names(source)):
         return None
     if allowlist:
         env = apply_env_allowlist(source, getattr(provider, "name", ""))
@@ -1556,6 +1601,10 @@ def build_child_env(
         env = dict(source)
     env.update(provider_env)
     for key in removals:
+        env.pop(key, None)
+    # Last, so neither a delta nor a host passthrough can hand a runner the
+    # skill's own environment (see SKILL_ENVIRONMENT_NAMES).
+    for key in skill_environment_names(env):
         env.pop(key, None)
     return env
 

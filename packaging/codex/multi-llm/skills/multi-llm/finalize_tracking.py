@@ -26,7 +26,7 @@ import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
-from typing import Dict, List, Set
+from typing import Dict, List, Optional, Set
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -40,6 +40,7 @@ from utils import (
     subtract_baseline,
 )
 from utils.git_utils import get_project_root_from_dir, ignored_paths, paths_in_commit
+from utils.metrics import StateLockTimeout, state_file_lock
 from utils.output_handler import workflow_file_entries
 from utils.state_manager import compute_plan_hash, mark_phase_completed_in_state
 
@@ -132,13 +133,14 @@ def _restamp_plan_hash(state_path: Path, plan_path: Path) -> None:
     the census — this command's actual job — is already on disk.
     """
     try:
-        state = json.loads(state_path.read_text(encoding="utf-8"))
-        if not isinstance(state, dict) or "plan_hash" not in state:
-            # No hash recorded means nothing reads one; do not invent a field.
-            return
-        state["plan_hash"] = compute_plan_hash(plan_path)
-        state.pop("plan_changed", None)
-        _write_state_atomic(state_path, state)
+        with state_file_lock(state_path):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict) or "plan_hash" not in state:
+                # No hash recorded means nothing reads one; do not invent a field.
+                return
+            state["plan_hash"] = compute_plan_hash(plan_path)
+            state.pop("plan_changed", None)
+            _write_state_atomic(state_path, state)
     except (OSError, json.JSONDecodeError) as e:
         print(f"Warning: could not re-stamp plan_hash: {e}", file=sys.stderr)
 
@@ -284,6 +286,41 @@ def main(argv=None) -> int:
         print(f"ERROR: State file not found: {state_path}", file=sys.stderr)
         return 1
 
+    # One lock from the read to the write (fix round 8): `util batch-done`,
+    # `util metrics` and this command are separate processes a host may run
+    # side by side, and each rewrites the whole file.
+    try:
+        with state_file_lock(state_path):
+            outcome = _record_tracked_files(args, state_path, explicit_scope)
+    except StateLockTimeout as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 1
+    if isinstance(outcome, int):
+        return outcome
+    tracked_files = outcome
+
+    print(f"\nTracked {len(tracked_files)} implementation files:")
+    _print_path_list(tracked_files)
+
+    print(f"\nState file updated: {state_path}")
+    if args.mark_completed:
+        print("Phase implement marked completed")
+
+    if args.plan_file:
+        code = _insert_summary_reference(args.plan_file, args.summary_file_relative)
+        if code:
+            return code
+        _restamp_plan_hash(state_path, Path(args.plan_file))
+    return 0
+
+
+def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
+    """Read *state_path*, record its ``tracked_files`` and write it back.
+
+    ``main``'s read-modify-write, run under ``metrics.state_file_lock``.
+    Returns the entries written, or an exit code: ``1`` for an unreadable
+    or failed write, ``0`` for a ``--dry-run`` (which writes nothing).
+    """
     # Load state
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
@@ -343,19 +380,7 @@ def main(argv=None) -> int:
         print(f"ERROR: Failed to write state file: {e}", file=sys.stderr)
         return 1
 
-    print(f"\nTracked {len(tracked_files)} implementation files:")
-    _print_path_list(tracked_files)
-
-    print(f"\nState file updated: {state_path}")
-    if args.mark_completed:
-        print("Phase implement marked completed")
-
-    if args.plan_file:
-        code = _insert_summary_reference(args.plan_file, args.summary_file_relative)
-        if code:
-            return code
-        _restamp_plan_hash(state_path, Path(args.plan_file))
-    return 0
+    return tracked_files
 
 
 def _drop_ignored(paths, say=print) -> List[str]:
@@ -440,14 +465,26 @@ def phase_tracked_files(
 ) -> List[Dict[str, str]]:
     """The whole ``tracked_files`` list after *phase* recorded its changes.
 
-    *phase*'s own entries are the census (:func:`_census_tracked_files`, the
+    *phase*'s own entries are the census (:func:`_census_paths`, the
     workflow's own files left out); every entry the OTHER code phase recorded
-    is kept as that phase recorded it, and a path it already holds is not
-    claimed again. So a file implement created stays ``created`` by
+    keeps that phase's label, and a path it already holds is not claimed
+    again. So a file implement created stays ``created`` by
     ``implementation`` after apply-code-fixes edits it, and nothing an
     earlier phase changed is attributed to a later one. Entries with any
     other label (the planning phases' plan and ``tasks.md`` entries an older
     run left, a hand-written list) are replaced, as before.
+
+    Every entry's ``action`` — a kept one's too — is read off the tree as it
+    is now (:func:`_path_states`), never copied from the record: after
+    apply-code-fixes deleted the ``index.html`` implement created, the kept
+    entry still read ``created`` and review-code was sent to a file that no
+    longer exists (fix round 8). A recorded path — a kept entry, or a
+    ``--touched`` file — that is neither on disk nor in the base commit is
+    left out, whichever phase recorded it: a file the code phases created
+    and later removed leaves no change behind, so there is nothing of it to
+    review. The drop is said once, naming each file and the phase that
+    recorded it. A path git's own census names is kept: git sees a change
+    there.
 
     The write executor calls this after every batch with ``say`` silenced,
     so a run that stops part-way has still recorded what its finished
@@ -457,7 +494,7 @@ def phase_tracked_files(
     if drop_ignored:
         touched = _drop_ignored(touched, say)
     workflow = _workflow_entries(state, state_path)
-    own = _census_tracked_files(state, touched, workflow=workflow, label=label, say=say)
+    own = _census_paths(state, touched, workflow=workflow, say=say)
     others = set(TRACKING_LABELS.values()) - {label}
     kept = [
         dict(entry) for entry in (state.get("tracked_files") or [])
@@ -465,39 +502,80 @@ def phase_tracked_files(
         and entry.get("task_id") in others
         and not (workflow and baseline_covers(entry["path"], workflow))
     ]
-    if kept:
-        say(
-            f"Kept {len(kept)} file(s) another phase recorded: "
-            + ", ".join(f"{e['path']} ({e['task_id']})" for e in kept[:5])
-            + (", …" if len(kept) > 5 else "")
-        )
     held = {entry["path"] for entry in kept}
-    merged = kept + [entry for entry in own if entry["path"] not in held]
+    own = [path for path in own if path not in held]
+    states = _path_states(
+        sorted(held | set(own)),
+        base_ref=state.get("head_before_implement"),
+        baseline=state.get("pre_existing_changes") or [],
+    )
+
+    merged: List[Dict[str, str]] = []
+    gone: List[Dict[str, str]] = []
+    for entry in kept:
+        action = (states or {}).get(entry["path"])
+        if action == GONE:
+            gone.append(entry)
+            continue
+        if action:
+            entry["action"] = action
+        merged.append(entry)
+    recorded = {path.strip() for path in touched if path and path.strip()}
+    for path in own:
+        action = (states or {}).get(path, "modified")
+        if action == GONE and path not in recorded:
+            # Git's own census named it, so git sees a change there: kept as
+            # it always read. Only a record (`--touched`, a kept entry) can
+            # name a file that has since gone.
+            action = "modified"
+        entry = {"path": path, "action": action, "task_id": label}
+        (gone if action == GONE else merged).append(entry)
+
+    kept_now = [entry for entry in merged if entry["task_id"] != label]
+    if kept_now:
+        say(
+            f"Kept {len(kept_now)} file(s) another phase recorded: "
+            + ", ".join(f"{e['path']} ({e['task_id']})" for e in kept_now[:5])
+            + (", …" if len(kept_now) > 5 else "")
+        )
+    if gone:
+        say(
+            f"Left out {len(gone)} file(s) that no longer exist and are not in "
+            f"the base commit (created, then removed: nothing is left to "
+            f"review): "
+            + ", ".join(f"{e['path']} ({e['task_id']})" for e in gone[:5])
+            + (", …" if len(gone) > 5 else "")
+        )
     return sorted(merged, key=lambda entry: entry["path"])
 
 
-def _file_actions(paths, *, base_ref=None, baseline=()) -> Dict[str, str]:
-    """``created`` / ``modified`` / ``deleted`` for each repo-relative path.
+#: :func:`_path_states`' word for a path that is neither on disk nor in the
+#: base commit, and that the baseline does not name: created after the base,
+#: then removed. Never a ``tracked_files`` action.
+GONE = "gone"
 
-    Every entry used to say ``modified`` whatever the run did, so a file
-    ``implement`` created read as an edit (2026-10-04, Claude Code racing
-    re-run: ``index.html``). Read off the implement baseline instead:
+
+def _path_states(paths, *, base_ref=None, baseline=()) -> Optional[Dict[str, str]]:
+    """What each repo-relative path is now, against the implement baseline.
 
     * in the base tree (``head_before_implement``, else ``HEAD``) — still on
       disk ``modified``, gone ``deleted``;
-    * not in it, on disk and not covered by ``pre_existing_changes`` —
-      ``created`` (untracked or staged, the phase made it);
-    * anything else ``modified``: a path the baseline covers existed before
-      the phase began (an untracked file it edited), and a path neither in
-      the tree nor on disk is nothing this can tell apart.
+    * not in it and on disk — ``created`` unless ``pre_existing_changes``
+      covers it (it existed before the phase began: ``modified``);
+    * not in it and not on disk — ``deleted`` when the baseline names the
+      path itself (an untracked or staged file that existed before the phase
+      and is gone now), else :data:`GONE`: nothing the base or the disk holds,
+      so nothing to review. A path covered only by a baseline *directory*
+      entry (``plans/``) is :data:`GONE` too: that entry says the directory
+      existed, not that this file did.
 
-    No readable base tree, or no repository at all, keeps the old ``modified``
-    for every path rather than guessing ``created``.
+    ``None`` when no base tree is readable, or there is no repository at
+    all: nothing here can be told apart then.
     """
     paths = [p for p in paths if p]
     toplevel = get_project_root_from_dir() if paths else None
     if toplevel is None:
-        return {p: "modified" for p in paths}
+        return None
     in_base = None
     for ref in (base_ref, "HEAD"):
         if ref:
@@ -505,34 +583,53 @@ def _file_actions(paths, *, base_ref=None, baseline=()) -> Dict[str, str]:
             if in_base is not None:
                 break
     if in_base is None:
-        return {p: "modified" for p in paths}
+        return None
     baseline = list(baseline or ())
-    actions: Dict[str, str] = {}
+    named = set(baseline)
+    states: Dict[str, str] = {}
     for path in paths:
         exists = os.path.lexists(os.path.join(toplevel, path))
         if path in in_base:
-            actions[path] = "modified" if exists else "deleted"
-        elif exists and not baseline_covers(path, baseline):
-            actions[path] = "created"
+            states[path] = "modified" if exists else "deleted"
+        elif exists:
+            states[path] = "modified" if baseline_covers(path, baseline) else "created"
         else:
-            actions[path] = "modified"
-    return actions
+            states[path] = "deleted" if path in named else GONE
+    return states
 
 
-def _census_tracked_files(
+def _file_actions(paths, *, base_ref=None, baseline=()) -> Dict[str, str]:
+    """``created`` / ``modified`` / ``deleted`` for each repo-relative path.
+
+    Every entry used to say ``modified`` whatever the run did, so a file
+    ``implement`` created read as an edit (2026-10-04, Claude Code racing
+    re-run: ``index.html``). Read off the implement baseline instead
+    (:func:`_path_states`). This is ``--only-touched``'s reading, which
+    tracks exactly the paths it was given: a :data:`GONE` path stays
+    ``modified`` there, as it always read. No readable base tree, or no
+    repository at all, keeps ``modified`` for every path rather than
+    guessing ``created``.
+    """
+    paths = [p for p in paths if p]
+    states = _path_states(paths, base_ref=base_ref, baseline=baseline)
+    if states is None:
+        return {p: "modified" for p in paths}
+    return {p: ("modified" if s == GONE else s) for p, s in states.items()}
+
+
+def _census_paths(
     state: dict,
     touched: List[str],
     *,
     workflow: List[str] = (),
-    label: str = TRACKING_LABELS["implement"],
     say=print,
-) -> List[Dict[str, str]]:
-    """The default scope: the dirty census, minus the baseline, plus ``--touched``.
+) -> List[str]:
+    """The default scope's paths: the dirty census, minus the baseline, plus ``--touched``.
 
     The workflow's own files (*workflow*, :func:`_workflow_entries`) are left
     out of both halves. Prints the census counts through *say*. May rewrite a
     malformed ``pre_existing_changes`` on *state* to ``[]`` (warned), which
-    the caller then persists.
+    the caller then persists. Sorted; the caller reads each path's action.
     """
     # Ensure pre_existing_changes is a list
     pre_existing_raw = state.get("pre_existing_changes")
@@ -588,10 +685,7 @@ def _census_tracked_files(
             )
         )
     say(f"Implementation changes: {len(implementation_changes)}")
-    ordered = sorted(implementation_changes)
-    return _tracked_entries(ordered, _file_actions(
-        ordered, base_ref=state.get("head_before_implement"), baseline=pre_existing,
-    ), label)
+    return sorted(implementation_changes)
 
 
 def _insert_summary_reference(plan_file: str, summary_relative: str) -> int:

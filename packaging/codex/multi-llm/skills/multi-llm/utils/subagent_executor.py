@@ -60,7 +60,6 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import structured_output
     from .json_extractor import (
         describe_syntax_error,
-        enclosing_syntax_error,
         extract_json_from_text,
         is_answer_shaped,
     )
@@ -188,7 +187,6 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils import structured_output
     from utils.json_extractor import (
         describe_syntax_error,
-        enclosing_syntax_error,
         extract_json_from_text,
         is_answer_shaped,
     )
@@ -4782,6 +4780,25 @@ def persist_result(task: Dict[str, Any], phase_dir: str, data: Any) -> str:
 def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool) -> Any:
     """Recover the subagent's answer: ``parse_output`` first, then extraction.
 
+    :func:`_extract_result_and_syntax` without the syntax diagnosis.
+    """
+    return _extract_result_and_syntax(
+        provider, stdout, stderr, prefer_arrays=prefer_arrays
+    )[0]
+
+
+def _extract_result_and_syntax(
+    provider: Any, stdout: str, stderr: str, *, prefer_arrays: bool
+) -> Tuple[Any, Optional[Dict[str, Any]]]:
+    """Recover the subagent's answer: ``parse_output`` first, then extraction.
+
+    Returns ``(data, enclosing_syntax_error)``: the second is the extractor's
+    own report (``json_extractor.extract_json_from_text``) that ``data`` is a
+    piece of a larger document which does not parse, else ``None``. It comes
+    from whichever extraction served ``data`` — the adapter's, handed back on
+    its ``parse_output`` dict, or this function's own for an adapter that
+    returns text — so nothing scans the reply a second time to rediscover it.
+
     The ordering is **mandatory, not an optimization** (D3): provider CLIs emit
     structured event streams, so running ``json_extractor`` over raw stdout would
     match an event envelope or a reasoning item instead of the answer, and
@@ -4834,6 +4851,7 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
         raise ResultRejected(str(error), STATUS_RUNNER_ERROR)
 
     data = parsed.get("data")
+    syntax = parsed.get("enclosing_syntax_error")
     if isinstance(data, str):
         extracted = extract_json_from_text(data, prefer_arrays=prefer_arrays)
         if not extracted.get("success"):
@@ -4842,6 +4860,7 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
                 STATUS_UNPARSEABLE,
             )
         data = extracted.get("data")
+        syntax = extracted.get("enclosing_syntax_error")
     if data is None or (isinstance(data, dict) and set(data.keys()) == {"raw"}):
         raise ResultRejected(
             "the adapter recovered no result object from the stream",
@@ -4853,7 +4872,7 @@ def extract_result(provider: Any, stdout: str, stderr: str, *, prefer_arrays: bo
             f"or array",
             STATUS_UNPARSEABLE,
         )
-    return data
+    return data, syntax if isinstance(syntax, dict) else None
 
 
 def _validation_result_errors(data: Any) -> List[str]:
@@ -5469,6 +5488,10 @@ class _Capture:
     #: ``HomeChange.to_dict()`` when ``$CODEX_HOME``'s security-relevant set
     #: changed during the attempt (warn-only in this lane).
     home_change: Optional[Dict[str, Any]] = None
+    #: Why the reply's JSON did not parse, as one redacted line, when the
+    #: extractor served only a piece of a broken document and that piece failed
+    #: validation; set by :func:`_parse_and_validate`, read by the re-ask.
+    reply_syntax_error: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -6858,26 +6881,46 @@ def dispatch_task(
                 reclassified = _classify_failed_run(provider, capture, model)
                 if reclassified is not None:
                     status, error = reclassified
-                    # `_classify_failed_run` returns `runner_error` from the
-                    # adapter's structural hook and from nowhere else, so this is
-                    # exactly "the structural check fired" (§4.4 step 4).
-                    if (
-                        status == STATUS_RUNNER_ERROR
-                        and profile == PROFILE_AGENT_WRITE
-                        and changed_files is not None
-                    ):
-                        status, error = _denied_write_turn(
-                            changed_files, error,
-                            {
-                                "task": task,
-                                "task_id": task_id,
-                                "kind": kind,
-                                "attempt": attempt_index,
-                                "cwd": cwd,
-                                "outcome": outcome,
-                                **_jail_hook_context(capture, jail_request, fallback),
-                            },
-                        )
+
+        # The pre-retry check (T4.8, widened in fix round 8): a write attempt
+        # the ladder could answer by sending the batch's own prompt again — a
+        # timeout, a runner error, a prose reply, a rate limit — is asked first
+        # whether it already moved bytes. If it did, the batch is never sent
+        # again on top of its own edits: the attempt is a partial application,
+        # or, for an apply kind whose reply could not be read, the one report
+        # re-ask (rule 7), which restates the report and edits nothing. A re-ask
+        # in flight is exempt: its retry re-sends the re-ask, and
+        # `repair_baseline` above already fails one that moved a file.
+        repeatable = True
+        partial_if_refused: Optional[str] = None
+        reply_text: Optional[str] = None
+        if (
+            (status in RETRYABLE_STATUSES or status in BACKOFF_STATUSES)
+            and profile == PROFILE_AGENT_WRITE
+            and changed_files is not None
+            and attempt_repair is None
+        ):
+            checked_status, checked_error = _denied_write_turn(
+                changed_files, error,
+                {
+                    "task": task,
+                    "task_id": task_id,
+                    "kind": kind,
+                    "attempt": attempt_index,
+                    "cwd": cwd,
+                    "outcome": outcome,
+                    **_jail_hook_context(capture, jail_request, fallback),
+                },
+                status=status,
+            )
+            if checked_status == STATUS_PARTIAL:
+                repeatable = False
+                if status == STATUS_UNPARSEABLE and ladder.schema_repairs_left > 0:
+                    reply_text = _reply_text(provider, capture.stdout)
+                    if _write_report_repairable(capture, reply_text, tree_fingerprint):
+                        partial_if_refused = checked_error
+                if partial_if_refused is None:
+                    status, error = checked_status, checked_error
 
         evidence = getattr(capture, "jail_evidence", None) or {}
         if (
@@ -6936,7 +6979,6 @@ def dispatch_task(
         # pinned re-ask), so it is not repairable here either; nor is a valid
         # document `persist_result` refused for its size (`data` dropped above).
         repairable = data is not None
-        reply_text: Optional[str] = None
         if repairable and status == STATUS_SCHEMA_INVALID and kind in WRITE_KINDS:
             # A write kind's re-ask restates the runner's own previous reply, so
             # it needs that reply, the hook that proves it moved nothing, and an
@@ -6946,7 +6988,21 @@ def dispatch_task(
             repairable = _write_report_repairable(
                 capture, reply_text, tree_fingerprint
             )
-        action = ladder.record(status, repairable=repairable)
+        if partial_if_refused is not None:
+            # A prose reply after edits (the pre-retry check above): the same
+            # re-ask an unreadable report gets, never the batch again.
+            repairable = True
+        action = ladder.record(
+            status, repairable=repairable, repeatable=repeatable
+        )
+        if partial_if_refused is not None and not action.retry:
+            # The re-ask was refused for want of budget: the edits stay
+            # unverified, so the attempt ends as the partial application the
+            # check found, with the ladder's reason appended.
+            status, error = STATUS_PARTIAL, partial_if_refused
+            if action.note:
+                error = f"{error} ({action.note})"
+            break
         if action.retry and action.repair:
             # The one schema-repair re-ask: same runner, same deadline. A read
             # kind gets the original prompt plus what was wrong and the reply
@@ -6954,9 +7010,10 @@ def dispatch_task(
             # never the batch's instructions again. The errors are re-read from
             # the extracted document, because the status line keeps only five,
             # and a reply that is not valid JSON is told so instead of being
-            # handed the errors of a fragment from inside it.
-            problems = validate_result(kind, data)
-            syntax = _reply_syntax_error(provider, capture, data)
+            # handed the errors of a fragment from inside it. A prose reply has
+            # no document: its own error is the one problem.
+            problems = validate_result(kind, data) if data is not None else []
+            syntax = capture.reply_syntax_error
             repair_prompt = build_schema_repair_prompt(
                 kind, prompt, problems or [error], syntax_error=syntax,
                 **({"previous_reply": reply_text} if kind in WRITE_KINDS else {}),
@@ -6967,12 +7024,16 @@ def dispatch_task(
                    if wrapping is not None else {}),
             )
             if too_long is not None:
+                if partial_if_refused is not None:
+                    status, error = STATUS_PARTIAL, partial_if_refused
                 error = f"{error} (no schema-repair re-ask: {too_long})"
                 break
             if kind in WRITE_KINDS:
                 try:
                     repair_baseline = tree_fingerprint(fingerprint_context)
                 except Exception as exc:  # noqa: BLE001 - fail closed: no re-ask
+                    if partial_if_refused is not None:
+                        status, error = STATUS_PARTIAL, partial_if_refused
                     error = (
                         f"{error} (no report re-ask: the files' state before it "
                         f"could not be recorded, {type(exc).__name__})"
@@ -7015,7 +7076,7 @@ def dispatch_task(
             error = f"{error} ({action.note})"
         break
 
-    if attempt_repair and status == STATUS_SCHEMA_INVALID:
+    if attempt_repair and status in (STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE):
         error = f"{error} (after the one schema-repair re-ask)"
     outcome.status = status
     outcome.reason = error
@@ -7027,32 +7088,39 @@ def _denied_write_turn(
     changed_files: Callable[[Dict[str, Any]], Sequence[str]],
     error: str,
     context: Dict[str, Any],
+    *,
+    status: str = STATUS_RUNNER_ERROR,
 ) -> Tuple[str, str]:
-    """``(status, reason)`` for a write attempt whose turn a denial ended (T4.8).
+    """``(status, reason)`` for a failed write attempt a retry would re-send.
 
-    With changed files, ``partial_application`` in the scheduler's own words
-    (``PARTIAL APPLICATION: …``, stop the loop, keep the snapshot, do not
-    complete the phase), never retried because the status is on no rung. With
-    none, ``runner_error`` unchanged, retried from the transport budget.
+    T4.8 asked it for a turn a denial ended (``runner_error``); since fix
+    round 8 it is asked for every write attempt whose ``status`` the ladder
+    could answer with the batch's own prompt again (a timeout, a prose reply,
+    a rate limit). With changed files, ``partial_application`` in the
+    scheduler's own words (``PARTIAL APPLICATION: …``, stop the loop, keep the
+    snapshot, do not complete the phase), never retried because the status is
+    on no rung. With none, ``status`` and ``error`` unchanged, retried as
+    before.
     """
     try:
         changed = [str(path) for path in (changed_files(context) or ())]
     except Exception as exc:  # noqa: BLE001 - fail closed, never retry blind
         return STATUS_PARTIAL, (
-            f"PARTIAL APPLICATION (unverified): {error}, and the working tree "
-            f"could not be compared with the pre-batch snapshot "
-            f"({type(exc).__name__}), so no further attempt is started — a "
-            f"retry on top of a half-applied edit is unsafe. The batch loop "
-            f"stops here and the phase is NOT marked completed."
+            f"PARTIAL APPLICATION (unverified): the attempt failed ({error}), "
+            f"and the working tree could not be compared with the pre-batch "
+            f"snapshot ({type(exc).__name__}), so no further attempt is "
+            f"started — a retry would send the whole batch again on top of "
+            f"whatever it already edited. The batch loop stops here and the "
+            f"phase is NOT marked completed."
         )
     if not changed:
-        return STATUS_RUNNER_ERROR, error
+        return status, error
     shown = ", ".join(changed[:5]) + (", …" if len(changed) > 5 else "")
     return STATUS_PARTIAL, (
-        f"PARTIAL APPLICATION: {len(changed)} file(s) changed ({shown}) but "
-        f"{error}. No further attempt is started — a retry on top of a "
-        f"half-applied edit is unsafe. The batch loop stops here and the phase "
-        f"is NOT marked completed."
+        f"PARTIAL APPLICATION: {len(changed)} file(s) changed ({shown}), but "
+        f"the attempt failed ({error}). No further attempt is started — a "
+        f"retry would send the whole batch again on top of those edits. The "
+        f"batch loop stops here and the phase is NOT marked completed."
     )
 
 
@@ -7341,22 +7409,6 @@ def _reply_text(provider: Any, stdout: str) -> Optional[str]:
     return body or None
 
 
-def _reply_syntax_error(provider: Any, capture: _Capture, data: Any) -> Optional[str]:
-    """Why the reply's JSON did not parse, when ``data`` is a fragment of it.
-
-    ``json_extractor.enclosing_syntax_error`` on the runner's reply text,
-    rendered as one redacted line; ``None`` when ``data`` is the whole document
-    (its validation errors are then the reply's own) or nothing can tell.
-    """
-    if data is None:
-        return None
-    text = _reply_text(provider, capture.stdout)
-    if not text:
-        return None
-    found = enclosing_syntax_error(text, data)
-    return _redact(describe_syntax_error(found)) if found else None
-
-
 def _parse_and_validate(
     provider: Any,
     capture: _Capture,
@@ -7379,7 +7431,7 @@ def _parse_and_validate(
     retried": the same raw output through the same prompt has the same answer.
     """
     try:
-        data = extract_result(
+        data, fragment = _extract_result_and_syntax(
             provider, capture.stdout, capture.stderr, prefer_arrays=prefer_arrays
         )
     except ResultRejected as exc:
@@ -7390,7 +7442,8 @@ def _parse_and_validate(
     _report_normalized(kind, normalize_result(kind, data))
     errors = validate_result(kind, data)
     if errors:
-        syntax = _reply_syntax_error(provider, capture, data)
+        syntax = _redact(describe_syntax_error(fragment)) if fragment else None
+        capture.reply_syntax_error = syntax
         if syntax:
             # The errors are the fragment's, not the reply's: say so first
             # (2026-10-05, a task-generation reply with the right keys was
@@ -7479,6 +7532,10 @@ def _parse_with_schema_policy(
             declined_marker if status == STATUS_OK else None,
         )
 
+    # The native document is completed before it is validated, as this lane's
+    # own parse is: a reply that left out a required-but-nullable key is
+    # native, not "present but did not validate" (fix round 8).
+    native_notes: List[str] = []
     verdict = structured_output.classify_attempt(
         schema,
         stdout=capture.stdout,
@@ -7488,6 +7545,9 @@ def _parse_with_schema_policy(
         model=model,
         native_document=structured_output.native_document_for(
             provider, capture.stdout
+        ),
+        normalize=lambda document: native_notes.extend(
+            normalize_result(kind, document)
         ),
     )
     if verdict.warning:
@@ -7504,7 +7564,7 @@ def _parse_with_schema_policy(
             f"structured output: no document conforming to {schema.name}"
         ), None, None
     if verdict.marker == structured_output.MARKER_NATIVE and verdict.data is not None:
-        _report_normalized(kind, normalize_result(kind, verdict.data))
+        _report_normalized(kind, native_notes + normalize_result(kind, verdict.data))
         errors = validate_result(kind, verdict.data)
         if errors:
             return (
@@ -7986,8 +8046,12 @@ def _dispatch_order(tasks: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 #: of the same task recorded.
 _RECORDED_RUNNER_SUFFIX = "(recorded from a previous attempt)"
 
+#: Row statuses whose recorded runner is not a pin for a re-run (fix round 8):
+#: the reply-quality failures, rungs 5 and 6. See :func:`_recorded_runners`.
+UNPINNED_ROW_STATUSES = frozenset({STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE})
 
-def _pinned_runner_note(key: str) -> str:
+
+def _pinned_runner_note(key: str, kind: str = "") -> str:
     """The dispatch line's reason when the runner is a recorded pin, else ``""``.
 
     A pin outranks every rung of the ladder — the session model and
@@ -7995,13 +8059,15 @@ def _pinned_runner_note(key: str) -> str:
     runner the user had just tried to move away from and gave no reason
     (2026-10-05, run 3: generate-tasks re-run after a host-model switch stayed
     on ``opencode/big-pickle``, the runner its failed first run recorded).
+    The file it names is the one :func:`_recorded_runners` read for ``kind``
+    (the judge's is kind-qualified, :func:`_batch_report_filename`).
     """
     if not key.endswith(_RECORDED_RUNNER_SUFFIX):
         return ""
     return (
         "; the runner this task's earlier attempt used, kept from "
-        "subagent_batch_report.json so a re-run repeats it — the session model "
-        "and driver.subagent_runner do not change it"
+        f"{_batch_report_filename(kind)} so a re-run repeats it — the session "
+        "model and driver.subagent_runner do not change it"
     )
 
 
@@ -8024,7 +8090,9 @@ def run_tasks(
     Runners are resolved **once per task at batch start** and pinned into the
     report, so a re-dispatch under ``--resume`` or ``--retry-failed-subagents``
     uses the runner the first attempt did rather than re-resolving against a
-    config that may have changed mid-run. The effective ceilings are logged once
+    config that may have changed mid-run — except a task whose attempt failed
+    fatally or on its reply's shape (:func:`_recorded_runners`). The effective
+    ceilings are logged once
     at batch start alongside each task's runner, so a slow batch is diagnosable
     from the log rather than inferred.
 
@@ -8090,7 +8158,7 @@ def run_tasks(
         version = report.runner_versions.get(spec, "unknown")
         print(
             f"[exec-subagents]   {task_id} -> {spec} (version {version}"
-            f"{_pinned_runner_note(resolved[task_id][1])})"
+            f"{_pinned_runner_note(resolved[task_id][1], kind)})"
         )
 
     # D4a, the *during* half: a batch of eleven validation tasks ran for a
@@ -8715,6 +8783,18 @@ def _recorded_runners(
     collide (``_authoritative_validator_runner``, always a validation-family
     kind), where it defaults to the bare name exactly as before.
 
+    **A row whose own status is a reply-quality failure is not a pin either**
+    (:data:`UNPINNED_ROW_STATUSES`, fix round 8): the runner was reached and
+    answered, in a shape nobody could use, so a re-run is the moment to try
+    another runner — the session model the host switched to, or a repaired
+    ``driver.subagent_runner`` — not to repeat it. Row-level, unlike the fatal
+    rule: the spec itself works. A transport failure (timeout, rate limit,
+    runner error) or an ``incomplete`` row keeps its pin, so a re-run of a
+    batch that merely ran out of time stays on the runner its siblings used.
+    Measured 2026-10-05, OpenCode run 3: generate-tasks failed twice on
+    ``opencode/big-pickle``'s reply shape, the host switched model, and the
+    re-run dispatched big-pickle again on the strength of that failed row.
+
     ``pin_sha256`` (2026-10-02, #29): the current batch's :func:`_pin_sha256`. A
     report that recorded a *different* digest was written for another round or other
     inputs, and its runners are not pins for this batch. Measured on a Codex
@@ -8744,7 +8824,7 @@ def _recorded_runners(
     recorded = {}
     for row in rows:
         spec = str(row["runner"])
-        if spec in rejected_specs:
+        if spec in rejected_specs or row.get("status") in UNPINNED_ROW_STATUSES:
             continue
         recorded[str(row["task_id"])] = spec
     return recorded

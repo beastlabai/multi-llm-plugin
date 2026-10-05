@@ -1602,29 +1602,96 @@ HOME_CHANGE_EXAMPLES = 3
 #: Where :func:`describe_changed` writes a full list, under the state home.
 HOME_CHANGE_LIST_DIR = "codex-home-check"
 
+#: How many lists that directory keeps: writing one more removes the oldest
+#: (fix round 8: nothing pruned it, and every render wrote another file).
+HOME_CHANGE_LIST_KEEP = 50
+
 _LIST_SEQ = {"n": 0}
 _LIST_LOCK = threading.Lock()
 
 
+def render_name(name: Any) -> str:
+    """A changed name as one printable token: as found when every character
+    is printable, else its ``repr`` (quoted, control characters, lone
+    surrogates and line separators escaped). A jailed turn chooses the names
+    under a watched tree, and a raw newline put a forged ``[CODEX_HOME_CHECK]``
+    line on stderr and in the list file (fix round 8); a non-UTF-8 name made
+    the list write raise."""
+    text = str(name)
+    return text if text.isprintable() else repr(text)
+
+
+def _private_dir(directory: str) -> bool:
+    """Create ``directory`` 0700, or make an existing one 0700; ``False`` when
+    it is not a real directory of this user's."""
+    os.makedirs(directory, mode=0o700, exist_ok=True)
+    info = os.lstat(directory)
+    if not stat.S_ISDIR(info.st_mode) or (hasattr(os, "getuid") and info.st_uid != os.getuid()):
+        return False
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        os.chmod(directory, 0o700)
+    return True
+
+
+def _prune_lists(directory: str, keep_name: str) -> None:
+    """Remove the oldest lists beyond :data:`HOME_CHANGE_LIST_KEEP`, never
+    ``keep_name``; best effort."""
+    try:
+        rows = []
+        for entry in os.scandir(directory):
+            if entry.name.endswith(".txt") and entry.is_file(follow_symlinks=False):
+                rows.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name))
+    except OSError:
+        return
+    rows.sort()
+    for _mtime, name in rows[:max(0, len(rows) - HOME_CHANGE_LIST_KEEP)]:
+        if name != keep_name:
+            with contextlib.suppress(OSError):
+                os.unlink(os.path.join(directory, name))
+
+
 def _write_change_list(lines: Sequence[str]) -> Optional[str]:
-    """Write *lines* to a new file under ``<state home>/codex-home-check/``;
-    its path, or ``None`` when it cannot be written (the line then says so)."""
+    """Write *lines* (already rendered by :func:`render_name`) to
+    ``<state home>/codex-home-check/<record hash>.txt``; its path, or ``None``
+    when it cannot be written (the line then says so).
+
+    One file per record: rendering the same change again names the same file
+    and does not rewrite it. The file is 0600 and the directory 0700 whatever
+    the umask, and the directory keeps the newest
+    :data:`HOME_CHANGE_LIST_KEEP` lists."""
     try:
         from .write_safety import state_home
     except ImportError:  # pragma: no cover - direct-script import shim
         from utils.write_safety import state_home  # type: ignore[no-redef]
+    body = ("\n".join(lines) + "\n").encode("utf-8", "backslashreplace")
+    name = hashlib.sha256(body).hexdigest()[:24] + ".txt"
+    directory = os.path.join(state_home(), HOME_CHANGE_LIST_DIR)
+    path = os.path.join(directory, name)
     with _LIST_LOCK:
         _LIST_SEQ["n"] += 1
         seq = _LIST_SEQ["n"]
-    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-    directory = os.path.join(state_home(), HOME_CHANGE_LIST_DIR)
-    path = os.path.join(directory, f"{stamp}-{os.getpid()}-{seq}.txt")
+    temp = os.path.join(directory, f".{name}.{os.getpid()}-{seq}.tmp")
     try:
-        os.makedirs(directory, mode=0o700, exist_ok=True)
-        with open(path, "x", encoding="utf-8") as handle:
-            handle.write("\n".join(lines) + "\n")
+        if not _private_dir(directory):
+            return None
+        status, current = _read_watched(path)
+        if (status == "ok" and current == body
+                and stat.S_IMODE(os.lstat(path).st_mode) == 0o600):
+            return path
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        for extra in ("O_NOFOLLOW", "O_CLOEXEC"):
+            flags |= getattr(os, extra, 0)
+        fd = os.open(temp, flags, 0o600)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(body)
+            os.replace(temp, path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(temp)
     except OSError:
         return None
+    _prune_lists(directory, name)
     return path
 
 
@@ -1634,30 +1701,34 @@ def describe_changed(names: Sequence[str], config_keys: Sequence[str] = ()) -> s
     Each home-relative name, with ``config.toml``'s changed key names after it
     (never a value), while there are at most :data:`HOME_CHANGE_LISTED`;
     otherwise ``N paths under <shared dir>/, e.g. a, b, c and K more (full
-    list: <file>)``. Only the line is shortened: the check's verdict and the
-    record it returns are unchanged.
+    list: <file>)``. Every name and key is rendered by :func:`render_name`, on
+    the line and in the file. Only the line is shortened: the check's verdict
+    and the record it returns are unchanged.
     """
-    parts: List[str] = []
-    for name in names:
+    raw = [str(name) for name in names]
+    keys = ", ".join(render_name(key) for key in config_keys)
+
+    def entry(name: str, shown: str) -> str:
         if name == HOME_CONFIG and config_keys:
-            parts.append(f"{name} ({', '.join(config_keys)})")
-        else:
-            parts.append(str(name))
+            return f"{render_name(shown)} ({keys})"
+        return render_name(shown)
+
+    parts = [entry(name, name) for name in raw]
     if len(parts) <= HOME_CHANGE_LISTED:
         return ", ".join(parts)
     try:
-        shared = os.path.commonpath([str(name) for name in names])
+        shared = os.path.commonpath(raw)
     except ValueError:
         shared = ""
-    if shared in [str(name) for name in names]:
+    if shared in raw:
         shared = os.path.dirname(shared)
     prefix = shared + os.sep if shared else ""
     examples = [
-        part[len(prefix):] if prefix and part.startswith(prefix) else part
-        for part in parts[:HOME_CHANGE_EXAMPLES]
+        entry(name, name[len(prefix):] if prefix and name.startswith(prefix) else name)
+        for name in raw[:HOME_CHANGE_EXAMPLES]
     ]
     where = _write_change_list(parts)
-    head = f"{len(parts)} paths" + (f" under {prefix}" if prefix else "")
+    head = f"{len(parts)} paths" + (f" under {render_name(shared)}{os.sep}" if prefix else "")
     tail = (f"full list: {render_home(where)}" if where
             else "the full list could not be written")
     return (f"{head}, e.g. {', '.join(examples)} and "

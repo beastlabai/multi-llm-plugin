@@ -687,6 +687,16 @@ def format_batches_for_output(
     only place the finished run tells the reader what is still owed by hand
     (measured 2026-09-16). A human task is never dispatched by either invoker,
     so carrying it through costs the resume nothing.
+
+    A **skipped code task** rides along for the same reason (fix round 8): a
+    dependent skipped with a deferred manual task, or a failed task answered
+    ``--human-task <id>=skip`` and its dependents, is ``skipped`` too, and
+    dropping it put it in no bucket of the resumed run's account — the
+    summary read ``5 — 4 done, 1 deferred manual`` for a six-task plan, the
+    stop block's "that is every one of the N task(s)" was false, and
+    ``write_batch_report.json``'s ``skipped_tasks`` lost the chain. The
+    scheduler re-resolves the same plan from the recorded strategy and
+    answers, so the task is skipped again, never dispatched.
     """
     output_batches = []
 
@@ -703,7 +713,7 @@ def format_batches_for_output(
             tasks_to_include = [
                 t for t in batch
                 if t.status in (TaskStatus.PENDING, TaskStatus.FAILED,
-                                TaskStatus.IN_PROGRESS)
+                                TaskStatus.IN_PROGRESS, TaskStatus.SKIPPED)
                 or (t.executor_role == "human"
                     and t.status != TaskStatus.COMPLETED)
             ]
@@ -770,15 +780,19 @@ def _applicable_task_decisions(
     Every recorded answer for a human task (they persist, so ``--resume``
     never re-asks), plus this run's ``retry`` answers (one-shot, never
     recorded) and a recorded ``done``/``skip`` for a code task only while
-    the state still says that task ``failed``: once it ran again or was
-    accepted, a stale answer must not mark it done behind the user's back.
+    the state still says that task ``failed`` — or, for ``skip``, ``skipped``:
+    the answer that skipped it is what keeps it skipped on the next resume,
+    now that a skipped code task is materialized again (fix round 8). Once
+    it ran again or was accepted, a stale answer must not mark it done
+    behind the user's back.
     """
     recorded = dict(state.get("human_task_decisions") or {})
     decisions: Dict[str, str] = {}
     for task_id, action in recorded.items():
+        status = state.get_task_status(task_id)
         if task_id in human_task_ids:
             decisions[task_id] = action
-        elif state.get_task_status(task_id) == "failed":
+        elif status == "failed" or (action == "skip" and status == "skipped"):
             decisions[task_id] = action
     for task_id, action in this_run.items():
         if action == "retry" and task_id not in human_task_ids:
@@ -1077,14 +1091,19 @@ def _native_human_task_plan(
     top-level ``skipped_tasks`` map: the host reads that it must not
     dispatch them instead of re-deriving the walk. With no strategy yet (an
     attended run, before the host asks) nothing is skipped.
+
+    A failed code task the user accepted (``--human-task <id>=done`` on a
+    resume) is **taken out of the batches**, exactly as a completed task is,
+    and named in a top-level ``accepted_tasks`` map with its reason: a task
+    left in the batches is one the host dispatches, and until fix round 8
+    the native leg recorded the acceptance in ``state.json`` while handing
+    the task out again as ``failed`` — whose ``util batch-done`` then
+    overwrote the acceptance (reviewer repro, 2026-10-05).
     """
     from utils.write_batch_scheduler import resolve_human_task_plan
 
-    entries = [
-        task
-        for batch in output_data.get("batches") or []
-        for task in batch.get("tasks") or []
-    ]
+    batches = output_data.get("batches") or []
+    entries = [task for batch in batches for task in batch.get("tasks") or []]
     plan = resolve_human_task_plan(
         [
             {
@@ -1108,6 +1127,20 @@ def _native_human_task_plan(
             task["status"] = TaskStatus.COMPLETED.value
     if plan.skipped:
         output_data["skipped_tasks"] = dict(sorted(plan.skipped.items()))
+    if plan.accepted:
+        kept = []
+        for batch in batches:
+            batch["tasks"] = [
+                task for task in batch.get("tasks") or []
+                if str(task.get("id") or "") not in plan.accepted
+            ]
+            if batch["tasks"]:
+                batch["can_parallelize"] = len(batch["tasks"]) > 1
+                kept.append(batch)
+        output_data["batches"] = kept
+        output_data["accepted_tasks"] = dict(sorted(plan.accepted.items()))
+        if "pending_tasks" in output_data:
+            output_data["pending_tasks"] = sum(len(b["tasks"]) for b in kept)
     return plan
 
 
@@ -1397,8 +1430,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Found {len(tasks)} tasks")
     # Both legs pass here, so a task the run defers (a human task, or a
     # dependent `skip-dependents` skips with it) can be named by its title
-    # once the workflow completes, not only by its id — the native leg's host
-    # records `skipped` itself and never writes a title (2026-10-04).
+    # once the workflow completes, not only by its id: `persist_human_task_plan`
+    # (the scheduler's, and this emit's since fix round 7) records the
+    # `skipped` status and its reason but no title, and `[MANUAL_TASK]` reads
+    # the title from here (2026-10-04).
     # The manual tasks ride along (`implement_human_task_ids`), so a finished
     # implement whose manual task nobody answered still names it as owed.
     if state.record_task_titles(
@@ -1616,16 +1651,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         getattr(args, "exec_subagents", False)
         or getattr(args, "dry_run_subagents", False)
     )
+    # The answers both legs apply this run: every human task's, and a code
+    # task's only while it still applies (`_applicable_task_decisions`).
+    applicable_decisions = _applicable_task_decisions(
+        state, human_task_ids, human_task_decisions,
+    )
     # The native leg resolves the human-task plan here, from the strategy and
     # the answers it already holds, exactly as the executor resolves it before
     # its first batch — so the skips are in the task JSON the host reads and
-    # are written to state.json below, not left for the host to record.
+    # are written to state.json below, not left for the host to record. Also
+    # with no manual task in the plan whenever an answer applies: a failed
+    # code task's `done`/`skip` used to pass validation, print
+    # `[HUMAN_TASK_ANSWERED]` and change nothing on this leg, because the
+    # plan was only resolved for a plan holding a human task (fix round 8).
     native_human_plan = None
-    if not executor_backed and human_task_ids:
+    if not executor_backed and (human_task_ids or applicable_decisions):
         native_human_plan = _native_human_task_plan(
             output_data,
             strategy=human_task_strategy,
-            decisions=dict(state.get("human_task_decisions") or {}),
+            decisions=applicable_decisions,
         )
     if not executor_backed:
         write_native_handoff()
@@ -1660,9 +1704,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         state=state,
         output_data=output_data,
         human_task_strategy=human_task_strategy,
-        human_task_decisions=_applicable_task_decisions(
-            state, human_task_ids, human_task_decisions,
-        ),
+        human_task_decisions=applicable_decisions,
         tasks_file=implement_tasks_file,
     )
     if scheduled is not None:
@@ -1700,15 +1742,43 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Pending tasks: {output_data.get('pending_tasks', output_data['total_tasks'])}")
     print(f"Batches: {len(output_data['batches'])}")
 
-    if native_human_plan is not None and native_human_plan.skipped:
-        print(
-            "Skipped tasks (recorded in state.json; do not dispatch them, and "
-            "list them in the summary's Manual Tasks (Deferred) section):"
-        )
+    if native_human_plan is not None:
         titles = dict(state.get("task_titles") or {})
-        for task_id, reason in sorted(native_human_plan.skipped.items()):
+
+        def _named(task_id: str) -> str:
             title = titles.get(task_id)
-            print(f"  {task_id}{' ' + title if title else ''}: {reason}")
+            return f"{task_id}{' ' + title if title else ''}"
+
+        deferred = native_human_plan.deferred()
+        declined = native_human_plan.declined()
+        if deferred:
+            print(
+                "Deferred tasks (recorded skipped in state.json; do not "
+                "dispatch them, and list them in the summary's Manual Tasks "
+                "(Deferred) section):"
+            )
+            for task_id, reason in sorted(deferred.items()):
+                print(f"  {_named(task_id)}: {reason}")
+        if declined:
+            # Not owed: the workflow's `[MANUAL_TASK]` lines leave these out,
+            # so a summary that filed them under Manual Tasks (Deferred)
+            # disagreed with `[WORKFLOW_COMPLETE]` (fix round 8).
+            print(
+                "Skipped at your request (recorded skipped in state.json; do "
+                "not dispatch them, and list them in the summary under a "
+                "separate 'Skipped at your request' heading, not under Manual "
+                "Tasks (Deferred) — they are not owed):"
+            )
+            for task_id, reason in sorted(declined.items()):
+                print(f"  {_named(task_id)}: {reason}")
+        if native_human_plan.accepted:
+            print(
+                "Accepted after failing (recorded completed in state.json; "
+                "not in the batches, do not dispatch or record them; list "
+                "them in the summary as accepted after failing):"
+            )
+            for task_id, reason in sorted(native_human_plan.accepted.items()):
+                print(f"  {_named(task_id)}: {reason}")
 
     print("\nClaude Code should now:")
     print("  1. Read the output JSON file")

@@ -365,7 +365,10 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
 
     1. **Top-level first.** A candidate contained in another candidate's span is
        ranked *after* every top-level one rather than dropped, so an inner
-       structure is still salvageable when the outer one does not parse.
+       structure is still salvageable when the outer one does not parse. Among
+       contained candidates an outer one is tried before the pieces inside it,
+       so a document that a stray bracket in the prose happens to enclose is
+       still served whole.
     2. **Shape before position.** ``prefer_arrays`` still tries every array
        before every object; last-wins applies *within* each group, so a trailing
        illustrative object never displaces a preceding array.
@@ -399,7 +402,13 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
         prefer_arrays: If True, try array candidates before objects
 
     Returns:
-        Dict with 'success', 'data'/'error', optionally 'raw'
+        Dict with 'success', 'data'/'error', optionally 'raw'. A success that
+        served a piece of a larger document which does not parse also carries
+        ``enclosing_syntax_error`` (:func:`_enclosing_document_error`'s dict;
+        :func:`describe_syntax_error` renders it): the validator's errors then
+        describe the fragment, and this says what was wrong with the reply.
+        Adapters hand this dict back from ``parse_output`` as it is, which is
+        how the executor learns it without scanning the reply a second time.
     """
     text = text.strip()
 
@@ -440,24 +449,40 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
     # ends at or after it — balanced runs nest, they never partially overlap —
     # so one pass over the position-sorted union settles containment across both
     # groups without comparing every pair.
+    every_span = sorted(span for group in groups for span in group)
     contained_spans = set()
     furthest_end = -1
-    for start, end, _ in sorted(span for group in groups for span in group):
+    for start, end, _ in every_span:
         if end <= furthest_end:
             contained_spans.add((start, end))
         else:
             furthest_end = end
 
     # Clause 1: within each group, every top-level candidate ranks ahead of
-    # every contained one; within each tier the LAST by position ranks first.
-    candidates: List[str] = []
+    # every contained one; within each tier the LAST by end position ranks
+    # first. Balanced runs nest or are disjoint, so ordering by where a run
+    # ENDS is "last wins" between disjoint candidates and "outer before inner"
+    # between nested ones: a candidate that parses is never passed over for a
+    # piece of itself. That matters only in the contained tier, where a stray
+    # `{` in the prose before a document and a `}` after it make the whole
+    # document "contained" — ordered by start, its last task object was served
+    # instead of the document (fix round 8).
+    candidates: List[Tuple[int, int, str]] = []
     for group in groups:
         for contained in (False, True):
             candidates.extend(
-                span[2]
-                for span in sorted(group, key=lambda s: s[0], reverse=True)
+                span
+                for span in sorted(group, key=lambda s: s[1], reverse=True)
                 if ((span[0], span[1]) in contained_spans) is contained
             )
+
+    def served(data: Any, span: Tuple[int, int, str]) -> Dict[str, Any]:
+        result = {"success": True, "data": data}
+        if (span[0], span[1]) in contained_spans:
+            error = _enclosing_document_error(span, every_span)
+            if error is not None:
+                result["enclosing_syntax_error"] = error
+        return result
 
     # Strategy 3: Try parsing each candidate in rank order.
     # Clauses 3 and 5: the highest-ranked candidate that parses to a document
@@ -465,19 +490,19 @@ def extract_json_from_text(text: str, prefer_arrays: bool = True) -> Dict[str, A
     # highest-ranked array of bare scalars. The last tier is still served rather
     # than dropped — `[1, 2]` really is the only JSON in a reply that holds
     # nothing else — but it can no longer outrank the `[]` a reviewer ended on.
-    fallbacks: Dict[int, Any] = {}
-    for candidate in candidates:
+    fallbacks: Dict[int, Tuple[Any, Tuple[int, int, str]]] = {}
+    for span in candidates:
         try:
-            data = _loads_reply(candidate)
+            data = _loads_reply(span[2])
         except json.JSONDecodeError:
             continue
         rank = _answer_rank(data)
         if rank == _RANK_ANSWER:
-            return {"success": True, "data": data}
-        fallbacks.setdefault(rank, data)
+            return served(data, span)
+        fallbacks.setdefault(rank, (data, span))
     for rank in (_RANK_EMPTY, _RANK_BARE):
         if rank in fallbacks:
-            return {"success": True, "data": fallbacks[rank]}
+            return served(*fallbacks[rank])
 
     return {
         "success": False,
@@ -492,8 +517,22 @@ _SYNTAX_EXCERPT_BEFORE = 60
 _SYNTAX_EXCERPT_AFTER = 40
 
 
-def enclosing_syntax_error(text: str, data: Any) -> Optional[Dict[str, Any]]:
-    """Why the document around *data* is not JSON, when *data* is only a piece of it.
+#: How a balanced span opens when it can be a JSON document a model meant to
+#: write: an object whose first token is a key (or that is empty), an array
+#: whose first token is a value (or that is empty). Single quotes count — a
+#: Python-style document is still a document, just a broken one. A span that
+#: opens any other way is prose that happens to hold a bracket (``{ and the
+#: report follows: … }``, ``[see above]``), and its parse error describes
+#: nothing the model wrote as JSON.
+_DOCUMENT_OPENING = re.compile(
+    r"""\{\s*["'}]|\[\s*(?:[\[\]{"'\-0-9]|(?:true|false|null)\b)"""
+)
+
+
+def _enclosing_document_error(
+    span: Tuple[int, int, str], every_span: List[Tuple[int, int, str]]
+) -> Optional[Dict[str, Any]]:
+    """Why the document around a served *span* is not JSON, when it is a piece of one.
 
     :func:`extract_json_from_text` salvages an inner structure when the one
     around it does not parse (clause 1). That is the right move for a reader
@@ -507,61 +546,51 @@ def enclosing_syntax_error(text: str, data: Any) -> Optional[Dict[str, Any]]:
     'acceptance_criteria'", the re-ask quoted that back, and the model — whose
     keys were right — repeated the same quoting mistake.
 
-    Returns ``None`` unless *data* is the parse of a candidate in *text* that
-    sits inside a larger top-level candidate that does **not** parse; then a
-    dict with ``message``, ``line``, ``column`` (both 1-based, within that
-    enclosing document) and ``excerpt`` (the text around the error, with
-    ``<<HERE>>`` at the position and line breaks shown as spaces). Never raises.
+    Decided from the spans the extractor already found, for the candidate it
+    actually served — never by searching the reply again for a value equal to
+    the served one (fix round 8): that search re-ran the quadratic scan, found
+    the *last* equal span rather than the served one (a document quoted again
+    inside a wrapper later in the reply read as broken), and stopped matching
+    once the caller completed the document in place. The enclosing document is
+    the **outermost** span around *span* that opens like one
+    (:data:`_DOCUMENT_OPENING`); a stray bracket in the prose is skipped, so a
+    whole document between a ``{`` and a ``}`` of narration has no error. If
+    that enclosing document parses, the served value is a piece of valid JSON
+    (an array-preferring caller took a document's inner array) and there is no
+    error either.
+
+    Returns ``None``, or a dict with ``message``, ``line``, ``column`` (both
+    1-based, within that enclosing document) and ``excerpt`` (the text around
+    the error, with ``<<HERE>>`` at the position and line breaks shown as
+    spaces). Never raises.
     """
     try:
-        body = _ANSI_ESCAPE.sub("", text or "")
-        spans = _candidate_spans(body, "both")
-        if not spans:
-            return None
-        top_level: List[Tuple[int, int, str]] = []
-        furthest_end = -1
-        for span in sorted(spans, key=lambda item: (item[0], -item[1])):
-            if span[1] > furthest_end:
-                top_level.append(span)
-                furthest_end = span[1]
-        matches = []
-        for start, end, candidate in spans:
-            try:
-                if _loads_reply(candidate) == data:
-                    matches.append((start, end))
-            except json.JSONDecodeError:
+        start, end = span[0], span[1]
+        for outer_start, outer_end, outer in every_span:
+            if outer_start >= start:
+                break  # position order: every encloser starts before the span
+            if outer_end < end or not _DOCUMENT_OPENING.match(outer):
                 continue
-        if not matches:
+            try:
+                _loads_reply(outer)
+            except json.JSONDecodeError as exc:
+                before = outer[max(0, exc.pos - _SYNTAX_EXCERPT_BEFORE):exc.pos]
+                after = outer[exc.pos:exc.pos + _SYNTAX_EXCERPT_AFTER]
+                excerpt = re.sub(r"\s+", " ", f"{before}<<HERE>>{after}").strip()
+                return {
+                    "message": exc.msg,
+                    "line": exc.lineno,
+                    "column": exc.colno,
+                    "excerpt": excerpt,
+                }
             return None
-        start, end = matches[-1]
-        if any(start == top[0] and end == top[1] for top in top_level):
-            return None  # the value IS a whole document
-        enclosing = next(
-            (top for top in top_level if top[0] <= start and end <= top[1]), None
-        )
-        if enclosing is None:
-            return None
-        try:
-            _loads_reply(enclosing[2])
-        except json.JSONDecodeError as exc:
-            doc = enclosing[2]
-            before = doc[max(0, exc.pos - _SYNTAX_EXCERPT_BEFORE):exc.pos]
-            after = doc[exc.pos:exc.pos + _SYNTAX_EXCERPT_AFTER]
-            excerpt = f"{before}<<HERE>>{after}"
-            excerpt = re.sub(r"\s+", " ", excerpt).strip()
-            return {
-                "message": exc.msg,
-                "line": exc.lineno,
-                "column": exc.colno,
-                "excerpt": excerpt,
-            }
         return None
     except Exception:  # noqa: BLE001 - a diagnosis must never fail a dispatch
         return None
 
 
 def describe_syntax_error(error: Dict[str, Any]) -> str:
-    """One line for :func:`enclosing_syntax_error`'s dict, for logs and prompts."""
+    """One line for an ``enclosing_syntax_error`` dict, for logs and prompts."""
     return (
         f"line {error.get('line')}, column {error.get('column')}: "
         f"{error.get('message')} — the text there reads: {error.get('excerpt')}"
