@@ -62,7 +62,12 @@ try:
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import ExecutorError, ResultRejected
     from .subagent_tasks import PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION
-    from .write_batch_scheduler import bind_prior_changes, with_result_contract
+    from .write_batch_scheduler import (
+        bind_prior_changes,
+        rerunnable_checks,
+        upstream_held_check,
+        with_result_contract,
+    )
     from .write_phase_bridge import WRITE_TASK_FILENAME
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
@@ -71,6 +76,8 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.subagent_tasks import PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         bind_prior_changes,
+        rerunnable_checks,
+        upstream_held_check,
         with_result_contract,
     )
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
@@ -79,6 +86,7 @@ except ImportError:  # pragma: no cover - direct script invocation
 __all__ = [
     "PROMPTS_SUBDIR",
     "WritePromptError",
+    "held_by_check",
     "load_write_task",
     "ordering_warnings",
     "render_write_prompt",
@@ -203,6 +211,41 @@ def render_write_prompt(
 #: The warning a prompt bound out of order prints (stderr; never a refusal).
 MARKER_ORDER = "[WRITE_PROMPT_ORDER]"
 
+#: The refusal for a task a check with findings holds back (stderr, exit 3).
+MARKER_BLOCKED = "[WRITE_PROMPT_BLOCKED]"
+
+
+def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str]]]:
+    """``(check id, its findings)`` when a check with findings holds *task_id*.
+
+    Fix round 11: on the native leg the host dispatches each task itself, so
+    the plugin's hold on the tasks that depend on a check that reported
+    problems (the executor leg's ``WriteBatchScheduler._block_dependents_of_checks``)
+    is enforced here, where the host gets each task's prompt. The held
+    checks are ``state.json``'s (``write_batch_scheduler.rerunnable_checks``:
+    findings on record, recorded completed, not accepted with
+    ``--human-task <id>=done``); the graph is ``write_tasks.json``'s
+    ``depends_on``. ``None`` for an implement task nothing holds, any other
+    kind, or a state or task file that cannot be read (the prompt step is
+    never refused on a guess).
+    """
+    phase_dir = Path(os.path.abspath(str(phase_dir)))
+    try:
+        document, _task = load_write_task(phase_dir, task_id)
+        if str(document.get("kind") or "") != "implement":
+            return None
+        state = json.loads((phase_dir.parent / "state.json").read_text(encoding="utf-8"))
+    except (WritePromptError, OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    tasks = document.get("batches") or document.get("tasks") or []
+    check_id = upstream_held_check(tasks, task_id, rerunnable_checks(state))
+    if check_id is None:
+        return None
+    findings = (state.get("task_check_findings") or {}).get(check_id) or []
+    return check_id, [str(item) for item in findings]
+
 
 def ordering_warnings(phase_dir: Path, task_id: str) -> List[str]:
     """What this prompt is missing because an earlier batch is not logged yet.
@@ -321,6 +364,25 @@ def main(argv: Optional[List[str]] = None) -> int:
         message = getattr(exc, "message", None) or str(exc)
         print(f"ERROR: {message}", file=sys.stderr)
         return int(getattr(exc, "exit_code", 3) or 3)
+
+    held = held_by_check(Path(args.phase_dir), args.task_id)
+    if held is not None:
+        check_id, findings = held
+        shown = ""
+        if findings:
+            more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
+            shown = f": {findings[0]}{more}"
+        print(
+            f"{MARKER_BLOCKED} {args.task_id} depends on {check_id}, whose check "
+            f"reported problems{shown}. Do not dispatch {args.task_id} and record "
+            f"nothing for it: it stays pending. Finish the tasks that do not "
+            f"depend on {check_id}, close the phase without --mark-completed, "
+            f"and report the way forward: fix what {check_id} reported and "
+            f"re-run implement with --resume (the check runs again), or accept "
+            f"its findings with --resume --human-task {check_id}=done.",
+            file=sys.stderr,
+        )
+        return 3
 
     # Advisory, on stderr so `--stdout` stays the prompt text alone.
     for line in ordering_warnings(Path(args.phase_dir), args.task_id):

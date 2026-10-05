@@ -33,6 +33,7 @@ from tests.test_implement_stop_account import (  # noqa: E402
     make_repo,
 )
 
+import implement_orchestrator  # noqa: E402
 import multi_llm  # noqa: E402
 from utils import provider_registry as registry  # noqa: E402
 from utils import run_status  # noqa: E402
@@ -303,3 +304,118 @@ class TestAnsweringACheckWithFindings:
         assert _implement(repo, "--resume", "--human-task", "T003=retry") == 3
         assert "code tasks that did not fail: T003" in capsys.readouterr().err
         assert _statuses(repo)["T002"] == "completed"
+
+
+class TestTheNativeLegHoldsTheDependents:
+    """On the native leg the host dispatches each task itself, so the plugin
+    enforces the hold where the host gets and records each task: `util
+    batch-done --check findings` records the dependents held, `util
+    write-prompt` refuses them, and `util finalize-tracking
+    --mark-completed` refuses while one is left."""
+
+    def _emit(self, repo, capsys, *flags) -> dict:
+        assert implement_orchestrator.main(
+            ["--plan-file", str(repo.plan), "--yes", *flags]
+        ) == 0
+        out = capsys.readouterr().out
+        path = next(
+            line.split(": ", 1)[1] for line in out.splitlines()
+            if line.startswith("Output file: ")
+        )
+        return json.loads(Path(path).read_text(encoding="utf-8"))
+
+    def _util(self, capsys, *argv) -> tuple:
+        code = multi_llm.main(["util", *argv])
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def _done(self, repo, capsys, task_id, *extra):
+        return self._util(
+            capsys, "batch-done", "--phase-dir", str(repo.phase_dir),
+            "--task-id", task_id, "--status", "completed", *extra,
+        )
+
+    def _prompt(self, repo, capsys, task_id):
+        return self._util(
+            capsys, "write-prompt", "--phase-dir", str(repo.phase_dir),
+            "--task-id", task_id,
+        )
+
+    def _findings(self):
+        return [arg for finding in FINDINGS for arg in ("--finding", finding)]
+
+    def test_batch_done_holds_write_prompt_refuses_and_completion_is_refused(
+        self, repo, capsys,
+    ):
+        self._emit(repo, capsys)
+        assert self._done(repo, capsys, "T001")[0] == 0
+        code, out, err = self._done(
+            repo, capsys, "T002", "--check", "findings", *self._findings(),
+        )
+        assert code == 0, err
+        assert "[CHECK_BLOCKED] T004 depends on T002, whose check reported problems" in out
+        state = get_or_create_state(repo.plan)
+        assert state.get_task_status("T004") == "pending"
+        assert state.get_task_status_reason("T004").startswith(
+            "not run — upstream check T002 reported problems"
+        )
+        assert state.get_task_status_reason("T003") is None
+
+        assert self._prompt(repo, capsys, "T003")[0] == 0
+        code, _out, err = self._prompt(repo, capsys, "T004")
+        assert code == 3
+        assert f"[WRITE_PROMPT_BLOCKED] T004 depends on T002, whose check reported problems: {FINDINGS[0]}" in err
+        assert "--human-task T002=done" in err
+        assert not (repo.phase_dir / "prompts" / "T004.prompt.txt").exists()
+
+        state_file = str(state.state_file)
+        code, _out, err = self._util(
+            capsys, "finalize-tracking", "--state-file", state_file, "--mark-completed",
+        )
+        assert code == 3
+        assert "T004 (waits for T002) did not run" in err
+        assert not get_or_create_state(repo.plan).is_phase_completed("implement")
+        assert self._util(capsys, "finalize-tracking", "--state-file", state_file)[0] == 0
+
+    def test_a_passed_recheck_releases_the_dependents(self, repo, capsys):
+        self._emit(repo, capsys)
+        self._done(repo, capsys, "T001")
+        self._done(repo, capsys, "T002", "--check", "findings", *self._findings())
+        code, out, _err = self._done(repo, capsys, "T002", "--check", "passed")
+        assert code == 0 and "[CHECK_BLOCKED]" not in out
+        state = get_or_create_state(repo.plan)
+        assert state.get_task_status("T004") == "pending"
+        assert state.get_task_status_reason("T004") is None
+        assert self._prompt(repo, capsys, "T004")[0] == 0
+
+    def test_a_native_resume_hands_the_check_out_again_or_accepts_it(
+        self, repo, capsys,
+    ):
+        self._emit(repo, capsys)
+        self._done(repo, capsys, "T001")
+        self._done(repo, capsys, "T002", "--check", "findings", *self._findings())
+        self._done(repo, capsys, "T003")
+
+        handoff = self._emit(repo, capsys, "--resume")
+        emitted = {t["id"]: t for b in handoff["batches"] for t in b["tasks"]}
+        assert emitted["T002"]["status"] == "pending", "the check runs again"
+        assert "T004" in emitted and "T001" not in emitted
+
+        handoff = self._emit(repo, capsys, "--resume", "--human-task", "T002=done")
+        emitted = {t["id"]: t for b in handoff["batches"] for t in b["tasks"]}
+        assert "T002" not in emitted
+        assert handoff["accepted_tasks"]["T002"].startswith(
+            "accepted — you answered --human-task T002=done after its check "
+            "reported problems"
+        )
+        assert self._prompt(repo, capsys, "T004")[0] == 0
+
+    def test_the_native_instructions_say_what_the_plugin_enforces(self):
+        text = (Path(__file__).parent.parent / "instructions" / "implement.md").read_text(
+            encoding="utf-8"
+        )
+        assert "[CHECK_BLOCKED]" in text
+        assert "[WRITE_PROMPT_BLOCKED]" in text
+        assert "## Not Run: Upstream Check Reported Problems" in text
+        assert "refuses it while a held task is left" in text
+        assert "a check that could not run" in text
