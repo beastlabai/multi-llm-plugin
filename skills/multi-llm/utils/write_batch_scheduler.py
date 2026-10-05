@@ -644,6 +644,23 @@ def _id_range(ids: Sequence[str]) -> str:
     return ", ".join(str(i) for i in ids)
 
 
+#: The start of the recorded reason of a task not run because a check it
+#: depends on reported problems (:func:`blocked_by_check_reason`). It starts
+#: ``not run``, so review-code's implementation record reads it as a gap
+#: (``code_review_orchestrator.build_implementation_record``), and
+#: ``util finalize-tracking --mark-completed`` refuses while one is pending.
+BLOCKED_BY_CHECK_PREFIX = "not run — upstream check "
+
+
+def blocked_by_check_reason(check_id: str) -> str:
+    """The reason recorded for a task a check with findings kept from running."""
+    return (
+        f"{BLOCKED_BY_CHECK_PREFIX}{check_id} reported problems; it runs once "
+        f"{check_id} passes on a --resume, or after --human-task "
+        f"{check_id}=done accepts its findings"
+    )
+
+
 def _accounting_line(account: Dict[str, Any]) -> str:
     """``N tasks in this decomposition: a done, b failed (…), …`` — every
     bucket, named, adding up to the total."""
@@ -655,7 +672,15 @@ def _accounting_line(account: Dict[str, Any]) -> str:
     if account["failed"]:
         parts.append(f"{len(account['failed'])} failed ({', '.join(account['failed'])})")
     if account["not_run"]:
-        parts.append(f"{len(account['not_run'])} not run ({', '.join(account['not_run'])})")
+        blocked = account.get("blocked") or {}
+        stopped = [tid for tid in account["not_run"] if tid not in blocked]
+        named = [", ".join(stopped)] if stopped else []
+        for check_id in sorted(set(blocked.values())):
+            waiting = [tid for tid in account["not_run"] if blocked.get(tid) == check_id]
+            named.append(
+                f"{', '.join(waiting)}: upstream check {check_id} reported problems"
+            )
+        parts.append(f"{len(account['not_run'])} not run ({'; '.join(named)})")
     if account["accepted"]:
         parts.append(
             f"{len(account['accepted'])} accepted after failing "
@@ -972,6 +997,12 @@ class SchedulerResult:
     #: the way forward — what the summary, the status mirror and the result
     #: line's ``error`` all render from, so they cannot disagree.
     stop: Optional[Dict[str, Any]] = None
+    #: ``task_id -> check task id`` for every task this run did not dispatch
+    #: because it depends (transitively) on a check task that reported
+    #: problems (fix round 11: the dependents ran on code the check had just
+    #: rejected). Each is in ``not_run`` too, with
+    #: :func:`blocked_by_check_reason` as its reason.
+    blocked_by_check: Dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -1049,6 +1080,7 @@ class SchedulerResult:
             "pending_human_tasks": list(self.human_plan.pending),
             "accepted_tasks": dict(self.human_plan.accepted),
             "not_run_tasks": dict(self.not_run),
+            "blocked_by_check": dict(self.blocked_by_check),
             "stop": copy.deepcopy(self.stop) if self.stop else None,
             "tasks": self.report_rows(),
         }
@@ -2165,6 +2197,7 @@ class WriteBatchScheduler:
                 task for task in batch_tasks
                 if not result.human_plan.is_skipped(str(task.get("task_id", "")))
                 and str(task.get("task_id", "")) not in result.human_plan.accepted
+                and str(task.get("task_id", "")) not in result.blocked_by_check
                 and task.get("executor_role") != "human"
             ]
             if not runnable:
@@ -2202,6 +2235,10 @@ class WriteBatchScheduler:
                 return result
             result.outcomes.extend(outcomes)
             result.batches_dispatched.append(batch_index)
+            # A check that reported problems keeps every task that depends on
+            # it from running (fix round 11); the tasks that do not depend on
+            # it go on.
+            self._block_dependents_of_checks(outcomes, result)
             self._record_batch_tracking(result)
             self._mirror_status(result)
             if any(o.stops_the_loop for o in outcomes) or any(
@@ -2231,6 +2268,25 @@ class WriteBatchScheduler:
                 self._mirror_status(result)
                 return result
 
+        # 4. The tasks a check with findings kept from running: the phase is
+        # not complete while they are unrun, so it ends needing a human, the
+        # way a stop does — after every task that could run has run, and
+        # with no finalization (no verify command, no completion record).
+        if result.blocked_by_check:
+            result.exit_code = EXIT_NEEDS_HUMAN
+            self._record_check_block(result)
+            if self.summary_file:
+                result.summary_file = self._write_summary(result)
+            result.messages.extend(self._check_findings_lines(result))
+            result.messages.extend(self._check_block_message(result))
+            if result.summary_file:
+                result.messages.append(
+                    f"Partial implementation summary: {result.summary_file}"
+                )
+            result.report_path = self._write_report(result)
+            self._mirror_status(result)
+            return result
+
         # 5. Finalization is part of the contract, not the caller's courtesy.
         if self.finalize:
             self._finalize(result)
@@ -2255,13 +2311,52 @@ class WriteBatchScheduler:
             f"; they are listed in {result.summary_file}"
             if result.summary_file else ""
         )
+        blocked = sorted(result.blocked_by_check)
+        went_on = (
+            f"the tasks that do not depend on them went on, and the ones that "
+            f"do were not run ({', '.join(blocked)})"
+            if blocked else "no task depends on them, so implement went on"
+        )
         lines.append(
             f"Check findings: {', '.join(found)} ran, changed no file and "
-            f"reported problems, so implement continued{where}. Review-code "
-            f"is told about them, and apply-code-fixes applies the fixes "
-            f"review-code validates."
+            f"reported problems; {went_on}{where}. Review-code is told about "
+            f"them, and apply-code-fixes applies the fixes review-code "
+            f"validates."
         )
         return lines
+
+    def _block_dependents_of_checks(
+        self, outcomes: Sequence[TaskOutcome], result: SchedulerResult,
+    ) -> None:
+        """Keep every task that depends on a check with findings from running.
+
+        Fix round 11 (review of round 10, T1): a check task that reported
+        problems was recorded ``check-findings`` and the loop dispatched the
+        tasks that depend on it — on the code the check had just rejected.
+        Its transitive dependents (``depends_on``, over this run's tasks) are
+        now recorded in ``result.blocked_by_check`` and left out of every
+        later batch; a task already skipped or accepted, and a manual task
+        (never dispatched), are not. A resume skip and a check not run again
+        because nothing changed carry the earlier findings, so they block
+        the same tasks again. ``implement`` only: no other kind has checks.
+        """
+        if self.kind != "implement":
+            return
+        plan = result.human_plan
+        for outcome in outcomes:
+            if not (outcome.ok and outcome.check_findings):
+                continue
+            for dependent in self._dependents_of(outcome.task_id):
+                task = self._task_by_id(dependent) or {}
+                if (
+                    dependent in result.blocked_by_check
+                    or plan.is_skipped(dependent)
+                    or dependent in plan.accepted
+                    or task.get("executor_role") == "human"
+                    or task.get("is_human")
+                ):
+                    continue
+                result.blocked_by_check[dependent] = outcome.task_id
 
     # -- one batch ------------------------------------------------------
 
@@ -5317,10 +5412,19 @@ class WriteBatchScheduler:
                 f"implementation summary): {', '.join(account['check_findings'])}."
             )
         if account["not_run"]:
-            lines.append(
-                f"Not run (the stop came before they were dispatched): "
-                f"{', '.join(account['not_run'])}."
-            )
+            blocked = account.get("blocked") or {}
+            for check_id in sorted(set(blocked.values())):
+                waiting = [t for t in account["not_run"] if blocked.get(t) == check_id]
+                lines.append(
+                    f"Not run (they depend on check {check_id}, which reported "
+                    f"problems): {', '.join(waiting)}."
+                )
+            stopped = [t for t in account["not_run"] if t not in blocked]
+            if stopped:
+                lines.append(
+                    f"Not run (the stop came before they were dispatched): "
+                    f"{', '.join(stopped)}."
+                )
         if account["accepted"]:
             lines.append(
                 f"Accepted after failing (--human-task <id>=done): "
@@ -5513,6 +5617,10 @@ class WriteBatchScheduler:
             "check_findings": check_findings,
             "failed": failed,
             "not_run": not_run,
+            "blocked": {
+                tid: cid for tid, cid in result.blocked_by_check.items()
+                if tid in result.not_run
+            },
             "accepted": accepted,
             "completed_manual": completed_manual,
             "declined": declined,
@@ -5541,30 +5649,22 @@ class WriteBatchScheduler:
             else (f"batch {batch_index} was refused" if refusal else
                   f"the loop stopped at batch {batch_index}")
         )
+        # A task a check with findings already kept from running keeps that
+        # reason: the stop is not why it did not run (fix round 11).
+        for task_id, check_id in result.blocked_by_check.items():
+            result.not_run[task_id] = blocked_by_check_reason(check_id)
         for task in self.tasks:
             task_id = str(task.get("task_id", ""))
             if (not task_id or task_id in seen or plan.is_skipped(task_id)
                     or task_id in plan.accepted
+                    or task_id in result.not_run
                     or task.get("executor_role") == "human"):
                 continue
             result.not_run[task_id] = (
                 f"not run — {self.phase} stopped at batch {batch_index} "
                 f"({cause}) before this task was dispatched"
             )
-        if self.state is not None and result.not_run:
-            with self._effects_lock:
-                for task_id, reason in result.not_run.items():
-                    current = None
-                    try:
-                        current = self.state.get_task_status(task_id)
-                    except Exception:  # noqa: BLE001 - advisory
-                        current = None
-                    if current in (None, "pending"):
-                        self.state.update_task_status(task_id, "pending", reason=reason)
-                try:
-                    self.state.save()
-                except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
-                    self.log(f"[write-subagents] warning: could not record the not-run tasks: {exc}")
+        self._record_not_run_in_state(result)
         first = failed[0] if failed else None
         is_check = bool(
             first is not None and self.kind == "implement"
@@ -5589,10 +5689,163 @@ class WriteBatchScheduler:
         }
         result.stop["headline"] = self._stop_headline(result.stop)
 
+    def _record_not_run_in_state(self, result: SchedulerResult) -> None:
+        """Give each ``result.not_run`` task its reason on a ``pending`` status.
+
+        Only a task with no status or a ``pending`` one: a status an earlier
+        run recorded (completed, failed, skipped) is never overwritten.
+        """
+        if self.state is None or not result.not_run:
+            return
+        with self._effects_lock:
+            for task_id, reason in result.not_run.items():
+                current = None
+                try:
+                    current = self.state.get_task_status(task_id)
+                except Exception:  # noqa: BLE001 - advisory
+                    current = None
+                if current in (None, "pending"):
+                    self.state.update_task_status(task_id, "pending", reason=reason)
+            try:
+                self.state.save()
+            except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
+                self.log(f"[write-subagents] warning: could not record the not-run tasks: {exc}")
+
+    def _blocking_checks(self, result: SchedulerResult) -> List[str]:
+        """The check tasks that kept a task from running, in task order."""
+        blocking = set(result.blocked_by_check.values())
+        order = [str(t.get("task_id", "")) for t in self.tasks]
+        return sorted(
+            blocking, key=lambda tid: (order.index(tid) if tid in order else len(order), tid),
+        )
+
+    def _record_check_block(self, result: SchedulerResult) -> None:
+        """Account for the tasks a check with findings kept from running.
+
+        The end-of-loop counterpart of :meth:`_record_stop` (fix round 11):
+        every task that could run has run, and the ones in
+        ``result.blocked_by_check`` were left out. Each is ``not run`` with
+        :func:`blocked_by_check_reason` on its ``pending`` status, and the
+        stop record (``kind: "check-findings"``) names the checks, what they
+        reported and the tasks waiting for them — the record the summary,
+        ``write_batch_report.json``, the mirror and the result line's
+        ``error`` render from.
+        """
+        for task_id, check_id in result.blocked_by_check.items():
+            result.not_run[task_id] = blocked_by_check_reason(check_id)
+        self._record_not_run_in_state(result)
+        checks = self._blocking_checks(result)
+        found = result.check_findings()
+        first = checks[0]
+        findings = found.get(first) or []
+        result.stop = {
+            "batch_index": None,
+            "failed_task_ids": [],
+            "task_id": first,
+            "kind": "check-findings",
+            "check_task_ids": checks,
+            "blocked": dict(sorted(result.blocked_by_check.items())),
+            "what": (
+                f"its check reported {len(findings)} problem(s)"
+                if findings else "its check reported problems"
+            ),
+            "reported": "; ".join(findings)[:600] or None,
+            "not_run": sorted(result.not_run),
+            "acceptable": True,
+            "not_rerun": False,
+        }
+        result.stop["headline"] = self._stop_headline(result.stop)
+
+    def _check_block_message(self, result: SchedulerResult) -> List[str]:
+        """The exit-3 block after a run whose checks kept tasks from running.
+
+        Names each check, what it reported and the tasks waiting for it, the
+        account of every task, and the three ways forward: fix and resume
+        (the check runs again), accept the findings (``=done``: the waiting
+        tasks run, the findings stay listed for review-code) or skip.
+        """
+        cmds = self.user_commands
+        found = result.check_findings()
+        blocked = result.blocked_by_check
+        checks = self._blocking_checks(result)
+        lines = [
+            "",
+            f"ERROR: {self.phase} did not run {len(blocked)} task(s) that depend "
+            f"on a check that reported problems:",
+        ]
+        for check_id in checks:
+            findings = found.get(check_id) or []
+            waiting = sorted(tid for tid, cid in blocked.items() if cid == check_id)
+            lines.append(
+                f"  {check_id}{self._task_label(check_id)} reported "
+                f"{len(findings)} problem(s): {'; '.join(findings)[:600]}"
+            )
+            lines.append(f"      not run: {', '.join(waiting)}")
+        lines.extend(self._account_lines(result))
+        resume = cmds.get("resume") or "re-invoke this phase with --resume"
+        lines.append("To go on:")
+        lines.append(
+            "  - fix what the check reported in the code — by hand, or run the "
+            "review-code phase and then apply-code-fixes"
+            + (":" if cmds.get("review") and cmds.get("fix") else "")
+        )
+        if cmds.get("review") and cmds.get("fix"):
+            lines.append(f"        {cmds['review']}")
+            lines.append(f"        {cmds['fix']}")
+        lines.append(
+            "    then resume this phase; the check runs again and, once it "
+            "passes, the tasks after it follow (a resume that changes no file "
+            "does not run it again):"
+        )
+        lines.append(f"        {resume}")
+        for check_id in checks:
+            waiting = sorted(tid for tid, cid in blocked.items() if cid == check_id)
+            accept = cmds.get("accept", "").replace("{task_id}", check_id) or (
+                f"add --human-task {check_id}=done to the resume command"
+            )
+            skip = cmds.get("skip", "").replace("{task_id}", check_id) or (
+                f"add --human-task {check_id}=skip to the resume command"
+            )
+            retry = cmds.get("retry", "").replace("{task_id}", check_id) or (
+                f"add --human-task {check_id}=retry to the resume command"
+            )
+            lines.append(
+                f"  - or accept {check_id}'s findings and run the tasks after "
+                f"it: {accept} ({', '.join(waiting)} then run; the findings "
+                f"stay listed for review-code), or {skip} ({check_id} and "
+                f"{', '.join(waiting)} stay undone)."
+            )
+            lines.append(
+                f"  - or run {check_id}'s check again on unchanged files: {retry}."
+            )
+        return lines
+
     def _stop_headline(self, stop: Dict[str, Any]) -> str:
         """One plain line for the result line's ``error``: what the hosts relay
         as "the last line it left"."""
         task_id = stop.get("task_id")
+        if stop.get("kind") == "check-findings":
+            checks = stop.get("check_task_ids") or [task_id]
+            named = ", ".join(
+                f"{cid}{self._task_label(cid)}" for cid in checks
+            )
+            head = (
+                f"{self.phase} did not run {', '.join(sorted(stop.get('blocked') or {}))}: "
+                f"they depend on {named}, whose check reported problems"
+            )
+            if stop.get("reported"):
+                head += f" [{stop['reported']}]"
+            answer = (
+                f"--human-task {task_id}=done" if len(checks) == 1
+                else "--human-task <check id>=done for each check"
+            )
+            head += (
+                ". To go on: fix what the check reported (by hand, or "
+                "review-code then apply-code-fixes), then resume this phase — "
+                f"the check runs again; or accept its findings by adding "
+                f"{answer} to the resume command (the tasks after it then run)."
+            )
+            return head
         if not task_id:
             return (
                 f"{self.phase} stopped at batch {stop.get('batch_index')}: "
@@ -6359,8 +6612,14 @@ class WriteBatchScheduler:
             lines += [
                 "", "## Check Findings", "",
                 "These checks ran and changed no file, but reported problems. "
-                "Implement continued; review-code is told about them, and "
-                "apply-code-fixes applies the fixes review-code validates.", "",
+                + (
+                    "The tasks that do not depend on them went on; the tasks "
+                    "that do were not run (see below). "
+                    if result.blocked_by_check else
+                    "No task depends on them, so implement went on. "
+                )
+                + "Review-code is told about them, and apply-code-fixes "
+                "applies the fixes review-code validates.", "",
             ]
             for row in findings_rows:
                 lines.append(f"### {row['task_id']}")
@@ -6406,6 +6665,24 @@ class WriteBatchScheduler:
                     f"| {task_id} | {', '.join(deps)} | ran against an unmet "
                     f"manual precondition |"
                 )
+        blocked = result.blocked_by_check
+        if blocked:
+            # Fix round 11: the tasks a check with findings kept from
+            # running, apart from a stop's own not-run list.
+            lines += [
+                "", "## Not Run: Upstream Check Reported Problems", "",
+                "These tasks depend on a check that reported problems (listed "
+                "under Check Findings), so they were not run; they stay "
+                "`pending`. Fix what the check reported and resume this phase "
+                "(the check runs again, and once it passes they run), or "
+                "accept the check's findings with `--human-task <check id>=done` "
+                "on the resume (they run, and the findings stay listed for "
+                "review-code), or leave the check and them undone with "
+                "`--human-task <check id>=skip`.", "",
+                "| Task | Waits for check |", "|------|-----------------|",
+            ]
+            for task_id, check_id in sorted(blocked.items()):
+                lines.append(f"| {task_id} | {check_id} |")
         if result.stopped_at_batch is not None:
             stop = result.stop or {}
             lines += ["", "## Cancelled", ""]
@@ -6416,14 +6693,20 @@ class WriteBatchScheduler:
                     f"The write loop stopped at batch {result.stopped_at_batch}."
                 )
             lines.append("")
-            if result.not_run:
+            stopped = sorted(t for t in result.not_run if t not in blocked)
+            if stopped:
                 lines.append(
                     "Not run (the stop came before they were dispatched; they "
                     "stay `pending` and a `--resume` dispatches them after the "
                     "failed task passes or is accepted):"
                 )
                 lines.append("")
-                lines += [f"- {task_id}" for task_id in sorted(result.not_run)]
+                lines += [f"- {task_id}" for task_id in stopped]
+            elif blocked:
+                lines.append(
+                    "Every other task of the decomposition had run, or waits "
+                    "for a check (above)."
+                )
             else:
                 lines.append("Every other task of the decomposition had run.")
             lines += [
@@ -6651,6 +6934,10 @@ class WriteBatchScheduler:
                         # so `status` and a terminal poll account for every
                         # task rather than only the dispatched ones.
                         "not_run_task_ids": sorted(result.not_run),
+                        # Fix round 11: which of them wait for a check that
+                        # reported problems, and for which one.
+                        **({"blocked_by_check": dict(sorted(result.blocked_by_check.items()))}
+                           if result.blocked_by_check else {}),
                         "accepted_task_ids": sorted(result.human_plan.accepted),
                         **({"stop": copy.deepcopy(result.stop)}
                            if result.stop else {}),

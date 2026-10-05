@@ -1230,6 +1230,82 @@ class TestVerificationOnlyImplementTask:
         assert outcome.outcome_label == "check-findings"
         assert again.check_findings() == {"T009": self.FINDINGS}
 
+    def test_the_tasks_that_depend_on_a_check_with_findings_are_not_run(self, env):
+        """Fix round 11 (review T1): T010 depends on the check T009, which
+        reported problems, and was dispatched on the code the check had just
+        rejected. T010 and T012 (which depends on T010) are not run now; T011,
+        independent of the check, is."""
+        log = env.enable_call_log()
+        env.edits([], result=self._check_reply())
+        a, b = env.root / "src" / "a.py", env.root / "src" / "b.py"
+
+        def code(task_id, index, path, depends_on):
+            return env.apply_task(
+                index, kind="implement", task_id=task_id, expected_ids=[task_id],
+                output_name=f"implement_batch_{task_id}.json",
+                declared_files=[str(path)], depends_on=depends_on,
+            )
+
+        tasks = [
+            self._task(env),
+            code("T011", 0, b, []),
+            code("T010", 1, a, ["T009"]),
+            code("T012", 2, a, ["T010"]),
+        ]
+        state = FakeState(env.tmp_path / "state.json")
+        result = env.scheduler(tasks, kind="implement", state=state).run()
+        prompts = [json.loads(l)["prompt"] for l in log.read_text().splitlines()]
+        assert len(prompts) == 2, "only T009 and T011 may run"
+        assert [o.task_id for o in result.outcomes] == ["T009", "T011"]
+        assert result.exit_code == 3
+        assert result.finalized is False
+        assert result.blocked_by_check == {"T010": "T009", "T012": "T009"}
+        assert sorted(result.not_run) == ["T010", "T012"]
+        assert result.stop["kind"] == "check-findings"
+        assert "phases_completed" not in state.state
+        state.reload()
+        for task_id in ("T010", "T012"):
+            assert state.state["task_status"][task_id] == "pending"
+            assert state.state["task_status_reasons"][task_id].startswith(
+                "not run — upstream check T009 reported problems"
+            )
+
+    def test_a_stop_after_a_check_block_keeps_each_reason(self, env):
+        """A later failure stops the loop: the tasks the check held keep the
+        check as their reason, the rest get the stop's."""
+        env.edits([])
+        env.monkeypatch.setenv(
+            "MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", "## Check result (required",
+        )
+        a, b = env.root / "src" / "a.py", env.root / "src" / "b.py"
+        tasks = [
+            self._task(env),
+            env.apply_task(
+                1, kind="implement", task_id="T010", expected_ids=["T010"],
+                output_name="implement_batch_T010.json",
+                declared_files=[str(a)], depends_on=["T009"],
+            ),
+            env.apply_task(
+                1, kind="implement", task_id="T011", expected_ids=["T011"],
+                output_name="implement_batch_T011.json",
+                declared_files=[str(b)], depends_on=[],
+            ),
+            env.apply_task(
+                2, kind="implement", task_id="T013", expected_ids=["T013"],
+                output_name="implement_batch_T013.json",
+                declared_files=[str(b)], depends_on=["T011"],
+            ),
+        ]
+        # T011's runner answers `failed` and moves nothing: a stop.
+        env.monkeypatch.setenv("MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", "`T011`")
+        result = env.scheduler(tasks, kind="implement", finalize=False).run()
+        assert result.exit_code == 3
+        assert result.not_run["T010"].startswith("not run — upstream check T009")
+        assert result.not_run["T013"].startswith("not run — implement stopped at batch 1")
+        account = "\n".join(result.messages)
+        assert "Not run (they depend on check T009, which reported problems): T010." in account
+        assert "Not run (the stop came before they were dispatched): T013." in account
+
     def test_a_task_that_declares_files_gets_no_check_contract(self, env):
         from utils.write_batch_scheduler import CHECK_RESULT_CONTRACT, with_result_contract
 
