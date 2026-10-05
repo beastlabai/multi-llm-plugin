@@ -309,6 +309,36 @@ class TestTheHookInput:
                 "last_assistant_message": "Done."}
         decision_of(run_check(capsys, path, hook=hook, tmp_path=tmp_path))
 
+    def test_a_transcript_that_has_not_written_the_reply_passes_without_the_field(
+            self, tmp_path, capsys):
+        """Measured live on 2.1.289 (2026-10-05): when the Stop hook runs, the
+        transcript still ends at the turn's last tool result. With no
+        ``last_assistant_message`` the check cannot see the reply at all, and a
+        reply it cannot see is never a miss."""
+        path = (Transcript().prompt("go").bash(block_output())
+                .write(tmp_path / "t.jsonl"))
+        hook = {"transcript_path": str(path), "stop_hook_active": False}
+        assert run_check(capsys, path, hook=hook, tmp_path=tmp_path) == ""
+
+    def test_a_reply_written_only_up_to_its_thinking_passes_too(self, tmp_path, capsys):
+        path = (Transcript().prompt("go").bash(block_output()).think()
+                .write(tmp_path / "t.jsonl"))
+        assert run_check(capsys, path) == ""
+
+    def test_the_field_alone_decides_while_the_reply_is_unwritten(self, tmp_path, capsys):
+        """The live input, field for field (2.1.289, headless ``claude -p``)."""
+        path = (Transcript().prompt("go").bash(block_output())
+                .write(tmp_path / "t.jsonl"))
+        hook = {"session_id": "s1", "transcript_path": str(path), "cwd": str(tmp_path),
+                "prompt_id": "p1", "permission_mode": "auto",
+                "effort": {"level": "medium"}, "hook_event_name": "Stop",
+                "stop_hook_active": False, "last_assistant_message": "done",
+                "background_tasks": [], "session_crons": []}
+        decision = decision_of(run_check(capsys, path, hook=hook, tmp_path=tmp_path))
+        assert f"```\n{COMMAND}\n```" in decision["reason"]
+        hook["last_assistant_message"] = report(COMMAND)
+        assert run_check(capsys, path, hook=hook, tmp_path=tmp_path) == ""
+
     def test_the_hook_input_on_stdin(self, tmp_path, capsys, monkeypatch):
         import io
 
