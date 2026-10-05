@@ -369,7 +369,7 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
         return 0
 
     if args.mark_completed:
-        held = _held_by_a_check(state)
+        held = _held_by_a_check(state, state_path)
         if held:
             # Fix round 11: a task a check with findings holds back never
             # ran, so the phase is not complete — the native leg's
@@ -402,32 +402,58 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
     return tracked_files
 
 
-def _held_by_a_check(state: dict) -> List[Tuple[str, str]]:
+def _held_by_a_check(
+    state: dict, state_path: Optional[Path] = None,
+) -> List[Tuple[str, str]]:
     """``(task id, check id)`` for each implement task still held back.
 
-    A task ``util batch-done --check findings`` (or the executor) recorded
-    ``pending`` with ``not run — upstream check <id> reported problems``
-    and that nothing recorded since, scoped to the decomposition implement
-    ran last when it is on record.
+    Computed the way ``util write-prompt`` decides
+    (``write_batch_scheduler.held_back_by_checks``): every task that has not
+    run (neither ``completed`` nor ``skipped``) with a check whose findings
+    hold (``rerunnable_checks``) upstream of it in the whole decomposition —
+    ``state.json``'s recorded graph plus the phase's ``write_tasks.json``
+    beside it. Fix round 12: this used to read the hold off the recorded
+    reason alone, and with two checks holding one task, recording the first
+    passed cleared the reason while the second's findings stood, so
+    ``--mark-completed`` completed implement with that task unrun. A task
+    still ``pending`` with a ``not run — upstream check <id> reported
+    problems`` reason is held too (a state with no graph on record), scoped
+    to the decomposition implement ran last when it is on record.
     """
     try:
-        from utils.write_batch_scheduler import BLOCKED_BY_CHECK_PREFIX
+        from utils.write_batch_scheduler import (
+            BLOCKED_BY_CHECK_PREFIX,
+            held_back_by_checks,
+        )
+        from utils.write_phase_bridge import WRITE_TASK_FILENAME
     except ImportError:  # pragma: no cover - the skill is always on the path
         return []
+    tasks: list = []
+    if state_path is not None:
+        try:
+            document = json.loads(
+                (Path(state_path).parent / "implement" / WRITE_TASK_FILENAME)
+                .read_text(encoding="utf-8")
+            )
+            if isinstance(document, dict):
+                found = document.get("batches") or document.get("tasks") or []
+                tasks = found if isinstance(found, list) else []
+        except (OSError, ValueError):
+            tasks = []
+    held: Dict[str, str] = dict(held_back_by_checks(tasks, state))
     statuses = state.get("task_status") or {}
     reasons = state.get("task_status_reasons") or {}
     scope = state.get("implement_task_ids")
-    held: List[Tuple[str, str]] = []
     for task_id, status in sorted(statuses.items()):
-        if status != "pending":
+        if status != "pending" or task_id in held:
             continue
         if isinstance(scope, list) and task_id not in scope:
             continue
         reason = str(reasons.get(task_id) or "")
         if reason.startswith(BLOCKED_BY_CHECK_PREFIX):
             check_id = reason[len(BLOCKED_BY_CHECK_PREFIX):].split(" ", 1)[0]
-            held.append((str(task_id), check_id))
-    return held
+            held[str(task_id)] = check_id
+    return sorted(held.items())
 
 
 def _drop_ignored(paths, say=print) -> List[str]:

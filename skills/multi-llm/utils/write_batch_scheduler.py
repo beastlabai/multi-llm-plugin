@@ -245,6 +245,7 @@ __all__ = [
     "bind_prior_changes",
     "blocked_by_check_reason",
     "decomposition_graph",
+    "held_back_by_checks",
     "rerunnable_checks",
     "transitive_dependents",
     "upstream_held_check",
@@ -711,6 +712,49 @@ def decomposition_graph(
             node["executor_role"] = "human"
         nodes.append(node)
     return nodes
+
+
+def held_back_by_checks(
+    tasks: Sequence[Dict[str, Any]], state: Any,
+) -> List[Tuple[str, str]]:
+    """``(task id, check id)`` for each implement task a check with findings
+    holds back and that has not run, by task id.
+
+    Computed, never read off a recorded reason (fix round 12: two checks
+    held D, the first was recorded again as passed, D's reason was cleared
+    while the second's findings stood, and ``util finalize-tracking
+    --mark-completed`` completed implement with D unrun): the held checks are
+    :func:`rerunnable_checks`, the graph is :func:`decomposition_graph` over
+    *tasks* and *state*, and a task has not run when ``task_status`` says
+    neither ``completed`` nor ``skipped``. A manual task is never held (no
+    subagent runs it), and the walk passes through it. Scoped to the
+    decomposition implement recorded last (``implement_task_ids``) when one
+    is on record.
+    """
+    held = rerunnable_checks(state)
+    if not held:
+        return []
+    graph = decomposition_graph(tasks, state)
+    try:
+        statuses = dict(state.get("task_status") or {})
+        scope = state.get("implement_task_ids")
+    except Exception:  # noqa: BLE001 - a read for a refusal, never fatal
+        return []
+    out: List[Tuple[str, str]] = []
+    for task in graph:
+        task_id = str(task.get("task_id", ""))
+        if not task_id or task_id in held:
+            continue
+        if isinstance(scope, list) and task_id not in scope:
+            continue
+        if task.get("executor_role") == "human" or task.get("is_human"):
+            continue
+        if statuses.get(task_id) in ("completed", "skipped"):
+            continue
+        check_id = upstream_held_check(graph, task_id, held)
+        if check_id is not None:
+            out.append((task_id, check_id))
+    return sorted(out)
 
 
 def transitive_dependents(tasks: Sequence[Dict[str, Any]], task_id: str) -> List[str]:

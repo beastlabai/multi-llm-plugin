@@ -558,3 +558,102 @@ class TestTheNativeLegHoldsThroughAFinishedTask:
         assert state.get_task_status_reason("T006") is None
         assert self._prompt(repo, capsys, "T006")[0] == 0
 
+
+#: Two checks, one task after both (fix round 12, review item 5).
+PLAN_TWO_CHECKS = """# Two checks
+
+## Tasks
+
+### T001: Edit: create the module
+Create the module file.
+- Depends on: none
+- Files to modify: src/main.py
+
+### T002: Check the module
+Run the validator. Read-only.
+- Depends on: T001
+- Files to modify: none
+
+### T003: Check the style
+Run the linter. Read-only.
+- Depends on: T001
+- Files to modify: none
+
+### T004: Edit: wire the fallback
+Add the fallback.
+- Depends on: T002, T003
+- Files to modify: src/main.py
+"""
+
+
+class TestTwoChecksHoldOneTask:
+    """Fix round 12 (review item 5): `--mark-completed` read the hold off
+    the recorded reason, and recording the first of two checks passed
+    cleared it while the second's findings stood."""
+
+    _util = TestTheNativeLegHoldsTheDependents._util
+    _done = TestTheNativeLegHoldsTheDependents._done
+    _prompt = TestTheNativeLegHoldsTheDependents._prompt
+
+    def test_a_task_stays_held_while_one_of_its_checks_has_findings(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        repo = make_repo(tmp_path, monkeypatch, PLAN_TWO_CHECKS)
+        try:
+            assert implement_orchestrator.main(
+                ["--plan-file", str(repo.plan), "--yes"]
+            ) == 0
+            capsys.readouterr()
+            self._done(repo, capsys, "T001")
+            # T003 first, so T004's reason names T002, the one that passes.
+            self._done(repo, capsys, "T003", "--check", "findings", "--finding", "q")
+            self._done(repo, capsys, "T002", "--check", "findings", "--finding", "p")
+            assert get_or_create_state(repo.plan).get_task_status_reason(
+                "T004").startswith("not run — upstream check T002 ")
+            code, _out, err = self._done(repo, capsys, "T002", "--check", "passed")
+            assert code == 0, err
+
+            state = get_or_create_state(repo.plan)
+            assert state.get_task_status("T004") == "pending"
+            assert state.get_task_status_reason("T004").startswith(
+                "not run — upstream check T003 reported problems"
+            )
+            assert self._prompt(repo, capsys, "T004")[0] == 3
+            state_file = str(state.state_file)
+            code, _out, err = self._util(
+                capsys, "finalize-tracking", "--state-file", state_file,
+                "--mark-completed",
+            )
+            assert code == 3, err
+            assert "T004 (waits for T003) did not run" in err
+            assert not get_or_create_state(repo.plan).is_phase_completed("implement")
+        finally:
+            registry._config = None
+            registry._config_key = None
+
+    def test_finalize_computes_the_hold_when_no_reason_says_so(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """The refusal reads the graph and the recorded checks, the way
+        `util write-prompt` decides, not the reason string alone."""
+        repo = make_repo(tmp_path, monkeypatch, PLAN_TWO_CHECKS)
+        try:
+            assert implement_orchestrator.main(
+                ["--plan-file", str(repo.plan), "--yes"]
+            ) == 0
+            capsys.readouterr()
+            self._done(repo, capsys, "T001")
+            self._done(repo, capsys, "T003", "--check", "findings", "--finding", "q")
+            state_path = get_or_create_state(repo.plan).state_file
+            raw = json.loads(Path(state_path).read_text(encoding="utf-8"))
+            raw["task_status_reasons"].pop("T004", None)  # no reason on record
+            Path(state_path).write_text(json.dumps(raw), encoding="utf-8")
+            code, _out, err = self._util(
+                capsys, "finalize-tracking", "--state-file", str(state_path),
+                "--mark-completed",
+            )
+            assert code == 3, err
+            assert "T004 (waits for T003) did not run" in err
+        finally:
+            registry._config = None
+            registry._config_key = None

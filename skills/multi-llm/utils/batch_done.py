@@ -92,7 +92,9 @@ try:
         blocked_by_check_reason,
         decomposition_graph,
         is_check_task,
+        rerunnable_checks,
         transitive_dependents,
+        upstream_held_check,
     )
     from .write_prompt import WritePromptError, load_write_task
 except ImportError:  # pragma: no cover - direct script invocation
@@ -112,7 +114,9 @@ except ImportError:  # pragma: no cover - direct script invocation
         blocked_by_check_reason,
         decomposition_graph,
         is_check_task,
+        rerunnable_checks,
         transitive_dependents,
+        upstream_held_check,
     )
     from utils.write_prompt import WritePromptError, load_write_task  # type: ignore
 
@@ -328,7 +332,10 @@ def _hold_or_release_dependents(
     ``pending`` with :func:`blocked_by_check_reason` — the reason the
     executor leg writes for the same tasks. Otherwise each dependent still
     ``pending`` under this check's reason loses it: the check passed, failed
-    or was recorded again, and is no longer why it waits. The walk
+    or was recorded again, and is no longer why it waits — unless another
+    check with findings is still upstream of it, whose reason it then
+    carries (fix round 12: with two checks holding D, recording the first
+    passed cleared D's reason while the second's findings stood). The walk
     is over the whole decomposition (``write_batch_scheduler.decomposition_graph``:
     the task file plus ``state.json``'s recorded graph), not only the tasks
     a resume put in the file (fix round 12). Returns the tasks held (empty
@@ -343,6 +350,7 @@ def _hold_or_release_dependents(
     statuses = state.get("task_status") or {}
     reasons = state.get("task_status_reasons") or {}
     mine = f"{BLOCKED_BY_CHECK_PREFIX}{task_id} "
+    still_held = [] if held else [c for c in rerunnable_checks(state) if c != task_id]
     held_ids: List[str] = []
     for dependent in transitive_dependents(tasks, task_id):
         task = by_id.get(dependent, {})
@@ -356,7 +364,11 @@ def _hold_or_release_dependents(
                 )
                 held_ids.append(dependent)
         elif status == "pending" and str(reasons.get(dependent) or "").startswith(mine):
-            update_task_status_in_state(state, dependent, "pending")
+            other = upstream_held_check(tasks, dependent, still_held)
+            update_task_status_in_state(
+                state, dependent, "pending",
+                blocked_by_check_reason(other) if other else None,
+            )
     return held_ids
 
 
