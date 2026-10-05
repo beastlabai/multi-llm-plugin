@@ -315,7 +315,8 @@ class RetryLadder:
         if self.stop_reason is not None:
             return None
 
-        refusal = self._admission_refusal()
+        left = self.remaining()
+        refusal = self._admission_refusal(left=left)
         if refusal is not None:
             # Rule 3 before the first attempt is the slot's own ceiling being
             # under the minimum: nothing was spawned, so it is the budget's.
@@ -325,12 +326,14 @@ class RetryLadder:
             return None
 
         self.attempt_index += 1
-        return self.remaining()
+        return left
 
     def _declared_wall(self) -> Optional[float]:
         return getattr(self.envelope, "max_wall_s", None) if self.envelope else None
 
-    def _admission_refusal(self, after: float = 0.0) -> Optional[str]:
+    def _admission_refusal(
+        self, after: float = 0.0, left: Optional[float] = None
+    ) -> Optional[str]:
         """Which rule would refuse an attempt started *after* seconds from now.
 
         ``None`` when it would be admitted. The one admission test, read by
@@ -339,7 +342,7 @@ class RetryLadder:
         and Lane B recorded a slot whose attempt 1 had run as
         ``budget_exhausted``, "Nothing was dispatched" (fix round 6).
         """
-        left = self.remaining() - after
+        left = (self.remaining() if left is None else left) - after
         # Rule 3: no attempt starts with less than MIN_ATTEMPT_BUDGET_S. A
         # runner handed a sliver spends it on process start-up and is killed for
         # the same reason the previous attempt was.
