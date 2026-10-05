@@ -1144,6 +1144,7 @@ def _native_human_task_plan(
     on_record: Optional[Any] = None,
     recorded_statuses: Optional[Dict[str, str]] = None,
     check_findings_ids: Optional[Sequence[str]] = None,
+    state_record: Optional[Dict[str, Any]] = None,
 ):
     """Resolve the human-task plan over the native leg's batches; annotate them.
 
@@ -1178,6 +1179,7 @@ def _native_human_task_plan(
     never left ``skipped`` for the host to pass over (fix round 9).
     """
     from utils.write_batch_scheduler import (
+        decomposition_graph,
         mark_no_longer_skipped,
         resolve_human_task_plan,
     )
@@ -1185,20 +1187,24 @@ def _native_human_task_plan(
     batches = output_data.get("batches") or []
     check_findings_ids = list(check_findings_ids or ())
     entries = [task for batch in batches for task in batch.get("tasks") or []]
+    nodes = [
+        {
+            "task_id": task.get("id"),
+            "task_title": task.get("title"),
+            "executor_role": task.get("executor_role"),
+            "is_human": task.get("is_human"),
+            "depends_on": list(task.get("depends_on") or []),
+        }
+        for task in entries
+    ]
     plan = resolve_human_task_plan(
-        [
-            {
-                "task_id": task.get("id"),
-                "task_title": task.get("title"),
-                "executor_role": task.get("executor_role"),
-                "is_human": task.get("is_human"),
-                "depends_on": list(task.get("depends_on") or []),
-            }
-            for task in entries
-        ],
+        nodes,
         strategy=strategy,
         decisions=decisions,
         check_findings_ids=check_findings_ids,
+        # The whole decomposition (fix round 12): a resume's batches lack
+        # the finished tasks a skip's walk must go through.
+        graph=decomposition_graph(nodes, state_record),
     )
     for task in entries:
         task_id = str(task.get("id") or "")
@@ -1542,12 +1548,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     # the title from here (2026-10-04).
     # The manual tasks ride along (`implement_human_task_ids`), so a finished
     # implement whose manual task nobody answered still names it as owed.
+    # So does the whole graph (fix round 12): a resume materializes only the
+    # unfinished tasks, and the hold a check with findings puts on the tasks
+    # after it must still reach a task whose chain runs through a finished one.
     if state.record_task_titles(
         {task.id: task.title for task in tasks},
         human_ids=[
             task.id for task in tasks
             if getattr(task, "executor_role", "") == "human"
         ],
+        depends_on={task.id: list(task.depends_on or []) for task in tasks},
     ):
         state.save()
 
@@ -1804,6 +1814,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             on_record=answered_on_record,
             recorded_statuses=state.get_all_task_statuses(),
             check_findings_ids=rerunnable_checks(state.state),
+            state_record=state.state,
         )
     if not executor_backed:
         write_native_handoff()

@@ -90,6 +90,7 @@ try:
     from .write_batch_scheduler import (
         BLOCKED_BY_CHECK_PREFIX,
         blocked_by_check_reason,
+        decomposition_graph,
         is_check_task,
         transitive_dependents,
     )
@@ -109,6 +110,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.write_batch_scheduler import (  # type: ignore
         BLOCKED_BY_CHECK_PREFIX,
         blocked_by_check_reason,
+        decomposition_graph,
         is_check_task,
         transitive_dependents,
     )
@@ -322,24 +324,28 @@ def _hold_or_release_dependents(
     """Record (or release) the tasks a check with findings holds back.
 
     *held*: the check was just recorded with findings, so every transitive
-    dependent in the task file with no status yet, or a ``pending`` one, is
-    recorded ``pending`` with :func:`blocked_by_check_reason` — the reason
-    the executor leg writes for the same tasks. Otherwise each dependent
-    still ``pending`` under this check's reason loses the reason: the check
-    passed, failed or was recorded again, and is no longer why it waits.
-    Returns the tasks held (empty on a release).
+    dependent with no status yet, or a ``pending`` one, is recorded
+    ``pending`` with :func:`blocked_by_check_reason` — the reason the
+    executor leg writes for the same tasks. Otherwise each dependent still
+    ``pending`` under this check's reason loses it: the check passed, failed
+    or was recorded again, and is no longer why it waits. The walk
+    is over the whole decomposition (``write_batch_scheduler.decomposition_graph``:
+    the task file plus ``state.json``'s recorded graph), not only the tasks
+    a resume put in the file (fix round 12). Returns the tasks held (empty
+    on a release).
     """
-    tasks = document.get("batches") or document.get("tasks") or []
+    tasks = decomposition_graph(
+        document.get("batches") or document.get("tasks") or [], state,
+    )
+    by_id = {
+        str(t.get("task_id") or ""): t for t in tasks if isinstance(t, dict)
+    }
     statuses = state.get("task_status") or {}
     reasons = state.get("task_status_reasons") or {}
     mine = f"{BLOCKED_BY_CHECK_PREFIX}{task_id} "
     held_ids: List[str] = []
     for dependent in transitive_dependents(tasks, task_id):
-        task = next(
-            (t for t in tasks if isinstance(t, dict)
-             and str(t.get("task_id") or "") == dependent),
-            {},
-        )
+        task = by_id.get(dependent, {})
         if task.get("is_human") or str(task.get("executor_role") or "") == "human":
             continue
         status = statuses.get(dependent)

@@ -27,6 +27,7 @@ import pytest
 
 from tests.test_implement_stop_account import (  # noqa: E402
     CHECK_GATE,
+    PLAN,
     _dispatched_titles,
     _implement,
     _statuses,
@@ -423,3 +424,137 @@ class TestTheNativeLegHoldsTheDependents:
         assert "## Not Run: Upstream Check Reported Problems" in text
         assert "refuses it while a held task is left" in text
         assert "a check that could not run" in text
+
+
+#: Fix round 12 (review of round 11, the leak): the PLAN with T005 (manual)
+#: depending on the check and a code task T006 after it — the hold reaches
+#: T006 only through T005, which a manual answer of `done` completes, so a
+#: `--resume` no longer materializes it.
+PLAN_THROUGH_A_MANUAL_TASK = (
+    PLAN.replace(
+        "Open the page and race.\n- Depends on: T004\n",
+        "Open the page and race.\n- Depends on: T002\n",
+    )
+    + """
+### T006: Edit: after the manual step
+Needs the manual play-through first.
+- Depends on: T005
+- Files to modify: src/main.py
+"""
+)
+
+
+@pytest.fixture
+def chain_repo(tmp_path, monkeypatch):
+    yield make_repo(tmp_path, monkeypatch, PLAN_THROUGH_A_MANUAL_TASK)
+    registry._config = None
+    registry._config_key = None
+
+
+def _paused(repo, *flags) -> int:
+    return implement_orchestrator.main([
+        "--plan-file", str(repo.plan), "--no-confirm", "--exec-subagents",
+        "--force-strategy", "pause-and-ask", *flags,
+    ])
+
+
+class TestTheHoldReachesThroughAFinishedTask:
+    """Fix round 12 (review of round 11, HIGH): the walk for the tasks a
+    check holds ran over the tasks a resume materialized, and a resume
+    leaves a finished task out — so a plain `--resume` that changed nothing
+    kept T004 held and dispatched T006, whose only path to the check ran
+    through T005, a manual task answered done."""
+
+    def test_a_plain_resume_keeps_holding_the_task_after_the_manual_one(
+        self, chain_repo, capsys,
+    ):
+        repo = chain_repo
+        _check_finds(repo)
+        assert _paused(repo, "--human-task", "T005=done") == 3
+        capsys.readouterr()
+        statuses = _statuses(repo)
+        assert statuses["T005"] == "completed"
+        assert statuses["T004"] == statuses["T006"] == "pending"
+        assert "Edit: after the manual step" not in _dispatched_titles(repo)
+        recorded = get_or_create_state(repo.plan).get("implement_task_depends_on")
+        assert recorded["T006"] == ["T005"] and recorded["T005"] == ["T002"]
+
+        repo.log.unlink(missing_ok=True)
+        assert _paused(repo, "--resume") == 3
+        captured = capsys.readouterr()
+        assert _dispatched_titles(repo) == [], captured.out + captured.err
+        assert _statuses(repo)["T006"] == "pending"
+        state = get_or_create_state(repo.plan)
+        assert state.get_task_status_reason("T006").startswith(
+            "not run — upstream check T002 reported problems"
+        )
+        assert _report(repo)["blocked_by_check"] == {"T004": "T002", "T006": "T002"}
+        assert not state.is_phase_completed("implement")
+
+    def test_skipping_the_check_on_a_resume_skips_the_task_after_the_manual_one(
+        self, chain_repo, capsys,
+    ):
+        repo = chain_repo
+        _check_finds(repo)
+        assert _paused(repo, "--human-task", "T005=done") == 3
+        repo.log.unlink(missing_ok=True)
+        assert _paused(repo, "--resume", "--human-task", "T002=skip") == 0
+        capsys.readouterr()
+        assert _dispatched_titles(repo) == []
+        statuses = _statuses(repo)
+        assert statuses["T002"] == statuses["T004"] == statuses["T006"] == "skipped"
+        assert statuses["T005"] == "completed", "a finished task is never re-marked"
+        state = get_or_create_state(repo.plan)
+        assert state.get_task_status_reason("T006").startswith(
+            "skipped — depends on skipped task T002 (Check the module)"
+        )
+        # Skipped at the user's answer: not owed as manual work.
+        assert state.deferred_implementation_tasks() == []
+
+
+class TestTheNativeLegHoldsThroughAFinishedTask:
+    """The same leak on the native leg: `util write-prompt` and `util
+    batch-done` walked `write_tasks.json`, which a `--resume` writes
+    without the finished tasks."""
+
+    _util = TestTheNativeLegHoldsTheDependents._util
+    _done = TestTheNativeLegHoldsTheDependents._done
+    _prompt = TestTheNativeLegHoldsTheDependents._prompt
+    _findings = TestTheNativeLegHoldsTheDependents._findings
+
+    def _emit(self, repo, capsys, *flags):
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--no-confirm",
+            "--force-strategy", "pause-and-ask", *flags,
+        ]) == 0
+        capsys.readouterr()
+        return json.loads(
+            (repo.phase_dir / "write_tasks.json").read_text(encoding="utf-8")
+        )
+
+    def test_write_prompt_refuses_and_batch_done_releases_through_it(
+        self, chain_repo, capsys,
+    ):
+        repo = chain_repo
+        self._emit(repo, capsys, "--human-task", "T005=done")
+        self._done(repo, capsys, "T001")
+        code, out, err = self._done(
+            repo, capsys, "T002", "--check", "findings", *self._findings(),
+        )
+        assert code == 0, err
+        assert "T004" in out and "T006" in out
+        self._done(repo, capsys, "T003")
+
+        written = self._emit(repo, capsys, "--resume")
+        assert "T005" not in {t["task_id"] for t in written["batches"]}
+        code, _out, err = self._prompt(repo, capsys, "T006")
+        assert code == 3, "T006 depends on T002 through the finished T005"
+        assert "[WRITE_PROMPT_BLOCKED] T006 depends on T002" in err
+
+        # The check runs again and passes: T006 is released too.
+        code, _out, err = self._done(repo, capsys, "T002", "--check", "passed")
+        assert code == 0, err
+        state = get_or_create_state(repo.plan)
+        assert state.get_task_status_reason("T006") is None
+        assert self._prompt(repo, capsys, "T006")[0] == 0
+
