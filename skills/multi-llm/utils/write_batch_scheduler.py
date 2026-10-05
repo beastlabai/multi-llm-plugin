@@ -227,6 +227,7 @@ __all__ = [
     "WriteBatchScheduler",
     "answered_done_on_record",
     "bind_prior_changes",
+    "mark_no_longer_skipped",
     "persist_human_task_plan",
     "resolve_human_task_plan",
     "run_write_phase",
@@ -497,6 +498,11 @@ class HumanTaskPlan:
     #: Failed tasks answered ``--human-task <id>=retry``: dispatched again even
     #: when nothing in the repository changed since the failure.
     retry: List[str] = field(default_factory=list)
+    #: Tasks an earlier run recorded ``skipped`` that this plan no longer
+    #: skips (``--resume --force-strategy skip-continue`` after a
+    #: ``skip-dependents`` run): :func:`persist_human_task_plan` records them
+    #: ``pending`` again, dropping the old reason (:func:`mark_no_longer_skipped`).
+    unskipped: List[str] = field(default_factory=list)
 
     def is_skipped(self, task_id: str) -> bool:
         return task_id in self.skipped
@@ -837,13 +843,44 @@ def resolve_human_task_plan(
     return plan
 
 
+def mark_no_longer_skipped(
+    plan: HumanTaskPlan, task_ids: Sequence[str], recorded: Dict[str, Any],
+) -> List[str]:
+    """Record on *plan* the tasks *recorded* says ``skipped`` that it runs.
+
+    A ``--resume`` materializes a skipped task again (fix round 8), and only
+    a skip the new plan makes used to overwrite its status. After a
+    ``skip-dependents`` run, ``--resume --force-strategy skip-continue``
+    (``--force-strategy`` outranks the recorded strategy) left a dependent of
+    the manual task ``skipped`` with its "depends on skipped task" reason: the
+    native host never dispatched it, a stop before it left the record
+    standing, and ``[MANUAL_TASK]`` named it owed for good (fix round 9). A
+    task of *task_ids* the plan neither skips, completes nor accepts goes in
+    ``plan.unskipped``; returns them. A plan with no strategy and manual tasks
+    pending resolved nothing (the walk never ran), so it unskips nothing.
+    """
+    if plan.strategy is None and plan.pending:
+        return []
+    for task_id in task_ids:
+        task_id = str(task_id or "")
+        if (
+            not task_id or recorded.get(task_id) != "skipped"
+            or task_id in plan.skipped or task_id in plan.completed
+            or task_id in plan.accepted or task_id in plan.unskipped
+        ):
+            continue
+        plan.unskipped.append(task_id)
+    return list(plan.unskipped)
+
+
 def persist_human_task_plan(state: Any, plan: HumanTaskPlan) -> None:
     """Write a resolved :class:`HumanTaskPlan` into ``state.json`` and save.
 
     The strategy, a ``skipped`` status (with its reason) for every task the
     walk skipped, ``completed`` for a human task answered ``done`` and for a
-    failed code task accepted with ``done``, and one dependency override per
-    unblocked task. Shared by the scheduler (before
+    failed code task accepted with ``done``, ``pending`` for a task an
+    earlier run skipped that this plan runs (``unskipped``), and one
+    dependency override per unblocked task. Shared by the scheduler (before
     its first batch) and by ``implement``'s native emit, which records the
     same plan before it hands the batches to the host: until 2026-10-05 the
     native leg left these writes to the host, which never made them, so a
@@ -861,6 +898,9 @@ def persist_human_task_plan(state: Any, plan: HumanTaskPlan) -> None:
         )
     for task_id, reason in sorted(plan.accepted.items()):
         state.update_task_status(task_id, "completed", reason=reason)
+    for task_id in plan.unskipped:
+        # No reason: the old skip's reason goes with the old status.
+        state.update_task_status(task_id, "pending")
     for task_id, overridden in sorted(plan.overrides.items()):
         state.record_dependency_override(task_id, list(overridden))
     state.save()
@@ -1932,6 +1972,16 @@ class WriteBatchScheduler:
             strategy=self.human_task_strategy,
             decisions=self.human_task_decisions,
         )
+        if self.kind == "implement" and self.state is not None:
+            try:
+                recorded = dict(self.state.get_all_task_statuses())
+            except Exception:  # noqa: BLE001 - a state fake without the map
+                recorded = {}
+            mark_no_longer_skipped(
+                result.human_plan,
+                [str(task.get("task_id", "")) for task in self.tasks],
+                recorded,
+            )
         if not self.dry_run:
             # A dry run resolves the plan (the report says what *would* be
             # skipped) but never persists it: D3l's contract is "no child
