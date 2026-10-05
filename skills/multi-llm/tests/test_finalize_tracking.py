@@ -626,6 +626,16 @@ class TestTouchedFilesSurvivePreExistingSubtraction:
     """`--touched` names a file the write executor verified it changed; it is
     tracked even when it was already dirty when the phase started."""
 
+    @pytest.fixture(autouse=True)
+    def _outside_a_repository(self, tmp_path, monkeypatch):
+        """These feed made-up census and `--touched` paths. Inside this
+        checkout a `--touched` path that is on no disk and in no base commit
+        is a file created and then removed, and is left out (fix round 8);
+        outside any repository nothing can be read off a tree, so every
+        path keeps the old `modified` and the arithmetic is all that is
+        tested."""
+        monkeypatch.chdir(tmp_path)
+
     @patch("finalize_tracking.get_all_modified_files")
     def test_a_pre_existing_file_the_run_touched_is_tracked(self, mock_get_files, valid_state, capsys):
         mock_get_files.return_value = {"existing_file1.py", "stray.md"}
@@ -661,6 +671,16 @@ class TestTouchedFilesSurvivePreExistingSubtraction:
 class TestADirectoryBaselineCoversThePathsUnderIt:
     """A baseline entry is whatever ``git status --porcelain`` printed, and an
     untracked *directory* is one line standing for everything beneath it."""
+
+    @pytest.fixture(autouse=True)
+    def _outside_a_repository(self, tmp_path, monkeypatch):
+        """These feed made-up census and `--touched` paths. Inside this
+        checkout a `--touched` path that is on no disk and in no base commit
+        is a file created and then removed, and is left out (fix round 8);
+        outside any repository nothing can be read off a tree, so every
+        path keeps the old `modified` and the arithmetic is all that is
+        tested."""
+        monkeypatch.chdir(tmp_path)
 
     @pytest.fixture
     def legacy_directory_baseline_state(self, temp_dir):
@@ -995,7 +1015,9 @@ def racing_repo(tmp_path, monkeypatch):
     _git(repo, "config", "commit.gpgsign", "false")
     plan = repo / "plans" / "racing-game.md"
     plan.write_text("# Racing game\n", encoding="utf-8")
-    _git(repo, "add", "plans/racing-game.md")
+    (repo / "src").mkdir()
+    (repo / "src" / "app.py").write_text("speed = 1\n", encoding="utf-8")
+    _git(repo, "add", "plans/racing-game.md", "src/app.py")
     _git(repo, "commit", "--quiet", "-m", "plan")
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True,
@@ -1125,6 +1147,77 @@ class TestEachCodePhaseKeepsItsOwnEntries:
             {"path": "fix.js", "action": "created", "task_id": "apply-code-fixes"},
             {"path": "index.html", "action": "created", "task_id": "implementation"},
         ]
+
+
+class TestAKeptEntryFollowsTheTree:
+    """Fix round 8 (review of round 7): the other code phase's entries were
+    copied verbatim, so after apply-code-fixes deleted the ``index.html``
+    implement created, ``tracked_files`` still read ``index.html created
+    implementation`` and review-code was sent to a file that no longer
+    exists. A kept entry keeps the label of the phase that recorded it, and
+    its action is read off the tree again; a file that is neither on disk nor
+    in the base commit has nothing left to review and is left out, said once."""
+
+    def _record(self, state_path, entries):
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["tracked_files"] = entries
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def test_a_created_file_a_later_phase_deleted_leaves_the_list(
+        self, racing_repo, capsys
+    ):
+        repo, state_path = racing_repo
+        self._record(state_path, [
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+        ])
+        (repo / "index.html").unlink()
+        (repo / "fix.js").write_text("// fix\n", encoding="utf-8")
+
+        code = main([
+            "--state-file", str(state_path), "--phase", "apply-code-fixes",
+            "--touched", "fix.js",
+        ])
+
+        assert code == 0
+        assert _entries(state_path) == [
+            {"path": "fix.js", "action": "created", "task_id": "apply-code-fixes"},
+        ]
+        out = capsys.readouterr().out
+        assert (
+            "Left out 1 file(s) that no longer exist and are not in the base "
+            "commit" in out
+        )
+        assert "index.html (implementation)" in out
+
+    def test_a_kept_entry_says_what_the_tree_shows_now(self, racing_repo):
+        repo, state_path = racing_repo
+        self._record(state_path, [
+            {"path": "src/app.py", "action": "modified", "task_id": "implementation"},
+        ])
+        (repo / "src" / "app.py").unlink()
+        (repo / "index.html").unlink()
+
+        code = main(["--state-file", str(state_path), "--phase", "apply-code-fixes"])
+
+        assert code == 0
+        assert _entries(state_path) == [
+            {"path": "src/app.py", "action": "deleted", "task_id": "implementation"},
+        ]
+
+    def test_a_touched_file_the_phase_created_and_removed_is_left_out(
+        self, racing_repo, capsys
+    ):
+        repo, state_path = racing_repo
+        # A batch created scratch.js and a later batch of the same phase
+        # removed it: the executor's --touched set still names it.
+        code = main([
+            "--state-file", str(state_path),
+            "--touched", "index.html", "--touched", "scratch.js",
+        ])
+
+        assert code == 0
+        assert [e["path"] for e in _entries(state_path)] == ["index.html"]
+        assert "scratch.js (implementation)" in capsys.readouterr().out
 
 
 class TestOnlyTouchedIsTheExactScope:
@@ -1281,6 +1374,16 @@ class TestTrackedFilesSayWhatHappenedToEachFile:
             # Untracked before the phase began: it existed, so an edit.
             "notes.txt": "modified",
         }
+
+    def test_a_removed_file_the_baseline_names_is_deleted(self, repo):
+        """`notes.txt` was untracked before the phase began (the baseline
+        names it) and the phase removed it: a deletion, not an edit."""
+        repo_dir, state_path = repo
+        (repo_dir / "notes.txt").unlink()
+        assert main([
+            "--state-file", str(state_path), "--touched", "notes.txt",
+        ]) == 0
+        assert self._actions(state_path)["notes.txt"] == "deleted"
 
     def test_only_touched_records_a_new_file_as_created(self, repo):
         _repo, state_path = repo
