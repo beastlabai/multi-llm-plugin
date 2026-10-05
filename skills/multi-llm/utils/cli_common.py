@@ -585,6 +585,13 @@ class ResultContext:
         self.progress_lines: Optional[List[str]] = None
         self.user_next_step: Optional[Dict[str, Any]] = None
         self.user_resume: Optional[Dict[str, Any]] = None
+        #: One plain line saying why a run stopped, for a needs-human or
+        #: failed exit: both package servers read ``payload.error`` as "the
+        #: last line it left" and put it in the message the host relays, and
+        #: the detached close-out records it as ``run.error`` so a terminal
+        #: poll carries it too (racing re-run 3, 2026-10-05: a stopped
+        #: implement's result line named no error and the host said so).
+        self.error: Optional[str] = None
         self._emitted = False
 
     # -- recording ------------------------------------------------------
@@ -767,6 +774,13 @@ class ResultContext:
         """
         self.user_next_step = copy.deepcopy(obj) if obj is not None else None
 
+    def set_error(self, text: Optional[str]) -> None:
+        """Record the one-line reason the run stopped (``MULTI_LLM_RESULT.error``)."""
+        cleaned = " ".join(str(text).split()) if text else ""
+        # One line the hosts quote inside their message: bounded, so a long
+        # refusal cannot bury the message it decorates.
+        self.error = cleaned[:1200] or None
+
     def set_user_resume(self, obj: Optional[Dict[str, Any]]) -> None:
         """Record the command that *resumes* a stopped write phase, for the user.
 
@@ -828,6 +842,8 @@ class ResultContext:
             payload["user_next_step"] = copy.deepcopy(self.user_next_step)
         if self.user_resume is not None:
             payload["user_resume"] = copy.deepcopy(self.user_resume)
+        if self.error and exit_code in (EXIT_ERROR, EXIT_NEEDS_HUMAN):
+            payload["error"] = self.error
         return payload
 
     def emit(self, exit_code: int, stream=None) -> None:
@@ -989,6 +1005,12 @@ def record_user_next_step(obj: Optional[Dict[str, Any]]) -> None:
     """
     if _ACTIVE is not None:
         _ACTIVE.set_user_next_step(obj)
+
+
+def record_error(text: Optional[str]) -> None:
+    """Record the run's one-line stop reason, if a dispatcher run is active."""
+    if _ACTIVE is not None:
+        _ACTIVE.set_error(text)
 
 
 def record_user_resume(obj: Optional[Dict[str, Any]]) -> None:

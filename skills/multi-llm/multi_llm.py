@@ -999,7 +999,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # ever observe its own exit status (after the double-spawn nothing is its
         # parent), so it records its own outcome before exiting. A no-op in every
         # other invocation.
-        _close_detached_run(exit_code, crash, ctx.state)
+        _close_detached_run(exit_code, crash or ctx.error, ctx.state)
         deactivate_result()
         clear_invocation()
 
