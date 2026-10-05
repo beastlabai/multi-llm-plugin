@@ -40,12 +40,20 @@ from utils import (
     subtract_baseline,
 )
 from utils.git_utils import get_project_root_from_dir, ignored_paths, paths_in_commit
+from utils.output_handler import workflow_file_entries
 from utils.state_manager import compute_plan_hash, mark_phase_completed_in_state
 
 # A tracked-file dump is a reference list, not a reading; state.json holds all
 # of it. Measured 2026-09-16: a run that tracked 1 511 files spent 1 512 of its
 # 1 585 log lines on this list, burying the batch outcomes either side of it.
 MAX_LISTED_PATHS = 20
+
+#: The phases that change code, and the ``task_id`` each one's entries carry
+#: in ``tracked_files``. Only these record it: apply-suggestions and
+#: apply-task-suggestions edit the plan and the task list, which are never code
+#: under review. ``implementation`` is the label every entry carried before
+#: apply-code-fixes had its own, so implement's entries read as before.
+TRACKING_LABELS = {"implement": "implementation", "apply-code-fixes": "apply-code-fixes"}
 
 
 def get_all_modified_files() -> Set[str]:
@@ -221,6 +229,17 @@ def main(argv=None) -> int:
              "instruction's closing step; never before every task has run and "
              "the repository's own check passed)",
     )
+    # Which code phase this census belongs to. Its entries are replaced; the
+    # other code phase's entries are kept as that phase recorded them, so
+    # apply-code-fixes never re-labels a file implement created and a resumed
+    # implement never takes over a file apply-code-fixes created.
+    parser.add_argument(
+        "--phase",
+        choices=sorted(TRACKING_LABELS),
+        default="implement",
+        help="The code phase whose changes this records (default: implement). "
+             "Entries another code phase recorded are kept as they are",
+    )
     args = parser.parse_args(argv)
 
     if bool(args.plan_file) != bool(args.summary_file_relative):
@@ -277,19 +296,35 @@ def main(argv=None) -> int:
         print("ERROR: State file is not a JSON object", file=sys.stderr)
         return 1
 
+    label = TRACKING_LABELS[args.phase]
     if args.only_touched:
+        explicit_scope = _drop_workflow_files(
+            explicit_scope, _workflow_entries(state, state_path), print,
+        )
+        if not explicit_scope:
+            print(
+                "ERROR: --only-touched was given only the workflow's own files "
+                "(the plan, its task list or its output folder), so there is "
+                "nothing to track: they are never code under review.",
+                file=sys.stderr,
+            )
+            return 1
         # No baseline on this route: a path is `created` when the base tree
         # lacks it (`_file_actions`), never because of pre_existing_changes.
         tracked_files = _tracked_entries(
             explicit_scope,
             _file_actions(explicit_scope, base_ref=state.get("head_before_implement")),
+            label,
         )
         print(
             f"Explicit scope (--only-touched): {len(tracked_files)} files "
             f"(the git census and pre_existing_changes were not consulted)"
         )
     else:
-        tracked_files = _census_tracked_files(state, args.touched)
+        tracked_files = phase_tracked_files(
+            state, args.touched, state_path=state_path, phase=args.phase,
+            drop_ignored=False,
+        )
 
     if args.dry_run:
         print("\nDry run - would track these files:")
@@ -323,7 +358,7 @@ def main(argv=None) -> int:
     return 0
 
 
-def _drop_ignored(paths) -> List[str]:
+def _drop_ignored(paths, say=print) -> List[str]:
     """``paths`` without the ones git ignores (a transcript, a build cache).
 
     An ignored path is not a change to the repository, and ``tracked_files``
@@ -333,7 +368,7 @@ def _drop_ignored(paths) -> List[str]:
     named = [p.strip() for p in paths if p and p.strip()]
     ignored = ignored_paths(named)
     if ignored:
-        print(
+        say(
             f"Left out {len(ignored)} gitignored path(s): "
             f"{', '.join(sorted(ignored)[:5])}"
             f"{', …' if len(ignored) > 5 else ''}"
@@ -341,12 +376,104 @@ def _drop_ignored(paths) -> List[str]:
     return [p for p in paths if p.strip() not in ignored]
 
 
-def _tracked_entries(paths, actions: Dict[str, str]) -> List[Dict[str, str]]:
+def _workflow_entries(state: dict, state_path: Path) -> List[str]:
+    """The workflow's own files for this state (``workflow_file_entries``).
+
+    The plan named by ``plan_path``, the output folder the state file lives in
+    and the task list the plan's ``TASKS_FILE`` marker names, relative to the
+    repository the census runs in. Empty outside a repository.
+    """
+    root = get_project_root_from_dir()
+    if root is None:
+        return []
+    entries = workflow_file_entries(
+        state.get("plan_path"), root=root, output_dirs=[state_path.parent],
+    )
+    # The plan beside its output folder (`plans/x.md` for `plans/x/state.json`)
+    # too: `plan_path` is stored absolute, so a repository that was moved or
+    # copied names a plan outside it, and the plan would read as code.
+    sibling = state_path.parent.parent / f"{state_path.parent.name}.md"
+    if sibling.is_file():
+        for entry in workflow_file_entries(sibling, root=root):
+            if entry not in entries:
+                entries.append(entry)
+    return entries
+
+
+def _drop_workflow_files(paths, workflow: List[str], say=print) -> List[str]:
+    """*paths* without the workflow's own files, saying once what went.
+
+    The plan, its task list and the output folder are what the planning
+    phases edit; a census that kept them handed review-code the plan and
+    ``tasks.md`` as code (2026-10-05, Codex racing run 3).
+    """
+    kept = subtract_baseline(paths, workflow) if workflow else list(paths)
+    kept_set = set(kept)
+    dropped = sorted({p for p in paths if p not in kept_set})
+    if dropped:
+        say(
+            f"Left out {len(dropped)} of the workflow's own file(s) (the plan, "
+            f"its task list and its output folder are never code under "
+            f"review): {', '.join(dropped[:5])}{', …' if len(dropped) > 5 else ''}"
+        )
+    return kept
+
+
+def _tracked_entries(
+    paths, actions: Dict[str, str], label: str = TRACKING_LABELS["implement"],
+) -> List[Dict[str, str]]:
     """``tracked_files`` entries for *paths*, in the order given."""
     return [
-        {"path": f, "action": actions.get(f, "modified"), "task_id": "implementation"}
+        {"path": f, "action": actions.get(f, "modified"), "task_id": label}
         for f in paths
     ]
+
+
+def phase_tracked_files(
+    state: dict,
+    touched: List[str],
+    *,
+    state_path: Path,
+    phase: str = "implement",
+    say=print,
+    drop_ignored: bool = True,
+) -> List[Dict[str, str]]:
+    """The whole ``tracked_files`` list after *phase* recorded its changes.
+
+    *phase*'s own entries are the census (:func:`_census_tracked_files`, the
+    workflow's own files left out); every entry the OTHER code phase recorded
+    is kept as that phase recorded it, and a path it already holds is not
+    claimed again. So a file implement created stays ``created`` by
+    ``implementation`` after apply-code-fixes edits it, and nothing an
+    earlier phase changed is attributed to a later one. Entries with any
+    other label (the planning phases' plan and ``tasks.md`` entries an older
+    run left, a hand-written list) are replaced, as before.
+
+    The write executor calls this after every batch with ``say`` silenced,
+    so a run that stops part-way has still recorded what its finished
+    batches changed; ``main`` calls it once with the census printed.
+    """
+    label = TRACKING_LABELS[phase]
+    if drop_ignored:
+        touched = _drop_ignored(touched, say)
+    workflow = _workflow_entries(state, state_path)
+    own = _census_tracked_files(state, touched, workflow=workflow, label=label, say=say)
+    others = set(TRACKING_LABELS.values()) - {label}
+    kept = [
+        dict(entry) for entry in (state.get("tracked_files") or [])
+        if isinstance(entry, dict) and entry.get("path")
+        and entry.get("task_id") in others
+        and not (workflow and baseline_covers(entry["path"], workflow))
+    ]
+    if kept:
+        say(
+            f"Kept {len(kept)} file(s) another phase recorded: "
+            + ", ".join(f"{e['path']} ({e['task_id']})" for e in kept[:5])
+            + (", …" if len(kept) > 5 else "")
+        )
+    held = {entry["path"] for entry in kept}
+    merged = kept + [entry for entry in own if entry["path"] not in held]
+    return sorted(merged, key=lambda entry: entry["path"])
 
 
 def _file_actions(paths, *, base_ref=None, baseline=()) -> Dict[str, str]:
@@ -392,11 +519,20 @@ def _file_actions(paths, *, base_ref=None, baseline=()) -> Dict[str, str]:
     return actions
 
 
-def _census_tracked_files(state: dict, touched: List[str]) -> List[Dict[str, str]]:
+def _census_tracked_files(
+    state: dict,
+    touched: List[str],
+    *,
+    workflow: List[str] = (),
+    label: str = TRACKING_LABELS["implement"],
+    say=print,
+) -> List[Dict[str, str]]:
     """The default scope: the dirty census, minus the baseline, plus ``--touched``.
 
-    Prints the census counts. May rewrite a malformed ``pre_existing_changes``
-    on *state* to ``[]`` (warned), which the caller then persists.
+    The workflow's own files (*workflow*, :func:`_workflow_entries`) are left
+    out of both halves. Prints the census counts through *say*. May rewrite a
+    malformed ``pre_existing_changes`` on *state* to ``[]`` (warned), which
+    the caller then persists.
     """
     # Ensure pre_existing_changes is a list
     pre_existing_raw = state.get("pre_existing_changes")
@@ -414,6 +550,13 @@ def _census_tracked_files(state: dict, touched: List[str]) -> List[Dict[str, str
     pre_existing = list(state.get("pre_existing_changes", []))
     implementation_changes = set(subtract_baseline(current_modified, pre_existing))
 
+    # The workflow's own folder goes before the expansion below, so an
+    # untracked output folder is never listed file by file only to be dropped
+    # (it is named once in the drop line further down).
+    surviving = set(subtract_baseline(implementation_changes, workflow))
+    workflow_entries = implementation_changes - surviving
+    implementation_changes = surviving
+
     # A directory that survived the subtraction is one this phase created:
     # expand it to the files inside it, which is what every consumer needs.
     implementation_changes = _expand_uncovered_directories(implementation_changes)
@@ -426,11 +569,17 @@ def _census_tracked_files(state: dict, touched: List[str]) -> List[Dict[str, str
         if baseline_covers(f, pre_existing) and f not in implementation_changes
     )
     implementation_changes |= set(verified)
+    # The plan, its task list and the output folder are never a phase's code
+    # change, whichever half named them (an expanded `plans/`, a `--touched`).
+    implementation_changes = set(_drop_workflow_files(
+        sorted(implementation_changes | workflow_entries), list(workflow), say,
+    ))
+    kept_pre_existing = [f for f in kept_pre_existing if f in implementation_changes]
 
-    print(f"Current modified files: {len(current_modified)}")
-    print(f"Pre-existing changes: {len(pre_existing)}")
+    say(f"Current modified files: {len(current_modified)}")
+    say(f"Pre-existing changes: {len(pre_existing)}")
     if verified:
-        print(
+        say(
             f"Verified by the write executor: {len(verified)}"
             + (
                 f" ({len(kept_pre_existing)} kept although modified before the "
@@ -438,11 +587,11 @@ def _census_tracked_files(state: dict, touched: List[str]) -> List[Dict[str, str
                 if kept_pre_existing else ""
             )
         )
-    print(f"Implementation changes: {len(implementation_changes)}")
+    say(f"Implementation changes: {len(implementation_changes)}")
     ordered = sorted(implementation_changes)
     return _tracked_entries(ordered, _file_actions(
         ordered, base_ref=state.get("head_before_implement"), baseline=pre_existing,
-    ))
+    ), label)
 
 
 def _insert_summary_reference(plan_file: str, summary_relative: str) -> int:

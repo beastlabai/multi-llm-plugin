@@ -977,6 +977,156 @@ def _tracked(state_path):
     return [e["path"] for e in json.loads(state_path.read_text(encoding="utf-8"))["tracked_files"]]
 
 
+@pytest.fixture
+def racing_repo(tmp_path, monkeypatch):
+    """The Codex racing run 3 tree after a partial implement (2026-10-05).
+
+    ``plans/racing-game.md`` is committed and then edited by apply-suggestions
+    (it carries the ``TASKS_FILE`` marker generate-tasks wrote); the output
+    folder ``plans/racing-game/`` holds ``state.json`` and the task list; and
+    implement created ``index.html``. The baseline is the one apply-suggestions
+    recorded at its own start, before it edited the plan: the output folder.
+    """
+    repo = tmp_path / "repo"
+    (repo / "plans").mkdir(parents=True)
+    _git(repo, "init", "--quiet")
+    _git(repo, "config", "user.email", "test@example.com")
+    _git(repo, "config", "user.name", "Test")
+    _git(repo, "config", "commit.gpgsign", "false")
+    plan = repo / "plans" / "racing-game.md"
+    plan.write_text("# Racing game\n", encoding="utf-8")
+    _git(repo, "add", "plans/racing-game.md")
+    _git(repo, "commit", "--quiet", "-m", "plan")
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=str(repo), check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+
+    plan.write_text(
+        "# Racing game\n\nApplied suggestion.\n\n"
+        "<!-- TASKS_FILE: racing-game/tasks/tasks.md -->\n",
+        encoding="utf-8",
+    )
+    tasks = repo / "plans" / "racing-game" / "tasks" / "tasks.md"
+    tasks.parent.mkdir(parents=True)
+    tasks.write_text("## T001: Scene\n", encoding="utf-8")
+    (repo / "index.html").write_text("<canvas></canvas>\n", encoding="utf-8")
+    state_path = repo / "plans" / "racing-game" / "state.json"
+    state_path.write_text(json.dumps({
+        "plan_path": str(plan),
+        "pre_existing_changes": ["plans/racing-game/"],
+        "head_before_implement": head,
+    }, indent=2), encoding="utf-8")
+    monkeypatch.chdir(repo)
+    return repo, state_path
+
+
+def _entries(state_path):
+    return json.loads(state_path.read_text(encoding="utf-8"))["tracked_files"]
+
+
+class TestTheWorkflowsOwnFilesAreNeverTracked:
+    """2026-10-05, Codex racing run 3: ``tracked_files`` held the plan and
+    ``tasks.md`` (apply-task-suggestions' census) and review-code reviewed
+    ``tasks.md`` as code; on OpenCode the plan an earlier phase edited was
+    recorded ``modified`` by implementation."""
+
+    def test_the_plan_and_the_task_list_are_left_out(self, racing_repo, capsys):
+        _repo, state_path = racing_repo
+
+        code = main([
+            "--state-file", str(state_path),
+            "--touched", "index.html",
+            "--touched", "plans/racing-game/tasks/tasks.md",
+        ])
+
+        assert code == 0
+        assert _entries(state_path) == [
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+        ]
+        out = capsys.readouterr().out
+        assert "Left out 2 of the workflow's own file(s)" in out
+        assert "plans/racing-game.md" in out
+
+    def test_a_plan_path_from_a_moved_repository_still_finds_the_plan(
+        self, racing_repo
+    ):
+        """`plan_path` is stored absolute; in a copied or moved repository it
+        names a plan elsewhere, and the plan beside the output folder is the
+        one that must stay out."""
+        _repo, state_path = racing_repo
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["plan_path"] = "/elsewhere/plans/racing-game.md"
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        assert main(["--state-file", str(state_path), "--touched", "index.html"]) == 0
+        assert [e["path"] for e in _entries(state_path)] == ["index.html"]
+
+    def test_only_touched_given_only_workflow_files_is_refused(
+        self, racing_repo, capsys
+    ):
+        _repo, state_path = racing_repo
+        before = state_path.read_text(encoding="utf-8")
+
+        code = main([
+            "--state-file", str(state_path), "--only-touched",
+            "--touched", "plans/racing-game.md",
+        ])
+
+        assert code == 1
+        assert "only the workflow's own files" in capsys.readouterr().err
+        assert state_path.read_text(encoding="utf-8") == before
+
+
+class TestEachCodePhaseKeepsItsOwnEntries:
+    """``tracked_files`` names what each code phase changed: apply-code-fixes
+    never re-labels a file implement created, and a resumed implement never
+    takes over one apply-code-fixes created."""
+
+    def _record(self, state_path, entries):
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        state["tracked_files"] = entries
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    def test_apply_code_fixes_adds_its_files_beside_implements(self, racing_repo):
+        repo, state_path = racing_repo
+        self._record(state_path, [
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+        ])
+        (repo / "index.html").write_text("<canvas id=c></canvas>\n", encoding="utf-8")
+        (repo / "fix.js").write_text("// fix\n", encoding="utf-8")
+
+        code = main([
+            "--state-file", str(state_path), "--phase", "apply-code-fixes",
+            "--touched", "index.html", "--touched", "fix.js",
+        ])
+
+        assert code == 0
+        assert _entries(state_path) == [
+            {"path": "fix.js", "action": "created", "task_id": "apply-code-fixes"},
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+        ]
+
+    def test_a_resumed_implement_keeps_apply_code_fixes_entries(self, racing_repo):
+        repo, state_path = racing_repo
+        (repo / "fix.js").write_text("// fix\n", encoding="utf-8")
+        self._record(state_path, [
+            {"path": "fix.js", "action": "created", "task_id": "apply-code-fixes"},
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+            # An older run's planning-phase entry: replaced, never kept.
+            {"path": "plans/racing-game.md", "action": "modified",
+             "task_id": "implementation"},
+        ])
+
+        code = main(["--state-file", str(state_path), "--touched", "index.html"])
+
+        assert code == 0
+        assert _entries(state_path) == [
+            {"path": "fix.js", "action": "created", "task_id": "apply-code-fixes"},
+            {"path": "index.html", "action": "created", "task_id": "implementation"},
+        ]
+
+
 class TestOnlyTouchedIsTheExactScope:
     def test_only_the_touched_paths_are_tracked(self, dirty_repo_without_baseline, capsys):
         _repo, state_path = dirty_repo_without_baseline
