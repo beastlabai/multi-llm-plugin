@@ -145,6 +145,18 @@ FATAL_STATUSES = frozenset({
     STATUS_SANDBOX_UNAVAILABLE,
 })
 
+#: Statuses no re-run of the same phase can change: the fatal rung-1 set (a
+#: property of the spec or the machine), ``rejected`` (rung 7, a configuration
+#: refusal "never retried, because re-running produces the same" — e.g. a CLI
+#: that refuses the schema file before any request) and
+#: ``context_length_exceeded`` (an unchanged oversized prompt fails
+#: identically). Read by ``next_phase.resume_command``: a phase whose failed
+#: tasks all ended elsewhere is handed back a re-invoke the user can type, and
+#: one with any of these gets none, because the command would repeat the stop.
+RERUN_FUTILE_STATUSES = FATAL_STATUSES | frozenset({
+    STATUS_REJECTED, STATUS_CONTEXT_LENGTH_EXCEEDED,
+})
+
 #: The smallest slice of the per-slot budget worth *starting* an attempt with
 #: (D3i). The timeout is the slot's total wall-clock budget, so a retry gets what
 #: is left of it — and a runner handed under a second would spend it on process

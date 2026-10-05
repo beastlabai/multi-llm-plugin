@@ -974,6 +974,99 @@ class TestResumeCommand:
         assert (code, out.out, key) == (0, "", None)
         assert not output_dir_path(plan).exists()
 
+    # -- generate-tasks: a failed dispatch resumes with the plain re-invoke ----
+    #
+    # Racing re-run 2026-10-04 (opencode #3): a generate-tasks whose one task
+    # came back schema_invalid ended on a tool result with no resume_command,
+    # and the host model invented `multi_llm --mode review-tasks --plan …`.
+    # Its documented recovery is the plain re-invoke
+    # (`run_status._RESUME_VERB_BY_MODE`), which re-dispatches the failed task.
+
+    @staticmethod
+    def _gt_status(counts, **extra):
+        status = {"state": "subagents_failed", "progress": {"subagents": {
+            "kind": "task_generation", "total": 1, "ok": 0, "counts": dict(counts),
+            "failed_task_ids": ["task_generation"],
+        }}}
+        status.update(extra)
+        return status
+
+    @pytest.mark.parametrize("host,route,prefix", ROUTES, ids=ROUTE_IDS)
+    def test_a_failed_generate_tasks_re_invokes_plain(self, host, route, prefix):
+        assert np_.resume_command(
+            P, host, route, "generate-tasks",
+            phase_status=self._gt_status({"schema_invalid": 1}),
+        ) == f"{prefix}--generate-tasks {P}"
+
+    @pytest.mark.parametrize("status", [
+        "timeout", "rate_limited", "runner_error", "unparseable_result",
+        "schema_invalid", "incomplete", "budget_exhausted",
+    ])
+    def test_every_rerunnable_failure_gets_it(self, status):
+        assert np_.resume_command(
+            P, "opencode", "package", "generate-tasks",
+            phase_status=self._gt_status({status: 1}),
+        ) == f"/multi-llm --generate-tasks {P}"
+
+    @pytest.mark.parametrize("status", [
+        "rejected", "invalid_model", "auth_failed", "spawn_failed",
+        "sandbox_unavailable", "context_length_exceeded",
+    ])
+    def test_no_command_where_no_re_run_can_help(self, status):
+        """Codex #1 (same run): the CLI refused the schema before any request
+        (`rejected`, rung 7, "never retried"); a re-run fails identically."""
+        assert np_.resume_command(
+            P, "codex", "package", "generate-tasks",
+            phase_status=self._gt_status({status: 1}),
+        ) is None
+        assert np_.resume_command(
+            P, "codex", "package", "generate-tasks",
+            phase_status=self._gt_status({"schema_invalid": 1, status: 1}),
+        ) is None
+
+    @pytest.mark.parametrize("phase_status", [
+        {},
+        {"state": "complete"},
+        {"state": "task_generation_pending"},
+        {"state": "subagents_failed"},  # no mirror: nothing says what failed
+        {"state": "runner_rejected", "reason_code": "nested_exec_denied"},
+    ], ids=["absent", "complete", "pending", "no-mirror", "refused"])
+    def test_anything_but_a_failed_dispatch_gets_none(self, phase_status):
+        assert np_.resume_command(
+            P, "codex", "package", "generate-tasks", phase_status=phase_status,
+        ) is None
+
+    def test_a_refused_runner_close_out_gets_none(self):
+        status = self._gt_status({"schema_invalid": 1},
+                                 run={"state": "runner_rejected", "reason_code": "x"})
+        assert np_.resume_command(
+            P, "codex", "package", "generate-tasks", phase_status=status) is None
+
+    def test_the_plain_re_invoke_phases_are_status_lines_plain_ones(self):
+        """Held to `run_status._RESUME_VERB_BY_MODE`: the modes whose status
+        line resumes with the bare `--yes` are exactly the ones answered here
+        without `--resume`."""
+        from utils import run_status
+
+        plain = {mode for mode, verb in run_status._RESUME_VERB_BY_MODE.items()
+                 if verb == "--yes"}
+        assert {modes.resolve(m).phase for m in plain} == set(np_.RERUN_RESUME_PHASES)
+
+    def test_util_answers_it_from_the_phase_dir(self, tmp_path, monkeypatch, capsys):
+        plan = _build(tmp_path, S(("review-plan", "apply-suggestions")))
+        phase_dir = output_dir_path(plan) / "generate-tasks"
+        phase_dir.mkdir(parents=True)
+        (phase_dir / ".status.json").write_text(
+            json.dumps(self._gt_status({"schema_invalid": 1})), encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv(modes.ROUTE_ENV, "package")
+        code, out, key = self._run(
+            [P, "--blocked", "generate-tasks", "--host", "opencode"], monkeypatch, capsys)
+        assert code == 0
+        assert out.out == f"[RESUME_COMMAND] /multi-llm --generate-tasks {P}\n"
+        assert key == {"phase": "generate-tasks",
+                       "command": f"/multi-llm --generate-tasks {P}"}
+
     def test_after_and_blocked_exclude_each_other(self, monkeypatch, capsys):
         code, out, _key = self._run(
             [P, "--after", "implement", "--blocked", "implement"], monkeypatch, capsys)
