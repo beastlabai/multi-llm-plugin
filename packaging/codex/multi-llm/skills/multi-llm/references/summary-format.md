@@ -71,7 +71,7 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
       `util next-command "<plan-path>" --after <the mode you ran>`, behind the
       same `uv run … multi_llm.py` prefix as every command in the core, with the
       plan path as the user typed it. Run it even when a `[NEXT_COMMAND]` line
-      is already on screen: a `--reaggregate` (or any other `next`) run names
+      is already on screen: a `--reaggregate` (or any other `next`) run can name
       the plan by its absolute path, and the command is printed with the path
       the user typed. Its `MULTI_LLM_RESULT` line carries `user_next_step`, and
       the `[NEXT_COMMAND]` lines above it hold the same strings.

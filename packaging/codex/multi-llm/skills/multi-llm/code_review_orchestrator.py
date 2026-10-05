@@ -1346,6 +1346,18 @@ def build_implementation_record(plan_path: Path) -> str:
                 "work did not pass; report what it found as a gap normally): "
                 + "; ".join(accepted)
             )
+        # A check task that ran, changed nothing and reported problems
+        # (`task_check_findings`, from its reply's structured `check`): it is
+        # recorded completed, so without this line a reviewer read it as a
+        # check that passed (racing re-run 4, 2026-10-05: T007's two
+        # html-validate problems reached no reviewer).
+        for entry in state.implementation_check_findings():
+            lines.append(
+                f"- Check task {entry['id']} ran and reported these problems, "
+                f"which nobody has fixed yet (implement continued past them; "
+                f"report each one that still holds in the code as an issue): "
+                + "; ".join(entry["findings"])
+            )
 
     changes = prior_changes.render(
         str(output_dir),

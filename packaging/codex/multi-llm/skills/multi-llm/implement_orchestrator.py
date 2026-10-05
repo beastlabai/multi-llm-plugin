@@ -45,6 +45,7 @@ from utils.cli_common import (
     dispatcher_command,
     record_artifacts,
     record_error,
+    record_notice,
 )
 from utils.output_handler import get_phase_dir, get_output_dir
 from utils.git_utils import get_project_root
@@ -935,6 +936,23 @@ def _record_implement_write_artifacts(
     record_artifacts(path for path in paths.values() if path and os.path.exists(path))
 
 
+def check_findings_notice(found: Dict[str, List[str]]) -> str:
+    """The result line's ``notice`` for check tasks that reported problems.
+
+    Bounded: one line a host relays, naming each task, how many problems its
+    check reported and the first of them, and where the rest are.
+    """
+    parts = []
+    for task_id, findings in found.items():
+        first = findings[0] if findings else ""
+        more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
+        parts.append(f"{task_id}: {first[:160]}{more}")
+    return (
+        "check findings (implement continued; review-code is told about "
+        "them; all listed in implement/summary.md): " + "; ".join(parts)
+    )[:900]
+
+
 def run_implement_write_phase(
     args: argparse.Namespace,
     *,
@@ -1036,6 +1054,12 @@ def run_implement_write_phase(
         # The result line's `error`: the one line the hosts relay as "the
         # last line it left", and the detached close-out's `run.error`.
         record_error(stop["headline"])
+    found = result.check_findings() if hasattr(result, "check_findings") else {}
+    if found:
+        # Racing re-run 4 (2026-10-05): a check task's problems were on no
+        # surface a host reads. The result line's `notice` carries them,
+        # beside the `[CHECK_FINDINGS]` lines above.
+        record_notice(check_findings_notice(found))
     if result.report_path:
         print(f"[write-subagents] report: {result.report_path}")
     if result.summary_file:

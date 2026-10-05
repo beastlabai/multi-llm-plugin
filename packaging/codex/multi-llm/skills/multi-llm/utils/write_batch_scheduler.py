@@ -102,6 +102,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         resolve_output_target,
         resolve_task_runner,
         row_outcome_label,
+        check_findings_from,
+        check_record,
+        row_check_findings,
         validate_result,
     )
     from .subagent_tasks import (
@@ -113,6 +116,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         snapshot_file_set,
         write_output_name,
     )
+    from .state_manager import set_task_check_findings_in_state
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
         DRY_RUN_FILENAME,
@@ -185,6 +189,9 @@ except ImportError:  # pragma: no cover - direct-script import shim
         resolve_output_target,
         resolve_task_runner,
         row_outcome_label,
+        check_findings_from,
+        check_record,
+        row_check_findings,
         validate_result,
     )
     from utils.subagent_tasks import (
@@ -196,6 +203,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         snapshot_file_set,
         write_output_name,
     )
+    from utils.state_manager import set_task_check_findings_in_state  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME
     from utils.write_safety import (
         DRY_RUN_FILENAME,
@@ -217,6 +225,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
 
 
 __all__ = [
+    "CHECK_FINDINGS_MARKER",
     "STRATEGIES",
     "STRATEGY_PAUSE",
     "STRATEGY_SKIP_CONTINUE",
@@ -305,6 +314,10 @@ SWEEP_ADOPT_MAX_FILES = 1000
 #: read — so they skip verification silently rather than logging a notice about a
 #: command that was never going to apply to them.
 CODE_WRITE_KINDS = frozenset({"apply_code_fixes", "implement"})
+
+#: The line an implement run prints per check task that reported problems
+#: (``WriteBatchScheduler._check_findings_lines``, racing re-run 4).
+CHECK_FINDINGS_MARKER = "[CHECK_FINDINGS]"
 
 #: How much of the verification command's output travels in the result payload,
 #: the summary and `.status.json`. A tail rather than the whole capture: a failing
@@ -635,6 +648,10 @@ def _accounting_line(account: Dict[str, Any]) -> str:
     """``N tasks in this decomposition: a done, b failed (…), …`` — every
     bucket, named, adding up to the total."""
     parts = [f"{len(account['done'])} done"]
+    flagged = account.get("check_findings") or []
+    if flagged:
+        # Inside the done bucket, so the buckets still add up to the total.
+        parts[0] += f" ({len(flagged)} with check findings: {', '.join(flagged)})"
     if account["failed"]:
         parts.append(f"{len(account['failed'])} failed ({', '.join(account['failed'])})")
     if account["not_run"]:
@@ -964,6 +981,17 @@ class SchedulerResult:
     def failed(self) -> List[TaskOutcome]:
         return [o for o in self.outcomes if not o.ok]
 
+    def check_findings(self) -> Dict[str, List[str]]:
+        """``{task_id: findings}`` for every check task that finished ``ok``
+        with problems, this run's and the earlier runs' rows alike, in row
+        order (racing re-run 4)."""
+        found: Dict[str, List[str]] = {}
+        for row in self.report_rows():
+            findings = row_check_findings(row)
+            if row.get("status") == STATUS_OK and findings:
+                found[str(row.get("task_id"))] = findings
+        return found
+
     def report_rows(self) -> List[Dict[str, Any]]:
         """Every task row of the phase: earlier runs' first, this run's after.
 
@@ -1193,7 +1221,37 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
         "A reply without this JSON object is recorded as a FAILED batch even "
         "when the edits landed, so send it in every case — including when "
         "nothing needed changing.\n"
+        + (CHECK_RESULT_CONTRACT if is_check_task(kind, task) else "")
     )
+
+
+#: Appended to the result contract of a check task (an ``implement`` task that
+#: declares no files): the structured check result the verdict reads
+#: (``subagent_executor.check_findings_from``). Racing re-run 4 (2026-10-05):
+#: T007's ``npx html-validate`` reported two problems, the runner said
+#: ``no-op`` and wrote them only in ``notes``, and the task read VERIFIED.
+CHECK_RESULT_CONTRACT = (
+    "\n## Check result (required for this task)\n\n"
+    "This task declares no files: it is a check, and it must not change any "
+    "file. Run every check it names, answer `status: \"no-op\"`, and add a "
+    "`check` object to the JSON above:\n\n"
+    "```json\n"
+    '{"check": {"passed": false, "findings": ["<one problem: the command, '
+    'what it reported, the file and line>"]}}\n'
+    "```\n\n"
+    "- `passed`: `true` only when every check the task names ran and met its "
+    "acceptance criteria.\n"
+    "- `findings`: one entry per problem a check reported, and one per check "
+    "you could not run; empty when `passed` is `true`.\n\n"
+    "A problem a check finds is a finding, not a failure: do not fix it and "
+    "do not answer `failed` for it. The run continues, and the findings are "
+    "recorded for the code review, which fixes them.\n"
+)
+
+
+def is_check_task(kind: str, task: Dict[str, Any]) -> bool:
+    """Whether *task* is a verification-only ``implement`` task (no files)."""
+    return kind == "implement" and not snapshot_file_set(task)
 
 
 class WriteBatchScheduler:
@@ -1406,6 +1464,12 @@ class WriteBatchScheduler:
         self._retained_bytes = 0
         self._counted_digests: set = set()
         self._retain_warned = False
+        #: ``relative -> denied by driver.write_paths?`` for every path the
+        #: sweep kept no bytes for (the policy does not change during a run,
+        #: so each path is asked once). The denied ones are named once, on the
+        #: closing utilisation line, rather than in a warning of their own
+        #: (see :meth:`_retain`).
+        self._unretained_denied: Dict[str, bool] = {}
         #: ``{spec: version}`` for every distinct runner this run actually
         #: preflighted (F12), populated as ``_dispatch_executor`` dispatches —
         #: the read path fills the same-shaped field from
@@ -1838,11 +1902,48 @@ class WriteBatchScheduler:
         """
         jail_lines_before = self._jail_line_count()
         try:
-            return self._run()
+            result = self._run()
+            self._report_resume_tally(result)
+            return result
         finally:
             self._report_rollback_store_utilization()
             self._discard_rollback_store()
             self._repeat_jail_lines(jail_lines_before)
+
+    def _report_resume_tally(self, result: SchedulerResult) -> None:
+        """One line on a run that kept earlier batches: what it kept and what
+        it dispatched.
+
+        Only this loop knows which batches an earlier run finished (their
+        result file, ``_done_evidence``); the apply base's own ``[resume]``
+        line is printed before any batch exists, and on this leg it used to
+        say "0 already processed, 12 remaining" while the run then kept
+        batch 0 as an earlier run's (OpenCode racing run 4).
+        """
+        kept = [o for o in result.outcomes if o.skipped]
+        # Every apply run resumes unless `--fresh`, so a first run (nothing
+        # kept) says nothing here; its batch lines already say what ran.
+        if not self.resume or self.dry_run or not kept:
+            return
+        dispatched = [o for o in result.outcomes if not o.skipped]
+        items = {
+            str(task.get("task_id", "")): len(task.get("expected_ids") or [])
+            for task in self.tasks
+        }
+
+        def counted(outcomes: Sequence[TaskOutcome]) -> str:
+            # An implement task is one item; the count would only repeat it.
+            if self.kind == "implement":
+                return ""
+            return f" ({sum(items.get(o.task_id, 0) for o in outcomes)} item(s))"
+
+        names = ", ".join(o.task_id for o in kept[:5]) + (", …" if len(kept) > 5 else "")
+        self.log(
+            f"[write-subagents] resume: kept {len(kept)} task(s) an earlier run "
+            f"finished — {names}{counted(kept)}; "
+            f"dispatched {len(dispatched)}{counted(dispatched)}"
+            + (f"; not reached {len(result.not_run)}" if result.not_run else "")
+        )
 
     @staticmethod
     def _jail_line_count() -> int:
@@ -1884,12 +1985,29 @@ class WriteBatchScheduler:
             return
         digests = {digest for _stamp, digest in self._retained.values() if digest}
         shards = {digest[:2] for digest in digests}
+        # The files the deny list kept out, named here once rather than in a
+        # warning at the start of every write phase (see `_retain`).
+        denied = sorted(
+            path for path, is_denied in self._unretained_denied.items() if is_denied)
+        kept_out = (
+            f"; never copied, as driver.write_paths denies "
+            f"{'it' if len(denied) == 1 else 'them'} (a write to "
+            f"{'it' if len(denied) == 1 else 'one'} fails the batch and "
+            f"cannot be undone): {', '.join(denied[:5])}"
+            f"{f', … {len(denied) - 5} more' if len(denied) > 5 else ''}"
+            if denied else ""
+        )
+        # The snapshot directory named in full: a jailed repo-wide batch keeps
+        # its snapshots under the state home, not the phase dir (Codex racing
+        # run 4: "restore points live in pre_batch/" read as the phase dir's
+        # copy, which the line before says is never read).
         self.log(
             f"[write-subagents] rollback store peaked at "
             f"{self._retained_bytes / (1024 * 1024):.1f} MB of the "
             f"{SWEEP_RETAIN_MAX_BYTES // (1024 * 1024)} MB budget "
-            f"({len(digests)} files, {len(shards)} shards); discarded now "
-            f"— restore points live in pre_batch/"
+            f"({len(digests)} files, {len(shards)} shards{kept_out}); discarded now "
+            f"— the restore points are the pre-batch snapshots in "
+            f"{os.path.join(self.safety_dir, 'pre_batch')}/"
         )
 
     def _discard_rollback_store(self) -> None:
@@ -2106,9 +2224,34 @@ class WriteBatchScheduler:
         # 5. Finalization is part of the contract, not the caller's courtesy.
         if self.finalize:
             self._finalize(result)
+        result.messages.extend(self._check_findings_lines(result))
         result.report_path = self._write_report(result)
         self._mirror_status(result)
         return result
+
+    def _check_findings_lines(self, result: SchedulerResult) -> List[str]:
+        """One ``[CHECK_FINDINGS]`` line per check task that reported
+        problems, and one line on what happens to them (racing re-run 4:
+        nothing on the run's own output named T007's two problems)."""
+        found = result.check_findings()
+        if not found:
+            return []
+        lines = [
+            f"{CHECK_FINDINGS_MARKER} {task_id} {len(findings)} problem(s): "
+            f"{'; '.join(findings)}"
+            for task_id, findings in found.items()
+        ]
+        where = (
+            f"; they are listed in {result.summary_file}"
+            if result.summary_file else ""
+        )
+        lines.append(
+            f"Check findings: {', '.join(found)} ran, changed no file and "
+            f"reported problems, so implement continued{where}. Review-code "
+            f"is told about them, and apply-code-fixes applies the fixes "
+            f"review-code validates."
+        )
+        return lines
 
     # -- one batch ------------------------------------------------------
 
@@ -2202,6 +2345,9 @@ class WriteBatchScheduler:
                 reason=verdict.get("reason") or recorded.get("reason"),
                 verification_only=bool(verdict.get("verification_only")),
             )
+            if outcome.verification_only and isinstance(verdict.get("check"), dict):
+                # The skip keeps the earlier run's `check-findings` label.
+                outcome.check_findings = row_check_findings(verdict)
             outcome.output_path = output_path
             # The files the earlier run verified for this batch, so a resumed
             # run's finalization (`--touched`) and summary still name them.
@@ -2794,6 +2940,18 @@ class WriteBatchScheduler:
                 kept[relative] = cached[1]
             else:
                 skipped.append(relative)
+        # A path the deny list keeps out is out by design, and a write to it
+        # fails the batch (the post-run policy check) whose reason says it
+        # could not be restored. Announced up front it was the same line on
+        # every write phase of a run (Codex racing run 4: `.multi-llm/
+        # providers.yaml` four times), so it is named once, on the closing
+        # utilisation line, and the warning keeps the gaps that are not by
+        # design: a file over the per-file cap or past the budget.
+        for path in skipped:
+            if path not in self._unretained_denied:
+                self._unretained_denied[path] = self.policy.violation(
+                    os.path.join(self.repo_root, path)) is not None
+        skipped = [path for path in skipped if not self._unretained_denied[path]]
         if skipped and not self._retain_warned:
             self._retain_warned = True
             # Named, with the reason each one was skipped: a count alone
@@ -3591,6 +3749,7 @@ class WriteBatchScheduler:
         if self._verification_only(snapshot) and self._verification_verdict(
             outcome, snapshot, undeclared, claimed, summary,
             changed=changed, crashed_exit=exit_code,
+            check=check_findings_from(result),
         ):
             self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                    observed, duration)
@@ -3639,9 +3798,24 @@ class WriteBatchScheduler:
                     f"{', …' if len(expected_ids) > 5 else ''}) are what landed"
                 )
             elif missing_ids:
+                # Counted from the expected side: the reply's own `ids` may
+                # name things this batch does not hold. OpenCode racing run 4
+                # (2026-10-05): a report re-ask restated "Suggestion 1",
+                # "Suggestion 2", and the reason read "only 2 of 2 expected
+                # id(s) came back (missing: <both of them>)".
+                matched = len(expected_ids) - len(missing_ids)
+                unexpected = [i for i in reported_ids if i not in expected_ids]
                 details.append(
-                    f"only {len(reported_ids)} of {len(expected_ids)} expected "
-                    f"id(s) came back (missing: {', '.join(missing_ids)})"
+                    (f"only {matched} of {len(expected_ids)}" if matched
+                     else f"none of the {len(expected_ids)}")
+                    + f" expected id(s) came back (missing: "
+                    f"{', '.join(missing_ids)})"
+                    + (
+                        f"; the reply named {len(unexpected)} id(s) this batch "
+                        f"does not hold ({', '.join(repr(i) for i in unexpected[:5])}"
+                        f"{', …' if len(unexpected) > 5 else ''})"
+                        if unexpected else ""
+                    )
                 )
             detail = " and ".join(details)
             outcome.status = STATUS_PARTIAL
@@ -3765,6 +3939,7 @@ class WriteBatchScheduler:
         *,
         changed: Sequence[str],
         crashed_exit: Optional[int],
+        check: Optional[List[str]] = None,
     ) -> bool:
         """The verdict for a task that declared no files. ``True`` when decided.
 
@@ -3791,11 +3966,24 @@ class WriteBatchScheduler:
           left on disk stays PARTIAL until it is declared or restored, instead
           of being laundered by a second run that touched nothing (adversarial
           review, 2026-10-02).
+        * nothing moved, the runner did not crash, and its reply's structured
+          ``check`` (*check*, :func:`subagent_executor.check_findings_from`)
+          lists findings: ``no-op``/``ok`` labelled ``check-findings`` —
+          whatever ``status`` it claimed. The loop continues and the findings
+          are named on every surface and recorded in ``state.json`` for
+          review-code, the phase that fixes them (racing re-run 4,
+          2026-10-05: T007's ``npx html-validate`` reported two problems and
+          the task read VERIFIED, the problems only in its free-text notes;
+          in run 3 the same kind of check claimed ``failed`` and stopped
+          implement for good). A check that reports problems is a finding,
+          never a stop, so a task's wording no longer decides which of the two
+          happens.
         * nothing moved and the runner did not fail: ``no-op``/``ok``. The
           check ran and left the repo as it was, which is a verification
           passing, and the loop continues.
-        * nothing moved and the runner failed or crashed: falls through to the
-          ordinary clean-failure branch (``False``).
+        * nothing moved and the runner failed (with no structured findings)
+          or crashed: falls through to the ordinary clean-failure branch
+          (``False``).
         """
         if not undeclared.observed:
             outcome.status = STATUS_BATCH_FAILED
@@ -3838,13 +4026,36 @@ class WriteBatchScheduler:
                 f"otherwise restore them with `util restore-batch`."
             )
             return True
-        if crashed_exit not in (0, None) or claimed == "failed":
+        if crashed_exit not in (0, None):
+            return False
+        if check:
+            outcome.write_outcome = WRITE_NO_OP
+            outcome.status = STATUS_OK
+            outcome.check_findings = list(check)
+            shown = "; ".join(check[:3]) + (
+                f"; +{len(check) - 3} more" if len(check) > 3 else ""
+            )
+            outcome.reason = (
+                f"CHECK FINDINGS: {outcome.task_id}'s check ran and reported "
+                f"{len(check)} problem(s): {shown}. No file changed, so the "
+                f"loop continues; the findings are listed in the "
+                f"implementation summary and go to review-code."
+            )
+            return True
+        if claimed == "failed":
             return False
         outcome.write_outcome = WRITE_NO_OP
         outcome.status = STATUS_OK
+        outcome.check_findings = check
         outcome.reason = (
             f"VERIFIED: {outcome.task_id} declares no files and the sweep found "
-            f"no file changed during its run. Recorded; the loop continues."
+            f"no file changed during its run"
+            + (
+                " and its check reported that it passed"
+                if check is not None else
+                " (its reply reported no `check` result)"
+            )
+            + ". Recorded; the loop continues."
             + (f" Runner summary: {summary}" if summary else "")
         )
         return True
@@ -4169,6 +4380,10 @@ class WriteBatchScheduler:
                 # reads them back so its row keeps the label.
                 data["verdict"]["verification_only"] = True
                 data["verdict"]["outcome_label"] = outcome.outcome_label
+                if outcome.check_findings is not None:
+                    # The bounded findings the label rests on, for a resume
+                    # skip to carry (the reply's own `check` stays above).
+                    data["verdict"]["check"] = check_record(outcome.check_findings)
                 if not outcome.ok and not outcome.files_touched and not outcome.not_rerun:
                     # A failed check that moved nothing: what the tree looked
                     # like when it failed, for `_unchanged_since_failure`.
@@ -4229,6 +4444,14 @@ class WriteBatchScheduler:
 
         if outcome.write_outcome == WRITE_APPLIED:
             summary = outcome.summary or f"batch {batch_index} applied"
+        elif (outcome.write_outcome == WRITE_NO_OP and outcome.verification_only
+              and outcome.check_findings):
+            # A check that found problems: never "verified" on the line the
+            # next batch and review-code's implementation record read.
+            summary = (
+                f"(check findings — {len(outcome.check_findings)} problem(s): "
+                f"{'; '.join(outcome.check_findings)}; no file changed)"
+            )
         elif outcome.write_outcome == WRITE_NO_OP and outcome.verification_only:
             # A check that ran and moved nothing: say it passed, in the word
             # every other surface uses for it.
@@ -4289,6 +4512,15 @@ class WriteBatchScheduler:
                 status = "completed" if outcome.ok else "failed"
                 reason = None if outcome.ok else (outcome.reason or outcome.status)
                 self.state.update_task_status(task_id, status, reason=reason)
+                if self.kind == "implement" and isinstance(
+                    getattr(self.state, "state", None), dict
+                ):
+                    # What this run's check found, for `status` and review-code;
+                    # any other outcome clears an earlier run's record.
+                    set_task_check_findings_in_state(
+                        self.state.state, task_id,
+                        outcome.check_findings if outcome.ok else None,
+                    )
                 # Persists the metric recorded just above too: it is a mutation
                 # of this object's dict now, not a second writer's file (F4).
                 self.state.save()
@@ -4299,6 +4531,11 @@ class WriteBatchScheduler:
             verdict = outcome.outcome_label or outcome.status
             if outcome.not_rerun:
                 verdict = "not run again (nothing changed since it failed)"
+            elif outcome.ok and outcome.check_findings:
+                verdict = (
+                    f"{verdict} ({len(outcome.check_findings)} problem(s): "
+                    f"{'; '.join(outcome.check_findings)[:300]})"
+                )
             elif outcome.write_outcome and not outcome.ok:
                 # Plan step 3: a failed batch whose write outcome reads
                 # "clean-failure" says which failure it was.
@@ -5056,6 +5293,11 @@ class WriteBatchScheduler:
             lines.append(
                 f"Done and kept: {len(done)} task(s) ({_id_range(done)})."
             )
+        if account.get("check_findings"):
+            lines.append(
+                f"Of those, checks that reported problems (listed in the "
+                f"implementation summary): {', '.join(account['check_findings'])}."
+            )
         if account["not_run"]:
             lines.append(
                 f"Not run (the stop came before they were dispatched): "
@@ -5242,9 +5484,15 @@ class WriteBatchScheduler:
         ids = set(done) | set(failed) | set(deferred) | set(skipped_dependents) \
             | set(declined) | set(accepted) | set(completed_manual) | set(not_run) \
             | set(by_id)
+        check_findings = sorted({
+            str(row.get("task_id"))
+            for row in rows
+            if str(row.get("task_id")) in done and row_check_findings(row)
+        })
         return {
             "total": len(ids),
             "done": done,
+            "check_findings": check_findings,
             "failed": failed,
             "not_run": not_run,
             "accepted": accepted,
@@ -6081,6 +6329,27 @@ class WriteBatchScheduler:
             lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
         for task_id, reason in sorted(result.not_run.items()):
             lines.append(f"| {task_id} | not run | — | {reason.replace('|', '/')[:160]} |")
+        findings_rows = [
+            row for row in rows
+            if row.get("status") == STATUS_OK and row_check_findings(row)
+        ]
+        if findings_rows:
+            # Racing re-run 4 (2026-10-05): T007's two html-validate problems
+            # read VERIFIED here and lived only in the runner's notes. They
+            # are listed whole, for the reader and for review-code, which is
+            # given this file and state.json's record of them.
+            lines += [
+                "", "## Check Findings", "",
+                "These checks ran and changed no file, but reported problems. "
+                "Implement continued; review-code is told about them, and "
+                "apply-code-fixes applies the fixes review-code validates.", "",
+            ]
+            for row in findings_rows:
+                lines.append(f"### {row['task_id']}")
+                lines.append("")
+                lines += [f"- {finding}" for finding in row_check_findings(row)]
+                lines.append("")
+            lines.pop()
         touched: List[str] = []
         for row in rows:
             for path in row.get("files_touched") or []:
@@ -6340,6 +6609,10 @@ class WriteBatchScheduler:
                                 **({"verification_only": True,
                                     "outcome_label": o.outcome_label}
                                    if o.verification_only else {}),
+                                # Racing re-run 4: what a check found, only on
+                                # the row of a check that found something.
+                                **({"check_findings": list(o.check_findings)}
+                                   if o.ok and o.check_findings else {}),
                                 "files_touched": list(o.files_touched),
                                 # Plan step 3: the rung, only when there was one.
                                 **({"sandbox_rung": self._dispatch_rungs[o.task_id]}
@@ -6350,6 +6623,11 @@ class WriteBatchScheduler:
                         "failed_task_ids": [
                             o.task_id for o in outcomes if not o.ok
                         ],
+                        **({"check_findings_task_ids": [
+                            o.task_id for o in outcomes
+                            if o.ok and o.check_findings
+                        ]} if any(o.ok and o.check_findings for o in outcomes)
+                           else {}),
                         # Racing re-run 3 (2026-10-05): the tasks a stop left
                         # undispatched, and the failed tasks the user accepted,
                         # so `status` and a terminal poll account for every
