@@ -1243,6 +1243,17 @@ class TestJudgeReportNamedByKind:
         }
 
 
+    def test_the_pinned_runner_note_names_the_file_the_pin_came_from(self):
+        """Fix round 8: the judge's pin is read from its kind-qualified report,
+        and the dispatch line used to name the bare one regardless."""
+        key = f"tasks[j0].runner {executor._RECORDED_RUNNER_SUFFIX}"
+        judge = executor._pinned_runner_note(key, "human_decision_judge")
+        assert "kept from subagent_batch_report_human_decision_judge.json so" in judge
+        bare = executor._pinned_runner_note(key, "task_generation")
+        assert "kept from subagent_batch_report.json so a re-run repeats it" in bare
+        assert executor._pinned_runner_note("driver.subagent_runner (base)", "") == ""
+
+
 class TestJudgeDispatchIsAudited:
     """The judging dispatch leaves the same ``subagent_audit.jsonl`` trail the
     write executor leaves for a write dispatch (F6).

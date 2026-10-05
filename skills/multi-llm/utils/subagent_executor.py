@@ -8047,7 +8047,7 @@ def _dispatch_order(tasks: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 _RECORDED_RUNNER_SUFFIX = "(recorded from a previous attempt)"
 
 
-def _pinned_runner_note(key: str) -> str:
+def _pinned_runner_note(key: str, kind: str = "") -> str:
     """The dispatch line's reason when the runner is a recorded pin, else ``""``.
 
     A pin outranks every rung of the ladder — the session model and
@@ -8055,13 +8055,15 @@ def _pinned_runner_note(key: str) -> str:
     runner the user had just tried to move away from and gave no reason
     (2026-10-05, run 3: generate-tasks re-run after a host-model switch stayed
     on ``opencode/big-pickle``, the runner its failed first run recorded).
+    The file it names is the one :func:`_recorded_runners` read for ``kind``
+    (the judge's is kind-qualified, :func:`_batch_report_filename`).
     """
     if not key.endswith(_RECORDED_RUNNER_SUFFIX):
         return ""
     return (
         "; the runner this task's earlier attempt used, kept from "
-        "subagent_batch_report.json so a re-run repeats it — the session model "
-        "and driver.subagent_runner do not change it"
+        f"{_batch_report_filename(kind)} so a re-run repeats it — the session "
+        "model and driver.subagent_runner do not change it"
     )
 
 
@@ -8150,7 +8152,7 @@ def run_tasks(
         version = report.runner_versions.get(spec, "unknown")
         print(
             f"[exec-subagents]   {task_id} -> {spec} (version {version}"
-            f"{_pinned_runner_note(resolved[task_id][1])})"
+            f"{_pinned_runner_note(resolved[task_id][1], kind)})"
         )
 
     # D4a, the *during* half: a batch of eleven validation tasks ran for a
