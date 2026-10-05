@@ -1381,6 +1381,27 @@ class TestAnApplyResumeKeepsTheEarlierRunsRows(_ApplyRig):
                 "not dispatched again)") in summary
         assert "- Suggestions applied: 3" in summary
 
+    def test_the_resume_lines_count_what_the_resume_kept(self, repo, capsys):
+        """OpenCode racing run 4: the executor leg's resume printed `[resume]
+        0 already processed, 12 remaining` (the native leg's record, which
+        this leg never writes) and then kept batch 0 from the earlier run."""
+        plan = self._review(repo, "one")
+        ids = self._ids(plan)
+        assert self._run(repo, plan, ids[0]) == 3
+        capsys.readouterr()
+
+        assert self._run(repo, plan, sum(ids, []), "--resume") == 0
+
+        captured = capsys.readouterr()
+        text = captured.out + captured.err
+        assert "already processed" not in text
+        assert ("[resume] 3 item(s) in scope; the write executor keeps every "
+                "batch an earlier run finished (its result file is on disk) and "
+                "dispatches the rest (a `resume:` line below names any it kept)"
+                ) in text
+        assert ("[write-subagents] resume: kept 1 task(s) an earlier run finished "
+                "— apply-batch-0 (1 item(s)); dispatched 2 (2 item(s))") in text
+
     def test_a_batch_whose_id_a_changed_selection_reused_keeps_its_row(self, repo):
         """The stopped batch's item is skipped before the resume, so its
         `apply-batch-1` id goes to the next item. Its partial edits are still

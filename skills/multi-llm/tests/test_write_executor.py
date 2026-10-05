@@ -3576,6 +3576,46 @@ class TestTheEmptyDiffBranch:
         assert json.dumps(on_disk["metrics"], sort_keys=True) == metrics_before
 
 
+class TestAResumeSaysWhatItKept:
+    """OpenCode racing run 4: the apply base's `[resume] 0 already processed,
+    12 remaining` came before any batch existed, and the run then kept batch 0
+    from an earlier run. Only the scheduler knows what a resume kept, so it
+    says so once, at the end."""
+
+    def test_the_kept_and_the_dispatched_batches_are_counted(self, env):
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S0"})
+        first = env.scheduler([env.apply_task(0)], finalize=False).run()
+        assert first.exit_code == 0, first.messages
+
+        env.edits([_patch_edit(env.plan, "second\n")],
+                  result={"status": "applied", "ids": ["s1", "s2"],
+                          "files_touched": ["plans/p.md"], "summary": "S1"})
+        lines = []
+        second = env.scheduler(
+            [env.apply_task(0),
+             env.apply_task(1, expected_ids=["s1", "s2"])],
+            resume=True, finalize=False, log=lines.append,
+        ).run()
+        assert second.exit_code == 0, second.messages
+        tally = [l for l in lines if l.startswith("[write-subagents] resume:")]
+        assert tally == [
+            "[write-subagents] resume: kept 1 task(s) an earlier run finished "
+            "— apply-batch-0 (1 item(s)); dispatched 1 (2 item(s))"
+        ], lines
+
+    def test_a_run_that_kept_nothing_says_nothing(self, env):
+        """Every apply run resumes unless `--fresh`, so a first run reaches
+        the tally too; with nothing kept its batch lines say it all."""
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S0"})
+        lines = []
+        env.scheduler([env.apply_task(0)], finalize=False, log=lines.append).run()
+        assert not [l for l in lines if "resume:" in l], lines
+
+
 # ===========================================================================
 # N2: a `no-op` claim with a NON-empty diff is still applied, but why the
 # claim and the bytes disagree is not one thing (measured 2026-09-16)
