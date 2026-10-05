@@ -1741,7 +1741,7 @@ async function runWorkflow({
       // The dispatcher's `next` names the plan absolutely; when that is the
       // plan this call was typed with, the continuation keeps the user's
       // spelling so its own next-phase command does too.
-      planArg: args.plan === values.plan ? values.planArg : undefined,
+      planArg: samePlanFile(args.plan, values.plan) ? values.planArg : undefined,
       question: args.question,
       extraFlags: args.extra_flags,
     })
@@ -2276,7 +2276,9 @@ function scrubValue(value, commands, pattern, respell = null) {
     if (!pattern) return once
     return once.replace(
       pattern,
-      (match) => (respell && respell(match)) || RUNNABLE_MARKER,
+      (match, offset, whole) =>
+        (respell && !cutMidToken(match, offset, whole) && respell(match)) ||
+        RUNNABLE_MARKER,
     )
   }
   if (Array.isArray(value)) {
@@ -2315,7 +2317,40 @@ function respellerFor(surface, values) {
 
 /** *plan* as this call typed it, when it names the call's own plan file. */
 function typedPlan(plan, values) {
-  return values?.planArg && plan && plan === values.plan ? values.planArg : plan
+  return values?.planArg && plan && samePlanFile(plan, values.plan)
+    ? values.planArg
+    : plan
+}
+
+/**
+ * Whether two plan paths name one file, symlinks followed on both sides.
+ *
+ * The call's plan is made absolute without following symlinks
+ * (`normalizePlan`) and the dispatcher prints some paths through
+ * `Path.resolve()`, so under a symlinked workspace the same file came back
+ * spelled two ways and the re-spelled commands and options carried the
+ * absolute real path instead of the plan as typed (2026-10-05). Two absolute
+ * paths are compared by their real paths; anything else only by equality.
+ */
+function samePlanFile(left, right) {
+  if (left === right) return true
+  if (!left || !right || !path.isAbsolute(left) || !path.isAbsolute(right)) {
+    return false
+  }
+  return realPathOf(left) === realPathOf(right)
+}
+
+/** `fs.realpathSync`, else the real directory plus the name, else as given. */
+function realPathOf(target) {
+  try {
+    return fs.realpathSync(target)
+  } catch {
+    try {
+      return path.join(fs.realpathSync(path.dirname(target)), path.basename(target))
+    } catch {
+      return path.resolve(target)
+    }
+  }
 }
 
 /**
@@ -2368,9 +2403,32 @@ function runnablePattern(surface) {
   // option blocks quote the command inline (``re-invoke with `uv run …` — it
   // re-dispatches …``), and a scrape that ran to the end of the line handed
   // back the closing backtick and the rest of the sentence as extra flags.
+  // Except `"'"`: the middle of `cli_common._quote`'s `'"'"'`, its only
+  // spelling of an apostrophe — a question holding one used to be cut there
+  // (2026-10-05).
+  const body = `(?:[^\\n"\`]|"'")*`
   return new RegExp(
-    `[^\\s"\`]*\\buv(?:\\.exe)?\\b\\s+run\\b[^\\n"\`]*${script}[^\\n"\`]*`,
+    `[^\\s"\`]*\\buv(?:\\.exe)?\\b\\s+run\\b${body}${script}${body}`,
     "g",
+  )
+}
+
+/**
+ * Whether a `"` cut this match where its last token may go on.
+ *
+ * The pattern stops at a double quote, and every command the dispatcher prints
+ * is POSIX-quoted (`cli_common._quote`), so a stop right after a closing quote
+ * (or an escaping backslash) can sit inside one shell word: the parse then
+ * succeeds on the part before the cut, and the re-spelled command — and the
+ * option — carry a truncated value (an `ask` question with a `"` in it,
+ * 2026-10-05). Such a match keeps the pointer and comes back unparseable; a
+ * cut inside an open quote already fails to parse.
+ */
+function cutMidToken(match, offset, whole) {
+  return (
+    typeof whole === "string" &&
+    whole[offset + match.length] === '"' &&
+    (match.endsWith("'") || match.endsWith("\\"))
   )
 }
 
@@ -2391,11 +2449,18 @@ function toolCallsFor(child, surface, values = null) {
   const raw = child.result?.next
   const commands = typeof raw === "string" && raw ? [raw] : []
   const captured = `${child.stdout || ""}\n${child.stderr || ""}`
-  commands.push(...(captured.match(runnablePattern(surface)) ?? []))
+  for (const found of captured.matchAll(runnablePattern(surface))) {
+    // A command a quote cut short is reported, never offered: its parse
+    // would carry the truncated value (`cutMidToken`).
+    commands.push(
+      cutMidToken(found[0], found.index, captured) ? null : found[0],
+    )
+  }
   const seen = new Set()
   const calls = []
   for (const command of commands) {
-    const call = nextAsToolCall(command, surface)
+    const call =
+      command === null ? unparseableCall() : nextAsToolCall(command, surface)
     // Never a `null` beside the human entry: the needs-human branch appends
     // that entry after this list, and "the last option" has to mean it.
     if (!call) continue
@@ -2427,19 +2492,22 @@ function toolCallsFor(child, surface, values = null) {
 function nextAsToolCall(next, surface) {
   if (!next || typeof next !== "string") return null
   const parsed = parseDispatcherCommand(next, surface)
-  if (!parsed) {
-    return {
-      unparseable: true,
-      note:
-        "The dispatcher returned a follow-up this plugin could not parse into " +
-        "a tool call. It is reported rather than executed. Do not run it in a " +
-        "shell.",
-    }
-  }
+  if (!parsed) return unparseableCall()
   return {
     tool: surface.tool_name,
     args: parsed,
     human: describeCall(parsed, surface),
+  }
+}
+
+/** What a follow-up this plugin cannot parse into a tool call comes back as. */
+function unparseableCall() {
+  return {
+    unparseable: true,
+    note:
+      "The dispatcher returned a follow-up this plugin could not parse into " +
+      "a tool call. It is reported rather than executed. Do not run it in a " +
+      "shell.",
   }
 }
 
@@ -3059,6 +3127,8 @@ const __testing = {
   toolCallsFor,
   userSpelling,
   redactCommand,
+  respellerFor,
+  typedPlan,
   relayCounts,
   relayMemory,
   relayProgress,
