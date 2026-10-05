@@ -1010,7 +1010,9 @@ WRITE_REPORT_QUOTE_MAX_CHARS = 20000
 #: A write report's own top-level keys (``write_batch_result.schema.json``'s
 #: properties; a test pins the two together). An object that opens on one of
 #: them is where a report starts.
-WRITE_REPORT_KEYS = ("status", "ids", "files_touched", "summary", "notes", "usage")
+WRITE_REPORT_KEYS = (
+    "status", "ids", "files_touched", "summary", "notes", "usage", "check",
+)
 
 
 def _last_report_opening(reply: str) -> Optional[int]:

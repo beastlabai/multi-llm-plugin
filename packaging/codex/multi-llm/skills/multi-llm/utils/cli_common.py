@@ -246,6 +246,16 @@ RETRY_VERBS: FrozenSet[str] = frozenset({
     "--consolidate", "--consolidate-dry-run", "--reaggregate-consolidation",
 })
 
+#: The verbs of a *continuation*: the follow-up a native leg hands back (the
+#: phase's ``next``) so the invoker can finish the same phase after its
+#: subagents wrote their replies. That command names the plan absolutely, like
+#: every printed follow-up, so the plan spelling the user typed survives it only
+#: through the phase dir's ``.status.json`` (``multi_llm._remember_plan_spelling``
+#: writes it, ``multi_llm._continued_plan_arg`` reads it back).
+CONTINUATION_VERBS: FrozenSet[str] = frozenset({
+    "--reaggregate", "--reaggregate-consolidation",
+})
+
 
 def retry_command(
     mode: str,
@@ -1033,7 +1043,9 @@ def record_user_resume(obj: Optional[Dict[str, Any]]) -> None:
 _INVOCATION: Optional[Dict[str, Any]] = None
 
 
-def record_invocation(mode: str, argv: Sequence[str]) -> None:
+def record_invocation(
+    mode: str, argv: Sequence[str], *, plan_arg: Optional[str] = None
+) -> None:
     """Remember the mode word and the **normalized** argv the dispatcher built.
 
     ``--detach`` rebuilds the child's command line from this rather than echoing
@@ -1043,9 +1055,14 @@ def record_invocation(mode: str, argv: Sequence[str]) -> None:
     through every orchestrator signature) also means a direct
     ``python review_plan_orchestrator.py`` still works — it simply falls back to
     the argv its own ``main`` received.
+
+    *plan_arg* is the plan as the user typed it, when that is not the argv's own
+    ``--plan-file`` value (:func:`invocation_plan_arg`).
     """
     global _INVOCATION
     _INVOCATION = {"mode": mode, "argv": list(argv)}
+    if plan_arg:
+        _INVOCATION["plan_arg"] = str(plan_arg)
 
 
 def clear_invocation() -> None:
@@ -1055,6 +1072,24 @@ def clear_invocation() -> None:
 
 def invocation() -> Optional[Dict[str, Any]]:
     return _INVOCATION
+
+
+def invocation_plan_arg() -> Optional[str]:
+    """The plan as the user typed it, for this invocation, or ``None``.
+
+    The record's ``plan_arg`` when the dispatcher recovered one — a
+    continuation (:data:`CONTINUATION_VERBS`) whose ``--plan-file`` is the
+    absolute path its hand-off printed, while the spelling the user typed is
+    what the next-phase command must carry — else the ``--plan-file`` value the
+    dispatcher received, verbatim.
+    """
+    record = _INVOCATION
+    if not record:
+        return None
+    recovered = record.get("plan_arg")
+    if recovered:
+        return str(recovered)
+    return flag_value(list(record.get("argv") or []), "--plan-file") or None
 
 
 # ---------------------------------------------------------------------------
@@ -1103,6 +1138,40 @@ _REPLAY_IMPLIERS = _option_table(("detach", "internal_worker"))
 #: while ``status``'s line (the launcher's list) said ``--detach``.
 _REPLAY_WORKER = _option_table(("internal_worker",))
 _DETACH_SPELLING = _REPLAY_IMPLIERS["detach"][0][0]
+_REPLAY_YES = _option_table(("yes",))
+
+#: The modes whose ``--yes`` already means ``--agent-decide`` (D6 row 10): the
+#: apply phases set it in ``apply_orchestrator_base.apply_unattended_defaults``,
+#: and ``full`` hands it to them under ``--yes`` (``apply_flags``).
+YES_IMPLIES_JUDGE_MODES: FrozenSet[str] = frozenset({
+    "apply-suggestions", "apply-task-suggestions", "apply-code-fixes", "full",
+})
+
+
+def drop_implied_judge_flag(mode: str, tokens: Iterable[str]) -> List[str]:
+    """*tokens* without the judge flag where ``--yes`` already implies it.
+
+    In a *mode* of :data:`YES_IMPLIES_JUDGE_MODES`, a replay carrying ``--yes``
+    — or ``--detach``/``--internal-worker``, which write it out — runs the
+    same phase with ``--agent-decide`` as without it, and the decisions an
+    earlier run recorded are replayed by ``--resume`` from ``state.json``,
+    not by the flag. Kept, it made the two commands one needs-human result
+    hands back disagree (OpenCode racing run 4): ``status``'s ``resume with:``
+    line, offered as a tool call, read ``--agent-decide --resume`` while the
+    result's ``resume_command`` read ``--resume``. Without ``--yes`` the flag is
+    the caller's own choice and stays.
+    """
+    out = [str(token) for token in tokens]
+    if mode not in YES_IMPLIES_JUDGE_MODES:
+        return out
+    heads = [token.split("=", 1)[0] for token in out]
+    if not any(
+        _matches_any(head, _REPLAY_YES) is not None
+        or _matches_any(head, _REPLAY_IMPLIERS) is not None
+        for head in heads
+    ):
+        return out
+    return [token for token in out if canonical_flag(token) != AGENT_DECIDE_FLAG]
 
 #: The positional-derived flags. Not parent-parser options, so named here next
 #: to the derived half, pointing at their single producer:
@@ -1146,7 +1215,9 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
       and every alias's ``alias_flags``), which the replay's mode word
       re-derives;
     * ``--yes``/``--exec-subagents`` when an implier is present (see
-      :data:`_REPLAY_DROP_IMPLIED`).
+      :data:`_REPLAY_DROP_IMPLIED`);
+    * ``--agent-decide`` where ``--yes`` already means it
+      (:func:`drop_implied_judge_flag`).
 
     Everything else stays, in the spelling it was typed, values with spaces
     included: ``--quick``, ``-q``, ``--models=a,b``, ``--host``, ``--detach``.
@@ -1189,7 +1260,7 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
             index += 1
             continue
         index += 2 if (takes_value and "=" not in token) else 1
-    return fold_judge_flag(out)
+    return drop_implied_judge_flag(mode, fold_judge_flag(out))
 
 
 def current_replay_flags(
@@ -1211,7 +1282,10 @@ def current_replay_flags(
     if record and record.get("mode") and (mode is None or record["mode"] == mode):
         return replay_flags(str(record["mode"]), record.get("argv") or [])
     if isinstance(stored, (list, tuple)):
-        return fold_judge_flag(str(token) for token in stored)
+        folded = fold_judge_flag(str(token) for token in stored)
+        # A list recorded before the judge flag was dropped from `--yes`
+        # replays reads the same as one recorded after.
+        return drop_implied_judge_flag(mode, folded) if mode else folded
     return []
 
 

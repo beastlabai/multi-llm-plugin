@@ -1375,11 +1375,30 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         )
                 unprocessed_merged.append(g)
 
-            print(
-                f"[resume] {len(processed_items)} already processed, "
-                f"{len(unprocessed_merged)} remaining",
-                file=sys.stderr,
+            # On the write executor's leg nothing writes `processed_items`: the
+            # batches an earlier run finished are kept by the scheduler from
+            # their result files, which no batch exists yet to look up. A count
+            # here read "0 already processed, 12 remaining" on a resume that
+            # then kept batch 0 (OpenCode racing run 4), so this leg defers to
+            # the scheduler's own `resume:` line.
+            executor_leg = bool(self.write_kind) and bool(
+                getattr(self.args, "exec_subagents", False)
+                or getattr(self.args, "dry_run_subagents", False)
             )
+            if executor_leg and not processed_items:
+                print(
+                    f"[resume] {len(unprocessed_merged)} item(s) in scope; the "
+                    f"write executor keeps every batch an earlier run finished "
+                    f"(its result file is on disk) and dispatches the rest "
+                    f"(a `resume:` line below names any it kept)",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    f"[resume] {len(processed_items)} already processed, "
+                    f"{len(unprocessed_merged)} remaining",
+                    file=sys.stderr,
+                )
             self.merged = unprocessed_merged
 
         # Step 24: Apply validation overrides
