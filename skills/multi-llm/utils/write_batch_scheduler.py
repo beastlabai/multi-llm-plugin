@@ -225,6 +225,7 @@ __all__ = [
     "HumanTaskPlan",
     "WriteBatchScheduler",
     "bind_prior_changes",
+    "persist_human_task_plan",
     "resolve_human_task_plan",
     "run_write_phase",
     "verification_line",
@@ -645,6 +646,32 @@ def resolve_human_task_plan(
             plan.chain[child] = parent
             queue.append(child)
     return plan
+
+
+def persist_human_task_plan(state: Any, plan: HumanTaskPlan) -> None:
+    """Write a resolved :class:`HumanTaskPlan` into ``state.json`` and save.
+
+    The strategy, a ``skipped`` status (with its reason) for every task the
+    walk skipped, ``completed`` for a human task answered ``done``, and one
+    dependency override per unblocked task. Shared by the scheduler (before
+    its first batch) and by ``implement``'s native emit, which records the
+    same plan before it hands the batches to the host: until 2026-10-05 the
+    native leg left these writes to the host, which never made them, so a
+    task deferred under ``--yes`` never reached ``task_status`` and the
+    finished workflow named no manual task (racing re-run 3, Claude Code).
+    An unanswered ``pause-and-ask`` task is left without a status here.
+    """
+    if plan.strategy and state.get("human_task_strategy") != plan.strategy:
+        state.set("human_task_strategy", plan.strategy)
+    for task_id, reason in sorted(plan.skipped.items()):
+        state.update_task_status(task_id, "skipped", reason=reason)
+    for task_id in plan.completed:
+        state.update_task_status(
+            task_id, "completed", reason="answered --human-task <id>=done",
+        )
+    for task_id, overridden in sorted(plan.overrides.items()):
+        state.record_dependency_override(task_id, list(overridden))
+    state.save()
 
 
 # ---------------------------------------------------------------------------
@@ -4440,17 +4467,7 @@ class WriteBatchScheduler:
     def _persist_human_plan(self, plan: HumanTaskPlan) -> None:
         if self.state is None:
             return
-        if plan.strategy and self.state.get("human_task_strategy") != plan.strategy:
-            self.state.set("human_task_strategy", plan.strategy)
-        for task_id, reason in sorted(plan.skipped.items()):
-            self.state.update_task_status(task_id, "skipped", reason=reason)
-        for task_id in plan.completed:
-            self.state.update_task_status(
-                task_id, "completed", reason="answered --human-task <id>=done",
-            )
-        for task_id, overridden in sorted(plan.overrides.items()):
-            self.state.record_dependency_override(task_id, list(overridden))
-        self.state.save()
+        persist_human_task_plan(self.state, plan)
 
     def _pending_human_message(self, plan: HumanTaskPlan) -> List[str]:
         lines = [

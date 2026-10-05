@@ -166,13 +166,22 @@ class TestOnlyTheCurrentDeferralsAreOwed:
         self._persist(plan, "pause-and-ask", {"T011": "skip"})
         assert StateManager(plan).deferred_implementation_tasks() == []
 
-    def test_the_native_legs_reasons_read_the_same(self, tmp_path):
-        """The reasons `instructions/implement.md` tells the host to record."""
+    def test_the_native_host_records_no_skip_by_hand(self):
+        """Fix round 7: the orchestrator records every skip on the native leg
+        too, so the instructions no longer hand the host a reason to write."""
         text = (SKILL_ROOT / "instructions" / "implement.md").read_text(encoding="utf-8")
+        assert 'Mark all human tasks as "skipped" in state' not in text
+        assert 'Mark task as "skipped" in state' not in text
+        assert 'state["human_task_strategy"]' not in text
+        assert "--force-strategy <answer>" in text
+        assert "--resume --human-task {id}=skip" in text
+        assert '"skipped — depends on skipped task {parent_id} ({parent_title})"' in text
+
+    def test_an_older_native_hosts_reasons_read_the_same(self, tmp_path):
+        """The reasons the instructions told the host to record before fix
+        round 7, still in states written then."""
         declined = "skipped by user during pause-and-ask"
         deferred = "deferred — user chose to complete manually after implementation"
-        assert f'reason "{declined}"' in text and f'reason "{deferred}"' in text
-        assert '"skipped — depends on skipped task {parent_id} ({parent_title})"' in text
         dependent = f"skipped — depends on skipped task T011 ({TITLES['T011']})"
         plan = _complete_plan(tmp_path)
         for parent_reason, owed in ((deferred, MANUAL), (declined, [])):
@@ -393,6 +402,8 @@ class TestImplementRecordsTheTitles:
             "T002": "Implement the core",
             "T003": "Add tests",
         }
+        # No manual task, no key: a plan without one keeps its state shape.
+        assert "implement_human_task_ids" not in state
 
     def test_the_executor_leg_names_its_deferred_tasks_on_completion(self, repo):
         import implement_orchestrator
@@ -431,3 +442,197 @@ def test_the_tool_routes_are_told_to_list_them():
     line = modes.TOOL_USER_NEXT_STEP_LINE
     assert "manual_tasks" in line
     assert "Workflow complete." in line
+
+
+# ---------------------------------------------------------------------------
+# The native leg records its own deferrals (fix round 7)
+# ---------------------------------------------------------------------------
+
+def _human_t002(repo):
+    """The repo fixture's three-task chain with T002 a manual task."""
+    import implement_orchestrator
+
+    original = implement_orchestrator.TaskDecomposer
+
+    class SeededDecomposer(original):
+        def parse_plan(self, content):
+            tasks = super().parse_plan(content)
+            self.tasks["T002"].executor_role = "human"
+            self.tasks["T002"].subagent_type = "human"
+            return tasks
+
+    repo.monkeypatch.setattr(implement_orchestrator, "TaskDecomposer", SeededDecomposer)
+
+
+def _native_emit(repo, capsys, *flags):
+    """`implement` on the native leg (no `--exec-subagents`), via the dispatcher."""
+    code, out, err, result = _run(
+        ["implement", str(repo.plan), "--host", "claude-code", *flags], capsys
+    )
+    assert code == 0, err
+    output_file = next(
+        line.split("Output file:", 1)[1].strip()
+        for line in out.splitlines() if line.startswith("Output file:")
+    )
+    return out, json.loads(Path(output_file).read_text(encoding="utf-8"))
+
+
+def _state(repo) -> dict:
+    return json.loads((output_dir_path(repo.plan) / "state.json").read_text())
+
+
+def _host_runs_t001_and_closes(repo, capsys):
+    """What the host does on the native leg: T001's subagent edits, its record,
+    then the closing `util finalize-tracking --mark-completed`."""
+    (repo.root / "src" / "main.py").write_text("x = 2\n", encoding="utf-8")
+    phase_dir = output_dir_path(repo.plan) / "implement"
+    state_file = output_dir_path(repo.plan) / "state.json"
+    for argv in (
+        ["util", "batch-done", "--phase-dir", str(phase_dir), "--task-id", "T001",
+         "--status", "completed"],
+        ["util", "finalize-tracking", "--state-file", str(state_file),
+         "--touched", "src/main.py", "--mark-completed"],
+    ):
+        code, _out, err, _result = _run(argv, capsys)
+        assert code == 0, err
+
+
+OWED_T002_T003 = [
+    {"id": "T002", "title": "Implement the core"},
+    {"id": "T003", "title": "Add tests"},
+]
+
+
+class TestTheNativeLegRecordsItsDeferrals:
+    """Racing re-run 3 (2026-10-05, Claude Code): T010, a manual task deferred
+    under `--yes`, was "Deferred" in summary.md but never reached `task_status`
+    — the native leg left that write to the host, which only ever records the
+    tasks it dispatches — so after apply-code-fixes `util next-command` printed
+    a bare `[WORKFLOW_COMPLETE]`. The emit now resolves and records the
+    human-task plan itself, from the strategy and the tasks it already holds."""
+
+    def test_yes_records_the_deferral_and_its_dependent_at_emit(self, repo, capsys):
+        _seed_generate_tasks(repo)
+        _human_t002(repo)
+        out, handoff = _native_emit(repo, capsys, "--yes")
+
+        state = _state(repo)
+        assert state["task_status"]["T002"] == "skipped"
+        assert state["task_status_reasons"]["T002"].startswith(
+            "deferred — manual task"
+        )
+        assert state["task_status"]["T003"] == "skipped"
+        assert state["task_status_reasons"]["T003"].startswith(
+            "skipped — depends on skipped task T002"
+        )
+        assert "T001" not in state["task_status"]  # the host's to record
+        assert state["implement_human_task_ids"] == ["T002"]
+
+        # The host reads the skips; it does not re-derive them.
+        assert sorted(handoff["skipped_tasks"]) == ["T002", "T003"]
+        by_id = {t["id"]: t for b in handoff["batches"] for t in b["tasks"]}
+        assert by_id["T002"]["status"] == by_id["T003"]["status"] == "skipped"
+        assert by_id["T003"]["skip_reason"] == state["task_status_reasons"]["T003"]
+        assert by_id["T001"]["status"] == "pending"
+        assert "T002 Implement the core: deferred — manual task" in out
+
+    def test_the_whole_native_path_names_the_manual_tasks_on_completion(
+        self, repo, capsys
+    ):
+        """native implement under --yes → batch-done → finalize --mark-completed
+        → review-code done → apply-code-fixes' closing call → next-command."""
+        _seed_generate_tasks(repo)
+        _human_t002(repo)
+        _native_emit(repo, capsys, "--yes")
+        _host_runs_t001_and_closes(repo, capsys)
+
+        # review-code finished with one finding (its own completion write).
+        review_dir = output_dir_path(repo.plan) / "code-review"
+        review_dir.mkdir(parents=True, exist_ok=True)
+        (review_dir / "grouped.json").write_text(json.dumps({
+            "format_version": 2, "groups": [{
+                "group_id": "g1", "theme": "t",
+                "suggestions": [{"title": "s", "importance": "HIGH"}],
+            }],
+        }), encoding="utf-8")
+        state = StateManager(repo.plan)
+        state.mark_phase_completed("review-plan")
+        state.mark_phase_completed("code-review")
+        state.save()
+
+        plan_arg = "plans/sample.md"
+        complete = {
+            "phase": None, "command": None, "complete": True,
+            "manual_tasks": OWED_T002_T003,
+        }
+        block = [
+            "[WORKFLOW_COMPLETE]",
+            "[MANUAL_TASK] T002 Implement the core",
+            "[MANUAL_TASK] T003 Add tests",
+        ]
+        code, out, err, result = _run(
+            ["apply-code-fixes", plan_arg, "--mark-completed"], capsys
+        )
+        assert code == 0, err
+        assert result["user_next_step"] == complete
+        lines = out.splitlines()
+        start = lines.index("[WORKFLOW_COMPLETE]")
+        assert lines[start:start + 3] == block
+
+        code, out, err, result = _run(
+            ["util", "next-command", plan_arg, "--after", "apply-code-fixes"], capsys
+        )
+        assert code == 0, err
+        assert result["user_next_step"] == complete
+        lines = out.splitlines()
+        start = lines.index("[WORKFLOW_COMPLETE]")
+        assert lines[start:start + 3] == block
+
+    def test_a_manual_task_nobody_answered_is_owed_once_implement_closes(
+        self, repo, capsys
+    ):
+        """The backstop: an attended run whose host picked a strategy and
+        recorded nothing. The finished phase still names the manual task —
+        never a clean completion — while a running one does not."""
+        _seed_generate_tasks(repo)
+        _human_t002(repo)
+        _out, handoff = _native_emit(repo, capsys)  # attended: no strategy yet
+        assert handoff["human_task_strategy"] is None
+        assert "skipped_tasks" not in handoff
+        assert "T002" not in _state(repo)["task_status"]
+        assert StateManager(repo.plan).deferred_implementation_tasks() == []
+
+        _host_runs_t001_and_closes(repo, capsys)
+        assert StateManager(repo.plan).deferred_implementation_tasks() == [
+            {"id": "T002", "title": "Implement the core"},
+        ]
+
+    def test_a_done_answer_is_recorded_and_not_owed(self, repo, capsys):
+        _seed_generate_tasks(repo)
+        _human_t002(repo)
+        _out, handoff = _native_emit(
+            repo, capsys, "--force-strategy", "pause-and-ask",
+            "--human-task", "T002=done",
+        )
+        assert _state(repo)["task_status"]["T002"] == "completed"
+        assert "skipped_tasks" not in handoff
+        _host_runs_t001_and_closes(repo, capsys)
+        assert StateManager(repo.plan).deferred_implementation_tasks() == []
+
+    def test_a_declined_task_and_its_dependent_are_recorded_and_not_owed(
+        self, repo, capsys
+    ):
+        _seed_generate_tasks(repo)
+        _human_t002(repo)
+        _out, handoff = _native_emit(
+            repo, capsys, "--force-strategy", "pause-and-ask",
+            "--human-task", "T002=skip",
+        )
+        state = _state(repo)
+        assert state["task_status_reasons"]["T002"] == (
+            "skipped by user during pause-and-ask"
+        )
+        assert state["task_status"]["T003"] == "skipped"
+        assert sorted(handoff["skipped_tasks"]) == ["T002", "T003"]
+        _host_runs_t001_and_closes(repo, capsys)
+        assert StateManager(repo.plan).deferred_implementation_tasks() == []

@@ -974,6 +974,56 @@ def _materialize_native_write_tasks(
     return path, tasks
 
 
+def _native_human_task_plan(
+    output_data: Dict[str, Any],
+    *,
+    strategy: Optional[str],
+    decisions: Dict[str, str],
+):
+    """Resolve the human-task plan over the native leg's batches; annotate them.
+
+    The same ``resolve_human_task_plan`` the executor runs over the same
+    tasks. Every task the plan skips (a deferred manual task, and under
+    ``skip-dependents`` each task that depends on one) gets
+    ``status: "skipped"`` and its ``skip_reason`` in the task JSON, a manual
+    task answered ``done`` gets ``status: "completed"``, and the JSON gains a
+    top-level ``skipped_tasks`` map: the host reads that it must not
+    dispatch them instead of re-deriving the walk. With no strategy yet (an
+    attended run, before the host asks) nothing is skipped.
+    """
+    from utils.write_batch_scheduler import resolve_human_task_plan
+
+    entries = [
+        task
+        for batch in output_data.get("batches") or []
+        for task in batch.get("tasks") or []
+    ]
+    plan = resolve_human_task_plan(
+        [
+            {
+                "task_id": task.get("id"),
+                "task_title": task.get("title"),
+                "executor_role": task.get("executor_role"),
+                "is_human": task.get("is_human"),
+                "depends_on": list(task.get("depends_on") or []),
+            }
+            for task in entries
+        ],
+        strategy=strategy,
+        decisions=decisions,
+    )
+    for task in entries:
+        task_id = str(task.get("id") or "")
+        if task_id in plan.skipped:
+            task["status"] = TaskStatus.SKIPPED.value
+            task["skip_reason"] = plan.skipped[task_id]
+        elif task_id in plan.completed:
+            task["status"] = TaskStatus.COMPLETED.value
+    if plan.skipped:
+        output_data["skipped_tasks"] = dict(sorted(plan.skipped.items()))
+    return plan
+
+
 def _refuse_unrecorded_native_resume(
     tasks: List[Dict[str, Any]], *, plan_path: Path, state: StateManager, resume: bool,
 ) -> bool:
@@ -1262,7 +1312,15 @@ def main(argv: Optional[List[str]] = None) -> int:
     # dependent `skip-dependents` skips with it) can be named by its title
     # once the workflow completes, not only by its id — the native leg's host
     # records `skipped` itself and never writes a title (2026-10-04).
-    if state.record_task_titles({task.id: task.title for task in tasks}):
+    # The manual tasks ride along (`implement_human_task_ids`), so a finished
+    # implement whose manual task nobody answered still names it as owed.
+    if state.record_task_titles(
+        {task.id: task.title for task in tasks},
+        human_ids=[
+            task.id for task in tasks
+            if getattr(task, "executor_role", "") == "human"
+        ],
+    ):
         state.save()
 
     # Restore previous statuses if resuming
@@ -1442,6 +1500,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         getattr(args, "exec_subagents", False)
         or getattr(args, "dry_run_subagents", False)
     )
+    # The native leg resolves the human-task plan here, from the strategy and
+    # the answers it already holds, exactly as the executor resolves it before
+    # its first batch — so the skips are in the task JSON the host reads and
+    # are written to state.json below, not left for the host to record.
+    native_human_plan = None
+    if not executor_backed and human_task_ids:
+        native_human_plan = _native_human_task_plan(
+            output_data,
+            strategy=human_task_strategy,
+            decisions=dict(state.get("human_task_decisions") or {}),
+        )
     if not executor_backed:
         write_native_handoff()
 
@@ -1513,6 +1582,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Pending tasks: {output_data.get('pending_tasks', output_data['total_tasks'])}")
     print(f"Batches: {len(output_data['batches'])}")
 
+    if native_human_plan is not None and native_human_plan.skipped:
+        print(
+            "Skipped tasks (recorded in state.json; do not dispatch them, and "
+            "list them in the summary's Manual Tasks (Deferred) section):"
+        )
+        titles = dict(state.get("task_titles") or {})
+        for task_id, reason in sorted(native_human_plan.skipped.items()):
+            title = titles.get(task_id)
+            print(f"  {task_id}{' ' + title if title else ''}: {reason}")
+
     print("\nClaude Code should now:")
     print("  1. Read the output JSON file")
     print("  2. Execute each batch sequentially (batches have dependencies)")
@@ -1528,6 +1607,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     # after every task, the verify step and the summary. Until 2026-10-05 this
     # site wrote `mark_phase_completed("implement")`, so `status` read the
     # phase as done minutes before its last task (racing re-run, 2026-10-04).
+    if native_human_plan is not None:
+        # What the executor's `_persist_human_plan` writes before its first
+        # batch: the deferred manual tasks (and the dependents skipped with
+        # them) as `skipped` with their reasons, a `done` answer as completed,
+        # the skip-continue overrides. Until fix round 7 the native leg left
+        # these writes to the host, which never made them, so `task_status`
+        # had no T010 and the finished workflow named no manual task.
+        from utils.write_batch_scheduler import persist_human_task_plan
+
+        persist_human_task_plan(state, native_human_plan)
     state.mark_phase_started("implement")
     state.save()
 
