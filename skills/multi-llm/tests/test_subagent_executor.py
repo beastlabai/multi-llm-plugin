@@ -1242,7 +1242,6 @@ class TestJudgeReportNamedByKind:
             "w0": "opencode:x",
         }
 
-
     def test_the_pinned_runner_note_names_the_file_the_pin_came_from(self):
         """Fix round 8: the judge's pin is read from its kind-qualified report,
         and the dispatch line used to name the bare one regardless."""
@@ -4044,6 +4043,29 @@ class TestInvalidModelIsFatal:
         }), encoding="utf-8")
         assert executor._recorded_runners(str(tmp_path)) == {
             "a": "codex:gpt-5.5", "f": "codex:gpt-5.5",
+        }
+
+    def test_a_reply_shape_failure_is_not_a_pin_and_a_transport_failure_is(
+        self, tmp_path
+    ):
+        """Fix round 8 (OpenCode run 3): a row that failed on its reply's shape
+        does not pin its runner, so a re-run after a model switch takes the
+        new one; a row that failed in transport keeps the pin. Row-level: the
+        same spec's other rows are untouched."""
+        spec = "opencode:opencode/big-pickle"
+        (tmp_path / executor.BATCH_REPORT_FILENAME).write_text(json.dumps({
+            "tasks": [
+                {"task_id": "a", "runner": spec, "status": "schema_invalid"},
+                {"task_id": "b", "runner": spec, "status": "unparseable_result"},
+                {"task_id": "c", "runner": spec, "status": "ok"},
+                {"task_id": "d", "runner": spec, "status": "timeout"},
+                {"task_id": "e", "runner": spec, "status": "rate_limited"},
+                {"task_id": "f", "runner": spec, "status": "runner_error"},
+                {"task_id": "g", "runner": spec, "status": "incomplete"},
+            ],
+        }), encoding="utf-8")
+        assert executor._recorded_runners(str(tmp_path)) == {
+            task_id: spec for task_id in ("c", "d", "e", "f", "g")
         }
 
     def test_a_recorded_runner_pins_only_the_round_it_was_recorded_for(self, tmp_path):
