@@ -708,10 +708,10 @@ class TestTheEnabledKindsTakeTheRung:
         # One rung probe for this scope's grant, then the wrapped dispatches.
         # A step-3 phase's closing next-step block asks the early warning,
         # which probes once more under the repo-wide scope key (the cache is
-        # scope-keyed): that probe carries the enumeration's deny dirs and
-        # is not this phase's.
+        # scope-keyed): that probe moves its canary workdir outside the
+        # repository (root grant, 2026-10-05) and is not this phase's.
         probes = scratch.wrapper.records(probe=True)
-        own = [r for r in probes if (r["env"]["MULTI_LLM_CANARY_DENY_DIRS"] is None) == (scope != "repo-wide")]
+        own = [r for r in probes if (r["env"]["MULTI_LLM_CANARY_WORKDIR"] is None) == (scope != "repo-wide")]
         [probe] = own
         assert len(probes) == (1 if scope == "repo-wide" else 2), probes
         rows = scratch.wrapper.records(probe=False)
@@ -732,20 +732,15 @@ class TestTheEnabledKindsTakeTheRung:
                 assert f"is the directory {tasks_dir}" in developer
                 assert in_repo == [f"dir:{tasks_dir}"]
             else:
-                # Step 3b: the enumeration — src/ required (it covers the
-                # declared file), plans/p.md a file rule under the descended
-                # ancestor, never the root, plans/ or a protected path.
-                src = os.path.realpath(scratch.app.parent)
+                # Step 3b, revised 2026-10-05: one required dir rule on the
+                # repository root and nothing else in the tree.
                 out_dir = os.path.realpath(scratch.out_dir)
-                assert f"anywhere in the repository {scratch.root}" in developer
+                assert f"The whole repository {scratch.root} is writable" in developer
                 assert f"this run's output folder {out_dir}" in developer
+                assert "Do NOT modify .git/" in developer
                 assert "/tmp and /dev/shm are denied" in developer
-                assert ("--allow", f"dir:{src}") in _allow(row)
-                assert f"file:{os.path.realpath(scratch.plan)}" in in_repo
-                for absent in (f"dir:{scratch.root}", f"dir:{os.path.realpath(scratch.plan.parent)}",
-                               f"dir:{out_dir}", f"dir:{scratch.root / '.git'}",
-                               f"dir:{scratch.root / '.codex'}", f"dir:{scratch.root / '.multi-llm'}"):
-                    assert absent not in in_repo, (absent, in_repo)
+                assert in_repo == [f"dir:{scratch.root}"]
+                assert ("--allow", f"dir:{scratch.root}") in _allow(row)
                 assert row["env"]["UV_CACHE_DIR"] == os.path.join(row["env"]["TMPDIR"], "uv-cache")
                 assert row["env"]["PYTEST_ADDOPTS"].startswith("-o cache_dir=")
                 assert "write phase, scope repo-wide" in lines[notices[0]]
@@ -1194,7 +1189,7 @@ class TestAPartialEditStaysRecoverable:
         elif scope == "tasks":
             assert _in_repo(rows[2], scratch.root) == [f"dir:{os.path.realpath(scratch.tasks.parent)}"]
         else:
-            assert f"dir:{os.path.realpath(scratch.app.parent)}" in _in_repo(rows[2], scratch.root)
+            assert _in_repo(rows[2], scratch.root) == [f"dir:{scratch.root}"]
         # Batch 1's edit appears once; the restore's new inode is not read as
         # a replaced target (the identity compared is this dispatch's own).
         assert scratch.target(mode).read_text(encoding="utf-8") == pre_batch_1 + BATCH1_EDIT
@@ -1324,10 +1319,12 @@ class TestRepoWideDeniedEdits:
     def test_a_denied_write_to_git_config_and_state_never_reads_applied(
         self, scratch, capsys, mode, edits_target,
     ):
-        """Item 13 "Out-of-scope edits are denied" for the repo-wide kinds:
-        the targets outside the grant are `.git/config` and this run's
-        `state.json`. A failed batch when nothing moved, a partial application
-        when the declared file changed — never applied, `.git/config` intact."""
+        """Item 13 for the repo-wide kinds, under the root grant (2026-10-05):
+        `.git/config` and this run's `state.json` are inside the grant now, so
+        a `file_change` codex reports as failed there is the jail's own
+        failure — still never applied: a failed batch when nothing moved, a
+        partial application when the declared file changed, `.git/config`
+        intact."""
         config = scratch.root / ".git" / "config"
         step: Dict[str, Any] = {
             "events": [file_change("failed", str(config), str(scratch.out_dir / "state.json"))],
@@ -1351,36 +1348,41 @@ class TestRepoWideDeniedEdits:
         assert row.get("sandbox_rung") == "plugin-landlock"
         assert "plugin-landlock jail refused the runner's write to" in text
         assert ".git/config" in text and "plans/p/state.json" in text
-        assert "outside this batch's grant" in text
+        assert "which the jail granted whole" in text
+        assert "outside this batch's grant" not in text
         assert len(scratch.write_calls()) == 1
         assert _in_flight(scratch.status(mode)) == []
         _no_uncontained_rung(scratch, text)
 
 
-class TestADeclaredNewTopLevelEntryIsRefused:
-    def test_implement_declaring_a_new_root_file_is_refused_before_dispatch(
+class TestADeclaredNewTopLevelEntryIsDispatched:
+    def test_implement_declaring_a_new_root_file_runs_on_the_jail(
         self, scratch, capsys,
     ):
-        """F1 "Protected paths": a declared file that would be a new entry at
-        the repository root is refused before any child starts, naming the
-        path and F6; the rung was measured (one probe) and nothing spawned."""
+        """Root grant (2026-10-05): a declared file that is a new entry at
+        the repository root is dispatched on the jail like any other and
+        lands; until then it was refused before any child started, naming
+        F6 (the racing re-run's `index.html`)."""
         scratch.tasks.write_text(
             TASKS_BODY.replace("Files to create: src/main.py", "Files to create: newtop.py"),
             encoding="utf-8",
         )
+        scratch.script("implement", batch0=[
+            {"append": {str(scratch.root / "newtop.py"): marker("{id}")}},
+        ])
         code = scratch.run("implement")
         cap = capsys.readouterr()
         text = cap.out + cap.err
-        assert code == 3, text[-4000:]
-        assert "T001: rejected" in cap.err
-        assert "newtop.py would be a new entry directly in" in cap.err
-        assert "driver.subagent_runner" in cap.err and "(F6)" in cap.err
-        assert "Nothing was spawned." in cap.err
-        assert not (scratch.root / "newtop.py").exists()
-        assert scratch.write_calls() == []
-        assert scratch.wrapper.records(probe=False) == []
+        assert code == 0, text[-4000:]
+        assert "would be a new entry directly in" not in text
+        assert "(F6)" not in text
+        assert (scratch.root / "newtop.py").read_text(encoding="utf-8") == marker("T001")
+        assert len(scratch.write_calls()) == 2
+        rows = scratch.wrapper.records(probe=False)
+        assert len(rows) == 2
+        assert all(_in_repo(row, scratch.root) == [f"dir:{scratch.root}"] for row in rows)
         assert len(scratch.wrapper.records(probe=True)) == 1
-        assert not scratch.completed("implement")
+        assert scratch.completed("implement")
         assert _in_flight(scratch.status("implement")) == []
 
     def test_the_same_task_runs_on_codex_s_own_sandbox(self, scratch, capsys, monkeypatch):
@@ -1401,33 +1403,26 @@ class TestADeclaredNewTopLevelEntryIsRefused:
         assert scratch.wrapper.records() == []
 
 
-#: The denied-write cases (F1 "Protected paths") as the "model" runs them
-#: from inside its batch, each tagged so the test can grep for a leak.
+#: Writes outside the repository, as the "model" runs them from inside its
+#: batch, each tagged so the test can grep for a leak: still the jail's to
+#: deny under the root grant.
 DENIED_SHELL = {
-    "commit": "git -c user.email=a@b.invalid -c user.name=a commit -q --allow-empty -m MARK3B",
-    "reset": "git reset -q --hard",
-    "config": "git config user.name MARK3B",
-    "hook": "echo MARK3B > .git/hooks/pre-commit",
-    "gitx": "echo MARK3B > .git/x",
-    "codex": "echo MARK3B > .codex/x",
-    "codexcfg": "echo MARK3B >> .codex/config.toml",
-    "providers": "echo MARK3B >> .multi-llm/providers.yaml",
-    "runs": "mkdir .multi-llm/runs",
-    "mtmp": "echo MARK3B > .multi-llm/tmp/x",
-    "state": "echo MARK3B >> plans/p/state.json",
-    "snapshot": "echo MARK3B > plans/p/implement/pre_batch/x",
-    "rollback": "echo MARK3B > plans/p/implement/rollback_store/x",
-    "audit": "echo MARK3B >> plans/p/implement/subagent_audit.jsonl",
-    "newtop": "echo MARK3B > newtop.txt",
-    "newtopdir": "mkdir newtop",
-    "rm": "rm README.md",
-    "mv": "mv README.md README2.md",
     "tmp": "echo MARK3B > /tmp/mllm-3b-accept-$$",
     "shm": "echo MARK3B > /dev/shm/mllm-3b-accept-$$",
 }
+#: Writes the root grant admits (2026-10-05): the hands-off set is the
+#: developer message's and the scheduler's business, not the jail's. `.git/`
+#: is pruned from the sweep, so its writes surface only through the
+#: `[GIT_CONFIG_CHANGED]` line; `newtop.txt` and `.codex/x` are undeclared
+#: writes the sweep names and the policy admits.
 POSITIVE_SHELL = {
     "tmpdir": 'echo MARK3B-ok > "$TMPDIR/scratch.txt"',
     "status": "git status --porcelain",
+    "gitx": "echo MARK3B > .git/x",
+    "config": "git config user.name MARK3B",
+    "hook": "echo MARK3B > .git/hooks/pre-commit",
+    "newtop": "echo MARK3B > newtop.txt",
+    "codexx": "echo MARK3B > .codex/x",
 }
 
 
@@ -1435,8 +1430,10 @@ POSITIVE_SHELL = {
 @pytest.mark.sandbox_probe  # the suite's guard would answer the production wrapper 126
 class TestTheRealJailThroughTheScheduler:
     """Tier 2: the real `landlock_exec.py`, the real scheduler, the mock codex
-    jailed for real (§8.3 "Step 3b is done when": the denied-write cases
-    run through the real scheduler, not the preflight rig)."""
+    jailed for real. Under the root grant (2026-10-05) the jail denies only
+    writes outside the repository; what the model is told to leave alone is
+    checked afterwards by the sweep, `driver.write_paths` and the warn-only
+    `[GIT_CONFIG_CHANGED]` line — nothing is backed up or restored."""
 
     @pytest.fixture
     def jailed(self, tmp_path, monkeypatch):
@@ -1447,18 +1444,19 @@ class TestTheRealJailThroughTheScheduler:
         registry._config_key = None
 
     @pytest.mark.parametrize("mode", REPO_WIDE)
-    def test_every_denied_write_holds_while_the_batch_lands(self, jailed, capsys, mode):
+    def test_outside_writes_are_denied_inside_ones_land_and_the_metadata_line_fires(
+        self, jailed, capsys, mode,
+    ):
         root = jailed.root
         head = _git(root, "rev-parse", "HEAD")
         commits = _git(root, "rev-list", "--count", "HEAD")
         keep = {
             p: p.read_bytes() for p in (
-                root / ".git" / "HEAD", root / ".git" / "config",
-                root / ".codex" / "config.toml", root / ".multi-llm" / "providers.yaml",
-                root / "README.md",
+                root / ".git" / "HEAD", root / ".codex" / "config.toml",
+                root / ".multi-llm" / "providers.yaml", root / "README.md",
             )
         }
-        top_before = sorted(os.listdir(root))
+        config_before = (root / ".git" / "config").read_bytes()
         target = jailed.target(mode)
         jailed.script(mode)
         script = json.loads(jailed.script_path.read_text(encoding="utf-8"))
@@ -1484,18 +1482,137 @@ class TestTheRealJailThroughTheScheduler:
         leaked = {name for name in DENIED_SHELL if results[name] == 0}
         assert leaked == set(), leaked
         assert all(results[name] == 0 for name in POSITIVE_SHELL), results
-        # Byte-identical afterwards, no new commit, no new top-level entry, no
-        # marker anywhere under the protected set.
+        assert not list(Path("/tmp").glob("mllm-3b-accept-*"))
+        assert not list(Path("/dev/shm").glob("mllm-3b-accept-*"))
+        # Inside the repository the root grant admitted everything, the
+        # hands-off set included — and nothing restored it.
+        assert (root / ".git" / "x").read_bytes() == b"MARK3B\n"
+        assert (root / ".git" / "hooks" / "pre-commit").read_bytes() == b"MARK3B\n"
+        assert b"MARK3B" in (root / ".git" / "config").read_bytes()
+        assert (root / "newtop.txt").read_bytes() == b"MARK3B\n"
+        assert (root / ".codex" / "x").read_bytes() == b"MARK3B\n"
         assert {p: p.read_bytes() for p in keep} == keep
         assert _git(root, "rev-parse", "HEAD") == head
         assert _git(root, "rev-list", "--count", "HEAD") == commits
-        assert sorted(os.listdir(root)) == top_before
-        for base in (root / ".git", root / ".codex", root / ".multi-llm", jailed.out_dir):
-            for path in base.rglob("*"):
-                if path.is_file():
-                    assert b"MARK3B" not in path.read_bytes(), path
-        assert not list(Path("/tmp").glob("mllm-3b-accept-*"))
-        assert not list(Path("/dev/shm").glob("mllm-3b-accept-*"))
+        # The warn-only line, once, for the batch that changed the metadata,
+        # naming what moved; the second batch drew none.
+        warned = [line for line in text.splitlines() if "[GIT_CONFIG_CHANGED]" in line]
+        assert len(warned) == 1, warned
+        assert ".git/config changed" in warned[0]
+        assert ".git/hooks/pre-commit added" in warned[0]
+        assert "warn-only" in warned[0]
+        # The sweep named the undeclared in-tree writes; the policy admitted them.
+        assert "changed outside this task's declared set" in text
+        assert "newtop.txt" in text and ".codex/x" in text
         # The declared edit landed, once per batch.
         assert target.read_text(encoding="utf-8").count("<!-- applied ") == 2
-        assert jailed.changed_outside(mode) == []
+        assert config_before != (root / ".git" / "config").read_bytes()
+
+    @pytest.mark.parametrize("mode", REPO_WIDE)
+    def test_a_denied_path_written_inside_the_jail_is_caught_by_the_policy(
+        self, jailed, capsys, mode,
+    ):
+        """`driver.write_paths` stays the detective control it is for every
+        other runner: the jail lets a write to `.multi-llm/providers.yaml`
+        land (the root grant covers it), the post-run sweep sees it moved,
+        the policy denies it and the batch fails without a restore (no
+        rollback point is ever taken for a denied path)."""
+        root = jailed.root
+        target = jailed.target(mode)
+        jailed.script(mode)
+        script = json.loads(jailed.script_path.read_text(encoding="utf-8"))
+        script["rules"] = [{
+            "match": BATCH_TEXT[mode][0],
+            "steps": [{"shell": {"providers": "echo MARK3B >> .multi-llm/providers.yaml"},
+                       "append": {str(target): marker("{id}")}}],
+        }]
+        jailed.script_path.write_text(json.dumps(script), encoding="utf-8")
+
+        code = jailed.run(mode)
+        cap = capsys.readouterr()
+        text = cap.out + cap.err
+        assert code == 3, text[-6000:]
+        assert jailed.shell_results() == {"providers": 0}
+        assert b"MARK3B" in (root / ".multi-llm" / "providers.yaml").read_bytes()
+        row = jailed.report(mode)["tasks"][0]
+        assert row["status"] == executor.STATUS_POLICY_VIOLATION
+        assert row["write_outcome"] == executor.WRITE_POLICY_VIOLATION
+        assert ".multi-llm/providers.yaml" in text and "driver.write_paths.deny" in text
+        assert not jailed.completed(mode)
+        assert len(jailed.write_calls()) == 1
+
+
+# ---------------------------------------------------------------------------
+# The root grant (2026-10-05, a user decision): a repo-wide batch may create a
+# file directly in the repository root — the racing re-run's `index.html`
+# (plans/2026-10-04-racing-rerun/FINDINGS-codex.md, issues 2 and 3) — and the
+# plugin's own git calls afterwards run nothing the batch could have planted.
+# ---------------------------------------------------------------------------
+
+ROOT_TASKS_BODY = """# Tasks
+
+## Tasks
+
+### T001: Create the page
+Create the single-file game page at the repository root.
+- Depends on: none
+- Files to create: index.html
+
+### T002: Tune the app
+Tune the module.
+- Depends on: T001
+- Files to modify: src/app.py
+"""
+
+
+@pytest.mark.landlock
+@pytest.mark.sandbox_probe
+class TestARootLevelFileLandsOnTheRealJail:
+    """Tier 2: the real wrapper, the real scheduler, the mock codex jailed for
+    real. Before the root grant the first task was refused before any child
+    started (``index.html would be a new entry directly in <root>``, F6)."""
+
+    @pytest.fixture
+    def jailed(self, tmp_path, monkeypatch):
+        from tests.test_landlock_exec import require_landlock
+        require_landlock()
+        yield Scratch(tmp_path, monkeypatch, real_jail=True)
+        registry._config = None
+        registry._config_key = None
+
+    def test_a_new_root_file_and_a_subdirectory_edit_both_land(self, jailed, capsys):
+        root = jailed.root
+        jailed.tasks.write_text(ROOT_TASKS_BODY, encoding="utf-8")
+        _git(root, "add", "-A")
+        _git(root, "commit", "-qm", "root tasks")
+        head = _git(root, "rev-parse", "HEAD")
+        index_html = root / "index.html"
+        assert not index_html.exists()
+        jailed.script_path.write_text(json.dumps({"rules": [
+            {"match": BATCH_TEXT["implement"][0],
+             "steps": [{"append": {str(index_html): "<!doctype html>\n"}}]},
+            {"match": BATCH_TEXT["implement"][1],
+             "steps": [{"append": {str(jailed.app): marker("{id}")}}]},
+        ], "default": {}}), encoding="utf-8")
+
+        code = jailed.run("implement")
+        cap = capsys.readouterr()
+        text = cap.out + cap.err
+        assert code == 0, text[-6000:]
+        assert "would be a new entry directly in" not in text
+        assert "(F6)" not in text
+        assert jailed.completed("implement")
+        report = jailed.report("implement")
+        assert [row.get("sandbox_rung") for row in report["tasks"]] == ["plugin-landlock"] * 2
+        assert [row["write_outcome"] for row in report["tasks"]] == ["applied"] * 2
+        assert "[SANDBOX_INCIDENTAL]" in text and "[SANDBOX_BYPASSED]" not in text
+        # Both edits landed: the new root-level file and the subdirectory edit.
+        assert index_html.read_text(encoding="utf-8") == "<!doctype html>\n"
+        assert jailed.app.read_text(encoding="utf-8") == "x = 1\n" + marker("T002")
+        # The batch made no commit and planted nothing in the metadata.
+        assert _git(root, "rev-parse", "HEAD") == head
+        assert "[GIT_CONFIG_CHANGED]" not in text
+        # Each wrapped dispatch carried one dir rule on the repository root.
+        rows = [json.loads(line) for line in jailed.calls.read_text(encoding="utf-8").splitlines() if line]
+        assert len(jailed.write_calls()) == 2
+        assert len(rows) >= 2

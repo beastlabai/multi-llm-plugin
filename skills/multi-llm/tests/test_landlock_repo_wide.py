@@ -1,13 +1,21 @@
-"""The repo-wide grant (plan step 3b, 2026-10-02): the dispatch half.
+"""The repo-wide grant (plan step 3b, 2026-10-02; revised 2026-10-05): the
+dispatch half.
 
-Plan ``codex-sandbox-unavailable-findings-and-fixes`` §6 F1 "Protected paths
-for repo-wide write profiles", "Editing turns that run tests and builds"
-(step 1b's decision), "Allow-list entries at dispatch" (the ``repo-wide``
-row) and §8.3 "Step 3b is done when". What this file pins is
-``landlock_dispatch``'s share — the enumeration, the required/optional split,
-the pre-dispatch refusals, step 1b's redirects, the canary's extra targets and
-the stream reading — and, at tier 2, the production wrapper denying every
-case in F1's denied-write list while the positive cases land.
+Plan ``codex-sandbox-unavailable-findings-and-fixes`` §6 F1 "Editing turns
+that run tests and builds" (step 1b's decision), "Allow-list entries at
+dispatch" (the ``repo-wide`` row) and §3's 2026-10-05 decision: the grant is
+**one dir rule on the repository root**. Until then it was one rule per
+enumerated root entry outside a protected set, which kept the root unruled
+and so refused a declared new top-level file before dispatch — the racing
+re-run's whole plan was one root-level ``index.html``. Landlock is allow-only
+and a rule inherits down the tree, so the root rule necessarily covers
+``.git``, ``.codex``, ``.multi-llm`` and the run's output folder; the user
+chose that over a backup-and-restore of the protected set around every
+batch. What this file pins is ``landlock_dispatch``'s share — the root entry,
+step 1b's redirects, the probe's out-of-repository negative controls, the
+developer message and the stream reading — and, at tier 2, the production
+wrapper admitting every write inside the repository while denying every
+write outside it.
 
 Tier 1 needs no kernel; tier 2 (``landlock`` marker) needs Landlock ABI 3 and
 skips without it (fails under ``MULTI_LLM_REQUIRE_LANDLOCK=1``).
@@ -33,7 +41,6 @@ sys.path.insert(0, str(SKILL_ROOT))
 
 from utils import landlock_dispatch as ld  # noqa: E402
 from utils import write_batch_scheduler as wbs  # noqa: E402
-from utils.provider_registry import DEFAULT_WRITE_PATHS  # noqa: E402
 from utils.providers import codex as codex_mod  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     SANDBOX_CANARY_DENIED,
@@ -51,7 +58,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 RUNG = codex_mod.PLUGIN_LANDLOCK_RUNG
-DENY = tuple(DEFAULT_WRITE_PATHS["deny"])
 
 
 @pytest.fixture(autouse=True)
@@ -74,9 +80,9 @@ def _git(tree: Path, *args: str) -> str:
 
 @pytest.fixture
 def wide(tmp_path):
-    """A committed scratch repo with everything F1's protected set names, a
-    denied entry of each kind, two symlinks, an ancestor (``plans/``) above
-    the output folder, and ordinary files and directories."""
+    """A committed scratch repo with everything the hands-off set names, a
+    denied entry of each kind, two symlinks, the output folder under
+    ``plans/``, and ordinary files and directories."""
     root = Path(os.path.realpath(tmp_path))
     repo = root / "repo"
     out = repo / "plans" / "plan"
@@ -114,21 +120,16 @@ def wide(tmp_path):
     return SimpleNamespace(root=root, repo=repo, out=out, phase=phase, home=home, slot=slot)
 
 
-def _request(wide, *, declared=(), output_dir=True, deny=DENY, kind="implement"):
+def _request(wide, *, output_dir=True, kind="implement"):
     return JailRequest(
         repo_root=str(wide.repo), kind=kind, write_scope=WRITE_SCOPE_REPO_WIDE,
-        output_dir=str(wide.out) if output_dir else None, deny_patterns=tuple(deny),
-        declared=tuple(str(p) for p in declared),
+        output_dir=str(wide.out) if output_dir else None,
     )
 
 
 def _ctx(wide, **kw):
     return JailContext(request=_request(wide, **kw), tmpdir=str(wide.slot),
                        codex_home=str(wide.home))
-
-
-def _rel(wide, path):
-    return os.path.relpath(path, wide.repo)
 
 
 def _tree_hashes(top: Path):
@@ -145,233 +146,55 @@ def _tree_hashes(top: Path):
 
 
 # ===========================================================================
-# Tier 1: the enumeration (F1 "Protected paths": prevention by enumeration)
+# Tier 1: the root grant (2026-10-05)
 # ===========================================================================
 
-
-class TestTheEnumeration:
-    def test_the_protected_set_and_the_ancestor_get_no_rule(self, wide):
-        plan = ld.repo_wide_plan(_request(wide))
-        assert plan.root == str(wide.repo)
-        assert [_rel(wide, p) for p in plan.protected] == [
-            ".git", ".hg", ".svn", ".codex", ".multi-llm", "plans/plan",
+class TestTheRootGrant:
+    def test_the_allow_list_is_base_plus_one_required_rule_on_the_root(self, wide):
+        entries = ld.allow_entries(_ctx(wide))
+        assert [(e.path, e.kind, e.required) for e in entries[:5]] == [
+            (str(wide.home), "dir", True), (str(wide.slot), "dir", True),
+            ("/dev/null", "file", True), ("/dev/ptmx", "file", False), ("/dev/pts", "dir", False),
         ]
-        assert [_rel(wide, a) for a in plan.ancestors] == ["plans"]
-        ruled = {e.path for e in plan.entries}
-        for name in (".", ".git", ".codex", ".multi-llm", "plans", "plans/plan"):
-            assert os.path.realpath(wide.repo / name) not in ruled, name
-
-    def test_one_rule_per_entry_outside_the_protected_set(self, wide):
-        plan = ld.repo_wide_plan(_request(wide))
-        assert [(_rel(wide, e.path), e.kind, e.required) for e in plan.entries] == [
-            (".gitignore", "file", False),
-            ("README.md", "file", False),
-            ("plans/other.md", "file", False),
-            ("plans/plan.md", "file", False),
-            ("pyproject.toml", "file", False),
-            ("src", "dir", False),
-            ("tests", "dir", False),
+        assert [(e.path, e.kind, e.required) for e in entries[5:]] == [
+            (str(wide.repo), "dir", True),
         ]
-        assert all(e.why.startswith("repo-wide: ") for e in plan.entries)
+        assert entries[5].why.startswith("repo-wide: ")
+        argv, _env = ld.wrap_argv(["codex", "exec"], RUNG, _ctx(wide), {})
+        assert argv[argv.index(f"dir:{wide.repo}") - 1] == "--allow"
+        # Nothing below the root gets a rule of its own any more.
+        assert not any(str(wide.repo / "src") in a for a in argv)
 
-    def test_the_denied_entries_get_no_rule_and_are_named(self, wide):
-        plan = ld.repo_wide_plan(_request(wide))
-        assert sorted((_rel(wide, p), pat) for p, pat in plan.denied) == [
-            (".env", "**/.env"), (".npmrc", "**/.npmrc"), (".ssh", "**/.ssh/**"),
-            ("key.pem", "**/*.pem"), ("node_modules", "**/node_modules/**"),
-        ]
-
-    def test_symlinks_get_no_rule_of_their_own(self, wide):
-        plan = ld.repo_wide_plan(_request(wide))
-        names = {_rel(wide, e.path) for e in plan.entries}
-        assert not names & {"gitlink", "outlink", "srclink"}
-
-    def test_with_no_deny_list_every_unprotected_entry_is_ruled(self, wide):
-        plan = ld.repo_wide_plan(_request(wide, deny=()))
-        names = {_rel(wide, e.path) for e in plan.entries}
-        assert {".env", ".npmrc", ".ssh", "key.pem", "node_modules"} <= names
-        assert plan.denied == ()
-
-    def test_an_output_dir_outside_the_repo_is_not_protected(self, wide, tmp_path):
-        request = JailRequest(
-            repo_root=str(wide.repo), kind="implement", write_scope=WRITE_SCOPE_REPO_WIDE,
-            output_dir=str(tmp_path / "elsewhere"),
-        )
-        plan = ld.repo_wide_plan(request)
-        assert [_rel(wide, p) for p in plan.protected] == [".git", ".hg", ".svn", ".codex", ".multi-llm"]
-        assert plan.ancestors == ()
-        # `plans/` is then an ordinary directory entry.
-        assert ("plans", "dir") in {(_rel(wide, e.path), e.kind) for e in plan.entries}
+    def test_the_root_is_realpath_resolved(self, wide):
+        dotted = wide.repo / "plans" / ".." / "src" / ".."
+        request = JailRequest(repo_root=str(dotted), kind="implement",
+                              write_scope=WRITE_SCOPE_REPO_WIDE, output_dir=str(wide.out))
+        assert ld.repo_wide_entry(request).path == str(wide.repo)
 
     def test_a_missing_repo_root_is_refused(self, wide):
         request = JailRequest(repo_root=str(wide.repo / "gone"), kind="implement",
                               write_scope=WRITE_SCOPE_REPO_WIDE)
         with pytest.raises(ld.JailRefused) as excinfo:
-            ld.repo_wide_plan(request)
+            ld.allow_entries(JailContext(request, str(wide.slot), str(wide.home)))
         assert excinfo.value.reason == "repo-root-missing"
 
-    def test_the_vcs_names_are_the_sweeps(self):
+    def test_the_hands_off_names_are_instruction_level_only(self, wide):
+        """The old protected set is now the developer message's: no entry
+        for it, no refusal of a declared path under it."""
+        assert ld.REPO_WIDE_HANDS_OFF_NAMES == (".git", ".codex", ".multi-llm")
         assert ld.VCS_DIR_NAMES == wbs.SWEEP_PRUNED_DIR_NAMES
-        assert ld.PROTECTED_ROOT_NAMES == ld.VCS_DIR_NAMES + (".codex", ".multi-llm")
+        assert not hasattr(ld, "PROTECTED_ROOT_NAMES")
+        assert not hasattr(ld, "repo_wide_declared_refusal")
+        assert not hasattr(ld, "repo_wide_plan")
+        assert not hasattr(ld, "extra_protected_paths")
+        assert not hasattr(ld, "REPO_WIDE_F6")
 
-    def test_the_probe_controls_come_from_the_enumeration(self, wide):
-        plan = ld.repo_wide_plan(_request(wide))
-        assert not hasattr(plan, "write_dir")  # no positive target in the tree (2026-10-02)
-        assert [_rel(wide, p) for p in plan.negative_dirs()] == [
-            ".git", ".codex", ".multi-llm", "plans/plan",
-        ]
-
-
-class TestTheHooksPathAndTheProvidersConfigAreProtected:
-    """Fix round 4 (2026-10-02). ``core.hooksPath`` names a directory git
-    runs unconfined on the user's next commit; outside ``.git/`` it was an
-    ordinary entry with a dir rule, so a jailed batch could plant a hook
-    there. ``MULTI_LLM_PROVIDERS_CONFIG`` is the config whose
-    ``verify_command`` the next run executes unjailed; pointed inside the
-    repository it was a ruled file. Both join the protected set when they
-    resolve inside the repository, as the output folder does."""
-
-    def test_a_relative_hooks_path_is_protected_and_never_ruled(self, wide):
-        (wide.repo / ".husky").mkdir()
-        (wide.repo / ".husky" / "pre-commit").write_text("#!/bin/sh\n")
-        _git(wide.repo, "config", "core.hooksPath", ".husky")
-        plan = ld.repo_wide_plan(_request(wide))
-        assert str(wide.repo / ".husky") in plan.protected
-        assert ".husky" not in {_rel(wide, e.path) for e in plan.entries}
-        assert str(wide.repo / ".husky") in plan.negative_dirs()
-        refusal = ld.repo_wide_declared_refusal(plan, [str(wide.repo / ".husky" / "pre-commit")])
-        assert refusal and "protected path" in refusal and "(F6)" in refusal
-
-    def test_an_absolute_hooks_path_inside_the_repo_makes_its_parent_an_ancestor(self, wide):
-        (wide.repo / "tools" / "hooks").mkdir(parents=True)
-        (wide.repo / "tools" / "lint.sh").write_text("")
-        _git(wide.repo, "config", "core.hooksPath", str(wide.repo / "tools" / "hooks"))
-        plan = ld.repo_wide_plan(_request(wide))
-        assert str(wide.repo / "tools" / "hooks") in plan.protected
-        assert [_rel(wide, a) for a in plan.ancestors] == ["plans", "tools"]
-        names = {_rel(wide, e.path) for e in plan.entries}
-        assert "tools/lint.sh" in names and "tools" not in names and "tools/hooks" not in names
-
-    def test_a_hooks_path_outside_the_repo_changes_nothing(self, wide, tmp_path):
-        outside = tmp_path / "githooks"
-        outside.mkdir()
-        _git(wide.repo, "config", "core.hooksPath", str(outside))
-        plan = ld.repo_wide_plan(_request(wide))
-        assert [_rel(wide, p) for p in plan.protected] == [
-            ".git", ".hg", ".svn", ".codex", ".multi-llm", "plans/plan",
-        ]
-
-    def test_a_hooks_path_under_git_is_already_covered(self, wide):
-        _git(wide.repo, "config", "core.hooksPath", ".git/hooks")
-        plan = ld.repo_wide_plan(_request(wide))
-        assert [_rel(wide, p) for p in plan.protected] == [
-            ".git", ".hg", ".svn", ".codex", ".multi-llm", "plans/plan",
-        ]
-
-    def test_a_providers_config_inside_the_repo_is_protected(self, wide, monkeypatch):
-        (wide.repo / "config").mkdir()
-        config = wide.repo / "config" / "providers.yaml"
-        config.write_text("driver:\n  verify_command: true\n")
-        (wide.repo / "config" / "other.yaml").write_text("")
-        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
-        plan = ld.repo_wide_plan(_request(wide))
-        assert str(config) in plan.protected
-        assert [_rel(wide, a) for a in plan.ancestors] == ["config", "plans"]
-        names = {_rel(wide, e.path) for e in plan.entries}
-        assert "config/other.yaml" in names and "config/providers.yaml" not in names
-        assert str(config) not in plan.negative_dirs()
-        refusal = ld.repo_wide_declared_refusal(plan, [str(config)])
-        assert refusal and "protected path" in refusal
-
-    def test_a_relative_providers_config_resolves_against_the_cwd(self, wide, monkeypatch):
-        config = wide.repo / "providers.yaml"
-        config.write_text("")
-        monkeypatch.chdir(wide.repo)
-        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", "providers.yaml")
-        plan = ld.repo_wide_plan(_request(wide))
-        assert str(config) in plan.protected
-        assert "providers.yaml" not in {_rel(wide, e.path) for e in plan.entries}
-
-    @pytest.mark.parametrize("where", ["outside", "unset", "under-.multi-llm"])
-    def test_a_providers_config_elsewhere_changes_nothing(self, wide, monkeypatch, tmp_path, where):
-        if where == "outside":
-            monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(tmp_path / "providers.yaml"))
-        elif where == "under-.multi-llm":
-            monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG",
-                               str(wide.repo / ".multi-llm" / "providers.yaml"))
-        else:
-            monkeypatch.delenv("MULTI_LLM_PROVIDERS_CONFIG", raising=False)
-        plan = ld.repo_wide_plan(_request(wide))
-        assert [_rel(wide, p) for p in plan.protected] == [
-            ".git", ".hg", ".svn", ".codex", ".multi-llm", "plans/plan",
-        ]
-
-
-# ===========================================================================
-# Tier 1: the declared set — required entries and the pre-dispatch refusals
-# ===========================================================================
-
-
-class TestTheDeclaredSet:
-    def test_the_entries_covering_a_declared_file_are_required(self, wide):
-        declared = (wide.repo / "src/app.py", wide.repo / "src/pkg/new.py",
-                    wide.repo / "README.md", wide.repo / "tests/sub/deep/new.py")
-        plan = ld.repo_wide_plan(_request(wide, declared=declared))
-        required = {_rel(wide, e.path) for e in plan.entries_for([str(p) for p in declared]) if e.required}
-        assert required == {"src", "README.md", "tests"}
-        assert ld.repo_wide_declared_refusal(plan, [str(p) for p in declared]) is None
-
-    @pytest.mark.parametrize("rel,case", [
-        ("newtop.txt", "new entry directly in"),
-        ("newdir/x.py", "covered by no enumerated entry"),
-        ("plans/new.md", "new entry directly in"),
-        (".git/hooks/pre-commit", "protected path"),
-        (".git/x", "protected path"),
-        (".codex/x", "protected path"),
-        (".multi-llm/providers.yaml", "protected path"),
-        (".multi-llm/runs/x", "protected path"),
-        ("plans/plan/state.json", "protected path"),
-        ("plans/plan/implement/pre_batch/t1/snapshot.json", "protected path"),
-        ("plans/plan/implement/rollback_store/blob", "protected path"),
-        ("plans/plan/implement/subagent_audit.jsonl", "protected path"),
-        ("node_modules/dep/index.js", "driver.write_paths denies"),
-        (".env", "driver.write_paths denies"),
-        ("gitlink", "protected path"),
-        ("outlink/passwd", "outside the repository"),
-        ("../elsewhere.txt", "outside the repository"),
-    ])
-    def test_a_declared_path_the_grant_cannot_cover_is_refused_naming_f6(self, wide, rel, case):
-        plan = ld.repo_wide_plan(_request(wide))
-        reason = ld.repo_wide_declared_refusal(plan, [str(wide.repo / rel)])
-        assert reason is not None and case in reason, reason
-        assert reason.endswith(ld.REPO_WIDE_F6)
-        assert "driver.subagent_runner" in reason
+    def test_the_two_narrow_scopes_still_never_rule_the_root(self, wide):
+        request = JailRequest(repo_root=str(wide.repo), kind="apply_suggestions",
+                              write_scope=WRITE_SCOPE_PLAN_FILE, target=str(wide.repo))
         with pytest.raises(ld.JailRefused) as excinfo:
-            ld.allow_entries(_ctx(wide, declared=(wide.repo / rel,)))
-        assert excinfo.value.reason == "declared-uncovered"
-
-    def test_a_symlink_into_the_tree_resolves_to_its_target(self, wide):
-        plan = ld.repo_wide_plan(_request(wide))
-        assert ld.repo_wide_declared_refusal(plan, [str(wide.repo / "srclink" / "z.py")]) is None
-
-    def test_the_allow_list_is_base_plus_the_enumeration_and_never_the_root(self, wide):
-        ctx = _ctx(wide, declared=(wide.repo / "src/app.py",))
-        entries = ld.allow_entries(ctx)
-        assert [(e.path, e.kind, e.required) for e in entries[:5]] == [
-            (str(wide.home), "dir", True), (str(wide.slot), "dir", True),
-            ("/dev/null", "file", True), ("/dev/ptmx", "file", False), ("/dev/pts", "dir", False),
-        ]
-        tail = [(_rel(wide, e.path), e.kind, e.required) for e in entries[5:]]
-        assert tail == [
-            (".gitignore", "file", False), ("README.md", "file", False),
-            ("plans/other.md", "file", False), ("plans/plan.md", "file", False),
-            ("pyproject.toml", "file", False), ("src", "dir", True), ("tests", "dir", False),
-        ]
-        assert str(wide.repo) not in {e.path for e in entries}
-        argv, _env = ld.wrap_argv(["codex", "exec"], RUNG, ctx, {})
-        assert "--allow" in argv and f"dir:{wide.repo / 'src'}" in argv
-        assert f"dir:{wide.repo / 'tests'}" in argv
-        assert argv[argv.index(f"dir:{wide.repo / 'tests'}") - 1] == "--allow-optional"
+            ld.allow_entries(JailContext(request, str(wide.slot), str(wide.home)))
+        assert excinfo.value.reason in ("repo-root", "target-missing")
 
     def test_an_unknown_scope_is_still_refused(self, wide):
         request = JailRequest(repo_root=str(wide.repo), kind="implement",
@@ -379,6 +202,10 @@ class TestTheDeclaredSet:
         with pytest.raises(ld.JailRefused) as excinfo:
             ld.allow_entries(JailContext(request, str(wide.slot), str(wide.home)))
         assert excinfo.value.reason == "scope-not-served"
+
+    def test_the_request_carries_no_per_task_path(self):
+        fields = set(JailRequest.__dataclass_fields__)
+        assert "declared" not in fields and "deny_patterns" not in fields
 
 
 # ===========================================================================
@@ -416,64 +243,96 @@ class TestStepOneBRedirects:
 
 
 class TestThePreviewAndTheInstructions:
-    def test_the_preview_shows_a_placeholder_and_enumerates_nothing(self, wide):
+    def test_the_preview_names_the_root_rule_and_computes_nothing(self, wide):
         argv = ld.preview_wrap_argv(["codex", "exec"], RUNG, _request(wide))
-        assert "--allow-optional" in argv
-        assert f"dir:{ld.PLACEHOLDER_REPO_ENTRIES}" in argv
-        assert not any(str(wide.repo) in a for a in argv)
+        assert argv[argv.index(f"dir:{wide.repo}") - 1] == "--allow"
+        assert [a for a in argv if str(wide.repo) in a] == [f"dir:{wide.repo}"]
+        assert not hasattr(ld, "PLACEHOLDER_REPO_ENTRIES")
 
-    def test_the_developer_message_names_the_grant_its_limits_and_the_toolchain(self, wide):
+    def test_the_developer_message_says_the_repository_is_writable_and_what_to_leave_alone(self, wide):
         text = codex_mod.jail_developer_instructions(JailContext(_request(wide), str(wide.slot)))
-        assert f"anywhere in the repository {wide.repo}" in text
+        assert f"The whole repository {wide.repo} is writable" in text
+        assert "including directly in its root" in text
+        assert "every write outside it is denied" in text
         assert f"this run's output folder {wide.out}" in text
-        assert ".git/, .codex/, .multi-llm/" in text
-        assert "The repository root itself (and plans/) is not writable" in text
-        assert "never replaced (sed -i, a temp-file save, mv)" in text
+        assert "Do NOT modify .git/" in text and ".codex/, .multi-llm/" in text
+        assert "no edits to .git/config or .git/hooks/" in text
+        assert "the jail does not enforce this" in text
         assert "/tmp and /dev/shm are denied" in text
         assert "uv, pytest, npm and Python bytecode already use caches under $TMPDIR" in text
         assert "never try sudo or chown" in text
-        assert "You may write only" not in text and "is the directory" not in text
+        # The old enumeration's wording and the narrow scopes' sentences are gone.
+        for absent in ("You may write only", "is the directory", "is not writable",
+                       "never replaced", "including anywhere in the repository, is denied",
+                       "are denied."):
+            assert absent not in text, absent
 
-    def test_a_plan_file_message_carries_no_repo_wide_sentence(self, wide):
+    def test_a_plan_file_message_is_byte_identical_to_before(self, wide):
         request = JailRequest(repo_root=str(wide.repo), kind="apply_suggestions",
                               write_scope=WRITE_SCOPE_PLAN_FILE,
                               target=str(wide.repo / "plans" / "plan.md"))
         text = codex_mod.jail_developer_instructions(JailContext(request, str(wide.slot)))
-        assert "You may edit existing files anywhere" not in text and "/dev/shm" not in text
+        assert text == (
+            "Filesystem writes are restricted, whatever your environment context says "
+            f"about sandboxing. Write scratch files only under {wide.slot} (also $TMPDIR). "
+            "Every other write, including anywhere in the repository, is denied."
+            f" You may write only {wide.repo / 'plans' / 'plan.md'}. Edit it in place with "
+            "apply_patch, or by rewriting it through a shell redirect. Commands that "
+            "replace the file are denied and leave it unchanged: sed -i, perl -i, editors "
+            "or scripts that save through a temporary file and a rename, mv over it, or "
+            "deleting and re-creating it. Git commands that write .git/ (add, commit, "
+            "stash, checkout, restore, fetch) are denied. npm and npx use a per-dispatch "
+            "cache under $TMPDIR. A Permission denied error here comes from this "
+            "restriction, not from file ownership: never try sudo or chown to work "
+            "around it."
+        )
+        assert "whole repository" not in text and "/dev/shm" not in text
 
 
 class TestTheCanary:
-    def test_canary_env_names_every_protected_dir_and_no_target_in_the_tree(self, wide):
+    def test_canary_env_hands_over_no_target_in_the_tree(self, wide):
         env = ld.canary_env(_ctx(wide))
-        assert env[codex_mod.CANARY_ENV_DENY_DIRS].split("\n") == [
-            str(wide.repo / ".git"), str(wide.repo / ".codex"),
-            str(wide.repo / ".multi-llm"), str(wide.out),
-        ]
-        # The repo-wide grant's positive control is the canary's own $TMPDIR
-        # write; nothing in the source tree is ever a target (2026-10-02).
-        assert codex_mod.CANARY_ENV_WRITE_DIR not in env
-        assert codex_mod.CANARY_ENV_WRITE_FILE not in env
+        assert env == {}
+        assert not hasattr(codex_mod, "CANARY_ENV_DENY_DIRS")
 
-    def test_the_rung_probe_hands_the_controls_to_the_canary(self, wide):
+    def test_the_rung_probe_moves_its_negative_controls_outside_the_repository(self, wide, temp_base):
         env = {"PATH": os.environ.get("PATH", ""), "HOME": str(wide.root),
                "CODEX_HOME": str(wide.home)}
         resolved = ["/opt/codex/bin/codex", *codex_mod.PLUGIN_LANDLOCK_PROBE_ARGV[1:]]
         with ld.rung_probe(RUNG, _request(wide), resolved, cwd=str(wide.repo), env=env) as probe:
+            workdir = probe.env[codex_mod.CANARY_ENV_WORKDIR]
+            assert Path(workdir).is_dir()
+            assert Path(workdir).parent == temp_base
+            assert workdir != probe.env["TMPDIR"]
+            assert Path(probe.seeded).parent == Path(workdir)
+            assert probe.seed_intact()
             assert codex_mod.CANARY_ENV_WRITE_DIR not in probe.env
-            assert str(wide.repo / ".git") in probe.env[codex_mod.CANARY_ENV_DENY_DIRS]
-            assert str(wide.out) in probe.env[codex_mod.CANARY_ENV_DENY_DIRS]
+            assert codex_mod.CANARY_ENV_WRITE_FILE not in probe.env
             allowed = [a for a in probe.argv if a.startswith(("dir:", "file:"))]
-            assert f"dir:{wide.repo / 'src'}" in allowed
-            assert f"dir:{wide.repo}" not in allowed
-        # The canary script reads the extra targets.
-        assert codex_mod.CANARY_ENV_DENY_DIRS in codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT
+            assert f"dir:{wide.repo}" in allowed
+            assert not any(workdir in a for a in allowed)
+        assert not Path(workdir).exists()
+        # The canary script reads the override ahead of its default workdir.
+        assert codex_mod.CANARY_ENV_WORKDIR in codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT
+        assert codex_mod.LANDLOCK_CANARY_WORKDIR in codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT
+
+    def test_a_plan_file_probe_keeps_the_in_repo_workdir(self, wide):
+        (wide.repo / ".multi-llm" / "tmp").mkdir(exist_ok=True)
+        env = {"PATH": os.environ.get("PATH", ""), "HOME": str(wide.root),
+               "CODEX_HOME": str(wide.home)}
+        request = JailRequest(repo_root=str(wide.repo), kind="apply_suggestions",
+                              write_scope=WRITE_SCOPE_PLAN_FILE,
+                              target=str(wide.repo / "plans" / "plan.md"))
+        resolved = ["/opt/codex/bin/codex", *codex_mod.PLUGIN_LANDLOCK_PROBE_ARGV[1:]]
+        with ld.rung_probe(RUNG, request, resolved, cwd=str(wide.repo), env=env) as probe:
+            assert codex_mod.CANARY_ENV_WORKDIR not in probe.env
+            assert Path(probe.seeded).parent == wide.repo / ".multi-llm" / "tmp"
 
 
 def _plain_repo(root: Path, *dirs: str) -> SimpleNamespace:
     """A repo for the permissions-jailed canary: a `.git` directory (made, not
-    initialised — the canary stats it, nothing reads it), the probe workdir
-    the walk would have prepared, the directories named, and a codex home
-    beside it. `root` may carry a space."""
+    initialised), the in-repo workdir the walk would have prepared, the
+    directories named, and a codex home beside it."""
     repo = root / "repo"
     for d in (".git", ".multi-llm/tmp", *dirs):
         (repo / d).mkdir(parents=True, exist_ok=True)
@@ -483,36 +342,29 @@ def _plain_repo(root: Path, *dirs: str) -> SimpleNamespace:
 
 
 @contextlib.contextmanager
-def _perms_jail(probe, *read_only: Path):
+def _perms_jail(probe):
     """Tier 1's stand-in for the kernel: inside an entered `rung_probe`, the
-    seeded file goes 0444 and the probe workdir, its `.multi-llm/` parent and
-    every `read_only` directory 0555, so a write there fails on plain permissions exactly as the
-    jail would deny it, while `$TMPDIR` stays writable. Everything is restored
-    before the context (and the probe's own clean-up) runs on."""
+    seeded file goes 0444 and its directory — the probe's workdir — 0555, so
+    a write there fails on plain permissions exactly as the jail would deny
+    it, while `$TMPDIR` stays writable. Restored before the context (and the
+    probe's own clean-up) runs on."""
     seeded = Path(probe.seeded)
     workdir = seeded.parent
-    # `.multi-llm/` (the workdir's parent) is itself a protected root and so
-    # always one of the negative targets.
-    dirs = [workdir, workdir.parent, *read_only]
     try:
         seeded.chmod(0o444)
-        for d in dirs:
-            d.chmod(0o555)
+        workdir.chmod(0o555)
         yield
     finally:
-        for d in reversed(dirs):
-            d.chmod(0o755)
+        workdir.chmod(0o755)
         seeded.chmod(0o644)
 
 
 @pytest.mark.skipif(os.name != "posix" or os.geteuid() == 0,
                     reason="plain permissions deny nothing to root")
 class TestTheCanaryUnderPlainPermissions:
-    """The canary script's reading of its targets, with the kernel stood in
-    for by file permissions (adversarial review, 2026-10-02: the extra
-    negative targets were handed to the script `os.pathsep`-joined and
-    word-split by the shell, so a repository path holding a space or a colon
-    produced nonexistent targets that read as denied)."""
+    """The canary script's reading of its workdir, with the kernel stood in
+    for by file permissions: a repo-wide probe's negative controls live in
+    the out-of-repository directory `$MULTI_LLM_CANARY_WORKDIR` names."""
 
     @pytest.fixture
     def sh(self):
@@ -529,66 +381,59 @@ class TestTheCanaryUnderPlainPermissions:
         return ld.rung_probe(RUNG, req, [sh, "-c", codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT],
                              cwd=str(plain.repo), env=env)
 
-    def test_the_controls_hold_when_every_target_is_denied(self, tmp_path, sh):
+    def test_the_controls_hold_when_the_outside_workdir_is_denied(self, tmp_path, sh):
         plain = _plain_repo(tmp_path, "src")
-        with self._probe(plain, sh) as probe, _perms_jail(probe, plain.repo / ".git"):
+        with self._probe(plain, sh) as probe, _perms_jail(probe):
+            assert Path(probe.env[codex_mod.CANARY_ENV_WORKDIR]) == Path(probe.seeded).parent
+            proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
+        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
+        assert SANDBOX_CANARY_DENIED in proc.stdout
+        # Nothing was created in the repository's own `.multi-llm/tmp`.
+        assert os.listdir(plain.repo / ".multi-llm" / "tmp") == []
+
+    def test_a_writable_in_repo_workdir_does_not_fail_a_repo_wide_probe(self, tmp_path, sh):
+        """The root grant makes `.multi-llm/tmp` writable: the canary's
+        negative control must not look there, or a working jail reads as
+        "not denied"."""
+        plain = _plain_repo(tmp_path, "src")
+        with self._probe(plain, sh) as probe, _perms_jail(probe):
+            assert os.access(plain.repo / ".multi-llm" / "tmp", os.W_OK)
             proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
         assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
         assert SANDBOX_CANARY_DENIED in proc.stdout
 
-    def test_a_repository_path_with_a_space_keeps_its_negative_targets(self, tmp_path, sh):
-        """`.git/` left writable under a path with a space must fail the
-        canary: the target is the one directory, not two fragments of it."""
-        plain = _plain_repo(tmp_path / "with space", "src")
-        with self._probe(plain, sh) as probe, _perms_jail(probe):
-            assert str(plain.repo / ".git") in probe.env[codex_mod.CANARY_ENV_DENY_DIRS]
+    def test_a_writable_outside_workdir_fails_the_probe(self, tmp_path, sh):
+        """A jail that left the out-of-repository directory writable (no
+        boundary at all) must not pass."""
+        plain = _plain_repo(tmp_path, "src")
+        with self._probe(plain, sh) as probe:
             proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
         assert proc.returncode == 3, (proc.returncode, proc.stdout, proc.stderr)
         assert SANDBOX_CANARY_DENIED not in proc.stdout
         assert "not denied" in proc.stderr
 
-    def test_a_repository_path_with_a_colon_keeps_its_negative_targets(self, tmp_path, sh):
-        plain = _plain_repo(tmp_path / "a:b", "src")
-        with self._probe(plain, sh) as probe, _perms_jail(probe):
-            proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
-        assert proc.returncode == 3, (proc.returncode, proc.stdout, proc.stderr)
-        assert SANDBOX_CANARY_DENIED not in proc.stdout
-
-    def test_a_negative_target_that_is_not_a_directory_is_a_setup_failure(self, tmp_path, sh):
-        """A target the script cannot stat is a mis-handed target, never a
-        denied write: the control that would pass vacuously stops the probe."""
-        plain = _plain_repo(tmp_path, "src")
-        with self._probe(plain, sh) as probe, _perms_jail(probe, plain.repo / ".git"):
-            env = dict(probe.env)
-            env[codex_mod.CANARY_ENV_DENY_DIRS] += "\n" + str(plain.repo / "gone")
-            proc = _run(ld.unwrap_argv(probe.argv), env, plain.repo)
-        assert proc.returncode == codex_mod.LANDLOCK_CANARY_SETUP_EXIT, (proc.stdout, proc.stderr)
-        assert codex_mod.LANDLOCK_CANARY_TARGET_FAILED in proc.stderr
-        assert SANDBOX_CANARY_DENIED not in proc.stdout
+    def test_a_repository_path_with_a_space_or_a_colon_is_fine(self, tmp_path, sh):
+        for name in ("with space", "a:b"):
+            plain = _plain_repo(tmp_path / name, "src")
+            with self._probe(plain, sh) as probe, _perms_jail(probe):
+                proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
+            assert proc.returncode == 0, (name, proc.returncode, proc.stdout, proc.stderr)
+            assert SANDBOX_CANARY_DENIED in proc.stdout
 
     def test_an_unwritable_first_directory_does_not_fail_the_probe(self, tmp_path, sh):
-        """The probe's positive control never writes into the source tree:
-        the first enumerated directory (sorted order puts `.github`, `.husky`
-        and a root-owned volume dir first) is nobody's proven-writable
-        target, and a control there failed on plain permissions where the
-        jail was fine (adversarial review, 2026-10-02, repro case B)."""
+        """The probe's positive control never writes into the source tree
+        (adversarial review, 2026-10-02, repro case B)."""
         plain = _plain_repo(tmp_path, ".github", "src")
-        with self._probe(plain, sh) as probe, _perms_jail(
-            probe, plain.repo / ".git", plain.repo / ".github",
-        ):
-            assert codex_mod.CANARY_ENV_WRITE_DIR not in probe.env
-            proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
+        (plain.repo / ".github").chmod(0o555)
+        try:
+            with self._probe(plain, sh) as probe, _perms_jail(probe):
+                assert codex_mod.CANARY_ENV_WRITE_DIR not in probe.env
+                proc = _run(ld.unwrap_argv(probe.argv), probe.env, plain.repo)
+        finally:
+            (plain.repo / ".github").chmod(0o755)
         assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
         assert SANDBOX_CANARY_DENIED in proc.stdout
         assert os.listdir(plain.repo / ".github") == []
-
-    def test_a_target_holding_a_newline_cannot_be_handed_over(self, tmp_path, sh):
-        """The one byte the hand-over cannot carry: the probe is a setup
-        failure (the walk's `unknown`), never a pass on a split target."""
-        plain = _plain_repo(tmp_path, "src", "plans/a\nb")
-        with pytest.raises(ld.ProbeSetupFailed, match="newline"):
-            with self._probe(plain, sh, output_dir=str(plain.repo / "plans" / "a\nb")):
-                pass
 
 
 # ===========================================================================
@@ -603,31 +448,35 @@ def _cmd(output: str) -> str:
 
 
 class TestJailDeniedEditsRepoWide:
-    def test_declared_paths_are_in_scope_and_the_jails_denials_are_not(self, wide):
-        ctx = _ctx(wide, declared=(wide.repo / "src/app.py", wide.repo / "README.md"))
+    def test_a_denial_inside_the_repository_is_in_scope_and_one_outside_is_not(self, wide):
+        """The root rule covers everything under the repository, so a denial
+        there is the jail's own failure (in scope); `/tmp` and the like are
+        the jail working (out of scope). No `replacement` reading survives:
+        a dir rule admits every write shape."""
         stream = "\n".join([
             _cmd("sh: 1: cannot create src/app.py: Permission denied\n"),
             _cmd("sh: 1: cannot create README.md.tmp: Permission denied\n"),
             _cmd("fatal: Unable to create '.git/index.lock': Permission denied\n"),
-            _cmd("PermissionError: [Errno 13] Permission denied: '/tmp/x'\n"),
             _cmd("sh: 1: cannot create newtop.txt: Permission denied\n"),
             _cmd("sh: 1: cannot create plans/plan/state.json: Permission denied\n"),
+            _cmd("PermissionError: [Errno 13] Permission denied: '/tmp/x'\n"),
+            _cmd("sh: 1: cannot create /dev/shm/x: Permission denied\n"),
         ])
-        denials = ld.jail_denied_edits(stream, ctx, cwd=str(wide.repo))
-        assert denials.in_scope_paths == [str(wide.repo / "src/app.py")]
-        # A new root name beside a declared root file could be sed -i's
-        # random temp file: counted as a replacement, never as clean.
-        assert denials.replacement_paths == [
-            str(wide.repo / "README.md.tmp"), str(wide.repo / "newtop.txt"),
+        denials = ld.jail_denied_edits(stream, _ctx(wide), cwd=str(wide.repo))
+        assert denials.in_scope_paths == [
+            str(wide.repo / "src/app.py"), str(wide.repo / "README.md.tmp"),
+            str(wide.repo / ".git/index.lock"), str(wide.repo / "newtop.txt"),
+            str(wide.repo / "plans/plan/state.json"),
         ]
-        assert denials.out_of_scope_count == 3
+        assert denials.replacement_paths == []
+        assert denials.out_of_scope_count == 2
+        assert denials.out_of_scope_paths == ["/tmp/x", "/dev/shm/x"]
         assert denials.failed_file_changes == []
 
-    def test_a_root_sibling_is_a_replacement_only_beside_a_declared_root_file(self, wide):
-        ctx = _ctx(wide, declared=(wide.repo / "src/app.py",))
-        stream = _cmd("sh: 1: cannot create README.md.tmp: Permission denied\n")
-        denials = ld.jail_denied_edits(stream, ctx, cwd=str(wide.repo))
-        assert denials.replacement_paths == [] and denials.out_of_scope_count == 1
+    def test_a_symlink_out_of_the_repository_is_out_of_scope(self, wide):
+        stream = _cmd("sh: 1: cannot create outlink/passwd: Permission denied\n")
+        denials = ld.jail_denied_edits(stream, _ctx(wide), cwd=str(wide.repo))
+        assert denials.in_scope_paths == [] and denials.out_of_scope_count == 1
 
     def test_a_failed_file_change_is_still_reported(self, wide):
         event = json.dumps({"type": "item.completed", "item": {
@@ -654,13 +503,10 @@ class TestJailDeniedEditsRepoWide:
 
     def test_a_test_suites_own_permission_denied_text_names_no_path(self, wide):
         """Fix round 4 (2026-10-02): a ``Permission denied`` line in ordinary
-        test output used to resolve to a declared path (in scope, so a
-        nothing-moved batch read FAILED) or to a new root name beside a
-        declared root file (a ``replacement`` denial, same verdict). Only the
-        shapes the measured denials take — a tool naming itself at column 0
-        — count."""
-        ctx = _ctx(wide, declared=(wide.repo / "src/app.py", wide.repo / "README.md"))
-        denials = ld.jail_denied_edits(_cmd(self.ORDINARY_OUTPUT), ctx, cwd=str(wide.repo))
+        test output used to resolve to a path inside the repository (in
+        scope, so a nothing-moved batch read FAILED). Only the shapes the
+        measured denials take — a tool naming itself at column 0 — count."""
+        denials = ld.jail_denied_edits(_cmd(self.ORDINARY_OUTPUT), _ctx(wide), cwd=str(wide.repo))
         assert denials.total == 0, denials.to_dict()
         assert ld._denied_paths_in(self.ORDINARY_OUTPUT) == []
 
@@ -690,43 +536,36 @@ class TestJailDeniedEditsRepoWide:
 
 
 # ===========================================================================
-# Tier 2: the production wrapper under a repo-wide grant (F1 "Denied-write
-# acceptance cases, which must pass before step 3b enables either mode")
+# Tier 2: the production wrapper under a repo-wide grant (the root rule)
 # ===========================================================================
 
+#: Writes outside the repository: still denied by the jail.
 DENIED_CASES = [
-    ("commit", "git -c user.email=a@b.invalid -c user.name=a commit -q --allow-empty -m x"),
-    ("reset", "git reset -q --hard"),
-    ("config", "git config user.name xx"),
-    ("hook", 'echo hook > .git/hooks/pre-commit'),
-    ("gitx", 'echo x > .git/x'),
-    ("codex", 'echo x > .codex/x'),
-    ("codexcfg", 'echo x >> .codex/config.toml'),
-    ("providers", 'echo x >> .multi-llm/providers.yaml'),
-    ("runs", 'echo x > .multi-llm/runs/x'),
-    ("mtmp", 'echo x > .multi-llm/tmp/x'),
-    ("state", 'echo x >> plans/plan/state.json'),
-    ("prebatch", 'echo x > plans/plan/implement/pre_batch/t1/x'),
-    ("blob", 'echo x >> plans/plan/implement/rollback_store/blob'),
-    ("audit", 'echo x >> plans/plan/implement/subagent_audit.jsonl'),
-    ("newtop", 'echo x > newtop.txt'),
-    ("newtopdir", 'mkdir newtop'),
-    ("rm", 'rm README.md'),
-    ("mv", 'mv README.md README2.md'),
-    ("gitlink", 'echo x >> gitlink'),
-    ("sedi", "sed -i s/readme/x/ README.md"),
-    ("plansnew", 'echo x > plans/new.md'),
-    ("env", 'echo x >> .env'),
-    ("nodemod", 'echo x > node_modules/dep/new.js'),
     ("tmp", 'echo x > /tmp/mllm-3b-$$'),
     ("shm", 'echo x > /dev/shm/mllm-3b-$$'),
+    ("home", 'echo x > "$HOME/mllm-3b-$$"'),
+    ("outlink", 'echo x > outlink/mllm-3b-$$'),
+    ("tmpbase", 'echo x > "$(dirname "$TMPDIR")/mllm-3b-$$"'),
 ]
+#: Writes inside the repository: every shape lands under the root rule,
+#: the old protected set and the two top-level shapes included. What the
+#: model is told not to touch is the developer message's business and the
+#: scheduler's checks', not the jail's.
 POSITIVE_CASES = [
     ("edit", 'echo edited > src/app.py'),
     ("new", 'echo new > src/new.py'),
     ("subdir", 'mkdir src/sub && echo s > src/sub/s.py'),
     ("topfile", 'echo top >> README.md'),
-    ("tests", 'echo t >> tests/test_app.py'),
+    ("newtop", 'echo x > newtop.txt'),
+    ("newtopdir", 'mkdir newtop'),
+    ("sedi", "sed -i s/readme/x/ README.md"),
+    ("mv", 'mv pyproject.toml pyproject.moved'),
+    ("rm", 'rm key.pem'),
+    ("plansnew", 'echo x > plans/new.md'),
+    ("gitx", 'echo x > .git/x'),
+    ("codex", 'echo x > .codex/x'),
+    ("mtmp", 'echo x > .multi-llm/tmp/x'),
+    ("state", 'echo x >> plans/plan/state.json'),
     ("tmpdir", 'echo t > "$TMPDIR/scratch.txt"'),
 ]
 
@@ -748,26 +587,19 @@ class TestTheRealJailRepoWide:
             pytest.skip("no sh on PATH")
         return path
 
-    def _run_jailed(self, wide, sh, script, declared=()):
-        env = dict(os.environ, CODEX_HOME=str(wide.home))
+    def _run_jailed(self, wide, sh, script):
+        env = dict(os.environ, CODEX_HOME=str(wide.home), HOME=str(wide.root))
         with ld.slot_tmpdir(str(wide.repo)) as tmpdir:
-            ctx = ld.complete_context(_request(wide, declared=declared), tmpdir, env)
+            ctx = ld.complete_context(_request(wide), tmpdir, env)
             argv, child_env = ld.wrap_argv([sh, "-c", script], RUNG, ctx, env)
             assert os.path.samefile(argv[3], SKILL_ROOT / "utils" / "landlock_exec.py")
             proc = _run(argv, child_env, wide.repo)
             scratch = sorted(os.listdir(tmpdir))
         return proc, scratch
 
-    def test_every_denied_write_case_holds_and_the_positives_land(self, wide, sh):
-        protected = [wide.repo / ".git", wide.repo / ".codex", wide.repo / ".multi-llm", wide.out]
-        before = {str(p): _tree_hashes(p) for p in protected}
-        readme_ino = os.stat(wide.repo / "README.md").st_ino
+    def test_every_write_outside_the_repository_is_denied_and_every_one_inside_lands(self, wide, sh):
         head = _git(wide.repo, "rev-parse", "HEAD")
-        top_before = sorted(os.listdir(wide.repo))
-        proc, scratch = self._run_jailed(
-            wide, sh, _script(DENIED_CASES + POSITIVE_CASES),
-            declared=(wide.repo / "src/app.py",),
-        )
+        proc, scratch = self._run_jailed(wide, sh, _script(DENIED_CASES + POSITIVE_CASES))
         assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
         results = dict(line.split("=", 1) for line in proc.stdout.split())
         denied = {name for name, _ in DENIED_CASES}
@@ -775,92 +607,61 @@ class TestTheRealJailRepoWide:
         assert failed == denied, {n: results[n] for n in denied - failed}
         for name, _ in POSITIVE_CASES:
             assert results[name] == "0", (name, results[name], proc.stderr)
-        # Byte-identical afterwards: every protected tree, the top level, HEAD.
-        assert {str(p): _tree_hashes(p) for p in protected} == before
-        assert _git(wide.repo, "rev-parse", "HEAD") == head
-        assert sorted(os.listdir(wide.repo)) == top_before
-        assert (wide.repo / "README.md").read_text() == "readme\ntop\n"
-        assert os.stat(wide.repo / "README.md").st_ino == readme_ino
-        assert (wide.repo / ".env").read_text() == "SECRET=1\n"
-        assert not (wide.repo / "node_modules/dep/new.js").exists()
-        assert not (wide.repo / "plans/new.md").exists()
-        assert (wide.repo / "plans/other.md").read_text() == "# other\n"
-        # The positives.
+        # Outside: nothing landed.
+        assert not list(Path("/tmp").glob("mllm-3b-*"))
+        assert not list(wide.root.glob("mllm-3b-*"))
+        assert not list(Path("/etc").glob("mllm-3b-*"))
+        # Inside: the root grant admitted every shape, the hands-off set included.
         assert (wide.repo / "src/app.py").read_text() == "edited\n"
         assert (wide.repo / "src/new.py").read_text() == "new\n"
         assert (wide.repo / "src/sub/s.py").read_text() == "s\n"
-        assert (wide.repo / "tests/test_app.py").read_text().endswith("t\n")
+        assert (wide.repo / "README.md").read_text() == "x\ntop\n"
+        assert (wide.repo / "newtop.txt").read_text() == "x\n"
+        assert (wide.repo / "newtop").is_dir()
+        assert (wide.repo / "pyproject.moved").exists() and not (wide.repo / "pyproject.toml").exists()
+        assert not (wide.repo / "key.pem").exists()
+        assert (wide.repo / "plans/new.md").read_text() == "x\n"
+        assert (wide.repo / ".git/x").read_text() == "x\n"
+        assert (wide.repo / ".codex/x").read_text() == "x\n"
+        assert (wide.repo / ".multi-llm/tmp/x").read_text() == "x\n"
+        assert (wide.repo / "plans/plan/state.json").read_text() == "{}\nx\n"
         assert "scratch.txt" in scratch
-        assert not list(Path("/tmp").glob("mllm-3b-*"))
-
-    def test_the_hooks_path_and_the_providers_config_are_denied(self, wide, sh, monkeypatch):
-        """Fix round 4: a ``core.hooksPath`` outside ``.git/`` and a
-        ``MULTI_LLM_PROVIDERS_CONFIG`` inside the repository are denied and
-        byte-identical afterwards, while the declared edit beside them lands."""
-        (wide.repo / ".husky").mkdir()
-        (wide.repo / ".husky" / "pre-commit").write_text("#!/bin/sh\n")
-        _git(wide.repo, "config", "core.hooksPath", ".husky")
-        (wide.repo / "config").mkdir()
-        config = wide.repo / "config" / "providers.yaml"
-        config.write_text("driver:\n  verify_command: true\n")
-        (wide.repo / "config" / "other.yaml").write_text("x\n")
-        monkeypatch.setenv("MULTI_LLM_PROVIDERS_CONFIG", str(config))
-        cases = [
-            ("hook", "echo x >> .husky/pre-commit"),
-            ("newhook", "echo x > .husky/post-commit"),
-            ("cfg", "echo x >> config/providers.yaml"),
-            ("cfgnew", "echo x > config/new.yaml"),
-            ("cfgmv", "mv config/other.yaml config/providers.yaml"),
-        ]
-        positives = [("sibling", "echo y >> config/other.yaml"), ("edit", "echo edited > src/app.py")]
-        before = {str(p): _tree_hashes(p) for p in (wide.repo / ".husky", wide.repo / ".git")}
-        config_before = config.read_text()
-        proc, _scratch = self._run_jailed(
-            wide, sh, _script(cases + positives), declared=(wide.repo / "src/app.py",),
-        )
-        assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
-        results = dict(line.split("=", 1) for line in proc.stdout.split())
-        assert all(results[name] != "0" for name, _ in cases), results
-        assert all(results[name] == "0" for name, _ in positives), results
-        assert {str(p): _tree_hashes(p) for p in (wide.repo / ".husky", wide.repo / ".git")} == before
-        assert config.read_text() == config_before
-        assert sorted(os.listdir(wide.repo / "config")) == ["other.yaml", "providers.yaml"]
-        assert (wide.repo / "config" / "other.yaml").read_text() == "x\ny\n"
-        assert (wide.repo / "src" / "app.py").read_text() == "edited\n"
+        # A shell script wrote files, not commits: HEAD did not move.
+        assert _git(wide.repo, "rev-parse", "HEAD") == head
 
     def test_the_same_script_unjailed_names_what_the_jail_stops(self, wide, sh):
-        """The control: outside the jail the denied cases land, so the pass
-        above is the wrapper's doing."""
-        env = dict(os.environ, CODEX_HOME=str(wide.home))
+        """The control: outside the jail the denied cases land too, so the
+        denials above are the wrapper's doing."""
+        env = dict(os.environ, CODEX_HOME=str(wide.home), HOME=str(wide.root))
         with ld.slot_tmpdir(str(wide.repo)) as tmpdir:
             ctx = ld.complete_context(_request(wide), tmpdir, env)
-            argv, child_env = ld.wrap_argv([sh, "-c", _script(DENIED_CASES[4:15])], RUNG, ctx, env)
+            argv, child_env = ld.wrap_argv([sh, "-c", _script(DENIED_CASES[2:3])], RUNG, ctx, env)
             proc = _run(ld.unwrap_argv(argv), child_env, wide.repo)
         results = dict(line.split("=", 1) for line in proc.stdout.split())
-        assert all(code == "0" for code in results.values()), results
-        assert (wide.repo / "newtop.txt").exists() and (wide.repo / ".git" / "x").exists()
+        assert results == {"home": "0"}, results
+        assert list(wide.root.glob("mllm-3b-*"))
 
-    def test_the_real_canary_passes_for_a_repo_wide_grant(self, wide, sh):
+    def test_the_real_canary_passes_for_a_repo_wide_grant(self, wide, sh, temp_base):
         git_before = _tree_hashes(wide.repo / ".git")
-        out_before = _tree_hashes(wide.out)
         env = dict(os.environ, CODEX_HOME=str(wide.home))
         resolved = [sh, "-c", codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT]
         with ld.rung_probe(RUNG, _request(wide), resolved, cwd=str(wide.repo), env=env) as probe:
-            assert probe.env[codex_mod.CANARY_ENV_DENY_DIRS].split("\n")[0] == str(wide.repo / ".git")
+            workdir = probe.env[codex_mod.CANARY_ENV_WORKDIR]
+            assert Path(workdir).parent == temp_base
             proc = _run(probe.argv, probe.env, wide.repo)
             assert proc.returncode == 0, (proc.returncode, proc.stdout, proc.stderr)
             assert SANDBOX_CANARY_DENIED in proc.stdout
             assert probe.seed_intact()
             unjailed = _run(ld.unwrap_argv(probe.argv), probe.env, wide.repo)
             assert unjailed.returncode == 3, (unjailed.stdout, unjailed.stderr)
+        assert not Path(workdir).exists()
         assert _tree_hashes(wide.repo / ".git") == git_before
-        assert _tree_hashes(wide.out) == out_before
         assert sorted(os.listdir(wide.repo / "src")) == ["app.py", "pkg"]
+        assert os.listdir(wide.repo / ".multi-llm" / "tmp") == []
 
     def test_the_real_canary_passes_with_an_unwritable_first_directory(self, wide, sh):
         """Repro case B (2026-10-02): the first sorted directory 0555 is a
-        plain-permissions fact the jail has no part in, so the probe passes
-        and nothing was ever created outside `.multi-llm/` and `$TMPDIR`."""
+        plain-permissions fact the jail has no part in."""
         first = wide.repo / ".husky"
         first.mkdir()
         (first / "pre-commit").write_text("#!/bin/sh\n")
@@ -877,18 +678,19 @@ class TestTheRealJailRepoWide:
         assert SANDBOX_CANARY_DENIED in proc.stdout
         assert sorted(os.listdir(first)) == ["pre-commit"]
 
-    def test_a_write_into_git_alone_fails_the_canary(self, wide, sh):
-        """A jail that left `.git/` writable (no deny target) must not pass:
-        the extra negative control is what catches it. Simulated by handing
-        the canary a deny dir that IS writable (the slot's own TMPDIR)."""
+    def test_a_canary_pointed_at_the_in_repo_workdir_would_fail(self, wide, sh):
+        """Why the workdir moved: under the root rule the repository's
+        `.multi-llm/tmp` is writable, so a canary there reads "not denied".
+        Simulated by handing the jailed canary the in-repo directory."""
         env = dict(os.environ, CODEX_HOME=str(wide.home))
         resolved = [sh, "-c", codex_mod.PLUGIN_LANDLOCK_CANARY_SCRIPT]
         with ld.rung_probe(RUNG, _request(wide), resolved, cwd=str(wide.repo), env=env) as probe:
             leaky = dict(probe.env)
-            leaky[codex_mod.CANARY_ENV_DENY_DIRS] = probe.env["TMPDIR"]
+            leaky[codex_mod.CANARY_ENV_WORKDIR] = str(wide.repo / ".multi-llm" / "tmp")
             proc = _run(probe.argv, leaky, wide.repo)
             assert proc.returncode == 3, (proc.returncode, proc.stdout, proc.stderr)
             assert SANDBOX_CANARY_DENIED not in proc.stdout
+        assert os.listdir(wide.repo / ".multi-llm" / "tmp") == []
 
 
 class TestAnInheritedPytestAddopts:

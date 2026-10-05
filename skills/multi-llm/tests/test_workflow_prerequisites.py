@@ -1710,7 +1710,9 @@ class TestEarlySandboxWarning:
         [probe] = jailhost.wrapper.records(probe=True)
         assert probe["env"]["MULTI_LLM_CANARY_WRITE_DIR"] is None
         assert probe["env"]["MULTI_LLM_CANARY_WRITE_FILE"] is None
-        assert os.path.realpath(jailhost.repo / ".git") in probe["env"]["MULTI_LLM_CANARY_DENY_DIRS"]
+        # Its negative controls live outside the repository (root grant, 2026-10-05).
+        workdir = probe["env"]["MULTI_LLM_CANARY_WORKDIR"]
+        assert workdir and not workdir.startswith(os.path.realpath(jailhost.repo) + os.sep)
 
     def test_a_usable_jail_stays_silent(self, jailhost):
         jailhost.configure(runner="codex:gpt-5.5")

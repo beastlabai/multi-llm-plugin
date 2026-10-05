@@ -42,11 +42,10 @@ import os
 import re
 import shutil
 import stat
-import subprocess
 import sys
 import tempfile
 import threading
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
@@ -54,7 +53,6 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         JailContext,
         JailRequest,
         SandboxRung,
-        WRITE_SCOPE_PLAN_FILE,
         WRITE_SCOPE_REPO_WIDE,
         WRITE_SCOPE_TASKS,
         WRITE_SCOPES,
@@ -66,7 +64,6 @@ except ImportError:  # pragma: no cover - direct-script import shim
         JailContext,
         JailRequest,
         SandboxRung,
-        WRITE_SCOPE_PLAN_FILE,
         WRITE_SCOPE_REPO_WIDE,
         WRITE_SCOPE_TASKS,
         WRITE_SCOPES,
@@ -262,15 +259,16 @@ def allow_entries(context: JailContext) -> List[AllowEntry]:
     (optional). A write scope adds its target: ``plan-file`` one **file** rule
     on the plan; ``tasks`` a dir rule on ``target_dir`` when the lane set it
     (the default tasks directory), else a file rule on the tasks file;
-    ``repo-wide`` (plan step 3b, 2026-10-02) one rule per enumerated entry of
-    the repository root outside the protected set (:func:`repo_wide_plan`),
-    required for the entries that cover a declared file and optional for the
-    rest. No scope ever yields a rule on the repository root.
+    ``repo-wide`` (plan step 3b revised, 2026-10-05, a user decision) one
+    **dir rule on the repository root** (:func:`repo_wide_entry`): the whole
+    repository — ``.git``, ``.codex``, ``.multi-llm`` and the run's output
+    folder included — is writable inside the jail, and the developer message
+    tells the model to leave those alone. Only the two narrower scopes keep
+    the root unruled.
 
     Raises :class:`JailRefused` for a missing home (checked again here, since a
-    probe may call this without :func:`complete_context`), a missing target,
-    a declared path the enumeration cannot cover, or an unknown scope. Never
-    creates a path.
+    probe may call this without :func:`complete_context`), a missing target
+    or repository root, or an unknown scope. Never creates a path.
     """
     if not context.codex_home:
         raise JailRefused(
@@ -289,11 +287,7 @@ def allow_entries(context: JailContext) -> List[AllowEntry]:
     scope = context.write_scope
     repo_root = os.path.realpath(context.repo_root) if context.repo_root else ""
     if scope == WRITE_SCOPE_REPO_WIDE:
-        plan = repo_wide_plan(context.request)
-        refusal = repo_wide_declared_refusal(plan, context.declared)
-        if refusal is not None:
-            raise JailRefused(refusal, reason="declared-uncovered")
-        entries.extend(plan.entries_for(context.declared))
+        entries.append(repo_wide_entry(context.request))
         return entries
     if scope:
         if scope not in WRITE_SCOPES:
@@ -334,310 +328,53 @@ def allow_entries(context: JailContext) -> List[AllowEntry]:
 
 
 # ---------------------------------------------------------------------------
-# The repo-wide grant (plan step 3b, F1 "Protected paths for repo-wide write
-# profiles"; 2026-10-02)
+# The repo-wide grant: one dir rule on the repository root (plan step 3b,
+# revised 2026-10-05 — a user decision)
 # ---------------------------------------------------------------------------
 
 #: The version-control directory names the post-run sweep prunes
 #: (``write_batch_scheduler.SWEEP_PRUNED_DIR_NAMES``), kept here because the
 #: scheduler imports this module; a test pins the two tuples equal.
 VCS_DIR_NAMES: Tuple[str, ...] = (".git", ".hg", ".svn")
-#: The fixed protected names at the repository root: the VCS directories
-#: (``git commit``, ``reset``, ``config``, hooks that later run unconfined),
-#: ``.codex`` (project config codex loads on its next start; codex's own
-#: ``workspace-write`` keeps it and ``.git`` read-only too) and ``.multi-llm``
-#: (``providers.yaml``, the ``runs/`` registry, ``tmp/``). The run's output
-#: folder (``state.json``, the snapshots, the rollback store, the audit log)
-#: joins them from the request's ``output_dir``, and two more join when they
-#: resolve inside the repository (:func:`extra_protected_paths`, fix round 4,
-#: 2026-10-02): the repository's ``core.hooksPath`` (``.husky/`` and the
-#: like — hooks git runs unconfined on the user's next commit, which outside
-#: ``.git/`` were an ordinary ruled entry) and the ``MULTI_LLM_PROVIDERS_CONFIG``
-#: file (the config whose ``verify_command`` the next run executes unjailed).
-PROTECTED_ROOT_NAMES: Tuple[str, ...] = VCS_DIR_NAMES + (".codex", ".multi-llm")
 
-#: The non-Codex runner, named by every refusal of a declared path the grant
-#: cannot cover (F6).
-REPO_WIDE_F6 = (
-    "To run this batch with such a write, set `driver.subagent_runner` to a "
-    "runner that is not Codex (F6)."
-)
+#: The repository-root names a repo-wide batch is told to leave alone
+#: (``codex.JAIL_DEVELOPER_TARGET_REPO``), **instruction-level only**. Until
+#: 2026-10-05 they were the protected set of a per-entry enumeration that
+#: kept the root unruled, so a batch could not create a top-level entry: the
+#: racing re-run's whole plan was one root-level ``index.html`` and Codex's
+#: implement was refused before any dispatch (F6). Landlock is allow-only
+#: and a rule inherits down the tree, so a root rule necessarily covers
+#: ``.git`` and ``.multi-llm``; asked to choose between that, a
+#: check-and-restore of the protected set around every batch, and a scratch
+#: copy, the user chose the root rule ("Backing up directories before each
+#: batch is too resource intensive"). The post-run sweep, ``driver.write_paths``
+#: and the scheduler's ``[GIT_CONFIG_CHANGED]`` line are the detective checks
+#: left, and the plugin's own git calls carry ``git_utils.GIT_HARDENING_ARGS``.
+REPO_WIDE_HANDS_OFF_NAMES: Tuple[str, ...] = (".git", ".codex", ".multi-llm")
 
 
-@dataclass(frozen=True)
-class RepoWidePlan:
-    """The repo-wide grant, enumerated at dispatch (never cached).
-
-    ``entries`` is one optional rule per repository-root entry outside the
-    protected set, with each ancestor of a protected path (``plans/`` above
-    the output folder) descended and enumerated the same way instead of
-    ruled. ``protected`` and ``ancestors`` are the resolved paths that get no
-    rule; ``denied`` names the entries ``driver.write_paths`` denies as a
-    whole, with the pattern. The root itself never appears anywhere but
-    ``root``: a Landlock rule grants its whole subtree and nothing can take
-    ``.git/`` back out of one.
-    """
-
-    root: str
-    protected: Tuple[str, ...]
-    ancestors: Tuple[str, ...]
-    entries: Tuple[AllowEntry, ...]
-    denied: Tuple[Tuple[str, str], ...] = ()
-
-    def covering(self, path: str) -> Optional[AllowEntry]:
-        """The entry whose rule covers ``path`` (absolute, resolved as far as
-        it exists), or ``None``."""
-        for entry in self.entries:
-            if entry.kind == KIND_DIR and _inside(path, entry.path):
-                return entry
-            if entry.kind == KIND_FILE and path == entry.path:
-                return entry
-        return None
-
-    def entries_for(self, declared: Sequence[str]) -> List[AllowEntry]:
-        """The entries with ``required`` set on each one that covers a
-        declared path (``realpath``-resolved through its nearest existing
-        ancestor, so a declared new file resolves under its directory)."""
-        wanted = {self.covering(_resolve_declared(p)) for p in declared}
-        return [
-            replace(entry, required=True) if entry in wanted else entry
-            for entry in self.entries
-        ]
-
-    def negative_dirs(self) -> List[str]:
-        """The protected directories that exist, for the probe's negative
-        controls (``.git/`` and the output folder among them)."""
-        return [p for p in self.protected if os.path.isdir(p)]
-
-
-def _resolve_declared(path: str) -> str:
-    """``path`` resolved through symlinks as far as it exists: an existing
-    path is its ``realpath``; a new file is its nearest existing ancestor's
-    ``realpath`` plus the rest, so ``src/new.py`` lands under ``src``."""
-    path = os.path.abspath(path)
-    probe = path
-    rest: List[str] = []
-    while probe and not os.path.lexists(probe):
-        parent, name = os.path.split(probe)
-        if parent == probe:
-            break
-        rest.insert(0, name)
-        probe = parent
-    resolved = os.path.realpath(probe)
-    return os.path.join(resolved, *rest) if rest else resolved
-
-
-def _denies_entry(rel: str, is_dir: bool, patterns: Sequence[Any]) -> Optional[str]:
-    """The ``driver.write_paths.deny`` pattern that denies the entry ``rel``
-    as a whole, or ``None``: a file entry matching a pattern (a root ``.env``,
-    ``.npmrc``), or a directory entry matching a pattern as written or with
-    its trailing ``/**`` removed (``**/node_modules/**`` denies
-    ``node_modules``). Such an entry gets no rule; the policy only ever
-    removes rules, never adds one."""
-    try:
-        from .write_safety import glob_to_regex
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.write_safety import glob_to_regex  # type: ignore[no-redef]
-    for pattern in patterns:
-        text = str(pattern)
-        if glob_to_regex(text).match(rel):
-            return text
-        if is_dir and text.endswith("/**") and glob_to_regex(text[:-3]).match(rel):
-            return text
-    return None
-
-
-def git_hooks_path(root: str) -> Optional[str]:
-    """The repository's effective ``core.hooksPath``, resolved (``~`` and a
-    relative value against ``root``, where git runs hooks; symlinks
-    followed), or ``None`` when unset, unreadable, or ``root`` holds no
-    ``.git``. Read through ``git config`` itself so the global and system
-    layers count as they do for git."""
-    if not os.path.lexists(os.path.join(root, ".git")):
-        return None
-    try:
-        proc = subprocess.run(
-            ["git", "-C", root, "config", "--get", "core.hooksPath"],
-            capture_output=True, text=True, timeout=10,
-            env=dict(os.environ, GIT_OPTIONAL_LOCKS="0"),
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    value = proc.stdout.strip() if proc.returncode == 0 else ""
-    if not value:
-        return None
-    value = os.path.expanduser(value)
-    if not os.path.isabs(value):
-        value = os.path.join(root, value)
-    return os.path.realpath(value)
-
-
-def providers_config_path() -> Optional[str]:
-    """The ``MULTI_LLM_PROVIDERS_CONFIG`` file as the registry resolves it
-    (CWD-anchored when relative), ``realpath``'d, or ``None`` when unset."""
-    try:
-        from .provider_registry import _resolve_env_path
-    except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.provider_registry import _resolve_env_path  # type: ignore[no-redef]
-    try:
-        path = _resolve_env_path()
-    except Exception:  # noqa: BLE001 - a bad value is the loader's to report
-        return None
-    return os.path.realpath(str(path)) if path else None
-
-
-def extra_protected_paths(root: str, protected: Sequence[str]) -> List[str]:
-    """The paths that join the protected set beyond :data:`PROTECTED_ROOT_NAMES`
-    and the output folder (fix round 4, 2026-10-02): the hooks directory and
-    the providers config, each only when it resolves inside ``root``, is not
-    the root, and is not already under a protected path (a ``core.hooksPath``
-    of ``.git/hooks``, a config at ``.multi-llm/providers.yaml``)."""
-    extra: List[str] = []
-    for path in (git_hooks_path(root), providers_config_path()):
-        if not path or path == root or not _inside(path, root):
-            continue
-        if any(_inside(path, guarded) for guarded in [*protected, *extra]):
-            continue
-        extra.append(path)
-    return extra
-
-
-def repo_wide_plan(request: JailRequest) -> RepoWidePlan:
-    """Enumerate the repository root for a ``repo-wide`` grant (F1 "Protected
-    paths": prevention by enumeration, never a repo-root rule).
-
-    Symlinks are resolved first: a top-level link gets no rule of its own
-    (the wrapper refuses a symlink entry; a link into the tree is covered by
-    its target's own entry, a link into the protected set or out of the
-    repository by nothing). A protected path — the fixed names, the output
-    folder, the hooks directory and the providers config when they lie
-    inside the repository (:func:`extra_protected_paths`) — gets no rule. An
-    ancestor of a protected path is descended and enumerated the same way. Every other
-    entry gets a dir rule (directory) or a file rule (anything else), unless
-    ``driver.write_paths`` denies it as a whole. The enumeration is a snapshot
-    taken now: an entry made mid-dispatch is not writable by that child.
-    """
+def repo_wide_root(request: JailRequest) -> str:
+    """The repository root a ``repo-wide`` grant rules, ``realpath``'d.
+    Raises :class:`JailRefused` (``repo-root-missing``) when it is not a
+    directory: nothing is spawned under a grant on a path that is not there."""
     root = os.path.realpath(request.repo_root)
     if not os.path.isdir(root):
         raise JailRefused(
             f"the repository root {render_home(root)} is not a directory, so "
-            f"its entries cannot be enumerated for a repo-wide grant",
+            f"a repo-wide grant has nothing to rule",
             path=root, reason="repo-root-missing",
         )
-    protected: List[str] = [os.path.join(root, name) for name in PROTECTED_ROOT_NAMES]
-    if request.output_dir:
-        out = os.path.realpath(request.output_dir)
-        if _inside(out, root) and out != root:
-            protected.append(out)
-    protected.extend(extra_protected_paths(root, protected))
-    protected_set = set(protected)
-    ancestors: set = set()
-    for path in protected:
-        parent = os.path.dirname(path)
-        while parent != root and _inside(parent, root):
-            ancestors.add(parent)
-            parent = os.path.dirname(parent)
-    entries: List[AllowEntry] = []
-    denied: List[Tuple[str, str]] = []
-    seen: set = set()
+    return root
 
-    def walk(directory: str) -> None:
-        try:
-            names = sorted(os.listdir(directory))
-        except OSError:
-            return
-        for name in names:
-            path = os.path.join(directory, name)
-            try:
-                info = os.lstat(path)
-            except OSError:
-                continue
-            if stat.S_ISLNK(info.st_mode):
-                continue
-            if path in protected_set:
-                continue
-            if path in ancestors:
-                walk(path)
-                continue
-            is_dir = stat.S_ISDIR(info.st_mode)
-            rel = os.path.relpath(path, root)
-            pattern = _denies_entry(rel, is_dir, request.deny_patterns)
-            if pattern is not None:
-                denied.append((path, pattern))
-                continue
-            if path in seen:
-                continue
-            seen.add(path)
-            entries.append(AllowEntry(
-                path, KIND_DIR if is_dir else KIND_FILE, False,
-                f"repo-wide: {rel}{'/' if is_dir else ''}",
-            ))
 
-    walk(root)
-    return RepoWidePlan(
-        root=root, protected=tuple(protected), ancestors=tuple(sorted(ancestors)),
-        entries=tuple(entries), denied=tuple(denied),
+def repo_wide_entry(request: JailRequest) -> AllowEntry:
+    """The one allow entry of a ``repo-wide`` grant: a required dir rule on
+    the repository root (the wrapper refuses a required entry it cannot
+    grant before codex starts)."""
+    return AllowEntry(
+        repo_wide_root(request), KIND_DIR, True,
+        "repo-wide: the whole repository (root grant, 2026-10-05)",
     )
-
-
-def repo_wide_declared_refusal(plan: RepoWidePlan, declared: Sequence[str]) -> Optional[str]:
-    """Why a batch's declared set cannot be granted under ``plan``, or ``None``.
-
-    Checked before any spawn (the scheduler's pre-dispatch check, and
-    :func:`allow_entries` as the backstop). A declared path is refused when
-    it lies outside the repository, inside the protected set, under an entry
-    ``driver.write_paths`` denies as a whole, or where a rule would have to
-    sit on the root or an enumerated ancestor: a new entry directly there, a
-    new directory there, or a path whose first missing component is there.
-    The message names the path, the case and F6.
-    """
-    for given in declared:
-        path = _resolve_declared(given)
-        shown = render_home(path)
-        if not _inside(path, plan.root) or path == plan.root:
-            return (
-                f"{shown} lies outside the repository {render_home(plan.root)}, "
-                f"which a repo-wide grant never leaves. {REPO_WIDE_F6}"
-            )
-        for guarded in plan.protected:
-            if _inside(path, guarded):
-                return (
-                    f"{shown} lies under the protected path "
-                    f"{render_home(guarded)}, which the plugin's Landlock jail "
-                    f"keeps read-only on every repo-wide batch (.git, .codex, "
-                    f".multi-llm, this run's output folder, the git hooks "
-                    f"directory and the providers config). {REPO_WIDE_F6}"
-                )
-        for denied_path, pattern in plan.denied:
-            if _inside(path, denied_path):
-                return (
-                    f"{shown} lies under {render_home(denied_path)}, which "
-                    f"driver.write_paths denies ({pattern!r}), so the jail "
-                    f"grants no rule there. {REPO_WIDE_F6}"
-                )
-        if plan.covering(path) is not None:
-            continue
-        parent = os.path.dirname(path)
-        if parent == plan.root or parent in plan.ancestors:
-            if os.path.lexists(path):
-                return (
-                    f"{shown} is a repository-root entry the jail cannot grant "
-                    f"(a symlink, or an entry enumerated as neither a file nor "
-                    f"a directory). {REPO_WIDE_F6}"
-                )
-            return (
-                f"{shown} would be a new entry directly in "
-                f"{render_home(parent)}, and a repo-wide grant never puts a "
-                f"rule on the repository root or on a directory holding a "
-                f"protected path, so it cannot be created there; declare it "
-                f"inside an existing subdirectory instead. {REPO_WIDE_F6}"
-            )
-        return (
-            f"{shown} is covered by no enumerated entry of the repository "
-            f"root (its first missing component sits where no rule goes). "
-            f"{REPO_WIDE_F6}"
-        )
-    return None
 
 
 def extra_base_entries(context: JailContext) -> List[AllowEntry]:
@@ -780,9 +517,6 @@ def merge_env_redirects(
 #: Placeholders a preview renders in place of per-attempt paths.
 PLACEHOLDER_CODEX_HOME = "<CODEX_HOME>"
 PLACEHOLDER_TMPDIR = "<SLOT_TMPDIR>"
-#: Stands for the repo-wide enumeration (one rule per repository-root entry
-#: outside the protected set), which a preview never computes.
-PLACEHOLDER_REPO_ENTRIES = "<REPO_ENTRIES>"
 
 
 def preview_wrap_argv(
@@ -799,7 +533,9 @@ def preview_wrap_argv(
     for entry in BASE_DEVICE_ENTRIES:
         argv.extend(entry.argv())
     if request is not None and request.write_scope == WRITE_SCOPE_REPO_WIDE:
-        argv += ["--allow-optional", f"{KIND_DIR}:{PLACEHOLDER_REPO_ENTRIES}"]
+        # The root grant names the request's root as given (no realpath: a
+        # preview reads nothing); the scheduler already resolved it.
+        argv += ["--allow", f"{KIND_DIR}:{request.repo_root}"]
     elif request is not None and request.write_scope and request.target:
         if request.write_scope == WRITE_SCOPE_TASKS and request.target_dir:
             argv += ["--allow", f"{KIND_DIR}:{request.target_dir}"]
@@ -1390,14 +1126,12 @@ def jail_denied_edits(
     * every other command denial is counted out of scope (the first three paths
       kept).
 
-    Under ``repo-wide`` (step 3b) the scope is the batch's declared set: a
-    denial naming a declared path is in scope; one naming a new path in the
-    repository root while a root-level file is declared is a ``replacement``
-    denial (``sed -i`` on a top-level file writes a randomly named temp file
-    beside it, which the jail cannot tell from any other new root name, and a
-    nothing-moved batch must fail rather than read as clean); every other
-    denial — ``.git/``, the output folder, ``/tmp``, a new top-level entry
-    with no root file declared — is the jail working, counted out of scope.
+    Under ``repo-wide`` (root grant, 2026-10-05) the scope is the whole
+    repository: a denial naming a path inside the root is in scope — the
+    grant covers it, so the jail should never have refused it — and every
+    denial outside the root (``/tmp``, ``~/.cache``, a sibling slot's
+    scratch) is the jail working, counted out of scope. There is no
+    ``replacement`` reading: a dir rule on the root admits every write shape.
 
     With no write scope (a read-only slot) every command denial is out of scope
     and every failed ``file_change`` is still reported, for the slot's line.
@@ -1410,14 +1144,9 @@ def jail_denied_edits(
         if context is not None and context.target_dir else None
     )
     file_only = bool(scope) and target is not None and target_dir is None
-    declared: List[str] = []
-    root_level_dirs: set = set()
+    root = ""
     if scope == WRITE_SCOPE_REPO_WIDE and context is not None:
-        declared = [_resolve_declared(p) for p in context.declared]
         root = os.path.realpath(context.repo_root)
-        for path in declared:
-            if os.path.dirname(path) == root:
-                root_level_dirs.add(root)
     for event in _events(stdout):
         if event.get("type") != "item.completed":
             continue
@@ -1437,13 +1166,9 @@ def jail_denied_edits(
         for raw in _denied_paths_in(str(item.get("aggregated_output") or "")):
             resolved = _resolve_against(raw, cwd)
             if scope == WRITE_SCOPE_REPO_WIDE:
-                if resolved in declared:
+                if root and _inside(resolved, root):
                     if resolved not in result.in_scope_paths:
                         result.in_scope_paths.append(resolved)
-                elif (os.path.dirname(resolved) in root_level_dirs
-                      and not os.path.exists(resolved)):
-                    if resolved not in result.replacement_paths:
-                        result.replacement_paths.append(resolved)
                 else:
                     result.out_of_scope_count += 1
                     if len(result.out_of_scope_paths) < 3:
@@ -1913,44 +1638,26 @@ class RungProbe:
 def canary_env(context: JailContext) -> Dict[str, str]:
     """The env keys the rung's canary reads for a write profile's controls:
     the plan or tasks file under a file rule, the tasks dir under a dir rule
-    — each the dispatch's own declared target; for ``repo-wide`` (step 3b)
-    the protected directories that exist (``.git/``, the output folder, …) as
-    extra negative targets, and **no positive target in the tree**. The
-    canary's ``$TMPDIR`` write is the repo-wide grant's one positive control:
-    every enumerated entry is the same kind of rule, rendered by the same
-    :func:`allow_entries` and taken by the same wrapper, a required entry it
-    cannot grant is the wrapper's own refusal before anything runs, and a
-    write the jail wrongly denies at dispatch is a ``[JAIL_DENIED]`` failure
-    naming the path. A control on the enumeration's first sorted directory
-    (``.github``, ``.husky``, a root-owned volume dir — a path nobody proved
-    writable) failed on plain permissions where the jail was fine, refused
-    every implement on a working jail through the shared decision, and
-    created a file in the user's source tree on every ``status`` poll
-    (adversarial review, 2026-10-02). Empty for a read-only probe."""
+    — each the dispatch's own declared target. A ``repo-wide`` grant hands
+    over **no target in the tree**: the canary's ``$TMPDIR`` write is its one
+    positive control (every entry is the same kind of rule, rendered by the
+    same :func:`allow_entries` and taken by the same wrapper, a required
+    entry it cannot grant is the wrapper's own refusal before anything runs,
+    and a write the jail wrongly denies at dispatch is a ``[JAIL_DENIED]``
+    failure naming the path; a control on the first sorted directory failed
+    on plain permissions where the jail was fine and wrote into the user's
+    tree on every ``status`` poll — adversarial review, 2026-10-02), and its
+    negative controls live outside the repository (:func:`rung_probe` moves
+    the canary's workdir there, since the root grant makes ``.multi-llm/tmp``
+    writable). Empty for a read-only probe."""
     try:
-        from .providers.codex import (
-            CANARY_ENV_DENY_DIRS, CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE,
-        )
+        from .providers.codex import CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE
     except ImportError:  # pragma: no cover - direct-script import shim
         from utils.providers.codex import (  # type: ignore[no-redef]
-            CANARY_ENV_DENY_DIRS, CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE,
+            CANARY_ENV_WRITE_DIR, CANARY_ENV_WRITE_FILE,
         )
     if context.write_scope == WRITE_SCOPE_REPO_WIDE:
-        plan = repo_wide_plan(context.request)
-        env: Dict[str, str] = {}
-        negatives = plan.negative_dirs()
-        for path in negatives:
-            if "\n" in path:
-                # The one byte the newline-separated hand-over cannot carry:
-                # a setup failure (the walk's ``unknown``), never a target
-                # split in two that the canary would read as denied.
-                raise ProbeSetupFailed(
-                    f"a negative target of the rung probe holds a newline and "
-                    f"cannot be handed to the canary: {render_home(path)!r}"
-                )
-        if negatives:
-            env[CANARY_ENV_DENY_DIRS] = "\n".join(negatives)
-        return env
+        return {}
     if not context.write_scope or not context.target:
         return {}
     if context.write_scope == WRITE_SCOPE_TASKS and context.target_dir:
@@ -1980,18 +1687,46 @@ def rung_probe(
     and not a measurement of the rung — and :class:`JailRefused` (walk:
     ``absent``, with the note) when a required entry is missing — the same
     allow entries the dispatch it gates would get.
+
+    A ``repo-wide`` probe (root grant, 2026-10-05) cannot use the in-repo
+    workdir for its negative controls: the root rule makes ``.multi-llm/tmp``
+    writable, so a canary there would read "not denied" on a working jail.
+    Its workdir is a fresh directory under the parent's temp base instead
+    (a sibling of the slot ``TMPDIR``, outside every allow entry), handed to
+    the canary as ``$MULTI_LLM_CANARY_WORKDIR`` and removed afterwards; the
+    positive control stays the ``$TMPDIR`` write.
     """
     try:
-        from .providers.codex import CANARY_ENV_PYTHON, CANARY_ENV_SEEDED
+        from .providers.codex import CANARY_ENV_PYTHON, CANARY_ENV_SEEDED, CANARY_ENV_WORKDIR
     except ImportError:  # pragma: no cover - direct-script import shim
-        from utils.providers.codex import CANARY_ENV_PYTHON, CANARY_ENV_SEEDED  # type: ignore[no-redef]
+        from utils.providers.codex import (  # type: ignore[no-redef]
+            CANARY_ENV_PYTHON, CANARY_ENV_SEEDED, CANARY_ENV_WORKDIR,
+        )
     base_env = dict(os.environ if env is None else env)
-    workdir = os.path.join(os.path.abspath(cwd or os.getcwd()), rung.probe_workdir or "")
+    outside: Optional[str] = None
+    if request.write_scope == WRITE_SCOPE_REPO_WIDE:
+        try:
+            outside = tempfile.mkdtemp(
+                prefix="plugin-landlock-probe-", dir=_slot_base(request.repo_root),
+            )
+        except JailRefused as exc:
+            raise ProbeSetupFailed(
+                f"could not make the probe's negative-control directory: {exc.message}"
+            ) from exc
+        except OSError as exc:
+            raise ProbeSetupFailed(
+                f"could not make the probe's negative-control directory: {exc}"
+            ) from exc
+        workdir = outside
+    else:
+        workdir = os.path.join(os.path.abspath(cwd or os.getcwd()), rung.probe_workdir or "")
     try:
         fd, seeded = tempfile.mkstemp(prefix="plugin-landlock-seed-", dir=workdir)
         with os.fdopen(fd, "wb") as handle:
             handle.write(TRUNCATION_SEED)
     except OSError as exc:
+        if outside is not None:
+            shutil.rmtree(outside, ignore_errors=True)
         raise ProbeSetupFailed(f"could not seed the truncation file: {exc}") from exc
     try:
         try:
@@ -2012,6 +1747,8 @@ def rung_probe(
             argv, child_env = wrap_argv(resolved_probe_argv, rung, context, base_env)
             child_env[CANARY_ENV_SEEDED] = seeded
             child_env[CANARY_ENV_PYTHON] = sys.executable
+            if outside is not None:
+                child_env[CANARY_ENV_WORKDIR] = outside
             child_env.update(canary_env(context))
             yield RungProbe(argv=argv, env=child_env, seeded=seeded, entries=entries)
         finally:
@@ -2021,6 +1758,8 @@ def rung_probe(
             os.unlink(seeded)
         except OSError:
             pass
+        if outside is not None:
+            shutil.rmtree(outside, ignore_errors=True)
 
 
 __all__ = [
@@ -2034,10 +1773,8 @@ __all__ = [
     "JailEvidence",
     "JailRefused",
     "NOTE_PREFIX",
-    "PROTECTED_ROOT_NAMES",
     "ProbeSetupFailed",
-    "REPO_WIDE_F6",
-    "RepoWidePlan",
+    "REPO_WIDE_HANDS_OFF_NAMES",
     "RungProbe",
     "TRUNCATION_SEED",
     "VCS_DIR_NAMES",
@@ -2046,12 +1783,9 @@ __all__ = [
     "canary_env",
     "child_env_redirects",
     "merge_env_redirects",
-    "repo_wide_declared_refusal",
     "repo_wide_env_redirects",
-    "extra_protected_paths",
-    "git_hooks_path",
-    "providers_config_path",
-    "repo_wide_plan",
+    "repo_wide_entry",
+    "repo_wide_root",
     "classify_denied_path",
     "compare_home",
     "complete_context",

@@ -90,7 +90,6 @@ sys.path.insert(0, str(SKILL_ROOT))
 from utils import landlock_dispatch as ld  # noqa: E402
 from utils import process_control  # noqa: E402
 from utils.llm_client import _resolve_executable  # noqa: E402
-from utils.provider_registry import DEFAULT_WRITE_PATHS  # noqa: E402
 from utils.providers.base import (  # noqa: E402
     PROFILE_AGENT_WRITE,
     PROFILE_GENERATE,
@@ -197,9 +196,9 @@ def _git(tree: Path, *args: str) -> str:
 
 #: Step 1b's scratch projects (plan "Editing turns that run tests and
 #: builds", measured 2026-10-02): a small Python project with a pytest suite
-#: and a small npm project, plus the protected set a repo-wide grant keeps
-#: read-only. ``implement_tools.json`` edits ``src/pkg/calc.py`` and runs the
-#: toolchain against them.
+#: and a small npm project, plus the hands-off set a repo-wide batch is told
+#: to leave alone. ``implement_tools.json`` edits ``src/pkg/calc.py`` and runs
+#: the toolchain against them.
 TOOLCHAIN_PYPROJECT = """[project]
 name = "scratch"
 version = "0.1.0"
@@ -473,8 +472,8 @@ def run_turn(
     ``plan_file`` gives the request the ``plan-file`` scope on ``plans/p.md``
     and renders the executor's ``agent-write`` leg; ``repo_wide`` (step 3b)
     the ``repo-wide`` scope of an ``implement`` dispatch, with ``plans/p/``
-    as the run's output folder and the shipped deny list, declaring
-    ``src/pkg/calc.py``; otherwise the fan-out's read-only ``generate`` leg.
+    as the run's output folder; otherwise the fan-out's read-only
+    ``generate`` leg.
     ``jailed=False`` runs the same codex argv and the same child env
     (``TMPDIR`` + redirects) without the wrapper prefix — the strace leg's
     "outside the jail". ``strace`` wraps whatever is spawned.
@@ -487,8 +486,6 @@ def run_turn(
         request = JailRequest(
             repo_root=str(tree), kind="implement", write_scope=WRITE_SCOPE_REPO_WIDE,
             output_dir=str(tree / "plans" / "p"),
-            deny_patterns=tuple(DEFAULT_WRITE_PATHS["deny"]),
-            declared=(str(tree / "src" / "pkg" / "calc.py"),),
         )
         prompt = "Implement T001: fix sub() in src/pkg/calc.py and run the tests."
     elif plan_file:
@@ -1122,24 +1119,23 @@ def test_step_1c_tool_turn_runs_clean_under_the_redirects(tmp_path, jail_ready):
 
 def test_step_1b_implement_turn_runs_its_toolchain_under_the_repo_wide_grant(tmp_path, jail_ready):
     """§8.3 "Step 3b is done when", tier 3 (the promoted step-1b turn, measured
-    2026-10-02 on codex 0.160.0): an ``implement`` batch on the rung edits a
-    file in a subdirectory with ``apply_patch``, then its commands run ``uv run
-    --frozen pytest``, the same with ``-n 2`` and ``npm test`` — all three
-    exit 0 with no denial under the redirects (``UV_CACHE_DIR`` and the pytest
-    ``cache_dir`` under ``TMPDIR`` beside step 1c's) — while a direct ``/tmp``
-    and ``/dev/shm`` write, and every attempt on the protected set (a new
-    top-level entry, ``git commit``, ``git config``, ``.codex``, ``.multi-llm``,
-    the output folder) are denied and leave ``.git/``, ``.multi-llm/`` and the
-    output folder byte-identical; a new file inside ``src/`` and an in-place
-    append to ``AGENTS.md`` land."""
+    2026-10-02 on codex 0.160.0; re-measured for the root grant, 2026-10-05):
+    an ``implement`` batch on the rung edits a file in a subdirectory with
+    ``apply_patch``, then its commands run ``uv run --frozen pytest``, the
+    same with ``-n 2`` and ``npm test`` — all three exit 0 with no denial
+    under the redirects (``UV_CACHE_DIR`` and the pytest ``cache_dir`` under
+    ``TMPDIR`` beside step 1c's) — while a direct ``/tmp`` and ``/dev/shm``
+    write are denied, and every write inside the repository lands: a new
+    top-level directory and file, a new file inside ``src/``, an in-place
+    append to ``AGENTS.md``, and — the root grant's measured consequence —
+    files under ``.codex/`` and ``.multi-llm/`` too. No commit is made
+    (nothing in the turn asks for one) and HEAD does not move."""
     tree = make_tree(tmp_path, with_toolchain=True)
-    protected = {}
-    for base in (tree / ".git", tree / ".codex", tree / ".multi-llm", tree / "plans" / "p"):
-        for path in base.rglob("*"):
-            if path.is_file() and path.name != "index":
-                protected[path] = path.read_bytes()
     head = _git(tree, "rev-parse", "HEAD")
-    top_before = sorted(os.listdir(tree))
+    git_files_before = {
+        path: path.read_bytes() for path in (tree / ".git").rglob("*")
+        if path.is_file() and path.name != "index"
+    }
     trace = bool(shutil.which("strace"))
     result = run_turn(
         tmp_path, tree, scripted(tmp_path, "implement_tools"), repo_wide=True, strace=trace,
@@ -1172,33 +1168,27 @@ def test_step_1b_implement_turn_runs_its_toolchain_under_the_repo_wide_grant(tmp
     direct = output_of("mllm-1b-direct")
     assert direct.count("PermissionError") == 2 and "wrote" not in direct, direct
     assert f"tempfile {result.context.tmpdir}/" in direct
-    # The protected set held; the subdirectory file and the in-place append landed.
-    attempts = output_of("git commit")
-    for denied in ("newtop", "newtop.txt", ".git/index.lock", ".git/config",
-                   ".codex/x", ".multi-llm/tmp/x", "plans/p/state.json"):
-        assert denied in attempts and "Permission denied" in attempts, (denied, attempts)
+    # Inside the repository the root grant admitted every write shape.
+    attempts = output_of("newtop")
+    assert "Permission denied" not in attempts, attempts
+    assert (tree / "newtop").is_dir() and (tree / "newtop.txt").read_text() == "x\n"
     assert (tree / "src" / "pkg" / "new_module.py").read_text() == "y\n"
     assert (tree / "AGENTS.md").read_text() == AGENTS_TEXT + "appended\n"
-    assert {p: p.read_bytes() for p in protected} == protected
+    assert (tree / ".codex" / "x").read_text() == "z\n"
+    assert (tree / ".multi-llm" / "x").read_text() == "z\n"
+    assert "?? newtop.txt" in attempts and "?? newtop/" in attempts
+    # Nothing in the turn wrote `.git/`: HEAD and the metadata are as they were.
     assert _git(tree, "rev-parse", "HEAD") == head
-    assert sorted(os.listdir(tree)) == top_before
-    assert not (tree / "newtop").exists() and not (tree / "newtop.txt").exists()
+    assert {
+        path: path.read_bytes() for path in (tree / ".git").rglob("*")
+        if path.is_file() and path.name != "index"
+    } == git_files_before
     # The stream reads back as the jail working: no in-scope denial, no
-    # codex-internal EACCES, the stray ones counted out of scope.
+    # codex-internal EACCES, the two stray writes counted out of scope.
     assert result.denials.in_scope_paths == [] and result.denials.failed_file_changes == []
-    assert result.denials.out_of_scope_count >= 7, result.denials.to_dict()
+    assert result.denials.out_of_scope_count >= 2, result.denials.to_dict()
     assert result.evidence is None, f"{jail_ready}: codex-internal EACCES {result.evidence}"
-    # The redirects were used.
-    assert any(p.startswith("uv-cache/") for p in result.tmp_files), result.tmp_files[:40]
-    assert any(p.startswith("pytest-cache/") for p in result.tmp_files), result.tmp_files[:40]
-    assert not (tree / ".pytest_cache").exists()
-    if result.trace is not None:
-        stray = sorted({e.path for e in result.trace.eacces})
-        allowed = (str(tree / ".git"), str(tree / ".codex"), str(tree / ".multi-llm"),
-                   str(tree / "plans" / "p"), "/tmp/mllm-1b-direct", "/dev/shm/mllm-1b",
-                   "/dev/tty", str(tree / "newtop"))
-        unexpected = [p for p in stray if not p.startswith(allowed)]
-        assert not unexpected, f"{jail_ready}: EACCES outside step 1b's expected set:\n{unexpected}"
+
 
 
 # ===========================================================================
