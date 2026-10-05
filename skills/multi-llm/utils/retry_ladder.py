@@ -148,13 +148,17 @@ FATAL_STATUSES = frozenset({
 #: Statuses no re-run of the same phase can change: the fatal rung-1 set (a
 #: property of the spec or the machine), ``rejected`` (rung 7, a configuration
 #: refusal "never retried, because re-running produces the same" — e.g. a CLI
-#: that refuses the schema file before any request) and
+#: that refuses the schema file before any request),
 #: ``context_length_exceeded`` (an unchanged oversized prompt fails
-#: identically). Read by ``next_phase.resume_command``: a phase whose failed
-#: tasks all ended elsewhere is handed back a re-invoke the user can type, and
-#: one with any of these gets none, because the command would repeat the stop.
+#: identically) and ``budget_exhausted`` (rule 4 refused the slot before
+#: anything was spawned, because the configured timeout cannot hold one declared
+#: worst-case attempt — a config refusal whose own reason says "Raise the slot
+#: timeout", and an unchanged re-run is refused the same way). Read by
+#: ``next_phase.resume_command``: a phase whose failed tasks all ended elsewhere
+#: is handed back a re-invoke the user can type, and one with any of these gets
+#: none, because the command would repeat the stop.
 RERUN_FUTILE_STATUSES = FATAL_STATUSES | frozenset({
-    STATUS_REJECTED, STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_REJECTED, STATUS_CONTEXT_LENGTH_EXCEEDED, STATUS_BUDGET_EXHAUSTED,
 })
 
 #: The smallest slice of the per-slot budget worth *starting* an attempt with
