@@ -4956,8 +4956,33 @@ class TestTheWayForwardLeadsTheResult:
 
     def test_a_blocked_run_leads_with_the_resume_command(self, built_package, uv_stub):
         result, _ = uv_stub.run(built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED])
-        assert list(result)[:5] == [
-            "ok", "state", "user_next_step", "resume_command", "message"]
+        # Fix round 8: the re-invoke options lead too, ahead of `result`,
+        # `output` and `stderr`; the `next: null` beside them does not.
+        assert list(result)[:6] == [
+            "ok", "state", "user_next_step", "resume_command", "options", "message"]
+
+    def test_the_calls_a_result_hands_back_lead_when_set(self, built_package):
+        """Fix round 8: a stopped watch's way forward is its `abort_command`,
+        and a running one's its `next`; both sat behind the run's details."""
+        ordered = node_json(
+            """
+            emit([
+              Object.keys(T.wayForwardFirst({
+                state: "needs-human", ok: false, reason: "r", run_id: "R", log: "/l",
+                abort_dispatched: false, abort_command: { tool: "t", args: {} },
+                anchor: "/a", message: "m", instructions: "long" })),
+              Object.keys(T.wayForwardFirst({
+                state: "running", ok: true, run_id: "R", log: "/l", polls: 3,
+                next: { tool: "t", args: {} }, abort_command: { tool: "t", args: {} },
+                options: null, message: "m", instructions: "long" })),
+            ])
+            """,
+            built_package,
+        )
+        assert ordered[0] == ["ok", "state", "abort_command", "message", "reason", "run_id",
+                              "log", "abort_dispatched", "anchor", "instructions"]
+        assert ordered[1] == ["ok", "state", "next", "abort_command", "message", "run_id",
+                              "log", "polls", "options", "instructions"]
 
     def test_no_command_leads_with_its_reason(self, built_package, uv_stub):
         result, _ = uv_stub.run(built_package, self.IMPLEMENT, [self.LAUNCH, self.BLOCKED],

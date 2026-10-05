@@ -3178,6 +3178,14 @@ function finishFields(outcome, checked, surface) {
 /** The keys that tell the user what to type, right after `ok` and `state`. */
 const WAY_FORWARD_KEYS = ["user_next_step", "resume_command", "no_command_reason"]
 
+/**
+ * The calls a result hands back, led after those when set (fix round 8): a
+ * stopped watch's way forward is its `abort_command`, a running one's its
+ * `next`, and a needs-human result's `options` trailed `result`, `output` and
+ * `stderr`. A null one keeps its place.
+ */
+const HANDED_BACK_LEAD_KEYS = ["next", "abort_command", "options"]
+
 /** The keys placed last: the long instructions text. */
 const LAST_KEYS = ["instructions"]
 
@@ -3194,9 +3202,13 @@ const LAST_KEYS = ["instructions"]
  */
 function wayForwardFirst(outcome) {
   const ordered = {}
-  for (const key of ["ok", "state", ...WAY_FORWARD_KEYS, "message"]) {
+  for (const key of ["ok", "state", ...WAY_FORWARD_KEYS]) {
     if (key in outcome) ordered[key] = outcome[key]
   }
+  for (const key of HANDED_BACK_LEAD_KEYS) {
+    if (outcome[key] != null) ordered[key] = outcome[key]
+  }
+  if ("message" in outcome) ordered.message = outcome.message
   for (const [key, value] of Object.entries(outcome)) {
     if (!(key in ordered) && !LAST_KEYS.includes(key)) ordered[key] = value
   }

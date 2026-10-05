@@ -202,7 +202,12 @@ USER_NEXT_STEP_KEY = "user_next_step"
 #: tokens truncated…"). ``resume_command`` sat just before the 39 722-character
 #: runbook, inside the dropped middle, while the trailing ``"user_next_step":
 #: null`` survived, and the model told the user there was no resume command.
-WAY_FORWARD_KEYS = (USER_NEXT_STEP_KEY, "resume_command", "no_command_reason")
+#: The calls a result hands back lead too, when set (fix round 8): a budget
+#: handoff's way forward is its re-attach ``next`` and its ``abort_command``,
+#: and a needs-human result's ``options`` trailed ``result``, ``output`` and
+#: ``stderr`` into the dropped middle.
+WAY_FORWARD_KEYS = (USER_NEXT_STEP_KEY, "resume_command", "no_command_reason",
+                    "next", "abort_command", "options")
 
 #: The keys placed last: the long runbook (Open question 20 of
 #: plans/codex-native-plugin.md: a cut must lose runbook text, never the
