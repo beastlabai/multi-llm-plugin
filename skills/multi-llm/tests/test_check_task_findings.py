@@ -84,7 +84,6 @@ class TestTheReplyField:
         )
 
         assert check_findings_from({"status": "no-op", "notes": "2 findings"}) is None
-        assert check_findings_from({"check": None}) is None
         assert check_findings_from({"check": {"passed": True}}) == []
         assert check_findings_from({"check": {"passed": False}}) == [
             CHECK_FAILED_WITHOUT_FINDINGS]
@@ -129,6 +128,10 @@ class TestTheReplyField:
         ({"passed": False, "findings": [{"a": ""}]}, "failed"),
         ("passed", "unknown"),
         (["a"], "unknown"),
+        # Fix round 12 (review item 2): `check: null` read as no result, so
+        # a check task's reply carrying it was VERIFIED. Only a missing key
+        # is no result.
+        (None, "unknown"),
     ]
 
     @pytest.mark.parametrize("check,expected", NEAR_MISSES)
@@ -157,6 +160,13 @@ class TestTheReplyField:
 
         assert check_findings_from({"check": {"passed": passed, "findings": []}}) == []
         assert check_findings_from({"check": {"passed": passed}}) == []
+
+    def test_only_a_missing_check_key_is_no_result(self):
+        from utils.subagent_executor import CHECK_RESULT_UNKNOWN, check_findings_from
+
+        assert check_findings_from({"status": "no-op"}) is None
+        found = check_findings_from({"status": "no-op", "check": None})
+        assert found == [f"{CHECK_RESULT_UNKNOWN} (its `check` was null)"]
 
 
 class TestTheStateRecord:

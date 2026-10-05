@@ -703,9 +703,9 @@ def _finding_text(item: Any) -> str:
 def check_findings_from(result: Any) -> Optional[List[str]]:
     """The structured check result of a write reply, as a findings list.
 
-    ``None`` when the reply carries no ``check`` at all (an older reply, a
-    task that is not a check, or ``check: null``); ``[]`` when it says the
-    check passed and lists nothing; otherwise the findings, one line each
+    ``None`` when the reply carries no ``check`` key at all (an older reply,
+    a task that is not a check); ``[]`` when it says the check passed and
+    lists nothing; otherwise the findings, one line each
     and bounded (:data:`CHECK_FINDINGS_MAX`, :data:`CHECK_FINDING_MAX_CHARS`).
     Read from the reply's own field, never from its notes.
 
@@ -717,12 +717,16 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     instead, and only a clear pass with nothing listed is a pass: a finding
     beside ``passed: true`` still counts, ``passed: false`` with none listed
     gets :data:`CHECK_FAILED_WITHOUT_FINDINGS`, and a ``check`` that says
-    neither (``{}``, ``passed: null``, a ``check`` that is not an object)
-    gets :data:`CHECK_RESULT_UNKNOWN` — never a pass.
+    neither (``{}``, ``passed: null``, ``check: null``, a ``check`` that is
+    not an object) gets :data:`CHECK_RESULT_UNKNOWN` — never a pass. Fix
+    round 12: ``check: null`` read as no result, so a check task's reply
+    carrying it was VERIFIED; only a missing key is no result now.
     """
-    if not isinstance(result, dict) or result.get("check") is None:
+    if not isinstance(result, dict) or "check" not in result:
         return None
     check = result.get("check")
+    if check is None:
+        return [f"{CHECK_RESULT_UNKNOWN} (its `check` was null)"]
     if not isinstance(check, dict):
         shown = " ".join(str(check).split())[:80]
         return [
@@ -730,6 +734,7 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
             f"{type(check).__name__} {shown!r}, not an object)"
         ]
     raw = check.get("findings")
+    passed = _check_passed(check.get("passed"))
     if isinstance(raw, list):
         items = raw
     elif raw is None:
@@ -749,7 +754,6 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
         ]
     if findings:
         return findings
-    passed = _check_passed(check.get("passed"))
     if passed is True:
         return []
     if passed is False:
