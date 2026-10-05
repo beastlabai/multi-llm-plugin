@@ -638,6 +638,32 @@ def answered_done_on_record(
     return accepted, completed_manual
 
 
+def _findings_from_a_failed_claim(data: Any) -> bool:
+    """Whether a result file that claims ``failed`` holds a check read as findings.
+
+    ``_verification_verdict`` reads a check's ``failed`` reply that lists
+    findings and does not say ``could_not_run`` as findings (``no-op``/ok,
+    labelled ``check-findings``, fix round 12), and ``_stamp_verdict``
+    records that verdict beside the runner's own words, which stay as the
+    runner wrote them: the claim is never the verdict (F1). Resume's
+    definition of done read the claim alone, so such a check was never
+    done and every plain ``--resume`` dispatched it again on unchanged
+    files, past the rule that keeps its findings (``_check_findings_rerun``;
+    fix round 13). Only the scheduler's own stamp turns the claim into
+    done-evidence, and only for exactly that verdict.
+    """
+    if not isinstance(data, dict) or str(data.get("status") or "") != "failed":
+        return False
+    verdict = data.get("verdict")
+    return (
+        isinstance(verdict, dict)
+        and verdict.get("ok") is True
+        and bool(verdict.get("verification_only"))
+        and verdict.get("write_outcome") == WRITE_NO_OP
+        and bool(row_check_findings(verdict))
+    )
+
+
 def rerunnable_checks(state: Any) -> List[str]:
     """The check tasks whose findings hold back the tasks after them.
 
@@ -5565,12 +5591,17 @@ class WriteBatchScheduler:
             return False
         if validate_result(self.kind, data):
             return False
-        if str(data.get("status") or "") not in (WRITE_APPLIED, WRITE_NO_OP):
+        verdict = data.get("verdict")
+        if (
+            str(data.get("status") or "") not in (WRITE_APPLIED, WRITE_NO_OP)
+            and not _findings_from_a_failed_claim(data)
+        ):
             # A schema-valid `{"status": "failed"}` is a batch the previous run
             # recorded as NOT done; resuming past it on the strength of the
-            # file existing would skip exactly the batch --resume is for.
+            # file existing would skip exactly the batch --resume is for —
+            # unless the verdict stamped on it read it as a check's findings
+            # (fix round 13), whose re-run `_check_findings_rerun` decides.
             return False
-        verdict = data.get("verdict")
         if isinstance(verdict, dict) and not verdict.get("ok", True):
             # The scheduler's own classification, stamped by `_stamp_verdict`
             # once `_classify` decided (F1): the file reads `applied` because
