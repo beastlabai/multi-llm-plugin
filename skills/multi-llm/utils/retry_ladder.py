@@ -40,8 +40,9 @@ each returned as ``Action(retry=True, repair=True)`` and charged to the same
 deadline. The re-ask is a different request (the original prompt plus the
 validator's errors), so it is not the identical retry rung 6 forbids; what the
 caller sends is the caller's business, and the default of ``0`` leaves rung 6
-exactly as terminal as it was. Lane B grants one, for ``task_generation`` only
-(``subagent_executor.SCHEMA_REPAIRS_BY_KIND``).
+exactly as terminal as it was. Lane B grants one, for ``task_generation`` and
+the three apply kinds (``subagent_executor.SCHEMA_REPAIRS_BY_KIND``; an apply
+kind's re-ask restates the batch's report and must move no file).
 
 The status vocabulary and the D3k rung table live here rather than in
 ``subagent_executor`` because the ladder is now their only consumer;
@@ -287,7 +288,7 @@ class RetryLadder:
         # "a deterministic disagreement a retry would only launder" when the
         # retry is the identical dispatch; a re-ask that hands the runner the
         # validator's own errors is a different request. Granted per kind by the
-        # lane (Lane B: `task_generation` only), never by the ladder, and it
+        # lane (Lane B: `task_generation` and the apply kinds), never by the ladder, and it
         # spends neither the transport budget nor the rate-limit allowance.
         self._schema_repairs_left = max(0, int(schema_repairs))
         self._schema_repairs_used = 0
