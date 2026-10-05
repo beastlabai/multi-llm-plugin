@@ -66,8 +66,13 @@ def _check_passes(repo) -> None:
     ))
 
 
-def _run_one_with_findings(repo, capsys) -> str:
+def _run_one_with_findings(repo, capsys, reply_status=None) -> str:
+    """One first run whose check reports FINDINGS; *reply_status* is the
+    top-level `status` its reply claims (`no-op` by default; `failed` is
+    racing run 3's runners' word for a check that ran and found problems)."""
     _check_finds(repo)
+    if reply_status:
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_STATUS", reply_status)
     assert _implement(repo) == 3
     captured = capsys.readouterr()
     return captured.out + captured.err
@@ -239,12 +244,19 @@ class TestAFailedReplyThatListsFindings:
 
 class TestTheCheckRunsAgain:
     """Review T2: a check with findings was done for good — `--resume`
-    skipped it and `--human-task <id>=retry` answered only a failed task."""
+    skipped it and `--human-task <id>=retry` answered only a failed task.
 
+    Fix round 13: each resume test runs for a reply that claimed `no-op` and
+    for one that claimed `failed` while listing findings. The `failed` one's
+    result file kept the runner's `"status": "failed"` beside a verdict
+    stamped ok/`check-findings`, resume never counted it as done, and every
+    plain `--resume` dispatched the check again on unchanged files."""
+
+    @pytest.mark.parametrize("reply_status", [None, "failed"])
     def test_a_resume_that_changes_nothing_keeps_the_findings_and_the_hold(
-        self, repo, capsys
+        self, repo, capsys, reply_status
     ):
-        _run_one_with_findings(repo, capsys)
+        _run_one_with_findings(repo, capsys, reply_status)
         repo.log.unlink(missing_ok=True)
         assert _implement(repo, "--resume") == 3
         text = capsys.readouterr()
@@ -271,14 +283,25 @@ class TestTheCheckRunsAgain:
             get_or_create_state(repo.plan).get("human_task_decisions") or {}
         )
 
-    def test_the_fixed_code_resumes_through_the_check_to_completion(self, repo, capsys):
-        _run_one_with_findings(repo, capsys)
+    @pytest.mark.parametrize("reply_status", [None, "failed"])
+    def test_the_fixed_code_resumes_through_the_check_to_completion(
+        self, repo, capsys, reply_status
+    ):
+        _run_one_with_findings(repo, capsys, reply_status)
         main = repo.root / "src" / "main.py"
         main.write_text(main.read_text() + "# fixed by hand\n", encoding="utf-8")
         _check_passes(repo)
+        repo.monkeypatch.delenv("MOCK_LLM_WRITE_CHECK_STATUS", raising=False)
         repo.log.unlink(missing_ok=True)
 
         assert _implement(repo, "--resume") == 0
+        captured = capsys.readouterr()
+        # Run again because the files changed — the findings rerun rule, not
+        # a result file resume could not read as done.
+        assert (
+            "T002: its check reported problems and the files changed since — "
+            "running it again." in captured.out + captured.err
+        )
         assert _dispatched_titles(repo) == ["Check the module", "Edit: wire the fallback"]
         state = get_or_create_state(repo.plan)
         assert state.implementation_task_statuses() == {
