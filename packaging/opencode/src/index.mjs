@@ -2724,17 +2724,21 @@ async function fetchInstructions({ row, surface, ctx, env, uv, anchor }) {
  * route, so this file spells none of it, and it is the user's to type: nothing
  * here (or in `isMechanical`) ever runs it. A surface without the `resume` entry,
  * a spawn failure, a non-zero exit or an empty answer all give `null`: an
- * advisory lookup never changes the result it decorates.
+ * advisory lookup never changes the result it decorates. The mode asked about
+ * is `blockedWord`'s: a `status`/`abort` call reports on a run and is no phase.
  */
-async function fetchResumeCommand({ values, surface, ctx, env, uv, anchor }) {
+async function fetchResumeCommand({
+  values, surface, ctx, env, uv, anchor, outcome = null,
+}) {
   const resume = surface.dispatcher.resume
   const plan = values.planArg || values.plan
-  if (!resume || !plan || !values.word) return null
+  const word = blockedWord(values, outcome, surface)
+  if (!resume || !plan || !word) return null
   const argv = [
     ...resume.argv,
     plan,
     resume.option,
-    values.word,
+    word,
     surface.dispatcher.host_option,
     surface.host,
   ]
@@ -2752,6 +2756,34 @@ async function fetchResumeCommand({ values, surface, ctx, env, uv, anchor }) {
   }
   const command = child.result?.[resume.result_key]?.command
   return typeof command === "string" && command.trim() ? command : null
+}
+
+/**
+ * The mode `fetchResumeCommand` asks about: the call's own when it is a phase,
+ * else the phase of the run the call reported on.
+ *
+ * A `status` or `abort` call on a failed run re-spells status's `resume with:`
+ * line into the host's command, and asking `--blocked status` — no phase, so no
+ * answer — then put "give the user no command" beside it (2026-10-05). The run
+ * is named by the result line (a poll pinned to one run carries its `mode` and
+ * `phase`), else by the one phase the output re-invokes; several, or none, name
+ * nothing.
+ */
+function blockedWord(values, outcome, surface) {
+  const isPhase = (word) =>
+    typeof word === "string" && !!resolveMode(word, surface)?.phase
+  if (isPhase(values?.word)) return values.word
+  const result = outcome?.result
+  for (const word of [result?.mode, result?.phase]) {
+    if (isPhase(word)) return word
+  }
+  const named = new Set(
+    (outcome?.options ?? [])
+      .map((option) => option?.args?.mode)
+      .filter(isPhase)
+      .map((word) => resolveMode(word, surface).name),
+  )
+  return named.size === 1 ? [...named][0] : null
 }
 
 // ---------------------------------------------------------------------------
@@ -3014,7 +3046,7 @@ async function execute(args, ctx, surface, client) {
       outcome.exit === surface.dispatcher.exit_codes.needs_human
     ) {
       const resume = await fetchResumeCommand({
-        values, surface, ctx, env, uv, anchor,
+        values, surface, ctx, env, uv, anchor, outcome,
       })
       if (resume) {
         outcome.resume_command = resume
@@ -3050,9 +3082,11 @@ async function execute(args, ctx, surface, client) {
  * surface's note naming what was dropped. Every sentence is the surface's; a
  * surface lacking one only loses that sentence.
  *
- * A result that names a run and no `exit` gets no reason (2026-10-05):
- * `abortAndReport` and `orphanReport` — the run outlived the call, so "did not
- * finish" is not yet true.
+ * Two results get no reason (2026-10-05): one that names a run and no `exit`
+ * (`abortAndReport`, `orphanReport`: the run outlived the call, so "did not
+ * finish" is not yet true), and a `status`/`abort` call whose output shows a
+ * re-spelled command re-invoking a phase (`showsAPhaseCommand`), which the
+ * reason would contradict.
  */
 function finishOutcome(outcome, checked, surface) {
   const dropped = checked?.dropped ?? []
@@ -3063,7 +3097,9 @@ function finishOutcome(outcome, checked, surface) {
   if (outcome.ok !== false) return outcome
   outcome.user_next_step = null
   if (outcome.resume_command) return outcome
-  if (outcome.run_id && (outcome.exit ?? null) === null) return outcome
+  const live = !!outcome.run_id && (outcome.exit ?? null) === null
+  const report = !!checked?.mode && !checked.mode.phase
+  if (live || (report && showsAPhaseCommand(outcome, surface))) return outcome
   if (typeof surface?.no_command_reason === "string") {
     outcome.no_command_reason = surface.no_command_reason
   }
@@ -3076,6 +3112,23 @@ function finishOutcome(outcome, checked, surface) {
     outcome.message = `${outcome.message} ${clause}`
   }
   return outcome
+}
+
+/**
+ * Whether the result's own text shows a re-spelled command that re-invokes a
+ * phase: an `options` call on a phase mode, spelled for the user
+ * (`userSpelling`), found in `output` or `stderr` as it was rendered.
+ */
+function showsAPhaseCommand(outcome, surface) {
+  const text = [outcome.output, outcome.stderr]
+    .filter((part) => typeof part === "string")
+    .join("\n")
+  if (!text) return false
+  return (outcome.options ?? []).some((option) => {
+    if (!option?.args || !resolveMode(option.args.mode, surface)?.phase) return false
+    const spelled = userSpelling(option.args, surface)
+    return !!spelled && text.includes(spelled)
+  })
 }
 
 /**
