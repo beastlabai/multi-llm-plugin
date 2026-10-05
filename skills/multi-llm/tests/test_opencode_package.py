@@ -1712,6 +1712,14 @@ if "--blocked" in argv:
     if os.environ.get("STUB_RESUME_FAIL"):
         sys.exit(1)
     plan, mode = argv[argv.index("--") + 5], argv[argv.index("--blocked") + 1]
+    # The real lookup answers only for a phase with something to resume:
+    # `STUB_RESUME_ONLY` names the modes this one answers for (unset: all).
+    only = os.environ.get("STUB_RESUME_ONLY")
+    if only is not None and mode not in only.split(","):
+        print("MULTI_LLM_RESULT: " + json.dumps({
+            "mode": "util next-command", "state": "done", "exit": 0,
+            "artifacts": [], "next": None}))
+        sys.exit(0)
     command = os.environ.get("STUB_RESUME_COMMAND") or (
         "/multi-llm --" + mode + " " + plan + " --resume")
     print("MULTI_LLM_RESULT: " + json.dumps({
@@ -4961,6 +4969,87 @@ class TestAFailedResultSaysWhatTheUserCanRun:
 
 
 UV_PREFIX = "uv run --frozen --no-dev --project /skill -- python /skill/multi_llm.py"
+
+
+class TestAReportCallOnAFailedRun:
+    """Adversarial review 2026-10-05: a direct `status` (or `abort`) call on a
+    failed write run re-spelled status's `resume with:` line into the host's
+    command, then asked `--blocked status` — which answers nothing, status is
+    no phase — and so added `user_next_step: null`, `no_command_reason` and
+    "give the user no command to type" beside output that visibly named one."""
+
+    PLAN = "plans/x.md"
+    STATUS = {"mode": "status", "plan": PLAN, "question": "", "extra_flags": []}
+    SPELLED = "/multi-llm --implement plans/x.md --resume"
+
+    def _failed(self, tmp_path, **body):
+        """A status poll of a failed implement run (exit 3), plan absolute."""
+        absolute = str(tmp_path / "plans" / "x.md")
+        payload = {"mode": "implement", "phase": "implement",
+                   "state": "needs-human", "exit": 3, "artifacts": [], "next": None}
+        payload.update(body)
+        return {"exit": 3, "stdout": [
+            "implement: failed (batch 2 of 4)",
+            f"      resume with: {UV_PREFIX} implement {absolute} --host opencode "
+            "--detach --resume",
+            "MULTI_LLM_RESULT: " + json.dumps(payload),
+        ]}
+
+    def _asked(self, uv_stub):
+        path = Path(str(uv_stub.log_path) + ".resume")
+        lines = path.read_text().splitlines() if path.exists() else []
+        return [argv[argv.index("--blocked") + 1]
+                for argv in (json.loads(line) for line in lines if line)]
+
+    def test_it_asks_about_the_runs_own_phase(self, built_package, uv_stub, tmp_path):
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        result, _ = uv_stub.run(built_package, self.STATUS, [self._failed(tmp_path)],
+                                extra_env={"STUB_RESUME_ONLY": "implement"})
+        assert self._asked(uv_stub) == ["implement"]
+        assert result["resume_command"] == self.SPELLED
+        assert f"resume with: {self.SPELLED}" in result["output"]
+        assert "no_command_reason" not in result
+        assert result["message"].endswith(surface["needs_human_message"]["resume"])
+
+    def test_an_unpinned_listing_names_it_through_its_one_option(
+        self, built_package, uv_stub, tmp_path
+    ):
+        """A bare `status` keeps `mode: status, phase: null` on its result line;
+        the one phase its output re-invokes is the run's."""
+        result, _ = uv_stub.run(
+            built_package, self.STATUS,
+            [self._failed(tmp_path, mode="status", phase=None)],
+            extra_env={"STUB_RESUME_ONLY": "implement"})
+        assert self._asked(uv_stub) == ["implement"]
+        assert result["resume_command"] == self.SPELLED
+
+    def test_no_lookup_answer_beside_a_visible_one_claims_no_absence(
+        self, built_package, uv_stub, tmp_path
+    ):
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        result, _ = uv_stub.run(built_package, self.STATUS, [self._failed(tmp_path)],
+                                extra_env={"STUB_RESUME_ONLY": "review-plan"})
+        assert f"resume with: {self.SPELLED}" in result["output"]
+        assert "resume_command" not in result
+        assert result["user_next_step"] is None
+        assert "no_command_reason" not in result
+        assert not result["message"].endswith(
+            surface["needs_human_message"]["no_command"])
+
+    def test_a_phase_call_still_says_there_is_none(self, built_package, uv_stub,
+                                                   tmp_path):
+        """On a phase's own exit 3 the lookup is authoritative: a visible retry
+        it does not back is one that would repeat the stop."""
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        launch = {"exit": 0, "stdout": [
+            "run_id: R", "log: /l",
+            'MULTI_LLM_RESULT: {"state":"done","exit":0,"next":null}']}
+        result, _ = uv_stub.run(
+            built_package, dict(self.STATUS, mode="implement"),
+            [launch, self._failed(tmp_path)],
+            extra_env={"STUB_RESUME_ONLY": "review-plan"})
+        assert self._asked(uv_stub) == ["implement"]
+        assert result["no_command_reason"] == surface["no_command_reason"]
 
 
 class TestARunStillAliveIsNoFinishedStop:

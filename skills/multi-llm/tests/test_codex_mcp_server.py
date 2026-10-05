@@ -168,6 +168,14 @@ if dargv[:2] == {resume_argv!r}:
         handle.write(json.dumps(record) + "\n")
     if os.environ.get("STUB_RESUME_FAIL"):
         sys.exit(1)
+    # The real lookup answers only for a phase with something to resume:
+    # `STUB_RESUME_ONLY` names the modes this one answers for (unset: all).
+    only = os.environ.get("STUB_RESUME_ONLY")
+    if only is not None and dargv[4] not in only.split(","):
+        print({marker!r} + " " + json.dumps({{
+            "mode": "util next-command", "state": "done", "exit": 0,
+            "artifacts": [], "next": None}}))
+        sys.exit(0)
     command = os.environ.get("STUB_RESUME_COMMAND") or (
         "$multi-llm:multi-llm --" + dargv[4] + " " + dargv[2] + " --resume")
     print({marker!r} + " " + json.dumps({{
@@ -2312,6 +2320,74 @@ def _server_module(name="mcp_server_under_test"):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+STATUS = {"mode": "status", "plan": "plans/x.md", "question": "", "extra_flags": []}
+SPELLED_RESUME = "$multi-llm:multi-llm --implement plans/x.md --resume"
+
+
+def failed_implement_status(harness, **body) -> dict:
+    """A status poll of a failed implement run (exit 3), plan absolute."""
+    absolute = os.path.join(os.path.realpath(harness.workspace), "plans", "x.md")
+    payload = {"mode": "implement", "phase": "implement",
+               "state": STATES["needs_human"], "exit": CODES["needs_human"]}
+    payload.update(body)
+    return {"exit": CODES["needs_human"], "stdout": [
+        "implement: failed (batch 2 of 4)",
+        "      resume with: {} implement {} --host {} --detach --resume".format(
+            UV_PREFIX, absolute, SURFACE["host"]),
+        result_line(**payload)]}
+
+
+class TestAReportCallOnAFailedRun:
+    """Adversarial review 2026-10-05: a direct `status` (or `abort`) call on a
+    failed write run re-spelled status's `resume with:` line into the host's
+    command, then asked `--blocked status` — which answers nothing, status is no
+    phase — and so added `user_next_step: null`, `no_command_reason` and "give
+    the user no command to type" beside output that visibly named one."""
+
+    @staticmethod
+    def _asked(harness):
+        return [dispatcher_argv(call)[4] for call in harness.resume_calls()]
+
+    def test_it_asks_about_the_runs_own_phase(self, harness):
+        envelope, _, _, _ = harness.run(
+            STATUS, [failed_implement_status(harness)],
+            extra_env={"STUB_RESUME_ONLY": "implement"})
+        assert self._asked(harness) == ["implement"]
+        assert envelope["resume_command"] == SPELLED_RESUME
+        assert "resume with: " + SPELLED_RESUME in envelope["output"]
+        assert "no_command_reason" not in envelope
+        assert envelope["message"].endswith(SURFACE["needs_human_message"]["resume"])
+
+    def test_an_unpinned_listing_names_it_through_its_one_option(self, harness):
+        envelope, _, _, _ = harness.run(
+            STATUS, [failed_implement_status(harness, mode="status", phase=None)],
+            extra_env={"STUB_RESUME_ONLY": "implement"})
+        assert self._asked(harness) == ["implement"]
+        assert envelope["resume_command"] == SPELLED_RESUME
+
+    def test_no_lookup_answer_beside_a_visible_one_claims_no_absence(self, harness):
+        envelope, _, _, _ = harness.run(
+            STATUS, [failed_implement_status(harness)],
+            extra_env={"STUB_RESUME_ONLY": "review-plan"})
+        assert "resume with: " + SPELLED_RESUME in envelope["output"]
+        assert "resume_command" not in envelope
+        assert envelope["user_next_step"] is None
+        assert "no_command_reason" not in envelope
+        assert not envelope["message"].endswith(
+            SURFACE["needs_human_message"]["no_command"])
+
+    def test_a_phase_call_still_says_there_is_none(self, harness):
+        """On a phase's own exit 3 the lookup is authoritative: a visible retry
+        it does not back is one that would repeat the stop."""
+        envelope, _, _, _ = harness.run(
+            dict(STATUS, mode="implement"),
+            [launch_step(), failed_implement_status(harness)],
+            meta=turn_meta(sandbox_mode="workspace-write"),
+            extra_env={"STUB_RESUME_ONLY": "review-plan"})
+        assert self._asked(harness) == ["implement"]
+        assert envelope["no_command_reason"] == SURFACE["no_command_reason"]
 
 
 class TestARunStillAliveIsNoFinishedStop:
