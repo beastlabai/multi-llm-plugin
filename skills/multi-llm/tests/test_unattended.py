@@ -1283,6 +1283,32 @@ class TestApplyPhaseRowsAreRecorded:
         # and names the flag that made the bypass deliberate, not just "bypassed"
         assert "--yes" in out.split(un.row(11).site_id, 1)[1]
 
+    def test_applying_everything_unasked_says_what_was_loaded_and_what_is_used(
+        self, tmp_path, capsys, monkeypatch
+    ):
+        """2026-10-05, Codex racing run 3: the record read "11 loaded task
+        suggestion group(s)" beside a review that reported 10 valid and 1
+        invalid, as if all eleven were applied."""
+        monkeypatch.setattr(_StubApplyOrchestrator, "GROUPS", [
+            {"theme": "A", "group_hash": "aaaa1111",
+             "suggestions": [{"title": "S1", "desc": "d", "importance": "MEDIUM"}]},
+            {"theme": "B", "group_hash": "bbbb2222",
+             "suggestions": [{"title": "S2", "desc": "d", "importance": "MEDIUM"}]},
+        ])
+        monkeypatch.setattr(_StubApplyOrchestrator, "VALIDATION", [
+            {"group_id": "aaaa1111", "status": "valid", "reason": "OK",
+             "confidence": 0.9},
+            {"group_id": "bbbb2222", "status": "invalid", "reason": "no",
+             "confidence": 0.9},
+        ])
+        _stub_apply_run(tmp_path, yes=True)
+        line = next(
+            l for l in capsys.readouterr().out.splitlines()
+            if f"[AUTO_RESOLVED] {un.row(11).site_id}:" in l
+        )
+        assert "2 suggestion group(s) loaded: 1 valid (applied), 1 invalid (left out)" in line
+        assert "--yes" in line
+
     def test_without_yes_neither_is_announced(self, tmp_path, capsys):
         """`--no-confirm` alone is a flag the caller typed, not a question answered."""
         _stub_apply_run(tmp_path, no_confirm=True)
