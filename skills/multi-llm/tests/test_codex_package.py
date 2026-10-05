@@ -607,6 +607,18 @@ class TestPluginSkill:
         assert "outside the exec sandbox" in flat
         assert "writes to the workspace" in flat
 
+    def test_validation_counts_are_reported_only_when_the_result_has_them(self):
+        """Codex racing run 4: "on exit 0, report `validation_counts`" held for
+        every mode, and the host said "the tool didn't return
+        validation_counts" after every apply phase, which never carries them.
+        Asserted on the render, not on the generated copy beside it."""
+        flat = " ".join(codex_build.skill_md().split())
+        assert "on exit 0, report `validation_counts`" not in flat
+        assert ("when the result carries `validation_counts` (a review phase's "
+                "does), report them") in flat
+        assert ("A result without that key has no counts to report, so do not "
+                "mention them.") in flat
+
     def test_is_under_twenty_lines(self, skill):
         assert len(skill.splitlines()) < 20
 
