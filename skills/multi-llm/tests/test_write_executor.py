@@ -876,6 +876,53 @@ class TestReportReAsk:
         )
         assert repr(foreign) in outcome.reason
 
+    def test_an_item_the_reply_says_it_skipped_is_not_restated_as_applied(
+        self, env
+    ):
+        """Fix round 12 (review item 6): the mock runner's restatement read
+        every "Suggestion N:" line as applied, so "Suggestion 2: skipped —
+        the section does not exist" came back as the batch's second id and
+        the batch read fully applied. A well-behaved runner does not claim it,
+        and the batch is a partial application naming the missing id."""
+        env.edits([_patch_edit(env.plan)])
+        env.monkeypatch.setenv(
+            "MOCK_LLM_WRITE_RESULT",
+            "Suggestion 1: added the CDN note to the Goal.\n"
+            "Suggestion 2: skipped — the Testing section does not exist.",
+        )
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESTATE", "1")
+
+        result = env.scheduler(
+            [env.apply_task(0, expected_ids=self.BATCH_IDS)]
+        ).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_PARTIAL, outcome.reason
+        assert result.exit_code == 3
+        assert f"missing: {self.BATCH_IDS[1]}" in outcome.reason
+
+    @pytest.mark.parametrize("line,claimed", [
+        ("Suggestion 2: applied the import fix.", True),
+        ("Suggestion 2: added the CDN note (the skip link stays).", True),
+        ("Suggestion 2: skipped — the file does not exist.", False),
+        ("Suggestion 2: could not apply, conflict.", False),
+        ("Suggestion 2: couldn't be applied.", False),
+        ("Suggestion 2: not applied: out of scope.", False),
+        ("**Suggestion 2**: did not apply — the text moved.", False),
+        ("- Suggestion 2: failed (no such heading).", False),
+    ])
+    def test_the_mock_restates_only_what_the_reply_applied(self, line, claimed):
+        from tests.mocks.mock_llm import restate_report
+        from utils.subagent_prompts import build_schema_repair_prompt
+
+        reply = f"Suggestion 1: applied the import fix.\n{line}\n"
+        prompt = build_schema_repair_prompt(
+            "apply_suggestions", "orig", ["no ids"], previous_reply=reply,
+            expected_ids=["S-A", "S-B"],
+        )
+        ids = json.loads(restate_report(prompt))["ids"]
+        assert ids == (["S-A", "S-B"] if claimed else ["S-A"])
+
     def test_a_raw_control_byte_in_the_report_needs_no_re_ask(self, env):
         """The measured reply's shape: a raw control byte in a key (a NUL then;
         a tab here, because an environment variable cannot carry a NUL) used to

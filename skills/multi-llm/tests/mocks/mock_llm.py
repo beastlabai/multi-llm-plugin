@@ -546,8 +546,28 @@ _LISTED_ID = re.compile(r"^- (?:suggestion|fix) (\d+) = `([^`]+)`$", re.MULTILIN
 #: Format" asks for ("Suggestion 1: …").
 _POSITIONAL_ID = re.compile(r"^\s*(?:suggestion|fix|item)\s*#?\s*(\d+)\s*$", re.I)
 _POSITIONAL_LINE = re.compile(
-    r"^[\s*#-]*((?:suggestion|fix)\s+\d+)\s*\**\s*:", re.I | re.MULTILINE
+    r"^[\s*#-]*((?:suggestion|fix)\s+\d+)\s*\**\s*:(.*)$", re.I | re.MULTILINE
 )
+
+#: How a positional line opens when its item was NOT applied ("Suggestion 2:
+#: skipped — the file does not exist"). A runner restating its report does
+#: not claim such an item (fix round 12: the mock restated it as applied).
+#: Read at the start of the line's text only, so "added the note (the skip
+#: link stays)" is still an applied item.
+_NOT_APPLIED = re.compile(
+    r"(?:skip(?:ped)?|not\s+applied|could\s*n[o']t\s+(?:be\s+)?appl\w*|"
+    r"cannot\s+(?:be\s+)?appl\w*|unable\s+to|did\s*n[o']t\s+appl\w*|"
+    r"failed|declined|rejected|no\s+change)\b",
+    re.I,
+)
+
+
+def _applied_positions(quoted: str) -> List[str]:
+    """The positional names a prose reply says it applied, in order."""
+    return [
+        name for name, rest in _POSITIONAL_LINE.findall(quoted)
+        if not _NOT_APPLIED.match(rest.lstrip(" \t*_-—–:([`"))
+    ]
 
 
 def restate_report(prompt: str) -> str:
@@ -558,9 +578,10 @@ def restate_report(prompt: str) -> str:
     that cut the report's start restates a report without its ids. A prose
     reply with no ``ids`` list restates the items it numbered ("Suggestion 1:
     …") under those names, as opencode/big-pickle did (racing run 4,
-    2026-10-05). When the re-ask lists the batch's ids, a name that is a
-    position is written as the id listed beside that number; any other name
-    is kept as it was quoted.
+    2026-10-05) — only the ones it says it applied: "Suggestion 2: skipped —
+    the file does not exist" is not claimed (fix round 12). When the re-ask
+    lists the batch's ids, a name that is a position is written as the id
+    listed beside that number; any other name is kept as it was quoted.
     """
     opener, closer = "<<<PREVIOUS REPLY\n", "\nPREVIOUS REPLY>>>"
     start = prompt.find(opener)
@@ -575,7 +596,7 @@ def restate_report(prompt: str) -> str:
         except json.JSONDecodeError:
             return []
 
-    ids = last_list("ids") or _POSITIONAL_LINE.findall(quoted)
+    ids = last_list("ids") or _applied_positions(quoted)
     listed = {int(n): item for n, item in _LISTED_ID.findall(after)}
 
     def spelled(name: Any) -> Any:
