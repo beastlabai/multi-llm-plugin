@@ -4163,7 +4163,32 @@ class TestTheRollbackStoreWarningNamesItsFiles:
         # At least the plan itself was censused and retained.
         assert int(match.group(1)) >= 1
         assert int(match.group(2)) >= 1
-        assert "restore points live in pre_batch/" in reported[0]
+        assert reported[0].endswith(
+            "the restore points are the pre-batch snapshots in "
+            f"{env.phase_dir / 'pre_batch'}/"
+        )
+
+    def test_a_jailed_phase_names_the_snapshots_outside_the_phase_dir(self, env):
+        """Codex racing run 4: a repo-wide batch on the plugin's jail keeps its
+        snapshots under the state home, and "restore points live in
+        pre_batch/" read as the phase dir's copy, which the line before says
+        is never read. The line names the directory the snapshots are in."""
+        from utils import write_safety
+
+        external = write_safety.claim_external_safety_dir(
+            str(env.phase_dir), str(env.root))
+        lines = []
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "applied", "ids": ["s0"],
+                          "files_touched": ["plans/p.md"], "summary": "S"})
+        result = env.scheduler([env.apply_task(0)], log=lines.append).run()
+        assert result.exit_code == 0, result.messages
+        reported = [l for l in lines if "rollback store peaked at" in l]
+        assert len(reported) == 1, lines
+        assert reported[0].endswith(
+            f"the restore points are the pre-batch snapshots in "
+            f"{os.path.join(external, 'pre_batch')}/")
+        assert os.path.isdir(os.path.join(external, "pre_batch", "apply-batch-0"))
 
     def test_no_rollback_utilization_line_when_nothing_was_ever_retained(
         self, env
