@@ -7008,3 +7008,77 @@ sys.exit(multi_llm.main([]))
                 child.wait(timeout=10)
             for marker in markers:
                 cli_tree.reap_leftovers(marker)
+
+
+# ===========================================================================
+# `status --exit-zero`: a report that is not a poll (fix round 7)
+# ===========================================================================
+
+class TestStatusExitZero:
+    """Racing re-run 3 (2026-10-05): every `status` call Claude Code made —
+    the roster read and each poll — showed "Exit code 2" as a tool error. Exit 2
+    is the poll contract (no run recorded: every phase that host runs in the
+    foreground; or a run still live) and it stays the default. `--exit-zero` is
+    the opt-in for a call whose exit code nobody loops on: exit 0 whenever the
+    status was read, and the verdict's word stays on the result line."""
+
+    @staticmethod
+    def _status(argv, capsys):
+        code = multi_llm.main(["status", *argv])
+        out = capsys.readouterr().out
+        return code, cli_common.parse_result_line(out), out
+
+    def test_no_run_recorded_is_exit_0_and_keeps_its_word(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "review-plan")
+        status_file.write_status(str(phase), {
+            "phase": "review-plan", "state": "models_running",
+            "progress": {"step": "fanout", "models_done": 0, "models_total": 2},
+        })
+        argv = [str(plan), "--phase", "review-plan", "--view", "run"]
+        code, result, text = self._status(argv, capsys)
+        assert code == 2 and result["exit"] == 2  # the contract, by default
+        code, zero, zero_text = self._status([*argv, "--exit-zero"], capsys)
+        assert code == 0 and zero["exit"] == 0
+        assert zero["state"] == result["state"] == "nothing-to-do"
+        assert zero_text.rsplit(cli_common.RESULT_MARKER, 1)[0] == (
+            text.rsplit(cli_common.RESULT_MARKER, 1)[0]
+        )
+
+    def test_a_live_run_is_exit_0_and_still_says_running(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        live = _phase_dir(plan, "generate-tasks")
+        status_file.claim_run(str(live), {
+            "run_id": "run-zero-0001", "pid": os.getpid(),
+            "process_start_time": process_control.process_start_time(os.getpid()),
+            "heartbeat_at": status_file.now_iso(), "heartbeat_interval_s": 10.0,
+            "state": "running", "detached": True, "mode": "generate-tasks",
+        })
+        code, result, _ = self._status(
+            [str(plan), "--view", "run", "--exit-zero"], capsys
+        )
+        assert code == 0 and result["state"] == "running"
+
+    def test_a_needs_human_verdict_is_exit_0_with_its_word(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        phase = _phase_dir(plan, "review-plan")
+        status_file.write_status(str(phase), {"phase": "review-plan", "state": "failed"})
+        status_file.claim_run(str(phase), {
+            "run_id": "run-zero-0002", "state": "failed", "exit_code": 3,
+            "detached": True, "mode": "review-plan",
+        })
+        argv = [str(plan), "--phase", "review-plan", "--view", "run"]
+        assert self._status(argv, capsys)[0] == 3
+        code, result, _ = self._status([*argv, "--exit-zero"], capsys)
+        assert code == 0 and result["state"] == "needs-human"
+
+    def test_a_bad_selector_and_a_missing_plan_still_fail(self, tmp_path, capsys):
+        plan = _plan(tmp_path)
+        code, _result, _ = self._status(
+            [str(plan), "--phase", "no-such-phase", "--exit-zero"], capsys
+        )
+        assert code == 3
+        code, _result, _ = self._status(
+            [str(tmp_path / "missing.md"), "--exit-zero"], capsys
+        )
+        assert code not in (0, 2)
