@@ -194,6 +194,21 @@ DEGRADED_STATE = "needs-human"
 #: loop never follows it, and the tool description (surface data) says so.
 USER_NEXT_STEP_KEY = "user_next_step"
 
+#: The keys that tell the user what to type, placed right after ``ok`` and
+#: ``state`` in every result. Codex shows the model only part of a large tool
+#: result: measured on codex 0.160.0 (racing re-run 3, 06b), the session model
+#: read the result through its code-mode ``exec`` cell, which kept the first and
+#: the last tokens of a 50 355-character result and dropped the middle ("…7996
+#: tokens truncated…"). ``resume_command`` sat just before the 39 722-character
+#: runbook, inside the dropped middle, while the trailing ``"user_next_step":
+#: null`` survived, and the model told the user there was no resume command.
+WAY_FORWARD_KEYS = (USER_NEXT_STEP_KEY, "resume_command", "no_command_reason")
+
+#: The keys placed last: the long runbook (Open question 20 of
+#: plans/codex-native-plugin.md: a cut must lose runbook text, never the
+#: envelope).
+LAST_KEYS = ("runbook",)
+
 #: Where a redacted ``next`` went, and where any other removed command went.
 NEXT_MARKER = "<see the `next` field of this result for the tool call>"
 RUNNABLE_MARKER = (
@@ -1473,17 +1488,31 @@ class Server:
         }
 
     def envelope(self, call: Call, fields: dict) -> dict:
-        """Rule 5's one shape: the fields every branch carries, then the rest."""
-        out = {"ok": bool(fields.get("ok")), "state": fields.get("state"),
-               "message": fields.get("message"), "exit": fields.get("exit"),
-               "anchor": call.anchor, "anchor_source": call.anchor_source,
-               "environment": self.environment(call), "relays": dict(call.relays),
-               "progress_lines": call.progress_lines}
-        for key, value in fields.items():
+        """Rule 5's one shape: the fields every branch carries, then the rest.
+
+        Ordered for a reader that sees only part of it (:data:`WAY_FORWARD_KEYS`,
+        :data:`LAST_KEYS`): ``ok`` and ``state``, then the way forward, then
+        ``message`` and the other fields, and the runbook last.
+        """
+        def kept(key, value):
             # A null `user_next_step` is the answer "no next phase", set on
             # purpose by `finish`; every other null is an absent key.
-            if key not in out and (value is not None or key == USER_NEXT_STEP_KEY):
+            return value is not None or key == USER_NEXT_STEP_KEY
+
+        out = {"ok": bool(fields.get("ok")), "state": fields.get("state")}
+        for key in WAY_FORWARD_KEYS:
+            if key in fields and kept(key, fields[key]):
+                out[key] = fields[key]
+        out.update({"message": fields.get("message"), "exit": fields.get("exit"),
+                    "anchor": call.anchor, "anchor_source": call.anchor_source,
+                    "environment": self.environment(call),
+                    "relays": dict(call.relays), "progress_lines": call.progress_lines})
+        for key, value in fields.items():
+            if key not in out and key not in LAST_KEYS and kept(key, value):
                 out[key] = value
+        for key in LAST_KEYS:
+            if fields.get(key) is not None:
+                out[key] = fields[key]
         return out
 
     def refusal(self, call: Call, state_key: str, message: str) -> dict:

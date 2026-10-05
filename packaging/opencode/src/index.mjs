@@ -3118,6 +3118,10 @@ async function execute(args, ctx, surface, client) {
  * reason would contradict.
  */
 function finishOutcome(outcome, checked, surface) {
+  return wayForwardFirst(finishFields(outcome, checked, surface))
+}
+
+function finishFields(outcome, checked, surface) {
   const dropped = checked?.dropped ?? []
   const note = surface?.reserved_flags?.redundant?.note
   if (dropped.length && typeof note === "string") {
@@ -3141,6 +3145,37 @@ function finishOutcome(outcome, checked, surface) {
     outcome.message = `${outcome.message} ${clause}`
   }
   return outcome
+}
+
+/** The keys that tell the user what to type, right after `ok` and `state`. */
+const WAY_FORWARD_KEYS = ["user_next_step", "resume_command", "no_command_reason"]
+
+/** The keys placed last: the long instructions text. */
+const LAST_KEYS = ["instructions"]
+
+/**
+ * The result ordered for a reader that sees only part of it: `ok`, `state`,
+ * the way forward, `message`, everything else, and the instructions last.
+ *
+ * A host shows its model a cut of a large tool result. Measured on the codex
+ * route (racing re-run 3, 2026-10-05): the model read a 50 355-character
+ * result whose middle was dropped, `resume_command` sat in that middle, and
+ * the model told the user there was no resume command. A cut that keeps the
+ * head, the tail or both still shows the way forward when it leads the result
+ * and the long text trails it. The port of the codex server's `envelope` order.
+ */
+function wayForwardFirst(outcome) {
+  const ordered = {}
+  for (const key of ["ok", "state", ...WAY_FORWARD_KEYS, "message"]) {
+    if (key in outcome) ordered[key] = outcome[key]
+  }
+  for (const [key, value] of Object.entries(outcome)) {
+    if (!(key in ordered) && !LAST_KEYS.includes(key)) ordered[key] = value
+  }
+  for (const key of LAST_KEYS) {
+    if (key in outcome) ordered[key] = outcome[key]
+  }
+  return ordered
 }
 
 /**
@@ -3235,6 +3270,7 @@ const __testing = {
   toolDescription,
   uvMissingText,
   validateArgs,
+  wayForwardFirst,
 }
 
 // Hung on the factory rather than exported, because opencode calls every export
