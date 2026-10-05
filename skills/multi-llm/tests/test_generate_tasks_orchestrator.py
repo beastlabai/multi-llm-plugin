@@ -1029,6 +1029,34 @@ class TestSchemaRepairReAsk:
         assert row["attempt_count"] == 2
         assert "after the one schema-repair re-ask" in row["reason"]
 
+    def test_a_reply_over_the_byte_cap_is_not_re_asked(
+        self, tmp_path, exec_env, scripted_runner, capsys, monkeypatch
+    ):
+        """The cap is not a shape problem (fix round 6): ``persist_result``
+        refuses an oversized but valid document, and a re-ask telling the
+        runner its reply "does not match the result shape" would be false."""
+        from utils import subagent_executor as executor
+
+        monkeypatch.setattr(executor, "MAX_RESULT_BYTES", 512)
+        exec_env("codex:gpt-5.5")
+        big = _valid_document()
+        big["tasks"][0]["description"] = "x" * 2000
+        prompts = scripted_runner(big, _valid_document())
+        plan = _plan(tmp_path)
+
+        code = multi_llm.main(["generate-tasks", str(plan), "--yes", "--exec-subagents"])
+        out = capsys.readouterr().out
+
+        assert code == 3
+        assert len(prompts) == 1, "no re-ask for a result over the byte cap"
+        assert "schema repair" not in out
+        assert "result shape" not in out
+        row = self._report(plan)["tasks"][0]
+        assert row["status"] == "schema_invalid"
+        assert "over the 512-byte cap" in row["reason"]
+        assert "schema-repair re-ask" not in row["reason"]
+        assert [a.get("repair") for a in row["attempts"]] == [None]
+
     def test_a_right_first_reply_is_never_re_asked(
         self, tmp_path, exec_env, scripted_runner, capsys
     ):

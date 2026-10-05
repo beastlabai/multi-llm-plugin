@@ -6673,6 +6673,11 @@ def dispatch_task(
                     written = persist_result(task, phase_dir, data)
                 except ResultRejected as exc:
                     status, error = exc.status, exc.message
+                    # The byte cap, not the shape: the document validated, so a
+                    # re-ask quoting "the validator's errors" would quote none
+                    # and tell the runner its reply has the wrong shape (fix
+                    # round 6). Rung 6 stays terminal for it.
+                    data = None
                 else:
                     outcome.output_path = written
                     outcome.attempts.append(Attempt(
@@ -6818,7 +6823,8 @@ def dispatch_task(
         # ceiling the wall clock usually reaches first.
         # A schema-invalid attempt with no extracted document is the CLI's own
         # exhausted structured-output budget (§4.2.1: the CLI already spent the
-        # pinned re-ask), so it is not repairable here either.
+        # pinned re-ask), so it is not repairable here either; nor is a valid
+        # document `persist_result` refused for its size (`data` dropped above).
         action = ladder.record(status, repairable=data is not None)
         if action.retry and action.repair:
             # The one schema-repair re-ask: same runner, same deadline, the
