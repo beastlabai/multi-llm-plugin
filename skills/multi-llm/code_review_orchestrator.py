@@ -1308,7 +1308,14 @@ def build_implementation_record(plan_path: Path) -> str:
         for task_id, status in unfinished:
             reason = state.get_task_status_reason(task_id)
             rendered = f"{task_id} ({status}{f': {reason}' if reason else ''})"
-            if status in ("skipped", "deferred") or (status == "pending" and reason):
+            # A `pending` task whose reason says the implement run stopped
+            # before dispatching it (`not run — …`, racing re-run 3,
+            # 2026-10-05) was never decided against: its missing work is
+            # exactly the gap to report.
+            not_run = bool(reason) and str(reason).startswith("not run")
+            if status in ("skipped", "deferred") or (
+                status == "pending" and reason and not not_run
+            ):
                 decided.append(rendered)
             else:
                 unfinished_gaps.append(rendered)
