@@ -5,7 +5,7 @@ Executes implementation tasks from a plan by spawning subagents.
 ## Usage
 
 ```bash
-<dispatcher> implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip] [--skip-prerequisites]
+<dispatcher> implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip|retry] [--skip-prerequisites]
 ```
 
 ## Options
@@ -15,7 +15,7 @@ Executes implementation tasks from a plan by spawning subagents.
 - `--dry-run`: Show task summary without executing
 - `--yes` / `--no-confirm`: Skip all advisory prompts (e.g., unapplied task suggestions) and proceed silently. `--yes` additionally resolves every gate this mode reaches from flags and config: the plan-review prerequisite becomes exit 3 rather than a question (D6 row 6), the task-suggestion advisory resolves to "skip, recorded" (row 7), and the human-task strategy resolves to `skip-dependents` (row 8).
 - `--force-strategy <strategy>`: Skip the human task strategy prompt and use the given strategy directly. Valid values: `pause-and-ask`, `skip-continue`, `skip-dependents`. Useful for scripted/non-interactive runs. `pause-and-ask` together with `--yes` is exit 3 at parse time — it promises a gate that an unattended run can never render.
-- `--human-task ID=done|skip` (repeatable): Answer one human task without a prompt (D6 row 9), e.g. `--human-task T004=done`. Recorded in `state.json` under `human_task_decisions`. An empty or unrecognized value is exit 3 at parse time.
+- `--human-task ID=done|skip|retry` (repeatable): Answer one human task without a prompt (D6 row 9), e.g. `--human-task T004=done`. Recorded in `state.json` under `human_task_decisions`. An empty or unrecognized value is exit 3 at parse time. With `--resume` it also answers a code task the last run recorded `failed` (a check that failed, say): `done` treats it as satisfied and the tasks after it run, `skip` leaves it and the tasks that depend on it undone, `retry` runs a check again even though nothing in the repository changed since it failed (`retry` is never recorded).
 - `--skip-prerequisites`: Proceed even though plan-review suggestions were never applied. Loud and recorded; **never implied by `--yes`**.
 
 ## Process
@@ -302,7 +302,18 @@ and exits 3 naming the exact re-invocation plus the rollback command
 (`multi_llm.py util restore-batch --phase-dir <dir> --task-id <id>`, which refuses a
 file that changed after the run unless `--force`). `--resume` then re-dispatches only
 the unfinished batches, replaying the prior-changes log from disk so the resumed
-batch sees the context an uninterrupted run would have.
+batch sees the context an uninterrupted run would have. The stop message, the
+`## Cancelled` section of `summary.md`, `write_batch_report.json` (`not_run_tasks`,
+`stop`) and the status mirror (`not_run_task_ids`) account for every task of the
+decomposition — done, failed, not run (the stop came before they were dispatched),
+accepted, deferred manual — and the message names the way forward: for a failed
+check (a task that declares no files), fix what it reported (by hand, or review-code
+then apply-code-fixes) and `--resume`, which runs the check again and the tasks after
+it; or accept the failure with `--human-task <id>=done` (`skip` leaves it and its
+dependents undone). A `--resume` that changes nothing does not run a failed check
+again: when the files git sees have the same sizes and timestamps as when it failed
+(`verdict.tree_fingerprint` on its result file), the stop is repeated with the remedy
+and no dispatch is spent; `--human-task <id>=retry` runs it anyway.
 
 `--dry-run-subagents` renders every command, applies every admission and policy
 check, writes `{phase}/subagent_dry_run.json` and starts no child.
