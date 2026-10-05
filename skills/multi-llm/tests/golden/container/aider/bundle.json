@@ -34,7 +34,7 @@
       "review-tasks"
     ],
     "suggestion_count": 4,
-    "tracked_file_count": 1,
+    "tracked_file_count": 0,
     "validation_partition": {
       "valid": 4
     }
@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-10-05T12:57:37Z",
+    "captured_at": "2026-10-05T18:14:24Z",
     "cli": "aider",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -58,10 +58,10 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:fix6-reseed",
+    "image": "mllm-e2e:fix9-reseed",
     "reviewer": "aider",
     "row_id": "chain-aider",
-    "run_bundle": "20261005T123505Z"
+    "run_bundle": "20261005T175142Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -77,6 +77,8 @@
     "[VALIDATION_BATCHES_PENDING]",
     "[PROGRESS]",
     "[AUTO_RESOLVED]",
+    "[SCOPE_FALLBACK]",
+    "[SCOPE_FALLBACK]",
     "[PROGRESS]",
     "[PROGRESS]",
     "[VALIDATION_BATCHES_PENDING]",
@@ -243,6 +245,7 @@
     }
   },
   "output_root_paths": [
+    ".state.lock",
     "apply-fixes/",
     "apply-fixes/.status.json",
     "apply-fixes/.status.lock",
@@ -344,7 +347,6 @@
     "code-review/aider_openai_stub-model.json",
     "code-review/diff/",
     "code-review/diff/.gitignore",
-    "code-review/diff/1-plans-auth-feature.md.diff",
     "code-review/grouped.json",
     "code-review/issues.json",
     "code-review/log_aider_openai_stub-model.txt",
@@ -981,6 +983,7 @@
           }
         },
         "write_batch_report.json": {
+          "accepted_tasks": {},
           "batches_dispatched": [
             0,
             1,
@@ -991,10 +994,12 @@
           "finalized": true,
           "human_task_strategy": null,
           "kind": "apply_code_fixes",
+          "not_run_tasks": {},
           "pending_human_tasks": [],
           "phase": "apply-code-fixes",
           "report_version": 1,
           "skipped_tasks": {},
+          "stop": null,
           "stopped_at_batch": null,
           "summary_file": "<run-root>/plans/auth-feature/apply-fixes/summary.md",
           "tasks": [
@@ -1725,6 +1730,7 @@
           }
         },
         "write_batch_report.json": {
+          "accepted_tasks": {},
           "batches_dispatched": [
             0,
             1,
@@ -1736,10 +1742,12 @@
           "finalized": true,
           "human_task_strategy": null,
           "kind": "apply_suggestions",
+          "not_run_tasks": {},
           "pending_human_tasks": [],
           "phase": "apply-suggestions",
           "report_version": 1,
           "skipped_tasks": {},
+          "stop": null,
           "stopped_at_batch": null,
           "summary_file": "<run-root>/plans/auth-feature/apply-suggestions/summary.md",
           "tasks": [
@@ -2457,6 +2465,7 @@
           }
         },
         "write_batch_report.json": {
+          "accepted_tasks": {},
           "batches_dispatched": [
             0,
             1,
@@ -2467,10 +2476,12 @@
           "finalized": true,
           "human_task_strategy": null,
           "kind": "apply_task_suggestions",
+          "not_run_tasks": {},
           "pending_human_tasks": [],
           "phase": "apply-task-suggestions",
           "report_version": 1,
           "skipped_tasks": {},
+          "stop": null,
           "stopped_at_batch": null,
           "summary_file": "<run-root>/plans/auth-feature/apply-task-suggestions/summary.md",
           "tasks": [
@@ -3598,6 +3609,7 @@
           }
         },
         "write_batch_report.json": {
+          "accepted_tasks": {},
           "batches_dispatched": [
             0,
             1,
@@ -3608,10 +3620,12 @@
           "finalized": true,
           "human_task_strategy": null,
           "kind": "implement",
+          "not_run_tasks": {},
           "pending_human_tasks": [],
           "phase": "implement",
           "report_version": 1,
           "skipped_tasks": {},
+          "stop": null,
           "stopped_at_batch": null,
           "summary_file": "<run-root>/plans/auth-feature/implement/summary.md",
           "tasks": [
@@ -4922,6 +4936,7 @@
     "pre_existing_changes": [
       ".aider.tags.cache.v4/",
       ".multi-llm/",
+      "plans/auth-feature.md",
       "plans/auth-feature/",
       "src/auth.py",
       "src/security.py"
@@ -4948,13 +4963,7 @@
       "T002": "Bound the login attempt store",
       "T003": "Add regression tests for lockout"
     },
-    "tracked_files": [
-      {
-        "action": "modified",
-        "path": "plans/auth-feature.md",
-        "task_id": "implementation"
-      }
-    ],
+    "tracked_files": [],
     "updated_at": "<str>"
   },
   "state_shape": {
@@ -5162,9 +5171,10 @@
         "<str>",
         "<str>",
         "<str>",
+        "<str>",
         "<str>"
       ],
-      "<list>": 5
+      "<list>": 6
     },
     "review_phase_completed": "<bool>",
     "schema_version": "<str>",
@@ -5189,17 +5199,9 @@
       "T003": "<str>"
     },
     "tracked_files": {
-      "<item-types>": [
-        "<dict>"
-      ],
-      "<items>": [
-        {
-          "action": "<str>",
-          "path": "<str>",
-          "task_id": "<str>"
-        }
-      ],
-      "<list>": 1
+      "<item-types>": [],
+      "<items>": [],
+      "<list>": 0
     },
     "updated_at": "<str>"
   },
@@ -5210,6 +5212,11 @@
         "progress": {
           "step": "<str>",
           "write_subagents": {
+            "accepted_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "batches_dispatched": {
               "<item-types>": [
                 "<int>"
@@ -5238,6 +5245,11 @@
             "items_applied": "<int>",
             "items_total": "<int>",
             "kind": "<str>",
+            "not_run_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -5312,6 +5324,11 @@
         "progress": {
           "step": "<str>",
           "write_subagents": {
+            "accepted_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "batches_dispatched": {
               "<item-types>": [
                 "<int>"
@@ -5341,6 +5358,11 @@
             "items_applied": "<int>",
             "items_total": "<int>",
             "kind": "<str>",
+            "not_run_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -5426,6 +5448,11 @@
         "progress": {
           "step": "<str>",
           "write_subagents": {
+            "accepted_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "batches_dispatched": {
               "<item-types>": [
                 "<int>"
@@ -5454,6 +5481,11 @@
             "items_applied": "<int>",
             "items_total": "<int>",
             "kind": "<str>",
+            "not_run_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
@@ -5718,6 +5750,11 @@
         "progress": {
           "step": "<str>",
           "write_subagents": {
+            "accepted_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "batches_dispatched": {
               "<item-types>": [
                 "<int>"
@@ -5746,6 +5783,11 @@
             "items_applied": "<int>",
             "items_total": "<int>",
             "kind": "<str>",
+            "not_run_task_ids": {
+              "<item-types>": [],
+              "<items>": [],
+              "<list>": 0
+            },
             "pending_human_task_ids": {
               "<item-types>": [],
               "<items>": [],
