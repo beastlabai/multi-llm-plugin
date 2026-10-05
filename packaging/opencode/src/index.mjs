@@ -253,6 +253,22 @@ function reservedHit(token, surface) {
 // Argument validation — every rule, before anything spawns
 // ---------------------------------------------------------------------------
 
+/**
+ * *args* with a left-out `question` read as `""`, its empty value.
+ *
+ * Only `ask` takes a question, and the property's own description says it is
+ * `""` for every other mode; a host model that left it out of an
+ * `apply-suggestions` call got `"question" must be a string, got undefined`
+ * and had to retry (racing re-run 3, opencode 02b). A question left out of an
+ * `ask` call is still refused by the arity rule, which names what to send.
+ */
+function withAbsentQuestion(args) {
+  if (args && typeof args === "object" && !Array.isArray(args) && !("question" in args)) {
+    return { ...args, question: "" }
+  }
+  return args
+}
+
 /** `{ ok: true, mode }` or `{ ok: false, error }`. Never throws. */
 function validateArgs(args, surface) {
   if (args === null || typeof args !== "object" || Array.isArray(args)) {
@@ -274,10 +290,18 @@ function validateArgs(args, surface) {
         `. Nothing is prefix-matched or guessed.`,
     )
   }
-  for (const [name, value] of [["plan", plan], ["question", question]]) {
-    if (typeof value !== "string") {
-      return fail(`"${name}" must be a string, got ${typeName(value)}.`)
-    }
+  if (typeof plan !== "string") {
+    return fail(`"plan" must be a string, got ${typeName(plan)}.`)
+  }
+  if (typeof question !== "string") {
+    const asking = surface.modes
+      .filter((m) => m.positionals.includes(surface.positional_kinds.question))
+      .map((m) => m.name)
+    return fail(
+      `"question" must be a string: the question for ` +
+        `${asking.join(" or ") || "no mode"}, "" (or the key left out) for ` +
+        `every other mode. Got ${typeName(question)}.`,
+    )
   }
   if (!Array.isArray(extraFlags) || extraFlags.some((t) => typeof t !== "string")) {
     return fail(
@@ -302,7 +326,10 @@ function validateArgs(args, surface) {
     )
   }
   if (takesQuestion && question.trim() === "") {
-    return fail(`mode "${row.name}" takes a question and "question" was empty.`)
+    return fail(
+      `mode "${row.name}" takes a question and "question" was empty: send ` +
+        `the user's question as "question".`,
+    )
   }
   if (!takesQuestion && question !== "") {
     return fail(
@@ -2992,6 +3019,7 @@ async function execute(args, ctx, surface, client) {
     const env = { ...process.env }
     const anchor = resolveAnchor(ctx)
 
+    args = withAbsentQuestion(args)
     const checked = validateArgs(args, surface)
     if (!checked.ok) {
       return { state: "error", ok: false, anchor, message: checked.error }
@@ -3271,6 +3299,7 @@ const __testing = {
   uvMissingText,
   validateArgs,
   wayForwardFirst,
+  withAbsentQuestion,
 }
 
 // Hung on the factory rather than exported, because opencode calls every export

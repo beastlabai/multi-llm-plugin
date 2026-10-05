@@ -1137,6 +1137,22 @@ class TestArguments:
         assert envelope["state"] == STATES["error"]
         assert envelope["anchor"] == os.path.realpath(harness.workspace)
 
+    def test_a_left_out_question_is_the_empty_one(self, harness):
+        """Racing re-run 3 (opencode 02b): a host model left `question` out of
+        a call whose mode takes none and was refused for it."""
+        envelope, _, calls, _ = harness.run(
+            {"mode": "review-plan", "plan": "p.md", "extra_flags": []},
+            [launch_step(), poll_step(0)])
+        assert envelope["ok"] is True
+        assert dispatcher_argv(calls[0])[:2] == ["review-plan", "p.md"]
+
+    def test_a_question_error_says_what_to_send(self, harness):
+        missing = _refused(harness, {"mode": "ask", "plan": "p.md", "extra_flags": []})
+        assert "send the user's question as \"question\"" in missing["message"]
+        wrong = _refused(harness, dict(REVIEW, question=None))
+        assert wrong["message"].startswith('"question" must be a string: the question '
+                                           'for ask, "" (or the key left out)')
+
     def test_composed_argv_order_and_empties(self, harness):
         _, _, calls, _ = harness.run(
             {"mode": "init", "plan": "", "question": "", "extra_flags": []},
