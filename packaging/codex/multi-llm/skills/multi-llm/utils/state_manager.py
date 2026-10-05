@@ -119,6 +119,15 @@ def update_task_status_in_state(
 #: ``{task_id: [finding, ...]}``, present only while some task has findings.
 TASK_CHECK_FINDINGS_KEY = "task_check_findings"
 
+#: ``state.json``'s record of the decomposition implement ran last, as a
+#: graph: ``{task_id: [the ids it depends on]}`` for EVERY task of it
+#: (:meth:`StateManager.record_task_titles`). A ``--resume`` materializes only
+#: the unfinished tasks, so a walk over ``write_tasks.json`` alone lost every
+#: edge through a finished one: a check's findings held back T004 but not
+#: T006, whose chain to the check ran through a manual task answered done
+#: (fix round 12). ``write_batch_scheduler.decomposition_graph`` reads it.
+IMPLEMENT_TASK_GRAPH_KEY = "implement_task_depends_on"
+
 
 def set_task_check_findings_in_state(
     state: Dict[str, Any], task_id: str, findings: Optional[Iterable[str]],
@@ -898,6 +907,7 @@ class StateManager:
 
     def record_task_titles(
         self, titles: Dict[str, str], *, human_ids: Optional[Iterable[str]] = None,
+        depends_on: Optional[Dict[str, Iterable[str]]] = None,
     ) -> bool:
         """Remember each implement task's title by id, under ``task_titles``.
 
@@ -913,8 +923,10 @@ class StateManager:
         decomposition's manual tasks and REPLACE ``implement_human_task_ids``
         the same way — the key is absent when there are none, so a plan with
         no manual task gains no key (fix round 7: the backstop in
-        :meth:`deferred_implementation_tasks`). Returns whether anything
-        changed; the caller saves.
+        :meth:`deferred_implementation_tasks`). *depends_on*, when given, is
+        that decomposition's graph (every task's ``depends_on``) and REPLACES
+        :data:`IMPLEMENT_TASK_GRAPH_KEY` (fix round 12). Returns whether
+        anything changed; the caller saves.
         """
         recorded = dict(self.state.get("task_titles") or {})
         merged = {**recorded, **{str(k): str(v) for k, v in titles.items() if k}}
@@ -927,10 +939,22 @@ class StateManager:
             human_ids is not None
             and self.state.get("implement_human_task_ids") != human
         )
+        graph = (
+            None if depends_on is None
+            else {
+                str(task_id): [str(dep) for dep in (deps or []) if dep]
+                for task_id, deps in sorted(depends_on.items()) if task_id
+            }
+        )
+        graph_changed = (
+            graph is not None
+            and self.state.get(IMPLEMENT_TASK_GRAPH_KEY) != graph
+        )
         if (
             merged == recorded
             and self.state.get("implement_task_ids") == current
             and not human_changed
+            and not graph_changed
         ):
             return False
         self.state["task_titles"] = merged
@@ -939,6 +963,8 @@ class StateManager:
             self.state["implement_human_task_ids"] = human
         elif human_ids is not None:
             self.state.pop("implement_human_task_ids", None)
+        if graph is not None:
+            self.state[IMPLEMENT_TASK_GRAPH_KEY] = graph
         return True
 
     #: The recorded reason of an implement task the USER declined at
