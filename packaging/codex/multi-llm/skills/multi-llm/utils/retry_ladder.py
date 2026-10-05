@@ -28,8 +28,11 @@ three-line loop:
             await asyncio.sleep(action.delay)           # Lane B: napper(delay)
 
 ``next_attempt()`` is where §7.5 rules 1, 3 and 4 live; ``record()`` is where
-rule 2's two counters and rule 6's composition tests live. The only lane-specific
-lines are the dispatch call and the sleep.
+rule 2's two counters and rule 6's composition tests live, and it takes every
+grant (a retry, a backoff, the re-ask below) against the same rules-3-and-4
+admission test, so a granted attempt is one ``next_attempt()`` admits and a
+refused one comes back as the attempt's own stop with ``Action.note`` saying
+why. The only lane-specific lines are the dispatch call and the sleep.
 
 Rule 7 is this module's own, not §7.5's (2026-10-05): a caller may grant
 ``schema_repairs`` — at most that many re-asks after a ``schema_invalid`` attempt,
@@ -148,13 +151,17 @@ FATAL_STATUSES = frozenset({
 #: Statuses no re-run of the same phase can change: the fatal rung-1 set (a
 #: property of the spec or the machine), ``rejected`` (rung 7, a configuration
 #: refusal "never retried, because re-running produces the same" — e.g. a CLI
-#: that refuses the schema file before any request) and
+#: that refuses the schema file before any request),
 #: ``context_length_exceeded`` (an unchanged oversized prompt fails
-#: identically). Read by ``next_phase.resume_command``: a phase whose failed
-#: tasks all ended elsewhere is handed back a re-invoke the user can type, and
-#: one with any of these gets none, because the command would repeat the stop.
+#: identically) and ``budget_exhausted`` (rule 4 refused the slot before
+#: anything was spawned, because the configured timeout cannot hold one declared
+#: worst-case attempt — a config refusal whose own reason says "Raise the slot
+#: timeout", and an unchanged re-run is refused the same way). Read by
+#: ``next_phase.resume_command``: a phase whose failed tasks all ended elsewhere
+#: is handed back a re-invoke the user can type, and one with any of these gets
+#: none, because the command would repeat the stop.
 RERUN_FUTILE_STATUSES = FATAL_STATUSES | frozenset({
-    STATUS_REJECTED, STATUS_CONTEXT_LENGTH_EXCEEDED,
+    STATUS_REJECTED, STATUS_CONTEXT_LENGTH_EXCEEDED, STATUS_BUDGET_EXHAUSTED,
 })
 
 #: The smallest slice of the per-slot budget worth *starting* an attempt with
@@ -228,6 +235,11 @@ class Action:
     #: caller re-sends the *same* runner its original prompt plus the
     #: validator's errors, rather than the identical dispatch.
     repair: bool = False
+    #: Set when the status earned a retry, a backoff or the re-ask and the
+    #: ladder refused it for want of budget (rule 3 or rule 4): the
+    #: parenthetical a lane appends to the attempt's own error, so the record
+    #: says why the slot stopped there instead of naming only the failure.
+    note: Optional[str] = None
 
 
 class RetryLadder:
@@ -304,28 +316,62 @@ class RetryLadder:
             return None
 
         left = self.remaining()
+        refusal = self._admission_refusal(left=left)
+        if refusal is not None:
+            # Rule 3 before the first attempt is the slot's own ceiling being
+            # under the minimum: nothing was spawned, so it is the budget's.
+            self.stop_reason = (
+                STOP_BUDGET if not self.attempt_index else refusal
+            )
+            return None
+
+        self.attempt_index += 1
+        return left
+
+    def _declared_wall(self) -> Optional[float]:
+        return getattr(self.envelope, "max_wall_s", None) if self.envelope else None
+
+    def _admission_refusal(
+        self, after: float = 0.0, left: Optional[float] = None
+    ) -> Optional[str]:
+        """Which rule would refuse an attempt started *after* seconds from now.
+
+        ``None`` when it would be admitted. The one admission test, read by
+        :meth:`next_attempt` and by every grant in :meth:`record` — a grant
+        decided on rule 3 alone was taken back by rule 4 at the next start,
+        and Lane B recorded a slot whose attempt 1 had run as
+        ``budget_exhausted``, "Nothing was dispatched" (fix round 6).
+        """
+        left = (self.remaining() if left is None else left) - after
         # Rule 3: no attempt starts with less than MIN_ATTEMPT_BUDGET_S. A
         # runner handed a sliver spends it on process start-up and is killed for
         # the same reason the previous attempt was.
         if left < self._min_attempt_budget_s:
-            self.stop_reason = (
-                STOP_DEADLINE if self.attempt_index else STOP_BUDGET
-            )
-            return None
-
+            return STOP_DEADLINE
         # Rule 4: vendor-internal retries are DECLARED, not discovered. If the
         # adapter's own worst-case wall for one attempt does not fit in what is
         # left, fail as `budget_exhausted` rather than spawn a child only to
         # kill it mid-retry. Strictly a pre-dispatch admission test — never a
         # second debit, because the deadline is already charged the awaited
         # subprocess's whole duration (rule 6(a)).
-        bound = getattr(self.envelope, "max_wall_s", None) if self.envelope else None
+        bound = self._declared_wall()
         if bound is not None and left < bound:
-            self.stop_reason = STOP_BUDGET
-            return None
+            return STOP_BUDGET
+        return None
 
-        self.attempt_index += 1
-        return left
+    def _refusal_text(self, refusal: str, after: float = 0.0) -> str:
+        """Why :meth:`_admission_refusal` said *refusal*, in one clause."""
+        if refusal == STOP_BUDGET:
+            left = max(0.0, self.remaining() - after)
+            when = (
+                f"would be left after the {after:.1f}s backoff" if after else "is left"
+            )
+            return (
+                f"only {left:.1f}s of the slot's {self.timeout}s budget {when}, "
+                f"under the {self._declared_wall():g}s one dispatch of this "
+                f"runner declares it may take (§7.5 rule 4)"
+            )
+        return f"the per-slot wall-clock budget of {self.timeout}s is exhausted"
 
     # -- rule 2 and rule 6 ------------------------------------------------
 
@@ -369,16 +415,15 @@ class RetryLadder:
         return Action(retry=False, reason=f"{status} is never retried")
 
     def _record_schema_repair(self) -> Action:
-        # Rule 3 again: the re-ask runs inside the SAME deadline as every other
-        # attempt of this slot, never on a fresh copy of it.
-        if self.remaining() < self._min_attempt_budget_s:
-            self.stop_reason = STOP_DEADLINE
+        # Rules 3 and 4 again: the re-ask runs inside the SAME deadline as every
+        # other attempt of this slot, never on a fresh copy of it, and is only
+        # granted when `next_attempt()` will admit it.
+        refusal = self._admission_refusal()
+        if refusal is not None:
+            self.stop_reason = refusal
+            note = f"no schema-repair re-ask: {self._refusal_text(refusal)}"
             return Action(
-                retry=False,
-                reason=(
-                    f"{STATUS_SCHEMA_INVALID} (no schema-repair re-ask: the "
-                    f"per-slot wall-clock budget of {self.timeout}s is exhausted)"
-                ),
+                retry=False, reason=f"{STATUS_SCHEMA_INVALID} ({note})", note=note
             )
         self._schema_repairs_left -= 1
         self._schema_repairs_used += 1
@@ -415,35 +460,38 @@ class RetryLadder:
             )
 
         delay = backoff_delay(self._rate_limit_attempts, self._jitter)
-        # Rule 3 again, for the sleep: the backoff is charged to the SAME
+        # Rules 3 and 4 again, for the sleep: the backoff is charged to the SAME
         # deadline as the spawns. Waiting past the ceiling only to dispatch one
         # more attempt spends the budget twice, and a slice the next attempt
-        # could not use is not worth waiting for either.
-        if self.remaining() - delay < self._min_attempt_budget_s:
-            self.stop_reason = STOP_DEADLINE
-            return Action(
-                retry=False,
-                reason="rate_limited, and the backoff would not fit in the budget",
-            )
+        # could not use — or that rule 4 would refuse — is not worth waiting for.
+        refusal = self._admission_refusal(after=delay)
+        if refusal is not None:
+            self.stop_reason = refusal
+            if refusal == STOP_DEADLINE:
+                note = "no backoff retry: the backoff would not fit in the budget"
+                reason = "rate_limited, and the backoff would not fit in the budget"
+            else:
+                note = f"no backoff retry: {self._refusal_text(refusal, after=delay)}"
+                reason = f"rate_limited ({note})"
+            return Action(retry=False, reason=reason, note=note)
         return Action(retry=True, delay=delay, reason="rate_limited")
 
     def _record_transport(self, status: str) -> Action:
         if self._transport_retries_left <= 0:
             self.stop_reason = STOP_EXHAUSTED_ATTEMPTS
             return Action(retry=False, reason=f"{status}, retry budget spent")
-        if self.remaining() < self._min_attempt_budget_s:
+        refusal = self._admission_refusal()
+        if refusal is not None:
             # The retry budget is not the only budget: a retry runs inside the
-            # slot's remaining wall clock, never on a fresh copy of it.
+            # slot's remaining wall clock, never on a fresh copy of it, and only
+            # when rule 4 would admit it there.
             unused = self._transport_retries_left
-            self.stop_reason = STOP_DEADLINE
-            return Action(
-                retry=False,
-                reason=(
-                    f"{status} (no retry: the per-slot wall-clock budget of "
-                    f"{self.timeout}s is exhausted, {unused} retr"
-                    f"{'y' if unused == 1 else 'ies'} unused)"
-                ),
+            self.stop_reason = refusal
+            note = (
+                f"no retry: {self._refusal_text(refusal)}, {unused} retr"
+                f"{'y' if unused == 1 else 'ies'} unused"
             )
+            return Action(retry=False, reason=f"{status} ({note})", note=note)
         self._transport_retries_left -= 1
         return Action(retry=True, reason=status)
 
@@ -483,20 +531,30 @@ def budget_exhausted_reason(
     wall = getattr(ladder.envelope, "max_wall_s", None)
     requests = getattr(ladder.envelope, "max_requests", None)
     left = max(0.0, ladder.remaining())
+    ran = ladder.attempt_index
+    # The grants in `record()` apply the same admission test, so this lands
+    # after an attempt ran only when the clock moved between a grant and the
+    # next start (an overslept backoff). It must not then claim the slot
+    # dispatched nothing.
+    outcome = (
+        "Nothing was dispatched"
+        if not ran
+        else f"{ran} attempt(s) ran; attempt {ran + 1} was not started"
+    )
     if wall is None:
         # Rule 3, before the first attempt: the slot's own ceiling is already
         # under MIN_ATTEMPT_BUDGET_S, so no declared envelope is involved.
         return (
             f"{STATUS_BUDGET_EXHAUSTED}: {target} was given a {timeout}s slot and "
             f"{left:.1f}s of it is left, below the {ladder._min_attempt_budget_s}s "
-            f"minimum an attempt is worth starting with. Nothing was dispatched."
+            f"minimum an attempt is worth starting with. {outcome}."
         )
     return (
         f"{STATUS_BUDGET_EXHAUSTED}: {target} declares one dispatch may cost up to "
         f"{wall:g}s of wall clock inside the CLI"
         + (f" ({requests} upstream requests)" if requests is not None else "")
         + f", and only {left:.1f}s of this slot's {timeout}s budget is left. "
-        f"Nothing was dispatched — §7.5 rule 4 refuses a child it would have to "
+        f"{outcome} — §7.5 rule 4 refuses a child it would have to "
         f"kill part-way through a retry chain the harness cannot see. Raise the "
         f"slot timeout above {wall:g}s, or pick a runner with a smaller envelope."
     )

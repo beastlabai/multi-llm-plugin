@@ -585,6 +585,25 @@ def _rerun_resumes(phase_status: Mapping[str, Any]) -> bool:
     return bool(failed) and not failed & RERUN_FUTILE_STATUSES
 
 
+def _prerequisites_unmet(plan_path: Path, phase: str) -> bool:
+    """Would the phase's own prerequisite gate refuse a re-run right now?
+
+    The gate refuses before anything is written (D6a), so a refusal leaves an
+    earlier attempt's ``.status.json`` — mirror included — exactly as it was,
+    and :func:`_rerun_resumes` reads that attempt (adversarial review,
+    2026-10-05: the tool routes offered the command the gate had just
+    refused). Asked through the same read-only check the gate runs
+    (``collect_missing`` over a read-only ``StateManager``), so it writes
+    nothing; a skip already recorded satisfies it, as it does the gate.
+    """
+    from .output_handler import output_dir_path
+    from .state_manager import StateManager
+
+    prereq = _skill_module("check_workflow_prerequisites")
+    state = StateManager(plan_path, read_only=True)
+    return bool(prereq.collect_missing(state, output_dir_path(plan_path), phase))
+
+
 def resume_command(
     plan_arg: str,
     host_id: str,
@@ -628,7 +647,10 @@ def resume_command(
     task generation left the tool result with no command, and the host model
     invented one). It answers from the phase dir's ``.status.json``
     (*phase_status*, else read for the plan) through :func:`_rerun_resumes`,
-    so a failure no re-run can change gets none. The servers pass through whatever this
+    so a failure no re-run can change gets none — and only while the phase's
+    prerequisite gate would let the re-run through
+    (:func:`_prerequisites_unmet`): a gate refusal writes no status, so the
+    file still describes the attempt before it. The servers pass through whatever this
     says and attach nothing when it says nothing; before the adversarial
     review (2026-10-02) they attached ``--resume`` to every write-phase exit 3,
     and ``util next-command does-not-exist.md --blocked implement`` printed
@@ -644,14 +666,13 @@ def resume_command(
 
     template = _host_capabilities().next_command_template(host_id, route)
     if mode.phase in RERUN_RESUME_PHASES:
+        source = Path(os.path.abspath(str(plan_arg if plan_path is None else plan_path)))
         if phase_status is None:
             from .output_handler import phase_dir_path
             from .status_file import read_status
 
-            source = plan_arg if plan_path is None else plan_path
-            phase_status = read_status(str(phase_dir_path(
-                Path(os.path.abspath(str(source))), mode.phase)))
-        if not _rerun_resumes(phase_status):
+            phase_status = read_status(str(phase_dir_path(source, mode.phase)))
+        if not _rerun_resumes(phase_status) or _prerequisites_unmet(source, mode.phase):
             return None
         return template.replace(ARGS_SLOT, f"--{mode.name} {quote_plan_arg(plan_arg)}")
     if mode.phase not in PHASE_BY_WRITE_KIND.values():

@@ -38,8 +38,15 @@ driving agent re-implements.
 4. **Validation happens before anything touches the plan**: the document is checked
    against `schemas/generated_tasks.schema.json` plus the semantic rules
    (unique `T###` ids, `depends_on` naming only declared ids, acyclic, at least one
-   dependency-free task). A failure is `schema_invalid` — deliberately **not**
-   retried — and nothing is written.
+   dependency-free task). A failure is `schema_invalid` and nothing is written.
+   With `--exec-subagents` the executor checks both before it persists the reply
+   and re-asks the same runner **once** with the validator's errors; a second
+   failure is exit 3. On the native path, `--reaggregate` only consumes the reply
+   on disk and re-asks nothing: it exits 3 naming the errors. Re-ask the subagent
+   once with them and write its reply over the file, then `--reaggregate` again —
+   or re-invoke the mode without `--reaggregate`. A result file that fails
+   validation is never resumed: a plain re-invoke archives it and dispatches the
+   task again.
 
 5. **The plan is updated in-process**, then the *outcome* is verified rather than
    the subagent's claim: a fresh `<!-- TASKS_FILE: … -->` marker, a rendered tasks
