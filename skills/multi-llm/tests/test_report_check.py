@@ -339,6 +339,20 @@ class TestTheHookInput:
         hook["last_assistant_message"] = report(COMMAND)
         assert run_check(capsys, path, hook=hook, tmp_path=tmp_path) == ""
 
+    def test_a_copy_in_an_earlier_block_of_a_split_reply_blocks_once(
+            self, tmp_path, capsys):
+        """The documented limit (hooks review of fix round 10): the field is
+        the reply's last text block alone, so a command copied into an earlier
+        block reads as missing. The block costs one turn, no more: the hook's
+        next run carries ``stop_hook_active`` and passes."""
+        path = (Transcript().prompt("go").bash(block_output())
+                .write(tmp_path / "t.jsonl"))
+        hook = {"transcript_path": str(path), "stop_hook_active": False,
+                "last_assistant_message": "Let me know if you want anything else."}
+        decision_of(run_check(capsys, path, hook=hook, tmp_path=tmp_path))
+        hook["stop_hook_active"] = True
+        assert run_check(capsys, path, hook=hook, tmp_path=tmp_path) == ""
+
     def test_the_hook_input_on_stdin(self, tmp_path, capsys, monkeypatch):
         import io
 

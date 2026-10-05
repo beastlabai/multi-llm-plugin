@@ -44,6 +44,19 @@ copy:
   the transcript still ends at the turn's last tool result: the reply is
   written after the hook returns. So the field is what gets checked, and a
   transcript with no reply text yet, with no field beside it, passes.
+* ``last_assistant_message`` is the text of the **last** assistant message
+  Claude Code holds in memory, not the whole reply (hooks review of fix round
+  10, read from the harness, not measured live). A reply split into several
+  text blocks hands the hook only the last one, so a command copied into an
+  earlier block reads as missing. That costs at most one needless block: the
+  model's extra turn ends with ``stop_hook_active`` set, and the hook passes
+  at once then. The transcript's own trailing assistant entries are checked
+  beside the field and would carry the earlier blocks, but at ``Stop`` time
+  they are not written yet, so they cannot prevent that one block.
+* A turn that ends on an API error fires Claude Code's ``StopFailure`` event,
+  not ``Stop``, so this check never runs on it (``hooks/hooks.json`` runs it
+  on ``Stop`` alone). :func:`ended_on_api_error` still passes such a turn, for
+  a transcript checked by hand or read later: the model wrote no report there.
 * On a miss it prints exactly one line, ``{"decision": "block", "reason": …}``,
   the one form Claude Code reads as a ``Stop`` decision. The reason names each
   missing command in its own fenced block and asks for it copied exactly (and
@@ -476,6 +489,12 @@ def check(
     last_assistant_message: Optional[str] = None,
 ) -> Optional[Dict[str, str]]:
     """The hook decision for one turn: ``None`` to pass, else the block object.
+
+    The turn passes when either the transcript's trailing assistant text or
+    *last_assistant_message* carries the copy. The second is only the last
+    text block of the reply (see the module docstring), so a copy made in an
+    earlier block of a split reply is a miss here, once: the hook's next run
+    sees ``stop_hook_active`` and passes.
 
     Raises :class:`_Unreadable` for a transcript it cannot read; the caller
     turns that into a silent pass.
