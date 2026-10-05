@@ -283,10 +283,22 @@ def record_pre_existing_changes(state: StateManager) -> None:
     Args:
         state: StateManager instance to store the pre-existing changes
     """
-    # Only record if not already recorded (avoid overwriting on --resume)
+    # Only record if not already recorded (avoid overwriting on --resume) —
+    # by implement. `head_before_implement` is recorded right after this on
+    # implement's first run, so a baseline without it was left by a planning
+    # phase (apply-suggestions records one at its own start), before that
+    # phase edited the plan: kept, it counted the plan edit as implement's
+    # change (2026-10-05, OpenCode racing run 3: the plan listed `modified`
+    # by implementation). Implement's first run takes its own.
     if state.get("pre_existing_changes") is not None:
-        print(f"Pre-existing changes already recorded ({len(state.get('pre_existing_changes', []))} paths)")
-        return
+        if state.get("head_before_implement") is not None:
+            print(f"Pre-existing changes already recorded ({len(state.get('pre_existing_changes', []))} paths)")
+            return
+        print(
+            f"Replacing the dirty-tree baseline an earlier phase recorded "
+            f"({len(state.get('pre_existing_changes') or [])} paths) with "
+            f"implement's own"
+        )
 
     # Get all modified files (staged and unstaged)
     # Filter empty strings before set union for robustness

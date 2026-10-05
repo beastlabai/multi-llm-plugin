@@ -331,6 +331,48 @@ class TestRecordPreExistingChanges:
 
         mock_modified.assert_not_called()
 
+    def test_a_baseline_a_planning_phase_left_is_replaced_on_the_first_run(
+        self, mock_state_manager
+    ):
+        """2026-10-05, OpenCode racing run 3: apply-suggestions records the
+        dirty-tree baseline at its own start, before it edits the plan, and
+        implement kept it, so the plan edit read as implement's change
+        (`plans/racing-game.md` tracked `modified` by implementation). No
+        `head_before_implement` yet means this is implement's first run, and
+        it takes its own baseline."""
+        from implement_orchestrator import record_pre_existing_changes
+
+        values = {"pre_existing_changes": ["plans/racing-game/"]}
+        mock_state_manager.get.side_effect = lambda key, default=None: values.get(
+            key, default
+        )
+        with patch('implement_orchestrator.get_modified_files',
+                   return_value=['plans/racing-game.md', 'plans/racing-game/']), \
+             patch('implement_orchestrator.get_staged_files', return_value=[]):
+            record_pre_existing_changes(mock_state_manager)
+
+        mock_state_manager.set.assert_called_once()
+        key, value = mock_state_manager.set.call_args[0]
+        assert key == "pre_existing_changes"
+        assert set(value) == {'plans/racing-game.md', 'plans/racing-game/'}
+
+    def test_a_resumed_implement_keeps_its_own_baseline(self, mock_state_manager):
+        """Once implement has run (`head_before_implement` recorded), the
+        baseline is its own and a resume must not re-take it: the files the
+        first run created would join it and leave `tracked_files`."""
+        from implement_orchestrator import record_pre_existing_changes
+
+        values = {"pre_existing_changes": ["plans/racing-game/"],
+                  "head_before_implement": "abc123"}
+        mock_state_manager.get.side_effect = lambda key, default=None: values.get(
+            key, default
+        )
+        with patch('implement_orchestrator.get_modified_files') as mock_modified:
+            record_pre_existing_changes(mock_state_manager)
+
+        mock_modified.assert_not_called()
+        mock_state_manager.set.assert_not_called()
+
     def test_handles_empty_file_list(self, mock_state_manager):
         """Test handling when no files are modified."""
         from implement_orchestrator import record_pre_existing_changes
