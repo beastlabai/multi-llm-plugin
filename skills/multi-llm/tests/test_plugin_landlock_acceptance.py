@@ -58,7 +58,7 @@ from utils.providers.base import (  # noqa: E402
     SKIP_RUNG_ENV,
 )
 from utils.state_manager import StateManager  # noqa: E402
-from utils.write_safety import AuditLog  # noqa: E402
+from utils.write_safety import AuditLog, safety_dir  # noqa: E402
 from tests.test_plugin_landlock_executor import (  # noqa: E402
     BWRAP_LINE,
     F6_LEAD,
@@ -1138,8 +1138,16 @@ def _first_run_stops_at_batch_1(scratch: Scratch, mode: str, capsys) -> Tuple[st
     assert _in_flight(scratch.status(mode)) == []
     task_1 = scratch.write_tasks(mode)[1]["task_id"]
     # Batch 1's pre-batch snapshot holds the scheduler's own copy of the
-    # bytes before batch 1 (what `util restore-batch` restores from).
-    assert (scratch.phase_dir(mode) / "pre_batch" / task_1).is_dir()
+    # bytes before batch 1 (what `util restore-batch` restores from) — in
+    # the phase dir for the two narrow scopes, outside the grant for a
+    # repo-wide batch on the rung (review fixes 2026-10-05).
+    phase_dir = scratch.phase_dir(mode)
+    snapshot_root = Path(safety_dir(str(phase_dir)))
+    assert (snapshot_root / "pre_batch" / task_1).is_dir()
+    if mode in REPO_WIDE:
+        assert snapshot_root != phase_dir and not snapshot_root.is_relative_to(scratch.root)
+    else:
+        assert snapshot_root == phase_dir
     _no_uncontained_rung(scratch, text)
     return pre_batch_1, task_1
 
