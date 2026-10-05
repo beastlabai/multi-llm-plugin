@@ -519,10 +519,9 @@ def validate_args(args, surface):
             "that merely contains a flag is fine; only the first character "
             "matters.")
     reserved = surface["reserved_flags"]
-    for token in extra:
-        hit = reserved_hit(token, surface)
-        if hit is None:
-            continue
+    _kept, _dropped, refused = split_extra_flags(extra, surface)
+    if refused is not None:
+        token, hit = refused
         if hit in reserved.get("named_exception", []):
             # Requirement #5: refused before the spawn, never substituted.
             return None, (
@@ -537,6 +536,45 @@ def validate_args(args, surface):
             "duplicate, contradict or restate it. Remove it from extra_flags."
             .format(token, hit))
     return row, None
+
+
+def split_extra_flags(extra, surface):
+    """``(kept, dropped, refused)``: what is forwarded, dropped, or refused first.
+
+    A token naming a flag this tool composes is a no-op when the surface lists
+    it as ``reserved_flags.redundant`` — a valueless one (``--yes`` in every
+    spelling, ``--exec-subagents``) always, a valued one (``--host``) only with
+    the value this tool composes, from the ``=`` form or the next element.
+    ``refused`` is ``(token, hit)`` for the first other reserved token, else
+    ``None``. A surface without ``redundant`` drops nothing, so every reserved
+    token is refused exactly as before. The port of ``splitExtraFlags``.
+    """
+    redundant = surface["reserved_flags"].get("redundant") or {}
+    flags = redundant.get("flags") or []
+    valued = redundant.get("valued") or {}
+    kept, dropped, index = [], [], 0
+    while index < len(extra):
+        token = extra[index]
+        hit = reserved_hit(token, surface)
+        if hit is None:
+            kept.append(token)
+            index += 1
+            continue
+        if hit in flags and "=" not in token:
+            dropped.append(token)
+            index += 1
+            continue
+        value = valued.get(hit)
+        if isinstance(value, str):
+            inline = "=" in token
+            given = token.split("=", 1)[1] if inline else (
+                extra[index + 1] if index + 1 < len(extra) else None)
+            if given == value:
+                dropped.append(token if inline else "{} {}".format(token, given))
+                index += 1 if inline else 2
+                continue
+        return kept, dropped, (token, hit)
+    return kept, dropped, None
 
 
 # ---------------------------------------------------------------------------
@@ -630,15 +668,19 @@ def runnable_pattern(surface):
         r'[^\s"`]*\buv(?:\.exe)?\b\s+run\b[^\n"`]*' + script + r'[^\n"`]*')
 
 
-def scrub_value(value, commands, pattern):
+def scrub_value(value, commands, pattern, respell=None):
     if isinstance(value, str):
         for form in commands:
             value = value.replace(form, NEXT_MARKER)
-        return pattern.sub(RUNNABLE_MARKER, value) if pattern else value
+        if not pattern:
+            return value
+        return pattern.sub(
+            lambda match: (respell(match.group(0)) if respell else None)
+            or RUNNABLE_MARKER, value)
     if isinstance(value, list):
-        return [scrub_value(item, commands, pattern) for item in value]
+        return [scrub_value(item, commands, pattern, respell) for item in value]
     if isinstance(value, dict):
-        return {key: scrub_value(item, commands, pattern)
+        return {key: scrub_value(item, commands, pattern, respell)
                 for key, item in value.items()}
     return value
 
@@ -671,9 +713,9 @@ def scrub_runbook(text: str, surface) -> str:
     return "\n".join(out)
 
 
-def redact(value, command, surface):
+def redact(value, command, surface, respell=None):
     return scrub_value(value, command_forms(command),
-                       runnable_pattern(surface) if surface else None)
+                       runnable_pattern(surface) if surface else None, respell)
 
 
 def split_posix(text: str):
@@ -767,6 +809,69 @@ def next_as_tool_call(raw, surface):
                     "executed. Do not run it in a shell.",
         }
     return parsed
+
+
+def quote_for_reader(value: str) -> str:
+    """A value quoted for the model reading a user-spelled command, never a shell.
+
+    ``next_phase.quote_plan_arg``'s rule, held to it by a shared case table:
+    bare without whitespace or a quote, single quotes around a value holding
+    ``"`` but not ``'``, double quotes otherwise, nothing escaped.
+    """
+    has_double, has_single = '"' in value, "'" in value
+    if has_double and not has_single:
+        return "'{}'".format(value)
+    if has_double or has_single or any(ch.isspace() for ch in value):
+        return '"{}"'.format(value)
+    return value
+
+
+def typed_plan(plan, values):
+    """*plan* as this call typed it, when it names the call's own plan file."""
+    values = values or {}
+    if plan and values.get("plan_arg") and plan == values.get("plan"):
+        return values["plan_arg"]
+    return plan
+
+
+def user_spelling(args, surface):
+    """Tool-call args spelled the way this route's user types them, or ``None``.
+
+    The template and slot are ``dispatcher.user_command``, the mode word the
+    row's ``user_flag``, every value quoted by :func:`quote_for_reader` — the
+    pieces ``next_phase.resume_command`` builds the same string from.
+    """
+    spell = (surface or {}).get("dispatcher", {}).get("user_command")
+    row = resolve_mode(args.get("mode"), surface) if surface else None
+    if not isinstance(spell, dict) or not isinstance(spell.get("template"), str) \
+            or not row or not row.get("user_flag"):
+        return None
+    words = [row["user_flag"]]
+    for key in ("plan", "question"):
+        if args.get(key):
+            words.append(quote_for_reader(args[key]))
+    words.extend(quote_for_reader(flag) for flag in args.get("extra_flags") or [])
+    return spell["template"].replace(spell["args_slot"], " ".join(words))
+
+
+def respeller_for(surface, values):
+    """Re-spell one redacted dispatcher command for the user, or ``None`` (D3c).
+
+    Parsed into tool-call args first (the composed flags already gone), the
+    plan put back as this call typed it, spelled through the route's template.
+    ``None`` when the surface carries no ``dispatcher.user_command``; the
+    returned function answers ``None`` for a command that does not parse, and
+    the caller keeps the pointer.
+    """
+    if not (surface or {}).get("dispatcher", {}).get("user_command"):
+        return None
+
+    def respell(command):
+        args = parse_dispatcher_command(command, surface)
+        if args is None:
+            return None
+        return user_spelling(dict(args, plan=typed_plan(args["plan"], values)), surface)
+    return respell
 
 
 def pinned_run_id(tokens, surface):
@@ -964,6 +1069,9 @@ class Call:
         self.log = None
         self.watched = None
         self.polls = 0
+        # The restated composed flags `split_extra_flags` dropped from this
+        # call's extra_flags, named back in `extra_flags_note`.
+        self.dropped = []
         self.deadline = time.monotonic()
         self.hard_deadline = self.deadline
 
@@ -1249,14 +1357,59 @@ class Server:
                "environment": self.environment(call), "relays": dict(call.relays),
                "progress_lines": call.progress_lines}
         for key, value in fields.items():
-            if key not in out and value is not None:
+            # A null `user_next_step` is the answer "no next phase", set on
+            # purpose by `finish`; every other null is an absent key.
+            if key not in out and (value is not None or key == USER_NEXT_STEP_KEY):
                 out[key] = value
         return out
 
     def refusal(self, call: Call, state_key: str, message: str) -> dict:
-        """A pre-spawn refusal: the ordinary envelope, ``exit`` null, relays zeroed."""
-        return self.envelope(call, {"ok": False, "state": self.state_word(state_key),
-                                    "message": message, "exit": None})
+        """A pre-spawn refusal: the ordinary envelope, ``exit`` null, relays zeroed.
+
+        An argument error (``state_key`` ``error``) is the model's own call to
+        fix and goes out as it is; a needs-human refusal is finished like any
+        other failed outcome (:meth:`finish`).
+        """
+        fields = {"ok": False, "state": self.state_word(state_key),
+                  "message": message, "exit": None}
+        if state_key != "error":
+            self.finish(call, fields)
+        return self.envelope(call, fields)
+
+    def finish(self, call: Call, outcome: dict) -> dict:
+        """What every outcome past argument validation owes the model (D3c).
+
+        A failed or needs-human result says explicitly what the user can run
+        (racing re-run 2026-10-04: a result with no command key at all, and the
+        host model composed a next command of its own): ``user_next_step`` is
+        null and, unless the result carries a ``resume_command``, the surface's
+        ``no_command_reason`` says there is none, with its ``no_command`` clause
+        on a dispatcher exit 3. A call whose ``extra_flags`` restated a composed
+        flag gets the surface's note naming what was dropped. Every sentence is
+        the surface's; with no surface, or a key it lacks, only that sentence
+        is lost. The port of ``finishOutcome``.
+        """
+        surface = self.surface
+        if surface is None:
+            return outcome
+        note = (surface["reserved_flags"].get("redundant") or {}).get("note")
+        if call.dropped and isinstance(note, str):
+            outcome["extra_flags_note"] = note.replace("{flags}", ", ".join(call.dropped))
+        if outcome.get("ok") is not False:
+            return outcome
+        outcome[USER_NEXT_STEP_KEY] = None
+        if outcome.get("resume_command"):
+            return outcome
+        reason = surface.get("no_command_reason")
+        if isinstance(reason, str):
+            outcome["no_command_reason"] = reason
+        clause = (surface.get("needs_human_message") or {}).get("no_command")
+        dispatcher = surface["dispatcher"]
+        if (isinstance(clause, str)
+                and outcome.get("state") == dispatcher["states"]["needs_human"]
+                and outcome.get("exit") == dispatcher["exit_codes"]["needs_human"]):
+            outcome["message"] = "{} {}".format(outcome.get("message") or "", clause)
+        return outcome
 
     # -- the budget ------------------------------------------------------------
 
@@ -1389,6 +1542,8 @@ class Server:
         row, problem = validate_args(call.args, surface)
         if problem:
             return self.refusal(call, "error", problem)
+        kept_flags, call.dropped, _refused = split_extra_flags(
+            call.args["extra_flags"], surface)
         if call.anchor is None:
             return self.refusal(call, "needs_human", fill(
                 surface["anchor_unresolved"], {"probed": ", ".join(probed)}))
@@ -1435,7 +1590,9 @@ class Server:
         self.export_host_posture(call)
         values = {"word": args["mode"], "plan": self.normalize_plan(args["plan"], call),
                   "plan_arg": self.plan_spelling(args["plan"]),
-                  "question": args["question"], "extra": list(args["extra_flags"])}
+                  # What validation forwards: a restated composed flag is
+                  # dropped (`split_extra_flags`) and named in the note.
+                  "question": args["question"], "extra": list(kept_flags)}
         outcome = self.run_workflow(call, row, values)
         if not call.cancel.is_set():
             self.attach_resume(call, values, outcome)
@@ -1443,7 +1600,7 @@ class Server:
             self.attach_runbook(call, row, outcome)
         if model is not None:
             outcome["session_model"] = model
-        return self.envelope(call, outcome)
+        return self.envelope(call, self.finish(call, outcome))
 
     def export_session_model(self, call: Call):
         """D9 layer 2: this turn's model for the ladder's ``session`` rung, or ``None``.
@@ -1893,28 +2050,40 @@ class Server:
 
     # -- S4/S5: results -------------------------------------------------------------------
 
-    def human_output(self, child: ChildRun, command):
+    def human_output(self, child: ChildRun, command, respell=None):
         """Redacted stdout, the result line dropped only when it parsed."""
-        text = redact(child.stdout, command, self.surface)
+        text = redact(child.stdout, command, self.surface, respell)
         if not text or child.result is None:
             return text.rstrip() if text else text
         marker = self.surface["dispatcher"]["result_marker"]
         return "\n".join(line for line in text.split("\n")
                          if not line.strip().startswith(marker)).rstrip()
 
-    def tool_calls_for(self, child: ChildRun) -> list:
+    def tool_calls_for(self, child: ChildRun, values=None) -> list:
+        """Every runnable command the child printed, as tool-call args, once each.
+
+        The plan is put back the way this call typed it when it is the call's
+        own plan file (the dispatcher prints it absolute), and two lines that
+        name the same call — a failed run's retry hint and ``status``'s
+        ``resume with:`` differ only in flags this tool composes — are one
+        option (racing re-run 2026-10-04).
+        """
         raw = (child.result or {}).get("next")
         commands = [raw] if isinstance(raw, str) and raw else []
         commands.extend(runnable_pattern(self.surface).findall(
             "{}\n{}".format(child.stdout or "", child.stderr or "")))
         seen, calls = set(), []
         for command in commands:
-            if command in seen:
-                continue
-            seen.add(command)
             call_args = next_as_tool_call(command, self.surface)
-            if call_args is not None:
-                calls.append(call_args)
+            if call_args is None:
+                continue
+            if not call_args.get("unparseable"):
+                call_args["plan"] = typed_plan(call_args["plan"], values)
+            key = json.dumps(call_args, sort_keys=True)
+            if key in seen:
+                continue
+            seen.add(key)
+            calls.append(call_args)
         return calls
 
     def nested_exec(self, child: ChildRun, call: Call):
@@ -1963,14 +2132,18 @@ class Server:
                 "log": call.log, "polls": call.polls,
                 "stdout_truncated": True if child.truncated else None}
         if child.code is not None and child.code == codes["needs_human"]:
-            payload = redact(child.result, None, surface)
-            output = self.human_output(child, None)
-            stderr = redact(child.stderr, None, surface)
+            # Each redacted dispatcher command is re-spelled the way this
+            # route's user types it, plan as typed, instead of a removal note;
+            # a surface without `dispatcher.user_command` keeps the note.
+            respell = respeller_for(surface, values)
+            payload = redact(child.result, None, surface, respell)
+            output = self.human_output(child, None, respell)
+            stderr = redact(child.stderr, None, surface, respell)
             base.update({
                 "ok": False, "state": states["needs_human"], "result": payload,
                 "error": (payload or {}).get("error"), "output": output,
                 "stderr": stderr or None, "next": None,
-                "options": self.tool_calls_for(child) + [
+                "options": self.tool_calls_for(child, values) + [
                     {"human": surface["needs_human_option"]}],
                 "nested_exec": self.nested_exec(child, call),
                 "message": self.needs_human_message(payload, output, stderr, values),
@@ -2021,7 +2194,7 @@ class Server:
     def error_result(self, call: Call, child: ChildRun, message: str,
                      with_run: bool = False) -> dict:
         """A failed child is a result. With a live run, it names how to stop it."""
-        options = self.tool_calls_for(child)
+        options = self.tool_calls_for(child, call.watched)
         out = {
             "ok": False, "state": self.state_word("error"), "exit": child.code,
             "argv": child.argv, "message": redact(message, None, self.surface),
