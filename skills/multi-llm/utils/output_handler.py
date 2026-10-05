@@ -250,25 +250,95 @@ def phase_dir_path(plan_path: Path, phase: str) -> Path:
     return output_dir_path(plan_path) / PHASE_DIRECTORIES.get(phase, phase)
 
 
+#: The files the workflow itself writes at the top of a plan's output folder,
+#: beside the phase folders (:data:`PHASE_DIR_NAMES`): the state file and the
+#: prior-changes log every write phase shares (``prior_changes.FILENAME``).
+WORKFLOW_ROOT_FILES = ("state.json", "prior_changes.jsonl")
+
+#: The suffixes of the workflow's own dot-files there: an atomic write's temp
+#: file (``.state_*.tmp``, ``.metrics_*.tmp``, ``.tracking_*.tmp``) and a
+#: lock file (``.state.lock``).
+_WORKFLOW_DOTFILE_SUFFIXES = (".tmp", ".lock")
+
+#: A task list is a Markdown document: generate-tasks writes
+#: ``<output folder>/tasks/tasks.md`` and implement parses the file the
+#: ``TASKS_FILE`` marker names as Markdown. A marker naming anything else names
+#: no task list, and following it left out real code (fix round 8).
+_TASK_LIST_SUFFIXES = (".md", ".markdown")
+
+
+def _is_workflow_part(entry: "os.DirEntry") -> bool:
+    """Whether *entry*, a child of an output folder, is one the workflow writes."""
+    name = entry.name
+    try:
+        is_dir = entry.is_dir(follow_symlinks=False)
+    except OSError:
+        return False
+    if is_dir:
+        return name in PHASE_DIR_NAMES
+    if name in WORKFLOW_ROOT_FILES:
+        return True
+    return name.startswith(".") and name.endswith(_WORKFLOW_DOTFILE_SUFFIXES)
+
+
+def _output_folder_entries(folder, rel: str) -> list:
+    """What of *folder*, a plan's output folder, is the workflow's: entries under *rel*.
+
+    * everything in it is the workflow's (the state file, the prior-changes
+      log, the phase folders, its own temp and lock files): ``[rel]``, the
+      whole folder, so an untracked output folder is never listed file by
+      file;
+    * it also holds anything else — a code folder that shares the plan's
+      name (``src/feature.md`` beside ``src/feature/``), where the workflow
+      puts its state too: only the workflow's own entries, so the code
+      beside them stays in ``tracked_files`` and in review-code's scope;
+    * none of it is the workflow's, or there is no such folder: nothing. The
+      folder's name alone says nothing about whose it is.
+
+    *rel* ends in ``/``.
+    """
+    try:
+        with os.scandir(str(folder)) as children:
+            children = list(children)
+    except OSError:
+        return []
+    ours = [child for child in children if _is_workflow_part(child)]
+    if not ours:
+        return []
+    if len(ours) == len(children):
+        return [rel]
+    return sorted(
+        rel + child.name + ("/" if child.is_dir(follow_symlinks=False) else "")
+        for child in ours
+    )
+
+
 def workflow_file_entries(plan_path, *, root, output_dirs=()) -> list:
     """The workflow's own files for *plan_path*, relative to the repository *root*.
 
-    The plan, its output folder (``state.json``, every phase folder, the
-    generated task list) and the task list the plan's ``TASKS_FILE`` marker
-    names. None of them is code: ``tracked_files`` must never record them and
-    ``review-code`` must never review them. Measured 2026-10-05 (Codex racing
-    run 3): apply-task-suggestions recorded the plan and ``tasks.md`` as
-    tracked files, implement stopped part-way without recording anything, and
-    review-code reviewed ``tasks.md`` as code — two duplicate findings — while
-    the ``index.html`` implement created was not in its scope at all.
+    The plan, what of its output folder is the workflow's (``state.json``,
+    the prior-changes log, every phase folder, the generated task list) and
+    the task list the plan's ``TASKS_FILE`` marker names. None of them is
+    code: ``tracked_files`` must never record them and ``review-code`` must
+    never review them. Measured 2026-10-05 (Codex racing run 3):
+    apply-task-suggestions recorded the plan and ``tasks.md`` as tracked
+    files, implement stopped part-way without recording anything, and
+    review-code reviewed ``tasks.md`` as code — two duplicate findings —
+    while the ``index.html`` implement created was not in its scope at all.
 
     A folder entry ends in ``/``, the shape ``git_utils.subtract_baseline``
     reads as "this folder and everything beneath it". *output_dirs* adds
     folders the caller knows hold the run's files (the state file's folder);
-    the computed output folder is always included (a ``None`` *plan_path*
-    leaves only *output_dirs*). A path outside *root*, or
-    *root* itself, is never an entry: excluding the whole repository would
-    empty every scope.
+    the computed output folder is always considered (a ``None`` *plan_path*
+    leaves only *output_dirs*). Each folder is read the same way
+    (:func:`_output_folder_entries`): left out whole only when everything in
+    it is the workflow's, and beside code only the workflow's own entries —
+    until fix round 8 the computed folder was left out whatever it held, so a
+    plan kept beside code of the same name took that code out of review. The
+    ``TASKS_FILE`` target counts only when it is a Markdown file
+    (:data:`_TASK_LIST_SUFFIXES`): a marker naming a code file is not
+    followed. A path outside *root*, or *root* itself, is never an entry:
+    excluding the whole repository would empty every scope.
     """
     if not root:
         return []
@@ -288,9 +358,11 @@ def workflow_file_entries(plan_path, *, root, output_dirs=()) -> list:
         rel = rel.replace(os.sep, "/")
         return rel + "/" if folder else rel
 
-    candidates = [(Path(folder), True) for folder in output_dirs if folder]
+    folders = [Path(folder) for folder in output_dirs if folder]
+    files = []
     if plan is not None:
-        candidates[:0] = [(plan, False), (output_dir_path(plan), True)]
+        folders.insert(0, output_dir_path(plan))
+        files.append(plan)
         try:
             from .plan_updater import get_tasks_file_path
         except ImportError:  # pragma: no cover - direct-script import shim
@@ -299,12 +371,18 @@ def workflow_file_entries(plan_path, *, root, output_dirs=()) -> list:
             named = get_tasks_file_path(plan.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError):
             named = None
-        if named:
-            candidates.append((plan.parent / named, False))
+        if named and Path(named).suffix.lower() in _TASK_LIST_SUFFIXES:
+            files.append(plan.parent / named)
+
+    candidates = [relative(path, False) for path in files[:1]]
+    for folder in folders:
+        rel = relative(folder, True)
+        if rel:
+            candidates.extend(_output_folder_entries(folder, rel))
+    candidates.extend(relative(path, False) for path in files[1:])
 
     entries = []
-    for path, folder in candidates:
-        entry = relative(path, folder)
+    for entry in candidates:
         if entry and entry not in entries:
             entries.append(entry)
     return entries
