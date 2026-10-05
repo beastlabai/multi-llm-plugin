@@ -291,6 +291,8 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report.
 
+   A `[WRITE_PROMPT_ORDER]` line (on stderr; the prompt is still written) names an earlier batch whose summary this prompt does not carry — recorded but not appended yet, or not finished: do what it says, then run this `util write-prompt` again before spawning the subagent.
+
 2. **Read current plan state and snapshot it** — Always read the latest plan file version before each batch, then capture a pre-batch snapshot so the batch's effect can be verified in step 5 **without** relying on git. (Plan files are frequently untracked — freshly created — and every `git diff` variant silently ignores fully-untracked files, so git CANNOT detect whether a batch changed the plan. Snapshot the file and diff against the snapshot instead.)
 
    The snapshot lives in the **workspace temp dir** at a deterministic path (each batch overwrites it; no cleanup step; the dir is self-gitignored). Resolve the project root first — if the command fails or prints nothing, STOP with the error: "multi-llm requires running inside a git repository":

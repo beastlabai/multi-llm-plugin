@@ -291,6 +291,8 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 
    **Error handling**: an exit 3 names the problem (no `write_tasks.json` — re-run the orchestrator; an unknown task id — the known ids are listed). Do not fall back to the raw `batch.prompt`; stop and report.
 
+   A `[WRITE_PROMPT_ORDER]` line (on stderr; the prompt is still written) names an earlier batch whose summary this prompt does not carry — recorded but not appended yet, or not finished: do what it says, then run this `util write-prompt` again before spawning the subagent.
+
 2. **Run the batch as a subagent** (`executor_role: "agent"` on every fix batch) whose whole prompt is: read the file at the `[WRITE_PROMPT]` path in full — through line `[WRITE_PROMPT_LINES]`, paging if a single read stops short — and follow it verbatim.
    - `general-purpose` for all fixes
    - That is the entire contract: do not paste the prompt text, add instructions of your own, or hand the subagent the JSON. The file already contains the fixes, the prior-batch context and the reply format (it ends with a JSON object the steps below read)

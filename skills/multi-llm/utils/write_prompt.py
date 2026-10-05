@@ -80,6 +80,7 @@ __all__ = [
     "PROMPTS_SUBDIR",
     "WritePromptError",
     "load_write_task",
+    "ordering_warnings",
     "render_write_prompt",
     "default_output_path",
     "main",
@@ -199,6 +200,79 @@ def render_write_prompt(
     return text, task, info
 
 
+#: The warning a prompt bound out of order prints (stderr; never a refusal).
+MARKER_ORDER = "[WRITE_PROMPT_ORDER]"
+
+
+def ordering_warnings(phase_dir: Path, task_id: str) -> List[str]:
+    """What this prompt is missing because an earlier batch is not logged yet.
+
+    Fix round 7 (racing re-run 3, Claude Code apply-code-fixes): the host
+    recorded batch 0 with ``util batch-done``, bound batch 1's prompt, and
+    only then appended batch 0's summary — so batch 1's prompt went out
+    without it, and the host had to notice, re-bind batch 1 and re-bind
+    batch 2. For every task of an EARLIER batch in ``write_tasks.json``
+    (same-batch siblings may legitimately run together) whose
+    ``prior_changes_id`` this phase's log does not hold yet, one line: it is
+    recorded finished but not appended (the case above), or it has no record
+    at all. A task recorded ``skipped`` and a human task are never in the
+    log and are passed over. Advisory only — the prompt is still written,
+    so a ``--resume`` (whose document holds only the unfinished tasks) and a
+    host skipping a failed task's dependents are never refused. Nothing is
+    said when the plan dir has no ``state.json`` or either file is
+    unreadable.
+    """
+    phase_dir = Path(os.path.abspath(str(phase_dir)))
+    try:
+        document, task = load_write_task(phase_dir, task_id)
+        state = json.loads((phase_dir.parent / "state.json").read_text(encoding="utf-8"))
+        own_index = int(task.get("batch_index"))
+    except (WritePromptError, OSError, ValueError, TypeError):
+        return []
+    if not isinstance(state, dict):
+        return []
+    statuses = state.get("task_status") or {}
+    scoped = _prior_changes.canonical_phase(_phase_word(document))
+    logged = {
+        str(entry.get("id") or "")
+        for entry in _prior_changes.entries(str(phase_dir.parent))
+        if _prior_changes.canonical_phase(entry.get("phase")) == scoped
+    }
+    lines: List[str] = []
+    for earlier in document.get("batches") or document.get("tasks") or []:
+        if not isinstance(earlier, dict):
+            continue
+        try:
+            index = int(earlier.get("batch_index"))
+        except (TypeError, ValueError):
+            continue
+        if index >= own_index:
+            continue
+        if earlier.get("is_human") or str(earlier.get("executor_role") or "") == "human":
+            continue
+        earlier_id = str(earlier.get("task_id") or "")
+        entry_id = str(earlier.get("prior_changes_id") or "")
+        status = statuses.get(earlier_id)
+        if not entry_id or entry_id in logged or status == "skipped":
+            continue
+        if status in ("completed", "failed"):
+            lines.append(
+                f"{MARKER_ORDER} {earlier_id} is recorded {status}, but its "
+                f"summary is not in the prior-changes log yet, so this prompt "
+                f"does not carry it. Run its `util prior-changes append` "
+                f"(--id {entry_id}), then run this `util write-prompt` again."
+            )
+        else:
+            lines.append(
+                f"{MARKER_ORDER} {earlier_id}, an earlier batch, has no "
+                f"`util batch-done` record and no prior-changes entry yet, so "
+                f"this prompt does not carry it. If it has not finished, finish, "
+                f"record and append it first, then run this `util write-prompt` "
+                f"again."
+            )
+    return lines
+
+
 def default_output_path(phase_dir: Path, task_id: str) -> Path:
     """``{phase_dir}/prompts/{task_id}.prompt.txt``."""
     return Path(os.path.abspath(str(phase_dir))) / PROMPTS_SUBDIR / f"{task_id}.prompt.txt"
@@ -247,6 +321,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         message = getattr(exc, "message", None) or str(exc)
         print(f"ERROR: {message}", file=sys.stderr)
         return int(getattr(exc, "exit_code", 3) or 3)
+
+    # Advisory, on stderr so `--stdout` stays the prompt text alone.
+    for line in ordering_warnings(Path(args.phase_dir), args.task_id):
+        print(line, file=sys.stderr)
 
     if args.stdout:
         sys.stdout.write(text)
