@@ -373,7 +373,11 @@ class TestImplementOrchestratorWiring:
         ])
         assert code == 0
         phase_dir = _phase_dir(repo)
-        for artifact in (WRITE_TASK_FILENAME, "subagent_audit.jsonl",
+        # `write_tasks.json` IS written on the native path since 2026-10-05
+        # (the input of `util write-prompt`); nothing of the executor's run
+        # record is.
+        assert (phase_dir / WRITE_TASK_FILENAME).exists()
+        for artifact in ("subagent_audit.jsonl",
                          "write_batch_report.json", "subagent_dry_run.json"):
             assert not (phase_dir / artifact).exists(), artifact
         assert not (phase_dir / "pre_batch").exists()
