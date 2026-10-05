@@ -153,6 +153,7 @@ record = {{"argv": argv, "cwd": os.getcwd(), "pid": os.getpid(),
           "env": {{k: os.environ.get(k) for k in (
               "MULTI_LLM_UV", "MULTI_LLM_SKILL_DIR", "STUB_PROFILE_MARK",
               "PYTHONDONTWRITEBYTECODE", "MULTI_LLM_HOST_SESSION_MODEL",
+              "UV_PROJECT_ENVIRONMENT",
               "MULTI_LLM_HOST_SANDBOX_POSTURE", {route_env_name!r})}}}}
 dargv = argv[argv.index("--") + 3:] if "--" in argv else []
 if dargv[:2] == ["util", "instructions"]:
@@ -1378,6 +1379,23 @@ class TestChildEnvironment:
         _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
                                      extra_env={"PYTHONDONTWRITEBYTECODE": "x"})
         assert {c["env"]["PYTHONDONTWRITEBYTECODE"] for c in calls} == {"x"}
+
+    def test_the_payload_environment_stays_where_the_home_check_watches_it(self, harness):
+        """Fix round 8 reverted 3b9cf25: the server exported
+        UV_PROJECT_ENVIRONMENT under the user's cache directory for a payload
+        inside $CODEX_HOME, every subagent's `uv run` in the user's repository
+        inherited it, and the relocated environment was code the next call ran
+        that [CODEX_HOME_CHECK] no longer watched. uv keeps `<payload>/.venv`."""
+        root = make_plugin_root(harness.home / ".codex" / "plugins" / "cache" / "m"
+                                / "multi-llm" / "0.0.0")
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)], root=root)
+        assert calls and {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {None}
+
+    def test_a_forwarded_project_environment_is_passed_on_unchanged(self, harness):
+        """The container image forwards one through `.mcp.json`'s allowlist."""
+        _, _, calls, _ = harness.run(REVIEW, [launch_step(), poll_step(0)],
+                                     extra_env={"UV_PROJECT_ENVIRONMENT": "/image/venv"})
+        assert {c["env"]["UV_PROJECT_ENVIRONMENT"] for c in calls} == {"/image/venv"}
 
     SESSION_ENV = DISPATCHER["session_model_env"]
 
