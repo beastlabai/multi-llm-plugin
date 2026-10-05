@@ -144,7 +144,12 @@ def planted_driver_overrides(cwd: Optional[str] = None) -> List[str]:
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL,
             **({"cwd": cwd} if cwd else {}),
         )
-        stdout, _ = proc.communicate(timeout=30)
+        try:
+            stdout, _ = proc.communicate(timeout=30)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.communicate()
+            return []
     except (OSError, ValueError, subprocess.SubprocessError):
         return []
     if not isinstance(stdout, bytes) or proc.returncode not in (0, 1):
