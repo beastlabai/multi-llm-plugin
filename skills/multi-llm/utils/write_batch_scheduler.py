@@ -1841,6 +1841,10 @@ class WriteBatchScheduler:
         self._jail_failed: set = set()
         #: Batch indexes whose stray-writes-only line was already printed.
         self._rung_noticed: set = set()
+        #: Tasks this run refused before any runner started (the write
+        #: policy, the grant, the snapshot or the census refused them), so
+        #: the stop says nothing was dispatched (fix round 13).
+        self._refused_before_dispatch: set = set()
 
     # -- the write grant (plan step 3, 2026-09-30) ----------------------
 
@@ -2825,10 +2829,10 @@ class WriteBatchScheduler:
         try:
             prompt = self._with_result_contract(task, self.dispatched_prompt(task))
         except ResultRejected as exc:
-            return TaskOutcome(
+            return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=exc.status, profile=profile, reason=exc.message,
-            )
+            ), batch_index, result)
         self._retire_foreign_result(task)
 
         # D3l pre-dispatch: a batch whose DECLARED set is not wholly inside the
@@ -2846,30 +2850,30 @@ class WriteBatchScheduler:
         try:
             self.policy.check(declared, when="pre-dispatch")
         except PolicyViolation as exc:
-            return TaskOutcome(
+            return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
                 write_outcome=WRITE_POLICY_VIOLATION,
-            )
+            ), batch_index, result)
         # Plan step 3 (2026-09-30), beside the D3l check and before the
         # snapshot for the same reason: under `plan-file`/`tasks` the declared
         # set must be exactly the phase's write target, on every rung, or the
         # batch is refused with nothing snapshotted and nothing spawned.
         mismatch = self._grant_mismatch(task)
         if mismatch is not None:
-            return TaskOutcome(
+            return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_REJECTED, profile=profile, reason=mismatch,
-            )
+            ), batch_index, result)
 
         try:
             self._decide_rollback_storage(task, profile)
             snapshot = self._snapshot(task)
         except WriteSafetyError as exc:
-            return TaskOutcome(
+            return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
-            )
+            ), batch_index, result)
         # The replaced-target check's "before": taken at THIS dispatch's
         # pre-batch snapshot (reused or fresh), so the identity compared after
         # the child is always the one this spawn saw (§8.3 item 14).
@@ -2886,10 +2890,10 @@ class WriteBatchScheduler:
             # The census is this task's whole verdict and there is none: a
             # refusal, with nothing spawned (W1, adversarial review 2026-10-02).
             self._target_identity_before.pop(task_id, None)
-            return TaskOutcome(
+            return self._refuse_before_dispatch(task, TaskOutcome(
                 task_id=task_id, kind=self.kind, runner=self.invoker,
                 status=STATUS_REJECTED, profile=profile, reason=exc.message,
-            )
+            ), batch_index, result)
         started = time.time()
         self._git_meta_before[task_id] = self._git_metadata_fingerprint()
         try:
@@ -2948,6 +2952,29 @@ class WriteBatchScheduler:
                 self._ignore_sources_before.pop(task_id, None)
             self._target_identity_before.pop(task_id, None)
         self._record_batch_effects(task, outcome, batch_index, result)
+        return outcome
+
+    def _refuse_before_dispatch(
+        self, task: Dict[str, Any], outcome: TaskOutcome, batch_index: int,
+        result: SchedulerResult,
+    ) -> TaskOutcome:
+        """Record a task refused before any runner started, and return it.
+
+        Fix round 13 (the check-gate fixture): a task ``driver.write_paths``
+        refused before dispatch was never recorded — it stayed ``pending``
+        with no reason while the task after it read "T005 failed" — so
+        ``--human-task <id>=skip`` was refused as "a code task that did not
+        fail" and changing the policy was the only way past it. It goes
+        through the normal record path now (``_record_batch_effects``:
+        ``failed`` with its reason in ``state.json``, the batch line), minus
+        the metric, since no child ran; a ``--resume`` checks it again, so a
+        policy the user widened lets it run, and ``--human-task
+        <id>=done|skip|retry`` answers it like any failed task.
+        """
+        self._refused_before_dispatch.add(outcome.task_id)
+        self._record_batch_effects(
+            task, outcome, batch_index, result, dispatched=False,
+        )
         return outcome
 
     def _check_findings_rerun(
@@ -4941,8 +4968,14 @@ class WriteBatchScheduler:
         outcome: TaskOutcome,
         batch_index: int,
         result: SchedulerResult,
+        *,
+        dispatched: bool = True,
     ) -> None:
         """Append prior-changes, record metrics, update task status — in that order.
+
+        *dispatched* is ``False`` for a task refused before any runner
+        started (:meth:`_refuse_before_dispatch`): no metric, and its batch
+        line says it was refused.
 
         The ordering is not cosmetic: the append must land before batch N+1's
         substitution reads the log, or the injected context lags a batch behind.
@@ -5021,7 +5054,7 @@ class WriteBatchScheduler:
             # own 1-based position in the run (F3). No metric for a check that
             # was not run again: no child ran, and a zero would average in.
             self._tasks_finished += 1
-            if not outcome.not_rerun:
+            if not outcome.not_rerun and dispatched:
                 self._record_metrics(task, outcome, result)
 
             if self.state is not None:
@@ -5047,6 +5080,10 @@ class WriteBatchScheduler:
             verdict = outcome.outcome_label or outcome.status
             if outcome.not_rerun:
                 verdict = "not run again (nothing changed since it failed)"
+            elif not dispatched:
+                verdict = "refused before dispatch" + (
+                    f" ({outcome.write_outcome})" if outcome.write_outcome else ""
+                )
             elif outcome.ok and outcome.check_findings:
                 verdict = (
                     f"{verdict} ({len(outcome.check_findings)} problem(s): "
@@ -5763,12 +5800,23 @@ class WriteBatchScheduler:
         lines.extend(self._way_forward_lines(
             failed, stop, plan=result.human_plan if result is not None else None,
         ))
+        lines.extend(self._held_by_checks_lines(result, failed))
         lines += [
             f"Audit log: {self.audit.path}",
             f"Snapshots: {os.path.join(self.safety_dir, 'pre_batch')}/",
-            "The half-applied state is deliberately left in place: what the "
-            "stop left on disk stays until you restore the batch or resume.",
         ]
+        if failed and all(
+            o.task_id in self._refused_before_dispatch for o in failed
+        ):
+            lines.append(
+                "Nothing was half-applied: the stopped task never started, and "
+                "the tasks before it keep what they changed."
+            )
+        else:
+            lines.append(
+                "The half-applied state is deliberately left in place: what the "
+                "stop left on disk stays until you restore the batch or resume."
+            )
         return lines
 
     def _task_label(self, task_id: str) -> str:
@@ -5790,6 +5838,12 @@ class WriteBatchScheduler:
                 "not run again — nothing in the repository changed since this "
                 "check failed, so it would fail the same way"
                 + (f" ({summary})" if summary else "")
+            )
+        if outcome.task_id in self._refused_before_dispatch:
+            return "refused before it was dispatched" + (
+                " — the write policy (driver.write_paths) does not allow a "
+                "file it declares"
+                if outcome.write_outcome == WRITE_POLICY_VIOLATION else ""
             )
         check = self._task_by_id(outcome.task_id) or {}
         is_check = self.kind == "implement" and not declared_file_set(check)
@@ -5896,6 +5950,45 @@ class WriteBatchScheduler:
             if self.kind == "implement"
             and not declared_file_set(self._task_by_id(o.task_id) or {})
         ]
+        refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
+        if refused and not acceptable:
+            names = ", ".join(o.task_id for o in refused)
+            policy = any(o.write_outcome == WRITE_POLICY_VIOLATION for o in refused)
+            lines.append(
+                f"  - nothing was dispatched for {names}, so there is nothing "
+                f"to restore. "
+                + (
+                    "If the file the details name is meant to be written, "
+                    "allow it in driver.write_paths (widen `allow` or narrow "
+                    "`deny` in .multi-llm/providers.yaml)"
+                    if policy else "Fix what the details name"
+                )
+                + ", then resume this phase; it is checked again before it is "
+                "dispatched, and the tasks after it follow:"
+            )
+            lines.append(f"        {resume}")
+            for outcome in refused:
+                task_id = outcome.task_id
+                dependents = [
+                    dep for dep in self._dependents_of(task_id)
+                    if dep not in already and dep not in manual
+                    and self._task_by_id(dep) is not None
+                ]
+                accept = cmds.get("accept", "").replace("{task_id}", task_id) or (
+                    f"add --human-task {task_id}=done to the resume command"
+                )
+                skip = cmds.get("skip", "").replace("{task_id}", task_id) or (
+                    f"add --human-task {task_id}=skip to the resume command"
+                )
+                lines.append(
+                    f"  - or go on without it: {skip} ({task_id}"
+                    + (f" and the tasks that depend on it, {', '.join(dependents)},"
+                       if dependents else "")
+                    + f" stay undone), or, once you have made its change "
+                    f"yourself, {accept} ({task_id} is treated as done and the "
+                    f"tasks after it run)."
+                )
+            return lines
         if checks:
             lines.append(
                 "  - fix what the check reported in the code — by hand, or run "
@@ -5955,6 +6048,66 @@ class WriteBatchScheduler:
                     f"  - or run the check again anyway (after installing a tool "
                     f"it needs, say): {retry}."
                 )
+        return lines
+
+    def _held_by_checks_lines(
+        self, result: Optional[SchedulerResult], failed: Sequence[TaskOutcome],
+    ) -> List[str]:
+        """The answers of each check with findings that holds tasks back, for
+        any stop's way forward (fix round 13).
+
+        A stop is not where those tasks wait: a ``--resume`` that changes no
+        file leaves the check's findings standing and the tasks held, so a
+        stop that offered only ``--resume`` left the user one stop away from
+        the next. Each check gets the three answers the end-of-run check
+        hold names (:meth:`_check_block_message`), and when the stop leaves
+        more than one task to answer, one resume command carrying them all.
+        """
+        if result is None or not result.blocked_by_check:
+            return []
+        cmds = self.user_commands
+        found = result.check_findings()
+        blocked = result.blocked_by_check
+        checks = self._blocking_checks(result)
+        lines: List[str] = []
+        for check_id in checks:
+            waiting = sorted(tid for tid, cid in blocked.items() if cid == check_id)
+            findings = found.get(check_id) or []
+            accept = cmds.get("accept", "").replace("{task_id}", check_id) or (
+                f"add --human-task {check_id}=done to the resume command"
+            )
+            skip = cmds.get("skip", "").replace("{task_id}", check_id) or (
+                f"add --human-task {check_id}=skip to the resume command"
+            )
+            retry = cmds.get("retry", "").replace("{task_id}", check_id) or (
+                f"add --human-task {check_id}=retry to the resume command"
+            )
+            lines.append(
+                f"  - {check_id}'s check reported problems and holds back "
+                f"{', '.join(waiting)}"
+                + (f" ({'; '.join(findings)[:300]})" if findings else "")
+                + ": a resume runs it again only once the files changed, so "
+                f"fix what it reported (by hand, or review-code then "
+                f"apply-code-fixes) and resume; or accept its findings: "
+                f"{accept} ({', '.join(waiting)} then run; the findings stay "
+                f"listed for review-code), or {skip} ({check_id} and "
+                f"{', '.join(waiting)} stay undone), or run its check again on "
+                f"unchanged files: {retry}."
+            )
+        answers = [f"--human-task {check_id}=done" for check_id in checks] + [
+            f"--human-task {o.task_id}=skip" for o in failed
+            if o.task_id in self._refused_before_dispatch
+            or (o.write_outcome == WRITE_CLEAN_FAILURE and not o.files_touched)
+        ]
+        if len(answers) > 1:
+            combined = " ".join(answers)
+            example = cmds.get("answers", "").replace("{answers}", combined) or (
+                f"the resume command with {combined}"
+            )
+            lines.append(
+                f"  - one resume command takes several answers, for example: "
+                f"{example}"
+            )
         return lines
 
     def _dependents_of(self, task_id: str) -> List[str]:
@@ -6106,6 +6259,16 @@ class WriteBatchScheduler:
             "acceptable": acceptable,
             "not_rerun": bool(first is not None and first.not_rerun),
         }
+        if first is not None and first.task_id in self._refused_before_dispatch:
+            # Fix round 13: nothing was dispatched, so there is nothing
+            # half-applied, and the task can be skipped or accepted.
+            result.stop["refused_before_dispatch"] = True
+            result.stop["policy"] = first.write_outcome == WRITE_POLICY_VIOLATION
+        if result.blocked_by_check:
+            # The tasks a check with findings holds, which this stop's own
+            # remedy does not release (fix round 13).
+            result.stop["blocked"] = dict(sorted(result.blocked_by_check.items()))
+            result.stop["check_task_ids"] = self._blocking_checks(result)
         result.stop["headline"] = self._stop_headline(result.stop)
 
     def _record_not_run_in_state(self, result: SchedulerResult) -> None:
@@ -6330,10 +6493,31 @@ class WriteBatchScheduler:
                 f"accept the failure by adding --human-task {task_id}=done to "
                 "the resume command."
             )
+        elif stop.get("refused_before_dispatch"):
+            head += (
+                " To go on: "
+                + (
+                    "allow the file it declares in driver.write_paths "
+                    "(.multi-llm/providers.yaml)"
+                    if stop.get("policy") else "fix what refused it"
+                )
+                + ", then resume this phase; or leave it and the tasks after "
+                f"it undone by adding --human-task {task_id}=skip to the "
+                "resume command."
+            )
         else:
             head += (
                 " To go on: inspect the half-applied state, restore or keep it, "
                 "fix the cause, then resume this phase."
+            )
+        blocked = stop.get("blocked") or {}
+        for check_id in stop.get("check_task_ids") or []:
+            waiting = sorted(t for t, c in blocked.items() if c == check_id)
+            head += (
+                f" {check_id}'s check reported problems and holds back "
+                f"{', '.join(waiting)}: fix them and resume (a resume runs it "
+                f"again only once the files changed), or accept its findings "
+                f"by adding --human-task {check_id}=done to the resume command."
             )
         return head
 
