@@ -104,7 +104,7 @@ do not run a different mode. Do not perform the work this run was going to revie
 it yourself is never a substitute for a failed run. Run an option only after the user has picked it. Run `next` as printed, never re-typed: its plan path as printed, no flag added or dropped (no re-spelled plan flag, no lost `--quick --yes`). Never pipe a dispatcher command through `cut`, `head` or `grep`: they chop the result line (`tail` is the only trim).
 `user_next_step` is the phase after this one, for the user to type: never run it yourself; end your report
 with its `command`, and each `optional_before` command, every one in its own fenced block, verbatim. After a workflow phase exits `0` or `2` with `next` `null` (never after `status`, `ask`, `init`), get it as the report's first step, after every command the core names: the command above
-with `util next-command "<plan-path>" --after <mode>` replacing `<mode> "<plan-path>"`, no `[flags…]`, the plan path as the user typed it — even when a `[NEXT_COMMAND]` line is already on screen (a `next` run names it absolutely). After
+with `util next-command "<plan-path>" --after <mode>` replacing `<mode> "<plan-path>"`, no `[flags…]`, the plan path as the user typed it — even when a `[NEXT_COMMAND]` line is already on screen (a `next` run can name it absolutely). After
 `1` or `3` look nothing up: a failed run has no next command. A lookup that prints no `[NEXT_COMMAND]` or `[WORKFLOW_COMPLETE]` line means there is none: write no command and never fill the gap (not from `suggested next:`, a plan path or a default).
 
 ## 7. Examples
