@@ -1329,6 +1329,23 @@ def build_implementation_record(plan_path: Path) -> str:
                 "- Tasks the implement phase did not finish (report gaps in "
                 "their work normally): " + "; ".join(unfinished_gaps)
             )
+        # A task recorded `completed` because the user ACCEPTED its failure
+        # (`--human-task <id>=done` after a failed check, fix round 8): the
+        # check still failed, so the reviewers are told what it found rather
+        # than reading `completed` as a check that passed.
+        accepted = [
+            f"{task_id} ({state.get_task_status_reason(task_id)})"
+            for task_id, status in sorted(state.implementation_task_statuses().items())
+            if status == "completed"
+            and str(state.get_task_status_reason(task_id) or "").startswith("accepted —")
+        ]
+        if accepted:
+            lines.append(
+                "- Tasks that failed and whose failure the user accepted with "
+                "--human-task <id>=done (recorded completed, but the check or "
+                "work did not pass; report what it found as a gap normally): "
+                + "; ".join(accepted)
+            )
 
     changes = prior_changes.render(
         str(output_dir),

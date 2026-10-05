@@ -500,6 +500,50 @@ class HumanTaskPlan:
     def is_skipped(self, task_id: str) -> bool:
         return task_id in self.skipped
 
+    def declined(self) -> Dict[str, str]:
+        """The skips that are the user's own decision, with their reasons.
+
+        A pause-and-ask "Skip", a failed code task answered
+        ``--human-task <id>=skip``, and every task skipped *because* it depends
+        on one of those (``chain``). They are not deferred work: nobody is
+        owed them afterwards, so neither the summary's ``## Manual Tasks
+        (Deferred)`` section nor ``[WORKFLOW_COMPLETE]``'s manual-task list
+        names them (``StateManager._deferred_to_user`` reads the same two
+        reasons back from ``state.json``). Everything else in ``skipped`` is a
+        deferral: a manual task under a skip strategy and its dependents.
+        """
+        declined: Dict[str, str] = {}
+        for task_id, reason in self.skipped.items():
+            if reason.startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX)):
+                declined[task_id] = reason
+        changed = True
+        while changed:
+            changed = False
+            for child, parent in self.chain.items():
+                if child not in declined and parent in declined and child in self.skipped:
+                    declined[child] = self.skipped[child]
+                    changed = True
+        return declined
+
+    def deferred(self) -> Dict[str, str]:
+        """``skipped`` minus :meth:`declined`: what is still owed by hand."""
+        declined = self.declined()
+        return {
+            task_id: reason for task_id, reason in self.skipped.items()
+            if task_id not in declined
+        }
+
+
+#: The recorded reason of a human task the user declined at pause-and-ask.
+#: ``StateManager._USER_DECLINED_REASON`` spells the same words, so the
+#: workflow's manual-task list reads a declined task as not owed.
+USER_DECLINED_REASON = "skipped by user during pause-and-ask"
+
+#: The prefix of the recorded reason of a failed code task the user answered
+#: ``--human-task <id>=skip`` (``StateManager._ANSWERED_SKIP_PREFIX`` is its
+#: twin). The sentence ends ``<id>=skip after it failed``.
+ANSWERED_SKIP_PREFIX = "skipped — you answered --human-task "
+
 
 def _deferred_reason(strategy: Optional[str]) -> str:
     """Why a manual task did not run, naming the strategy and not a person.
@@ -539,6 +583,16 @@ def _accounting_line(account: Dict[str, Any]) -> str:
         parts.append(
             f"{len(account['accepted'])} accepted after failing "
             f"({', '.join(account['accepted'])})"
+        )
+    if account["completed_manual"]:
+        parts.append(
+            f"{len(account['completed_manual'])} completed manual "
+            f"({', '.join(account['completed_manual'])})"
+        )
+    if account["declined"]:
+        parts.append(
+            f"{len(account['declined'])} skipped at your request "
+            f"({', '.join(account['declined'])})"
         )
     if account["skipped_dependents"]:
         parts.append(
@@ -616,6 +670,15 @@ def resolve_human_task_plan(
     * ``skip-dependents`` marks every human task skipped and runs the transitive
       BFS forward walk over ``depends_on``.
 
+    The strategy governs the **manual** tasks. A failed code task answered
+    ``--human-task <id>=skip`` always takes its dependents with it, under every
+    strategy: ``skip-continue`` means "a manual precondition is not met, run
+    the code anyway", and a code task that failed and was then given up is
+    not a precondition anyone can meet by hand. Until fix round 8 the
+    ``skip-continue`` branch returned before the walk, so the dependents ran
+    (with override records) while the stop message and the instructions both
+    said they stay undone (reviewer repro, 2026-10-05).
+
     Pure: takes the task list, returns the decision. Persisting it (through
     ``update_task_status`` / ``record_dependency_override``) is the scheduler's job,
     which is what keeps this testable against the native path's expectations.
@@ -634,6 +697,7 @@ def resolve_human_task_plan(
     # the failure and treats the task as satisfied, `skip` leaves it and what
     # depends on it undone, `retry` re-runs it past the unchanged-tree guard.
     seeds: List[str] = []
+    code_seeds: List[str] = []
     for task_id, answer in sorted(decisions.items()):
         if task_id in human_ids or task_id not in by_id:
             continue
@@ -644,10 +708,10 @@ def resolve_human_task_plan(
             )
         elif answer == "skip":
             plan.skipped[task_id] = (
-                f"skipped — you answered --human-task {task_id}=skip after it "
-                f"failed"
+                f"{ANSWERED_SKIP_PREFIX}{task_id}=skip after it failed"
             )
             seeds.append(task_id)
+            code_seeds.append(task_id)
         elif answer == "retry":
             plan.retry.append(task_id)
     if not human_ids and not seeds:
@@ -671,9 +735,7 @@ def resolve_human_task_plan(
             if answer == "done":
                 plan.completed.append(task_id)
             elif answer == "skip":
-                plan.skipped[task_id] = (
-                    "skipped by user during pause-and-ask"
-                )
+                plan.skipped[task_id] = USER_DECLINED_REASON
                 seeds.append(task_id)
             else:
                 plan.pending.append(task_id)
@@ -682,30 +744,15 @@ def resolve_human_task_plan(
             plan.skipped[task_id] = _deferred_reason(strategy)
             seeds.append(task_id)
 
-    if strategy == STRATEGY_SKIP_CONTINUE:
-        # Edges are treated as satisfied: dependents run, and every one of them
-        # gets an override RECORD so "it ran against an unmet precondition" is
-        # visible afterwards instead of inferred.
-        skipped_set = set(plan.skipped)
-        for task_id, task in by_id.items():
-            if task_id in skipped_set:
-                continue
-            overridden = [
-                dep for dep in (task.get("depends_on") or [])
-                if str(dep) in skipped_set
-            ]
-            if overridden:
-                plan.overrides[task_id] = sorted(str(dep) for dep in overridden)
-        return plan
-
     # pause-and-ask (for the tasks answered `skip`) and skip-dependents both walk
     # the graph forward: BFS over "who depends on me", so a chain
-    # T001(human) -> T003 -> T005 is skipped in full.
+    # T001(human) -> T003 -> T005 is skipped in full. skip-continue walks it
+    # only from a failed code task answered `skip` (see the docstring).
     dependents: Dict[str, List[str]] = {}
     for task_id, task in by_id.items():
         for dep in task.get("depends_on") or []:
             dependents.setdefault(str(dep), []).append(task_id)
-    queue = list(seeds)
+    queue = list(code_seeds if strategy == STRATEGY_SKIP_CONTINUE else seeds)
     while queue:
         parent = queue.pop(0)
         parent_title = str(by_id.get(parent, {}).get("task_title", "") or parent)
@@ -717,6 +764,22 @@ def resolve_human_task_plan(
             )
             plan.chain[child] = parent
             queue.append(child)
+
+    if strategy == STRATEGY_SKIP_CONTINUE:
+        # A manual task's edges are treated as satisfied: its dependents run,
+        # and every one of them gets an override RECORD so "it ran against an
+        # unmet precondition" is visible afterwards instead of inferred. A
+        # dependent the walk above skipped does not run, so it gets none.
+        manual_skipped = {tid for tid in human_ids if tid in plan.skipped}
+        for task_id, task in by_id.items():
+            if task_id in plan.skipped:
+                continue
+            overridden = [
+                dep for dep in (task.get("depends_on") or [])
+                if str(dep) in manual_skipped
+            ]
+            if overridden:
+                plan.overrides[task_id] = sorted(str(dep) for dep in overridden)
     return plan
 
 
@@ -3921,6 +3984,14 @@ class WriteBatchScheduler:
         if not outcome.output_path:
             return
         path = Path(outcome.output_path)
+        if not path.is_file():
+            # `output_path` is where the result WOULD go, set before dispatch;
+            # a dispatch that persisted nothing (a prose reply, a timeout, a
+            # partial application) has no file to stamp, and the audit's
+            # `completed` line and `state.json` carry its verdict instead. A
+            # warning here named a file that was never meant to exist (fix
+            # round 8).
+            return
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
@@ -4772,7 +4843,9 @@ class WriteBatchScheduler:
                 f"completed."
             )
         lines.extend(self._account_lines(result))
-        lines.extend(self._way_forward_lines(failed, stop))
+        lines.extend(self._way_forward_lines(
+            failed, stop, plan=result.human_plan if result is not None else None,
+        ))
         lines += [
             f"Audit log: {self.audit.path}",
             f"Snapshots: {os.path.join(self.safety_dir, 'pre_batch')}/",
@@ -4834,6 +4907,16 @@ class WriteBatchScheduler:
                 f"Accepted after failing (--human-task <id>=done): "
                 f"{', '.join(account['accepted'])}."
             )
+        if account["completed_manual"]:
+            lines.append(
+                f"Completed by hand (--human-task <id>=done): "
+                f"{', '.join(account['completed_manual'])}."
+            )
+        if account["declined"]:
+            lines.append(
+                f"Skipped at your request (--human-task <id>=skip): "
+                f"{', '.join(account['declined'])}."
+            )
         if account["skipped_dependents"]:
             lines.append(
                 f"Skipped (depend on a skipped task): "
@@ -4848,10 +4931,22 @@ class WriteBatchScheduler:
         return lines
 
     def _way_forward_lines(
-        self, failed: Sequence[TaskOutcome], stop: Dict[str, Any]
+        self, failed: Sequence[TaskOutcome], stop: Dict[str, Any],
+        plan: Optional[HumanTaskPlan] = None,
     ) -> List[str]:
-        """The remedy, with the host's own command spellings when known."""
+        """The remedy, with the host's own command spellings when known.
+
+        The dependents a ``skip`` answer would leave undone are the ones a
+        skip can still change: a manual task (never dispatched) and a task
+        the run already skipped are not listed, so the sentence does not name
+        a deferred manual task as if the answer decided it.
+        """
         cmds = self.user_commands
+        already = set(plan.skipped) if plan is not None else set()
+        manual = {
+            str(t.get("task_id", "")) for t in self.tasks
+            if t.get("executor_role") == "human" or t.get("is_human")
+        }
         resume = cmds.get("resume") or "re-invoke this phase with --resume"
         lines = ["To go on:"]
         acceptable = [
@@ -4893,7 +4988,10 @@ class WriteBatchScheduler:
             lines.append(f"        {resume}")
         for outcome in acceptable:
             task_id = outcome.task_id
-            dependents = self._dependents_of(task_id)
+            dependents = [
+                dep for dep in self._dependents_of(task_id)
+                if dep not in already and dep not in manual
+            ]
             after = sorted(stop.get("not_run") or [])
             accept = cmds.get("accept", "").replace("{task_id}", task_id) or (
                 f"add --human-task {task_id}=done to the resume command"
@@ -4942,10 +5040,12 @@ class WriteBatchScheduler:
         ``done`` is this run's ``ok`` outcomes (resume skips included) plus the
         earlier runs' ``ok`` rows; ``failed`` this run's failed outcomes;
         ``not_run`` the tasks the stop left undispatched; ``accepted`` the
-        failed tasks answered ``done``; ``deferred`` the human tasks the
-        strategy skipped and ``skipped_dependents`` the tasks skipped with a
-        skipped one. The buckets add up to ``total``, which is the test
-        ``summary.md``'s accounting line is written to.
+        failed tasks answered ``done``; ``completed_manual`` the human tasks
+        answered ``done`` (fix round 8: they counted in ``total`` and sat in
+        no bucket, so a five-task line summed to four); ``deferred`` the human
+        tasks the strategy skipped and ``skipped_dependents`` the tasks
+        skipped with a skipped one. The buckets add up to ``total``, which is
+        the test ``summary.md``'s accounting line is written to.
         """
         rows = result.report_rows()
         plan = result.human_plan
@@ -4956,24 +5056,36 @@ class WriteBatchScheduler:
             for row in rows
             if row.get("status") == STATUS_OK and str(row.get("task_id")) not in failed
         })
+        # A skip the user chose (a pause-and-ask "Skip", `--human-task
+        # <id>=skip` on a failed task) is its own bucket: the seed is neither
+        # deferred work nor "skipped with a skipped task".
+        declined = sorted(
+            tid for tid, reason in plan.skipped.items()
+            if reason.startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))
+        )
         deferred = sorted(
             tid for tid in plan.skipped
-            if (by_id.get(tid) or {}).get("executor_role") == "human"
-            or (by_id.get(tid) or {}).get("is_human")
+            if tid not in declined
+            and ((by_id.get(tid) or {}).get("executor_role") == "human"
+                 or (by_id.get(tid) or {}).get("is_human"))
         )
         skipped_dependents = sorted(
-            tid for tid in plan.skipped if tid not in deferred
+            tid for tid in plan.skipped if tid not in deferred and tid not in declined
         )
         accepted = sorted(plan.accepted)
+        completed_manual = sorted(plan.completed)
         not_run = sorted(result.not_run)
         ids = set(done) | set(failed) | set(deferred) | set(skipped_dependents) \
-            | set(accepted) | set(not_run) | set(by_id)
+            | set(declined) | set(accepted) | set(completed_manual) | set(not_run) \
+            | set(by_id)
         return {
             "total": len(ids),
             "done": done,
             "failed": failed,
             "not_run": not_run,
             "accepted": accepted,
+            "completed_manual": completed_manual,
+            "declined": declined,
             "deferred": deferred,
             "skipped_dependents": skipped_dependents,
         }
@@ -5801,6 +5913,8 @@ class WriteBatchScheduler:
             )
         for task_id, reason in sorted(result.human_plan.accepted.items()):
             lines.append(f"| {task_id} | accepted after failing | — | {reason.replace('|', '/')[:160]} |")
+        for task_id in sorted(result.human_plan.completed):
+            lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
         for task_id, reason in sorted(result.not_run.items()):
             lines.append(f"| {task_id} | not run | — | {reason.replace('|', '/')[:160]} |")
         touched: List[str] = []
@@ -5812,10 +5926,21 @@ class WriteBatchScheduler:
         lines += [f"- `{path}`" for path in touched] or ["- (none)"]
 
         plan = result.human_plan
-        if plan.skipped:
+        deferred = plan.deferred()
+        declined = plan.declined()
+        if deferred:
             lines += ["", "## Manual Tasks (Deferred)", ""]
             lines += ["| Task | Reason |", "|------|--------|"]
-            for task_id, reason in sorted(plan.skipped.items()):
+            for task_id, reason in sorted(deferred.items()):
+                lines.append(f"| {task_id} | {reason} |")
+        if declined:
+            # The user's own decision, not work left for them: a pause-and-ask
+            # "Skip", a failed task answered `--human-task <id>=skip`, and the
+            # tasks skipped with them. Listed apart so the summary and the
+            # workflow's `[MANUAL_TASK]` lines (which leave these out) agree.
+            lines += ["", "## Skipped at your request", ""]
+            lines += ["| Task | Reason |", "|------|--------|"]
+            for task_id, reason in sorted(declined.items()):
                 lines.append(f"| {task_id} | {reason} |")
         if plan.overrides:
             lines += [

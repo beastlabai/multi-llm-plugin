@@ -842,7 +842,14 @@ class ResultContext:
             payload["user_next_step"] = copy.deepcopy(self.user_next_step)
         if self.user_resume is not None:
             payload["user_resume"] = copy.deepcopy(self.user_resume)
-        if self.error and exit_code in (EXIT_ERROR, EXIT_NEEDS_HUMAN):
+        # Gated on the word the line carries, not the exit code: under
+        # `status --exit-zero` the verdict's word stays (`keep_state_word`)
+        # while the code is 0, and the stop's headline the poll relays as
+        # "the last line it left" used to drop off exactly that line
+        # (reviewer repro, fix round 8).
+        if self.error and payload["state"] in (
+            _STATE_BY_EXIT[EXIT_ERROR], _STATE_BY_EXIT[EXIT_NEEDS_HUMAN],
+        ):
             payload["error"] = self.error
         return payload
 
