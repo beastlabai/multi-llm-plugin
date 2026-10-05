@@ -27,6 +27,8 @@ import os
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 import check_workflow_prerequisites as prereq  # noqa: E402
@@ -82,7 +84,7 @@ class TestTheReplyField:
         )
 
         assert check_findings_from({"status": "no-op", "notes": "2 findings"}) is None
-        assert check_findings_from({"check": "failed"}) is None
+        assert check_findings_from({"check": None}) is None
         assert check_findings_from({"check": {"passed": True}}) == []
         assert check_findings_from({"check": {"passed": False}}) == [
             CHECK_FAILED_WITHOUT_FINDINGS]
@@ -108,8 +110,53 @@ class TestTheReplyField:
         ):
             errors = validate_with_schema_file(reply, "write_batch_result.schema.json")
             assert not errors, (reply, errors)
-        assert validate_with_schema_file(
-            {**base, "check": {"passed": "no"}}, "write_batch_result.schema.json")
+
+    # Fix round 11 (review of round 10, T3 and repro_check_shapes): a
+    # near-miss `check` was a schema_invalid reply, and implement has no
+    # report re-ask, so the run stopped for good on a check that had
+    # answered; and `check: {}` read as VERIFIED.
+    NEAR_MISSES = [
+        ({"passed": "false", "findings": ["a"]}, ["a"]),
+        ({"passed": False, "findings": "a problem"}, ["a problem"]),
+        ({"passed": False, "findings": None}, "failed"),
+        ({"passed": 0, "findings": []}, "failed"),
+        ({"passed": "FALSE"}, "failed"),
+        ({"passed": None, "findings": []}, "unknown"),
+        ({}, "unknown"),
+        ({"passed": "maybe"}, "unknown"),
+        ({"passed": False, "findings": [1, None, "  "]}, ["1"]),
+        ({"passed": False, "findings": {"message": "bad doctype"}}, ["message: bad doctype"]),
+        ({"passed": False, "findings": [{"a": ""}]}, "failed"),
+        ("passed", "unknown"),
+        (["a"], "unknown"),
+    ]
+
+    @pytest.mark.parametrize("check,expected", NEAR_MISSES)
+    def test_a_near_miss_shape_is_valid_and_never_reads_as_a_pass(self, check, expected):
+        from utils.schema_validator import validate_with_schema_file
+        from utils.subagent_executor import (
+            CHECK_FAILED_WITHOUT_FINDINGS, CHECK_RESULT_UNKNOWN,
+            check_findings_from, validate_result,
+        )
+
+        reply = {"status": "no-op", "ids": ["T007"], "files_touched": [],
+                 "summary": "checks ran", "check": check}
+        assert validate_with_schema_file(reply, "write_batch_result.schema.json") == []
+        assert validate_result("implement", reply) == []
+        found = check_findings_from(reply)
+        if expected == "failed":
+            assert found == [CHECK_FAILED_WITHOUT_FINDINGS]
+        elif expected == "unknown":
+            assert len(found) == 1 and found[0].startswith(CHECK_RESULT_UNKNOWN), found
+        else:
+            assert found == expected
+
+    @pytest.mark.parametrize("passed", [True, "true", "Yes", 1, "passed"])
+    def test_a_clear_pass_with_nothing_listed_is_a_pass(self, passed):
+        from utils.subagent_executor import check_findings_from
+
+        assert check_findings_from({"check": {"passed": passed, "findings": []}}) == []
+        assert check_findings_from({"check": {"passed": passed}}) == []
 
 
 class TestTheStateRecord:

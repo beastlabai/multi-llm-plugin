@@ -217,8 +217,9 @@ def record_batch(
             "A check that ran and reported problems is recorded "
             "--status completed with --check findings: implement continues "
             "past it and review-code is told about the findings. Use "
-            "--status failed (without --check) only for a check task whose "
-            "subagent failed or changed a file."
+            "--status failed (without --check) for a check task whose reply "
+            "said failed (a check that could not run) or whose subagent "
+            "changed a file."
         )
     phase_dir = Path(phase_dir).resolve()
     document, task = load_write_task(phase_dir, task_id)
