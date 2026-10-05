@@ -415,7 +415,10 @@ TOOL_OUTCOMES_LINE = (
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
     "call to make: copy its `command`, and each `optional_before` command, into your "
-    "report, each in its own fenced block, and stop. Only `next` is a call. A "
+    "report, each in its own fenced block, and stop; when it is `complete`, say "
+    "\"Workflow complete.\" and list each of its `manual_tasks` (id and title): "
+    "tasks the run deferred to the user, which no phase will run. Only `next` is "
+    "a call. A "
     "needs-human result's `resume_command` is the same kind of thing: the user's to "
     "type, never a call."
 )

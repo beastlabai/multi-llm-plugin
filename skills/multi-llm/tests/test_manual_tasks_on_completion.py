@@ -350,3 +350,14 @@ class TestImplementRecordsTheTitles:
             {"id": "T002", "title": "Implement the core"},
             {"id": "T003", "title": "Add tests"},
         ]
+
+
+def test_the_tool_routes_are_told_to_list_them():
+    """OpenCode's and Codex's package routes read no summary-format.md on a
+    finished run: the tool description's `user_next_step` line is all they
+    get before the result, so it names `manual_tasks` itself."""
+    import modes
+
+    line = modes.TOOL_USER_NEXT_STEP_LINE
+    assert "manual_tasks" in line
+    assert "Workflow complete." in line
