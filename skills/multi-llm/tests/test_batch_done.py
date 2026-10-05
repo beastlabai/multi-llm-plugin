@@ -1,0 +1,523 @@
+"""``util batch-done``: the native write leg's per-batch progress record.
+
+Reviewer finding 1 of fix round 5 (2026-10-05): the native leg recorded a
+write phase *started* at emit, so ``util next-command`` offered
+``--apply-suggestions <plan> --resume`` — but nothing on that leg recorded
+per-batch progress (``StateManager.mark_item_processed`` had no callers, the
+instructions never wrote ``task_status``), so the offered ``--resume`` printed
+``[resume] 0 already processed`` and re-emitted every batch with the same
+``prior_changes_id``: a host following it re-applied batches to an
+already-edited plan. The reviewer's repro (``scratchpad/review5/native-leg/
+reproB``) is ``TestNativeResumeDropsRecordedBatches`` below.
+
+The record is one command the host runs per batch, right after it verified
+the batch and before it appends the batch's summary to the prior-changes log.
+It writes the same ``state.json`` keys the executor leg's scheduler writes —
+``task_status[<task id>]`` — plus, for the apply kinds, the base's
+``processed_<phase>`` map keyed by the batch's member ids (``expected_ids``),
+which is what the apply base's ``--resume`` filter reads. A native
+``--resume`` whose prior-changes log names a batch it is about to emit again,
+with no record saying that batch finished, is refused (exit 3) rather than
+re-emitting everything.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import multi_llm  # noqa: E402
+import apply_suggestions_orchestrator  # noqa: E402
+from utils import batch_done  # noqa: E402
+from utils import prior_changes  # noqa: E402
+from utils.cli_common import parse_result_line  # noqa: E402
+from utils.state_manager import StateManager  # noqa: E402
+from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
+from utils.write_phase_bridge import (  # noqa: E402
+    WRITE_TASK_FILENAME,
+    materialize_write_tasks,
+    write_task_file_for_phase,
+)
+
+from tests.test_apply_suggestions_integration import TestFixtures  # noqa: E402
+
+
+INSTRUCTIONS = Path(__file__).parent.parent / "instructions"
+
+PROMPT = "# Apply\n\n" + PRIOR_CHANGES_TOKEN + "\n\n1. Do the thing.\n"
+
+
+# ---------------------------------------------------------------------------
+# Fixtures
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def plan_dir(tmp_path):
+    plan = tmp_path / "plans" / "feature.md"
+    plan.parent.mkdir(parents=True)
+    plan.write_text("# Feature\n\n## Step 2\n\nBody.\n", encoding="utf-8")
+    out = tmp_path / "plans" / "feature"
+    out.mkdir()
+    return plan, out
+
+
+def _suggestion_batches():
+    return [
+        {
+            "section_key": "step_2",
+            "prompt": PROMPT,
+            "suggestions": [
+                {"group_id": "g-email", "title": "Add email validation"},
+                {"group_id": "g-password", "title": "Enforce password rules"},
+            ],
+        },
+        {
+            "section_key": "step_3",
+            "prompt": PROMPT,
+            "suggestions": [{"group_id": "g-rate", "title": "Add rate limiting"}],
+        },
+    ]
+
+
+def _implement_batches():
+    return [
+        {"batch_index": 0, "can_parallelize": False, "tasks": [
+            {"id": "T001", "title": "Foundation", "prompt": PROMPT,
+             "files_to_create": ["src/a.py"], "depends_on": [],
+             "executor_role": "agent"},
+        ]},
+        {"batch_index": 1, "can_parallelize": False, "tasks": [
+            {"id": "T002", "title": "Manual step", "prompt": PROMPT,
+             "files_to_create": [], "depends_on": ["T001"],
+             "executor_role": "human"},
+        ]},
+    ]
+
+
+def _materialize(plan, out, kind, batches, phase_subdir):
+    phase_dir = out / phase_subdir
+    phase_dir.mkdir(parents=True, exist_ok=True)
+    tasks = materialize_write_tasks(
+        kind=kind, batches=batches, phase_dir=str(phase_dir), plan_file=str(plan),
+    )
+    write_task_file_for_phase(
+        kind=kind, tasks=tasks, phase_dir=str(phase_dir), plan_file=str(plan),
+    )
+    return phase_dir, tasks
+
+
+def _run(argv, capsys):
+    code = multi_llm.main(list(argv))
+    captured = capsys.readouterr()
+    return code, captured.out, captured.err, parse_result_line(captured.out)
+
+
+def _state(out):
+    return json.loads((out / "state.json").read_text(encoding="utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# The util
+# ---------------------------------------------------------------------------
+
+class TestTheUtilRecordsABatch:
+    def test_an_apply_batch_records_its_task_and_its_items(self, plan_dir, capsys):
+        plan, out = plan_dir
+        StateManager(plan).save()
+        phase_dir, tasks = _materialize(
+            plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+        code, stdout, err, result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "apply-batch-0", "--status", "completed",
+        ], capsys)
+        assert code == 0, err
+        assert f"{batch_done.MARKER} apply-batch-0 completed" in stdout
+        assert result["mode"] == "util batch-done"
+        state = _state(out)
+        assert state["task_status"]["apply-batch-0"] == "completed"
+        processed = state["processed_apply-suggestions"]
+        assert set(processed) == {"g-email", "g-password"}
+        for item in processed.values():
+            assert item["status"] == "applied"
+            assert item["details"]["task_id"] == "apply-batch-0"
+            assert item["details"]["prior_changes_id"] == tasks[0]["prior_changes_id"]
+        # The other batch is untouched.
+        assert "apply-batch-1" not in state["task_status"]
+        assert "g-rate" not in processed
+        # The record is readable through the StateManager API the base uses.
+        reloaded = StateManager(plan, read_only=True)
+        assert reloaded.is_item_processed("apply-suggestions", "g-email")
+        assert reloaded.get_task_status("apply-batch-0") == "completed"
+
+    def test_a_failed_apply_batch_records_failed_on_both(self, plan_dir, capsys):
+        plan, out = plan_dir
+        StateManager(plan).save()
+        phase_dir, _tasks = _materialize(
+            plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+        code, _out, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "apply-batch-1", "--status", "failed",
+            "--reason", "subagent reported failure, plan unchanged",
+        ], capsys)
+        assert code == 0, err
+        state = _state(out)
+        assert state["task_status"]["apply-batch-1"] == "failed"
+        assert state["task_status_reasons"]["apply-batch-1"] == (
+            "subagent reported failure, plan unchanged")
+        assert state["processed_apply-suggestions"]["g-rate"]["status"] == "failed"
+
+    def test_apply_code_fixes_records_under_the_phase_dir_word(self, plan_dir, capsys):
+        """The base keys `processed_<phase_name>` on its PHASE DIR word
+        (`apply-fixes`), not the mode word the task file carries."""
+        plan, out = plan_dir
+        StateManager(plan).save()
+        batches = [{
+            "file_key": "src/a.py", "prompt": PROMPT, "batch_type": "general",
+            "fixes": [{"group_id": "f-1", "title": "Null check", "file": "src/a.py"}],
+        }]
+        phase_dir, _tasks = _materialize(plan, out, "apply_code_fixes", batches, "apply-fixes")
+        code, _out, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "apply-fix-batch-0", "--status", "completed",
+        ], capsys)
+        assert code == 0, err
+        state = _state(out)
+        assert state["task_status"]["apply-fix-batch-0"] == "completed"
+        assert "f-1" in state["processed_apply-fixes"]
+        assert "processed_apply-code-fixes" not in state
+
+    def test_an_implement_task_records_its_status_alone(self, plan_dir, capsys):
+        plan, out = plan_dir
+        StateManager(plan).save()
+        phase_dir, _tasks = _materialize(
+            plan, out, "implement", _implement_batches(), "implement")
+        code, _out, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "T001", "--status", "completed",
+        ], capsys)
+        assert code == 0, err
+        state = _state(out)
+        assert state["task_status"]["T001"] == "completed"
+        assert not [k for k in state if k.startswith("processed_")]
+
+    def test_it_preserves_what_the_state_file_already_holds(self, plan_dir, capsys):
+        """A raw read-modify-write of the host's file: a `--mark-completed`
+        later re-reads it, so nothing recorded between may be lost."""
+        plan, out = plan_dir
+        state = StateManager(plan)
+        state.mark_phase_completed("review-plan")
+        state.mark_phase_started("apply-suggestions")
+        state.update_task_status("apply-batch-0", "completed")
+        state.save()
+        phase_dir, _tasks = _materialize(
+            plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+        code, _out, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "apply-batch-1", "--status", "completed",
+        ], capsys)
+        assert code == 0, err
+        after = _state(out)
+        assert after["phases_completed"]["review-plan"]
+        assert after["phases_started"]["apply-suggestions"]
+        assert after["task_status"] == {
+            "apply-batch-0": "completed", "apply-batch-1": "completed"}
+
+    def test_an_unknown_task_id_is_exit_3_naming_the_known_ids(self, plan_dir, capsys):
+        plan, out = plan_dir
+        StateManager(plan).save()
+        phase_dir, _tasks = _materialize(
+            plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+        code, _out, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "apply-batch-9", "--status", "completed",
+        ], capsys)
+        assert code == 3
+        assert "apply-batch-9" in err and "apply-batch-0, apply-batch-1" in err
+        assert "apply-batch-9" not in _state(out).get("task_status", {})
+
+    def test_a_status_outside_the_two_words_is_an_argparse_error(self, plan_dir, capsys):
+        plan, out = plan_dir
+        phase_dir = out / "apply-suggestions"
+        phase_dir.mkdir()
+        with pytest.raises(SystemExit) as exc:
+            batch_done.main([
+                "--phase-dir", str(phase_dir), "--task-id", "apply-batch-0",
+                "--status", "done",
+            ])
+        assert exc.value.code == 2
+        assert "invalid choice" in capsys.readouterr().err
+
+    def test_no_task_file_is_exit_3(self, plan_dir, capsys):
+        plan, out = plan_dir
+        phase_dir = out / "apply-suggestions"
+        phase_dir.mkdir()
+        code, _out, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "apply-batch-0", "--status", "completed",
+        ], capsys)
+        assert code == 3
+        assert WRITE_TASK_FILENAME in err
+
+    def test_a_human_task_is_refused(self, plan_dir, capsys):
+        plan, out = plan_dir
+        StateManager(plan).save()
+        phase_dir, _tasks = _materialize(
+            plan, out, "implement", _implement_batches(), "implement")
+        code, _out, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "T002", "--status", "completed",
+        ], capsys)
+        assert code == 3
+        assert "human task" in err
+
+
+# ---------------------------------------------------------------------------
+# The reviewer's repro: a real apply-suggestions run, then --resume
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def repo(tmp_path, monkeypatch):
+    """`reproB/build.py`: a git repo holding the integration fixture's plan,
+    its review-plan artifacts, and review-plan recorded completed."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=root, check=True)
+    plan = root / "plans" / "test-plan.md"
+    review = root / "plans" / "test-plan" / "review-plan"
+    review.mkdir(parents=True)
+    plan.write_text(TestFixtures.PLAN_CONTENT, encoding="utf-8")
+    (review / "grouped.json").write_text(
+        json.dumps(TestFixtures.GROUPED_SUGGESTIONS, indent=2), encoding="utf-8")
+    (review / "validation.json").write_text(
+        json.dumps(TestFixtures.VALIDATION_RESULTS, indent=2), encoding="utf-8")
+    (review / "backup.md").write_text(TestFixtures.PLAN_CONTENT, encoding="utf-8")
+    state = StateManager(plan)
+    state.mark_phase_completed("review-plan")
+    state.save()
+    monkeypatch.chdir(root)
+    return plan
+
+
+def _emit(plan, capsys, *flags):
+    """One native apply-suggestions run; its exit, stderr and the task file."""
+    code = apply_suggestions_orchestrator.main([
+        "--plan-file", str(plan), "--yes", "--output-format", "json", *flags,
+    ])
+    captured = capsys.readouterr()
+    task_file = plan.parent / "test-plan" / "apply-suggestions" / WRITE_TASK_FILENAME
+    tasks = (json.loads(task_file.read_text(encoding="utf-8"))["batches"]
+             if task_file.exists() else [])
+    return code, captured.err, tasks
+
+
+def _batch_done(plan, task_id, status="completed"):
+    return batch_done.main([
+        "--phase-dir", str(plan.parent / "test-plan" / "apply-suggestions"),
+        "--task-id", task_id, "--status", status,
+    ])
+
+
+class TestNativeResumeDropsRecordedBatches:
+    def test_a_recorded_batch_is_not_emitted_again(self, repo, capsys):
+        plan = repo
+        code, err, first = _emit(plan, capsys)
+        assert code == 0, err
+        assert len(first) == 3, [t["task_id"] for t in first]
+        done = first[0]
+        # The host's per-batch steps, in the instructions' order: record,
+        # then append the summary to the log.
+        assert _batch_done(plan, done["task_id"]) == 0
+        capsys.readouterr()
+        assert prior_changes.append(
+            str(plan.parent / "test-plan"), done["prior_changes_id"],
+            "apply-suggestions", "batch 0 applied")
+
+        code, err, second = _emit(plan, capsys, "--resume")
+        assert code == 0, err
+        assert f"[resume] {len(done['expected_ids'])} already processed" in err
+        # The recorded batch's items are gone from the re-emitted set, and
+        # the batch that applied them is never re-dispatched under its id.
+        emitted_items = {i for t in second for i in t["expected_ids"]}
+        assert emitted_items.isdisjoint(done["expected_ids"])
+        assert done["prior_changes_id"] not in {t["prior_changes_id"] for t in second}
+        assert emitted_items == {
+            i for t in first[1:] for i in t["expected_ids"]}
+
+    def test_a_failed_batch_is_retried(self, repo, capsys):
+        """`--status failed` is a record too — the batch is dispatched again
+        on resume, as the executor leg re-dispatches a failed batch, and its
+        log entry (`(batch failed — …)`) earns no refusal."""
+        plan = repo
+        code, err, first = _emit(plan, capsys)
+        assert code == 0, err
+        failed = first[1]
+        assert _batch_done(plan, failed["task_id"], "failed") == 0
+        capsys.readouterr()
+        prior_changes.append(
+            str(plan.parent / "test-plan"), failed["prior_changes_id"],
+            "apply-suggestions", "(batch failed — timeout, verified no file changes)")
+        code, err, second = _emit(plan, capsys, "--resume")
+        assert code == 0, err
+        assert set(failed["expected_ids"]) <= {
+            i for t in second for i in t["expected_ids"]}
+
+    def test_a_started_phase_with_a_batch_recorded_reads_in_progress(self, repo, capsys):
+        """The record is what `status` and the next-step builder already
+        read (`apply-batch-N` completed), so the offered `--resume` is now
+        backed by a record the resume honours."""
+        import check_workflow_prerequisites as prereq
+        from utils import next_phase
+
+        plan = repo
+        code, err, first = _emit(plan, capsys)
+        assert code == 0, err
+        assert _batch_done(plan, first[0]["task_id"]) == 0
+        capsys.readouterr()
+        status = prereq.get_workflow_status(
+            StateManager(plan, read_only=True), plan, plan.parent / "test-plan")
+        assert status["phases"]["apply-suggestions"]["status"] == "in_progress"
+        answer = next_phase.next_phase_commands(
+            "plans/test-plan.md", "claude-code", None, None, plan_path=plan)
+        assert answer.command.endswith("--apply-suggestions plans/test-plan.md --resume")
+
+
+class TestNativeResumeRefusesUnrecordedLoggedBatches:
+    def test_a_logged_batch_without_a_record_refuses_the_resume(self, repo, capsys):
+        """reproB as the reviewer ran it: one batch appended to the log and
+        nothing recorded. Re-emitting every batch would re-apply it; the
+        resume refuses and names the batch and the record command."""
+        plan = repo
+        code, err, first = _emit(plan, capsys)
+        assert code == 0, err
+        logged = first[0]
+        prior_changes.append(
+            str(plan.parent / "test-plan"), logged["prior_changes_id"],
+            "apply-suggestions", "batch 0 applied")
+        code, err, _second = _emit(plan, capsys, "--resume")
+        assert code == 3
+        assert batch_done.RESUME_REFUSED_MARKER in err
+        assert logged["task_id"] in err and logged["prior_changes_id"] in err
+        assert "util batch-done" in err and "--fresh" in err
+        # Nothing re-stamped: the phase is still the first run's start.
+        assert "apply-suggestions" in _state(plan.parent / "test-plan")["phases_started"]
+
+        # The repair the message names, then the resume goes through.
+        assert _batch_done(plan, logged["task_id"]) == 0
+        capsys.readouterr()
+        code, err, second = _emit(plan, capsys, "--resume")
+        assert code == 0, err
+        assert logged["prior_changes_id"] not in {t["prior_changes_id"] for t in second}
+
+    def test_a_log_entry_of_another_phase_is_not_this_phases(self, repo, capsys):
+        plan = repo
+        code, err, first = _emit(plan, capsys)
+        assert code == 0, err
+        prior_changes.append(
+            str(plan.parent / "test-plan"), first[0]["prior_changes_id"],
+            "implement", "some implement task")
+        code, err, _second = _emit(plan, capsys, "--resume")
+        assert code == 0, err
+
+    def test_a_bare_rerun_is_not_refused(self, repo, capsys):
+        """Only `--resume` promises to skip landed batches; a bare re-run
+        starts the phase over, as documented, and is not this check's."""
+        plan = repo
+        code, err, first = _emit(plan, capsys)
+        assert code == 0, err
+        prior_changes.append(
+            str(plan.parent / "test-plan"), first[0]["prior_changes_id"],
+            "apply-suggestions", "batch 0 applied")
+        code, err, _second = _emit(plan, capsys)
+        assert code == 0, err
+
+
+# ---------------------------------------------------------------------------
+# The helper the two native emit paths share
+# ---------------------------------------------------------------------------
+
+class TestUnrecordedLoggedBatches:
+    def test_implement_keys_on_task_status(self, plan_dir):
+        plan, out = plan_dir
+        state = StateManager(plan)
+        state.save()
+        _phase_dir, tasks = _materialize(
+            plan, out, "implement", _implement_batches(), "implement")
+        prior_changes.append(str(out), "T001", "implement", "did T001")
+        unrecorded = batch_done.unrecorded_logged_batches(
+            tasks, output_dir=str(out), phase="implement", state=state.state)
+        assert [t["task_id"] for t in unrecorded] == ["T001"]
+        for recorded_as in ("completed", "failed"):
+            state.update_task_status("T001", recorded_as)
+            assert batch_done.unrecorded_logged_batches(
+                tasks, output_dir=str(out), phase="implement", state=state.state) == []
+        state.update_task_status("T001", "pending")
+        assert len(batch_done.unrecorded_logged_batches(
+            tasks, output_dir=str(out), phase="implement", state=state.state)) == 1
+
+    def test_apply_code_fixes_reads_the_aliased_phase_word(self, plan_dir):
+        """The native instruction appends under `apply-fixes`, the executor
+        under `apply-code-fixes`; both name one phase to the log."""
+        plan, out = plan_dir
+        state = StateManager(plan)
+        state.save()
+        batches = [{
+            "file_key": "src/a.py", "prompt": PROMPT, "batch_type": "general",
+            "fixes": [{"group_id": "f-1", "title": "Null check", "file": "src/a.py"}],
+        }]
+        _phase_dir, tasks = _materialize(plan, out, "apply_code_fixes", batches, "apply-fixes")
+        prior_changes.append(str(out), tasks[0]["prior_changes_id"], "apply-fixes", "fixed")
+        unrecorded = batch_done.unrecorded_logged_batches(
+            tasks, output_dir=str(out), phase="apply-code-fixes", state=state.state,
+            processed_phase="apply-fixes")
+        assert [t["task_id"] for t in unrecorded] == ["apply-fix-batch-0"]
+        state.mark_item_processed("apply-fixes", "f-1", "applied")
+        assert batch_done.unrecorded_logged_batches(
+            tasks, output_dir=str(out), phase="apply-code-fixes", state=state.state,
+            processed_phase="apply-fixes") == []
+
+
+# ---------------------------------------------------------------------------
+# The instructions run it
+# ---------------------------------------------------------------------------
+
+class TestTheInstructionsRecordEachBatch:
+    """The four write-mode cores record every batch through `util batch-done`
+    right after verification and BEFORE the prior-changes append, so a host
+    that dies between the two leaves a record the resume honours, never a log
+    entry the resume would re-apply."""
+
+    @pytest.mark.parametrize("core,phase_dir,id_example", [
+        ("apply-suggestions.md", "apply-suggestions", "apply-batch-0"),
+        ("apply-task-suggestions.md", "apply-task-suggestions", "apply-task-batch-0"),
+        ("apply-code-fixes.md", "apply-fixes", "apply-fix-batch-0"),
+        ("implement.md", "implement", "T001"),
+    ])
+    def test_the_loop_records_each_batch_before_it_appends(self, core, phase_dir, id_example):
+        text = (INSTRUCTIONS / core).read_text(encoding="utf-8")
+        record = re.search(
+            r'util batch-done \\\n\s+--phase-dir "\{plan\}/' + re.escape(phase_dir)
+            + r'" --task-id "[^"]+" --status \{batch_status\}', text)
+        assert record, core
+        append = text.index("util prior-changes append \\\n")
+        assert record.start() < append, (core, "record the batch, then append")
+        # The two outcomes the record takes, named for the host.
+        assert "`completed`" in text and "`failed`" in text, core
+        assert "[BATCH_DONE]" in text, core
+
+    def test_implement_no_longer_asks_the_host_to_retype_a_state_write(self):
+        text = (INSTRUCTIONS / "implement.md").read_text(encoding="utf-8")
+        assert 'state["task_status"][task_id]' not in text
+
+    @pytest.mark.parametrize("core", [
+        "apply-suggestions.md", "apply-task-suggestions.md", "apply-code-fixes.md",
+    ])
+    def test_the_resume_section_names_what_the_resume_honours(self, core):
+        text = (INSTRUCTIONS / core).read_text(encoding="utf-8")
+        assert "util batch-done" in text.split("### Resuming Interrupted Sessions", 1)[1]

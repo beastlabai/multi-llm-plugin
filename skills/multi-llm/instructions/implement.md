@@ -10,7 +10,7 @@ Executes implementation tasks from a plan by spawning subagents.
 
 ## Options
 
-- `--resume`: Resume from previous session state (skip completed tasks)
+- `--resume`: Resume from previous session state (skip completed tasks). A task recorded with `util batch-done` (step 5) is skipped when `completed` and dispatched again when `failed`; a task the prior-changes log names that no record says finished is refused — exit 3 with a `[RESUME_REFUSED]` block naming the task and the `util batch-done` call that records it — because re-emitting it would run it twice.
 - `--task T001`: Execute only a specific task
 - `--dry-run`: Show task summary without executing
 - `--yes` / `--no-confirm`: Skip all advisory prompts (e.g., unapplied task suggestions) and proceed silently. `--yes` additionally resolves every gate this mode reaches from flags and config: the plan-review prerequisite becomes exit 3 rather than a question (D6 row 6), the task-suggestion advisory resolves to "skip, recorded" (row 7), and the human-task strategy resolves to `skip-dependents` (row 8).
@@ -451,14 +451,12 @@ your host.
         ```
      6. The partial summary allows `--resume` to pick up where it left off
 
-   - After each task completes, update the state file:
-     ```python
-     # Load state file (path from JSON's "state_file" field)
-     state = json.load(state_file)
-     state["task_status"][task_id] = "completed"  # or "failed"
-     state["updated_at"] = datetime.now().isoformat()
-     json.dump(state, state_file)
+   - **Record the task outcome** — after the task's subagent returned and you classified its outcome (its reply's `status` and `files_touched`, checked against the files on disk), run:
+     ```bash
+     uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util batch-done \
+       --phase-dir "{plan}/implement" --task-id "{task_id}" --status {batch_status}
      ```
+     `{batch_status}` is `completed` for an applied task (a verified no-op included) and `failed` for one that failed — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task_id} {batch_status}` line and writes `task_status[{task_id}]` into `state.json`, the same entry the `--exec-subagents` executor writes: what `--resume` reads to skip the task (a `failed` task is dispatched again) and what `status` counts as progress. Run it **before** the append below — a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-run — and never retype this as a hand-rolled JSON edit of the state file.
    - **Append to prior changes** — record the task's one-line `summary` (normalized: one line, at most 200 characters; for a failed task `(task failed — {compact reason})`) so every later task's bound prompt sees it, as the `--exec-subagents` leg records it. `--id` is the task id, `--phase` is `implement`, and `--output-dir` is the plan directory `{plan}` (the one holding `state.json`: the one log every write phase shares and the one `util write-prompt` binds from):
      ```bash
      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util prior-changes append \

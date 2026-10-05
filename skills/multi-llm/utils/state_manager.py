@@ -90,6 +90,49 @@ def mark_phase_completed_in_state(state: Dict[str, Any], phase: str) -> None:
         started.pop(phase, None)
 
 
+def update_task_status_in_state(
+    state: Dict[str, Any], task_id: str, status: str, reason: Optional[str] = None
+) -> None:
+    """``StateManager.update_task_status``'s mutation on a raw state dict.
+
+    Module-level for the same reason :func:`mark_phase_completed_in_state`
+    is: the native write leg's per-batch record (``util batch-done``) edits
+    ``state.json`` as a file, mid-loop, and must not build a ``StateManager``
+    over a plan the batch just edited.
+    """
+    if "task_status" not in state:
+        state["task_status"] = {}
+    state["task_status"][task_id] = status
+    if reason is not None:
+        if "task_status_reasons" not in state:
+            state["task_status_reasons"] = {}
+        state["task_status_reasons"][task_id] = reason
+
+
+def mark_item_processed_in_state(
+    state: Dict[str, Any],
+    phase: str,
+    item_id: str,
+    status: str,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    """``StateManager.mark_item_processed``'s mutation on a raw state dict.
+
+    ``processed_<phase>`` is the map the apply base's ``--resume`` filters
+    its merged groups on (``apply_orchestrator_base`` step 23), keyed by the
+    group id a batch's ``expected_ids`` carry; ``phase`` is the base's own
+    ``phase_name`` (the phase DIR word — ``apply-fixes`` for apply-code-fixes).
+    """
+    key = f"processed_{phase}"
+    if key not in state or not isinstance(state[key], dict):
+        state[key] = {}
+    state[key][item_id] = {
+        "status": status,
+        "details": details or {},
+        "timestamp": datetime.now().isoformat(),
+    }
+
+
 def compute_plan_hash(plan_path: Path) -> str:
     """Hash a plan's content the way ``state.json``'s ``plan_hash`` records it.
 
@@ -778,14 +821,7 @@ class StateManager:
             status: New status value
             reason: Optional reason for the status change (e.g., why a task was skipped)
         """
-        if "task_status" not in self.state:
-            self.state["task_status"] = {}
-        self.state["task_status"][task_id] = status
-
-        if reason is not None:
-            if "task_status_reasons" not in self.state:
-                self.state["task_status_reasons"] = {}
-            self.state["task_status_reasons"][task_id] = reason
+        update_task_status_in_state(self.state, task_id, status, reason)
 
     def get_task_status(self, task_id: str) -> Optional[str]:
         """Get status of a task."""
@@ -1296,15 +1332,7 @@ class StateManager:
             status: Processing status ("applied", "skipped", "failed")
             details: Optional details about the processing
         """
-        key = f"processed_{phase}"
-        if key not in self.state:
-            self.state[key] = {}
-
-        self.state[key][group_id] = {
-            "status": status,
-            "details": details or {},
-            "timestamp": datetime.now().isoformat()
-        }
+        mark_item_processed_in_state(self.state, phase, group_id, status, details)
 
     def get_processed_items(self, phase: str) -> Dict[str, Dict[str, Any]]:
         """Get all processed items for a phase."""

@@ -1875,6 +1875,77 @@ class TestTheNativeImplementEmitRecordsAStart:
         assert second != "2026-01-01T00:00:00" and second >= first
 
 
+class TestTheNativeImplementResumeHonoursTheBatchRecord:
+    """`util batch-done` is the native leg's per-task record (reviewer
+    finding 1, fix round 6, 2026-10-05): a `--resume` skips a task recorded
+    `completed`, dispatches one recorded `failed` again, and refuses when the
+    implement log names a task no record says finished — re-emitting it
+    would run it twice."""
+
+    def _emit(self, repo, capsys, *flags):
+        code = implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", *flags])
+        err = capsys.readouterr().err
+        document = json.loads((_phase_dir(repo) / WRITE_TASK_FILENAME).read_text())
+        return code, err, [t["task_id"] for t in document["batches"]]
+
+    def _record(self, repo, task_id, status="completed"):
+        from utils import batch_done
+        return batch_done.main([
+            "--phase-dir", str(_phase_dir(repo)), "--task-id", task_id,
+            "--status", status,
+        ])
+
+    def test_a_recorded_task_is_not_emitted_again(self, repo, capsys):
+        from utils.output_handler import get_output_dir
+
+        _seed_generate_tasks(repo)
+        code, err, first = self._emit(repo, capsys)
+        assert code == 0, err
+        assert first == ["T001", "T002", "T003"]
+        assert self._record(repo, "T001") == 0
+        capsys.readouterr()
+        prior_changes.append(str(get_output_dir(repo.plan)), "T001", "implement", "did T001")
+        code, err, second = self._emit(repo, capsys, "--resume")
+        assert code == 0, err
+        assert second == ["T002", "T003"]
+
+    def test_a_failed_task_is_dispatched_again(self, repo, capsys):
+        from utils.output_handler import get_output_dir
+
+        _seed_generate_tasks(repo)
+        code, err, _first = self._emit(repo, capsys)
+        assert code == 0, err
+        assert self._record(repo, "T001", "failed") == 0
+        capsys.readouterr()
+        prior_changes.append(
+            str(get_output_dir(repo.plan)), "T001", "implement", "(task failed — boom)")
+        code, err, second = self._emit(repo, capsys, "--resume")
+        assert code == 0, err
+        assert "T001" in second
+
+    def test_a_logged_unrecorded_task_refuses_the_resume(self, repo, capsys):
+        from utils import batch_done
+        from utils.output_handler import get_output_dir
+        from utils.state_manager import get_or_create_state
+
+        _seed_generate_tasks(repo)
+        code, err, _first = self._emit(repo, capsys)
+        assert code == 0, err
+        prior_changes.append(str(get_output_dir(repo.plan)), "T001", "implement", "did T001")
+        code, err, _second = self._emit(repo, capsys, "--resume")
+        assert code == 3
+        assert batch_done.RESUME_REFUSED_MARKER in err
+        assert "T001" in err and "util batch-done" in err
+        assert not get_or_create_state(repo.plan).is_phase_completed("implement")
+        # The repair the block names, then the resume goes through.
+        assert self._record(repo, "T001") == 0
+        capsys.readouterr()
+        code, err, third = self._emit(repo, capsys, "--resume")
+        assert code == 0, err
+        assert third == ["T002", "T003"]
+
+
 class TestTheNativeImplementEmitMaterializesTheWriteTaskFile:
     """Same file, same bytes as the executor leg would dispatch from."""
 

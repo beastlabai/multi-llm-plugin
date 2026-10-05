@@ -1301,6 +1301,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         self.merged = merge_validation_with_groups(self.groups, self.validation)
 
         # Step 23: Handle --resume
+        #
+        # `processed_<phase>` is the native leg's per-batch record (`util
+        # batch-done`, 2026-10-05): one entry per member id of every batch
+        # the host recorded, keyed by the id the batch's `expected_ids`
+        # carry — the group's stamped `group_hash`, which is what the
+        # suggestion's `group_id` was copied from. A `failed` record keeps
+        # the group in the work set (the batch is dispatched again, as the
+        # executor leg re-dispatches a failed batch); every other status
+        # drops it. The executor leg never writes this map: its resume
+        # evidence is the result file on disk (`_done_evidence`).
         if getattr(self.args, "resume", False) and self.state is not None:
             previous_decisions = self.state.get_all_human_decisions(self.phase_name)
             processed_items = self.state.get_processed_items(self.phase_name)
@@ -1308,10 +1318,17 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             for group in self.merged:
                 group["_group_id"] = generate_group_id(group)
 
+            def _recorded_done(group: Dict[str, Any]) -> bool:
+                for key in (group.get("_group_id"), group.get("group_hash")):
+                    record = processed_items.get(str(key or ""))
+                    if isinstance(record, dict) and record.get("status") != "failed":
+                        return True
+                return False
+
             unprocessed_merged = []
             for g in self.merged:
                 gid = g["_group_id"]
-                if gid in processed_items:
+                if _recorded_done(g):
                     continue
                 if gid in previous_decisions:
                     decision = previous_decisions[gid]
@@ -1981,6 +1998,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         else:
             if task_file:
                 print(f"[WRITE_TASKS_FILE] {task_file}", file=sys.stderr)
+                # A native `--resume` promises to skip what already landed.
+                # A batch about to go out again whose `prior_changes_id` the
+                # log already holds for this phase, with no record
+                # (`util batch-done`) saying it finished, is one the host
+                # applied without recording: re-emitting it would apply it
+                # twice, so the resume stops here (exit 3) naming the batch
+                # and the record command (reviewer repro, 2026-10-05).
+                self._refuse_unrecorded_native_resume()
 
         # The native leg: the batches are now the host's to apply, so the phase
         # is recorded *started*, never completed — completion is the host's
@@ -3193,9 +3218,43 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             tasks_file=tasks_file,
             grouped_file=grouped,
         )
+        self._native_write_tasks = list(tasks)
         return write_task_file_for_phase(
             kind=self.write_kind, tasks=tasks, phase_dir=phase_dir,
             plan_file=self.plan_path, tasks_file=tasks_file, grouped_file=grouped,
+        )
+
+    def _refuse_unrecorded_native_resume(self) -> None:
+        """Exit 3 when a native ``--resume`` would re-emit a logged, unrecorded batch.
+
+        See :func:`utils.batch_done.unrecorded_logged_batches`. Only under
+        ``--resume`` (a bare re-run starts the phase over by contract) and
+        only on the native leg, whose batches this method's caller has just
+        materialized; the executor leg judges its own result files.
+        """
+        if not getattr(self.args, "resume", False) or self.state is None:
+            return
+        tasks = getattr(self, "_native_write_tasks", None) or []
+        if not tasks:
+            return
+        from .batch_done import resume_refusal_lines, unrecorded_logged_batches
+
+        word = self.confirmation_phase_name or self.phase_name
+        unrecorded = unrecorded_logged_batches(
+            tasks, output_dir=self.out_dir, phase=word,
+            state=self.state.state, processed_phase=self.phase_name,
+        )
+        if not unrecorded:
+            return
+        phase_dir = os.path.join(self.out_dir, self.phase_name)
+        for line in resume_refusal_lines(
+            unrecorded, phase_dir=phase_dir, mode_word=word,
+        ):
+            print(line, file=sys.stderr)
+        raise OrchestratorError(
+            f"Phase _write_outputs, step 33: --resume refused, "
+            f"{len(unrecorded)} logged batch(es) carry no progress record",
+            exit_code=3,
         )
 
     def _record_pre_existing_changes(self) -> None:
