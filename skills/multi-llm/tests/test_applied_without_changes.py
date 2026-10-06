@@ -82,6 +82,53 @@ class TestTheReSend:
         # The loop went on.
         assert [o.task_id for o in result.outcomes] == ["apply-batch-0", "apply-batch-1"]
 
+    def test_the_batch_and_its_re_send_are_kept_as_separate_prompt_files(self, env):
+        """Run 6 (#10b): the executor leg keeps what each dispatch sent under
+        `{phase}/prompts/`, the native leg's layout. The re-send never replaces
+        the batch's own file; it is the attempt's own, and the next dispatch
+        of the task clears it."""
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)], result=APPLIED_S0)
+        env.monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", HEADING)
+
+        env.scheduler([env.apply_task(0)]).run()
+
+        prompts = env.phase_dir / "prompts"
+        sent = _dispatch_prompts(log)
+        assert sorted(p.name for p in prompts.iterdir()) == [
+            "apply-batch-0.attempt-2.prompt.txt", "apply-batch-0.prompt.txt"]
+        assert (prompts / "apply-batch-0.prompt.txt").read_text() == sent[0]
+        assert (prompts / "apply-batch-0.attempt-2.prompt.txt").read_text() == sent[1]
+        assert HEADING not in sent[0] and HEADING in sent[1]
+
+        # A fresh dispatch of the same task: its first attempt rewrites the
+        # batch's file and clears the earlier dispatch's re-send.
+        (prompts / "apply-batch-0.prompt.txt").write_text("stale", encoding="utf-8")
+        (env.phase_dir / "apply_batch_0.json").unlink()
+        env.monkeypatch.delenv("MOCK_LLM_EDITS_IF_PROMPT_HAS")
+        again = env.scheduler([env.apply_task(0)]).run()
+        assert len(again.outcomes[0].attempts) == 1, "dispatched once, no re-send"
+        assert sorted(p.name for p in prompts.iterdir()) == ["apply-batch-0.prompt.txt"]
+        assert (prompts / "apply-batch-0.prompt.txt").read_text() == (
+            _dispatch_prompts(log)[-1])
+
+    def test_a_planted_prompts_symlink_is_never_followed(self, env, tmp_path):
+        """A jailed repo-wide batch can write the phase dir; the scheduler is
+        not jailed, so a `prompts` link it planted must not carry the prompt
+        out of the repository. The dispatch goes ahead, with one warning."""
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (env.phase_dir / "prompts").symlink_to(outside, target_is_directory=True)
+        env.edits([_patch_edit(env.plan)], result=APPLIED_S0)
+        lines = []
+
+        result = env.scheduler([env.apply_task(0)], log=lines.append).run()
+
+        assert result.outcomes[0].status == executor.STATUS_OK
+        assert list(outside.iterdir()) == []
+        assert any("could not keep apply-batch-0's dispatched prompt" in line
+                   and "symlink" in line for line in lines), lines
+
     def test_a_re_send_that_finds_the_change_present_is_a_no_op(self, env):
         """Told that nothing changed, an honest runner whose change is already
         there answers `no-op`: the claim and the bytes agree."""

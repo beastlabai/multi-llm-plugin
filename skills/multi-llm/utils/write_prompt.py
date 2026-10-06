@@ -68,10 +68,12 @@ try:
         PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
     )
     from .write_batch_scheduler import (
+        DISPATCHED_PROMPTS_SUBDIR,
         SWEEP_MAX_FILES,
         accepted_upstream_checks,
         bind_prior_changes,
         decomposition_graph,
+        dispatched_prompt_path,
         is_check_task,
         rerunnable_checks,
         upstream_held_check,
@@ -90,10 +92,12 @@ except ImportError:  # pragma: no cover - direct script invocation
         PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
     )
     from utils.write_batch_scheduler import (  # type: ignore
+        DISPATCHED_PROMPTS_SUBDIR,
         SWEEP_MAX_FILES,
         accepted_upstream_checks,
         bind_prior_changes,
         decomposition_graph,
+        dispatched_prompt_path,
         is_check_task,
         rerunnable_checks,
         upstream_held_check,
@@ -124,8 +128,9 @@ __all__ = [
     "main",
 ]
 
-#: Where the bound prompt files land, under the phase dir.
-PROMPTS_SUBDIR = "prompts"
+#: Where the bound prompt files land, under the phase dir: the scheduler's
+#: own constant, since the executor leg keeps its dispatched prompts there too.
+PROMPTS_SUBDIR = DISPATCHED_PROMPTS_SUBDIR
 
 #: The marker lines a host reads (``--stdout`` prints none of them).
 MARKER_PATH = "[WRITE_PROMPT]"
@@ -433,8 +438,9 @@ def ordering_warnings(phase_dir: Path, task_id: str) -> List[str]:
 
 
 def default_output_path(phase_dir: Path, task_id: str) -> Path:
-    """``{phase_dir}/prompts/{task_id}.prompt.txt``."""
-    return Path(os.path.abspath(str(phase_dir))) / PROMPTS_SUBDIR / f"{task_id}.prompt.txt"
+    """``{phase_dir}/prompts/{task_id}.prompt.txt``, the file the executor leg
+    keeps for the same task (:func:`dispatched_prompt_path`)."""
+    return Path(dispatched_prompt_path(str(phase_dir), task_id))
 
 
 # ---------------------------------------------------------------------------

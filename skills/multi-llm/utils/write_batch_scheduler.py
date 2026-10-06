@@ -263,6 +263,8 @@ __all__ = [
     "bind_prior_changes",
     "blocked_by_check_reason",
     "decomposition_graph",
+    "DISPATCHED_PROMPTS_SUBDIR",
+    "dispatched_prompt_path",
     "held_back_by_checks",
     "rerunnable_checks",
     "transitive_dependents",
@@ -1892,6 +1894,30 @@ def bind_prior_changes(
     return prompt.replace(PRIOR_CHANGES_TOKEN, context)
 
 
+#: Where a write batch's dispatched prompt is kept, under the phase dir: the
+#: layout the native leg's ``util write-prompt`` writes (``write_prompt``
+#: imports it), which the executor leg keeps too since fix round 16.
+DISPATCHED_PROMPTS_SUBDIR = "prompts"
+
+
+def dispatched_prompt_path(
+    phase_dir: str, task_id: str, attempt: Optional[int] = None
+) -> str:
+    """``{phase_dir}/prompts/{task_id}.prompt.txt``, the batch's prompt.
+
+    With ``attempt``, ``{task_id}.attempt-{attempt}.prompt.txt``: what one
+    attempt sent when it was not the batch's prompt (a report re-ask, rule 9's
+    re-send).
+    """
+    name = (
+        f"{task_id}.prompt.txt" if attempt is None
+        else f"{task_id}.attempt-{attempt}.prompt.txt"
+    )
+    return os.path.join(
+        os.path.abspath(str(phase_dir)), DISPATCHED_PROMPTS_SUBDIR, name
+    )
+
+
 def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
     """Append the write-batch result contract the classification reads.
 
@@ -2737,6 +2763,85 @@ class WriteBatchScheduler:
     def _with_result_contract(self, task: Dict[str, Any], prompt: str) -> str:
         """Append the write-batch result contract (:func:`with_result_contract`)."""
         return with_result_contract(self.kind, task, prompt)
+
+    def _keep_dispatched_prompt(
+        self, task_id: str, attempt: int, sent: str, batch_prompt: str
+    ) -> None:
+        """Keep the prompt this attempt sends, beside the native leg's.
+
+        Run 6 (#10b): on the executor leg the prompt a task was dispatched
+        with was in no plan artifact — the audit line keeps its sha256 and
+        length only — so T007's prompt with "## Check findings the user
+        accepted" could not be audited on Codex at all, and on OpenCode only
+        from the host's session database. The native leg's ``util
+        write-prompt`` always wrote ``{phase}/prompts/<id>.prompt.txt``; this
+        writes the same file, the same bytes, just before the child starts.
+
+        * The batch's prompt **overwrites** the file on every dispatch, as a
+          ``--resume`` rebinds the native one: it is what the task was last
+          told, and the audit log's ``prompt_sha256`` on that ``dispatched``
+          line verifies it.
+        * An attempt that sends something else (a report re-ask, rule 9's
+          re-send) goes to ``<id>.attempt-<n>.prompt.txt`` instead, so the
+          batch's file is never replaced by a re-ask; the task's next first
+          attempt clears those, so none outlives the dispatch it belongs to.
+        * Never for a task refused before dispatch: the policy check and the
+          snapshot run first, so a task declaring a denied path leaves no
+          file. The text is the native file's, unredacted — plan and task
+          text, the prior-changes summaries, accepted check findings, all
+          already on disk in the phase and plan dirs — and it lies inside the
+          phase dir, which the containment sweep never attributes to a runner.
+
+        A jailed repo-wide batch can write the phase dir, so the folder is
+        resolved and must be a real directory inside it, never a planted
+        symlink (the parent is not jailed, and following one would write
+        outside the repository); a file name is replaced by rename, which
+        never follows a link either.
+
+        Best-effort: a write that fails warns once and never fails the
+        dispatch.
+        """
+        try:
+            if not task_id or os.path.basename(task_id) != task_id or task_id in (
+                    ".", ".."):
+                raise OSError(f"{task_id!r} is not a file name")
+            phase = os.path.realpath(self.phase_dir)
+            folder = os.path.join(phase, DISPATCHED_PROMPTS_SUBDIR)
+            if os.path.islink(folder):
+                raise OSError(f"{folder} is a symlink")
+            os.makedirs(folder, exist_ok=True)
+            if os.path.realpath(folder) != folder or not os.path.isdir(folder):
+                raise OSError(f"{folder} is not a directory inside {phase}")
+            if sent == batch_prompt:
+                target = dispatched_prompt_path(phase, task_id)
+                if attempt <= 1:
+                    head, tail = f"{task_id}.attempt-", ".prompt.txt"
+                    for name in os.listdir(folder):
+                        if (name.startswith(head) and name.endswith(tail)
+                                and name[len(head):-len(tail)].isdigit()):
+                            os.unlink(os.path.join(folder, name))
+            else:
+                target = dispatched_prompt_path(phase, task_id, attempt)
+            handle, temporary = tempfile.mkstemp(prefix=".prompt-", dir=folder)
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
+                    stream.write(sent)
+                os.replace(temporary, target)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+        except OSError as exc:
+            if not getattr(self, "_prompt_keep_warned", False):
+                self._prompt_keep_warned = True
+                self.log(
+                    f"[write-subagents] could not keep {task_id}'s dispatched "
+                    f"prompt under {os.path.join(self.phase_dir, DISPATCHED_PROMPTS_SUBDIR)}: "
+                    f"{exc}. The dispatch goes ahead; the audit log keeps its "
+                    f"sha256."
+                )
 
     # -- the loop -------------------------------------------------------
 
@@ -4596,6 +4701,9 @@ class WriteBatchScheduler:
                     entry.relative: entry.sha256 for entry in snapshot.entries
                 },
             )
+            self._keep_dispatched_prompt(
+                task_id, int(context["attempt"]), sent, prompt
+            )
 
         def after_result(context: Dict[str, Any]) -> None:
             # The executor's own record of the rung this attempt ran on wins;
@@ -4699,6 +4807,7 @@ class WriteBatchScheduler:
                 snapshot_dir=snapshot.directory,
                 snapshot_before={e.relative: e.sha256 for e in snapshot.entries},
             )
+            self._keep_dispatched_prompt(task_id, attempt, sent, prompt)
             data = self.respond(task, sent)  # type: ignore[misc]
             if isinstance(data, str):
                 try:
