@@ -424,11 +424,52 @@ class TestACheckTaskRecordsWhatItFound:
         assert expected in err
         assert "T002" not in _state(plan_dir[1]).get("task_status", {})
 
-    def test_a_task_that_declares_files_has_no_check_result(self, plan_dir, capsys):
-        code, _out, err, _result = self._record(
+    def test_a_code_task_records_the_checks_it_ran_and_holds_nothing(
+        self, plan_dir, capsys,
+    ):
+        """Fix round 14 (codex racing run 5): a task that declares files
+        reports the checks it ran on its own edits in the same `check`
+        object. A failing one is printed for the host to list and report —
+        never a plain success — and holds nothing back."""
+        failing = "node tests/race-logic.test.mjs: AssertionError: a skipped gate must be rejected"
+        code, stdout, err, _result = self._record(
+            plan_dir, capsys, "--check", "findings", "--finding", failing, task="T001")
+        assert code == 0, err
+        assert "[BATCH_DONE] T001 completed" in stdout
+        assert (
+            "[BATCH_CHECK_FAILED] T001: its edits were applied, but a check it "
+            f"ran on them fails (1 problem(s)): {failing}. The edits are kept."
+        ) in stdout
+        assert "## Check Findings" in stdout
+        assert "never report the phase as a clean success" in stdout
+        assert "[CHECK_BLOCKED]" not in stdout
+        state = _state(plan_dir[1])
+        assert state["task_status"]["T001"] == "completed"
+        assert "task_check_findings" not in state, "a write task is never a hold"
+
+        code, stdout, err, _result = self._record(
             plan_dir, capsys, "--check", "passed", task="T001")
+        assert code == 0, err
+        assert "[BATCH_CHECK_FAILED]" not in stdout
+
+    def test_a_code_task_has_no_could_not_run(self, plan_dir, capsys):
+        code, _out, err, _result = self._record(
+            plan_dir, capsys, "--check", "could-not-run", task="T001", status="failed")
         assert code == 3
         assert "not a check task" in err
+        assert "T001" not in _state(plan_dir[1]).get("task_status", {})
+
+    def test_a_plan_batch_has_no_check_result(self, plan_dir, capsys):
+        plan, out = plan_dir
+        StateManager(plan).save()
+        phase_dir, _tasks = _materialize(
+            plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
+        code, _out, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", "apply-batch-0", "--status", "completed", "--check", "passed",
+        ], capsys)
+        assert code == 3
+        assert "edits the plan or the task list, not code" in err
 
     def test_a_finding_needs_check_findings(self, plan_dir, capsys):
         code, _out, err, _result = self._record(plan_dir, capsys, "--finding", "x")

@@ -108,6 +108,10 @@ Environment Variables (New - for scenario-based testing):
         contains it prints a ``status: no-op`` batch result carrying the
         ``check`` object in MOCK_LLM_WRITE_CHECK (JSON; default: two findings)
         — a check task that ran and reported problems.
+    MOCK_LLM_WRITE_BATCH_CHECK: JSON ``check`` object an applied batch's
+        derived result carries (the checks it ran on its own edits; fix round
+        14), only when the prompt holds MOCK_LLM_WRITE_BATCH_CHECK_IF_PROMPT_HAS
+        if that is set
     MOCK_LLM_WRITE_RESULT: JSON object the mock prints as the D3g batch result
         (``status``/``ids``/``files_touched``/``summary``/``notes``). Defaults are
         derived from MOCK_LLM_EDITS so the common case needs only that.
@@ -665,7 +669,7 @@ def write_batch_result(applied: List[Dict[str, Any]], prompt: str = "") -> str:
             "summary": "the checks ran",
             "check": check,
         })
-    return json.dumps({
+    derived = {
         "status": "applied" if applied else "no-op",
         "ids": [str(item) for item in ids] if isinstance(ids, list) else [],
         "files_touched": touched,
@@ -673,7 +677,15 @@ def write_batch_result(applied: List[Dict[str, Any]], prompt: str = "") -> str:
             f"edited {len(touched)} file(s): {', '.join(touched)}"[:200]
             if touched else "nothing needed changing"
         ),
-    })
+    }
+    # Fix round 14: a code batch reporting the checks it ran on its edits
+    # (MOCK_LLM_WRITE_BATCH_CHECK, JSON), only on a batch whose prompt holds
+    # MOCK_LLM_WRITE_BATCH_CHECK_IF_PROMPT_HAS when that is set.
+    own_check = os.environ.get("MOCK_LLM_WRITE_BATCH_CHECK")
+    only_if = os.environ.get("MOCK_LLM_WRITE_BATCH_CHECK_IF_PROMPT_HAS")
+    if own_check and applied and (not only_if or only_if in (prompt or "")):
+        derived["check"] = json.loads(own_check)
+    return json.dumps(derived)
 
 
 def default_response_content(provider: str) -> str:

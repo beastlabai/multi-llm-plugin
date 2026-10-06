@@ -828,6 +828,37 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     return [CHECK_RESULT_UNKNOWN]
 
 
+def batch_check_findings(result: Any) -> Optional[List[str]]:
+    """What a code-writing batch's own ``check`` object says about the checks
+    it ran on its edits (fix round 14), read as :func:`check_findings_from`
+    reads a check task's.
+
+    ``None`` when the reply reports no usable check — no ``check`` key, or one
+    that says neither whether it passed nor what failed (``{}``, ``null``): the
+    contract asks a batch for ``check`` only when it ran one, so saying nothing
+    is not a finding here, as it is for a check task, whose whole answer it
+    is. ``[]`` for a clear pass; else the failing checks, bounded. Codex
+    racing run 5 (2026-10-06): an apply-code-fixes batch wrote "the bundled
+    test fails" in its free-text ``notes``, the repository's test failed
+    afterwards, and the run reported every fix applied. Never read from
+    ``notes``.
+    """
+    findings = check_findings_from(result)
+    if findings is None:
+        return None
+    if findings and findings[0].startswith(CHECK_RESULT_UNKNOWN):
+        return None
+    return findings
+
+
+def row_batch_check_findings(row: Dict[str, Any]) -> List[str]:
+    """A serialized row's own-check findings (its ``batch_check``), else ``[]``."""
+    check = row.get("batch_check") if isinstance(row, dict) else None
+    if not isinstance(check, dict):
+        return []
+    return [str(item) for item in (check.get("findings") or []) if str(item)]
+
+
 def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
     """A serialized row's label: ``outcome_label`` when present, else ``write_outcome``.
 
@@ -1108,6 +1139,13 @@ class TaskOutcome:
     #: ``[]`` when the check passed, else what the check found. Non-empty on a
     #: ``no-op`` makes the label ``check-findings`` (racing re-run 4).
     check_findings: Optional[List[str]] = None
+    #: A code-writing batch's own ``check`` (:func:`batch_check_findings`):
+    #: the checks it ran on its edits. ``None`` when its reply reported none,
+    #: ``[]`` when they passed, else what failed. Its own axis, never
+    #: ``check_findings``: a write task whose test fails holds nothing back,
+    #: but an ``ok`` row carrying findings is never reported as a plain
+    #: success (fix round 14).
+    batch_check: Optional[List[str]] = None
 
     @property
     def ok(self) -> bool:
@@ -1177,6 +1215,10 @@ class TaskOutcome:
                 out["outcome_label"] = self.outcome_label
                 if self.check_findings is not None:
                     out["check"] = check_record(self.check_findings)
+            if self.batch_check is not None:
+                # Additive and only here, so a row whose reply ran no check
+                # is unchanged.
+                out["batch_check"] = check_record(self.batch_check)
             if self.runner_notes:
                 out["runner_notes"] = self.runner_notes
             if self.not_rerun:
