@@ -2622,28 +2622,78 @@ class WriteBatchScheduler:
         say "0 already processed, 12 remaining" while the run then kept
         batch 0 as an earlier run's (OpenCode racing run 4).
         """
-        kept = [o for o in result.outcomes if o.skipped]
         # Every apply run resumes unless `--fresh`, so a first run (nothing
         # kept) says nothing here; its batch lines already say what ran.
-        if not self.resume or self.dry_run or not kept:
+        if not self.resume or self.dry_run:
             return
-        dispatched = [o for o in result.outcomes if not o.skipped]
+        # Kept: every task an earlier run finished that this run did not
+        # dispatch — a resume skip, and (fix round 14) a task the resume never
+        # materialized because `state.json` records it completed: implement
+        # materializes only the unfinished tasks, so its skips were empty and
+        # OpenCode racing 06b, which kept 14, printed no line at all. Read
+        # off the phase's report rows (this run's and the earlier runs'), the
+        # account the stop's "Done and kept" line is built from; a task
+        # answered `--human-task <id>=done` is its own bucket.
+        this_run = {o.task_id for o in result.outcomes if not o.skipped}
+        answered = set(result.human_plan.accepted) | set(result.human_plan.completed)
+        kept: List[Dict[str, Any]] = []
+        seen: set = set()
+        for row in result.report_rows():
+            task_id = str(row.get("task_id") or "")
+            if (
+                not task_id or task_id in seen or task_id in this_run
+                or task_id in answered or row.get("status") != STATUS_OK
+            ):
+                continue
+            seen.add(task_id)
+            kept.append(row)
+        if not kept:
+            return
+        # Dispatched: the tasks a runner was started for. A task refused
+        # before dispatch and a check not run again started none (fix round
+        # 14: the stop fixture's 01b counted the refused T005 as dispatched).
+        refused = [
+            o for o in result.outcomes
+            if not o.skipped and o.task_id in self._refused_before_dispatch
+        ]
+        not_rerun = [o for o in result.outcomes if not o.skipped and o.not_rerun]
+        dispatched = [
+            o for o in result.outcomes
+            if not o.skipped and o not in refused and o not in not_rerun
+        ]
         items = {
             str(task.get("task_id", "")): len(task.get("expected_ids") or [])
             for task in self.tasks
         }
 
-        def counted(outcomes: Sequence[TaskOutcome]) -> str:
+        def counted(ids: Sequence[str], rows: Sequence[Dict[str, Any]] = ()) -> str:
             # An implement task is one item; the count would only repeat it.
             if self.kind == "implement":
                 return ""
-            return f" ({sum(items.get(o.task_id, 0) for o in outcomes)} item(s))"
+            by_row = {
+                str(row.get("task_id")): len(row.get("expected_ids") or [])
+                for row in rows
+            }
+            total = sum(by_row.get(i, items.get(i, 0)) for i in ids)
+            return f" ({total} item(s))"
 
-        names = ", ".join(o.task_id for o in kept[:5]) + (", …" if len(kept) > 5 else "")
+        def named(ids: Sequence[str]) -> str:
+            return ", ".join(ids[:5]) + (", …" if len(ids) > 5 else "")
+
+        kept_ids = [str(row.get("task_id")) for row in kept]
+        dispatched_ids = [o.task_id for o in dispatched]
         self.log(
-            f"[write-subagents] resume: kept {len(kept)} task(s) an earlier run "
-            f"finished — {names}{counted(kept)}; "
-            f"dispatched {len(dispatched)}{counted(dispatched)}"
+            f"[write-subagents] resume: kept {len(kept_ids)} task(s) an earlier "
+            f"run finished — {named(kept_ids)}{counted(kept_ids, kept)}; "
+            f"dispatched {len(dispatched_ids)}{counted(dispatched_ids)}"
+            + (
+                f"; refused before dispatch {len(refused)} "
+                f"({named([o.task_id for o in refused])})" if refused else ""
+            )
+            + (
+                f"; not run again {len(not_rerun)} "
+                f"({named([o.task_id for o in not_rerun])})" if not_rerun else ""
+            )
             + (f"; not reached {len(result.not_run)}" if result.not_run else "")
         )
 
@@ -2885,6 +2935,9 @@ class WriteBatchScheduler:
                 result.exit_code = int(exc.exit_code or EXIT_NEEDS_HUMAN)
                 self._record_stop(result, batch_index, [], refusal=exc.message)
                 result.messages.extend(
+                    self._check_findings_lines(result, stopped=True)
+                )
+                result.messages.extend(
                     self._refusal_message(exc, batch_index, result)
                 )
                 if self.summary_file and result.outcomes:
@@ -2916,9 +2969,7 @@ class WriteBatchScheduler:
                 self._record_stop(
                     result, batch_index, [o for o in outcomes if not o.ok],
                 )
-                result.messages.extend(
-                    self._stop_message(batch_index, outcomes, result)
-                )
+                stop_lines = self._stop_message(batch_index, outcomes, result)
                 # The partial summary is the cancellation's own record (D3n,
                 # instructions/implement.md): `_finalize` never runs on this
                 # path, so without this write the `## Cancelled` section would be
@@ -2928,6 +2979,16 @@ class WriteBatchScheduler:
                 # written.
                 if self.summary_file:
                     result.summary_file = self._write_summary(result)
+                # A stop is a way the run ends too, so a check that reported
+                # problems is named on its `[CHECK_FINDINGS]` line here as at
+                # the end of a run (fix round 14: the stop fixture's first run
+                # stopped on T005 and its log named T002's findings only in
+                # the stop's own wording).
+                result.messages.extend(
+                    self._check_findings_lines(result, stopped=True)
+                )
+                result.messages.extend(stop_lines)
+                if result.summary_file:
                     result.messages.append(
                         f"Partial implementation summary: {result.summary_file}"
                     )
@@ -2964,10 +3025,16 @@ class WriteBatchScheduler:
         self._mirror_status(result)
         return result
 
-    def _check_findings_lines(self, result: SchedulerResult) -> List[str]:
+    def _check_findings_lines(
+        self, result: SchedulerResult, *, stopped: bool = False,
+    ) -> List[str]:
         """One ``[CHECK_FINDINGS]`` line per check task that reported
         problems, and one line on what happens to them (racing re-run 4:
-        nothing on the run's own output named T007's two problems)."""
+        nothing on the run's own output named T007's two problems).
+
+        *stopped*: the run ended on a stop (fix round 14), where the tasks
+        after the stop did not go on whatever they depend on.
+        """
         found = result.check_findings()
         if not found:
             return []
@@ -2981,11 +3048,17 @@ class WriteBatchScheduler:
             if result.summary_file else ""
         )
         blocked = sorted(result.blocked_by_check)
-        went_on = (
-            f"the tasks that do not depend on them went on, and the ones that "
-            f"do were not run ({', '.join(blocked)})"
-            if blocked else "no task waits for them, so implement went on"
-        )
+        if stopped:
+            went_on = (
+                f"the tasks that depend on them are held ({', '.join(blocked)})"
+                if blocked else "no task waits for them"
+            )
+        else:
+            went_on = (
+                f"the tasks that do not depend on them went on, and the ones "
+                f"that do were not run ({', '.join(blocked)})"
+                if blocked else "no task waits for them, so implement went on"
+            )
         lines.append(
             f"Check findings: {', '.join(found)} ran, changed no file and "
             f"reported problems; {went_on}{where}. Review-code is told about "
@@ -6382,6 +6455,14 @@ class WriteBatchScheduler:
                 "Nothing was half-applied: the stopped task never started, and "
                 "the tasks before it keep what they changed."
             )
+        elif failed and not any(o.files_touched for o in failed):
+            # Fix round 14 (stop fixture, accept 02): a clean failure, a
+            # timeout or a prose reply that moved no byte left nothing
+            # half-applied either.
+            lines.append(
+                "Nothing was half-applied: the stopped task changed no file, "
+                "and the tasks before it keep what they changed."
+            )
         else:
             lines.append(
                 "The half-applied state is deliberately left in place: what the "
@@ -6593,12 +6674,21 @@ class WriteBatchScheduler:
                 "dispatched again and the tasks after it follow:"
             )
             lines.append(f"        {resume}")
-        else:
+        elif any(o.files_touched for o in failed):
             lines.append(
                 "  - inspect the half-applied state (restore the batch with the "
                 "command above, or keep it), fix the cause, then resume this "
                 "phase; the failed batch is dispatched again and the ones never "
                 "reached follow:"
+            )
+            lines.append(f"        {resume}")
+        else:
+            # Fix round 14: no byte moved (a timeout, a prose reply, a
+            # refused runner), so there is nothing half-applied to inspect.
+            lines.append(
+                "  - nothing changed, so there is nothing to restore: fix the "
+                "cause the details name, then resume this phase; the failed "
+                "batch is dispatched again and the ones never reached follow:"
             )
             lines.append(f"        {resume}")
         for outcome in acceptable:
@@ -6861,6 +6951,10 @@ class WriteBatchScheduler:
         if first is not None and first.applied_without_changes:
             # Fix round 14: it said `applied` and changed nothing, twice.
             result.stop["applied_without_changes"] = True
+        # Whether the stop left bytes a human has to look at (fix round 14:
+        # "the half-applied state is left in place" followed a refusal before
+        # dispatch and a clean failure, where nothing was half-applied).
+        result.stop["bytes_moved"] = any(o.files_touched for o in failed)
         if result.blocked_by_check:
             # The tasks a check with findings holds, which this stop's own
             # remedy does not release (fix round 13).
@@ -7112,9 +7206,14 @@ class WriteBatchScheduler:
                 f"it undone by adding --human-task {task_id}=skip to the "
                 "resume command."
             )
-        else:
+        elif stop.get("bytes_moved", True):
             head += (
                 " To go on: inspect the half-applied state, restore or keep it, "
+                "fix the cause, then resume this phase."
+            )
+        else:
+            head += (
+                " Nothing changed, so there is nothing to restore. To go on: "
                 "fix the cause, then resume this phase."
             )
         blocked = stop.get("blocked") or {}

@@ -2102,6 +2102,28 @@ def _write_mirror_as_counts(mirror: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _failed_batches_moved_nothing(view: Dict[str, Any]) -> bool:
+    """Whether every failed row of a write run's mirror records that no file
+    moved (``files_touched`` present and empty). A row without the key — an
+    older mirror — says nothing, so the answer is ``False`` and the status
+    line keeps its "half-applied" wording."""
+    progress = view.get("progress") or {}
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    if not isinstance(mirror, dict):
+        return False
+    failed_ids = set(mirror.get("failed_task_ids") or [])
+    rows = [
+        row for row in (mirror.get("tasks") or [])
+        if isinstance(row, dict) and row.get("task_id") in failed_ids
+    ]
+    if not rows:
+        return False
+    return all(
+        isinstance(row.get("files_touched"), list) and not row["files_touched"]
+        for row in rows
+    )
+
+
 def _reason_explanation(reason_code: Optional[str]) -> Optional[str]:
     """``_REASON_EXPLANATION[reason_code]``, imported only on this failed path."""
     if not reason_code:
@@ -2195,10 +2217,19 @@ def _resume_lines(
             cost = f"re-dispatches the {redispatch} failed batch(es) and the ones never reached"
             if kept:
                 cost += f", keeps the {kept} already applied"
-            lines.append(
-                f"      ({cost}; the half-applied state is left in place — inspect "
-                f"it, or `util restore-batch` the failed batch, before resuming)"
-            )
+            if _failed_batches_moved_nothing(view):
+                # Fix round 14 (stop fixture 01b): a task refused before
+                # dispatch, a clean failure, a timeout that wrote nothing —
+                # no byte moved, so nothing is half-applied.
+                lines.append(
+                    f"      ({cost}; nothing was half-applied, so there is "
+                    f"nothing to restore)"
+                )
+            else:
+                lines.append(
+                    f"      ({cost}; the half-applied state is left in place — inspect "
+                    f"it, or `util restore-batch` the failed batch, before resuming)"
+                )
         else:
             cost = f"re-dispatches the {redispatch} failed task(s)"
             if kept is not None:
