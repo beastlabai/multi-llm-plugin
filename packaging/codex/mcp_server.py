@@ -206,8 +206,8 @@ USER_NEXT_STEP_KEY = "user_next_step"
 #: handoff's way forward is its re-attach ``next`` and its ``abort_command``,
 #: and a needs-human result's ``options`` trailed ``result``, ``output`` and
 #: ``stderr`` into the dropped middle.
-WAY_FORWARD_KEYS = (USER_NEXT_STEP_KEY, "resume_command", "no_command_reason",
-                    "next", "abort_command", "options")
+WAY_FORWARD_KEYS = (USER_NEXT_STEP_KEY, "resume_command", "resume_answers",
+                    "no_command_reason", "next", "abort_command", "options")
 
 #: The keys placed last: the long runbook (Open question 20 of
 #: plans/codex-native-plugin.md: a cut must lose runbook text, never the
@@ -2462,6 +2462,61 @@ class Server:
             outcome["resume_command"] = command
             outcome["message"] = "{} {}".format(
                 outcome.get("message") or "", self.surface["needs_human_message"]["resume"])
+            self.attach_answers(step, word, plan, outcome)
+
+    def attach_answers(self, step: dict, word: str, plan: str, outcome: dict) -> None:
+        """Lead ``options`` with the resume and every answer the stop offers.
+
+        Fix round 14 (live run 5): ``resume_command`` was a plain ``--resume``
+        while the first option replayed ``--human-task`` answers, and on a
+        first stop ``message`` and ``options`` offered only the bare resume, the
+        answers sitting in ``error``. ``util next-command --blocked`` now hands
+        back the resume's own ``flags`` and the stop's ``answers`` (each a
+        command the user types, its flags, and what it does); here the resume
+        becomes the first option — the same command as ``resume_command`` by
+        construction — each answer the next ones, in order, and the scraped
+        options follow minus any repeat, the human note still last. The answers
+        go to ``resume_answers`` and, through the surface's ``answers`` clause
+        filled with the dispatcher's ``answers_text``, into ``message``. This
+        file spells none of it. The port of ``attachAnswers``.
+        """
+        row = resolve_mode(word, self.surface)
+        if not row:
+            return
+
+        def flags_of(value):
+            return (list(value) if isinstance(value, list)
+                    and all(isinstance(flag, str) and flag for flag in value) else None)
+
+        lead = []
+        flags = flags_of(step.get("flags"))
+        if flags is not None:
+            lead.append({"mode": row["name"], "plan": plan, "question": "",
+                         "extra_flags": flags})
+        answers = []
+        for entry in step.get("answers") if isinstance(step.get("answers"), list) else []:
+            entry_flags = flags_of((entry or {}).get("flags")) if isinstance(entry, dict) else None
+            spelled, why = (entry.get("command"), entry.get("why")) if isinstance(
+                entry, dict) else (None, None)
+            if (entry_flags is None or not isinstance(spelled, str) or not spelled.strip()
+                    or not isinstance(why, str)):
+                continue
+            answers.append({"command": spelled, "why": why})
+            lead.append({"mode": row["name"], "plan": plan, "question": "",
+                         "extra_flags": entry_flags})
+        if answers:
+            outcome["resume_answers"] = answers
+            clause = (self.surface.get("needs_human_message") or {}).get("answers")
+            text = step.get("answers_text")
+            if isinstance(clause, str) and isinstance(text, str) and text.strip():
+                outcome["message"] = "{} {}".format(
+                    outcome.get("message") or "", fill(clause, {"answers": text}))
+        if not lead:
+            return
+        seen = {json.dumps(call, sort_keys=True) for call in lead}
+        rest = [option for option in outcome.get("options") or []
+                if json.dumps(option, sort_keys=True) not in seen]
+        outcome["options"] = lead + rest
 
     def attach_runbook(self, call: Call, row, outcome) -> None:
         """``util instructions <mode> --host <id>``: integrity-checked, banner dropped."""

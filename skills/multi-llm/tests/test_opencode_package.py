@@ -1762,9 +1762,13 @@ if "--blocked" in argv:
         sys.exit(0)
     command = os.environ.get("STUB_RESUME_COMMAND") or (
         "/multi-llm --" + mode + " " + plan + " --resume")
+    # `STUB_RESUME_EXTRA`: more `user_resume` keys (fix round 14: the resume's
+    # `flags`, the stop's `answers` and `answers_text`), merged as given.
+    step = {"phase": mode, "command": command}
+    step.update(json.loads(os.environ.get("STUB_RESUME_EXTRA") or "{}"))
     print("MULTI_LLM_RESULT: " + json.dumps({
         "mode": "util next-command", "state": "done", "exit": 0, "artifacts": [],
-        "next": None, "user_resume": {"phase": mode, "command": command}}))
+        "next": None, "user_resume": step}))
     sys.exit(0)
 
 with open(log, "a", encoding="utf-8") as handle:
@@ -4896,6 +4900,58 @@ class TestResumeCommand:
             built_package,
         )
         assert out is None
+
+    def _answers_step(self):
+        """A `user_resume` carrying a stop's answers, spelled by the real
+        Python (`next_phase.phase_command`, `render_resume_answers`)."""
+        sys.path.insert(0, str(SKILL_ROOT))
+        from utils import next_phase
+
+        flag_sets = [
+            ["--resume", "--human-task", "T002=done", "--human-task", "T005=skip"],
+            ["--resume", "--human-task", "T005=skip"],
+        ]
+        answers = [
+            {"command": next_phase.phase_command(
+                "plans/x.md", "opencode", "package", "implement", *flags),
+             "flags": flags, "why": f"way {index}"}
+            for index, flags in enumerate(flag_sets)
+        ]
+        return {"flags": ["--resume"], "answers": answers,
+                "answers_text": next_phase.render_resume_answers(answers)}
+
+    def test_the_resume_and_the_stops_answers_lead_the_options(
+        self, built_package, uv_stub,
+    ):
+        """Fix round 14 (live run 5, OpenCode stop fix 01 and accept 02): the
+        first option replayed `--human-task` answers beside a plain
+        `resume_command`, and a first stop's `message` and `options` offered
+        only the bare resume, the answers sitting in `error`."""
+        step = self._answers_step()
+        resume_line = {"exit": 3, "stdout": [
+            "      resume with: uv run -- python multi_llm.py implement "
+            "plans/x.md --host opencode --detach --resume",
+            'MULTI_LLM_RESULT: {"state":"needs-human","exit":3,"artifacts":[],'
+            '"next":null,"error":"batch 0 refused"}']}
+        result, _ = uv_stub.run(
+            built_package, self.IMPLEMENT, [self.LAUNCH, resume_line],
+            extra_env={"STUB_RESUME_EXTRA": json.dumps(step)})
+        surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())
+        assert result["resume_command"] == "/multi-llm --implement plans/x.md --resume"
+        calls = [option["args"] for option in result["options"] if "args" in option]
+        assert calls[0] == dict(self.IMPLEMENT, extra_flags=["--resume"])
+        assert calls[1:] == [dict(self.IMPLEMENT, extra_flags=answer["flags"])
+                             for answer in step["answers"]]
+        assert len(calls) == 1 + len(step["answers"])
+        assert "human" in result["options"][-1] and "args" not in result["options"][-1]
+        assert result["resume_answers"] == [
+            {"command": answer["command"], "why": answer["why"]}
+            for answer in step["answers"]]
+        clause = surface["needs_human_message"]["answers"].replace(
+            "{answers}", step["answers_text"])
+        assert result["message"].endswith(clause)
+        assert list(result)[:5] == [
+            "ok", "state", "user_next_step", "resume_command", "resume_answers"]
 
     def test_the_plugin_spells_none_of_the_lookup(self, built_package):
         surface = json.loads((built_package / "dist" / "cli-surface.json").read_text())

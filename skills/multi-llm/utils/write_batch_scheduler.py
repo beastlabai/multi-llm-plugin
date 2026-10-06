@@ -6984,7 +6984,131 @@ class WriteBatchScheduler:
             # remedy does not release (fix round 13).
             result.stop["blocked"] = dict(sorted(result.blocked_by_check.items()))
             result.stop["check_task_ids"] = self._blocking_checks(result)
+        answers = self._stop_answers(result, failed)
+        if answers:
+            result.stop["answers"] = answers
         result.stop["headline"] = self._stop_headline(result.stop)
+
+    def _stop_answers(
+        self, result: SchedulerResult, failed: Sequence[TaskOutcome] = (),
+    ) -> List[Dict[str, Any]]:
+        """The ``--human-task`` answers this stop offers, as data (fix round 14).
+
+        ``[{"flags": [...], "why": ...}]``, each a resume command's flags
+        (``--resume`` first) and one plain clause saying what it does, in the
+        order a user weighs them: the one combined command that goes on
+        without fixing anything (when more than one task needs an answer),
+        then each task's own answers — a task refused before dispatch
+        (``skip``, ``done``), a clean failure (``done``, ``skip``, ``retry``
+        when it was not run again) and each check whose findings hold tasks
+        back (``done``, ``skip``, ``retry``). The same answers the stop
+        message names (:meth:`_way_forward_lines`,
+        :meth:`_held_by_checks_lines`, :meth:`_check_block_message`); a
+        partial application offers none, since it is inspected first.
+
+        Recorded on the stop (``write_batch_report.json``, the mirror) so
+        ``util next-command --blocked implement`` can hand the tool routes
+        each one as a command the user types and an ``options`` entry: on
+        live run 5 the answers lived only in the result's ``error`` and the
+        hosts relayed them in two of four first stops. ``implement`` only:
+        ``--human-task`` is its flag.
+        """
+        if self.kind != "implement":
+            return []
+        already = set(result.human_plan.skipped)
+        manual = {
+            str(t.get("task_id", "")) for t in self.tasks
+            if t.get("executor_role") == "human" or t.get("is_human")
+        }
+
+        def undone_with(task_id: str) -> List[str]:
+            return [
+                dep for dep in self._dependents_of(task_id)
+                if dep not in already and dep not in manual
+                and self._task_by_id(dep) is not None
+            ]
+
+        def answer(task_id: str, word: str) -> List[str]:
+            return ["--human-task", f"{task_id}={word}"]
+
+        def skipped_clause(task_id: str) -> str:
+            deps = undone_with(task_id)
+            return f"leave {task_id} undone" + (
+                f", with the tasks that depend on it ({', '.join(deps)})" if deps else ""
+            )
+
+        refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
+        acceptable = [
+            o for o in failed
+            if o.task_id not in self._refused_before_dispatch
+            and o.write_outcome == WRITE_CLEAN_FAILURE and not o.files_touched
+        ]
+        blocked = result.blocked_by_check
+        checks = self._blocking_checks(result) if blocked else []
+        found = result.check_findings()
+        each: List[Dict[str, Any]] = []
+        for outcome in refused:
+            task_id = outcome.task_id
+            each.append({"flags": answer(task_id, "skip"),
+                         "why": skipped_clause(task_id)})
+            each.append({
+                "flags": answer(task_id, "done"),
+                "why": (f"once you have made {task_id}'s change yourself: "
+                        f"{task_id} counts as done and the tasks after it run"),
+            })
+        for outcome in acceptable:
+            task_id = outcome.task_id
+            each.append({
+                "flags": answer(task_id, "done"),
+                "why": (f"accept {task_id}'s failure: {task_id} counts as done "
+                        "and the tasks after it run"),
+            })
+            each.append({"flags": answer(task_id, "skip"),
+                         "why": skipped_clause(task_id)})
+            if outcome.not_rerun:
+                each.append({
+                    "flags": answer(task_id, "retry"),
+                    "why": f"run {task_id}'s check again on unchanged files",
+                })
+        for check_id in checks:
+            waiting = sorted(t for t, c in blocked.items() if c == check_id)
+            each.append({
+                "flags": answer(check_id, "done"),
+                "why": (f"accept {check_id}'s check findings: "
+                        f"{', '.join(waiting)} then run, and the findings stay "
+                        "listed for review-code"
+                        + (f" ({'; '.join(found.get(check_id) or [])[:200]})"
+                           if found.get(check_id) else "")),
+            })
+            each.append({
+                "flags": answer(check_id, "skip"),
+                "why": f"leave {check_id} and {', '.join(waiting)} undone",
+            })
+            each.append({
+                "flags": answer(check_id, "retry"),
+                "why": f"run {check_id}'s check again on unchanged files",
+            })
+        # One command that goes on without fixing anything: every check with
+        # findings accepted, every refused or cleanly failed task left undone.
+        combined_flags: List[str] = []
+        clauses: List[str] = []
+        for check_id in checks:
+            combined_flags += answer(check_id, "done")
+            clauses.append(f"accept {check_id}'s check findings")
+        for outcome in [*refused, *acceptable]:
+            combined_flags += answer(outcome.task_id, "skip")
+            clauses.append(skipped_clause(outcome.task_id))
+        answers: List[Dict[str, Any]] = []
+        if len(clauses) > 1:
+            answers.append({
+                "flags": ["--resume", *combined_flags],
+                "why": " and ".join(clauses) + "; the rest runs",
+            })
+        answers.extend(
+            {"flags": ["--resume", *item["flags"]], "why": item["why"]}
+            for item in each
+        )
+        return answers
 
     def _record_not_run_in_state(self, result: SchedulerResult) -> None:
         """Give each ``result.not_run`` task its reason on a ``pending`` status.
@@ -7092,6 +7216,9 @@ class WriteBatchScheduler:
             "acceptable": True,
             "not_rerun": False,
         }
+        answers = self._stop_answers(result)
+        if answers:
+            result.stop["answers"] = answers
         result.stop["headline"] = self._stop_headline(result.stop)
 
     def _check_block_message(self, result: SchedulerResult) -> List[str]:

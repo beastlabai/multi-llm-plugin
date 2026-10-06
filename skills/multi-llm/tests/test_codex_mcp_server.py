@@ -179,9 +179,13 @@ if dargv[:2] == {resume_argv!r}:
         sys.exit(0)
     command = os.environ.get("STUB_RESUME_COMMAND") or (
         "$multi-llm:multi-llm --" + dargv[4] + " " + dargv[2] + " --resume")
+    # `STUB_RESUME_EXTRA`: more `user_resume` keys (fix round 14: the resume's
+    # `flags`, the stop's `answers` and `answers_text`), merged as given.
+    step = {{"phase": dargv[4], "command": command}}
+    step.update(json.loads(os.environ.get("STUB_RESUME_EXTRA") or "{{}}"))
     print({marker!r} + " " + json.dumps({{
         "mode": "util next-command", "state": "done", "exit": 0, "artifacts": [],
-        "next": None, "user_resume": {{"phase": dargv[4], "command": command}}}}))
+        "next": None, "user_resume": step}}))
     sys.exit(0)
 with open(log, "a", encoding="utf-8") as handle:
     handle.write(json.dumps(record) + "\n")
@@ -2592,6 +2596,84 @@ def failed_implement_status(harness, **body) -> dict:
         "      resume with: {} implement {} --host {} --detach --resume".format(
             UV_PREFIX, absolute, SURFACE["host"]),
         result_line(**payload)]}
+
+
+IMPLEMENT_CALL = {"mode": "implement", "plan": "plans/x.md", "question": "",
+                  "extra_flags": []}
+
+
+def stop_answers_step(plan="plans/x.md"):
+    """A `user_resume` carrying a stop's answers, spelled by the real Python
+    (`next_phase.phase_command`, `render_resume_answers`), never by hand."""
+    sys.path.insert(0, str(SKILL_ROOT))
+    from utils import next_phase
+
+    host = SURFACE["host"]
+    flag_sets = [
+        ["--resume", "--human-task", "T002=done", "--human-task", "T005=skip"],
+        ["--resume", "--human-task", "T005=skip"],
+    ]
+    whys = ["accept T002's check findings and leave T005 undone; the rest runs",
+            "leave T005 undone, with the tasks that depend on it (T006)"]
+    answers = [
+        {"command": next_phase.phase_command(plan, host, "package", "implement", *flags),
+         "flags": flags, "why": why}
+        for flags, why in zip(flag_sets, whys)
+    ]
+    return {"flags": ["--resume"], "answers": answers,
+            "answers_text": next_phase.render_resume_answers(answers)}
+
+
+class TestTheStopsAnswersLeadTheOptions:
+    """Fix round 14 (live run 5, Codex stop fix 01 and accept 02): the first
+    option replayed `--human-task` answers while `resume_command` was a plain
+    `--resume`, and on a first stop `message` and `options` offered only the
+    bare resume, the answers sitting in `error`. The resume is now the first
+    option by construction, each answer the stop offers the next ones, and
+    `resume_answers` plus `message` name every one."""
+
+    def _run(self, harness, step):
+        return harness.run(
+            IMPLEMENT_CALL, [launch_step(), failed_implement_status(harness)],
+            meta=turn_meta(sandbox_mode="workspace-write"),
+            extra_env={"STUB_RESUME_COMMAND": SPELLED_RESUME,
+                       "STUB_RESUME_EXTRA": json.dumps(step)})[0]
+
+    def test_the_first_option_is_the_resume_command_and_the_answers_follow(
+        self, harness,
+    ):
+        step = stop_answers_step()
+        envelope = self._run(harness, step)
+        assert envelope["resume_command"] == SPELLED_RESUME
+        calls = [option for option in envelope["options"] if "human" not in option]
+        assert calls[0] == dict(IMPLEMENT_CALL, extra_flags=["--resume"])
+        assert SPELLED_RESUME.split()[3:] == calls[0]["extra_flags"]
+        assert calls[1:] == [dict(IMPLEMENT_CALL, extra_flags=answer["flags"])
+                             for answer in step["answers"]]
+        # status's own `resume with:` line is the same call: listed once.
+        assert len(calls) == 1 + len(step["answers"])
+        assert envelope["options"][-1] == {"human": SURFACE["needs_human_option"]}
+
+    def test_message_and_resume_answers_name_every_answer(self, harness):
+        step = stop_answers_step()
+        envelope = self._run(harness, step)
+        assert envelope["resume_answers"] == [
+            {"command": answer["command"], "why": answer["why"]}
+            for answer in step["answers"]]
+        clause = SURFACE["needs_human_message"]["answers"].replace(
+            "{answers}", step["answers_text"])
+        assert envelope["message"].endswith(clause)
+        for answer in step["answers"]:
+            assert f"`{answer['command']}`" in envelope["message"]
+        assert list(envelope)[:5] == [
+            "ok", "state", "user_next_step", "resume_command", "resume_answers"]
+
+    def test_a_lookup_with_no_answers_leaves_the_options_as_scraped(self, harness):
+        envelope = self._run(harness, {})
+        assert "resume_answers" not in envelope
+        assert envelope["message"].endswith(SURFACE["needs_human_message"]["resume"])
+        calls = [option for option in envelope["options"] if "human" not in option]
+        assert calls == [dict(IMPLEMENT_CALL, extra_flags=["--resume"])]
 
 
 class TestAReportCallOnAFailedRun:

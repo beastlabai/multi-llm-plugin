@@ -2770,8 +2770,9 @@ async function fetchInstructions({ row, surface, ctx, env, uv, anchor }) {
 
 /**
  * `util next-command <plan> --blocked <mode> --host <id>`: the command that
- * resumes a blocked write phase, as the result line's `user_resume.command`, or
- * `null`.
+ * resumes a blocked write phase, as the result line's `user_resume` (its
+ * `command`, the resume's `flags`, the stop's `answers`) plus the `word` and
+ * `plan` it was asked about, or `null`.
  *
  * Asked after an exit 3 so the user is left with something to type: the
  * dispatcher's own output names the retry as a raw `uv run` argv (redacted
@@ -2810,8 +2811,71 @@ async function fetchResumeCommand({
   if (child.spawnError || child.code !== surface.dispatcher.exit_codes.ok) {
     return null
   }
-  const command = child.result?.[resume.result_key]?.command
-  return typeof command === "string" && command.trim() ? command : null
+  const step = child.result?.[resume.result_key]
+  const command = step?.command
+  return typeof command === "string" && command.trim()
+    ? { ...step, command, word, plan }
+    : null
+}
+
+/**
+ * Lead `options` with the resume and every answer the stop offers.
+ *
+ * Fix round 14 (live run 5): `resume_command` was a plain `--resume` while the
+ * first option replayed `--human-task` answers, and on a first stop `message`
+ * and `options` offered only the bare resume, the answers sitting in `error`.
+ * `util next-command --blocked` now hands back the resume's own `flags` and
+ * the stop's `answers` (each a command the user types, its flags and what it
+ * does); here the resume becomes the first option — the same command as
+ * `resume_command` by construction — each answer the next ones, in order, and
+ * the scraped options follow minus any repeat, the human note still last. The
+ * answers go to `resume_answers` and, through the surface's `answers` clause
+ * filled with the dispatcher's `answers_text`, into `message`. This file
+ * spells none of it. The port of the codex server's `attach_answers`.
+ */
+function attachAnswers(step, outcome, surface) {
+  const row = resolveMode(step.word, surface)
+  if (!row) return
+  const flagsOf = (value) =>
+    Array.isArray(value) &&
+    value.every((flag) => typeof flag === "string" && flag)
+      ? [...value]
+      : null
+  const callFor = (extraFlags) => {
+    const args = {
+      mode: row.name, plan: step.plan, question: "", extra_flags: extraFlags,
+    }
+    return { tool: surface.tool_name, args, human: describeCall(args, surface) }
+  }
+  const lead = []
+  const flags = flagsOf(step.flags)
+  if (flags) lead.push(callFor(flags))
+  const answers = []
+  for (const entry of Array.isArray(step.answers) ? step.answers : []) {
+    const entryFlags = flagsOf(entry?.flags)
+    if (
+      !entryFlags || typeof entry.command !== "string" ||
+      !entry.command.trim() || typeof entry.why !== "string"
+    ) {
+      continue
+    }
+    answers.push({ command: entry.command, why: entry.why })
+    lead.push(callFor(entryFlags))
+  }
+  if (answers.length) {
+    outcome.resume_answers = answers
+    const clause = surface.needs_human_message?.answers
+    const text = step.answers_text
+    if (typeof clause === "string" && typeof text === "string" && text.trim()) {
+      outcome.message = `${outcome.message} ${clause.split("{answers}").join(text)}`
+    }
+  }
+  if (!lead.length) return
+  const seen = new Set(lead.map((call) => JSON.stringify(call.args)))
+  const rest = (outcome.options ?? []).filter(
+    (option) => !(option?.args && seen.has(JSON.stringify(option.args))),
+  )
+  outcome.options = [...lead, ...rest]
 }
 
 /**
@@ -3107,8 +3171,9 @@ async function execute(args, ctx, surface, client) {
         values, surface, ctx, env, uv, anchor, outcome,
       })
       if (resume) {
-        outcome.resume_command = resume
+        outcome.resume_command = resume.command
         outcome.message = `${outcome.message} ${surface.needs_human_message.resume}`
+        attachAnswers(resume, outcome, surface)
       }
     }
     // Echoed for the same reason `anchor` is: a wrong one is otherwise
@@ -3177,7 +3242,9 @@ function finishFields(outcome, checked, surface) {
 }
 
 /** The keys that tell the user what to type, right after `ok` and `state`. */
-const WAY_FORWARD_KEYS = ["user_next_step", "resume_command", "no_command_reason"]
+const WAY_FORWARD_KEYS = [
+  "user_next_step", "resume_command", "resume_answers", "no_command_reason",
+]
 
 /**
  * The calls a result hands back, led after those when set (fix round 8): a

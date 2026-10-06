@@ -794,8 +794,13 @@ class ResultContext:
     def set_user_resume(self, obj: Optional[Dict[str, Any]]) -> None:
         """Record the command that *resumes* a stopped write phase, for the user.
 
-        ``{"phase", "command"}``: the same phase, in the host's own spelling
-        (``utils.next_phase.resume_command``). Not ``user_next_step``, which
+        ``{"phase", "command", "flags"}``: the same phase, in the host's own
+        spelling (``utils.next_phase.resume_command``), and the flags it
+        carries after the plan; plus, when the phase's last stop named
+        ``--human-task`` answers, ``answers`` (``[{command, flags, why}]``)
+        and ``answers_text`` (them as one run of text), so a tool route offers
+        each as an option and names each in its message (fix round 14). Not
+        ``user_next_step``, which
         names the *next* phase and is never set on a failed run, and never
         ``next``, which a tool route auto-follows: a needs-human stop is where a
         person decides, so this is for the user to type and nothing may run it.

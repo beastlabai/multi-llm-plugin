@@ -1023,7 +1023,8 @@ class TestResumeCommand:
         assert code == 0
         assert out.out == f"[RESUME_COMMAND] $multi-llm:multi-llm --implement {P} --resume\n"
         assert key == {"phase": "implement",
-                       "command": f"$multi-llm:multi-llm --implement {P} --resume"}
+                       "command": f"$multi-llm:multi-llm --implement {P} --resume",
+                       "flags": ["--resume"]}
 
     def test_util_prints_nothing_for_a_mode_with_no_resume(self, tmp_path, monkeypatch, capsys):
         _build(tmp_path, S(UP_TO_TASKS, tasks=IMPLEMENT_PARTIAL))
@@ -1161,7 +1162,8 @@ class TestResumeCommand:
         assert code == 0
         assert out.out == f"[RESUME_COMMAND] /multi-llm --generate-tasks {P}\n"
         assert key == {"phase": "generate-tasks",
-                       "command": f"/multi-llm --generate-tasks {P}"}
+                       "command": f"/multi-llm --generate-tasks {P}",
+                       "flags": []}
 
     def test_no_re_invoke_after_a_prerequisite_refusal(self, tmp_path, monkeypatch, capsys):
         """Adversarial review 2026-10-05: the gate exits 3 before any status

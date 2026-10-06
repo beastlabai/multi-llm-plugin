@@ -9,6 +9,10 @@ routes and on Claude Code's native leg. Each class pins one finding:
 * after ``--resume --human-task …`` the next stop's ``resume_command`` was a
   plain ``--resume`` while its first option replayed the answers: the
   answers are on record, and a plain ``--resume`` applies them;
+* on a first stop ``message`` and ``options`` offered only the bare
+  ``--resume``, the answers sitting in ``error``: the stop now records its
+  answers as data and ``util next-command --blocked`` hands each back as a
+  command in the host's spelling (the servers make them options);
 """
 
 from __future__ import annotations
@@ -67,3 +71,63 @@ class TestAPlainResumeKeepsTheAnswersOnRecord:
         assert _dispatched_titles(repo) == [NOTE]
         statuses = _statuses(repo)
         assert statuses["T005"] == "skipped" and statuses["T006"] == "skipped"
+
+
+#: The answers the check-gate first stop offers, in the order a user weighs
+#: them: the combined go-on-without-fixing command, then T005's (refused before
+#: dispatch), then T002's (its findings hold T007).
+FIRST_STOP_FLAGS = [
+    ["--resume", "--human-task", "T002=done", "--human-task", "T005=skip"],
+    ["--resume", "--human-task", "T005=skip"],
+    ["--resume", "--human-task", "T005=done"],
+    ["--resume", "--human-task", "T002=done"],
+    ["--resume", "--human-task", "T002=skip"],
+    ["--resume", "--human-task", "T002=retry"],
+]
+
+
+class TestTheStopRecordsItsAnswers:
+
+    def test_the_first_stop_records_every_answer_it_names(self, repo, capsys):
+        text = _first_run(repo, capsys)
+        report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
+        answers = report["stop"]["answers"]
+        assert [a["flags"] for a in answers] == FIRST_STOP_FLAGS
+        assert answers[0]["why"].startswith(
+            "accept T002's check findings and leave T005 undone, with the "
+            "tasks that depend on it (T006)")
+        assert "T007 then run" in answers[3]["why"]
+        mirror = json.loads(
+            (repo.phase_dir / ".status.json").read_text()
+        )["progress"]["write_subagents"]["stop"]
+        assert mirror["answers"] == answers
+        # Every answer recorded is one the stop's own text names.
+        for flags in FIRST_STOP_FLAGS:
+            assert " ".join(flags[1:]) in text, flags
+
+    def test_util_next_command_spells_each_one_for_the_host(
+        self, repo, capsys, monkeypatch,
+    ):
+        import modes
+        from utils import cli_common, next_phase
+
+        _first_run(repo, capsys)
+        record = {}
+        monkeypatch.setattr(cli_common, "record_user_resume",
+                            lambda obj: record.setdefault("v", obj))
+        monkeypatch.setenv(modes.ROUTE_ENV, "package")
+        plan = "plans/checked.md"
+        assert next_phase.main([plan, "--blocked", "implement", "--host", "codex"]) == 0
+        out = capsys.readouterr().out
+        resume = record["v"]
+        prefix = f"$multi-llm:multi-llm --implement {plan}"
+        assert out == f"[RESUME_COMMAND] {prefix} --resume\n"
+        assert resume["command"] == f"{prefix} --resume"
+        assert resume["flags"] == ["--resume"]
+        assert [a["flags"] for a in resume["answers"]] == FIRST_STOP_FLAGS
+        assert [a["command"] for a in resume["answers"]] == [
+            f"{prefix} {' '.join(flags)}" for flags in FIRST_STOP_FLAGS]
+        assert all(a["why"] for a in resume["answers"])
+        text = resume["answers_text"]
+        for answer in resume["answers"]:
+            assert f"`{answer['command']}` ({answer['why']})" in text

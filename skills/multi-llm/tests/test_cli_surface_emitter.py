@@ -375,7 +375,11 @@ def test_the_no_command_sentences_are_the_tables(host):
     # The redaction sentence now says where a redacted command went for the
     # user (its host spelling), and that only `resume_command` is theirs.
     assert "re-spelled" in message["template"]
-    assert "only `resume_command` is theirs to type" in message["template"]
+    assert "only `resume_command` (and each `resume_answers` command) is " \
+        "theirs to type" in message["template"]
+    # Fix round 14: the stop's answers have a clause of their own.
+    assert "{answers}" in message["answers"]
+    assert "`resume_answers`" in message["answers"]
 
 
 @pytest.mark.parametrize("host", HOSTS)
