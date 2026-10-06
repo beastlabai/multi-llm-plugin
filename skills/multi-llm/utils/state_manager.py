@@ -10,7 +10,7 @@ import tempfile
 import unicodedata
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from .git_utils import get_current_head, get_branch_name
 from .judge_vocab import upgrade_legacy
@@ -1162,6 +1162,25 @@ class StateManager:
             for task_id in sorted(owed)
             if scope is None or task_id in scope
         ]
+
+    def manual_tasks_to_close(self, deferred: Sequence[Dict[str, Any]]) -> List[str]:
+        """The ids of *deferred* (:meth:`deferred_implementation_tasks`) that a
+        ``--human-task <id>=done`` closes: the manual tasks themselves.
+
+        Fix round 16: the how-to-close note answered every deferred id, so a
+        code task ``skip-dependents`` skipped with a manual task got
+        ``--human-task <id>=done`` too, which implement refuses (a code task is
+        answerable only once it failed); it runs on that same resume once its
+        manual task is done. A state with no ``implement_human_task_ids`` (one
+        written before fix round 7) keeps every id, as before.
+        """
+        ids = [str(entry.get("id")) for entry in deferred
+               if isinstance(entry, dict) and entry.get("id")]
+        human = self.state.get("implement_human_task_ids")
+        if not isinstance(human, list):
+            return ids
+        manual = {str(task_id) for task_id in human}
+        return [task_id for task_id in ids if task_id in manual]
 
     def implementation_check_findings(self) -> List[Dict[str, Any]]:
         """The implement check tasks whose check reported problems, by id.

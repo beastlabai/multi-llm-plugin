@@ -8760,6 +8760,30 @@ class WriteBatchScheduler:
             return None
         return _parse_local_timestamp(completed.get(review))
 
+    def _manual_close_note(self, deferred: Dict[str, str]) -> Optional[str]:
+        """How to record the deferred manual tasks done, in the host's
+        spelling (``user_commands["answers"]``), or ``None``.
+
+        Fix round 16 (live run 6): the how-to-close note rode implement's
+        result only, never its summary.md, on either leg. The manual tasks
+        only: a code task skipped with one is not answerable ``done`` and
+        runs on that resume.
+        """
+        template = self.user_commands.get("answers")
+        if self.kind != "implement" or not template or "{answers}" not in template:
+            return None
+        manual = sorted(
+            task_id for task_id in deferred
+            if (self._task_by_id(task_id) or {}).get("executor_role") == "human"
+            or (self._task_by_id(task_id) or {}).get("is_human")
+        )
+        if not manual:
+            return None
+        from .next_phase import manual_close_note
+
+        return manual_close_note(template.replace(
+            "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)))
+
     def _write_summary(self, result: SchedulerResult) -> str:
         """The implementation summary, with the three conditional sections (D3n)."""
         plan_name = Path(self.plan_file).name if self.plan_file else "(plan)"
@@ -8875,6 +8899,9 @@ class WriteBatchScheduler:
             lines += ["| Task | Reason |", "|------|--------|"]
             for task_id, reason in sorted(deferred.items()):
                 lines.append(f"| {task_id} | {reason} |")
+            note = self._manual_close_note(deferred)
+            if note:
+                lines += ["", note]
         if declined:
             # The user's own decision, not work left for them: a pause-and-ask
             # "Skip", a failed task answered `--human-task <id>=skip`, and the

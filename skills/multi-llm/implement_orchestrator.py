@@ -923,6 +923,26 @@ def _prepare_selected_task(
     state.save()
 
 
+def _manual_close_note(
+    args: argparse.Namespace, plan_arg: str, task_ids: Sequence[str],
+) -> Optional[str]:
+    """``next_phase.manual_close_note`` for *task_ids*, in this host's own
+    command spelling (the template the result line's ``user_next_step``
+    uses); ``None`` when nothing can be spelled."""
+    import io
+
+    try:
+        from utils import host_capabilities as _hosts
+        from utils import next_phase as _next
+
+        host_id = _hosts.resolve_host_id(explicit=getattr(args, "host", None))
+        template = _hosts.next_command_template(
+            host_id, _next.resolve_route(host_id, stderr=io.StringIO()))
+        return _next.manual_close_note(_next.close_command(template, plan_arg, task_ids))
+    except Exception:  # noqa: BLE001 - advisory: the deferred list still stands
+        return None
+
+
 def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
     """The way forward after a stop, in this host's own command spelling.
 
@@ -2317,6 +2337,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             check_findings_ids=rerunnable_checks(state.state),
             state_record=state.state,
         )
+    if native_human_plan is not None:
+        # How to record the deferred manual tasks done, in this host's
+        # spelling, for the host's summary and report (fix round 16, live
+        # run 6: the native implement said only "T011 … deferred" and the
+        # command first appeared two phases later). The manual tasks only: a
+        # code task skipped with one runs on that resume.
+        manual_ids = sorted(
+            set(native_human_plan.deferred()) & {str(t) for t in human_task_ids}
+        )
+        note = (
+            _manual_close_note(args, str(output_data["plan_arg"]), manual_ids)
+            if manual_ids else None
+        )
+        if note:
+            output_data["manual_tasks_note"] = note
     native_withheld: Optional[Dict[str, Dict[str, str]]] = None
     if not executor_backed:
         native_withheld = _native_withheld(
@@ -2415,13 +2450,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         deferred = native_human_plan.deferred()
         declined = native_human_plan.declined()
         if deferred:
+            note = output_data.get("manual_tasks_note")
             print(
                 "Deferred tasks (recorded skipped in state.json; do not "
                 "dispatch them, and list them in the summary's Manual Tasks "
-                "(Deferred) section):"
+                "(Deferred) section"
+                + (", with the text of the [MANUAL_TASK_NOTE] line below the "
+                   "list under it, verbatim; give that text in your report "
+                   "too" if note else "")
+                + "):"
             )
             for task_id, reason in sorted(deferred.items()):
                 print(f"  {_named(task_id)}: {reason}")
+            if note:
+                print(f"[MANUAL_TASK_NOTE] {note}")
         if declined:
             # Not owed: the workflow's `[MANUAL_TASK]` lines leave these out,
             # so a summary that filed them under Manual Tasks (Deferred)

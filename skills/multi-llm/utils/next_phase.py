@@ -183,7 +183,8 @@ class NextPhase:
         if self.answers is not None:
             payload["answers"] = self.answers.to_dict()
         if self.manual_tasks:
-            # Fix round 16: the tool routes relay this key, not the notice.
+            # Fix round 16: the tool routes relay this key, and `util
+            # next-command` prints it as [MANUAL_TASK_NOTE].
             payload["manual_tasks"] = [task.to_dict() for task in self.manual_tasks]
             if self.manual_tasks_note:
                 payload["manual_tasks_note"] = self.manual_tasks_note
@@ -217,22 +218,38 @@ def _manual_tasks(
     *,
     template: Optional[str] = None,
     plan_arg: Optional[str] = None,
-) -> Tuple[Tuple[ManualTask, ...], Optional[str]]:
-    """``(manual_tasks, manual_tasks_note)`` off the workflow payload's
-    ``implement`` entry: the tasks the run deferred to the user and, with the
-    host's *template* and the *plan_arg*, how to record them done."""
-    entries = (phases.get("implement") or {}).get("manual_tasks") or ()
+) -> Tuple[Tuple["ManualTask", ...], Optional[str]]:
+    """The implement tasks the run deferred, and the note saying how to close
+    them (``None`` without a template and plan, or with nothing to answer).
+
+    The note's command answers :func:`manual_close_ids` only (fix round 16).
+    """
+    implement = phases.get("implement") or {}
+    entries = implement.get("manual_tasks") or ()
     manual = tuple(
         ManualTask(str(entry.get("id")), entry.get("title") or None)
         for entry in entries
         if isinstance(entry, Mapping) and entry.get("id")
     )
     note = None
-    if manual and template is not None and plan_arg is not None:
-        note = manual_close_note(
-            close_command(template, plan_arg, [task.id for task in manual])
-        )
+    ids = manual_close_ids(implement)
+    if manual and ids and template is not None and plan_arg is not None:
+        note = manual_close_note(close_command(template, plan_arg, ids))
     return manual, note
+
+
+def manual_close_ids(implement: Mapping[str, Any]) -> List[str]:
+    """The deferred ids a ``--human-task <id>=done`` closes, off the workflow
+    payload's ``implement`` entry: ``manual_close_ids`` (the manual tasks
+    themselves, ``StateManager.manual_tasks_to_close``) when present, else
+    every ``manual_tasks`` id (a payload built before fix round 16)."""
+    recorded = implement.get("manual_close_ids")
+    if isinstance(recorded, list):
+        return [str(task_id) for task_id in recorded if task_id]
+    return [
+        str(entry.get("id")) for entry in implement.get("manual_tasks") or ()
+        if isinstance(entry, Mapping) and entry.get("id")
+    ]
 
 
 def _with_manual_tasks(
@@ -890,13 +907,13 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     ``[NEXT_COMMAND_OPTIONAL]`` pair in the answer's order. A command line holds
     the command and nothing else.
     """
+    manual_lines = [
+        f"{MANUAL_TASK_MARKER} {task.line()}" for task in answer.manual_tasks
+    ]
+    if answer.manual_tasks and answer.manual_tasks_note:
+        manual_lines.append(f"{MANUAL_TASK_NOTE_MARKER} {answer.manual_tasks_note}")
     if answer.complete:
-        lines = [WORKFLOW_COMPLETE_MARKER] + [
-            f"{MANUAL_TASK_MARKER} {task.line()}" for task in answer.manual_tasks
-        ]
-        if answer.manual_tasks and answer.manual_tasks_note:
-            lines.append(f"{MANUAL_TASK_NOTE_MARKER} {answer.manual_tasks_note}")
-        return lines
+        return [WORKFLOW_COMPLETE_MARKER] + manual_lines
     lines = []
     if answer.warning:
         lines.append(f"{RUNNER_WARNING_MARKER} {answer.warning}")
@@ -907,7 +924,9 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     if answer.answers is not None:
         lines.append(f"{NEXT_COMMAND_ANSWERS_WHY_MARKER} {answer.answers.why}")
         lines.append(f"{NEXT_COMMAND_ANSWERS_MARKER} {answer.answers.command}")
-    return lines
+    # After the commands (fix round 16, `util next-command --after implement`):
+    # the tasks implement deferred to the user, and how to record them done.
+    return lines + manual_lines
 
 
 def implement_answers(
@@ -980,6 +999,14 @@ def implement_answers(
 # The emitters' shared step (§2.2)
 # ---------------------------------------------------------------------------
 
+def _after_implement(after_mode: Optional[str]) -> bool:
+    """Whether ``--after`` names implement (its mode word or an alias)."""
+    if not after_mode:
+        return False
+    mode = _skill_module("modes").resolve(after_mode)
+    return mode is not None and mode.phase == "implement"
+
+
 class LookupFailed(Exception):
     """Raised by :func:`emit_answer` under ``strict=True``, after its stderr line."""
 
@@ -1048,6 +1075,11 @@ def emit_answer(
             if not _state_file(os.path.abspath(str(source))).is_file():
                 return None
         route = resolve_route(host_id, stderr=err)
+        manual_wanted = with_answers and _after_implement(after_mode)
+        if manual_wanted and workflow is None:
+            # Read once, for the answer and the manual tasks beside it.
+            source = plan_arg if plan_path is None else plan_path
+            workflow = _workflow_payload(Path(os.path.abspath(str(source))), host_id)
         answer = next_phase_commands(
             plan_arg, host_id, route, finished_mode,
             after_mode=after_mode, plan_path=plan_path, workflow=workflow,
@@ -1067,6 +1099,21 @@ def emit_answer(
             )
             if answers is not None:
                 answer = _replace(answer, answers=answers)
+        if manual_wanted and not answer.complete:
+            # `util next-command --after implement` only: the native leg's
+            # report step, where the tool routes' implement result carries
+            # the deferred manual tasks and how to close them in its notice.
+            # Live run 6 (Claude Code racing 06) said only "T011 … deferred"
+            # until the workflow completed two phases later (fix round 16).
+            from dataclasses import replace as _replace
+
+            manual, note = _manual_tasks(
+                (workflow or {}).get("phases") or {},
+                template=_host_capabilities().next_command_template(host_id, route),
+                plan_arg=plan_arg,
+            )
+            if manual:
+                answer = _replace(answer, manual_tasks=manual, manual_tasks_note=note)
         payload = answer.to_dict()
         out = sys.stdout if stream is None else stream
         for line in render_next_phase_lines(answer):
