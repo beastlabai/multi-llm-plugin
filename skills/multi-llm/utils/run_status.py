@@ -2505,6 +2505,22 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         unrun = [str(t) for t in failing if str(t) in could_not]
         if unrun:
             parts.append(f"own check could not run {', '.join(unrun)}")
+    # Fix round 18: an item a finished batch declined (or one skipped at the
+    # user's request) is named, never only left out of `items applied`.
+    for key, words in (
+        ("declined_items", "not applied, declined by its batch"),
+        ("skipped_items", "not applied, skipped at your request"),
+    ):
+        entries = [
+            entry for entry in (mirror.get(key) or [])
+            if isinstance(entry, dict) and entry.get("id")
+        ] if isinstance(mirror.get(key), list) else []
+        if entries:
+            parts.append(f"{words}: " + "; ".join(
+                f"{str(entry['id'])[:8]} in {entry.get('task_id')} "
+                f"({' '.join(str(entry.get('reason') or '').split())[:120]})"
+                for entry in entries[:5]
+            ) + (f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""))
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []

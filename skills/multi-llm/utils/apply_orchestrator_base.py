@@ -2594,12 +2594,58 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         :meth:`_phase_rows`, the rows the report lists, so the count lines
         agree with the table under them.
         """
-        counts = {"applied": 0, "no-op": 0, "clean-failure": 0}
+        counts = {
+            "applied": 0, "no-op": 0, "clean-failure": 0,
+            "declined": 0, "skipped": 0,
+        }
         for row in rows:
             verdict = row.get("write_outcome")
             if self._row_ok(row) and verdict in counts:
-                counts[verdict] += len(self._row_item_ids(row))
+                # Fix round 18: an item its batch declined, or one skipped at
+                # the user's request, is never counted under the batch's
+                # verdict (an `applied` batch did not apply it).
+                declined, skipped = self._row_not_applied(row)
+                counts[verdict] += len([
+                    item for item in self._row_item_ids(row)
+                    if item not in declined and item not in skipped
+                ])
+                counts["declined"] += len(declined)
+                counts["skipped"] += len(skipped)
         return counts
+
+    def _not_applied_lines(self, rows: List[Dict[str, Any]]) -> List[str]:
+        """One plain line per item a finished batch did not apply on purpose
+        (fix round 18): ``<title> [<id8>] (fix 2 of apply-fix-batch-1) not
+        applied: the batch declined it — <reason>``, and the same for an item
+        skipped at the user's request. Over the finished (``ok``) rows only:
+        a stopped batch is dispatched again."""
+        word = "fix" if self.write_kind == "apply_code_fixes" else "suggestion"
+        lines: List[str] = []
+        for row in rows:
+            if not self._row_ok(row):
+                continue
+            declined, skipped = self._row_not_applied(row)
+            if not declined and not skipped:
+                continue
+            item_ids = self._row_item_ids(row)
+            titles = {
+                member: str(item.get("title") or item.get("theme") or "").strip()
+                for member, item in self._row_items_with_ids(row, item_ids)
+                if member
+            }
+            for member in item_ids:
+                if member in declined:
+                    why = f"the batch declined it — {declined[member]}"
+                elif member in skipped:
+                    why = f"skipped at your request — {skipped[member]}"
+                else:
+                    continue
+                title = titles.get(member) or "Untitled"
+                lines.append(
+                    f"{title} [{member[:8]}] ({word} {item_ids.index(member) + 1} "
+                    f"of {row.get('task_id')}) not applied: {why}"
+                )
+        return lines
 
     def print_write_outcome_summary(self) -> None:
         """Report what the batch loop DID, plus the decision summary.
@@ -2638,6 +2684,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             + self._rows_provenance_note(rows)
         )
         print(f"{self.item_noun_plural.capitalize()} applied: {item_counts['applied']}")
+        if item_counts["declined"]:
+            print(
+                f"{self.item_noun_plural.capitalize()} declined by their batch "
+                f"(not applied): {item_counts['declined']}"
+            )
+        if item_counts["skipped"]:
+            print(
+                f"{self.item_noun_plural.capitalize()} skipped at your request "
+                f"(not applied): {item_counts['skipped']}"
+            )
         if item_counts["no-op"]:
             print(f"{self.item_noun_plural.capitalize()} needing no changes: {item_counts['no-op']}")
         if item_counts["clean-failure"]:
@@ -2680,6 +2736,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 reason = row.get("reason")
                 if reason:
                     print(f"      reason: {reason}")
+            not_applied = self._not_applied_lines(rows)
+            if not_applied:
+                print(f"\n{self.item_noun_plural.capitalize()} not applied:")
+                for line in not_applied:
+                    print(f"  - {line}")
 
         for warning in self.consistency_warnings():
             print(f"\n[CONSISTENCY_WARNING] {warning}")
@@ -2742,6 +2803,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         notes = [
             f"consistency warning: {warning}" for warning in self.consistency_warnings()
         ]
+        # Fix round 18: an item a batch declined (or one skipped at the
+        # user's request) is named with its reason, never only counted.
+        notes.extend(self._not_applied_lines(self._phase_rows()))
         skipped = list(self.formatted_skipped or [])
         if skipped:
             applied = self._write_item_counts(self._phase_rows())["applied"]
@@ -2915,16 +2979,40 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         else the items found by member id: an earlier run's row whose
         positional id now names another batch.
         """
+        return [item for _member, item in self._row_items_with_ids(row, item_ids)]
+
+    def _row_items_with_ids(
+        self, row: Dict[str, Any], item_ids: List[str]
+    ) -> List[Tuple[Optional[str], Dict[str, Any]]]:
+        """:meth:`_row_items` with each item's own id beside it (fix round 18:
+        a declined item is named by its id on the row). ``None`` for an item
+        whose id cannot be told."""
         task_id = str(row.get("task_id", ""))
         for task, batch in zip(self.write_tasks, self.batches):
             if str(task.get("task_id", "")) != task_id or not isinstance(batch, dict):
                 continue
             task_ids = [str(i) for i in task.get("expected_ids") or []]
             if not row.get("expected_ids") or sorted(task_ids) == sorted(item_ids):
-                return self._batch_member_items(batch)
+                members = self._batch_member_items(batch)
+                return [
+                    (task_ids[index] if index < len(task_ids) else None, item)
+                    for index, item in enumerate(members)
+                ]
             break
         by_id = self._items_by_member_id()
-        return [by_id[i] for i in item_ids if i in by_id]
+        return [(i, by_id[i]) for i in item_ids if i in by_id]
+
+    @staticmethod
+    def _row_not_applied(row: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """``(declined, skipped)``: a row's items its batch declined and the
+        items a ``--human-task <id>=skip`` answer recorded as skipped at the
+        user's request, each ``{id: reason}`` (fix round 18). Never applied."""
+        from .subagent_executor import row_declined
+
+        return (
+            row_declined(row),
+            row_declined({"declined": row.get("skipped_items")}),
+        )
 
     def write_apply_summary_report(self) -> Optional[str]:
         """Write ``{phase}/summary.md`` — the report the instructions promise (F3).
@@ -2995,6 +3083,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             f"- Batches processed: {len(ok)}/{len(rows)}"
             + self._rows_provenance_note(rows),
             f"- {nouns.capitalize()} applied: {item_counts['applied']}",
+            *(
+                [f"- {nouns.capitalize()} declined by their batch (not "
+                 f"applied): {item_counts['declined']}"]
+                if item_counts["declined"] else []
+            ),
+            *(
+                [f"- {nouns.capitalize()} skipped at your request (not "
+                 f"applied): {item_counts['skipped']}"]
+                if item_counts["skipped"] else []
+            ),
             f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
             f"- Decided by the judge agent: {len(decided)}"
             + self._judge_breakdown(decided),
@@ -3041,7 +3139,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     f"**Duration**: {float(row.get('duration_seconds') or 0.0):.1f}s  "
                     f"**Runner**: {row.get('runner') or '(none)'}"
                 )
-                items = self._row_items(row, item_ids)
+                members = self._row_items_with_ids(row, item_ids)
+                items = [item for _member, item in members]
+                declined, skipped = self._row_not_applied(row)
                 if not items and item_ids and row.get("from_earlier_run"):
                     # An earlier batch whose items this run no longer selects:
                     # its ids are all that is left to name them by.
@@ -3055,9 +3155,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         "clean-failure": "No verified changes",
                         "partial-application": "Partial application; inspect batch",
                     }.get(verdict, "Not applied")
-                    for item_index, item in enumerate(items, 1):
+                    for item_index, (member, item) in enumerate(members, 1):
                         item_title = item.get("title") or item.get("theme") or "Untitled"
-                        lines.append(f"{item_index}. **{item_title}** - {item_status}")
+                        # Fix round 18: an item its batch declined (or one
+                        # skipped at your request) says so, with the reason,
+                        # never the batch's own verdict.
+                        own_status = (
+                            f"Not applied: the batch declined it — {declined[member]}"
+                            if member in declined else
+                            f"Not applied: skipped at your request — {skipped[member]}"
+                            if member in skipped else item_status
+                        )
+                        lines.append(f"{item_index}. **{item_title}** - {own_status}")
                         file_path = item.get("file")
                         if file_path:
                             line_range = item.get("line_range") or []

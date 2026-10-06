@@ -336,3 +336,98 @@ class TestAResumeKeepsADeclinedBatch:
         assert kept.declined == {"s0": REASON}
         rows = {row["task_id"]: row for row in resumed.report_rows()}
         assert rows["apply-batch-0"]["declined"] == [{"id": "s0", "reason": REASON}]
+
+
+# ===========================================================================
+# Every surface names a declined item and its reason (the real orchestrator)
+# ===========================================================================
+
+from tests.test_write_executor_orchestrators import (  # noqa: E402
+    APPLY_PLAN, _ApplyRig, _validation, repo,  # noqa: F401
+)
+
+
+def _alpha_pair_groups():
+    """Two suggestions on one section (one batch) and one on another."""
+    def group(n, section, step):
+        return {"theme": f"theme {n}", "category": "c", "models": ["m"],
+                "suggestions": [{
+                    "title": f"suggestion {n}", "desc": f"Do {n}.",
+                    "type": "addition", "reference": f"## Step {step}: {section}",
+                    "importance": "MEDIUM", "source_model": "m",
+                }]}
+    return [group("A1", "Alpha", 1), group("A2", "Alpha", 1), group("B", "Beta", 2)]
+
+
+class TestADeclinedItemIsNamedOnEverySurface(_ApplyRig):
+
+    def _review_pair(self, repo):
+        from utils.state_manager import get_or_create_state
+
+        plan = repo.root / "plans" / "apply.md"
+        plan.write_text(APPLY_PLAN, encoding="utf-8")
+        review = repo.root / "plans" / "apply" / "review-plan"
+        review.mkdir(parents=True, exist_ok=True)
+        (review / "grouped.json").write_text(
+            json.dumps(_alpha_pair_groups()), encoding="utf-8")
+        (review / "validation.json").write_text(
+            json.dumps(_validation(["valid"] * 3)), encoding="utf-8")
+        state = get_or_create_state(plan)
+        state.mark_phase_completed("review-plan")
+        state.save()
+        return plan
+
+    def test_summary_md_the_notice_the_mirror_and_status_name_it(self, repo, capsys):
+        import multi_llm
+        from utils import cli_common
+
+        plan = self._review_pair(repo)
+        ids = self._ids(plan)
+        assert [len(batch) for batch in ids] == [2, 1], ids
+        declined_id, applied_id = ids[0]
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_DECLINED", json.dumps(
+            [{"id": declined_id, "reason": REASON}]))
+        capsys.readouterr()
+        context = cli_common.activate_result(cli_common.ResultContext(
+            mode="apply-suggestions", phase="apply-suggestions"))
+        try:
+            assert self._run(repo, plan, [applied_id] + ids[1]) == 0
+            notice = context.notice or ""
+        finally:
+            cli_common.deactivate_result()
+        out = capsys.readouterr().out
+
+        # summary.md: never counted as applied, named with its reason.
+        summary = self._summary(plan)
+        assert "- Suggestions applied: 2" in summary
+        assert "- Suggestions declined by their batch (not applied): 1" in summary
+        titles = {"A1": "suggestion A1", "A2": "suggestion A2"}
+        lines = [line for line in summary.splitlines() if "**suggestion A" in line]
+        declined_title = next(
+            title for title in titles.values()
+            if any(f"**{title}** - Not applied: the batch declined it — {REASON}"
+                   in line for line in lines)
+        )
+        assert any(line.endswith("- Applied") for line in lines), lines
+        # The RESULT block and the result line's notice say it in plain words.
+        expected = (
+            f"{declined_title} [{declined_id[:8]}] (suggestion 1 of apply-batch-0) "
+            f"not applied: the batch declined it — {REASON}"
+        )
+        assert "Suggestions declined by their batch (not applied): 1" in out
+        assert f"  - {expected}" in out
+        assert expected in notice
+        # The mirror `status` reads, and `status` itself.
+        mirror = json.loads(
+            (self._phase_dir(plan) / ".status.json").read_text())["progress"]
+        assert mirror["write_subagents"]["declined_items"] == [
+            {"task_id": "apply-batch-0", "id": declined_id, "reason": REASON}]
+        assert mirror["write_subagents"]["items_applied"] == 2
+        assert expected in mirror["notes"]
+        capsys.readouterr()
+        multi_llm.main(["status", str(plan), "--view", "run", "--phase",
+                        "apply-suggestions"])
+        view = capsys.readouterr().out
+        assert (f"not applied, declined by its batch: {declined_id[:8]} in "
+                f"apply-batch-0 ({REASON})") in view
+        assert f"note: {expected}" in view
