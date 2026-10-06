@@ -2918,9 +2918,13 @@ class WriteBatchScheduler:
         file is created, renamed and unlinked relative to the folder's own
         descriptor (:mod:`utils.prompt_files`).
 
-        Best-effort: a write that fails warns once and never fails the
-        dispatch.
+        Best-effort: a write that fails never fails the dispatch, and warns
+        once for that task, naming it (fix round 17: one warning for the
+        whole run let a directory planted under one task's file name silence
+        every later task's failure). An earlier re-ask file that cannot be
+        removed is named and left; the batch's own prompt is still kept.
         """
+        where = os.path.join(self.phase_dir, DISPATCHED_PROMPTS_SUBDIR)
         try:
             if not task_id or os.path.basename(task_id) != task_id or task_id in (
                     ".", ".."):
@@ -2931,21 +2935,44 @@ class WriteBatchScheduler:
                     if attempt <= 1:
                         head, tail = f"{task_id}.attempt-", ".prompt.txt"
                         for entry in folder.names():
-                            if (entry.startswith(head) and entry.endswith(tail)
+                            if not (entry.startswith(head) and entry.endswith(tail)
                                     and entry[len(head):-len(tail)].isdigit()):
+                                continue
+                            try:
                                 folder.remove(entry)
+                            except OSError as exc:
+                                self._warn_prompt_keep(
+                                    task_id, entry,
+                                    f"[write-subagents] could not remove "
+                                    f"{task_id}'s earlier re-ask prompt {entry} "
+                                    f"under {where}: {exc}. It is not this "
+                                    f"dispatch's prompt; {task_id}'s own prompt "
+                                    f"is kept beside it.",
+                                )
                 else:
                     name = dispatched_prompt_name(task_id, attempt)
                 folder.write(name, sent)
         except (OSError, ValueError) as exc:
-            if not getattr(self, "_prompt_keep_warned", False):
-                self._prompt_keep_warned = True
-                self.log(
-                    f"[write-subagents] could not keep {task_id}'s dispatched "
-                    f"prompt under {os.path.join(self.phase_dir, DISPATCHED_PROMPTS_SUBDIR)}: "
-                    f"{exc}. The dispatch goes ahead; the audit log keeps its "
-                    f"sha256."
-                )
+            self._warn_prompt_keep(
+                task_id, None,
+                f"[write-subagents] could not keep {task_id}'s dispatched "
+                f"prompt under {where}: {exc}. The dispatch goes ahead; the "
+                f"audit log keeps its sha256.",
+            )
+
+    def _warn_prompt_keep(
+        self, task_id: str, entry: Optional[str], line: str
+    ) -> None:
+        """Log ``line`` once per task (and per leftover ``entry`` it names):
+        a retried dispatch that meets the same problem says nothing new,
+        another task always does."""
+        warned = getattr(self, "_prompt_keep_warnings", None)
+        if warned is None:
+            warned = self._prompt_keep_warnings = set()
+        if (task_id, entry) in warned:
+            return
+        warned.add((task_id, entry))
+        self.log(line)
 
     # -- the loop -------------------------------------------------------
 

@@ -276,3 +276,36 @@ class TestTheNativeLeg:
         write_prompt.discard_check_tree(phase_dir, "T001")
 
         assert kept.exists()
+
+
+# ===========================================================================
+# Noise #3: one planted directory costs only its own task a warning
+# ===========================================================================
+
+class TestOneTaskPerWarning:
+
+    def test_a_planted_directory_never_silences_another_tasks_failure(self, env):
+        """A directory planted under a prompt file's name made ``unlink`` or
+        ``replace`` raise, and the run's one warning then silenced every later
+        task's failure; a leftover re-ask name also cost its task the batch's
+        own file."""
+        prompts = env.phase_dir / "prompts"
+        prompts.mkdir()
+        (prompts / "T003.attempt-2.prompt.txt").mkdir()
+        (prompts / "T005.prompt.txt").mkdir()
+        lines = []
+        scheduler = env.scheduler([env.apply_task(0)], log=lines.append)
+
+        for task_id in ("T003", "T004", "T005"):
+            scheduler._keep_dispatched_prompt(task_id, 1, f"P-{task_id}", f"P-{task_id}")
+        scheduler._keep_dispatched_prompt("T005", 1, "P-T005", "P-T005")
+
+        assert (prompts / "T003.prompt.txt").read_text() == "P-T003"
+        assert (prompts / "T004.prompt.txt").read_text() == "P-T004"
+        assert (prompts / "T005.prompt.txt").is_dir()
+        about = {t: [ln for ln in lines if f" {t}'s " in ln] for t in ("T003", "T004", "T005")}
+        assert len(about["T003"]) == 1 and "T003.attempt-2.prompt.txt" in about["T003"][0]
+        assert "T003's own prompt is kept" in about["T003"][0]
+        assert about["T004"] == []
+        assert len(about["T005"]) == 1, "named once, not again on a retry"
+        assert "could not keep T005's dispatched prompt" in about["T005"][0]
