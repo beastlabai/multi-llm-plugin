@@ -152,6 +152,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STATUS_AUTH_FAILED,
         STATUS_BUDGET_EXHAUSTED,
         STATUS_INCOMPLETE,
+        STATUS_INCOMPLETE_REPORT,
         STATUS_INVALID_MODEL,
         STATUS_OK,
         STATUS_RATE_LIMITED,
@@ -285,6 +286,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STATUS_AUTH_FAILED,
         STATUS_BUDGET_EXHAUSTED,
         STATUS_INCOMPLETE,
+        STATUS_INCOMPLETE_REPORT,
         STATUS_INVALID_MODEL,
         STATUS_OK,
         STATUS_RATE_LIMITED,
@@ -7455,23 +7457,16 @@ def dispatch_task(
                         # Rule 7, second form (fix round 18): the report read
                         # but left items out; the runner restates it once.
                         reask_prompt, repair_baseline = reask
+                        # Fix round 19: a readable report, so its own status
+                        # and no failure capture (the re-ask's prompt file
+                        # quotes the reply).
                         outcome.attempts.append(Attempt(
                             index=attempt_index,
-                            status=STATUS_SCHEMA_INVALID,
+                            status=STATUS_INCOMPLETE_REPORT,
                             exit_code=capture.exit_code,
                             duration_seconds=capture.duration,
                             error=reask_why,
                             usage=usage,
-                            capture_path=_write_failure_capture(
-                                phase_dir=phase_dir, task=task,
-                                attempt_index=attempt_index,
-                                argv=capture.argv, prompt=attempt_prompt,
-                                stdout=capture.stdout, stderr=capture.stderr,
-                                exit_code=capture.exit_code,
-                                duration=capture.duration,
-                                status=STATUS_SCHEMA_INVALID, error=reask_why,
-                                repair=attempt_resend,
-                            ),
                             repair=attempt_resend,
                         ))
                         _accumulate_usage(outcome, usage)

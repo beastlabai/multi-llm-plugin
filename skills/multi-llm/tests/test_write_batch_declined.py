@@ -769,14 +769,22 @@ class TestAReportThatLeavesItemsOutIsReAskedOnce:
                 "(`s0`) is in neither `ids` nor `declined`.") in second
         assert "Not applied; T011 records it as deliberate" in second
         outcome = result.outcomes[0]
+        # Fix round 19 (review of round 18, #4): the first report was
+        # readable, so it is no schema failure and leaves no failure capture.
         assert [(a.status, a.repair) for a in outcome.attempts] == [
-            (executor.STATUS_SCHEMA_INVALID, None),
+            (executor.STATUS_INCOMPLETE_REPORT, None),
             (executor.STATUS_OK, executor.REPAIR_INCOMPLETE_REPORT),
         ]
+        assert outcome.attempts[0].capture_path is None
+        assert not list((env.phase_dir / "failed").glob("apply-batch-0.attempt*"))
+        assert executor.STATUS_INCOMPLETE_REPORT not in executor.RUNG_BY_STATUS
         assert outcome.ok and outcome.write_outcome == executor.WRITE_APPLIED
         assert outcome.declined == {"s0": REASON}
         assert env.plan.read_text(encoding="utf-8").count("edit\n") == 1
         assert result.exit_code == 0
+        row = outcome.to_dict()
+        assert row["attempts"][0]["status"] == "incomplete_report"
+        assert "capture" not in row["attempts"][0]
 
     def test_a_restatement_that_still_leaves_it_out_stops_with_the_answer(self, env):
         log = env.enable_call_log()
