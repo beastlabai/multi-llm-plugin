@@ -84,9 +84,38 @@ def test_an_implement_resume_names_the_tasks_it_did_not_materialize(repo, capsys
     _policy(repo, ALLOW)
     assert _implement(repo, "--resume", "--human-task", "T002=done") == 0
     line = _tally(_text(capsys))
-    assert "kept 3 task(s) an earlier run finished — T001, T003, T004;" in line, line
+    assert "an earlier run finished — T001, T003, T004" in line, line
     assert "dispatched 3" in line, line
     assert "refused before dispatch" not in line
+
+
+def test_a_check_accepted_with_done_counts_as_kept_and_says_so(repo, capsys):
+    """Run 6, Codex stop-path accept 02: after `--human-task T002=done
+    --human-task T005=skip` the line read `kept 3 task(s) … T001, T003,
+    T004; dispatched 1`, leaving the accepted check out."""
+    _first_run(repo, capsys)
+    assert _implement(
+        repo, "--resume", "--human-task", "T002=done", "--human-task", "T005=skip",
+    ) == 0
+    line = _tally(_text(capsys))
+    assert line.endswith(
+        "resume: kept 4 task(s) an earlier run finished — T001, T003, T004, "
+        "T002 (accepted with its check findings); dispatched 1"
+    ), line
+
+
+def test_a_failed_task_accepted_with_done_counts_as_kept_and_says_so(repo, capsys):
+    """The same for a code task refused before dispatch and answered
+    `=done`: it is kept, accepted after failing, and never dispatched."""
+    _first_run(repo, capsys)
+    assert _implement(
+        repo, "--resume", "--human-task", "T002=done", "--human-task", "T005=done",
+    ) == 0
+    line = _tally(_text(capsys))
+    assert (
+        "kept 5 task(s) an earlier run finished — T001, T003, T004, "
+        "T002 (accepted with its check findings), T005 (accepted after failing); "
+    ) in line, line
 
 
 # ===========================================================================
