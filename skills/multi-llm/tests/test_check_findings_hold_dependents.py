@@ -884,3 +884,52 @@ class TestTwoChecksHoldOneTask:
         finally:
             registry._config = None
             registry._config_key = None
+
+
+class TestABlockedRecordIsNotAFailure:
+    """Fix round 14 (stop fixture, Claude Code fix 01): the run's notes read
+    "a blocked `batch-done` exits 3 while its result line says done/exit 0".
+    The transcript says otherwise: the host chained `batch-done T002 --check
+    findings` (exit 0, `[CHECK_BLOCKED]`, result line exit 0) with a
+    `write-prompt T007` (`[WRITE_PROMPT_BLOCKED]`, result line needs-human,
+    exit 3), and the shell reported the chain's last exit. Pinned: the record
+    exits 0 and says so; the refusal exits 3 and says so; the core tells the
+    host to run write-prompt on its own."""
+
+    _emit = TestTheNativeLegHoldsTheDependents._emit
+    _findings = TestTheNativeLegHoldsTheDependents._findings
+
+    def test_each_call_s_exit_matches_its_result_line(self, repo, capsys):
+        from utils.cli_common import parse_result_line
+
+        self._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        multi_llm.main(["util", "batch-done", "--phase-dir", phase,
+                        "--task-id", "T001", "--status", "completed"])
+        capsys.readouterr()
+        code = multi_llm.main([
+            "util", "batch-done", "--phase-dir", phase, "--task-id", "T002",
+            "--status", "completed", "--check", "findings", *self._findings(),
+        ])
+        out = capsys.readouterr().out
+        assert "[CHECK_BLOCKED]" in out
+        result = parse_result_line(out)
+        assert code == 0 and result["exit"] == 0 and result["state"] == "done"
+
+        code = multi_llm.main(
+            ["util", "write-prompt", "--phase-dir", phase, "--task-id", "T004"]
+        )
+        captured = capsys.readouterr()
+        assert "[WRITE_PROMPT_BLOCKED]" in captured.err
+        result = parse_result_line(captured.out)
+        assert code == 3 and result["exit"] == 3 and result["state"] == "needs-human"
+
+    def test_the_core_says_to_run_write_prompt_on_its_own(self):
+        text = (Path(__file__).parent.parent / "instructions" / "implement.md").read_text(
+            encoding="utf-8"
+        )
+        assert (
+            "Run each `util write-prompt` as a command of its own, never chained "
+            "after the records of the tasks before it"
+        ) in text
+        assert "`util batch-done` exits 0 whenever it recorded the task" in text
