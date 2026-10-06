@@ -641,11 +641,13 @@ def _settle_eta_total(
 
     Only tasks of this phase's ``write_tasks.json`` (what was handed out) and
     never a manual task (``tasks_to_dispatch`` does not count one). A record
-    of the same task again first puts back what its earlier record took out.
-    Nothing happens when the host never ran ``util metrics start``.
+    of the same task again first puts back what its earlier record took out,
+    then keeps out each of those that another cause still holds
+    (:func:`_still_kept_out`). Nothing happens when the host never ran
+    ``util metrics start``.
     """
     phase = PHASE_BY_WRITE_KIND.get(str(document.get("kind") or ""), "implement")
-    restore_to_progress_in_state(state, phase, task_id)
+    back = restore_to_progress_in_state(state, phase, task_id)
     handed = {
         str(task.get("task_id") or ""): task
         for task in (document.get("batches") or document.get("tasks") or [])
@@ -668,6 +670,43 @@ def _settle_eta_total(
             if statuses.get(dependent) in (None, "pending"):
                 out.append(dependent)
     withdraw_from_progress_in_state(state, phase, out, task_id)
+    for dependent, cause in _still_kept_out(state, handed, back):
+        withdraw_from_progress_in_state(state, phase, [dependent], cause)
+
+
+def _still_kept_out(
+    state: Dict[str, Any], handed: Dict[str, Dict[str, Any]], back: List[str],
+) -> List[Tuple[str, str]]:
+    """``(task, cause)`` for each task in *back* — put back in the total as
+    the record that took it out was replaced — that another cause still
+    keeps from being dispatched: a check with findings upstream of it
+    (``rerunnable_checks``), else a failed task upstream of it, while it has
+    no record of its own.
+
+    Fix round 19 (review of round 18, #3): ``withdrawn`` keeps one cause per
+    task, so a task taken out after a failed T003 was skipped when check
+    T002 then held it ("already out"); T003 retried and recorded completed
+    put it back although T002's findings still held it, and the native
+    ``[ETA]`` line ended "N/N+1" again. The other way round, T002 passing
+    put back a task T003's failure still kept out.
+    """
+    if not back:
+        return []
+    statuses = state.get("task_status") or {}
+    graph = decomposition_graph(list(handed.values()), state)
+    checks = rerunnable_checks(state)
+    failed = sorted(str(t) for t, status in statuses.items() if status == "failed")
+    kept: List[Tuple[str, str]] = []
+    for task_id in back:
+        if statuses.get(task_id) not in (None, "pending"):
+            continue
+        cause = (
+            upstream_held_check(graph, task_id, checks)
+            or upstream_held_check(graph, task_id, failed)
+        )
+        if cause:
+            kept.append((task_id, cause))
+    return kept
 
 
 def _hold_or_release_dependents(
