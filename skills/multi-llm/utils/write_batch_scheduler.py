@@ -909,6 +909,30 @@ def _findings_from_a_failed_claim(data: Any) -> bool:
     )
 
 
+def _declined_from_a_failed_claim(data: Any) -> bool:
+    """Whether a result file that claims ``failed`` holds an apply batch read
+    as the declined no-op: every item it held declined with a reason, no byte
+    moved (fix round 19, review of round 18 #3).
+
+    ``_classify`` reads such a batch as complete whatever word the runner put
+    in ``status``, and resume's definition of done read the word alone, so a
+    batch that refused everything with ``failed`` would be dispatched again
+    to decline it all again. As for :func:`_findings_from_a_failed_claim`,
+    only the scheduler's own stamp turns the claim into done-evidence.
+    """
+    if not isinstance(data, dict) or str(data.get("status") or "") != "failed":
+        return False
+    verdict = data.get("verdict")
+    if not (
+        isinstance(verdict, dict) and verdict.get("ok") is True
+        and verdict.get("write_outcome") == WRITE_NO_OP
+    ):
+        return False
+    expected = [str(i) for i in (verdict.get("expected_ids") or [])]
+    declined = row_declined(verdict)
+    return bool(expected) and all(item in declined for item in expected)
+
+
 def rerunnable_checks(state: Any) -> List[str]:
     """The check tasks whose findings hold back the tasks after them.
 
@@ -6143,12 +6167,16 @@ class WriteBatchScheduler:
             outside_names = ", ".join(outside[:5]) + (
                 ", …" if len(outside) > 5 else ""
             )
-            if crashed or claimed == "failed":
+            if crashed or (claimed == "failed" and not all_declined):
                 # The runner's own verdict, and the bytes agree. Nothing to
                 # restore, but nothing done either: the loop stops here rather
                 # than dispatching the next batch on top of the gap, and the
                 # status is one `ok` never reads as. D3k: a non-zero exit never
-                # counts as success on its own.
+                # counts as success on its own. Fix round 19 (review of round
+                # 18, #3): a `failed` claim on a batch that declined every
+                # item is the declined no-op below — a resume would dispatch
+                # it to decline them again — and a failure names what the
+                # batch declined.
                 outcome.write_outcome = WRITE_CLEAN_FAILURE
                 outcome.status = STATUS_BATCH_FAILED
                 what = (
@@ -6162,6 +6190,10 @@ class WriteBatchScheduler:
                 outcome.reason = (
                     f"FAILED: {what} and the pre-batch snapshot comparison "
                     f"confirms no byte changes in {declared_names}. "
+                    + (
+                        f"It declined {self._declined_words(outcome.declined)}. "
+                        if outcome.declined else ""
+                    )
                     + (
                         f"{len(outside)} file(s) outside it changed "
                         f"({outside_names}): inspect them, restore them with "
@@ -7798,6 +7830,7 @@ class WriteBatchScheduler:
         if (
             str(data.get("status") or "") not in (WRITE_APPLIED, WRITE_NO_OP)
             and not _findings_from_a_failed_claim(data)
+            and not _declined_from_a_failed_claim(data)
         ):
             # A schema-valid `{"status": "failed"}` is a batch the previous run
             # recorded as NOT done; resuming past it on the strength of the
