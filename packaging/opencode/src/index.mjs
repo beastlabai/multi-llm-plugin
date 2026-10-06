@@ -1705,10 +1705,11 @@ async function runWorkflow({
       anchor, surface, runId, logPath, polls, values: watched,
     })
     // `argv` names what this cycle ran: its own launch, never the internal
-    // `status … --wait --run-id` poll whose answer this is. The model is told
-    // to report `argv` as "what was being run", and on Codex racing re-run 5
-    // the host told the user the poll was "the dispatcher's final argv" (fix
-    // round 14). Set here, per cycle, so a continuation names its own launch.
+    // `status … --wait --run-id` poll whose answer this is. The model was told
+    // to report `argv` as "what was being run" (it is told the phase and the
+    // plan since fix round 19), and on Codex racing re-run 5 the host told the
+    // user the poll was "the dispatcher's final argv" (fix round 14). Set here,
+    // per cycle, so a continuation names its own launch.
     terminal.argv = launch.argv
     // The launch's own result line is a handshake, not the answer: it says
     // state: done, exit: 0 and would report "done" for a fan-out that has not
