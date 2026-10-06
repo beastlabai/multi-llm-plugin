@@ -10,11 +10,10 @@ from tests import test_write_executor
 env = test_write_executor.env
 
 
-@pytest.mark.parametrize("claim", ["no-op", "applied"])
-def test_resume_preserves_no_change_verdict(env, claim):
+def test_resume_preserves_no_change_verdict(env):
     task = env.apply_task(0)
     result = {
-        "status": claim, "summary": "Nothing changed", "ids": ["s0"],
+        "status": "no-op", "summary": "Nothing changed", "ids": ["s0"],
         "files_touched": ["plans/p.md"],
     }
     first = env.scheduler([task], respond=lambda *_: result, finalize=False).run()
@@ -28,6 +27,34 @@ def test_resume_preserves_no_change_verdict(env, claim):
     assert after.files_touched == before.files_touched == []
     assert after.sha256_before == before.sha256_before
     assert after.sha256_after == before.sha256_after
+
+
+def test_resume_dispatches_again_an_applied_claim_that_changed_nothing(env):
+    """Fix round 14 (OpenCode racing run 5, T016): an `applied` claim over an
+    unchanged tree is not done — it is sent once more, then recorded failed —
+    so a resume dispatches it again rather than keeping it. Nothing moved, so
+    sending it again cannot apply anything twice."""
+    task = env.apply_task(0)
+    result = {
+        "status": "applied", "summary": "Nothing changed", "ids": ["s0"],
+        "files_touched": ["plans/p.md"],
+    }
+    first = env.scheduler([task], respond=lambda *_: result, finalize=False).run()
+    assert first.exit_code == 3
+    assert not first.outcomes[0].ok and first.outcomes[0].applied_without_changes
+
+    calls = []
+
+    def respond(*_):
+        calls.append(1)
+        env.plan.write_text(env.plan.read_text() + "edit\n", encoding="utf-8")
+        return result
+
+    resumed = env.scheduler([task], respond=respond, resume=True, finalize=False).run()
+    assert calls == [1], "the failed batch was not dispatched again"
+    assert not resumed.outcomes[0].skipped
+    assert resumed.outcomes[0].ok
+    assert resumed.outcomes[0].files_touched == ["plans/p.md"]
 
 
 def test_resume_keeps_observed_files_when_runner_omitted_them(env):
