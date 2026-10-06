@@ -626,7 +626,11 @@ class TestADeniedEditIsNeverReportedApplied:
         # Resume re-dispatches it: the verdict on disk is not `ok`.
         stamped = json.loads((repo.phase_dir / "apply_batch_0.json").read_text())
         assert stamped["verdict"]["ok"] is False
-        assert repo.prior_changes() == []
+        # Fix round 15: the native leg's failure line, which the resume that
+        # applies it supersedes.
+        assert repo.prior_changes() == [
+            "(batch failed — the write jail refused its edit, verified no file changes)"
+        ]
 
     def test_a_command_denial_on_the_plan_fails_the_batch(self, repo, monkeypatch):
         FakeExecutor(repo, monkeypatch).script(untouched(

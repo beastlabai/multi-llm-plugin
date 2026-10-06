@@ -142,8 +142,9 @@ class CodeFixBatch:
 
         NOT ``file_key``: the batcher emits many batches per file (three fixes a
         batch, plus one batch per security/HIGH fix), and ``prior_changes.append``
-        is idempotent on ``(id, phase)`` — so a file-keyed id records the first
-        batch on that file and silently drops every later one. Computed here so a
+        keeps one entry per ``(id, phase)`` (the newest, since fix round 14) — so
+        a file-keyed id keeps only the last batch on that file and silently drops
+        every earlier one. Computed here so a
         native invoker reads it off the serialized batch instead of picking a key,
         and byte-identical to what ``utils/write_phase_bridge`` derives for the
         same batch.

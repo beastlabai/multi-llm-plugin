@@ -1803,7 +1803,9 @@ def bind_prior_changes(
     let another phase's older batches crowd out this phase's own recent ones.
 
     Module-level (2026-10-05) because it has two callers that must produce
-    byte-identical text for the same state: the scheduler's
+    byte-identical text for the same prior-changes log (both legs append a
+    summary per finished batch and a failure line per failed one since fix
+    round 15; a native host words a failure's reason itself): the scheduler's
     :meth:`WriteBatchScheduler.dispatched_prompt` on the executor leg, and
     ``util write-prompt`` (:mod:`utils.write_prompt`) on the native leg, where
     the host used to substitute the token by hand — and, measured on the
@@ -2266,11 +2268,13 @@ class WriteBatchScheduler:
         #: warn-only ``[GIT_CONFIG_CHANGED]`` line (never a copy, never a revert).
         self._git_meta_before: Dict[str, Optional[Dict[str, Any]]] = {}
         #: Tasks whose verdict came from the jail (a denied edit or a replaced
-        #: target) and failed the batch: no prior-changes entry is appended for
-        #: them. ``prior_changes.append`` is idempotent on ``(id, phase)``, so
-        #: a "(batch failed — …)" line written now would silently drop the
-        #: entry the ``--resume`` that re-dispatches this batch writes.
+        #: target) and failed the batch: never a success line in the
+        #: prior-changes log — the failed batch's own line, which the
+        #: ``--resume`` that re-dispatches it supersedes (fix round 15).
         self._jail_failed: set = set()
+        #: The subset whose target was replaced under the batch: their failure
+        #: writes no prior-changes line at all (fix round 15).
+        self._replaced_targets: set = set()
         #: Batch indexes whose stray-writes-only line was already printed.
         self._rung_noticed: set = set()
         #: Tasks this run refused before any runner started (the write
@@ -5530,6 +5534,7 @@ class WriteBatchScheduler:
             f"batch against the file now at the path, under a fresh grant."
         )
         self._jail_failed.add(outcome.task_id)
+        self._replaced_targets.add(outcome.task_id)
         return True
 
     def _replaced_target_unclassified(
@@ -5880,14 +5885,15 @@ class WriteBatchScheduler:
         else:
             summary = None
         if not outcome.ok or task_id in self._jail_failed or outcome.not_rerun:
-            # A batch that is not done stops the loop, so no later batch of
-            # this run reads its line, and --resume dispatches it again — and
-            # `append` is idempotent on `(id, phase)`, so a "(batch failed — …)"
-            # line here would drop that dispatch's real entry (plan step 3 for
-            # the jail's failures; fix round 14 for every failed batch: a clean
-            # failure resumed and applied read "batch failed" to every task
-            # after it). A not-re-run check is not done either.
-            summary = None
+            # A batch that is not done gets the line the native leg appends
+            # for it (fix round 15: the executor wrote none, so later prompts
+            # differed between the legs for the same history). Safe since fix
+            # round 14 made `append` supersede a changed summary per `(id,
+            # phase)`: the --resume that dispatches it again replaces the line
+            # with its real entry, and a task answered `--human-task <id>=skip`
+            # keeps it on both legs, which tells the tasks after it that the
+            # work is not there.
+            summary = self._failed_entry(outcome) if dispatched else None
 
         # Plan step 3 (2026-09-30): the rung the batch ran on, named on its
         # line and in the report whatever the outcome (a timeout included).
@@ -5985,6 +5991,47 @@ class WriteBatchScheduler:
                 # or partial batch attested that its optimistic result file was
                 # current, which is half of how resume skipped it (F1).
                 self._record_fingerprint(task)
+
+    def _failed_entry(self, outcome: TaskOutcome) -> Optional[str]:
+        """The prior-changes line a failed batch leaves, in the native leg's
+        words (``instructions/implement.md``, the three ``apply-*.md`` cores):
+        ``(task failed — …)`` for an implement task, ``(batch failed — …,
+        verified no file changes)`` for an apply batch that moved nothing.
+
+        ``None`` where the native leg appends nothing: an apply batch that
+        moved bytes (its loop stops before the append), and a check not run
+        again (the line of the run that ran it stands). A task refused before
+        dispatch gets none either (the caller's ``dispatched``): the native
+        emit records it, and no host appends for a task it never ran.
+        """
+        if outcome.not_rerun or outcome.task_id in self._replaced_targets:
+            # A replaced target: the file at the path changed under the batch,
+            # and not by it — no line can say what it left.
+            return None
+        task = self._task_by_id(outcome.task_id) or {}
+        is_check = self.kind == "implement" and not declared_file_set(task)
+        last = outcome.attempts[-1] if outcome.attempts else None
+        if outcome.applied_without_changes:
+            what = "said applied, but its change did not land"
+        elif outcome.write_outcome == WRITE_CLEAN_FAILURE and not is_check:
+            if outcome.task_id in self._jail_failed:
+                what = "the write jail refused its edit"
+            elif last is not None and last.exit_code not in (0, None):
+                what = f"the runner exited {last.exit_code}"
+            else:
+                # It said it failed: what it said, in its own words.
+                what = " ".join(str(outcome.summary or "").split()) or (
+                    "it reported that it could not do the task"
+                )
+            if not outcome.bytes_moved and self.kind == "implement":
+                what += ", no file changed"
+        else:
+            what = " ".join(self._failure_sentence(outcome).split())
+        if self.kind == "implement":
+            return f"(task failed — {what})"
+        if outcome.bytes_moved:
+            return None
+        return f"(batch failed — {what}, verified no file changes)"
 
     def _record_metrics(
         self, task: Dict[str, Any], outcome: TaskOutcome, result: SchedulerResult
