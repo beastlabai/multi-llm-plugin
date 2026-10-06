@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"01a111cb-c7f9-7eb1-bc89-b1d7b369c5da"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_0","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"01a111cb-c7f9-7eb1-bc89-b1d7b369c5da","receiver_thread_ids":[],"prompt":"SUBAGENT-TASK write a file","agents_states":{},"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_0","type":"collab_tool_call","tool":"spawn_agent","sender_thread_id":"01a111cb-c7f9-7eb1-bc89-b1d7b369c5da","receiver_thread_ids":["01a111cb-c82f-78f1-935f-d3d964e870fa"],"prompt":"SUBAGENT-TASK write a file","agents_states":{"01a111cb-c82f-78f1-935f-d3d964e870fa":{"status":"pending_init","message":null}},"status":"completed"}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'sleep 6'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc 'sleep 6'","aggregated_output":"","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"[]"}}
+{"type":"turn.completed","usage":{"input_tokens":3,"cached_input_tokens":0,"cache_write_input_tokens":0,"output_tokens":3,"reasoning_output_tokens":0}}
