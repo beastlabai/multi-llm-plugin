@@ -158,3 +158,103 @@ def test_the_claude_code_shim_carries_the_same_rule(name):
 
     text = (Path(modes.__file__).parent / name).read_text(encoding="utf-8")
     assert modes.NEEDS_HUMAN_RULE in " ".join(text.split())
+
+
+# ===========================================================================
+# The native leg (Claude Code): `util next-command` prints the line
+# ===========================================================================
+
+class TestTheNativeStopPrintsTheTestsLine:
+    """Live run 7, Claude Code stop 01: the native stop printed no "Nothing
+    ran this repository's tests" line in any tool result; the host wrote its
+    own from the instructions. The report's `util next-command` lookup prints
+    it now, as `[TESTS_NOT_RUN]`, above the stopped implement's commands."""
+
+    @staticmethod
+    def _util(capsys, *argv):
+        code = multi_llm.main(["util", *argv])
+        captured = capsys.readouterr()
+        return code, captured.out, captured.err
+
+    def _stop(self, repo, capsys, *, code_tasks=("T001", "T003", "T004")):
+        import implement_orchestrator
+
+        assert implement_orchestrator.main(
+            ["--plan-file", str(repo.plan), "--yes"]) == 0
+        capsys.readouterr()
+        phase = str(repo.phase_dir)
+        for task_id in code_tasks:
+            assert self._util(
+                capsys, "batch-done", "--phase-dir", phase, "--task-id", task_id,
+                "--status", "completed")[0] == 0
+        assert self._util(
+            capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
+            "--status", "completed", "--check", "findings",
+            "--finding", "retries must be 3 (found 2)")[0] == 0
+        code, out, err = self._util(
+            capsys, "next-command", "plans/checked.md", "--after", "implement")
+        assert code == 0, err
+        return out
+
+    def test_it_is_printed_above_the_commands(self, repo, capsys):
+        (repo.root / "package.json").write_text(
+            json.dumps({"scripts": {"test": "node --test"}}), encoding="utf-8")
+        out = self._stop(repo, capsys)
+        lines = [l for l in out.splitlines() if l.startswith("[")]
+        tests = [l for l in lines if l.startswith("[TESTS_NOT_RUN] ")]
+        assert tests == [
+            "[TESTS_NOT_RUN] " + UNVERIFIED + " To have every code phase run "
+            'them, add verify_command: "npm test" under driver: in '
+            ".multi-llm/providers.yaml (package.json defines scripts.test)."
+        ], lines
+        assert lines.index(tests[0]) < next(
+            i for i, l in enumerate(lines) if l.startswith("[NEXT_COMMAND] "))
+        assert any(l.endswith("--implement plans/checked.md --resume") for l in lines)
+        result = json.loads(out.rsplit("MULTI_LLM_RESULT: ", 1)[1])
+        assert "tests_note" not in result["user_next_step"]
+
+    def test_a_stop_after_only_a_check_prints_none(self, repo, capsys):
+        out = self._stop(repo, capsys, code_tasks=())
+        assert "[NEXT_COMMAND] " in out
+        assert "[TESTS_NOT_RUN]" not in out
+
+    def test_a_verify_command_keeps_it_out(self, repo, capsys):
+        _policy(repo, DENY + "  verify_command: \"true\"\n")
+        out = self._stop(repo, capsys)
+        assert "[NEXT_COMMAND] " in out
+        assert "[TESTS_NOT_RUN]" not in out
+
+    def test_a_finished_implement_prints_none(self, repo, capsys):
+        from utils.state_manager import get_or_create_state
+
+        self._stop(repo, capsys)
+        state = get_or_create_state(repo.plan)
+        for task_id in ("T005", "T006", "T007"):
+            state.update_task_status(task_id, "completed")
+        state.mark_phase_completed("implement")
+        state.save()
+        code, out, _err = self._util(
+            capsys, "next-command", "plans/checked.md", "--after", "implement")
+        assert code == 0
+        assert "--review-code plans/checked.md" in out
+        assert "[TESTS_NOT_RUN]" not in out
+
+    def test_the_host_is_told_to_relay_it(self):
+        from pathlib import Path
+
+        root = Path(modes.__file__).parent
+        skill = " ".join((root / "SKILL.md").read_text(encoding="utf-8").split())
+        assert (
+            "and, when nothing ran the repository's tests, a `[TESTS_NOT_RUN]` "
+            "line: give its text in the report, verbatim"
+        ) in skill
+        core = " ".join((root / "instructions" / "implement.md").read_text(
+            encoding="utf-8").split())
+        assert (
+            "At a stop after a code task completed, with no "
+            "`driver.verify_command` configured: the `[TESTS_NOT_RUN]` line "
+            "the next-step lookup prints, its text verbatim"
+        ) in core
+        summary = " ".join((root / "references" / "summary-format.md").read_text(
+            encoding="utf-8").split())
+        assert "a `[TESTS_NOT_RUN]` line above them" in summary

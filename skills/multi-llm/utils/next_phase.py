@@ -66,6 +66,13 @@ NEXT_COMMAND_ANSWERS_MARKER = "[NEXT_COMMAND_ANSWERS]"
 #: write phase, and nothing else on the line (same rule as ``[NEXT_COMMAND]``).
 RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
 
+#: The line ``util next-command`` prints above a stopped native implement's
+#: commands when nothing ran the repository's tests
+#: (``write_batch_scheduler.native_stop_unverified_line``, fix round 18): the
+#: executor stop's own line, for the report. Not a command marker: the text
+#: after it is a sentence that names a setting, never a command to copy.
+TESTS_NOT_RUN_MARKER = "[TESTS_NOT_RUN]"
+
 #: The one slot every ``next_command`` template ends with (schema pattern
 #: ``^[^{}]+\{args\}$``). Filled with ``str.replace``, never ``str.format``.
 ARGS_SLOT = "{args}"
@@ -183,6 +190,12 @@ class NextPhase:
     #: Beside ``manual_tasks``: how the user records them done, in the host's
     #: spelling (:func:`manual_close_note`, fix round 14).
     manual_tasks_note: Optional[str] = None
+    #: On a stopped native implement's ``--resume``, from ``util
+    #: next-command`` only: the line saying nothing ran the repository's tests
+    #: (fix round 18), printed as ``[TESTS_NOT_RUN]`` above the commands and
+    #: never part of ``user_next_step`` (the tool routes carry it in the
+    #: stop's ``error``).
+    tests_note: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
@@ -931,7 +944,8 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     Complete renders ``[WORKFLOW_COMPLETE]``, then one ``[MANUAL_TASK]`` line
     per task the run deferred to the user (none when it deferred nothing) and
     the ``[MANUAL_TASK_NOTE]`` line. Otherwise the ``[NEXT_COMMAND]`` line
-    comes first, then each ``optional_before`` entry's
+    comes first (below a ``[RUNNER_WARNING]`` and a ``[TESTS_NOT_RUN]`` line
+    when the answer carries them), then each ``optional_before`` entry's
     ``[NEXT_COMMAND_OPTIONAL_WHY]`` / ``[NEXT_COMMAND_OPTIONAL]`` pair in the
     answer's order, the answers pair, and then the same manual-task lines. A
     command line holds the command and nothing else.
@@ -946,6 +960,8 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     lines = []
     if answer.warning:
         lines.append(f"{RUNNER_WARNING_MARKER} {answer.warning}")
+    if answer.tests_note:
+        lines.append(f"{TESTS_NOT_RUN_MARKER} {answer.tests_note}")
     lines.append(f"{NEXT_COMMAND_MARKER} {answer.command}")
     for step in answer.optional_before:
         lines.append(f"{NEXT_COMMAND_OPTIONAL_WHY_MARKER} {step.why}")
@@ -1116,6 +1132,16 @@ def emit_answer(
             )
             if answers is not None:
                 answer = _replace(answer, answers=answers)
+            # Fix round 18 (live run 7, Claude Code stop 01): the native
+            # stop's line saying nothing ran the repository's tests, which
+            # the executor stop prints itself.
+            from .write_batch_scheduler import native_stop_unverified_line
+
+            tests = native_stop_unverified_line(
+                os.path.abspath(str(plan_arg if plan_path is None else plan_path))
+            )
+            if tests:
+                answer = _replace(answer, tests_note=tests)
         payload = answer.to_dict()
         out = sys.stdout if stream is None else stream
         for line in render_next_phase_lines(answer):
