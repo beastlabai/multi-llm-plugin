@@ -538,8 +538,9 @@ your host.
      both legs reporting the same check.
    - Only if none is configured, detect the target repository's own test runner
      (never this skill's — the suite under test is the one the plan changed):
-     - If `package.json` exists with a `test` script: `npm test 2>&1 | tail -50`
-     - If `pytest.ini`, `pyproject.toml` with `[tool.pytest]`, or `conftest.py` exists: `pytest -v --tb=short 2>&1 | tail -50`
+     - If `package.json` exists with a `test` script: `npm test`
+     - If `pytest.ini`, `pyproject.toml` with `[tool.pytest]`, or `conftest.py` exists: `pytest -v --tb=short`
+   - Run that command bare, exactly as the repository defines it: no `| tail`, `| head` or `| grep`, no `2>&1 |`, nothing chained before or after it. Read its whole output and take pass or fail from its own exit code: a pipe reports the last command's exit code, not the check's, and a trim drops the failures above the cut. A long output is saved to a file: read it to the end.
    - Record pass/fail results for inclusion in the implementation summary, naming
      the command you ran (or `not configured` when nothing was)
    - When no `driver.verify_command` is configured, say so in one plain line of your
