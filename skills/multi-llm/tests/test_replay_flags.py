@@ -83,6 +83,22 @@ class TestReplayFlags:
     def test_quick_survives(self):
         assert replay_flags("review-plan", _argv("--quick")) == ["--quick"]
 
+    def test_human_task_answers_are_never_replayed(self):
+        """Fix round 14 (live run 5, Codex/OpenCode stop accept 02): the
+        answers are in `state.json` and a plain `--resume` applies them, so a
+        replay that carried them made `status`'s `resume with:` line — the
+        tool route's first option — disagree with `resume_command`, and run
+        as printed it was refused (T005 was `skipped` by then)."""
+        argv = _argv("--resume", "--human-task", "T002=done",
+                     "--human-task=T005=skip", "--human", "T007=retry", "--quick")
+        assert replay_flags("implement", argv) == ["--resume", "--quick"]
+        stored = ["--human-task", "T002=done", "--human-task=T005=skip", "--quick"]
+        assert current_replay_flags(stored, mode="implement") == ["--quick"]
+        view = {"run": {"mode": "implement", "replay_flags": stored}, "progress": {}}
+        command = run_status._resume_command(view, Path(PLAN))
+        assert "--human-task" not in command
+        assert command.endswith("--quick --resume")
+
     def test_spellings_survive_as_typed(self):
         assert replay_flags("review-plan", _argv("-q", "--models=a,b")) == [
             "-q", "--models=a,b",

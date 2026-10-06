@@ -1213,6 +1213,42 @@ _REPLAY_DROP_POSITIONAL: Dict[str, Tuple[Tuple[str, ...], bool]] = {
 }
 
 
+#: The answers a replay never carries: ``implement``'s ``--human-task
+#: <id>=done|skip|retry`` (its own parser, ``action='append'``, one value). A
+#: ``done``/``skip`` is recorded in ``state.json``'s ``human_task_decisions``
+#: and a plain ``--resume`` applies it again
+#: (``implement_orchestrator._applicable_task_decisions``), and a ``retry`` is
+#: one-shot. Replayed, the answer was both redundant and wrong (fix round 14,
+#: live run 5): ``status``'s ``resume with:`` line, offered as the tool
+#: route's first option, read ``--human-task T002=done --human-task T005=skip
+#: --resume`` beside a ``resume_command`` of plain ``--resume`` — and run as
+#: printed it is refused, since T005 is ``skipped`` by then and an answer is
+#: taken only for a task still ``failed`` or held by a check.
+_REPLAY_DROP_ANSWERS: Dict[str, Tuple[Tuple[str, ...], bool]] = {
+    "human_task": (("--human-task",), True),
+}
+
+
+def drop_answer_flags(tokens: Iterable[str]) -> List[str]:
+    """*tokens* without any ``--human-task`` answer (:data:`_REPLAY_DROP_ANSWERS`).
+
+    For a stored replay list recorded before the answers were dropped at
+    record time, so an older run's ``resume with:`` line reads the same.
+    """
+    out: List[str] = []
+    items = [str(token) for token in tokens]
+    index = 0
+    while index < len(items):
+        token = items[index]
+        takes_value = _matches_any(token.split("=", 1)[0], _REPLAY_DROP_ANSWERS)
+        if takes_value is None:
+            out.append(token)
+            index += 1
+            continue
+        index += 2 if (takes_value and "=" not in token) else 1
+    return out
+
+
 def _matches_any(head: str, table: Dict[str, Tuple[Tuple[str, ...], bool]]) -> Optional[bool]:
     """``takes_value`` for the table entry ``head`` binds to, else ``None``."""
     for names, takes_value in table.values():
@@ -1241,7 +1277,9 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
     * ``--yes``/``--exec-subagents`` when an implier is present (see
       :data:`_REPLAY_DROP_IMPLIED`);
     * ``--agent-decide`` where ``--yes`` already means it
-      (:func:`drop_implied_judge_flag`).
+      (:func:`drop_implied_judge_flag`);
+    * ``implement``'s ``--human-task`` answers, which ``state.json`` keeps
+      (:data:`_REPLAY_DROP_ANSWERS`).
 
     Everything else stays, in the spelling it was typed, values with spaces
     included: ``--quick``, ``-q``, ``--models=a,b``, ``--host``, ``--detach``.
@@ -1275,6 +1313,8 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
         takes_value = _matches_any(head, _REPLAY_DROP_ALWAYS)
         if takes_value is None:
             takes_value = _matches_any(head, _REPLAY_DROP_POSITIONAL)
+        if takes_value is None:
+            takes_value = _matches_any(head, _REPLAY_DROP_ANSWERS)
         if takes_value is None and implied:
             takes_value = _matches_any(head, _REPLAY_DROP_IMPLIED)
         if takes_value is None and head in injected:
@@ -1306,7 +1346,7 @@ def current_replay_flags(
     if record and record.get("mode") and (mode is None or record["mode"] == mode):
         return replay_flags(str(record["mode"]), record.get("argv") or [])
     if isinstance(stored, (list, tuple)):
-        folded = fold_judge_flag(str(token) for token in stored)
+        folded = fold_judge_flag(drop_answer_flags(stored))
         # A list recorded before the judge flag was dropped from `--yes`
         # replays reads the same as one recorded after.
         return drop_implied_judge_flag(mode, folded) if mode else folded
