@@ -49,7 +49,8 @@ Usage::
 
     multi_llm.py util batch-done --phase-dir <dir> --task-id <id> \\
         --status completed|failed [--reason TEXT] [--state-file PATH] \\
-        [--check passed|findings|could-not-run [--finding TEXT ...]]
+        [--check passed|findings|could-not-run [--finding TEXT ...]] \\
+        [--own-check passed|findings [--finding TEXT ...]]
 
 ``--check`` is a check task's structured result (an implement task that
 declares no files; its reply's ``check`` object): ``findings`` records each
@@ -69,9 +70,14 @@ defaults to saying so), never as findings; a ``failed`` reply that lists
 findings without it ran, and is recorded ``--status completed --check
 findings``. A batch that edits code (implement's tasks that declare files,
 apply-code-fixes' batches; fix round 14) records the checks it ran on its
-own edits the same way, ``--check passed|findings``: a failing one prints a
+own edits with ``--own-check passed|findings``: a failing one prints a
 ``[BATCH_CHECK_FAILED]`` line telling the host to list it in summary.md and
-report it, and holds nothing back.
+report it, and holds nothing back. ``--check`` on such a batch is refused,
+naming the ``--own-check`` call (fix round 18, live run 7: Claude Code
+recorded ``--check passed`` for T008, a "check" task that declares
+``index.html``, and its summary then called the code task ``Verified``), and
+``--own-check`` on a check task is refused naming ``--check``: the two words
+are two kinds of task, and the plugin says which one the host has.
 
 Import is side-effect free: argparse and all I/O live inside :func:`main`.
 """
@@ -101,7 +107,7 @@ try:
     )
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import check_findings_from
-    from .subagent_tasks import PHASE_BY_WRITE_KIND
+    from .subagent_tasks import PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
@@ -136,7 +142,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import check_findings_from  # type: ignore
-    from utils.subagent_tasks import PHASE_BY_WRITE_KIND  # type: ignore
+    from utils.subagent_tasks import PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
@@ -192,6 +198,12 @@ _ITEM_STATUS = {"completed": "applied", "failed": "failed"}
 #: object (``passed: true`` and no finding, problems found, or — fix round
 #: 12 — ``could_not_run: true``).
 CHECK_RESULTS = ("passed", "findings", "could-not-run")
+
+#: ``--own-check``'s words: what a code batch's reply said in its ``check``
+#: object about the checks it ran on its own edits (fix round 18). A code
+#: batch has no ``could-not-run``: a check of its own that could not run is
+#: one of its findings.
+OWN_CHECK_RESULTS = ("passed", "findings")
 
 #: The reason ``--check could-not-run`` records when ``--reason`` gives none.
 COULD_NOT_RUN_REASON = (
@@ -254,6 +266,7 @@ def record_batch(
     state_file: Optional[Path] = None,
     check: Optional[str] = None,
     findings: Optional[List[str]] = None,
+    own_check: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Record *task_id*'s outcome; the ``{task_id, status, items, state_file,
     check_findings}`` written.
@@ -262,11 +275,16 @@ def record_batch(
     ``check`` object, racing re-run 4): ``findings`` records them in
     ``state.json``'s ``task_check_findings`` beside a ``completed`` status,
     as the executor leg does; every other record of an implement task clears
-    that task's entry.
+    that task's entry. *own_check* / *findings* are a code batch's report of
+    the checks it ran on its own edits (fix round 14; its own flag since fix
+    round 18): a failing one is recorded beside the status
+    (``task_batch_check``) and holds nothing back.
 
     Raises :class:`WritePromptError` (exit 3) for a missing task file, an
     unknown id, a human task, a status outside :data:`STATUSES`, or a check
-    result that does not fit the task or the status.
+    result that does not fit the task or the status — ``--check`` on a task
+    that is not a check task included, naming the call to make instead.
+    Nothing is recorded on a refusal.
     """
     if status not in STATUSES:
         raise WritePromptError(
@@ -276,10 +294,30 @@ def record_batch(
         raise WritePromptError(
             f"--check must be one of {', '.join(CHECK_RESULTS)}, not {check!r}."
         )
-    if findings and check != "findings":
+    if own_check is not None and own_check not in OWN_CHECK_RESULTS:
         raise WritePromptError(
-            "--finding is recorded only with --check findings: pass "
-            "--check findings and one --finding per problem the check reported."
+            f"--own-check must be one of {', '.join(OWN_CHECK_RESULTS)}, not "
+            f"{own_check!r}."
+        )
+    if check is not None and own_check is not None:
+        raise WritePromptError(
+            "Pass --check or --own-check, not both: --check records a check "
+            "task's verdict (an implement task that declares no files), "
+            "--own-check the checks a task that edits files ran on its own "
+            "edits. Nothing was recorded."
+        )
+    if findings and check != "findings" and own_check != "findings":
+        raise WritePromptError(
+            "--finding is recorded only with --check findings (a check task) "
+            "or --own-check findings (a task that edits files): pass one of "
+            "them and one --finding per problem the check reported."
+        )
+    if own_check == "findings" and status != "completed":
+        raise WritePromptError(
+            "--own-check findings is recorded with --status completed: the "
+            "task's edits are kept and the check it ran on them is reported "
+            "as failing. A task that failed is recorded --status failed "
+            "(with --reason), without --own-check. Nothing was recorded."
         )
     if check == "findings" and status != "completed":
         raise WritePromptError(
@@ -314,22 +352,31 @@ def record_batch(
             f"through the phase's human-task strategy instead."
         )
     checking = is_check_task(kind, task)
+    flag = "--check" if check is not None else "--own-check"
+    if (check is not None or own_check is not None) and kind not in CODE_WRITE_KINDS:
+        raise WritePromptError(
+            f"Task {task_id} edits the plan or the task list, not code, "
+            f"so it has no check result: record it without {flag}. Nothing "
+            f"was recorded."
+        )
     if check is not None and not checking:
-        # Fix round 14: a code batch reports the checks it ran on its own
-        # edits in the same `check` object; a plan or task-list batch has none.
-        if kind not in CODE_WRITE_KINDS:
-            raise WritePromptError(
-                f"Task {task_id} edits the plan or the task list, not code, "
-                f"so it has no check result: record it without --check."
-            )
-        if check == "could-not-run":
-            raise WritePromptError(
-                f"Task {task_id} is not a check task (a check task is an "
-                f"implement task that declares no files): its reply's `check` "
-                f"reports the checks it ran on its own edits, so record --check "
-                f"passed, or --check findings with one --finding per failing "
-                f"check, or leave --check out when it reported none."
-            )
+        # Fix round 18 (live run 7, Claude Code racing 06): `--check passed`
+        # was accepted for T008, which declares index.html, and the host's
+        # summary called the code task `Verified`. A code batch's own checks
+        # are `--own-check` (fix round 14 spelled them `--check` too).
+        raise WritePromptError(
+            _not_a_check_task_message(phase_dir, task_id, task, kind, status)
+        )
+    if own_check is not None and checking:
+        raise WritePromptError(
+            f"{task_id} declares no files, so it is a check task: its reply's "
+            f"`check` is its verdict. Record it with --check instead of "
+            f"--own-check: util batch-done --phase-dir \"{phase_dir}\" "
+            f"--task-id {task_id} --status completed --check passed (or "
+            f"--check findings with one --finding per problem, or --status "
+            f"failed --check could-not-run when its check could not run). "
+            f"Nothing was recorded."
+        )
     if checking and status == "completed":
         changed = changed_since_bound(
             phase_dir, task_id,
@@ -343,14 +390,14 @@ def record_batch(
     if check == "could-not-run":
         reason = reason or COULD_NOT_RUN_REASON
     elif check is not None:
-        read = check_findings_from({
+        check_findings = check_findings_from({
             "check": {"passed": check == "passed", "findings": list(findings or [])}
         }) or []
-        if checking:
-            check_findings = read
-        else:
-            # A code batch's own check: reported, never a hold (fix round 14).
-            batch_check = read
+    elif own_check is not None:
+        # A code batch's own check: reported, never a hold (fix round 14).
+        batch_check = check_findings_from({
+            "check": {"passed": own_check == "passed", "findings": list(findings or [])}
+        }) or []
     # The tree a check with findings leaves (fix round 14): a native
     # `--resume` hands the check out again only once the files moved since,
     # as the executor does from its verdict's stamp. `util finalize-tracking`
@@ -414,6 +461,42 @@ def record_batch(
         "batch_check": batch_check or [],
         "blocked": blocked,
     }
+
+
+def _not_a_check_task_message(
+    phase_dir: Path, task_id: str, task: Dict[str, Any], kind: str, status: str,
+) -> str:
+    """The refusal of ``--check`` for a task that edits code (fix round 18):
+    what the task is, and the call that records it."""
+    files = snapshot_file_set(task)
+    shown = ", ".join(files[:5]) + (f" (+{len(files) - 5} more)" if len(files) > 5 else "")
+    what = (
+        f"{task_id} declares files ({shown}), so it is a code task, not a "
+        f"check task (a check task is an implement task that declares no "
+        f"files)" if kind == "implement" and shown else
+        f"{task_id} is an apply-code-fixes batch, so it is a code task, not a "
+        f"check task (a check task is an implement task that declares no "
+        f"files)" if kind != "implement" else
+        f"{task_id} is a code task, not a check task"
+    )
+    call = f"util batch-done --phase-dir \"{phase_dir}\" --task-id {task_id}"
+    if status == "completed":
+        instead = (
+            f"Record the checks its subagent ran on its own edits with "
+            f"--own-check instead: {call} --status completed --own-check passed "
+            f"when its reply's `check` says \"passed\": true, or --own-check "
+            f"findings with one --finding per failing check; leave --own-check "
+            f"out when its reply carries no `check`."
+        )
+    else:
+        instead = (
+            f"A code task that failed is recorded without a check result: "
+            f"{call} --status failed --reason \"<why it failed>\"."
+        )
+    return (
+        f"{what}, and --check records only a check task's verdict. {instead} "
+        f"Nothing was recorded."
+    )
 
 
 def _changed_a_file_message(phase_dir: Path, task_id: str, changed: List[str]) -> str:
@@ -687,17 +770,25 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--check", default=None, choices=CHECK_RESULTS,
-        help="For a check task (an implement task that declares no files): "
-             "its reply's check result — passed, findings (the check ran "
-             "and reported problems; recorded with --status completed), or "
-             "could-not-run (its check said could_not_run: true; recorded "
-             "with --status failed). For a batch that edits code (implement, "
-             "apply-code-fixes): the checks it ran on its own edits, passed "
-             "or findings, with --status completed.",
+        help="For a check task (an implement task that declares no files) "
+             "only: its reply's check result — passed, findings (the check "
+             "ran and reported problems; recorded with --status completed), "
+             "or could-not-run (its check said could_not_run: true; recorded "
+             "with --status failed). A task that edits files takes "
+             "--own-check instead.",
+    )
+    parser.add_argument(
+        "--own-check", default=None, choices=OWN_CHECK_RESULTS, dest="own_check",
+        help="For a task that edits files (an implement task that declares "
+             "files, an apply-code-fixes batch): the checks its subagent ran "
+             "on its own edits, from its reply's check object — passed, or "
+             "findings (one --finding per failing check), with --status "
+             "completed. Never --check on such a task.",
     )
     parser.add_argument(
         "--finding", action="append", default=None, metavar="TEXT",
-        help="One problem a check reported (repeatable; with --check findings).",
+        help="One problem a check reported (repeatable; with --check findings "
+             "or --own-check findings).",
     )
     return parser
 
@@ -713,6 +804,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             state_file=Path(args.state_file) if args.state_file else None,
             check=args.check,
             findings=args.finding,
+            own_check=args.own_check,
         )
     except WritePromptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)

@@ -365,7 +365,7 @@ CHECK_FINDINGS_MARKER = "[CHECK_FINDINGS]"
 
 #: The line a code phase prints per batch whose own check failed after its
 #: edits (``WriteBatchScheduler._batch_check_lines``, ``util batch-done
-#: --check findings`` on a code batch; fix round 14).
+#: --own-check findings`` on a code batch; fix round 14).
 BATCH_CHECK_MARKER = "[BATCH_CHECK_FAILED]"
 
 

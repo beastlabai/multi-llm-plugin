@@ -433,7 +433,7 @@ class TestACheckTaskRecordsWhatItFound:
         never a plain success — and holds nothing back."""
         failing = "node tests/race-logic.test.mjs: AssertionError: a skipped gate must be rejected"
         code, stdout, err, _result = self._record(
-            plan_dir, capsys, "--check", "findings", "--finding", failing, task="T001")
+            plan_dir, capsys, "--own-check", "findings", "--finding", failing, task="T001")
         assert code == 0, err
         assert "[BATCH_DONE] T001 completed" in stdout
         assert (
@@ -449,7 +449,7 @@ class TestACheckTaskRecordsWhatItFound:
         assert "task_check_findings" not in state, "a write task is never a hold"
 
         code, stdout, err, _result = self._record(
-            plan_dir, capsys, "--check", "passed", task="T001")
+            plan_dir, capsys, "--own-check", "passed", task="T001")
         assert code == 0, err
         assert "[BATCH_CHECK_FAILED]" not in stdout
 
@@ -460,17 +460,75 @@ class TestACheckTaskRecordsWhatItFound:
         assert "not a check task" in err
         assert "T001" not in _state(plan_dir[1]).get("task_status", {})
 
-    def test_a_plan_batch_has_no_check_result(self, plan_dir, capsys):
+    @pytest.mark.parametrize("flag", ["--check", "--own-check"])
+    def test_a_plan_batch_has_no_check_result(self, plan_dir, capsys, flag):
         plan, out = plan_dir
         StateManager(plan).save()
         phase_dir, _tasks = _materialize(
             plan, out, "apply_suggestions", _suggestion_batches(), "apply-suggestions")
         code, _out, err, _result = _run([
             "util", "batch-done", "--phase-dir", str(phase_dir),
-            "--task-id", "apply-batch-0", "--status", "completed", "--check", "passed",
+            "--task-id", "apply-batch-0", "--status", "completed", flag, "passed",
         ], capsys)
         assert code == 3
         assert "edits the plan or the task list, not code" in err
+        assert f"record it without {flag}" in err
+
+    @pytest.mark.parametrize("extra", [
+        ("--check", "passed"),
+        ("--check", "findings", "--finding", "node --check: SyntaxError"),
+    ])
+    def test_check_on_a_code_task_is_refused_naming_own_check(
+        self, plan_dir, capsys, extra,
+    ):
+        """Fix round 18 (live run 7, Claude Code racing 06): `--check passed`
+        was accepted for T008, which declares index.html, and the host's
+        summary then called the code task `Verified`. `--check` is a check
+        task's verdict only; the refusal names the call to make, and records
+        nothing."""
+        code, stdout, err, _result = self._record(
+            plan_dir, capsys, *extra, task="T001")
+        assert code == 3, (stdout, err)
+        assert "T001 declares files (src/a.py), so it is a code task, not a check task" in err
+        assert "--check records only a check task's verdict" in err
+        assert "--task-id T001 --status completed --own-check passed" in err
+        assert "Nothing was recorded." in err
+        assert "[BATCH_DONE]" not in stdout
+        state = _state(plan_dir[1])
+        assert "T001" not in state.get("task_status", {})
+        assert "task_check_findings" not in state
+        assert "task_batch_check" not in state
+
+    def test_check_on_a_failed_code_task_names_the_plain_failed_record(
+        self, plan_dir, capsys,
+    ):
+        code, _out, err, _result = self._record(
+            plan_dir, capsys, "--check", "could-not-run", task="T001", status="failed")
+        assert code == 3
+        assert "--task-id T001 --status failed --reason" in err
+        assert "--own-check" not in err
+
+    def test_own_check_on_a_check_task_is_refused_naming_check(self, plan_dir, capsys):
+        code, stdout, err, _result = self._record(
+            plan_dir, capsys, "--own-check", "passed", task="T002")
+        assert code == 3, (stdout, err)
+        assert "T002 declares no files, so it is a check task" in err
+        assert "--task-id T002 --status completed --check passed" in err
+        assert "T002" not in _state(plan_dir[1]).get("task_status", {})
+
+    def test_check_and_own_check_together_are_refused(self, plan_dir, capsys):
+        code, _out, err, _result = self._record(
+            plan_dir, capsys, "--check", "passed", "--own-check", "passed", task="T001")
+        assert code == 3
+        assert "Pass --check or --own-check, not both" in err
+
+    def test_own_check_findings_goes_with_completed(self, plan_dir, capsys):
+        code, _out, err, _result = self._record(
+            plan_dir, capsys, "--own-check", "findings", "--finding", "x",
+            task="T001", status="failed")
+        assert code == 3
+        assert "--own-check findings is recorded with --status completed" in err
+        assert "T001" not in _state(plan_dir[1]).get("task_status", {})
 
     def test_a_finding_needs_check_findings(self, plan_dir, capsys):
         code, _out, err, _result = self._record(plan_dir, capsys, "--finding", "x")

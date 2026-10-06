@@ -232,7 +232,7 @@ def set_task_check_findings_in_state(
 #: while some task's own check fails (fix round 15). Never
 #: :data:`TASK_CHECK_FINDINGS_KEY`: a code task whose own test fails keeps its
 #: edits and holds nothing back, where a check task's findings hold its
-#: dependents. Written by both legs (``util batch-done --check findings`` on a
+#: dependents. Written by both legs (``util batch-done --own-check findings`` on a
 #: task that declares files, the scheduler from ``TaskOutcome.batch_check``);
 #: ``status`` and review-code's implementation record read it.
 TASK_BATCH_CHECK_KEY = "task_batch_check"

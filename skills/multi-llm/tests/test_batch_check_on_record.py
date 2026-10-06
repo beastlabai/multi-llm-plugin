@@ -62,21 +62,21 @@ class TestTheNativeLegRecordsIt:
         self, repo, capsys,
     ):
         _emit(repo, capsys)
-        out = _record(repo, capsys, "T001", "--check", "findings", "--finding", FAILING)
+        out = _record(repo, capsys, "T001", "--own-check", "findings", "--finding", FAILING)
         assert "[BATCH_CHECK_FAILED] T001" in out
         state = get_or_create_state(repo.plan).state
         assert state[TASK_BATCH_CHECK_KEY] == {"T001": [FAILING]}
         assert "task_check_findings" not in state
 
-        _record(repo, capsys, "T001", "--check", "passed")
+        _record(repo, capsys, "T001", "--own-check", "passed")
         assert TASK_BATCH_CHECK_KEY not in get_or_create_state(repo.plan).state
-        _record(repo, capsys, "T001", "--check", "findings", "--finding", FAILING)
+        _record(repo, capsys, "T001", "--own-check", "findings", "--finding", FAILING)
         _record(repo, capsys, "T001")
         assert TASK_BATCH_CHECK_KEY not in get_or_create_state(repo.plan).state
 
     def test_status_and_review_code_read_it(self, repo, capsys):
         _emit(repo, capsys)
-        _record(repo, capsys, "T001", "--check", "findings", "--finding", FAILING)
+        _record(repo, capsys, "T001", "--own-check", "findings", "--finding", FAILING)
 
         run_status.main(["--plan-file", str(repo.plan), "--view", "run"])
         out = capsys.readouterr().out
@@ -98,7 +98,7 @@ class TestTheNativeLegRecordsIt:
 
     def test_the_state_schema_admits_it(self, repo, capsys):
         _emit(repo, capsys)
-        _record(repo, capsys, "T001", "--check", "findings", "--finding", FAILING)
+        _record(repo, capsys, "T001", "--own-check", "findings", "--finding", FAILING)
         state = get_or_create_state(repo.plan).state
         valid, errors = validate_state_file(state)
         assert valid, errors
