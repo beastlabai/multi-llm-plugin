@@ -668,3 +668,34 @@ class TestTheAnswersCommandIsCarriedToo:
         path = (Transcript().prompt("go").bash(self._output())
                 .say(report(self.RESUME, self.ANSWERS)).write(tmp_path / "t.jsonl"))
         assert run_check(capsys, path) == ""
+
+
+class TestABlockAsksForTheWholeReport:
+    """Fix round 14 (racing run 5, Claude Code 08): the block asked for "your
+    report's `### Next Steps` section", the host answered with that section
+    alone, and since the reply becomes the run's final message the report it
+    had written (what was fixed, skipped, left out) was lost."""
+
+    def _reason(self, tmp_path, capsys, output, message) -> str:
+        path = (Transcript().prompt("go").bash(output).say(message)
+                .write(tmp_path / "t.jsonl"))
+        return decision_of(run_check(capsys, path))["reason"]
+
+    @pytest.mark.parametrize("case", ["command", "complete", "manual"])
+    def test_every_reason_asks_for_the_whole_report_again(self, tmp_path, capsys, case):
+        if case == "command":
+            reason = self._reason(tmp_path, capsys, block_output(), "## Summary\n\nDone.")
+        elif case == "complete":
+            reason = self._reason(tmp_path, capsys, COMPLETE_OUTPUT, "## Summary\n\nDone.")
+        else:
+            output = (
+                "[WORKFLOW_COMPLETE]\n[MANUAL_TASK] T011 Play it by hand\n"
+                'MULTI_LLM_RESULT: {"mode": "util next-command", "exit": 0}\n'
+            )
+            reason = self._reason(tmp_path, capsys, output, "## Summary\n\nDone.")
+        assert (
+            "Your next reply replaces your last message as the run's final "
+            "message, so send your whole report again"
+        ) in reason
+        assert "what was skipped, failed or left out" in reason
+        assert "Reply now with your report's `### Next Steps` section" not in reason
