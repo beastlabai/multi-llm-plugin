@@ -1079,9 +1079,10 @@ def record_user_next_step(obj: Optional[Dict[str, Any]]) -> None:
 
 
 #: How long the result line's ``error`` may be (:meth:`set_error`). A stop's
-#: headline that would run past it is cut before the line saying nothing ran
-#: the repository's tests, never through it
-#: (``WriteBatchScheduler._note_unverified_on_stop``, fix round 18).
+#: headline is fitted to it by one rule (``write_batch_scheduler.
+#: fit_stop_headline``, fix round 19): the model's quoted words give way
+#: first, then the not-run list and the task titles, never the remedy, the
+#: answers or the line saying nothing ran the repository's tests.
 ERROR_MAX_CHARS = 1200
 
 
