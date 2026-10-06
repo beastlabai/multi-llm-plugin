@@ -2063,7 +2063,10 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
 #: run 5 (2026-10-06): an apply-code-fixes batch said in its free-text
 #: `notes` that the bundled test failed, the repository's test failed
 #: afterwards, and the run reported "All 6 valid fixes were applied". Read by
-#: `subagent_executor.batch_check_findings`, never from `notes`.
+#: `subagent_executor.batch_check_findings`, never from `notes`. Fix round 17:
+#: the corrected run that replaces a failing one is pinned to the same check
+#: over the same scope, as :data:`CHECK_RESULT_CONTRACT` pins it to the task's
+#: own command; a narrower re-run passing never launders the failure.
 WRITE_CHECK_CONTRACT = (
     "\n## Checks you ran (required when you ran any)\n\n"
     "If you ran any check on your edits — a test, a build, a type check, a "
@@ -2079,8 +2082,13 @@ WRITE_CHECK_CONTRACT = (
     "Report the last run of each check. A run that failed because of how you "
     "ran it (a wrong flag, mode or path) and that you then ran correctly is "
     "reported by the corrected run, and so is a check you ran again after "
-    "fixing what it found: an attempt you corrected is not a finding. Never "
-    "describe a passing run as a finding.\n\n"
+    "fixing what it found: an attempt you corrected is not a finding. The "
+    "corrected run is the same check over the same scope: the full command "
+    "the task or the repository names, with only what you ran wrongly put "
+    "right. It is never a narrower one (fewer files or tests, a filter, or a "
+    "flag such as `--passWithNoTests` that lets it pass on less). If the only "
+    "run that passed was narrower, the failing run is the last run of that "
+    "check: report it. Never describe a passing run as a finding.\n\n"
     "Report a failing check here even when you think your change did not "
     "cause it: the batch is then recorded as applied with a failing check, "
     "and the user is told, instead of the run reporting a clean success. "
