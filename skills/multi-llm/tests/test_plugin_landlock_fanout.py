@@ -511,31 +511,50 @@ class TestTheHomeCheck:
         assert CODEX_HOME_CHECK_MARKER not in out
         assert _result_file(phase_dir).exists()
 
-    def test_another_repositorys_trust_entry_is_not_named(
-        self, fake_codex, monkeypatch, capsys
+    @pytest.mark.parametrize("mode, named", [
+        ("foreign", "/elsewhere/other-repo"),
+        ("subdir", os.path.join("packages", "web")),
+    ])
+    def test_a_trust_entry_added_during_the_run_is_named_in_the_closing_summary_only(
+        self, fake_codex, monkeypatch, capsys, mode, named
     ):
-        """Run 6 (#11a): the closing summary listed the trust entries of
-        concurrent runs in other repositories, as though this run made them."""
+        """Fix round 17: a jailed slot can write ``$CODEX_HOME`` itself, so a
+        table for another repository may be this run's own; round 16 named
+        only one inside the repository (run 6, #11a), which hid it. Named in
+        the closing summary only, blaming no one, and never a failure."""
         _pin_verdict(monkeypatch, RUNG)
-        monkeypatch.setenv("FAKE_CODEX_MODE", "foreign")
-        phase_dir, _status = _run_review_plan(fake_codex)
-        out = capsys.readouterr().out
-        assert CODEX_HOME_CHECK_MARKER not in out
-        assert "/elsewhere/other-repo" not in out
-        assert _result_file(phase_dir).exists()
-
-    def test_a_trust_entry_inside_the_repository_is_named_in_the_closing_summary_only(
-        self, fake_codex, monkeypatch, capsys
-    ):
-        _pin_verdict(monkeypatch, RUNG)
-        monkeypatch.setenv("FAKE_CODEX_MODE", "subdir")
+        monkeypatch.setenv("FAKE_CODEX_MODE", mode)
         phase_dir, _status = _run_review_plan(fake_codex)
         out = capsys.readouterr().out
         assert not _slot_lines(out, CODEX_HOME_CHECK_MARKER)
         lines = [line for line in out.splitlines() if CODEX_HOME_CHECK_MARKER in line]
         assert len(lines) == 1
-        assert os.path.join("packages", "web") in lines[0]
-        assert "inside this repository" in lines[0] and "not a failure" in lines[0]
+        assert named in lines[0] and "not a failure" in lines[0]
+        assert "by this run or by another codex session" in lines[0]
+        assert _result_file(phase_dir).exists()
+
+    def test_a_trust_entry_gone_again_by_the_closing_summary_is_not_named(
+        self, fake_codex, monkeypatch, capsys
+    ):
+        """Run 6's noise: a concurrent sibling run's own clean-up removed the
+        entry it added before this run's summary printed."""
+        _pin_verdict(monkeypatch, RUNG)
+        monkeypatch.setenv("FAKE_CODEX_MODE", "foreign")
+        config = fake_codex["home"] / "config.toml"
+        real_print = base.print_closing_summary
+
+        def sibling_cleans_up_first(key):
+            text = config.read_text(encoding="utf-8")
+            config.write_text(text.replace(
+                '[projects."/elsewhere/other-repo"]\ntrust_level = "trusted"\n', ""),
+                encoding="utf-8")
+            return real_print(key)
+
+        monkeypatch.setattr(base, "print_closing_summary", sibling_cleans_up_first)
+        phase_dir, _status = _run_review_plan(fake_codex)
+        out = capsys.readouterr().out
+        assert "/elsewhere/other-repo" not in out
+        assert CODEX_HOME_CHECK_MARKER not in out
         assert _result_file(phase_dir).exists()
 
     def test_a_long_change_is_summarized_and_listed_in_full_elsewhere(

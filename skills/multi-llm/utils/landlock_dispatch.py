@@ -62,6 +62,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import process_control
     from . import landlock_exec
     from . import git_utils as _git_utils
+    from . import codex_trust as _codex_trust
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils.providers.base import (  # type: ignore[no-redef]
         CODEX_HOME_CHECK_MARKER,
@@ -75,6 +76,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils import process_control  # type: ignore[no-redef]
     from utils import landlock_exec  # type: ignore[no-redef]
     from utils import git_utils as _git_utils  # type: ignore[no-redef]
+    from utils import codex_trust as _codex_trust  # type: ignore[no-redef]
 
 # ---------------------------------------------------------------------------
 # The wrapper and its launch
@@ -1434,27 +1436,29 @@ def _tree_entry(path: str, *, links_only: bool = False) -> Optional[Tuple[Any, .
     return entry
 
 
-def _inside(path: str, root: str) -> bool:
-    """Whether ``path`` is ``root`` or beneath it, separator-aware."""
-    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
-
-
 def _strip_expected_trust(text: str, run_cwds: Sequence[str]) -> Tuple[str, Tuple[str, ...]]:
     """Remove every trust-only table (a ``[projects."<path>"]`` table holding
     exactly ``trust_level = "trusted"``) from the compared text, and return the
-    remaining text plus the paths this run could have caused other than its
-    own cwds: those **inside** one of ``run_cwds`` (a codex started in a
-    subdirectory), named in the run's closing summary, never a failure.
+    remaining text plus the paths of every such table other than the run's
+    own cwds (named in the run's closing summary, never a failure).
 
-    The table for a cwd this run's children use is I12's expected entry. A
-    table for a directory outside every cwd is not this run's at all: its
-    children run in its repository, and codex records trust for the directory
-    a session runs in, so such a table is another codex session's, typically
-    a concurrent run in another repository sharing ``$CODEX_HOME`` (run 6,
-    #11a: every Codex racing run's summary listed its sibling runs' entries
-    as though it had made them). It is stripped and not named."""
+    The table for a cwd this run's children use is I12's expected entry. Any
+    other one is stripped too, so a concurrent codex session's entry (run 6,
+    #11a: sibling runs in other repositories sharing ``$CODEX_HOME``) never
+    fails the check — but it is still named: ``$CODEX_HOME`` is on every jailed
+    dispatch's allow list, so a batch of this run can add ``[projects."/"]``
+    or ``[projects."~"]`` itself, and that table, which makes the next codex
+    session there skip its trust prompt, is indistinguishable from another
+    session's (fix round 17; round 16 named only tables inside the run's
+    cwds, which hid exactly those). Which of them reach the summary is
+    decided there (:class:`TrustEntriesNote`)."""
     cwds = {os.path.realpath(c) for c in run_cwds if c}
     raw = {str(c) for c in run_cwds if c}
+    # The keys codex itself records for a session in a run cwd — its git
+    # toplevel and, in a linked worktree, the main repository's root — which
+    # `codex_trust` removes at the run's end (I12): expected, never named.
+    # Asked of git only once a table outside the cwds turns up.
+    codex_keys: List[set] = []
     foreign: List[str] = []
 
     def keep(match: "re.Match[str]") -> str:
@@ -1462,8 +1466,13 @@ def _strip_expected_trust(text: str, run_cwds: Sequence[str]) -> Tuple[str, Tupl
         real = os.path.realpath(path)
         if real in cwds or path in cwds or path in raw:
             return ""
-        if any(_inside(real, c) or _inside(path, c) for c in cwds | raw):
-            foreign.append(path)
+        if not codex_keys:
+            codex_keys.append({
+                key for cwd in cwds for key in _codex_trust.repo_keys(cwd)
+            })
+        if real in codex_keys[0]:
+            return ""
+        foreign.append(path)
         return ""
 
     stripped = _TRUST_TABLE.sub(keep, text)
@@ -1760,19 +1769,106 @@ def own_trust_entries_line(
 ) -> str:
     """The closing-summary note for :attr:`HomeChange.foreign_trust`, both lanes.
 
-    Only trust tables inside this run's repository reach it (see
-    :func:`_strip_expected_trust`), and it says what they are without blaming
-    anyone: codex records one for each directory a session runs in. Each path
-    is a name a jailed turn could have written into the config, so it goes
-    through :func:`render_name` and can never start a line of its own."""
+    It names every trust table that appeared during the run besides the
+    run's own cwds, and says who could have added one without blaming
+    anyone: this run (a jailed batch can write ``$CODEX_HOME``) or another
+    codex session running at the same time — the check cannot tell them
+    apart. Each path is a name a jailed turn could have written into the
+    config, so it goes through :func:`render_name` and can never start a line
+    of its own."""
     who = f"{provider}: " if provider else ""
     where = f"{render_home(home)}/config.toml" if home else "$CODEX_HOME/config.toml"
     names = ", ".join(render_name(render_home(path)) for path in paths)
     return (
-        f"{CODEX_HOME_CHECK_MARKER} {who}{where} gained trust entries for "
-        f"directories inside this repository during this run: {names}. Codex "
-        f"adds one for each directory a codex session runs in; not a failure."
+        f"{CODEX_HOME_CHECK_MARKER} {who}{where} gained trust entries during "
+        f"this run, added by this run or by another codex session running at "
+        f"the same time (not a failure): {names}. Codex trusts a listed "
+        f"directory in later sessions without asking and loads its "
+        f".codex/config.toml; if you did not run codex there, delete its "
+        f"[projects.\"<path>\"] table from {where}."
     )
+
+
+#: A ``[projects."<key>"]`` or ``[projects.'<key>']`` header, any table body.
+_PROJECT_HEADER = re.compile(
+    r'^[ \t]*\[projects\.(?:"((?:[^"\\]|\\.)*)"|\'([^\']*)\')\][ \t]*(?:#.*)?$',
+    re.MULTILINE,
+)
+
+
+def project_table_keys(text: str) -> set:
+    """The paths of every ``[projects."<path>"]`` table in a codex config."""
+    keys = set()
+    for match in _PROJECT_HEADER.finditer(text):
+        if match.group(1) is not None:
+            keys.add(match.group(1).replace('\\"', '"').replace("\\\\", "\\"))
+        else:
+            keys.add(match.group(2))
+    return keys
+
+
+@dataclass(frozen=True)
+class TrustEntriesNote:
+    """A closing-summary note for trust tables that appeared during a run,
+    rendered when the summary is printed (fix round 17).
+
+    Only the tables still in ``home``'s ``config.toml`` by then are named:
+    a table that was gone again is another codex session's that removed its
+    own entry when it finished (run 6, #11a: concurrent sibling runs, whose
+    own clean-up removes what they added), and it left nothing behind to
+    inspect, while one this run's batch planted stays until someone deletes
+    it. A config that cannot be read keeps every path named. ``str()`` is the
+    line, or ``""`` when none is left."""
+
+    home: Optional[str]
+    paths: Tuple[str, ...]
+    provider: Optional[str] = None
+
+    def remaining(self) -> Tuple[str, ...]:
+        if not self.home:
+            return tuple(self.paths)
+        status, data = _read_watched(os.path.join(self.home, HOME_CONFIG))
+        if status == "absent":
+            return ()
+        if status != "ok":
+            return tuple(self.paths)
+        present = project_table_keys(data.decode("utf-8", errors="replace"))
+        return tuple(path for path in self.paths if path in present)
+
+    def __str__(self) -> str:
+        left = self.remaining()
+        if not left:
+            return ""
+        return own_trust_entries_line(left, home=self.home, provider=self.provider)
+
+
+def render_summary_entries(entries: Sequence[Any]) -> List[str]:
+    """A closing summary's lines: each string as it is, and the
+    :class:`TrustEntriesNote` entries of one home and provider merged into
+    one line, at the first one's place, naming what is left of them now."""
+    merged: Dict[Tuple[Optional[str], Optional[str]], List[str]] = {}
+    order: List[Any] = []
+    for entry in entries:
+        if isinstance(entry, TrustEntriesNote):
+            key = (entry.home, entry.provider)
+            if key not in merged:
+                merged[key] = []
+                order.append(key)
+            for path in entry.paths:
+                if path not in merged[key]:
+                    merged[key].append(path)
+        else:
+            order.append(entry)
+    lines: List[str] = []
+    for item in order:
+        if isinstance(item, tuple):
+            home, provider = item
+            text = str(TrustEntriesNote(home, tuple(sorted(merged[item])), provider))
+        else:
+            text = str(item)
+        if text:
+            lines.append(text)
+    return lines
 
 
 def compare_home(before: Optional[HomeSnapshot], after: Optional[HomeSnapshot]) -> Optional[HomeChange]:
@@ -1959,6 +2055,9 @@ def rung_probe(
 
 __all__ = [
     "AllowEntry",
+    "TrustEntriesNote",
+    "project_table_keys",
+    "render_summary_entries",
     "BASE_DEVICE_ENTRIES",
     "EXIT_REQUIRED_ENTRY",
     "EXIT_UNAVAILABLE",

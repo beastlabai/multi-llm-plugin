@@ -1115,32 +1115,58 @@ class TestTheDispatchOnTheRung:
         assert "Warn-only" in lines[0]
         assert "mcp_servers.x" in (jail_home / "config.toml").read_text(encoding="utf-8")
 
-    @pytest.mark.parametrize("where, named", [("other", False), ("sub", True)])
-    def test_only_a_trust_entry_inside_this_repository_is_named(
-        self, repo, wrapper, runner_env, jail_home, capsys, where, named
+    @pytest.mark.parametrize("where", ["other", "root", "sub"])
+    def test_a_trust_entry_added_during_the_run_is_named_in_the_summary(
+        self, repo, wrapper, runner_env, jail_home, capsys, where
     ):
-        """Run 6 (#11a): the closing summary listed the trust entries that
-        concurrent runs in other repositories added to the shared config.
-        Only one inside this run's repository is this run's to name."""
+        """Fix round 17: a jailed batch can write ``$CODEX_HOME``, so a table
+        for another repository or for ``/`` may be this run's own; round 16
+        named only one inside the repository (run 6, #11a), which hid them.
+        Every one is named, in the closing summary only, blaming no one."""
         runner_env.use("codex:gpt-5.5")
         runner_env.echo("validation")
-        path = "/elsewhere/other-repo" if where == "other" else str(repo / "web")
+        path = {"other": "/elsewhere/other-repo", "root": "/",
+                "sub": str(repo / "web")}[where]
         wrapper.set(dispatch='home:\\n[projects."%s"]\\ntrust_level = "trusted"\\n' % path)
         _decide("codex:gpt-5.5", PROFILE_AGENT_READONLY, "plugin-landlock")
         phase = repo / "phase"
         phase.mkdir()
+        before = executor.jail_summary_count()
         outcome = executor.dispatch_task(
             _validation_batch(phase), phase_dir=str(phase), runner="codex:gpt-5.5",
             cwd=str(repo), retries=0,
         )
         assert outcome.ok, outcome.reason
         assert "[CODEX_HOME_CHECK]" not in capsys.readouterr().out, "summary only"
-        trust = [ln for ln in executor.jail_summary_lines() if path in ln]
-        if named:
-            assert len(trust) == 1 and "inside this repository" in trust[0], trust
-            assert "not a failure" in trust[0]
-        else:
-            assert trust == []
+        trust = [ln for ln in executor.jail_summary_lines(before)
+                 if f"time (not a failure): {landlock_dispatch.render_name(landlock_dispatch.render_home(path))}." in ln]
+        assert len(trust) == 1, executor.jail_summary_lines(before)
+        assert "by this run or by another codex session" in trust[0]
+
+    def test_a_trust_entry_gone_again_by_the_summary_is_not_named(
+        self, repo, wrapper, runner_env, jail_home
+    ):
+        """Run 6's noise: a concurrent sibling run added its own entry and its
+        own clean-up removed it again before this run's summary printed."""
+        runner_env.use("codex:gpt-5.5")
+        runner_env.echo("validation")
+        path = "/elsewhere/sibling-run"
+        table = '[projects."%s"]\ntrust_level = "trusted"\n' % path
+        wrapper.set(dispatch=f"home:\\n{table}".replace("\n", "\\n"))
+        _decide("codex:gpt-5.5", PROFILE_AGENT_READONLY, "plugin-landlock")
+        phase = repo / "phase"
+        phase.mkdir()
+        before = executor.jail_summary_count()
+        outcome = executor.dispatch_task(
+            _validation_batch(phase), phase_dir=str(phase), runner="codex:gpt-5.5",
+            cwd=str(repo), retries=0,
+        )
+        assert outcome.ok, outcome.reason
+        config = jail_home / "config.toml"
+        assert path in config.read_text(encoding="utf-8")
+        config.write_text(config.read_text(encoding="utf-8").replace(table, ""),
+                          encoding="utf-8")
+        assert not [ln for ln in executor.jail_summary_lines(before) if path in ln]
 
     def _seed_linked_venv(self, tmp_path, jail_home):
         """A plugin's uv ``.venv`` file under the home, hardlinked from a uv
