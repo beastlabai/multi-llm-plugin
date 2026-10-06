@@ -79,6 +79,22 @@ def rerunnable_checks(state: Any) -> List[str]:
     return _rerunnable(state)
 
 
+def _unlanded_on_record(plan_path: Path, state: Any) -> List[str]:
+    """``write_batch_scheduler.unlanded_on_record`` for this plan, each id
+    named on stdout with why it runs again (fix round 15)."""
+    from utils.write_batch_scheduler import unlanded_on_record
+
+    phase_dir = get_phase_dir(plan_path, "implement")
+    unlanded = unlanded_on_record(str(phase_dir), state.state)
+    for task_id in unlanded:
+        print(
+            f"[resume] {task_id} runs again: an earlier run recorded it done, "
+            f"but its result file says its change never landed (the reply "
+            f"said applied and no file changed)."
+        )
+    return unlanded
+
+
 def check_apply_suggestions_prerequisite(state, plan_dir: Path) -> dict:
     """Row 6: whether apply-suggestions still owes work before implement runs.
 
@@ -1984,6 +2000,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 state, plan_path, rerun_ids,
                 _applicable_task_decisions(state, human_task_ids, human_task_decisions),
             )
+        if args.resume:
+            # Fix round 15: a task a run before fix round 14 recorded done
+            # although its change never landed is handed out again.
+            unlanded = _unlanded_on_record(plan_path, state)
+            if unlanded:
+                rerun_ids = sorted(set(rerun_ids or []) | set(unlanded))
         # Format for output
         output_batches = format_batches_for_output(
             batches, skip_completed=args.resume, plan_preamble=plan_preamble,

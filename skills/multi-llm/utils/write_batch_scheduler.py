@@ -822,6 +822,45 @@ def rerunnable_checks(state: Any) -> List[str]:
     )
 
 
+def unlanded_on_record(phase_dir: str, state: Any) -> List[str]:
+    """Implement tasks recorded done whose change never landed.
+
+    Fix round 15 (review of round 14): a run before fix round 14 recorded an
+    ``applied`` reply that moved not one byte ``completed`` (OpenCode racing
+    run 5's T016). Its result file says so — the verdict is stamped
+    ``clean-failure`` at ``ok`` — and the scheduler dispatches such a result
+    again (:meth:`WriteBatchScheduler._result_counts_as_done`), but
+    ``--resume`` materializes only unfinished tasks, so it never got the
+    chance. These are the ids ``implement_orchestrator`` hands out again: a
+    task ``state.json`` records ``completed`` whose own result file
+    (``subagent_tasks.implement_output_name``) carries that verdict. A
+    check task (``verification_only``) is never one. Read-only, never fatal.
+    """
+    try:
+        from .subagent_tasks import implement_output_name
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.subagent_tasks import implement_output_name  # type: ignore
+    try:
+        statuses = dict(state.get("task_status") or {})
+    except Exception:  # noqa: BLE001 - a read for the resume
+        return []
+    found: List[str] = []
+    for task_id, status in sorted(statuses.items()):
+        if status != "completed" or not _IMPLEMENT_TASK_ID.match(str(task_id)):
+            continue
+        path = Path(phase_dir) / implement_output_name(str(task_id))
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        verdict = data.get("verdict") if isinstance(data, dict) else None
+        if (isinstance(verdict, dict) and verdict.get("ok") is True
+                and verdict.get("write_outcome") == WRITE_CLEAN_FAILURE
+                and not verdict.get("verification_only")):
+            found.append(str(task_id))
+    return found
+
+
 def decomposition_graph(
     tasks: Sequence[Dict[str, Any]], state: Any,
 ) -> List[Dict[str, Any]]:
