@@ -1070,3 +1070,25 @@ class TestTheCodeOnlyRuleNamesThisRunsPlan:
 
         rule = code_only_rule(str(tmp_path / "missing.md"))
         assert "or the task list generated from it" in rule
+
+
+class TestEveryFixOfABatchNamesItsOneFile:
+    """Fix round 19 (review of round 18, decline #6, not a bug): a declined
+    fix whose file the batch edited while no applied fix of the batch shares
+    that file cannot occur, because every fix of a batch names the batch's
+    one file. A batch that declines one fix and applies another edits the
+    file they share; one that declines every fix while its file moved is a
+    partial application (``test_write_batch_declined``). Should batching
+    ever mix files in one batch, a decline would need checking per file."""
+
+    def test_high_risk_and_normal_fixes_across_files(self):
+        fixes = [
+            make_fix(file=f"src/f{n % 3}.py", line_range=(n, n + 1),
+                     title=f"Fix {n}", importance="HIGH" if n % 5 == 0 else "LOW",
+                     fix_type="security" if n % 7 == 0 else "bug")
+            for n in range(1, 30)
+        ]
+        batches = batch_code_fixes(fixes)
+        assert sum(b.size for b in batches) == len(fixes)
+        for batch in batches:
+            assert {fix["file"] for fix in batch.fixes} == {batch.file_key}
