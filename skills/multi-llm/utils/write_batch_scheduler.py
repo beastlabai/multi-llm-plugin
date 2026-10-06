@@ -536,6 +536,13 @@ VERIFY_EXIT_NOT_RUN = 127
 EXIT_OK = 0
 EXIT_NEEDS_HUMAN = 3
 
+#: What a refused ``--human-task <batch>=skip`` leaves the user (fix round
+#: 18), on the refusal's printed block and its stop headline alike.
+REFUSED_SKIP_WAY_FORWARD = (
+    "Resume without it to dispatch the batch again, or restore the batch "
+    "first (util restore-batch) and then resume."
+)
+
 #: The review each apply kind applies — the first entry of
 #: ``check_workflow_prerequisites.PHASE_PREREQUISITES`` for that phase, which
 #: is the prerequisite ``_apply_batches_predate_review`` dates a batch
@@ -2475,6 +2482,9 @@ class WriteBatchScheduler:
         #: at the user's request (:meth:`_check_partial_skips`).
         self.partial_skips: List[str] = [str(t) for t in (partial_skips or [])]
         self._kept_at_request: Dict[str, Dict[str, Any]] = {}
+        #: The answers :meth:`_check_partial_skips` refused, with why (fix
+        #: round 19: recorded as a stop, :meth:`_record_answer_refusal`).
+        self._refused_skips: Dict[str, str] = {}
 
         # Plan step 3 (2026-09-30): the grant a write dispatch on the
         # plugin-landlock rung carries. ONE request for the whole phase — the
@@ -3508,6 +3518,10 @@ class WriteBatchScheduler:
         if refusals:
             result.exit_code = EXIT_NEEDS_HUMAN
             result.messages.extend(refusals)
+            # Fix round 19: on the record the tool routes read, so the
+            # result line names the refusal and the refused answer is not
+            # offered again from the stop it answered.
+            self._record_answer_refusal(result)
             return result
 
         # 3. The batches, in order, each verified before the next is dispatched.
@@ -4295,7 +4309,7 @@ class WriteBatchScheduler:
         if not self.partial_skips:
             return []
         by_id = {str(task.get("task_id", "")): task for task in self.tasks}
-        problems: List[str] = []
+        self._refused_skips = {}
         for task_id in self.partial_skips:
             task = by_id.get(task_id)
             if self.kind not in APPLY_WRITE_KINDS:
@@ -4308,17 +4322,78 @@ class WriteBatchScheduler:
             else:
                 why = self._partial_skip_evidence(task)
             if why:
-                problems.append(f"  - --human-task {task_id}=skip: {why}.")
-        if not problems:
+                self._refused_skips[task_id] = why
+        if not self._refused_skips:
             return []
         return [
             "",
             f"ERROR: {self.phase} cannot take the answer below, so nothing was "
             f"dispatched and no file was changed:",
-            *problems,
-            "Resume without it to dispatch the batch again, or restore the "
-            "batch first (util restore-batch) and then resume.",
+            *(
+                f"  - --human-task {task_id}=skip: {why}."
+                for task_id, why in self._refused_skips.items()
+            ),
+            REFUSED_SKIP_WAY_FORWARD,
         ]
+
+    def _record_answer_refusal(self, result: SchedulerResult) -> None:
+        """Keep a refused ``--human-task <batch>=skip`` where the tool routes
+        read a stop (fix round 19).
+
+        Review of fix round 18: the refusal was printed and nothing else, so
+        the result line named no ``error`` (the tool's needs-human message
+        said "Its result line names no error", run 7's #4 shape) and the
+        mirror still held the stop the answer was refused for, whose
+        ``answers`` ``util next-command --blocked`` handed back as the way
+        forward — the answer just refused. The stop record now says the
+        answer was refused, in a headline the orchestrator records as the
+        result line's ``error``; it keeps the answers of the earlier stop
+        that name no refused batch (an answer typed for the wrong batch
+        leaves the right one standing), and the mirror's other rows are the
+        earlier run's, untouched: this run dispatched nothing.
+        """
+        refused = dict(getattr(self, "_refused_skips", {}) or {})
+        earlier = self._mirror_snapshot()
+        before = earlier.get("stop") if isinstance(earlier.get("stop"), dict) else {}
+        refused_flags = {f"{task_id}=skip" for task_id in refused}
+        kept = [
+            dict(entry) for entry in (before.get("answers") or [])
+            if isinstance(entry, dict)
+            and not refused_flags.intersection(entry.get("flags") or [])
+        ]
+        named = "; ".join(
+            f"--human-task {task_id}=skip: {why}" for task_id, why in refused.items()
+        )
+        result.stop = {
+            "batch_index": None,
+            "failed_task_ids": [],
+            "task_id": None,
+            "kind": "answer-refused",
+            "what": f"cannot take {named}",
+            "refused_answers": [
+                ["--human-task", f"{task_id}=skip"] for task_id in refused
+            ],
+            "not_run": [],
+            "acceptable": False,
+            "not_rerun": False,
+            **({"answers": kept} if kept else {}),
+        }
+        result.stop["headline"] = self._stop_headline(result.stop)
+        try:
+            from . import status_file as _status_file
+        except ImportError:  # pragma: no cover
+            from utils import status_file as _status_file
+        try:
+            _status_file.update_status(self.phase_dir, {
+                "state": "subagents_failed",
+                "progress": {"write_subagents": {
+                    **earlier,
+                    "in_flight": [],
+                    "stop": copy.deepcopy(result.stop),
+                }},
+            })
+        except Exception:  # noqa: BLE001 - observability must not fail a phase
+            pass
 
     def _partial_skip_evidence(self, task: Dict[str, Any]) -> Optional[str]:
         """Why *task* cannot be kept at the user's request, or ``None`` when it
@@ -8823,6 +8898,12 @@ class WriteBatchScheduler:
         """One plain line for the result line's ``error``: what the hosts relay
         as "the last line it left"."""
         task_id = stop.get("task_id")
+        if stop.get("kind") == "answer-refused":
+            # Fix round 19: a `--human-task <batch>=skip` this run refused.
+            return (
+                f"{self.phase} {stop.get('what')}. Nothing was dispatched and "
+                f"no file was changed. {REFUSED_SKIP_WAY_FORWARD}"
+            )
         if stop.get("kind") == "check-findings":
             checks = stop.get("check_task_ids") or [task_id]
             named = ", ".join(
