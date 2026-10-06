@@ -24,6 +24,7 @@ three stories: the accept path, the fix path and a plain resume.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -298,6 +299,39 @@ class TestTheAcceptPath:
         # After the prior-batch context, before the task's instructions.
         assert prompt.index("## Check findings the user accepted") < prompt.index(
             "## Result (required")
+
+    def test_the_dispatched_prompts_are_kept_beside_the_native_legs(
+        self, repo, capsys,
+    ):
+        """Run 6 (#10b): on the executor leg (both tool routes) the prompt a
+        task was dispatched with was in no plan artifact, so T007's prompt
+        with the accepted findings could not be audited. It is kept where the
+        native leg's `util write-prompt` writes it, byte for byte what the
+        runner got, and the audit line's sha256 verifies it."""
+        import hashlib
+
+        from utils.write_safety import AUDIT_FILENAME, safety_dir
+
+        prompts = repo.phase_dir / "prompts"
+        _first_run(repo, capsys)
+        assert sorted(p.name for p in prompts.iterdir()) == [
+            "T001.prompt.txt", "T002.prompt.txt", "T003.prompt.txt",
+            "T004.prompt.txt",
+        ], "T005 was refused before dispatch: no prompt is kept for it"
+        assert _implement(
+            repo, "--resume", "--human-task", "T002=done", "--human-task", "T005=skip",
+        ) == 0
+        capsys.readouterr()
+        kept = (prompts / "T007.prompt.txt").read_text(encoding="utf-8")
+        assert kept == _dispatched_prompt(repo, NOTE)
+        assert "## Check findings the user accepted" in kept
+        audit = Path(safety_dir(str(repo.phase_dir))) / AUDIT_FILENAME
+        dispatched = [
+            json.loads(line) for line in audit.read_text().splitlines()
+            if '"dispatched"' in line
+        ]
+        last = [r for r in dispatched if r["task_id"] == "T007"][-1]
+        assert last["prompt_sha256"] == hashlib.sha256(kept.encode()).hexdigest()
 
     def test_retry_checks_the_policy_again(self, repo, capsys):
         _first_run(repo, capsys)
