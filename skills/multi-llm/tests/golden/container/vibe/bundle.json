@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-10-05T18:14:24Z",
+    "captured_at": "2026-10-06T00:46:39Z",
     "cli": "vibe",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -58,10 +58,10 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:fix9-reseed",
+    "image": "mllm-e2e:fix13-reseed",
     "reviewer": "vibe",
     "row_id": "chain-vibe",
-    "run_bundle": "20261005T175142Z"
+    "run_bundle": "20261006T002312Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -989,6 +989,7 @@
             1,
             2
           ],
+          "blocked_by_check": {},
           "dependency_overrides": {},
           "exit": 0,
           "finalized": true,
@@ -1737,6 +1738,7 @@
             2,
             3
           ],
+          "blocked_by_check": {},
           "dependency_overrides": {},
           "exit": 0,
           "finalized": true,
@@ -2471,6 +2473,7 @@
             1,
             2
           ],
+          "blocked_by_check": {},
           "dependency_overrides": {},
           "exit": 0,
           "finalized": true,
@@ -3615,6 +3618,7 @@
             1,
             2
           ],
+          "blocked_by_check": {},
           "dependency_overrides": {},
           "exit": 0,
           "finalized": true,
@@ -4787,6 +4791,14 @@
     },
     "head_at_start": "<str>",
     "head_before_implement": "c42d568a4006b1c36e18bb33fa820a0aaf03a14c",
+    "implement_task_depends_on": {
+      "T001": [],
+      "T002": [],
+      "T003": [
+        "T001",
+        "T002"
+      ]
+    },
     "implement_task_ids": [
       "T001",
       "T002",
@@ -4985,6 +4997,28 @@
     },
     "head_at_start": "<str>",
     "head_before_implement": "<str>",
+    "implement_task_depends_on": {
+      "T001": {
+        "<item-types>": [],
+        "<items>": [],
+        "<list>": 0
+      },
+      "T002": {
+        "<item-types>": [],
+        "<items>": [],
+        "<list>": 0
+      },
+      "T003": {
+        "<item-types>": [
+          "<str>"
+        ],
+        "<items>": [
+          "<str>",
+          "<str>"
+        ],
+        "<list>": 2
+      }
+    },
     "implement_task_ids": {
       "<item-types>": [
         "<str>"
