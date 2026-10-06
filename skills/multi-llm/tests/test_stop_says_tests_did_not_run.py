@@ -14,7 +14,11 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 import multi_llm  # noqa: E402
+from utils import provider_registry as registry  # noqa: E402
+from utils.state_manager import get_or_create_state  # noqa: E402
 from tests.test_check_gate_fixture import (  # noqa: E402,F401
     DENY,
     _check,
@@ -80,3 +84,134 @@ def test_a_stop_before_any_code_ran_says_nothing(repo, capsys):
     assert "ERROR: implement stopped at T001" in text
     assert "Nothing ran this repository's tests" not in text
     assert "Nothing ran this repository's tests" not in (result.get("notice") or "")
+
+
+#: Fix round 17 (review of round 16): a check (T001) that reports findings
+#: and holds T002, and an independent edit (T003) that fails. The stop comes
+#: after the check ran and before any code task applied an edit.
+CHECK_FIRST = """# Check first
+
+## Overview
+A check that runs before any edit lands.
+
+## Tasks
+
+### T001: Check the module
+Run the release check. Read-only.
+- Depends on: none
+- Files to modify: none
+
+### T002: Edit: write the release note
+Write the note.
+- Depends on: T001
+- Files to modify: src/main.py
+
+### T003: Edit: add the greeting module
+Add the greeting.
+- Depends on: none
+- Files to modify: src/main.py
+"""
+
+
+@pytest.fixture
+def check_first(tmp_path, monkeypatch):
+    from tests.test_check_gate_fixture import CHECK_GATE, FINDINGS
+    from tests.test_implement_stop_account import make_repo
+
+    obj = make_repo(tmp_path, monkeypatch, CHECK_FIRST)
+    monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001", "T002", "T003"]))
+    monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
+    monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(
+        {"passed": False, "findings": FINDINGS}))
+    # T003 fails having moved nothing: only T002, which never runs, edits.
+    monkeypatch.setenv(
+        "MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", "Title: Edit: add the greeting module")
+    monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", "Title: Edit: write the release note")
+    yield obj
+    registry._config = None
+    registry._config_key = None
+
+
+def test_a_stop_after_only_a_check_ran_says_nothing(check_first, capsys):
+    """The tests line is about edits nothing checked. A check task edits
+    nothing (and may have run the tests itself), so a stop after a check
+    alone completed must not say "Nothing ran this repository's tests"."""
+    assert multi_llm.main([
+        "implement", str(check_first.plan), "--yes", "--exec-subagents",
+    ]) == 3
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    statuses = get_or_create_state(check_first.plan).implementation_task_statuses()
+    # The check ran (findings, T002 held) and T003 failed: no edit applied.
+    assert statuses["T001"] == "completed", statuses
+    assert statuses["T003"] == "failed", statuses
+    assert "ERROR: implement stopped at T003" in text, text
+    assert "Nothing ran this repository's tests" not in text
+    report = json.loads(
+        (check_first.phase_dir / "write_batch_report.json").read_text())
+    assert not report.get("unverified"), report
+
+
+def test_a_resume_after_only_a_check_completed_says_nothing_either(
+    check_first, capsys,
+):
+    """The same on a resume: the check is on record `completed` in
+    state.json (the earlier run's), which is not an applied edit."""
+    assert multi_llm.main([
+        "implement", str(check_first.plan), "--yes", "--exec-subagents",
+    ]) == 3
+    capsys.readouterr()
+    assert multi_llm.main([
+        "implement", str(check_first.plan), "--yes", "--exec-subagents", "--resume",
+    ]) == 3
+    captured = capsys.readouterr()
+    text = captured.out + captured.err
+    assert "ERROR: implement stopped at T003" in text, text
+    assert "Nothing ran this repository's tests" not in text
+
+
+CHECK_ONLY = """# Check only
+
+## Overview
+A plan whose one task is a check.
+
+## Tasks
+
+### T001: Check the module
+Run the release check. Read-only.
+- Depends on: none
+- Files to modify: none
+"""
+
+
+def test_a_finished_run_of_a_check_alone_runs_no_verify_command(
+    tmp_path, monkeypatch, capsys,
+):
+    """`_run_verification` asks the same question as the stop's line: a
+    run whose tasks edited nothing has no edit for `driver.verify_command`
+    to judge (it used to run on any dispatched batch)."""
+    from tests.test_check_gate_fixture import CHECK_GATE
+    from tests.test_implement_stop_account import make_repo
+
+    repo = make_repo(tmp_path, monkeypatch, CHECK_ONLY)
+    (tmp_path / "driver.yaml").write_text(
+        "driver:\n  subagent_runner: codex:gpt-5.5\n"
+        "  verify_command: \"touch verify-ran\"\n", encoding="utf-8")
+    registry._config = None
+    registry._config_key = None
+    monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001"]))
+    monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
+    monkeypatch.setenv("MOCK_LLM_WRITE_CHECK", json.dumps(
+        {"passed": True, "findings": []}))
+    try:
+        assert multi_llm.main([
+            "implement", str(repo.plan), "--yes", "--exec-subagents",
+        ]) == 0
+    finally:
+        registry._config = None
+        registry._config_key = None
+    captured = capsys.readouterr()
+    assert not (repo.root / "verify-ran").exists()
+    assert "Nothing ran this repository's tests" not in captured.out + captured.err
+    report = json.loads((repo.phase_dir / "write_batch_report.json").read_text())
+    assert not report.get("verification") and not report.get("unverified"), report
