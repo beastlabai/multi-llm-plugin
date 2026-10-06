@@ -2197,3 +2197,45 @@ class TestImplementCountsTheWholeDecomposition:
         entry = _status(self._plan(tmp_path, {}, started=False))["phases"]["implement"]
         assert entry["status"] == "pending"
         assert "tasks_total" not in entry
+
+
+class TestSuggestedNextFollowsThePhasePosition:
+    """Fix round 14 (racing re-run 5, the stop-path fixture): its repo starts
+    at generate-tasks, so review-plan is never on record, and the result's
+    `notice` and plain `status` read "suggested next: review-plan" beside an
+    implement stopped at 4/7 — and again after implement completed. The
+    suggestion now resumes a started phase first, and otherwise walks on
+    from the furthest phase on record, never back."""
+
+    def test_an_unfinished_implement_is_resumed_first(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("generate-tasks",),
+                tasks={"T001": "completed", "T002": "pending"})
+        assert _status(plan)["suggested_next"] == "implement"
+
+    def test_a_finished_implement_is_followed_by_review_code(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("generate-tasks", "implement"))
+        assert _status(plan)["suggested_next"] == "code-review"
+
+    def test_nothing_open_after_the_furthest_phase_is_no_suggestion(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("generate-tasks", "implement", "code-review",
+                                 "apply-code-fixes"))
+        assert _status(plan)["suggested_next"] is None
+
+    def test_a_fresh_plan_still_starts_at_review_plan(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _record(plan)
+        assert _status(plan)["suggested_next"] == "review-plan"
+
+    def test_status_says_resume_implement_never_review_plan(self, tmp_path, capsys):
+        from utils import run_status
+
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("generate-tasks",),
+                tasks={"T001": "completed", "T002": "pending"})
+        run_status.main(["--plan-file", str(plan)])
+        out = capsys.readouterr().out
+        assert "suggested next: implement" in out
+        assert "suggested next: review-plan" not in out

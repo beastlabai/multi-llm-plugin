@@ -1059,7 +1059,10 @@ class TestUtilNextCommand:
     def test_no_after_is_plain_suggested_next(self, workdir, capsys):
         build(workdir, S(("generate-tasks",)))
         _code, out, _err, result = _run(["util", "next-command", P], capsys)
-        assert result["user_next_step"]["command"] == f"{PLUGIN}--review-plan {P}"
+        # Fix round 14: the suggestion follows the phase position, so a
+        # standalone generate-tasks is followed by implement, as `--after
+        # generate-tasks` answers, never by the review-plan that never ran.
+        assert result["user_next_step"]["command"] == f"{PLUGIN}--implement {P}"
 
     @pytest.mark.parametrize("tail", [
         ["--after", "generate-tasks", "--host", "codex"],
