@@ -519,3 +519,63 @@ class TestALaterCycleOnTheNativeLeg:
         assert "RESUME_REFUSED" not in text, text
         assert CONTINUED in text, text
         assert handed == ["T001"]
+
+
+class TestAStartOverClearsTheEarlierPrompts:
+    """Review of fix round 16 (noise #4): a start-over left the earlier run's
+    `prompts/<id>.prompt.txt` and `<id>.attempt-N.prompt.txt`, so a task the
+    new run never dispatched still had a prompt file in its folder."""
+
+    def test_a_task_the_start_over_did_not_dispatch_keeps_no_prompt(
+        self, repo, capsys
+    ):
+        _finish_once(repo)
+        prompts = _phase_dir(repo) / "prompts"
+        assert (prompts / "T003.prompt.txt").is_file()
+        (prompts / "T003.attempt-2.prompt.txt").write_text("re-ask", encoding="utf-8")
+        (prompts / "T003.tree.json").write_text("{}", encoding="utf-8")
+        (prompts / "notes.txt").write_text("keep", encoding="utf-8")
+
+        _stop_again_after_t001(repo, capsys)
+        assert (prompts / "T001.prompt.txt").is_file()
+        assert (prompts / "T002.prompt.txt").is_file()
+        assert not (prompts / "T003.prompt.txt").exists()
+        assert not (prompts / "T003.attempt-2.prompt.txt").exists()
+        assert (prompts / "T003.tree.json").read_text(encoding="utf-8") == "{}"
+        assert (prompts / "notes.txt").read_text(encoding="utf-8") == "keep"
+
+    def test_the_native_start_over_clears_them_too(self, repo, capsys):
+        _finish_once(repo)
+        prompts = _phase_dir(repo) / "prompts"
+        (prompts / "T002.tree.json").write_text("{}", encoding="utf-8")
+        capsys.readouterr()
+        code, text, handed = TestTheNativeEmit._emit(None, repo, capsys)
+        assert code == 0, text
+        assert handed == ["T001", "T002", "T003"]
+        assert sorted(p.name for p in prompts.iterdir()) == ["T002.tree.json"]
+
+    def test_a_planted_symlink_is_never_followed(self, repo, capsys, tmp_path):
+        import os
+
+        _finish_once(repo)
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        victim = outside / "T009.prompt.txt"
+        victim.write_text("not the plugin's", encoding="utf-8")
+        prompts = _phase_dir(repo) / "prompts"
+        os.symlink(victim, prompts / "T008.prompt.txt")
+        (prompts / "T007.prompt.txt.d").mkdir()
+        (prompts / "T006.prompt.txt").mkdir()
+        _stop_again_after_t001(repo, capsys)
+        assert victim.read_text(encoding="utf-8") == "not the plugin's"
+        assert (prompts / "T008.prompt.txt").is_symlink()
+        assert (prompts / "T006.prompt.txt").is_dir()
+
+        # And a `prompts/` that is itself a symlink is left alone entirely.
+        moved = _phase_dir(repo) / "prompts.real"
+        prompts.rename(moved)
+        os.symlink(outside, prompts)
+        capsys.readouterr()
+        code, text, _handed = TestTheNativeEmit._emit(None, repo, capsys, "--fresh")
+        assert code == 0, text
+        assert victim.read_text(encoding="utf-8") == "not the plugin's"

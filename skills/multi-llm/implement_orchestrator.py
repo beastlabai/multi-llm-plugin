@@ -958,8 +958,9 @@ def _start_over(
       ``--resume`` does not read the earlier run's prior-changes line as one
       this run left unrecorded.
 
-    Implement is recorded started on both legs, as the native emit records
-    it.
+    The prompts kept in ``{phase}/prompts/`` are removed
+    (:func:`_remove_kept_prompts`), and implement is recorded started on both
+    legs, as the native emit records it.
     """
     from utils.state_manager import (
         set_task_batch_check_in_state, set_task_check_findings_in_state,
@@ -1015,6 +1016,7 @@ def _start_over(
         if touched:
             set_aside.append(task_id)
     mark_tasks_reset_in_state(state.state, code_ids)
+    removed = _remove_kept_prompts(phase_dir)
     state.mark_phase_started("implement")
     state.save()
     if set_aside:
@@ -1026,6 +1028,66 @@ def _start_over(
             f"pre-batch snapshot beside its slot), and a later --resume keeps "
             f"only what this run finishes."
         )
+    if removed:
+        print(
+            f"start over: removed {removed} prompt file(s) an earlier run kept "
+            f"in {phase_dir}/prompts/."
+        )
+
+
+def _remove_kept_prompts(phase_dir: Path) -> int:
+    """Remove the ``*.prompt.txt`` files in ``{phase}/prompts/``; how many.
+
+    The batch prompts each dispatch keeps (``<id>.prompt.txt``, and
+    ``<id>.attempt-<n>.prompt.txt`` for a re-ask) are one run's: after a
+    start-over, a task the new run refuses before dispatch must have none
+    (fix round 17, review of fix round 16). Anything else in the folder — a
+    check's ``<id>.tree.json``, which the native leg binds there — stays.
+
+    A jailed repo-wide batch can write the phase dir, so nothing here
+    follows a link: the phase dir and ``prompts/`` are opened
+    ``O_DIRECTORY | O_NOFOLLOW`` (a symlink there removes nothing), each name
+    is checked with ``lstat`` relative to that descriptor and removed only
+    when it is a regular file, by ``unlink(dir_fd=…)``. Best-effort: a
+    platform without ``dir_fd`` removes nothing.
+    """
+    import stat as _stat
+
+    from utils.write_batch_scheduler import DISPATCHED_PROMPTS_SUBDIR
+
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    directory = getattr(os, "O_DIRECTORY", 0)
+    if not nofollow or not directory or os.unlink not in os.supports_dir_fd:
+        return 0
+
+    flags = os.O_RDONLY | directory | nofollow
+    try:
+        phase_fd = os.open(str(phase_dir), flags)
+    except OSError:
+        return 0
+    try:
+        try:
+            folder_fd = os.open(DISPATCHED_PROMPTS_SUBDIR, flags, dir_fd=phase_fd)
+        except OSError:
+            return 0
+    finally:
+        os.close(phase_fd)
+    removed = 0
+    try:
+        for name in os.listdir(folder_fd):
+            if not name.endswith(".prompt.txt"):
+                continue
+            try:
+                info = os.stat(name, dir_fd=folder_fd, follow_symlinks=False)
+                if not _stat.S_ISREG(info.st_mode):
+                    continue
+                os.unlink(name, dir_fd=folder_fd)
+            except OSError:
+                continue
+            removed += 1
+    finally:
+        os.close(folder_fd)
+    return removed
 
 
 def _manual_close_note(
