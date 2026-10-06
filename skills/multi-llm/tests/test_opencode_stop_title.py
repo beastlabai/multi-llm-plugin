@@ -6,8 +6,8 @@ reply — it sat idle for 28 minutes until it was killed — so the user got
 nothing. A plugin tool's title is what opencode shows of a call without the
 model: ``opencode run`` prints it on the tool's own line the moment the call
 returns (``⚙ multi_llm <title>``, in place of the arguments), ``--format json``
-carries it as ``state.title``, and the TUI shows it on the tool's header —
-measured offline on opencode 1.18.34 with a stub provider and a model that
+carries it as ``state.title`` (the TUI's tool header reads the same title, not
+measured) — measured offline on opencode 1.18.34 with a stub provider and a model that
 never replies, through ``tool.execute.after``, the hook this plugin sets it in.
 
 Every word of the title is the surface's ``stop_title`` (``modes.STOP_TITLE``)
