@@ -468,8 +468,8 @@ NO_COMMAND_REASON = (
 
 #: The title the OpenCode package puts on its tool part when a call ends at a
 #: stop (``tool.execute.after``; fix round 16). ``opencode run`` prints a
-#: plugin tool's title on the tool's own line and the TUI on its header, as
-#: soon as the call returns and whether or not the session's model ever
+#: plugin tool's title on the tool's own line (the TUI's header reads it too,
+#: not measured) as soon as the call returns and whether or not the session's model ever
 #: writes its reply: OpenCode racing run 6's free model never did (28 min
 #: idle), and the stop and its resume command were only in the tool output.
 #: ``{line}`` is the run's own last error line (``result.error``, the line

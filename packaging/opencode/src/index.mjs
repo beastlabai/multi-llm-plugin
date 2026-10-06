@@ -3095,9 +3095,9 @@ export const MultiLlmPlugin = async ({ client } = {}) => {
  * nothing. A plugin tool's title is the one thing opencode shows of a tool
  * call without the model: `opencode run` prints it on the tool's own line
  * (`⚙ multi_llm <title>`, in place of the call's arguments) the moment the call
- * returns, `--format json` carries it as `state.title`, and the TUI puts it on
- * the tool's header (measured offline on 1.18.34 with a stub provider and a
- * model that never replies). `tool.execute.after` is where a plugin sets it;
+ * returns and `--format json` carries it as `state.title` (measured offline
+ * on 1.18.34 with a stub provider and a model that never replies; the TUI's
+ * tool header reads the same title, which was not measured). `tool.execute.after` is where a plugin sets it;
  * `execute` keeps returning one JSON string.
  *
  * Only a finished stop is titled: a failed or needs-human result that carries
