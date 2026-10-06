@@ -2612,7 +2612,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         invocation, so that step never runs — the per-item reasons, which are the
         good part, existed only inside ``orchestrator_output.json``.
         """
-        from .subagent_executor import row_batch_check_findings
+        from .subagent_executor import batch_check_could_not_run, row_batch_check_findings
 
         result = self.write_result
         rows = self._phase_rows()
@@ -2665,7 +2665,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # `subagent_executor.row_outcome_label`'s reading order.
                 verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
                 if self._row_ok(row) and row_batch_check_findings(row):
-                    verdict += ", its check fails"
+                    verdict += (
+                        ", its check could not run"
+                        if batch_check_could_not_run(row_batch_check_findings(row))
+                        else ", its check fails"
+                    )
                 print(
                     f"  {row.get('task_id')}{self._row_provenance(row)}: "
                     f"{row.get('status')} ({verdict}), "
@@ -2953,7 +2957,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 batch_check_section,
                 verification_line,
             )
-        from .subagent_executor import row_batch_check_findings
+        from .subagent_executor import batch_check_could_not_run, row_batch_check_findings
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         result = self.write_result
         # #28: the phase's rows, not this run's outcomes — a `--resume` keeps
@@ -3023,7 +3027,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 # `subagent_executor.row_outcome_label`'s reading order.
                 verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
                 failing = (
-                    ", its check fails"
+                    (", its check could not run"
+                     if batch_check_could_not_run(row_batch_check_findings(row))
+                     else ", its check fails")
                     if self._row_ok(row) and row_batch_check_findings(row) else ""
                 )
                 lines.append(

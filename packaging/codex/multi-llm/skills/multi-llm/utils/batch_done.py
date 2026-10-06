@@ -89,6 +89,7 @@ try:
     from .metrics import _read_state, _write_state, state_file_lock
     from .state_manager import (
         mark_item_processed_in_state,
+        set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
@@ -117,6 +118,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.metrics import _read_state, _write_state, state_file_lock  # type: ignore
     from utils.state_manager import (  # type: ignore
         mark_item_processed_in_state,
+        set_task_batch_check_in_state,
         set_task_check_findings_in_state,
         set_task_check_tree_in_state,
         update_task_status_in_state,
@@ -362,6 +364,10 @@ def record_batch(
         if kind == "implement":
             set_task_check_findings_in_state(state, task_id, check_findings)
             set_task_check_tree_in_state(state, task_id, tree)
+            # A code task's own failing check, on record beside the check
+            # findings and never among them (fix round 15): it holds
+            # nothing back, and every other record of the task clears it.
+            set_task_batch_check_in_state(state, task_id, batch_check)
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )

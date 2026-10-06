@@ -588,7 +588,9 @@ _ASK = {
 _DETACH = {
     "native": (
         f"**Run detached** — use your host's own background mechanism `{{tool}}`, "
-        "redirecting stdout and stderr to the phase dir's `orchestrator-run.log`. "
+        "redirecting stdout and stderr to the phase dir's `orchestrator-run.log` "
+        "(`> … 2>&1`, the one dispatcher command that takes a redirect: every "
+        "foreground call runs bare). "
         "Never pass `--detach` on this host. Then make one **non-waiting** "
         "`status <plan> <selector> --host <this host's id> --view run --exit-zero` "
         "call — no "
