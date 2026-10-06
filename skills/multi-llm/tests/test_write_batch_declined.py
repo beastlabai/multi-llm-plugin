@@ -260,6 +260,58 @@ class TestABatchThatDeclinesAnItem:
             assert len(respond.seen) == 1, "a batch that declined everything is not re-sent"
             assert result.exit_code == 0
 
+    def test_a_failed_claim_that_declined_every_item_is_the_declined_no_op(self, env):
+        """Fix round 19 (review of round 18, #3): a runner that refuses
+        everything plausibly says `failed`. It declined every item with a
+        reason and moved nothing, so it is the declined no-op, and a resume
+        keeps it rather than dispatching it to decline them again."""
+        respond = _respond_with(env, {
+            "status": "failed", "ids": [],
+            "declined": [{"id": "s0", "reason": REASON},
+                         {"id": "s1", "reason": "needs a plan decision"}],
+            "files_touched": [], "summary": "declined both",
+        }, edit=False)
+        state = FakeState(env.tmp_path / "state.json")
+        result = env.scheduler([_two_item_task(env)], respond=respond, state=state).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.ok, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_NO_OP
+        assert outcome.reason.startswith("NO-OP: the batch declined every item it held")
+        assert f"suggestion 1 (`s0`) — {REASON}" in outcome.reason
+        assert result.exit_code == 0
+
+        again = env.scheduler(
+            [_two_item_task(env)], respond=respond, state=state, resume=True,
+        ).run()
+        assert again.exit_code == 0, again.messages
+        assert len(respond.seen) == 1, "a resume does not dispatch it again"
+        assert again.outcomes[0].skipped
+        assert again.outcomes[0].declined == {
+            "s0": REASON, "s1": "needs a plan decision"}
+
+    def test_a_crash_that_declined_every_item_fails_naming_the_declines(self, env):
+        """A non-zero exit is never a success on its own (D3k), so it stays a
+        failure; the failure says what the batch declined, and why."""
+        from tests.test_write_executor import _install_crashing_launcher
+
+        _install_crashing_launcher(env.bin_dir, "codex")
+        executor.reset_version_cache()
+        env.edits([], result={
+            "status": "no-op", "ids": [],
+            "declined": [{"id": "s0", "reason": REASON},
+                         {"id": "s1", "reason": "needs a plan decision"}],
+            "files_touched": [], "summary": "declined both",
+        })
+        result = env.scheduler([_two_item_task(env)]).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE, outcome.reason
+        assert outcome.reason.startswith("FAILED: the runner exited 17")
+        assert (f"It declined suggestion 1 (`s0`) — {REASON}; suggestion 2 "
+                f"(`s1`) — needs a plan decision.") in outcome.reason
+        assert result.exit_code == 3
+
     def test_every_item_declined_while_the_file_changed_is_a_partial_application(self, env):
         respond = _respond_with(env, {
             "status": "applied", "ids": [],
@@ -945,5 +997,7 @@ class TestTheNativeLegRecordsADeclinedItem:
         assert ("attests at least one fix applied" in text
                 or "attests at least one suggestion applied" in text)
         assert "(in `ids`, with a `status` other than `failed`)" in text
+        assert ("is a success (a no-op when it changed nothing), whatever word "
+                "its `status` carries, `failed` included") in text
         assert f"append its summary (step {append})" in text
         assert "declined by their batch (not applied): N" in text
