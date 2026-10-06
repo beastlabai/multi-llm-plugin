@@ -2343,7 +2343,9 @@ def build_validation_batch_records(
     return records
 
 
-def resolved_reaggregate_command(document: Dict[str, Any]) -> Optional[str]:
+def resolved_reaggregate_command(
+    document: Dict[str, Any], *, typed_plan: bool = False,
+) -> Optional[str]:
     """Rebuild a task document's follow-up command from the *running* skill dir.
 
     ``validation_tasks.json`` stores the durable, rebindable pair
@@ -2355,9 +2357,17 @@ def resolved_reaggregate_command(document: Dict[str, Any]) -> Optional[str]:
 
     Returns ``None`` when the document carries neither the durable pair nor a
     legacy resolved command (an empty phase, which owes no follow-up).
+
+    *typed_plan* (the native hand-off's printed command, fix round 14) names
+    the plan as this invocation's user typed it when that spelling names the
+    same file (``cli_common.typed_plan_for``).
     """
     mode = document.get("reaggregate_mode")
     plan = document.get("plan_file")
+    if mode and plan and typed_plan:
+        from .cli_common import typed_plan_for
+
+        plan = typed_plan_for(str(plan))
     if mode and plan:
         # The live invocation of this mode wins over the document's stored
         # `replay_flags` (D2's precedence rule); the stored list is the fallback

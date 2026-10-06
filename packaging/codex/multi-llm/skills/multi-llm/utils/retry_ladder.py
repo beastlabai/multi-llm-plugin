@@ -41,7 +41,7 @@ deadline. The re-ask is a different request (the original prompt plus the
 validator's errors), so it is not the identical retry rung 6 forbids; what the
 caller sends is the caller's business, and the default of ``0`` leaves rung 6
 exactly as terminal as it was. Lane B grants one, for ``task_generation`` and
-the three apply kinds (``subagent_executor.SCHEMA_REPAIRS_BY_KIND``; an apply
+the four write kinds (``subagent_executor.SCHEMA_REPAIRS_BY_KIND``; a write
 kind's re-ask restates the batch's report and must move no file).
 
 Rule 8 is this module's own too (fix round 8): ``record(..., repeatable=False)``
@@ -51,6 +51,16 @@ top of its own edits. A transport or rate-limit status then earns no retry and n
 backoff: the slot stops (``not_repeatable``), unless the attempt is
 ``repairable`` and the rule-7 allowance has a re-ask left, which is a different
 request (the runner restates its report and edits nothing).
+
+Rule 9 is this module's own as well (fix round 14): a caller may grant
+``resends`` — at most that many re-sends of a write batch whose reply said
+``applied`` while not one byte moved (``record_resend()``, returned as
+``Action(retry=True, resend=True)``). Rule 8 forbids re-sending an attempt that
+moved bytes; this one moved none, so the batch can be sent again, told that its
+previous attempt changed no file. It spends neither the transport budget nor
+the rule-7 allowance, and takes the same admission test as every other grant
+(OpenCode racing run 5: T016 said ``applied``, named ``index.html``, and
+``index.html`` was byte-for-byte unchanged).
 
 The status vocabulary and the D3k rung table live here rather than in
 ``subagent_executor`` because the ladder is now their only consumer;
@@ -229,6 +239,11 @@ STOP_NOT_REPEATABLE = "not_repeatable"
 #: re-ask, and the value a lane records on the attempt that re-ask produces.
 REPAIR_SCHEMA_INVALID = "schema_invalid"
 
+#: Rule 9's word: the reason an :class:`Action` carries when it grants the
+#: re-send of a write batch whose reply said ``applied`` while no byte moved,
+#: and the value a lane records on the attempt that re-send produces.
+RESEND_NOTHING_CHANGED = "nothing_changed"
+
 
 @dataclass(frozen=True)
 class Action:
@@ -251,6 +266,9 @@ class Action:
     #: parenthetical a lane appends to the attempt's own error, so the record
     #: says why the slot stopped there instead of naming only the failure.
     note: Optional[str] = None
+    #: The next attempt is rule 9's re-send: the batch's own prompt again,
+    #: told that the previous attempt said ``applied`` and changed no file.
+    resend: bool = False
 
 
 class RetryLadder:
@@ -271,6 +289,7 @@ class RetryLadder:
         max_rate_limit_backoffs: int = MAX_RATE_LIMIT_BACKOFFS,
         min_attempt_budget_s: float = MIN_ATTEMPT_BUDGET_S,
         schema_repairs: int = 0,
+        resends: int = 0,
     ) -> None:
         if now is None:  # pragma: no cover - the default is the real clock
             import time
@@ -298,10 +317,14 @@ class RetryLadder:
         # "a deterministic disagreement a retry would only launder" when the
         # retry is the identical dispatch; a re-ask that hands the runner the
         # validator's own errors is a different request. Granted per kind by the
-        # lane (Lane B: `task_generation` and the apply kinds), never by the ladder, and it
+        # lane (Lane B: `task_generation` and the write kinds), never by the ladder, and it
         # spends neither the transport budget nor the rate-limit allowance.
         self._schema_repairs_left = max(0, int(schema_repairs))
         self._schema_repairs_used = 0
+        # Rule 9: a FOURTH counter, zero unless the caller grants it (Lane B:
+        # the write kinds, `subagent_executor.RESENDS_BY_KIND`).
+        self._resends_left = max(0, int(resends))
+        self._resends_used = 0
 
         self.attempt_index = 0
         self.stop_reason: Optional[str] = None
@@ -462,6 +485,27 @@ class RetryLadder:
         self._schema_repairs_used += 1
         return Action(retry=True, reason=REPAIR_SCHEMA_INVALID, repair=True)
 
+    def record_resend(self) -> Action:
+        """Rule 9: may the write batch whose reply said ``applied`` while no
+        byte moved be sent once more?
+
+        The attempt itself ran and its reply was read, so this is not a
+        status the rung table knows: the caller asks only after it measured
+        that nothing moved (rule 8's condition for a safe re-send). Granted
+        at most ``resends`` times, inside the same deadline and under the
+        same admission test as every other grant; a refusal for want of
+        budget carries the ``note`` the caller records with the outcome.
+        """
+        if self._resends_left <= 0:
+            return Action(retry=False, reason="the re-send was already spent")
+        refusal = self._admission_refusal()
+        if refusal is not None:
+            note = f"no re-send: {self._refusal_text(refusal)}"
+            return Action(retry=False, reason=note, note=note)
+        self._resends_left -= 1
+        self._resends_used += 1
+        return Action(retry=True, reason=RESEND_NOTHING_CHANGED, resend=True)
+
     def _record_rate_limited(self) -> Action:
         # Rule 6(b): a rate-limit rung may not re-issue an identical dispatch
         # the vendor already exhausted. If the adapter declares it retries 429s
@@ -547,6 +591,16 @@ class RetryLadder:
     def schema_repairs_left(self) -> int:
         """Schema-repair re-asks the allowance still holds (rule 7)."""
         return self._schema_repairs_left
+
+    @property
+    def resends_left(self) -> int:
+        """Rule 9's re-sends the allowance still holds."""
+        return self._resends_left
+
+    @property
+    def resends_used(self) -> int:
+        """Rule 9's re-sends granted so far."""
+        return self._resends_used
 
     @property
     def spawns(self) -> int:

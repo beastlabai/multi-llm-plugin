@@ -42,8 +42,9 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
   report nothing as a next step that the run did not name. Copy it character
   for character, never re-typed: its plan path as printed, no flag added or
   dropped (not a `--plan-file` spelling, not without the `--quick --yes` it
-  carries), and read the dispatcher's output whole: piping it through `cut`,
-  `head` or `grep` chops the very `MULTI_LLM_RESULT` line you must read.
+  carries), and read the dispatcher's output whole: a pipe, even through
+  `tail`, hands you the pipe's exit code instead of the dispatcher's and
+  drops the marker lines above the `MULTI_LLM_RESULT` line you must read.
   `user_next_step`
   *starts the next phase*: it is the user's to type, never yours to run, and it
   ends the report as the next rule says.
@@ -91,11 +92,16 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     entries follow it, never precede it: the line "Optional, before that:",
     then each entry in the order the key lists them — its `why` as plain text
     outside the fence, then its `command` alone in its own fenced block. When
+    the lookup also printed `[NEXT_COMMAND_ANSWERS_WHY]` /
+    `[NEXT_COMMAND_ANSWERS]` (`user_next_step.answers`: a stopped implement's
+    one command carrying every `--human-task` answer it waits for), write that
+    why as plain text and that command alone in its own fenced block, last. When
     `complete` is `true` (its `command` is then `null`), write
     "Workflow complete." instead, and when it carries `manual_tasks`, list
     each one under it, its `id` and `title`, as the user's to do: implement
     deferred them and the plugin will not run them (the `[MANUAL_TASK]` lines
-    below `[WORKFLOW_COMPLETE]` are the same tasks). When there is no `user_next_step` at all,
+    below `[WORKFLOW_COMPLETE]` are the same tasks), then its `manual_tasks_note`
+    (the `[MANUAL_TASK_NOTE]` line) verbatim: it says how to record them done. When there is no `user_next_step` at all,
     write neither a command nor "Workflow complete.": an absent key is not a
     completion.
   - *A failed lookup prints no command.* When `util next-command` exits

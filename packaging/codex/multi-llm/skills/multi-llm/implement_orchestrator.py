@@ -46,6 +46,7 @@ from utils.cli_common import (
     record_artifacts,
     record_error,
     record_notice,
+    typed_plan_for,
 )
 from utils.output_handler import get_phase_dir, get_output_dir
 from utils.git_utils import get_project_root
@@ -1030,7 +1031,7 @@ def run_implement_write_phase(
             or getattr(args, "dry_run_subagents", False)):
         return None
 
-    from utils.write_batch_scheduler import WriteBatchScheduler
+    from utils.write_batch_scheduler import WriteBatchScheduler, write_result_notice
     from utils.write_phase_bridge import (
         materialize_write_tasks,
         write_task_file_for_phase,
@@ -1092,11 +1093,17 @@ def run_implement_write_phase(
         # last line it left", and the detached close-out's `run.error`.
         record_error(stop["headline"])
     found = result.check_findings() if hasattr(result, "check_findings") else {}
-    if found:
+    notice = [check_findings_notice(found)] if found else []
+    # Fix round 14: a task whose own check failed after its edits, and a run
+    # nothing verified, are on the same line.
+    extra = write_result_notice(result) if hasattr(result, "report_rows") else None
+    if extra:
+        notice.append(extra)
+    if notice:
         # Racing re-run 4 (2026-10-05): a check task's problems were on no
         # surface a host reads. The result line's `notice` carries them,
         # beside the `[CHECK_FINDINGS]` lines above.
-        record_notice(check_findings_notice(found))
+        record_notice("; ".join(notice))
     if result.report_path:
         print(f"[write-subagents] report: {result.report_path}")
     if result.summary_file:
@@ -1257,6 +1264,216 @@ def _native_human_task_plan(
         if "pending_tasks" in output_data:
             output_data["pending_tasks"] = sum(len(b["tasks"]) for b in kept)
     return plan
+
+
+def _native_check_reruns(
+    state: StateManager,
+    plan_path: Path,
+    checks: Sequence[str],
+    decisions: Dict[str, str],
+) -> Tuple[List[str], Dict[str, List[str]]]:
+    """``(checks handed out again, checks kept)`` for a native ``--resume``.
+
+    Fix round 14 (stop fixture, Claude Code 01b): the native leg handed every
+    check whose findings hold tasks back out again on every ``--resume``, so a
+    resume the user changed nothing for spent a new subagent (~23k tokens) on
+    the same findings — the executor refuses that run
+    (``WriteBatchScheduler._check_findings_rerun``). A check is kept — not in
+    the batches, its findings standing, the tasks after it held — when the
+    files git sees are the ones its stamp recorded
+    (``state.json``'s ``task_check_trees``: ``util batch-done`` stamps it,
+    ``util finalize-tracking`` re-stamps it with the tree the run left), and
+    no answer applies to it this run: ``retry`` runs it anyway, and a
+    ``done``/``skip`` answer is resolved by the human-task plan as before.
+    A check handed out again because the files changed (or with no stamp to
+    compare) loses its stamp, so a run that never re-runs it cannot re-stamp
+    it as checked. The kept map is ``check id -> its findings``.
+    """
+    from utils.state_manager import (
+        TASK_CHECK_TREES_KEY,
+        set_task_check_tree_in_state,
+    )
+    from utils.write_prompt import check_tree_fingerprint
+
+    stamps = state.get(TASK_CHECK_TREES_KEY) or {}
+    if not isinstance(stamps, dict):
+        stamps = {}
+    findings_on_record = state.get("task_check_findings") or {}
+    current: Optional[str] = None
+    measured = False
+    rerun: List[str] = []
+    kept: Dict[str, List[str]] = {}
+    for check_id in checks:
+        answer = decisions.get(check_id)
+        if answer in ("done", "skip"):
+            rerun.append(check_id)
+            continue
+        recorded = stamps.get(check_id)
+        if answer != "retry" and recorded:
+            if not measured:
+                current = check_tree_fingerprint(get_phase_dir(plan_path, "implement"))
+                measured = True
+            if current is not None and current == recorded:
+                kept[check_id] = [
+                    str(item) for item in (findings_on_record.get(check_id) or [])
+                ]
+                continue
+        rerun.append(check_id)
+        set_task_check_tree_in_state(state.state, check_id, None)
+    return rerun, kept
+
+
+def _native_withheld(
+    output_data: Dict[str, Any],
+    state: StateManager,
+    plan_path: Path,
+    *,
+    kept_checks: Dict[str, List[str]],
+    tasks_file: Optional[Path],
+) -> Dict[str, Dict[str, str]]:
+    """Take out of the native handoff's batches every task the host must not
+    dispatch; what was taken out, by bucket.
+
+    Fix round 14 (stop fixture, Claude Code accept 02): T005 and T006,
+    skipped by ``--human-task T005=skip``, were in ``skipped_tasks`` and the
+    prose said "do not dispatch", yet they sat in ``batches`` 3 and 4, and the
+    emit counted "4 task(s) to dispatch" beside "Pending tasks: 3". The
+    batches now hold only what the host dispatches (and a manual task still
+    waiting for its answer), so a host that walks them cannot run one of
+    these:
+
+    * a task the human-task plan skipped, and a manual task answered
+      ``done`` (named in ``skipped_tasks`` / ``completed_manual_tasks``);
+    * ``held``: each task that depends on a check this resume keeps
+      (:func:`_native_check_reruns`), with the reason ``util batch-done``
+      recorded for it;
+    * ``refused``: a task ``driver.write_paths`` does not allow, recorded
+      ``failed`` in ``state.json`` with its reason, as the executor refuses it
+      before dispatch (``--human-task <id>=done|skip|retry`` answers it, and a
+      ``--resume`` checks it again) — ``util write-prompt`` refused it before,
+      after the host had already been handed it;
+    * ``not_run``: each task that depends on a refused one.
+
+    ``pending_tasks`` is recounted from what is left.
+    """
+    from utils.write_batch_scheduler import (
+        blocked_by_check_reason,
+        decomposition_graph,
+        transitive_dependents,
+    )
+
+    batches = output_data.get("batches") or []
+    entries = [task for batch in batches for task in batch.get("tasks") or []]
+    nodes = [
+        {
+            "task_id": str(task.get("id") or ""),
+            "depends_on": list(task.get("depends_on") or []),
+            "executor_role": task.get("executor_role"),
+            "is_human": task.get("is_human"),
+        }
+        for task in entries
+    ]
+    graph = decomposition_graph(nodes, state.state)
+    gone: set = {
+        str(task.get("id") or "") for task in entries
+        if task.get("status") in (TaskStatus.SKIPPED.value, TaskStatus.COMPLETED.value)
+    }
+    human = {
+        str(task.get("id") or "") for task in entries
+        if task.get("is_human") or task.get("executor_role") == "human"
+    }
+    present = {str(task.get("id") or "") for task in entries}
+
+    held: Dict[str, str] = {}
+    for check_id in sorted(kept_checks):
+        for dependent in transitive_dependents(graph, check_id):
+            if dependent in present and dependent not in gone | human:
+                held.setdefault(dependent, blocked_by_check_reason(check_id))
+
+    refused: Dict[str, str] = {}
+    not_run: Dict[str, str] = {}
+    candidates = [
+        task for task in entries
+        if str(task.get("id") or "") not in gone | human | set(held)
+    ]
+    if candidates:
+        try:
+            from utils.write_phase_bridge import materialize_write_tasks
+            from utils.write_prompt import policy_refusal_for
+
+            phase_dir = get_phase_dir(plan_path, "implement")
+            write_tasks = materialize_write_tasks(
+                kind="implement",
+                batches=[{"batch_index": 0, "can_parallelize": False, "tasks": candidates}],
+                phase_dir=str(phase_dir),
+                plan_file=str(plan_path.absolute()),
+                tasks_file=str(tasks_file) if tasks_file else None,
+            )
+        except Exception:  # noqa: BLE001 - never refuse on a guess
+            write_tasks = []
+        for write_task in write_tasks:
+            task_id = str(write_task.get("task_id") or "")
+            message = policy_refusal_for(
+                write_task, plan_file=str(plan_path.absolute()),
+                anchor_dir=get_phase_dir(plan_path, "implement"),
+            )
+            if message is None:
+                continue
+            refused[task_id] = f"refused before dispatch: {message}"
+        for task_id in sorted(refused):
+            state.update_task_status(task_id, "failed", reason=refused[task_id])
+            for dependent in transitive_dependents(graph, task_id):
+                if (dependent in present and dependent not in gone | human
+                        and dependent not in held and dependent not in refused):
+                    not_run.setdefault(
+                        dependent,
+                        f"not run — depends on {task_id}, which was refused "
+                        f"before dispatch (the write policy does not allow a "
+                        f"file it declares)",
+                    )
+
+    withheld = gone | set(held) | set(refused) | set(not_run)
+    kept_batches = []
+    for batch in batches:
+        batch["tasks"] = [
+            task for task in batch.get("tasks") or []
+            if str(task.get("id") or "") not in withheld
+        ]
+        if batch["tasks"]:
+            batch["can_parallelize"] = len(batch["tasks"]) > 1
+            kept_batches.append(batch)
+    output_data["batches"] = kept_batches
+    if "pending_tasks" in output_data:
+        output_data["pending_tasks"] = sum(len(b["tasks"]) for b in kept_batches)
+    if kept_checks:
+        output_data["not_rerun_checks"] = {
+            check_id: (
+                "not run again — nothing in the repository changed since its "
+                "check reported problems"
+                + (f": {'; '.join(findings)}" if findings else "")
+            )
+            for check_id, findings in sorted(kept_checks.items())
+        }
+    if held:
+        output_data["held_tasks"] = dict(sorted(held.items()))
+    if refused:
+        output_data["refused_tasks"] = dict(sorted(refused.items()))
+    if not_run:
+        output_data["not_run_tasks"] = dict(sorted(not_run.items()))
+    return {"held": held, "refused": refused, "not_run": not_run}
+
+
+def _dispatch_line(output_data: Dict[str, Any], decomposed_batches: int) -> str:
+    """``Organized into N execution batches: X task(s) to dispatch …``,
+    counted from the batches as handed out."""
+    entries = [t for b in output_data.get("batches") or [] for t in b.get("tasks") or []]
+    manual = sum(1 for t in entries if t.get("executor_role") == "human")
+    dispatching = len(entries) - manual
+    return (
+        f"Organized into {decomposed_batches} execution batches: {dispatching} "
+        f"task(s) to dispatch"
+        + (f", {manual} manual task(s) it does not run" if manual else "")
+    )
 
 
 def _refuse_unrecorded_native_resume(
@@ -1658,6 +1875,17 @@ def main(argv: Optional[List[str]] = None) -> int:
         for task_id, action in sorted(human_task_decisions.items()):
             print(f"[HUMAN_TASK_ANSWERED] {task_id}={action}")
 
+    # Which leg hands the batches out: the Python executor schedules them
+    # itself, anything else hands them to the host (the native leg).
+    executor_backed = bool(
+        getattr(args, "exec_subagents", False)
+        or getattr(args, "dry_run_subagents", False)
+    )
+    # A check whose findings stand is handed out again on a native resume only
+    # once the files moved (fix round 14); the executor decides at dispatch.
+    kept_checks: Dict[str, List[str]] = {}
+    decomposed_batches = 1
+
     # If specific task requested
     if args.task:
         task = decomposer.get_task(args.task)
@@ -1689,27 +1917,27 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         # Get parallel batches
         batches = decomposer.get_parallel_batches()
+        decomposed_batches = len(batches)
+        rerun_ids = rerunnable_checks(state.state) if args.resume else None
+        if rerun_ids and not executor_backed:
+            rerun_ids, kept_checks = _native_check_reruns(
+                state, plan_path, rerun_ids,
+                _applicable_task_decisions(state, human_task_ids, human_task_decisions),
+            )
         # Format for output
         output_batches = format_batches_for_output(
             batches, skip_completed=args.resume, plan_preamble=plan_preamble,
             plan_path=plan_path_str, all_tasks=decomposer.tasks,
-            rerun_ids=rerunnable_checks(state.state) if args.resume else None,
+            rerun_ids=rerun_ids,
         )
 
         # The result line counts what dispatches ("0/13 batches"), and a manual
         # task is a graph node that dispatches nothing, so a bare "15 execution
         # batches" read as two more than the run would ever report (2026-10-01).
-        manual_in_output = sum(
-            1 for b in output_batches for t in b["tasks"]
-            if t.get("executor_role") == "human"
-        )
-        dispatching = sum(len(b["tasks"]) for b in output_batches) - manual_in_output
-        print(
-            f"Organized into {len(batches)} execution batches: {dispatching} "
-            f"task(s) to dispatch"
-            + (f", {manual_in_output} manual task(s) it does not run"
-               if manual_in_output else "")
-        )
+        # The native leg prints it once it has taken out what the host must not
+        # dispatch (`_native_withheld`), so it agrees with "Pending tasks".
+        if executor_backed or args.dry_run:
+            print(_dispatch_line({"batches": output_batches}, decomposed_batches))
 
         # Count pending tasks
         pending_count = sum(len(b["tasks"]) for b in output_batches)
@@ -1732,6 +1960,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             "pending_tasks": pending_count,
             "batches": output_batches
         }
+
+    # The plan as the user typed it, for the closing `util finalize-tracking
+    # --plan-file` (fix round 14: the host copied the absolute `plan_file`).
+    output_data["plan_arg"] = typed_plan_for(plan_path)
 
     # The resolved answers travel with the tasks, so the invoker copies a
     # decision instead of composing one (D5a).
@@ -1777,10 +2009,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         _write_temp_dir_gitignore(output_path.parent)
         output_path.write_text(json.dumps(output_data, indent=2), encoding="utf-8")
 
-    executor_backed = bool(
-        getattr(args, "exec_subagents", False)
-        or getattr(args, "dry_run_subagents", False)
-    )
     # The answers both legs apply this run: every human task's, and a code
     # task's only while it still applies (`_applicable_task_decisions`).
     applicable_decisions = _applicable_task_decisions(
@@ -1819,7 +2047,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             check_findings_ids=rerunnable_checks(state.state),
             state_record=state.state,
         )
+    native_withheld: Optional[Dict[str, Dict[str, str]]] = None
     if not executor_backed:
+        native_withheld = _native_withheld(
+            output_data, state, plan_path,
+            kept_checks=kept_checks, tasks_file=implement_tasks_file,
+        )
+        if not args.task:
+            print(_dispatch_line(output_data, decomposed_batches))
         write_native_handoff()
 
     # --- the detach boundary (D4) ---------------------------------------------
@@ -1936,6 +2171,65 @@ def main(argv: Optional[List[str]] = None) -> int:
             for task_id in sorted(native_human_plan.completed):
                 print(f"  {_named(task_id)}: answered --human-task {task_id}=done")
 
+    stopped_short = False
+    if native_withheld is not None:
+        titles = dict(state.get("task_titles") or {})
+
+        def _titled(task_id: str) -> str:
+            title = titles.get(task_id)
+            return f"{task_id}{' ' + title if title else ''}"
+
+        for check_id, findings in sorted(kept_checks.items()):
+            waiting = sorted(
+                task_id for task_id, reason in native_withheld["held"].items()
+                if reason.startswith(f"not run — upstream check {check_id} ")
+            )
+            print(
+                f"[CHECK_NOT_RERUN] {check_id} is not run again: nothing in the "
+                f"repository changed since its check reported problems, so it "
+                f"would report the same"
+                + (f" ({'; '.join(findings)[:300]})" if findings else "")
+                + ". Its findings stand"
+                + (
+                    f", and {', '.join(waiting)} "
+                    f"{'stays' if len(waiting) == 1 else 'stay'} held behind it"
+                    if waiting else ""
+                )
+                + "."
+            )
+        if native_withheld["held"]:
+            print(
+                "Held back by a check with findings (pending in state.json; not "
+                "in the batches, do not dispatch or record them; list them in "
+                "the summary as not run):"
+            )
+            for task_id, reason in sorted(native_withheld["held"].items()):
+                print(f"  {_titled(task_id)}: {reason}")
+        if native_withheld["refused"]:
+            print(
+                "Refused before dispatch (recorded failed in state.json; not in "
+                "the batches, do not dispatch or record them; list them in the "
+                "summary as failed, refused before dispatch):"
+            )
+            for task_id, reason in sorted(native_withheld["refused"].items()):
+                print(f"  {_titled(task_id)}: {reason}")
+        if native_withheld["not_run"]:
+            print(
+                "Not run because a task they depend on was refused (not in the "
+                "batches, do not dispatch or record them; list them in the "
+                "summary as not run):"
+            )
+            for task_id, reason in sorted(native_withheld["not_run"].items()):
+                print(f"  {_titled(task_id)}: {reason}")
+        stopped_short = bool(
+            kept_checks or any(native_withheld[key] for key in native_withheld)
+        )
+        if not output_data["batches"]:
+            print(
+                "Nothing to dispatch: every task is done, skipped, accepted or "
+                "listed above. Do not spawn a subagent."
+            )
+
     print("\nClaude Code should now:")
     print("  1. Read the output JSON file")
     print("  2. Execute each batch sequentially (batches have dependencies)")
@@ -1943,7 +2237,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     print("  4. Update the state file after each task completes")
     print("  5. After all tasks complete, generate the implementation summary")
     print(f"     Summary file: {output_data['summary_file']}")
-    print("  6. Close the phase with `util finalize-tracking … --mark-completed`")
+    if stopped_short:
+        print(
+            "  6. Close the phase with `util finalize-tracking` without "
+            "--mark-completed (tasks listed above did not run), then end the "
+            "report with the commands `util next-command` prints"
+        )
+    else:
+        print("  6. Close the phase with `util finalize-tracking … --mark-completed`")
 
     # The batches are now the host's to run, so the phase is recorded
     # *started*, never completed: completion is the instruction's closing
@@ -1961,10 +2262,41 @@ def main(argv: Optional[List[str]] = None) -> int:
         from utils.write_batch_scheduler import persist_human_task_plan
 
         persist_human_task_plan(state, native_human_plan)
-    state.mark_phase_started("implement")
+    if not args.task and _closes_a_completed_implement(state, output_data):
+        # Fix round 14: a resume of a completed implement that only records
+        # answers (`--human-task T007=done` closing a deferred manual task)
+        # hands out nothing to run, so it does not reopen the phase: marked
+        # started, the host's closing `--mark-completed` re-stamped it and
+        # review-code and apply-code-fixes read stale for no code change.
+        print(
+            "\nNothing is left to run: implement stays completed. The answers "
+            "above are recorded in state.json; there is no batch to execute and "
+            "no phase to close."
+        )
+    else:
+        state.mark_phase_started("implement")
     state.save()
 
     return 0
+
+
+def _closes_a_completed_implement(state: StateManager, output_data: Dict[str, Any]) -> bool:
+    """Whether this native emit only answers tasks of an implement already done.
+
+    True when ``implement`` is on record completed and the handoff holds no
+    code task left to run — every task it lists is a manual one or already
+    ``completed``/``skipped`` (fix round 14). Never asked for ``--task``,
+    which hands one task out to be run again whatever its status.
+    """
+    if not state.is_phase_completed("implement"):
+        return False
+    for batch in output_data.get("batches") or []:
+        for task in batch.get("tasks") or []:
+            if task.get("executor_role") == "human" or task.get("is_human"):
+                continue
+            if task.get("status") not in ("completed", "skipped"):
+                return False
+    return True
 
 
 if __name__ == "__main__":

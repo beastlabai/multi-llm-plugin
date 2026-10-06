@@ -327,6 +327,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    Classify the result:
    - **Success**: The snapshot diff is non-empty AND the expected changes are present (spot-check by `grep`-ing the plan for distinctive text from this batch's suggestions).
    - **Failure (clean)**: The subagent reported failure AND the snapshot diff is empty (plan byte-identical to the pre-batch snapshot).
+   - **Not applied**: The subagent reported `applied` **and** the snapshot diff is empty: its edits did not land. Dispatch the batch once more, with one sentence added to its prompt saying the previous attempt answered `applied` but changed no file, and verify again; if nothing changed this time either, it is a clean failure (record it `failed`), never a success.
    - **Partial application**: The snapshot diff shows some but not all expected changes, or the subagent failed but the snapshot diff is non-empty.
 
    The snapshot diff is the authoritative, fully git-independent check — no git intent-to-add step is needed here (flows that genuinely need untracked files visible to git diffs, like code review, handle that inside their Python orchestrator via `utils/git_utils.intent_to_add_untracked`).
@@ -359,14 +360,15 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    batch's prompt from, and the one the `--exec-subagents` executor appends to — scoped
    per phase by `--phase`, never a per-phase file.
    The `--id` is `batch.prior_changes_id` — read it off the batch (it is the same value in `write_tasks.json`), never construct one.
-   The batcher emits **many** batches for the same `section_key`, and `append` is idempotent
-   on `(id, phase)`: an id two batches share records the first and silently drops the
-   rest (exit 0, a `Notice:` on stderr), so every later batch reads a prior-changes
-   context missing its predecessors. `prior_changes_id` is that key plus a digest of the
+   The batcher emits **many** batches for the same `section_key`, and the log keeps one
+   entry per `(id, phase)`, the newest: an id two batches share leaves only the last
+   one's summary (exit 0), so every later batch reads a prior-changes context missing
+   its predecessors. `prior_changes_id` is that key plus a digest of the
    batch's own items — unique per batch, and identical if the same batch is re-dispatched.
    Do **not** use the batch loop index. The `--phase` is `"apply-suggestions"`.
 
    For **clean failures**, use summary: `(batch failed — {compact reason}, verified no file changes)`
+   When a `--resume` dispatches that batch again, append its new summary under the same `--id`: it replaces the failure line in every later batch's prompt (`Replaced entry …` on stderr).
 
    **Error handling**: If `append` fails, log a warning but do not abort the batch loop.
 

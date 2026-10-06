@@ -88,10 +88,12 @@ def entry_id(key: str, member_ids: Sequence[str], *, fallback: str) -> str:
     The id handed to :func:`append` has to be **both** unique per batch and
     stable across a re-dispatch, and getting either half wrong fails silently:
 
-    * a **colliding** id silently DROPS an entry. ``append`` is idempotent on
-      ``(id, phase)``, so the second batch that presents an id an earlier batch
-      already used is skipped with a `Notice:` on stderr and exit 0 — and every
-      later batch then reads a prior-changes context missing its predecessors,
+    * a **colliding** id silently DROPS an entry. Every reader sees one entry
+      per ``(id, phase)`` (the newest, :func:`latest_entries`), so the second
+      batch that presents an id an earlier batch already used replaces that
+      batch's entry (until fix round 14 it was skipped with a `Notice:`
+      instead) — and every later batch then reads a prior-changes context
+      missing a predecessor,
       which is the whole signal the step exists to provide. This is not
       hypothetical: the batchers emit **many** batches per file key and per
       section key (``MAX_FIXES_PER_BATCH``, the char caps, and the one-per-batch
@@ -143,6 +145,40 @@ def _load_entries(path: Path) -> list[dict]:
     return entries
 
 
+def latest_entries(raw: Sequence[dict]) -> list[dict]:
+    """One entry per ``(id, phase)``: the last one recorded, at its position.
+
+    ``append`` keeps the log append-only and records a batch again when its
+    summary changed (a check that reported problems and later passed, a task
+    refused before dispatch that later ran), so a task can hold several lines.
+    Every reader wants what the task did *last*: fix round 14 (stop fixture,
+    Claude Code fix 02) — T002's re-run passed, but ``append`` skipped its new
+    line as "already exists", so T007's prompt still said T002's check failed
+    and its subagent refused to write the release note. The view keeps the
+    newest line of each ``(id, phase)`` in the order those newest lines were
+    written, so a re-recorded task moves to where it last ran. An entry with
+    no id is never folded into another.
+    """
+    last: dict = {}
+    for index, entry in enumerate(raw):
+        eid = entry.get("id")
+        key = (
+            (str(eid), canonical_phase(entry.get("phase")))
+            if eid not in (None, "") else ("", index)
+        )
+        last[key] = index
+    keep = sorted(last.values())
+    return [raw[index] for index in keep]
+
+
+def _latest_for(raw: Sequence[dict], entry_id: str, phase: Optional[str]) -> Optional[dict]:
+    """The newest entry recorded for ``(entry_id, phase)``, or ``None``."""
+    for entry in reversed(raw):
+        if entry.get("id") == entry_id and canonical_phase(entry.get("phase")) == phase:
+            return entry
+    return None
+
+
 def render(
     output_dir: str,
     phase: Optional[str] = None,
@@ -179,7 +215,7 @@ def render(
     (``accel tuned 28->32``, recorded against the phase's third task) was the
     third of thirteen and so was trimmed away.
     """
-    entries = _load_entries(_jsonl_path(output_dir))
+    entries = latest_entries(_load_entries(_jsonl_path(output_dir)))
     if max_chars <= 0:
         return ""
     if not entries:
@@ -230,22 +266,27 @@ def render(
 
 
 def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
-    """Append one entry, skipping a duplicate ``(id, phase)``. True when written.
+    """Record one entry for ``(id, phase)``. True when a line was written.
 
     The in-process half of ``append``, for the same reason :func:`render` exists.
-    Idempotent on ``(id, phase)`` — which is why the write task carries a stable
-    ``prior_changes_id`` rather than a loop index: a re-dispatched batch must not
-    double its own summary into the context every later batch reads. The other
-    half of that contract is :func:`entry_id`, which is what makes the id unique
-    per batch: idempotency on a key two different batches share is a *dropped*
-    entry, silently, at exit 0.
+    Idempotent on ``(id, phase)`` **and summary**: a re-dispatched batch that
+    reports what its entry already says writes nothing, so it never doubles
+    its own summary into the context every later batch reads — which is why
+    the write task carries a stable ``prior_changes_id`` rather than a loop
+    index. A batch recorded again with a *different* summary supersedes its
+    earlier entry (fix round 14): the line is appended, and every reader
+    (:func:`entries`, :func:`render`) sees only the newest line per
+    ``(id, phase)`` (:func:`latest_entries`). Until then the first summary
+    won for good — a check whose findings were fixed and that passed on
+    ``--resume`` kept telling the tasks after it that it failed. The other
+    half of the contract is :func:`entry_id`, which is what makes the id
+    unique per batch: two batches sharing an id would supersede each other.
     """
     phase = canonical_phase(phase)
     path = _jsonl_path(output_dir)
-    entries = _load_entries(path)
-    for entry in entries:
-        if entry.get("id") == entry_id and canonical_phase(entry.get("phase")) == phase:
-            return False
+    latest = _latest_for(_load_entries(path), entry_id, phase)
+    if latest is not None and latest.get("summary") == summary:
+        return False
     record = {
         "id": entry_id,
         "phase": phase,
@@ -257,18 +298,27 @@ def append(output_dir: str, entry_id: str, phase: str, summary: str) -> bool:
         "timestamp": datetime.now().isoformat(),
     }
     path.parent.mkdir(parents=True, exist_ok=True)
+    # Append-only, one write per line: concurrent appends (a native host
+    # recording same-batch tasks in parallel) never lose each other's line,
+    # which a read-modify-write of the file could.
     with path.open("a", encoding="utf-8") as f:
         f.write(json.dumps(record) + "\n")
     return True
 
 
 def entries(output_dir: str) -> list[dict]:
-    """Every recorded entry, in order (resume replay, and the batch report)."""
+    """The recorded entries, newest per ``(id, phase)``, in order
+    (:func:`latest_entries`): what each batch did last."""
+    return latest_entries(_load_entries(_jsonl_path(output_dir)))
+
+
+def history(output_dir: str) -> list[dict]:
+    """Every line the log holds, superseded ones included, in file order."""
     return _load_entries(_jsonl_path(output_dir))
 
 
 def cmd_read(args: argparse.Namespace) -> None:
-    entries = _load_entries(_jsonl_path(args.output_dir))
+    entries = latest_entries(_load_entries(_jsonl_path(args.output_dir)))
     if not entries:
         print(DEFAULT_TEXT)
         return
@@ -306,25 +356,20 @@ def cmd_append(args: argparse.Namespace) -> None:
     # leg and its --exec-subagents executor otherwise write this same file
     # under two different `phase` values for the same phase (F6).
     phase = canonical_phase(args.phase)
-
-    path = _jsonl_path(args.output_dir)
-    entries = _load_entries(path)
-
-    for entry in entries:
-        if entry.get("id") == args.id and canonical_phase(entry.get("phase")) == phase:
-            print(f"Notice: entry {args.id}/{phase} already exists, skipping", file=sys.stderr)
-            return
-
-    record = {
-        "id": args.id,
-        "phase": phase,
-        "summary": summary,
-        # See the in-process `append`'s matching comment (F13).
-        "timestamp": datetime.now().isoformat(),
-    }
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a", encoding="utf-8") as f:
-        f.write(json.dumps(record) + "\n")
+    earlier = _latest_for(_load_entries(_jsonl_path(args.output_dir)), args.id, phase)
+    if not append(args.output_dir, args.id, phase, summary):
+        print(
+            f"Notice: entry {args.id}/{phase} already says this, skipping",
+            file=sys.stderr,
+        )
+        return
+    if earlier is not None:
+        print(
+            f"Replaced entry {args.id}/{phase}: later tasks now read this "
+            f"summary instead of the earlier one",
+            file=sys.stderr,
+        )
+        return
     print(f"Appended entry {args.id}/{phase}", file=sys.stderr)
 
 

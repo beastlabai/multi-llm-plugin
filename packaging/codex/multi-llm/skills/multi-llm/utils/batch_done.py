@@ -67,7 +67,11 @@ check (``--check passed``, ``--status failed``) releases them.
 ``check.could_not_run: true``: recorded ``--status failed`` (its reason
 defaults to saying so), never as findings; a ``failed`` reply that lists
 findings without it ran, and is recorded ``--status completed --check
-findings``.
+findings``. A batch that edits code (implement's tasks that declare files,
+apply-code-fixes' batches; fix round 14) records the checks it ran on its
+own edits the same way, ``--check passed|findings``: a failing one prints a
+``[BATCH_CHECK_FAILED]`` line telling the host to list it in summary.md and
+report it, and holds nothing back.
 
 Import is side-effect free: argparse and all I/O live inside :func:`main`.
 """
@@ -86,6 +90,7 @@ try:
     from .state_manager import (
         mark_item_processed_in_state,
         set_task_check_findings_in_state,
+        set_task_check_tree_in_state,
         update_task_status_in_state,
     )
     from .stream_bootstrap import bootstrap_streams
@@ -93,7 +98,9 @@ try:
     from .subagent_tasks import PHASE_BY_WRITE_KIND
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
+        BATCH_CHECK_MARKER,
         BLOCKED_BY_CHECK_PREFIX,
+        CODE_WRITE_KINDS,
         blocked_by_check_reason,
         decomposition_graph,
         is_check_task,
@@ -102,7 +109,8 @@ try:
         upstream_held_check,
     )
     from .write_prompt import (
-        WritePromptError, changed_since_bound, discard_check_tree, load_write_task,
+        WritePromptError, changed_since_bound, check_tree_fingerprint,
+        discard_check_tree, load_write_task,
     )
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
@@ -110,6 +118,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.state_manager import (  # type: ignore
         mark_item_processed_in_state,
         set_task_check_findings_in_state,
+        set_task_check_tree_in_state,
         update_task_status_in_state,
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
@@ -117,7 +126,9 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.subagent_tasks import PHASE_BY_WRITE_KIND  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
+        BATCH_CHECK_MARKER,
         BLOCKED_BY_CHECK_PREFIX,
+        CODE_WRITE_KINDS,
         blocked_by_check_reason,
         decomposition_graph,
         is_check_task,
@@ -126,7 +137,8 @@ except ImportError:  # pragma: no cover - direct script invocation
         upstream_held_check,
     )
     from utils.write_prompt import (  # type: ignore
-        WritePromptError, changed_since_bound, discard_check_tree, load_write_task,
+        WritePromptError, changed_since_bound, check_tree_fingerprint,
+        discard_check_tree, load_write_task,
     )
 
 
@@ -287,13 +299,23 @@ def record_batch(
             f"subagent, so there is no batch outcome to record. Answer it "
             f"through the phase's human-task strategy instead."
         )
-    if check is not None and not is_check_task(kind, task):
-        raise WritePromptError(
-            f"Task {task_id} is not a check task (a check task is an implement "
-            f"task that declares no files), so it has no check result: record "
-            f"it without --check."
-        )
     checking = is_check_task(kind, task)
+    if check is not None and not checking:
+        # Fix round 14: a code batch reports the checks it ran on its own
+        # edits in the same `check` object; a plan or task-list batch has none.
+        if kind not in CODE_WRITE_KINDS:
+            raise WritePromptError(
+                f"Task {task_id} edits the plan or the task list, not code, "
+                f"so it has no check result: record it without --check."
+            )
+        if check == "could-not-run":
+            raise WritePromptError(
+                f"Task {task_id} is not a check task (a check task is an "
+                f"implement task that declares no files): its reply's `check` "
+                f"reports the checks it ran on its own edits, so record --check "
+                f"passed, or --check findings with one --finding per failing "
+                f"check, or leave --check out when it reported none."
+            )
     if checking and status == "completed":
         changed = changed_since_bound(
             phase_dir, task_id,
@@ -303,12 +325,23 @@ def record_batch(
         if changed:
             raise WritePromptError(_changed_a_file_message(phase_dir, task_id, changed))
     check_findings: Optional[List[str]] = None
+    batch_check: Optional[List[str]] = None
     if check == "could-not-run":
         reason = reason or COULD_NOT_RUN_REASON
     elif check is not None:
-        check_findings = check_findings_from({
+        read = check_findings_from({
             "check": {"passed": check == "passed", "findings": list(findings or [])}
         }) or []
+        if checking:
+            check_findings = read
+        else:
+            # A code batch's own check: reported, never a hold (fix round 14).
+            batch_check = read
+    # The tree a check with findings leaves (fix round 14): a native
+    # `--resume` hands the check out again only once the files moved since,
+    # as the executor does from its verdict's stamp. `util finalize-tracking`
+    # re-stamps it with the tree the run ends on.
+    tree = check_tree_fingerprint(phase_dir) if check_findings else None
     target = Path(state_file) if state_file else phase_dir.parent / "state.json"
     if not target.is_file():
         raise WritePromptError(
@@ -328,6 +361,7 @@ def record_batch(
         blocked: List[str] = []
         if kind == "implement":
             set_task_check_findings_in_state(state, task_id, check_findings)
+            set_task_check_tree_in_state(state, task_id, tree)
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )
@@ -358,6 +392,7 @@ def record_batch(
     return {
         "task_id": task_id, "status": status, "items": items,
         "state_file": str(target), "check_findings": check_findings or [],
+        "batch_check": batch_check or [],
         "blocked": blocked,
     }
 
@@ -553,7 +588,9 @@ def _build_parser() -> argparse.ArgumentParser:
              "its reply's check result — passed, findings (the check ran "
              "and reported problems; recorded with --status completed), or "
              "could-not-run (its check said could_not_run: true; recorded "
-             "with --status failed).",
+             "with --status failed). For a batch that edits code (implement, "
+             "apply-code-fixes): the checks it ran on its own edits, passed "
+             "or findings, with --status completed.",
     )
     parser.add_argument(
         "--finding", action="append", default=None, metavar="TEXT",
@@ -586,6 +623,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     if found:
         suffix += f" ({len(found)} check finding(s) recorded)"
     print(f"{MARKER} {written['task_id']} {written['status']}{suffix}")
+    failing = written.get("batch_check") or []
+    if failing:
+        # Fix round 14: the native leg's counterpart of the executor's line.
+        print(
+            f"{BATCH_CHECK_MARKER} {written['task_id']}: its edits were applied, "
+            f"but a check it ran on them fails ({len(failing)} problem(s)): "
+            f"{'; '.join(failing)[:600]}. The edits are kept. List it under "
+            f"## Check Findings in the phase's summary.md, and say in your "
+            f"final report that this check fails: never report the phase as a "
+            f"clean success."
+        )
     blocked = written.get("blocked") or []
     if blocked:
         task_id = written["task_id"]
@@ -598,7 +646,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"close the phase without --mark-completed and report the way "
             f"forward: fix what {task_id} reported and re-run implement with "
             f"--resume (the check runs again), or accept its findings with "
-            f"--resume --human-task {task_id}=done, or leave it and them "
+            f"--resume --human-task {task_id}=done (they then run, told that "
+            f"the findings were accepted), or leave it and them "
             f"undone with --resume --human-task {task_id}=skip."
         )
     return 0

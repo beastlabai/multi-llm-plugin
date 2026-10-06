@@ -499,7 +499,62 @@ def _reader_host(args) -> str:
     return host_capabilities.resolve_host_id(explicit=getattr(args, "host", None))
 
 
-def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> List[str]:
+def _plan_spelling(
+    args: argparse.Namespace, views: Sequence[Dict[str, Any]], plan_path: Path,
+) -> str:
+    """The plan as its user typed it, for a command this view prints.
+
+    A poll pinned to one run takes that run's recorded ``plan_arg`` when
+    ``next_phase.recorded_plan_spelling`` passes it (a tool route polls with
+    the absolute path); anything else is the plan as this call received it.
+    """
+    from . import next_phase
+
+    if len(views) == 1 and (args.phase or args.question or args.run_id):
+        recorded = next_phase.recorded_plan_spelling(
+            (views[0].get("run") or {}).get("plan_arg"), str(plan_path),
+        )
+        if recorded:
+            return recorded
+    return str(args.plan_file)
+
+
+def manual_close_note(
+    payload: Dict[str, Any], plan_spelling: str, host_id: Optional[str],
+) -> Optional[str]:
+    """How to record the deferred manual tasks done, in *host_id*'s spelling.
+
+    ``next_phase.manual_close_note`` over the workflow payload's
+    ``phases.implement.manual_tasks`` (fix round 14: Codex racing 06/08
+    listed T007 and never said how to close it). ``None`` when nothing is
+    owed or the host has no command template for this route.
+    """
+    manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
+    ids = [str(entry["id"]) for entry in manual or []
+           if isinstance(entry, dict) and entry.get("id")]
+    if not ids:
+        return None
+    import io
+
+    from . import next_phase
+
+    try:
+        host = host_capabilities.resolve_host_id(explicit=host_id)
+        # The route's one stderr line, if any, is the emitter's to print.
+        template = host_capabilities.next_command_template(
+            host, next_phase.resolve_route(host, stderr=io.StringIO()),
+        )
+    except Exception:  # noqa: BLE001 - advisory: the list still stands
+        return None
+    return next_phase.manual_close_note(
+        next_phase.close_command(template, plan_spelling, ids)
+    )
+
+
+def _workflow_trailer_lines(
+    payload: Dict[str, Any], *, prefix: str = "  ",
+    close_note: Optional[str] = None,
+) -> List[str]:
     """The workflow view's ``suggested next``/``notice`` lines, alone.
 
     Split out of ``render_workflow_text`` so the terminal ``--view run`` carry-
@@ -544,7 +599,10 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
             if isinstance(entry, dict) and entry.get("id")
         )
         if named:
-            lines.append(f"{prefix}manual tasks left for you: {named}")
+            lines.append(
+                f"{prefix}manual tasks left for you: {named}"
+                + (f". {close_note}" if close_note else "")
+            )
     # The implement check tasks that ran and reported problems
     # (`phases.implement.check_findings`, from state.json; racing re-run 4,
     # 2026-10-05). Shown while implement is unfinished — its findings are
@@ -576,7 +634,9 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
     return lines
 
 
-def render_workflow_text(payload: Dict[str, Any]) -> List[str]:
+def render_workflow_text(
+    payload: Dict[str, Any], *, close_note: Optional[str] = None,
+) -> List[str]:
     lines = ["workflow (state.json) — which phases are done:"]
     width = max((len(p) for p in payload.get("phases", {})), default=0)
     for phase, info in payload.get("phases", {}).items():
@@ -591,7 +651,7 @@ def render_workflow_text(payload: Dict[str, Any]) -> List[str]:
             extra.append(str(info["timestamp"]))
         suffix = f"  ({', '.join(extra)})" if extra else ""
         lines.append(f"  {phase.ljust(width)}  {info.get('status', '?')}{suffix}")
-    lines.extend(_workflow_trailer_lines(payload))
+    lines.extend(_workflow_trailer_lines(payload, close_note=close_note))
     return lines
 
 
@@ -742,6 +802,8 @@ def render_run_text(
         )
         if validation_context_line:
             lines.append(f"      {validation_context_line}")
+        for note in _run_notes(view):
+            lines.append(f"      note: {note}")
         # F4: recorded only for a finished code-review run — `high_priority_groups`
         # is written once, at the very end of main(), so a mid-run poll has
         # nothing to render yet, and the key exists on no other phase.
@@ -946,6 +1008,38 @@ def _validation_context_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]
         if notice and notice not in sentences:
             sentences.append(notice)
     return "; ".join(sentences) or None
+
+
+def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """The write mirror's own notice parts over every view, or ``None``.
+
+    Fix round 14: a code batch whose own check failed after its edits
+    (``write_subagents.tasks[].batch_check_findings``) and the line saying
+    nothing ran the repository's tests (``write_subagents.unverified``) —
+    what the worker recorded on its own result line, which a detached caller
+    never sees. Read from the run's own mirror, so it describes that run.
+    """
+    try:
+        from .write_batch_scheduler import batch_check_summary
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.write_batch_scheduler import batch_check_summary  # type: ignore
+    parts: List[str] = []
+    for view in views:
+        mirror = (view.get("progress") or {}).get("write_subagents")
+        if not isinstance(mirror, dict):
+            continue
+        found = {
+            str(row.get("task_id")): [str(item) for item in row["batch_check_findings"]]
+            for row in mirror.get("tasks") or []
+            if isinstance(row, dict) and isinstance(row.get("batch_check_findings"), list)
+            and row["batch_check_findings"]
+        }
+        if found:
+            parts.append("not a clean finish: " + batch_check_summary(found))
+        unverified = mirror.get("unverified")
+        if isinstance(unverified, str) and unverified and unverified not in parts:
+            parts.append(unverified)
+    return "; ".join(parts)[:1200] or None
 
 
 def _high_priority_text(high_priority: Any) -> Optional[str]:
@@ -1547,6 +1641,10 @@ def _progress_lines(view: Dict[str, Any]) -> List[str]:
     just_finished = _just_finished_text(view)
     if just_finished:
         lines.append(f"{JUST_FINISHED_LABEL} {just_finished}")
+    # Fix round 14: a finished run's notes follow its counts, so a host that
+    # relays these lines verbatim relays "1 not applied" beside "10/10 items
+    # applied" (Codex racing re-run 5 reported "Applied 10 of 10").
+    lines.extend(f"note: {note}" for note in _run_notes(view))
     return lines
 
 
@@ -1780,6 +1878,151 @@ def _attach_finished_during_wait(
 GENERIC_NEEDS_HUMAN_ERROR = "needs_human (exit 3)"
 
 
+#: The phase whose tasks :func:`state_implement_view` reads back from
+#: ``state.json``, and the report whose absence marks a run the host drove.
+_IMPLEMENT_PHASE = "implement"
+_WRITE_REPORT = "write_batch_report.json"
+
+
+def state_implement_view(
+    plan_path: Path, views: Sequence[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Implement's tasks as ``state.json`` records them, when nothing else does.
+
+    Fix round 14 (live run 5, the stop path on Claude Code): the native leg
+    hands its batches to the host, which writes no ``write_batch_report.json``
+    and no write mirror, so ``status --view run`` listed no implement task at
+    all while ``state.json`` held every status, reason, check finding and
+    answer. This reads them back — only when the implement phase dir has no
+    report, no listed view carries a write mirror for it, and the plan has an
+    implement decomposition on record that is started and not completed — as
+    ``{tasks, titles, buckets, reasons, findings, answers}``. Read-only;
+    ``None`` when it does not apply.
+    """
+    from .state_manager import StateManager
+
+    if (phase_dir_path(plan_path, _IMPLEMENT_PHASE) / _WRITE_REPORT).exists():
+        return None
+    for view in views:
+        if (view.get("phase") or os.path.basename(str(view.get("phase_dir") or ""))) \
+                != _IMPLEMENT_PHASE:
+            continue
+        progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
+        if isinstance(progress.get("write_subagents"), dict):
+            return None
+    try:
+        state = StateManager(plan_path, read_only=True)
+    except Exception:  # noqa: BLE001 - advisory: the run view is not
+        return None
+    record = state.state
+    decomposition = record.get("implement_task_ids")
+    statuses = state.implementation_task_statuses()
+    if not isinstance(decomposition, list) or not decomposition:
+        return None
+    if state.is_phase_completed(_IMPLEMENT_PHASE) or not (
+        state.is_phase_started(_IMPLEMENT_PHASE) or statuses
+    ):
+        # A finished implement is the workflow view's to report (its manual
+        # tasks and check findings ride the trailer); this block is for the
+        # run the host stopped part-way.
+        return None
+    reasons = record.get("task_status_reasons") or {}
+    titles = record.get("task_titles") or {}
+    human = set(record.get("implement_human_task_ids") or [])
+    buckets: Dict[str, List[str]] = {
+        "completed": [], "accepted": [], "completed_manual": [], "failed": [],
+        "declined": [], "declined_dependents": [], "deferred": [], "not_run": [],
+    }
+    for task_id in [str(t) for t in decomposition]:
+        status = statuses.get(task_id)
+        reason = str(reasons.get(task_id) or "")
+        if status == "completed":
+            if reason.startswith("accepted — "):
+                buckets["accepted"].append(task_id)
+            elif task_id in human and "--human-task" in reason:
+                buckets["completed_manual"].append(task_id)
+            else:
+                buckets["completed"].append(task_id)
+        elif status == "failed":
+            buckets["failed"].append(task_id)
+        elif status == "skipped":
+            if reason.startswith((state._USER_DECLINED_REASON, state._ANSWERED_SKIP_PREFIX)):
+                buckets["declined"].append(task_id)
+            elif not state._deferred_to_user(task_id):
+                buckets["declined_dependents"].append(task_id)
+            else:
+                buckets["deferred"].append(task_id)
+        else:
+            buckets["not_run"].append(task_id)
+    answers = record.get("human_task_decisions")
+    return {
+        "tasks": [str(t) for t in decomposition],
+        "titles": {str(k): str(v) for k, v in titles.items()},
+        "buckets": buckets,
+        "reasons": {
+            task_id: str(reasons[task_id])
+            for task_id in buckets["failed"] + buckets["not_run"]
+            if reasons.get(task_id)
+        },
+        "findings": state.implementation_check_findings(),
+        "answers": dict(answers) if isinstance(answers, dict) else {},
+    }
+
+
+def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
+    """:func:`state_implement_view` as the run view's text: one block."""
+    buckets = view["buckets"]
+    done = buckets["completed"] + buckets["accepted"] + buckets["completed_manual"]
+    total = len(view["tasks"])
+    lines = [
+        "  implement  no run record — the host ran these tasks itself; read "
+        "from state.json (not marked completed)",
+    ]
+    parts = [f"{len(done)}/{total} done"]
+    labels = (
+        ("completed", "completed"),
+        ("accepted", "accepted with their check findings or after failing"),
+        ("completed_manual", "completed by hand"),
+        ("failed", "failed"),
+        ("declined", "skipped at your request"),
+        ("declined_dependents", "skipped (depend on a task you skipped)"),
+        ("deferred", "deferred manual"),
+        ("not_run", "not run"),
+    )
+    for key, label in labels:
+        if buckets[key]:
+            parts.append(f"{label}: {', '.join(buckets[key])}")
+    lines.append(f"      tasks:          {'; '.join(parts)}")
+    for task_id, reason in view["reasons"].items():
+        lines.append(f"      {task_id}: {reason}")
+    for entry in view["findings"]:
+        findings = entry.get("findings") or []
+        lines.append(
+            f"      check findings {entry['id']}: {'; '.join(findings)[:300]}"
+        )
+    if view["answers"]:
+        lines.append(
+            "      answers on record: "
+            + ", ".join(f"--human-task {task_id}={action}"
+                        for task_id, action in sorted(view["answers"].items()))
+        )
+    return lines
+
+
+def _run_notes(view: Dict[str, Any]) -> List[str]:
+    """``progress.notes``: a finished apply phase's lines for the host (fix
+    round 14) — a consistency warning, the items left unapplied and why."""
+    progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
+    notes = progress.get("notes")
+    return [str(note).strip() for note in notes if str(note).strip()] if isinstance(
+        notes, list) else []
+
+
+def _id_list(value: Any) -> List[str]:
+    """A mirror's id list as strings; anything that is not a list is none."""
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
 def _mirror_text(key: str, mirror: Any) -> List[str]:
     """One clause per executor mirror: ``<kind> <ok>/<total> ok`` and, when any
     task did not end ``ok``, the non-ok statuses and the failed ids."""
@@ -1865,6 +2108,11 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     flagged = mirror.get("check_findings_task_ids")
     if isinstance(flagged, list) and flagged:
         parts.append(f"check findings {', '.join(map(str, flagged))}")
+    # Fix round 14: a code batch applied its edits, then a check it ran
+    # failed — never only an `ok` count.
+    failing = mirror.get("batch_check_task_ids")
+    if isinstance(failing, list) and failing:
+        parts.append(f"own check fails {', '.join(map(str, failing))}")
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
@@ -1887,10 +2135,27 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     # but rendered nowhere, so the one task `--yes`'s default strategy defers
     # to a human was invisible in the finished run's own progress line.
     skipped_ids = mirror.get("skipped_task_ids") if isinstance(mirror.get("skipped_task_ids"), list) else []
-    if skipped_ids:
+    # Fix round 14: a task the user skipped (`--human-task <id>=skip`), and
+    # the tasks skipped with it, are not manual work left for the user, so
+    # they are named apart from the deferral (Codex stop-path accept 02 read
+    # "deferred manual: T005, T006" beside a summary saying "Skipped at your
+    # request"). A mirror without the keys reads as before.
+    declined = _id_list(mirror.get("declined_task_ids"))
+    with_them = _id_list(mirror.get("declined_dependent_task_ids"))
+    deferred = [
+        str(task_id) for task_id in skipped_ids
+        if str(task_id) not in declined and str(task_id) not in with_them
+    ]
+    if deferred:
         strategy = mirror.get("human_task_strategy")
         suffix = f" ({strategy})" if strategy else ""
-        parts.append(f"deferred manual: {', '.join(map(str, skipped_ids))}{suffix}")
+        parts.append(f"deferred manual: {', '.join(deferred)}{suffix}")
+    if declined:
+        parts.append(f"skipped at your request: {', '.join(declined)}")
+    if with_them:
+        parts.append(
+            f"skipped (depend on a task you skipped): {', '.join(with_them)}"
+        )
     # F4: `driver.verify_command`'s outcome. Without it a run that applied every
     # batch and then failed the repository's own check renders as
     # `apply_code_fixes 3/3 batches ok` with no failed id anywhere — the only
@@ -2065,6 +2330,28 @@ def _write_mirror_as_counts(mirror: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _failed_batches_moved_nothing(view: Dict[str, Any]) -> bool:
+    """Whether every failed row of a write run's mirror records that no file
+    moved (``files_touched`` present and empty). A row without the key — an
+    older mirror — says nothing, so the answer is ``False`` and the status
+    line keeps its "half-applied" wording."""
+    progress = view.get("progress") or {}
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    if not isinstance(mirror, dict):
+        return False
+    failed_ids = set(mirror.get("failed_task_ids") or [])
+    rows = [
+        row for row in (mirror.get("tasks") or [])
+        if isinstance(row, dict) and row.get("task_id") in failed_ids
+    ]
+    if not rows:
+        return False
+    return all(
+        isinstance(row.get("files_touched"), list) and not row["files_touched"]
+        for row in rows
+    )
+
+
 def _reason_explanation(reason_code: Optional[str]) -> Optional[str]:
     """``_REASON_EXPLANATION[reason_code]``, imported only on this failed path."""
     if not reason_code:
@@ -2145,6 +2432,14 @@ def _resume_lines(
     ):
         return [f"      {NO_RESUME_BEFORE_DISPATCH}"]
     shape, repair, redispatch, kept = _resume_shape(view)
+    if mode == _IMPLEMENT_PHASE and redispatch:
+        # Fix round 14: the mirror holds only this run's rows, so a resume
+        # that kept T001/T003/T004 from an earlier run (and T002's findings)
+        # read "keeps the 1 already applied". state.json counts every task
+        # of the decomposition on record as done.
+        done = _implement_tasks_done(plan_path, workflow)
+        if done is not None and done > (kept or 0):
+            kept = done
     lines: List[str] = []
     if shape == cli_common.SHAPE_REPAIR:
         lines.append(f"      repair first: {repair}")
@@ -2158,16 +2453,39 @@ def _resume_lines(
             cost = f"re-dispatches the {redispatch} failed batch(es) and the ones never reached"
             if kept:
                 cost += f", keeps the {kept} already applied"
-            lines.append(
-                f"      ({cost}; the half-applied state is left in place — inspect "
-                f"it, or `util restore-batch` the failed batch, before resuming)"
-            )
+            if _failed_batches_moved_nothing(view):
+                # Fix round 14 (stop fixture 01b): a task refused before
+                # dispatch, a clean failure, a timeout that wrote nothing —
+                # no byte moved, so nothing is half-applied.
+                lines.append(
+                    f"      ({cost}; nothing was half-applied, so there is "
+                    f"nothing to restore)"
+                )
+            else:
+                lines.append(
+                    f"      ({cost}; the half-applied state is left in place — inspect "
+                    f"it, or `util restore-batch` the failed batch, before resuming)"
+                )
         else:
             cost = f"re-dispatches the {redispatch} failed task(s)"
             if kept is not None:
                 cost += f" and keeps the {kept} valid result(s) already on disk"
             lines.append(f"      ({cost}; --force is not needed and would re-run the reviewer panel)")
     return lines
+
+
+def _implement_tasks_done(
+    plan_path: Path, workflow: Optional[Dict[str, Any]],
+) -> Optional[int]:
+    """``phases.implement.tasks_done`` from the workflow view, read once if
+    the caller has none; ``None`` when it is not on record or unreadable."""
+    if workflow is None:
+        try:
+            workflow = _workflow_payload(plan_path)
+        except Exception:  # noqa: BLE001 - advisory: the mirror count stands
+            return None
+    done = ((workflow.get("phases") or {}).get(_IMPLEMENT_PHASE) or {}).get("tasks_done")
+    return done if isinstance(done, int) and not isinstance(done, bool) else None
 
 
 def _abort_command(plan_path: Path, view: Dict[str, Any]) -> str:
@@ -2668,15 +2986,34 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except Exception:
             terminal_workflow = None
         if terminal_workflow:
-            trailer = _workflow_trailer_lines(terminal_workflow, prefix="")
+            trailer = _workflow_trailer_lines(
+                terminal_workflow, prefix="",
+                close_note=manual_close_note(
+                    terminal_workflow, _plan_spelling(args, views, plan_path),
+                    _reader_host(args),
+                ),
+            )
             if trailer:
                 workflow_trailer = [f"workflow {line}" for line in trailer]
                 terminal_notice = "; ".join(trailer)
+
+    # Fix round 14: a native-leg implement leaves no run record and no
+    # report, so its tasks are read back from state.json (`--run-id` and
+    # `--question` name a run, which this is not).
+    implement_tasks = None
+    if (not args.run_id and not args.question
+            and _resolve_phase(args.phase) in (None, _IMPLEMENT_PHASE)):
+        try:
+            implement_tasks = state_implement_view(plan_path, views)
+        except Exception:  # noqa: BLE001 - advisory: the run view is not
+            implement_tasks = None
 
     if args.json:
         payload: Dict[str, Any] = {"runs": views}
         if args.view == VIEW_ALL:
             payload = {"workflow": workflow, "runs": views}
+        if implement_tasks is not None:
+            payload["implement_tasks"] = implement_tasks
         # Plan §7.4a2/b: what discovery skipped, only when there is something
         # to say, so a plan with none keeps today's payload byte for byte.
         if discovery.get("ignored_dirs"):
@@ -2687,12 +3024,20 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         lines: List[str] = []
         if args.view == VIEW_ALL and workflow is not None:
-            lines += render_workflow_text(workflow)
+            lines += render_workflow_text(
+                workflow,
+                close_note=manual_close_note(
+                    workflow, _plan_spelling(args, views, plan_path),
+                    _reader_host(args),
+                ),
+            )
             lines.append("")
         lines += render_run_text(
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args), resume_workflow=terminal_workflow,
         )
+        if implement_tasks is not None:
+            lines += render_state_implement_lines(implement_tasks)
         # Plan §7.4a2: after the phase views, never silently dropped.
         lines += _ignored_text(
             discovery.get("ignored_dirs") or [], discovery.get("copies") or []
@@ -2735,8 +3080,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     truncation_notice = (
         _validation_context_notice(views) if terminal_run else None
     )
+    # Fix round 14: a terminal write run's own not-clean parts, first among
+    # the workflow's, since they qualify the run the poll is about; then a
+    # finished run's own notes (a consistency warning, the items left
+    # unapplied) — the log was the only place that carried them.
+    write_notice = _write_result_notice(views) if terminal_run else None
+    notes_notice = "; ".join(
+        note for view in views for note in _run_notes(view)
+    ) if terminal_run else ""
     combined_notice = "; ".join(
-        part for part in (truncation_notice, terminal_notice) if part
+        part for part in (truncation_notice, write_notice, notes_notice, terminal_notice) if part
     )
     if combined_notice:
         record_notice(combined_notice)

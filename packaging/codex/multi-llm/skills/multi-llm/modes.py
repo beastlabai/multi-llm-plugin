@@ -420,7 +420,8 @@ TOOL_USER_NEXT_STEP_LINE = (
     "call to make: copy its `command`, and each `optional_before` command, into your "
     "report, each in its own fenced block, and stop; when it is `complete`, and "
     "only then, say \"Workflow complete.\" and list each of its `manual_tasks` "
-    "(id and title): tasks the run deferred to the user, which no phase will run. "
+    "(id and title): tasks the run deferred to the user, which no phase will run; "
+    "then give its `manual_tasks_note` verbatim, which says how to record them done. "
     "Never say \"Workflow complete.\" otherwise, even when a notice lists manual "
     "tasks left for the user: while `user_next_step` names a `command`, the "
     "workflow goes on. Only `next` is "
@@ -441,8 +442,9 @@ TOOL_USER_NEXT_STEP_LINE = (
 TOOL_NO_COMPOSED_COMMAND_LINE = (
     "Never compose a command for the user yourself, and never spell one from "
     "this tool's arguments: the only commands you may give them are "
-    "`user_next_step.command`, its `optional_before` commands and "
-    "`resume_command`, each copied verbatim. A result whose `user_next_step` is "
+    "`user_next_step.command`, its `optional_before` commands, "
+    "`resume_command` and each `resume_answers` command, each copied verbatim. "
+    "A result whose `user_next_step` is "
     "null and that carries no `resume_command` has no command to give "
     "(`no_command_reason` says why): name no command and no next phase."
 )
@@ -561,7 +563,8 @@ NEEDS_HUMAN_MESSAGE = {
         "and also comes back as a tool call in `options`, in the order it "
         "appeared, and its result line is in `result` instead; do not "
         "paraphrase the output, and do not lift a command out of it for the "
-        "user: only `resume_command` is theirs to type. Do "
+        "user: only `resume_command` (and each `resume_answers` command) is "
+        "theirs to type. Do "
         "not run a different mode. " + NEEDS_HUMAN_WORK_SENTENCE + " Send back "
         "an `options` entry only after the user has picked one."
     ),
@@ -581,6 +584,20 @@ NEEDS_HUMAN_MESSAGE = {
         "cause above is fixed. Give it to the user verbatim in its own fenced "
         "block, as the way forward. It is never a tool call and never a shell "
         "command: do not run it, and do not offer to run it for them."
+    ),
+    # Appended after `resume` when the stop offers answers as well (fix round
+    # 14, live run 5: the `--human-task` answers lived only in `error`, and
+    # hosts relayed them in two of four first stops). `{answers}` is the
+    # dispatcher's `user_resume.answers_text` — each command in backticks and
+    # what it does, `; `-joined — substituted as it comes; the server authors
+    # none of it. Each is also in `resume_answers` and an `options` entry.
+    "answers": (
+        "The stop also offers these ways forward, each a command the user "
+        "types instead of `resume_command` (each is in `resume_answers` and is "
+        "also an `options` entry, in the same order): {answers}. Give the user "
+        "every one of them verbatim, each in its own fenced block with what it "
+        "does, after `resume_command`; like it, none is a tool call or a shell "
+        "command for you to run."
     ),
     # Appended instead of `resume` when the result carries no
     # `resume_command` (racing re-run 2026-10-04: a result with neither command

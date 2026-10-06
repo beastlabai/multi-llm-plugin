@@ -311,7 +311,61 @@ def main(argv=None) -> int:
         if code:
             return code
         _restamp_plan_hash(state_path, Path(args.plan_file))
+    if args.phase == "implement":
+        # Last, after this command's own edit to the plan: the tree the run
+        # ends on is the one a `--resume` compares against.
+        _restamp_check_trees(state_path)
     return 0
+
+
+def _restamp_check_trees(state_path: Path) -> None:
+    """Stamp each check whose findings hold tasks with the tree as the run
+    leaves it (fix round 14, the native counterpart of the executor's
+    ``WriteBatchScheduler._restamp_check_trees``).
+
+    ``util batch-done --check findings`` stamps the tree when the check is
+    recorded, and the tasks that do not depend on it go on and edit files
+    after it, so a ``--resume`` the user changed nothing for would read "the
+    files changed" and hand the check out again: on the stop fixture's
+    resume with nothing changed, Claude Code re-ran T002 (a new subagent,
+    ~23k tokens) for the same findings. The run's own edits are not a change
+    the user made, so this command — the native run's closing call — re-stamps
+    every stamp still standing; a stamp on a check that passed, failed or was
+    accepted is dropped. Only a check stamped before keeps one: one the emit
+    handed out again and nobody re-ran has none, and runs on the next resume.
+    Best-effort and silent: a check with no stamp is run again.
+    """
+    try:
+        from utils.state_manager import (
+            TASK_CHECK_TREES_KEY,
+            set_task_check_tree_in_state,
+        )
+        from utils.write_batch_scheduler import rerunnable_checks
+        from utils.write_prompt import check_tree_fingerprint
+    except ImportError:  # pragma: no cover - the skill is always on the path
+        return
+    try:
+        with state_file_lock(state_path):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                return
+            stamped = state.get(TASK_CHECK_TREES_KEY)
+            if not isinstance(stamped, dict) or not stamped:
+                return
+            held = set(rerunnable_checks(state))
+            current = check_tree_fingerprint(state_path.parent / "implement")
+            changed = False
+            for task_id in sorted(stamped):
+                if task_id not in held:
+                    set_task_check_tree_in_state(state, task_id, None)
+                    changed = True
+                elif current is not None and stamped[task_id] != current:
+                    set_task_check_tree_in_state(state, task_id, current)
+                    changed = True
+            if changed:
+                _write_state_atomic(state_path, state)
+    except (StateLockTimeout, OSError, ValueError):
+        return
 
 
 def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
@@ -382,7 +436,8 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
                 f"--mark-completed (the phase stays in progress), and report "
                 f"the way forward: fix what the check reported and re-run "
                 f"implement with --resume, or accept its findings with "
-                f"--resume --human-task <check id>=done.",
+                f"--resume --human-task <check id>=done (the held tasks then "
+                f"run, told that the findings were accepted).",
                 file=sys.stderr,
             )
             return 3
@@ -390,7 +445,7 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
     # Update state
     state["tracked_files"] = tracked_files
     state["updated_at"] = datetime.now().isoformat()
-    if args.mark_completed:
+    if args.mark_completed and not _completion_stands(state):
         mark_phase_completed_in_state(state, "implement")
 
     try:
@@ -400,6 +455,30 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
         return 1
 
     return tracked_files
+
+
+def _completion_stands(state: dict) -> bool:
+    """Whether implement's completion is on record and no run reopened it.
+
+    ``--mark-completed`` closes the run an emit started (``phases_started``);
+    with no start newer than the completion there is no run to close, so the
+    completion keeps its date (fix round 14: a native resume that only
+    recorded ``--human-task T007=done`` for a deferred manual task re-stamped
+    implement, and review-code and apply-code-fixes read stale for no code
+    change). The ``StateManager.is_phase_started`` rule, on the raw dict.
+    """
+    from utils.state_manager import _parse_completion_time
+
+    completed = _parse_completion_time(
+        (state.get("phases_completed") or {}).get("implement")
+    )
+    if completed is None:
+        return False
+    started = _parse_completion_time(
+        (state.get("phases_started") or {}).get("implement")
+        if isinstance(state.get("phases_started"), dict) else None
+    )
+    return started is None or started <= completed
 
 
 def _held_by_a_check(

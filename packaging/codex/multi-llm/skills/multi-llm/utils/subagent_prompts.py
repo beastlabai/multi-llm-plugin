@@ -59,6 +59,8 @@ __all__ = [
     "build_human_decision_judge_prompt",
     "build_task_generation_prompt",
     "build_schema_repair_prompt",
+    "build_nothing_changed_resend_prompt",
+    "NOTHING_CHANGED_RESEND_HEADING",
     "SCHEMA_REPAIR_EXAMPLES",
     "SCHEMA_REPAIR_SHAPES",
     "SCHEMA_REPAIR_TOP_KEYS",
@@ -924,12 +926,14 @@ WRITE_REPORT_REPLY_SHAPE = '''{"status": "applied", "ids": ["<id>"], "files_touc
 '''
 
 #: The write kinds a schema-repair re-ask may restate the report of: the three
-#: apply phases (2026-10-05). ``implement`` is deliberately absent — its grant
-#: would be the same mechanism, but it was not part of the measured failure.
+#: apply phases (2026-10-05) and ``implement`` (fix round 14: OpenCode racing
+#: run 5's T013 finished its edit, replied in prose, and stopped implement as
+#: a partial application).
 WRITE_REPORT_REPAIR_KINDS = (
     "apply_suggestions",
     "apply_task_suggestions",
     "apply_code_fixes",
+    "implement",
 )
 
 #: The reply shape a schema-repair re-ask restates, per kind. A kind absent here
@@ -988,7 +992,14 @@ SCHEMA_REPAIR_EXAMPLES: Dict[str, Dict[str, Any]] = {
             "summary": "Added the \"Countdown\" rule to the Race logic section.",
             "notes": "",
         }
-        for kind in WRITE_REPORT_REPAIR_KINDS
+        for kind in WRITE_REPORT_REPAIR_KINDS if kind != "implement"
+    },
+    "implement": {
+        "status": "applied",
+        "ids": ["T001"],
+        "files_touched": ["index.html"],
+        "summary": "Added the countdown overlay to index.html.",
+        "notes": "",
     },
 }
 
@@ -1131,7 +1142,7 @@ def _batch_ids_block(kind: str, ids: Sequence[str]) -> str:
     (``write_batch_scheduler.with_result_contract``: "suggestion 1 = `<id>`"),
     so a reply that named its items by position maps back by that number.
     """
-    item = "fix" if kind == "apply_code_fixes" else "suggestion"
+    item = {"apply_code_fixes": "fix", "implement": "task"}.get(kind, "suggestion")
     held = f"1 {item}" if len(ids) == 1 else (
         f"{len(ids)} {item}es" if item == "fix" else f"{len(ids)} {item}s"
     )
@@ -1219,6 +1230,14 @@ def build_schema_repair_prompt(
                 "Restate that reply's report. Take every value from it; never name "
                 "an id or a\nfile it does not name."
             )
+        if kind == "implement":
+            # A check task's result rides in `check`, which the verdict reads
+            # (``subagent_executor.check_findings_from``): restated as given,
+            # never re-run and never invented.
+            take += (
+                "\nIf it gave a `check` object (a check task's result), restate "
+                "that object as\nit gave it; do not run the check again."
+            )
         return f'''You are re-sending the report of a batch of edits. A previous turn
 already made the edits — they are on disk now — but its closing report could not
 be read, so the batch cannot be checked yet.
@@ -1266,6 +1285,58 @@ The shape:
 A minimal complete reply with one task — copy its format, not its content:
 
 {example}'''
+
+
+# ===========================================================================
+# the one re-send of a batch that said "applied" and changed nothing
+# ===========================================================================
+
+#: The heading the re-send appends, after the batch's own prompt (whose result
+#: contract already ends it): the newest instruction the runner reads.
+NOTHING_CHANGED_RESEND_HEADING = "## Your previous attempt changed no file"
+
+
+def build_nothing_changed_resend_prompt(
+    original_prompt: str,
+    *,
+    declared: Sequence[str],
+    named: Sequence[str] = (),
+) -> str:
+    """The batch's own prompt again, told that its last attempt changed nothing.
+
+    Pure, like every generator here. Fix round 14 (OpenCode racing run 5): T016
+    replied ``status: applied`` and named ``index.html``, and ``index.html``
+    was byte-for-byte what it had been, so the function it described never
+    existed. Nothing moved, so sending the batch again cannot apply anything
+    twice (the retry ladder's rule 9). Unlike the report re-ask, this one
+    carries the instructions: the work was not done. *declared* is the files
+    the batch may change, *named* the ones the reply said it edited.
+    """
+    files = ", ".join(declared) or "the files this task names"
+    verb = "is" if len(declared) == 1 else "are"
+    said = (
+        f" and named {', '.join(named[:5])}{', …' if len(named) > 5 else ''} "
+        f"as edited" if named else ""
+    )
+    return f'''{original_prompt.rstrip()}
+
+{NOTHING_CHANGED_RESEND_HEADING}
+
+A previous attempt at this exact task ended with `"status": "applied"`{said},
+but no file changed: {files} {verb} byte-for-byte as before it started.
+Its edits did not land — an edit command that failed, a change made
+to another path, or a change described but never written.
+
+Do the task now, and make each change in the file itself. Then:
+
+- answer `"status": "applied"` only for edits you made in this turn and saw
+  land in the file;
+- if every change the task asks for is already present, edit nothing and
+  answer `"status": "no-op"`;
+- if you cannot make the change, answer `"status": "failed"` and say why in
+  `summary`.
+
+End your reply with the JSON object the Result section above asks for.'''
 
 
 # ===========================================================================

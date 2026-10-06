@@ -2031,6 +2031,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         sys.stderr if as_json else sys.stdout
                     ):
                         self.print_write_outcome_summary()
+                    self._publish_run_notes()
             except Exception as e:  # noqa: BLE001 - summary is non-fatal
                 self.logger.warning("write outcome summary failed: %s", e)
             return scheduled
@@ -2439,6 +2440,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 "output_path": getattr(outcome, "output_path", None),
                 "expected_ids": list(getattr(outcome, "expected_ids", None) or []),
                 "skipped": bool(getattr(outcome, "skipped", False)),
+                **(
+                    {"batch_check": {
+                        "passed": not outcome.batch_check,
+                        "findings": list(outcome.batch_check),
+                    }}
+                    if getattr(outcome, "batch_check", None) is not None else {}
+                ),
             })
         return rows
 
@@ -2604,6 +2612,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         invocation, so that step never runs — the per-item reasons, which are the
         good part, existed only inside ``orchestrator_output.json``.
         """
+        from .subagent_executor import row_batch_check_findings
+
         result = self.write_result
         rows = self._phase_rows()
         ok = [row for row in rows if self._row_ok(row)]
@@ -2635,6 +2645,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         print(f"Skipped: {len(self.formatted_skipped)}")
         if getattr(result, "stopped_at_batch", None) is not None:
             print(f"Stopped at batch: {result.stopped_at_batch}")
+        failing = {
+            str(row.get("task_id")): row_batch_check_findings(row)
+            for row in rows
+            if self._row_ok(row) and row_batch_check_findings(row)
+        }
+        if failing:
+            # Fix round 14: applied, but not a clean finish.
+            from .write_batch_scheduler import batch_check_summary
+
+            print(f"Not a clean finish: {batch_check_summary(failing)}")
+        if getattr(result, "unverified", None):
+            print(result.unverified)
 
         if rows:
             print("\nBatches:")
@@ -2642,6 +2664,8 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 count = len(self._row_item_ids(row))
                 # `subagent_executor.row_outcome_label`'s reading order.
                 verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
+                if self._row_ok(row) and row_batch_check_findings(row):
+                    verdict += ", its check fails"
                 print(
                     f"  {row.get('task_id')}{self._row_provenance(row)}: "
                     f"{row.get('status')} ({verdict}), "
@@ -2699,6 +2723,64 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # ------------------------------------------------------------------
     # The executor leg's own summary report and decisions overlay (F3)
     # ------------------------------------------------------------------
+
+    def run_notes(self) -> List[str]:
+        """The lines a host must relay beside this run's counts (fix round 14).
+
+        Codex racing re-run 5, apply-task-suggestions: the log carried
+        ``[CONSISTENCY_WARNING] T003 depends on T004, listed after it`` and
+        "Skipped: 1" (a suggestion the judge skipped), while the result the
+        host read said "10/10 items applied" and nothing else, so the host
+        reported "Applied 10 of 10". One line per consistency warning, and one
+        naming every item left unapplied with why, its title and group id —
+        the RESULT block's own facts, in plain words.
+        """
+        notes = [
+            f"consistency warning: {warning}" for warning in self.consistency_warnings()
+        ]
+        skipped = list(self.formatted_skipped or [])
+        if skipped:
+            applied = self._write_item_counts(self._phase_rows())["applied"]
+            noun = self.item_noun if len(skipped) == 1 else self.item_noun_plural
+            by_label: Dict[str, List[str]] = {}
+            for item in skipped:
+                gid = str(item.get("group_id") or "")
+                title = str(item.get("title") or "Unknown").strip()
+                by_label.setdefault(judge_status_label(item.get("status")), []).append(
+                    f"{title}{f' [{gid[:8]}]' if gid else ''}"
+                )
+            shown = "; ".join(
+                f"{label}: {', '.join(titles[:5])}"
+                + (f" (+{len(titles) - 5} more)" if len(titles) > 5 else "")
+                for label, titles in by_label.items()
+            )
+            notes.append(
+                f"{len(skipped)} {noun} not applied, beside the {applied} "
+                f"applied — {shown} (reasons in summary.md)"
+            )
+        return notes
+
+    def _publish_run_notes(self) -> None:
+        """Hand :meth:`run_notes` to the result line and to ``status``.
+
+        The run's own ``notice`` (appended, never replacing one) for a
+        foreground caller, and ``progress.notes`` in the phase's
+        ``.status.json``, which a detached run's terminal poll carries into
+        its ``notice`` — the poll is the only result line a tool route reads.
+        """
+        notes = self.run_notes()
+        if not notes:
+            return
+        from . import cli_common as _cli
+
+        try:
+            from . import detach as _detach
+        except ImportError:  # pragma: no cover - direct script runs
+            import detach as _detach  # type: ignore
+        _detach.report_progress(
+            os.path.join(self.out_dir, self.phase_name), notes=notes,
+        )
+        _cli.add_notice("; ".join(notes))
 
     def consistency_warnings(self) -> List[str]:
         """Problems the finished edits left in the file they edited (advisory).
@@ -2862,12 +2944,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         run over. Returns the path written, or ``None``.
         """
         try:
-            from .write_batch_scheduler import CODE_WRITE_KINDS, verification_line
+            from .write_batch_scheduler import (
+                CODE_WRITE_KINDS, batch_check_section, verification_line,
+            )
         except ImportError:  # pragma: no cover - direct script runs
             from utils.write_batch_scheduler import (  # type: ignore
                 CODE_WRITE_KINDS,
+                batch_check_section,
                 verification_line,
             )
+        from .subagent_executor import row_batch_check_findings
         phase_dir = os.path.join(self.out_dir, self.phase_name)
         result = self.write_result
         # #28: the phase's rows, not this run's outcomes — a `--resume` keeps
@@ -2936,9 +3022,13 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 item_ids = self._row_item_ids(row)
                 # `subagent_executor.row_outcome_label`'s reading order.
                 verdict = row.get("outcome_label") or row.get("write_outcome") or "-"
+                failing = (
+                    ", its check fails"
+                    if self._row_ok(row) and row_batch_check_findings(row) else ""
+                )
                 lines.append(
                     f"### {row.get('task_id')}{self._row_provenance(row)} — "
-                    f"{row.get('status')} ({verdict})"
+                    f"{row.get('status')} ({verdict}{failing})"
                 )
                 lines.append(
                     f"**{nouns.capitalize()}**: {len(item_ids)}  "
@@ -2980,6 +3070,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 if reason:
                     lines.append(f"**Reason**: {reason}")
                 lines.append("")
+            # Fix round 14: the batches whose own check failed, whole.
+            section = batch_check_section(rows)
+            if section:
+                lines += section[1:] + [""]
         else:
             lines += ["(no batches were dispatched)", ""]
 
@@ -3235,6 +3329,14 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(line, file=sys.stderr if result.exit_code else sys.stdout)
         if result.report_path:
             print(f"[write-subagents] report: {result.report_path}")
+        # Fix round 14: a batch whose own check failed after its edits, and
+        # a code phase nothing verified, are on the result line a host relays.
+        from .cli_common import record_notice
+        from .write_batch_scheduler import write_result_notice
+
+        notice = write_result_notice(result)
+        if notice:
+            record_notice(notice)
         return result.exit_code
 
     def _materialize_native_write_tasks(self) -> Optional[str]:
