@@ -689,7 +689,10 @@ def render_run_text(
     resume_workflow: Optional[Dict[str, Any]] = None,
     implement_tally: Optional[Dict[str, Any]] = None,
     state_block: bool = False,
+    spell: Optional[Speller] = None,
 ) -> List[str]:
+    # *spell* (`user_speller`): the user's commands below in the host's
+    # spelling (fix round 18); `None` keeps the dispatcher command.
     # The workflow payload the resume block may consult without rendering the
     # workflow lines above it (`--view run`'s terminal read); see `_resume_lines`.
     resume_workflow = workflow if workflow is not None else resume_workflow
@@ -762,7 +765,7 @@ def render_run_text(
                     )
                     lines.append(
                         f"      re-run it with: "
-                        f"{_rerun_command(view, plan_path, mode=review)}"
+                        f"{_rerun_command(view, plan_path, mode=review, spell=spell)}"
                     )
             else:
                 lines.append(f"      workflow phase: {wf_status}")
@@ -861,7 +864,7 @@ def render_run_text(
             # so the resume command is handed over now rather than after the
             # close-out. `reason` carries what the probe saw.
             lines.append(f"      {view.get('reason')}")
-            lines.extend(_resume_lines(view, plan_path, resume_workflow))
+            lines.extend(_resume_lines(view, plan_path, resume_workflow, spell))
         if view["verdict"] in (detach.VERDICT_FAILED, detach.VERDICT_ABORTED):
             lines.append(f"      exit_code: {run.get('exit_code')}")
             lines.append(f"      error:     {run.get('error')}")
@@ -869,7 +872,7 @@ def render_run_text(
             if tail:
                 lines.append("      last log lines:")
                 lines.append(tail)
-            lines.extend(_resume_lines(view, plan_path, resume_workflow))
+            lines.extend(_resume_lines(view, plan_path, resume_workflow, spell))
     return lines
 
 
@@ -2058,8 +2061,21 @@ def state_implement_view(
     settled = completed and (
         state.is_phase_completed("code-review") or state.is_phase_skipped("code-review")
     )
+    tally_buckets, _waits = _implement_buckets(state)
     return {
         "completed": completed,
+        # Fix round 18 (Claude Code racing 06, mid-run): when the host's loop
+        # is between `util metrics start` and `finish`.
+        "in_progress_since": None if completed else _host_run_started_at(
+            record, _IMPLEMENT_PHASE),
+        # The executor routes' `all tasks:` tally, every task in one bucket
+        # (fix round 18: the native leg printed a coarser `tasks:` line).
+        "tally": {
+            "total": len(decomposition),
+            "done": sum(len(tally_buckets[key]) for key in _TALLY_DONE),
+            "buckets": tally_buckets,
+            "waits_on": waits_on,
+        },
         "tasks": [str(t) for t in decomposition],
         "titles": {str(k): str(v) for k, v in titles.items()},
         "buckets": buckets,
@@ -2077,21 +2093,61 @@ def state_implement_view(
     }
 
 
-def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
-    """:func:`state_implement_view` as the run view's text: one block."""
-    buckets = view["buckets"]
-    done = buckets["completed"] + buckets["accepted"] + buckets["completed_manual"]
-    total = len(view["tasks"])
-    lines = [
-        "  implement  no run record — the host ran these tasks itself; read "
-        "from state.json ("
-        + ("marked completed" if view.get("completed") else "not marked completed")
-        + ")",
-    ]
-    parts = [f"{len(done)}/{total} done"] + _bucket_clauses(
-        buckets, view.get("waits_on") or {}, _VIEW_LABELS,
+def _host_run_started_at(record: Mapping[str, Any], phase: str) -> Optional[str]:
+    """When the host's own loop over *phase*'s batches started, or ``None``.
+
+    The native leg's instructions open the loop with ``util metrics start``
+    and close it with ``util metrics finish`` (finished or stopped), so a
+    ``metrics_progress`` entry for the phase is a host run still in progress
+    (or one that died without its finish). Seconds precision.
+    """
+    progress = record.get("metrics_progress")
+    entry = progress.get(phase) if isinstance(progress, dict) else None
+    started = entry.get("started_at") if isinstance(entry, dict) else None
+    if not isinstance(started, str) or not started.strip():
+        return None
+    return started.strip()[:19]
+
+
+def _native_head(
+    dir_name: str, *, completed: bool, since: Optional[str], unit: str,
+) -> str:
+    """A native write phase's head line: what state.json says it is doing.
+
+    Fix round 18 (Claude Code racing 06): a running native implement read
+    "no run record — the host ran these tasks itself" exactly as a stopped
+    one did, so the view could not say whether anything was going on.
+    """
+    if completed:
+        verdict = "done on the host (marked completed)"
+        tense = "ran"
+    elif since:
+        verdict = f"in progress on the host (started {since})"
+        tense = "runs"
+    else:
+        verdict = "not finished on the host (not marked completed)"
+        tense = "ran"
+    return (
+        f"  {dir_name}  {verdict} — no run record, since the host {tense} "
+        f"these {unit} itself; read from state.json"
     )
-    lines.append(f"      tasks:          {'; '.join(parts)}")
+
+
+def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
+    """:func:`state_implement_view` as the run view's text: one block.
+
+    Fix round 18 (Claude Code racing 06 and stop path): its tally line reads
+    ``all tasks:``, in the executor routes' words (:func:`implement_tally_text`),
+    and its head says whether the host's run is in progress.
+    """
+    since = view.get("in_progress_since")
+    lines = [_native_head(
+        _IMPLEMENT_PHASE, completed=bool(view.get("completed")), since=since,
+        unit="tasks",
+    )]
+    lines.append(
+        f"      all tasks:      {implement_tally_text(view['tally'], live=bool(since))}"
+    )
     for task_id, reason in view["reasons"].items():
         lines.append(f"      {task_id}: {reason}")
     for entry in view["findings"]:
@@ -2110,6 +2166,109 @@ def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
             + ", ".join(f"--human-task {task_id}={action}"
                         for task_id, action in sorted(view["answers"].items()))
         )
+    return lines
+
+
+#: The apply phases a native host drives itself, in workflow order: no run
+#: record, no report, only ``state.json`` and the batch list the emit wrote.
+NATIVE_APPLY_PHASES: Tuple[str, ...] = (
+    "apply-suggestions", "apply-task-suggestions", "apply-code-fixes",
+)
+#: Implement's place among them, for the order the blocks print in.
+NATIVE_PHASE_ORDER: Tuple[str, ...] = (
+    "apply-suggestions", "apply-task-suggestions", _IMPLEMENT_PHASE,
+    "apply-code-fixes",
+)
+_WRITE_TASKS = "write_tasks.json"
+
+
+def state_apply_views(
+    plan_path: Path, views: Sequence[Dict[str, Any]],
+    workflow: Optional[Dict[str, Any]], *, only: Optional[str] = None,
+    host_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """The apply phases a native host ran, read back from ``state.json``.
+
+    Fix round 18 (Claude Code racing run 7): the run view listed the native
+    implement (fix round 14) but none of the apply phases the same host had
+    run, while on the tool routes, whose apply runs leave a run record, it
+    listed every one. A phase is listed when its folder holds the batch list
+    the native emit wrote (``write_tasks.json``) and neither a run view nor a
+    ``write_batch_report.json`` (the executor's), and the workflow payload
+    (*workflow*: ``get_workflow_status``, which already sets an earlier
+    cycle's batches aside) shows it ``completed`` or ``in_progress``, or the
+    host's loop is going. ``{phase, phase_dir, completed,
+    in_progress_since, batches_recorded, batches_total}`` in workflow order;
+    *only* limits it to one phase (``--phase``). Read-only.
+    """
+    from .metrics import _current_run_id
+    from .state_manager import StateManager
+
+    listed = {
+        os.path.basename(str(view.get("phase_dir") or "")) for view in views
+    }
+    candidates = []
+    for phase in NATIVE_APPLY_PHASES:
+        if only is not None and only not in (phase, os.path.basename(
+                str(phase_dir_path(plan_path, phase)))):
+            continue
+        directory = phase_dir_path(plan_path, phase)
+        if (directory.name in listed or (directory / _WRITE_REPORT).exists()
+                or not (directory / _WRITE_TASKS).is_file()):
+            continue
+        candidates.append((phase, directory))
+    if not candidates:
+        return []
+    try:
+        record = StateManager(plan_path, read_only=True).state
+        if workflow is None:
+            workflow = _workflow_payload(plan_path, host_id=host_id)
+    except Exception:  # noqa: BLE001 - advisory: the run view is not
+        return []
+    phases = (workflow or {}).get("phases") or {}
+    out: List[Dict[str, Any]] = []
+    for phase, directory in candidates:
+        status = (phases.get(phase) or {}).get("status")
+        since = _host_run_started_at(record, phase)
+        completed = status == "completed"
+        if not (completed or status == "in_progress" or since):
+            continue
+        entry: Dict[str, Any] = {
+            "phase": phase,
+            "phase_dir": directory.name,
+            "completed": completed,
+            "in_progress_since": None if completed else since,
+            "batches_recorded": None,
+            "batches_total": None,
+        }
+        if entry["in_progress_since"]:
+            # This host run's own count: the entries `util metrics record`
+            # stamped with the run id `util metrics start` gave it. A batch
+            # id is reused across a native resume, so the ids say less.
+            run_id = _current_run_id(record, phase)
+            progress = (record.get("metrics_progress") or {}).get(phase) or {}
+            metrics = (record.get("metrics") or {}).get(phase)
+            if run_id and isinstance(metrics, list):
+                entry["batches_recorded"] = sum(
+                    1 for item in metrics
+                    if isinstance(item, dict) and item.get("run_id") == run_id
+                )
+            total = progress.get("total_batches")
+            if isinstance(total, int) and not isinstance(total, bool) and total > 0:
+                entry["batches_total"] = total
+        out.append(entry)
+    return out
+
+
+def render_state_apply_lines(view: Dict[str, Any]) -> List[str]:
+    """:func:`state_apply_views`' entry as the run view's text: one block."""
+    lines = [_native_head(
+        view["phase_dir"], completed=bool(view.get("completed")),
+        since=view.get("in_progress_since"), unit="batches",
+    )]
+    recorded, total = view.get("batches_recorded"), view.get("batches_total")
+    if isinstance(recorded, int) and isinstance(total, int):
+        lines.append(f"      batches:        {recorded}/{total} recorded by this run")
     return lines
 
 
@@ -2456,7 +2615,64 @@ _WRITE_MODES = ("apply-suggestions", "apply-task-suggestions",
                 "apply-code-fixes", "implement")
 
 
-def _resume_command(view: Dict[str, Any], plan_path: Path) -> str:
+#: Spells one retry the way the host's user types it: ``(mode, positionals
+#: after the plan, flags and verbs) -> command``, or ``None`` to keep the
+#: dispatcher command (:func:`user_speller`).
+Speller = Any
+
+
+def user_speller(
+    host_id: Optional[str], plan_arg: str,
+) -> Optional[Speller]:
+    """The run view's commands in *host_id*'s spelling, or ``None``.
+
+    Fix round 18 (Codex racing run 7): ``resume with:`` printed the raw ``uv
+    run … multi_llm.py … --host codex --detach --resume`` while every other
+    next-step line of the same view (the manual-task note, the next phase) was
+    the host's own spelling. Built from the same ``next_command`` template and
+    quoting as ``next_phase.phase_command``, with the plan as typed and only
+    the flags the user typed (:func:`cli_common.drop_host_composed_flags`).
+
+    ``None`` on a tool route (``modes.TOOL_ROUTES``): there the tool's server
+    re-spells every dispatcher command in the output itself and also hands it
+    back as a tool call in ``options``, which it can only do from the
+    dispatcher command. ``None`` too when the host has no template for its
+    route; the dispatcher command stands then.
+    """
+    import io
+
+    from . import next_phase
+
+    try:
+        modes = next_phase._skill_module("modes")
+        host = host_capabilities.resolve_host_id(explicit=host_id)
+        route = next_phase.resolve_route(host, stderr=io.StringIO())
+        if route in modes.TOOL_ROUTES:
+            return None
+        template = host_capabilities.next_command_template(host, route)
+    except Exception:  # noqa: BLE001 - advisory: the dispatcher command stands
+        return None
+
+    def spell(mode: str, extra: Sequence[str], tokens: Sequence[str]) -> Optional[str]:
+        resolved = modes.resolve(mode)
+        if resolved is None:
+            return None
+        words = [f"--{resolved.name}", next_phase.quote_plan_arg(plan_arg)]
+        # A token with a control character is not something a user typed
+        # (a replay list is read from the run's output folder).
+        words += [
+            next_phase.quote_plan_arg(str(token))
+            for token in [*extra, *cli_common.drop_host_composed_flags(tokens)]
+            if str(token) and str(token).isprintable()
+        ]
+        return template.replace(next_phase.ARGS_SLOT, " ".join(words))
+
+    return spell
+
+
+def _resume_command(
+    view: Dict[str, Any], plan_path: Path, spell: Optional[Speller] = None,
+) -> str:
     """The ``resume with:`` command, with the run's own flags spliced back in.
 
     Flags come from the run record's ``replay_flags`` (the launcher's list,
@@ -2464,7 +2680,8 @@ def _resume_command(view: Dict[str, Any], plan_path: Path) -> str:
     never lets ``status``'s own ``--view run`` argv win here (a different
     mode). ``ask`` re-derives its question positional from the checkpoint's
     ``question`` field — the one place it is stored — and falls back to the
-    questionless string when the key is missing.
+    questionless string when the key is missing. With *spell*
+    (:func:`user_speller`) the same retry in the host's spelling.
     """
     run = view["run"]
     mode = str(run.get("mode") or view.get("phase") or "review-plan")
@@ -2475,6 +2692,11 @@ def _resume_command(view: Dict[str, Any], plan_path: Path) -> str:
     verb = _RESUME_VERB_BY_MODE.get(mode) or (
         "--reaggregate" if mode in _REAGGREGATE_MODES else "--force"
     )
+    if spell is not None:
+        _positionals, tokens = cli_common.retry_tokens(*positionals, verb, flags=flags)
+        spelled = spell(mode, positionals[1:], tokens)
+        if spelled:
+            return spelled
     return cli_common.retry_command(mode, *positionals, verb, flags=flags)
 
 
@@ -2492,7 +2714,8 @@ def _stale_review_of(phase_name: str, workflow: Dict[str, Any]) -> Optional[str]
 
 
 def _rerun_command(
-    view: Dict[str, Any], plan_path: Path, *, mode: Optional[str] = None
+    view: Dict[str, Any], plan_path: Path, *, mode: Optional[str] = None,
+    spell: Optional[Speller] = None,
 ) -> str:
     """The plain re-run of a done run whose phase went stale: no verb at all.
 
@@ -2509,9 +2732,15 @@ def _rerun_command(
     if mode is not None:
         resolved = cli_common._modes().resolve(mode)
         word = resolved.name if resolved is not None else mode
-        return cli_common.retry_command(word, str(plan_path))
-    word = str(run.get("mode") or view.get("phase") or "review-code")
-    flags = cli_common.current_replay_flags(run.get("replay_flags"), mode=word)
+        flags: List[str] = []
+    else:
+        word = str(run.get("mode") or view.get("phase") or "review-code")
+        flags = cli_common.current_replay_flags(run.get("replay_flags"), mode=word)
+    if spell is not None:
+        # Fix round 18: in the host's spelling, as `resume with:` is.
+        spelled = spell(word, [], cli_common.retry_tokens(str(plan_path), flags=flags)[1])
+        if spelled:
+            return spelled
     return cli_common.retry_command(word, str(plan_path), flags=flags)
 
 
@@ -2668,6 +2897,7 @@ def _phase_in_progress(
 def _resume_lines(
     view: Dict[str, Any], plan_path: Path,
     workflow: Optional[Dict[str, Any]] = None,
+    spell: Optional[Speller] = None,
 ) -> List[str]:
     """The shaped resume block: the repair first when there is one, then the
     single ``resume with:`` command, then what it costs.
@@ -2695,7 +2925,7 @@ def _resume_lines(
     lines: List[str] = []
     if shape == cli_common.SHAPE_REPAIR:
         lines.append(f"      repair first: {repair}")
-    lines.append(f"      resume with: {_resume_command(view, plan_path)}")
+    lines.append(f"      resume with: {_resume_command(view, plan_path, spell)}")
     if redispatch:
         mode = str(view["run"].get("mode") or view.get("phase") or "")
         if mode in _WRITE_MODES:
@@ -3276,6 +3506,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             implement_tasks = state_implement_view(plan_path, views)
         except Exception:  # noqa: BLE001 - advisory: the run view is not
             implement_tasks = None
+    # Fix round 18: and the apply phases the same native host ran.
+    apply_tasks: List[Dict[str, Any]] = []
+    if not args.run_id and not args.question:
+        try:
+            apply_tasks = state_apply_views(
+                plan_path, views, workflow or terminal_workflow,
+                only=_resolve_phase(args.phase), host_id=_reader_host(args),
+            )
+        except Exception:  # noqa: BLE001 - advisory: the run view is not
+            apply_tasks = []
 
     if args.json:
         payload: Dict[str, Any] = {"runs": views}
@@ -3283,6 +3523,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             payload = {"workflow": workflow, "runs": views}
         if implement_tasks is not None:
             payload["implement_tasks"] = implement_tasks
+        if apply_tasks:
+            payload["apply_phases"] = apply_tasks
         if implement_tally is not None:
             payload["implement_tally"] = implement_tally
         # Plan §7.4a2/b: what discovery skipped, only when there is something
@@ -3307,10 +3549,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args), resume_workflow=terminal_workflow,
             implement_tally=implement_tally,
-            state_block=implement_tasks is not None,
+            state_block=implement_tasks is not None or bool(apply_tasks),
+            spell=user_speller(
+                _reader_host(args), _plan_spelling(args, views, plan_path)),
         )
+        # The phases a native host ran (no run record), in workflow order.
+        native: List[Tuple[str, List[str]]] = [
+            (entry["phase"], render_state_apply_lines(entry)) for entry in apply_tasks
+        ]
         if implement_tasks is not None:
-            lines += render_state_implement_lines(implement_tasks)
+            native.append((_IMPLEMENT_PHASE, render_state_implement_lines(implement_tasks)))
+        for _phase, block in sorted(
+                native, key=lambda item: NATIVE_PHASE_ORDER.index(item[0])):
+            lines += block
         # Plan §7.4a2: after the phase views, never silently dropped.
         lines += _ignored_text(
             discovery.get("ignored_dirs") or [], discovery.get("copies") or []
