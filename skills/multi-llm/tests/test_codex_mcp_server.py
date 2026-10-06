@@ -2839,14 +2839,17 @@ QUOTE_CASES = [
 
 class TestRestatedComposedFlags:
     """OpenCode #1 (and codex #6): a restated `--yes` was refused as reserved.
-    A composed flag restated with the same meaning is now dropped with a note."""
+    A composed flag restated with the same meaning is now dropped. Run 6
+    (#10a/#14): the note that named it ("leave them out next time") was relayed
+    to the user as "`--yes` was dropped from your flags" on every call, so the
+    drop is quiet: the flag means what the tool already does."""
 
     @pytest.mark.parametrize("flags, shown", [
         (["--yes"], "--yes"), (["-y"], "-y"), (["--non-interactive"], "--non-interactive"),
         (["--exec-subagents"], "--exec-subagents"), (["--ye"], "--ye"),
         (["--host", "codex"], "--host codex"), (["--host=codex"], "--host=codex"),
     ])
-    def test_a_restated_flag_runs_and_is_named_in_a_note(self, harness, flags, shown):
+    def test_a_restated_flag_runs_quietly(self, harness, flags, shown):
         envelope, result, calls, _ = harness.run(
             dict(REVIEW, extra_flags=[*flags, "--quick"]),
             [launch_step(), poll_step(CODES["ok"])])
@@ -2856,8 +2859,16 @@ class TestRestatedComposedFlags:
             if baked.startswith("-"):
                 assert launch.count(baked) == 1, launch
         assert "--quick" in launch
-        note = SURFACE["reserved_flags"]["redundant"]["note"]
-        assert envelope["extra_flags_note"] == note.replace("{flags}", shown)
+        assert "extra_flags_note" not in envelope
+        assert "note" not in SURFACE["reserved_flags"]["redundant"]
+        assert "leave them out" not in json.dumps(envelope)
+
+    def test_a_restated_flag_on_a_failed_call_adds_no_note(self, harness):
+        envelope, _, _, _ = harness.run(
+            dict(REVIEW, extra_flags=["--yes"]),
+            [launch_step(), poll_step(CODES["needs_human"])])
+        assert envelope["ok"] is False
+        assert "extra_flags_note" not in envelope
 
     def test_the_quoting_agrees_with_the_dispatchers(self):
         import importlib.util

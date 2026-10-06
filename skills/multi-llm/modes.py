@@ -461,19 +461,6 @@ NO_COMMAND_REASON = (
     "compose a command."
 )
 
-#: The note a package server returns when ``extra_flags`` restated a flag it
-#: already composes with the same meaning (``--yes`` and its spellings,
-#: ``--exec-subagents``, ``--host`` naming this host): the token is dropped and
-#: the call runs, where it used to be refused and cost the model a call (racing
-#: re-run 2026-10-04: four refusals in one session). ``{flags}`` is the dropped
-#: tokens, comma-joined, by plain substitution. A flag whose meaning would
-#: differ — ``--interactive``, ``--detach``, ``--host`` naming another host, the
-#: ``--internal-`` prefix — is still refused.
-REDUNDANT_FLAG_NOTE = (
-    "Dropped from extra_flags because this tool already composes them with the "
-    "same meaning: {flags}. Nothing else changed; leave them out next time."
-)
-
 #: The route signal's one owner (plans/next-phase-command.md §2.1, "Knowing the
 #: route"). The package routes' tool servers set ``ROUTE_ENV`` in every child
 #: env they spawn (polls included) to their surface's
