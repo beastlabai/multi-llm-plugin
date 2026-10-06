@@ -2750,8 +2750,17 @@ def user_speller(
         resolved = modes.resolve(mode)
         if resolved is None:
             return None
+        # What the run's own host composed too, when another host reads it
+        # (its `--host` is in the replay): never something the user typed.
+        table = dict(composed)
+        run_host = cli_common.replay_host(tokens)
+        if run_host and run_host != host:
+            try:
+                table.update(cli_common.file_route_composed_flags(run_host))
+            except Exception:  # noqa: BLE001 - an unknown id adds nothing
+                pass
         kept = [str(token) for token in [
-            *extra, *cli_common.drop_host_composed_flags(tokens, composed)]]
+            *extra, *cli_common.drop_host_composed_flags(tokens, table)]]
         # A token this one-line spelling cannot carry as it is — an `ask`
         # question with a newline or a tab, an empty value — keeps the
         # dispatcher command, which quotes it whole. Fix round 19: those

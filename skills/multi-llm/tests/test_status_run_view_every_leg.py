@@ -203,6 +203,27 @@ class TestEachHostDropsOnlyWhatItsOwnShimComposes:
             "/multi-llm:multi-llm --apply-code-fixes plans/p.md "
             "--exec-subagents --yes --models a:b --resume")
 
+    def test_a_run_another_host_launched_drops_what_that_host_composed(
+        self, plan, capsys,
+    ):
+        """Read on Claude Code, which never passes `--detach`, a codex run's
+        resume loses the `--detach` the codex shim added; read on opencode,
+        a Claude Code run's keeps what its user typed."""
+        _failed_run(plan, mode="review-plan", directory="review-plan",
+                    flags=["--host", "codex", "--detach", "--quick"])
+        assert _resume_line(capsys, "--host", "claude-code") == (
+            "/multi-llm:multi-llm --review-plan plans/p.md --quick --reaggregate")
+        _failed_run(plan, mode="review-plan", directory="review-plan",
+                    flags=["--host=claude-code", "--models", "a:b"])
+        assert _resume_line(capsys, "--host", "opencode") == (
+            "/multi-llm --review-plan plans/p.md --models a:b --reaggregate")
+
+    def test_the_replays_host_is_read_in_every_spelling(self):
+        assert cli_common.replay_host(["--quick", "--host", "codex"]) == "codex"
+        assert cli_common.replay_host(["--host=opencode"]) == "opencode"
+        assert cli_common.replay_host(["--ho", "claude-code"]) == "claude-code"
+        assert cli_common.replay_host(["--quick"]) is None
+
     @pytest.mark.parametrize("host,prefix", [
         ("codex", "Use the multi-llm skill with exactly these arguments: "),
         ("opencode", "/multi-llm "),
