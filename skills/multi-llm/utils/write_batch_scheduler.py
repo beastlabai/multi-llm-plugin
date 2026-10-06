@@ -9065,8 +9065,14 @@ class WriteBatchScheduler:
         (the one line the needs-human ``message`` quotes). So the line also
         ends the headline of a stop already recorded (``_record_stop`` and
         ``_record_check_block`` run first): the tool routes carry it where
-        they carry the stop, and ``run.error``, ``status`` and the OpenCode
-        stop title with it.
+        they carry the stop — the result line's ``error`` in the tool output
+        — and ``run.error`` and ``status`` with it. Not the OpenCode stop
+        title (fix round 19, review of round 18, #5): that cuts the error
+        line at ``modes.STOP_TITLE["max_line"]`` (300) characters, and a
+        real stop headline runs past that before this line (live run 7:
+        644), so the title shows what stopped and the resume command. The
+        line stays in the ``notice`` too, the field a finished run carries
+        it in, so a tool result shows it in both.
         """
         if self.kind not in CODE_WRITE_KINDS or self.dry_run or result.unverified:
             return []

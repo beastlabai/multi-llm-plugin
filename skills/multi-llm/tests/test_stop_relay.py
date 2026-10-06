@@ -78,6 +78,20 @@ class TestTheTestsLineTravelsWithTheStop:
         mirror = json.loads((repo.phase_dir / ".status.json").read_text())
         assert UNVERIFIED in mirror["progress"]["write_subagents"]["stop"]["headline"]
 
+    def test_the_tool_output_carries_it_not_the_opencode_stop_title(
+        self, repo, capsys,
+    ):
+        """Review of round 18, #5: d1cdc11 said the line reaches the OpenCode
+        stop title, which cuts the error line at `STOP_TITLE["max_line"]`
+        characters; a real stop's headline runs past that before the line,
+        so it reaches the host in the tool output's `error` (and `notice`,
+        kept there as on a finished run)."""
+        (repo.root / "package.json").write_text(
+            json.dumps({"scripts": {"test": "node --test"}}), encoding="utf-8")
+        _text, result = _stop(repo, capsys)
+        assert result["error"].index(UNVERIFIED) > modes.STOP_TITLE["max_line"]
+        assert UNVERIFIED in (result.get("notice") or ""), result
+
     def test_a_long_headline_is_cut_before_it_never_through_it(self, repo, capsys):
         """The result line's `error` is bounded; the tests line is the part
         that must reach the host whole."""
