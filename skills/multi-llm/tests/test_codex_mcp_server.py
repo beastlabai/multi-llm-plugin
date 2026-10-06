@@ -973,6 +973,38 @@ class TestWireContract:
         aborts = [c for c in harness.calls() if DISPATCHER["abort"][1] in dispatcher_argv(c)]
         assert len(aborts) == 1
 
+    def test_codex_s_turn_end_teardown_still_aborts_the_claimed_run(self, harness):
+        # Measured offline on codex 0.160.1 (fix round 16, Codex racing 06):
+        # under code mode the model calls this tool from a JavaScript `exec`
+        # cell that yields back to it while the call is still in flight, and
+        # nothing stops it ending its turn there. `codex exec` then closes
+        # this server's stdin and SIGTERMs it in the same millisecond, sends
+        # no notifications/cancelled, and kills it about 0.5 s later. The
+        # claimed run must still be aborted (cleanly, so it can be resumed),
+        # never left running with nobody watching: the abort child is spawned
+        # inside that half second and, in its own session, outlives the kill.
+        client = harness.client([launch_step(run_id="RID-K"),
+                                 {"exit": 2, "sleep": 60}, ABORT_CONFIRMED])
+        client.start_call(REVIEW)
+        _wait_for_calls(harness, 2)
+        poll_pid = harness.calls()[1]["pid"]
+        client.proc.send_signal(signal.SIGTERM)
+        client.proc.stdin.close()
+        time.sleep(0.5)
+        client.proc.kill()
+        client.proc.wait(10)
+
+        def aborts():
+            return [dispatcher_argv(c) for c in harness.calls()
+                    if DISPATCHER["abort"][1] in dispatcher_argv(c)]
+
+        until = time.monotonic() + 10
+        while not aborts() and time.monotonic() < until:
+            time.sleep(0.05)
+        assert len(aborts()) == 1, harness.calls()
+        assert aborts()[0][aborts()[0].index(DISPATCHER["run_id_option"]) + 1] == "RID-K"
+        assert _pid_gone(poll_pid)
+
     def test_the_login_shell_s_noise_never_reaches_fd_1(self, harness):
         (harness.home / ".profile").write_text(
             "echo PROFILE-STDOUT-NOISE\necho PROFILE-STDERR-NOISE >&2\n"
