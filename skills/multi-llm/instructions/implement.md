@@ -228,6 +228,8 @@ Prerequisites are met. If `[TASK_SUGGESTIONS_ADVISORY]` was present, handle it a
 
 3. **Check for prerequisite markers in orchestrator output** (see Step 0 above)
 
+   When step 2 ended with `Nothing is left to run: implement stays completed`, the run only recorded answers for an implement that already completed (a `--resume --human-task {id}=done` closing a deferred manual task, say): report the answers it recorded (`[HUMAN_TASK_ANSWERED]`) and end the report with the command `util next-command` prints, as step 11 does. Skip steps 4 to 10: dispatch nothing, write no summary (the completed run's `summary.md` stays as it is) and run no `util finalize-tracking`.
+
 4. **Read the task JSON file:**
    ```
    Read the absolute path printed on the orchestrator's `Output file:` line in step 2
@@ -342,7 +344,7 @@ your host.
      --state-file "$STATE_FILE" --phase "implement" --total-batches {total_tasks}
    ```
 
-   `batches` holds exactly the tasks you dispatch (and a manual task still waiting for its answer); its count is the `Pending tasks:` line. Step 2 left out, and named in top-level maps with their reasons, every task you must neither dispatch nor record: `skipped_tasks`, `accepted_tasks` and `completed_manual_tasks` (above); `refused_tasks`, a task the write policy (`driver.write_paths`) does not allow, already recorded `failed` as the `--exec-subagents` leg refuses it before dispatch, and `not_run_tasks`, the tasks that depend on one; `not_rerun_checks`, a check whose findings stand because nothing changed since they were recorded (`[CHECK_NOT_RERUN]`), and `held_tasks`, the tasks a check with findings holds back. List them in the summary (refused: `Failed`, refused before dispatch; the others: `Not run`). When `batches` is empty step 2 says `Nothing to dispatch`: spawn nothing and go on to step 7.
+   `batches` holds exactly the tasks you dispatch (and a manual task still waiting for its answer); its count is the `Pending tasks:` line. Step 2 left out, and named in top-level maps with their reasons, every task you must neither dispatch nor record: `skipped_tasks`, `accepted_tasks` and `completed_manual_tasks` (above); `refused_tasks`, a task the write policy (`driver.write_paths`) does not allow, already recorded `failed` as the `--exec-subagents` leg refuses it before dispatch, and `not_run_tasks`, the tasks that depend on one; `not_rerun_checks`, a check whose findings stand because nothing changed since they were recorded (`[CHECK_NOT_RERUN]`), and `held_tasks`, the tasks a check with findings holds back. List them in the summary (refused: `Failed`, refused before dispatch; the others: `Not run`). When `batches` is empty step 2 says `Nothing to dispatch`: spawn nothing and go on to step 7 (this run reopened implement; one that printed `Nothing is left to run` ended at step 3).
 
    For each batch in `batches` array:
    - Execute all tasks in the batch (can be parallel if `can_parallelize` is true)

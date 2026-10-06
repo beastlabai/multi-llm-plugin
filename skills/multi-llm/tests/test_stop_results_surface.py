@@ -382,6 +382,36 @@ class TestClosingADeferredManualTask:
         assert get_or_create_state(done_repo.plan).state[
             "phases_completed"]["implement"] == stamp
 
+    def test_the_native_answers_only_emit_asks_for_no_summary_and_no_close(
+        self, done_repo, capsys, tmp_path,
+    ):
+        """Fix round 15 (review of round 14, prompts #1): the answers-only
+        emit still printed the generic "1. Read the output JSON … 5. generate
+        the implementation summary 6. … --mark-completed" block, and the core
+        sent empty batches on to step 7, so a host following them overwrote
+        the completed run's summary.md with a nothing-ran one."""
+        import implement_orchestrator
+
+        self._finish_with_review(done_repo, capsys)
+        assert implement_orchestrator.main([
+            "--plan-file", str(done_repo.plan), "--output", str(tmp_path / "h.json"),
+            "--yes", "--resume", "--human-task", "T005=done",
+        ]) == 0
+        out = capsys.readouterr().out
+        steps = out.split("Claude Code should now:", 1)[1]
+        assert "--mark-completed" not in steps
+        assert "generate the implementation summary" not in steps
+        assert "Read the output JSON file" not in steps
+        assert "write no implementation summary" in steps
+        assert "run no `util finalize-tracking`" in steps
+        assert "End the report with the command `util next-command` prints" in steps
+        core = (Path(implement_orchestrator.__file__).parent / "instructions"
+                / "implement.md").read_text(encoding="utf-8")
+        assert (
+            "When step 2 ended with `Nothing is left to run: implement stays "
+            "completed`, the run only recorded answers"
+        ) in core
+
 
 def multi_llm_util(argv) -> int:
     import multi_llm
