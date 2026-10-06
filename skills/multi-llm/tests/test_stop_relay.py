@@ -258,3 +258,76 @@ class TestTheNativeStopPrintsTheTestsLine:
         summary = " ".join((root / "references" / "summary-format.md").read_text(
             encoding="utf-8").split())
         assert "a `[TESTS_NOT_RUN]` line above them" in summary
+
+
+# ===========================================================================
+# The native leg: an explicit `--resume` says what it kept
+# ===========================================================================
+
+class TestAnExplicitNativeResumeSaysWhatItKept:
+    """Live run 7, Claude Code stop 01b and accept 02: an explicit
+    `--implement … --resume` printed no `resume: kept …` line on the native
+    leg (only the plain `--implement` that continues a run did), so "T002
+    (accepted with its check findings)" was never shown there, while both
+    tool routes print it."""
+
+    _util = staticmethod(TestTheNativeStopPrintsTheTestsLine._util)
+
+    def _emit(self, repo, capsys, *flags) -> str:
+        import implement_orchestrator
+
+        assert implement_orchestrator.main(
+            ["--plan-file", str(repo.plan), "--yes", *flags]) == 0
+        captured = capsys.readouterr()
+        return captured.out + captured.err
+
+    def _stop(self, repo, capsys):
+        self._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        for task_id in ("T001", "T003", "T004"):
+            assert self._util(
+                capsys, "batch-done", "--phase-dir", phase, "--task-id", task_id,
+                "--status", "completed")[0] == 0
+        assert self._util(
+            capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
+            "--status", "completed", "--check", "findings",
+            "--finding", "retries must be 3 (found 2)")[0] == 0
+        state_file = str(repo.phase_dir.parent / "state.json")
+        assert self._util(capsys, "finalize-tracking", "--state-file", state_file)[0] == 0
+
+    @staticmethod
+    def _kept(text: str) -> list:
+        return [l for l in text.splitlines() if l.startswith("resume: ")]
+
+    def test_an_unchanged_resume_names_the_four_it_kept(self, repo, capsys):
+        self._stop(repo, capsys)
+        text = self._emit(repo, capsys, "--resume")
+        assert self._kept(text) == [
+            "resume: kept 4 task(s) an earlier run finished (T001, T002, T003, T004)."
+        ], text
+
+    def test_the_accept_resume_names_the_accepted_check(self, repo, capsys):
+        self._stop(repo, capsys)
+        text = self._emit(
+            repo, capsys, "--resume", "--human-task", "T002=done",
+            "--human-task", "T005=skip",
+        )
+        assert self._kept(text) == [
+            "resume: kept 4 task(s) an earlier run finished (T001, T003, T004, "
+            "T002 (accepted with its check findings))."
+        ], text
+
+    def test_the_plain_continue_still_prints_its_own_line_once(self, repo, capsys):
+        self._stop(repo, capsys)
+        text = self._emit(repo, capsys)
+        assert self._kept(text) == [
+            "resume: implement started earlier and did not finish, so this run "
+            "continues it as --resume: kept 4 task(s) an earlier run finished "
+            "(T001, T002, T003, T004) and runs what is left. To run every task "
+            "again instead, add --fresh."
+        ], text
+
+    def test_a_first_resume_with_nothing_finished_prints_none(self, repo, capsys):
+        self._emit(repo, capsys)
+        text = self._emit(repo, capsys, "--resume")
+        assert self._kept(text) == [], text
