@@ -320,8 +320,8 @@ again: when the files git sees have the same sizes and timestamps as when it fai
 (`verdict.tree_fingerprint` on its result file), the stop is repeated with the remedy
 and no dispatch is spent; `--human-task <id>=retry` runs it anyway. A stop after a
 code task of the phase completed, with no `driver.verify_command` configured, also
-says that nothing ran the repository's tests (its log, `notice` and `summary.md`), as
-a finished run does.
+says that nothing ran the repository's tests (its log, `notice` and `summary.md`, and
+at the end of the stop's own line, the result's `error`), as a finished run does.
 
 A check that ran and reported problems (`check-findings`, also from a reply that said `failed` but listed findings and not `could_not_run`) is not a stop: the tasks that
 do not depend on it run. The tasks that depend on it, directly or through another task,

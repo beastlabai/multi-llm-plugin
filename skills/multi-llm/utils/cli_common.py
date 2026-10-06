@@ -826,7 +826,7 @@ class ResultContext:
         cleaned = plain_line(text)
         # One line the hosts quote inside their message: bounded, so a long
         # refusal cannot bury the message it decorates.
-        self.error = cleaned[:1200] or None
+        self.error = cleaned[:ERROR_MAX_CHARS] or None
 
     def set_user_resume(self, obj: Optional[Dict[str, Any]]) -> None:
         """Record the command that *resumes* a stopped write phase, for the user.
@@ -1076,6 +1076,13 @@ def record_user_next_step(obj: Optional[Dict[str, Any]]) -> None:
     """
     if _ACTIVE is not None:
         _ACTIVE.set_user_next_step(obj)
+
+
+#: How long the result line's ``error`` may be (:meth:`set_error`). A stop's
+#: headline that would run past it is cut before the line saying nothing ran
+#: the repository's tests, never through it
+#: (``WriteBatchScheduler._note_unverified_on_stop``, fix round 18).
+ERROR_MAX_CHARS = 1200
 
 
 def record_error(text: Optional[str]) -> None:
