@@ -967,7 +967,9 @@ def _suggested_next(phases: Dict[str, dict], order: List[str]) -> Optional[str]:
     )
 
 
-def unapplied_task_groups_notice(count: int, *, valid: bool) -> str:
+def unapplied_task_groups_notice(
+    count: int, *, valid: bool, in_progress: bool = False,
+) -> str:
     """The notice for task suggestion groups review-tasks left unapplied.
 
     It is also the ``why`` of the optional ``--apply-task-suggestions`` step
@@ -975,11 +977,25 @@ def unapplied_task_groups_notice(count: int, *, valid: bool) -> str:
     it names how many groups are waiting and what going straight to
     implement does with them (fix round 18, live run 7 #11: 11, 9 and 7
     valid groups sat unapplied while the next step read ``--implement``).
+
+    *in_progress*: a run of the phase started and did not finish, so its
+    command is a ``--resume`` that applies only what that run has not; the
+    count is then review-tasks' and the notice says so (fix round 19: it
+    said all N were unapplied beside that ``--resume``).
     """
     kind = "valid task suggestion" if valid else "task suggestion"
     noun = "group" if count == 1 else "groups"
     them = "it" if count == 1 else "them"
     changes = "that change" if count == 1 else f"those {count} changes"
+    if in_progress:
+        return (
+            f"review-tasks left {count} {kind} {noun} to apply, and a run of "
+            f"--apply-task-suggestions started on {them} and has not finished. "
+            "Run --apply-task-suggestions --resume first to apply what that "
+            "run has not applied yet; going straight to --implement skips "
+            "what is left, and implement then works from the task list as it "
+            "stands."
+        )
     return (
         f"review-tasks left {count} {kind} {noun} unapplied. Run "
         f"--apply-task-suggestions first to apply {them} to the task list; going "
@@ -1157,27 +1173,6 @@ def get_workflow_status(
 
     notices = []
 
-    # Check for unapplied task suggestions (reuse cached result from above —
-    # cached_task_check is always set when review-tasks is completed, so no
-    # redundant I/O call is needed here).
-    if (phases["apply-task-suggestions"]["status"] == "pending"
-            and phases["review-tasks"]["status"] == "completed"
-            and cached_task_check is not None):
-        actionable_count = cached_task_check.get("actionable_count", 0)
-        if actionable_count > 0 and not cached_task_check["met"]:
-            # F9.5: `actionable_count` is a count of valid GROUPS (see the
-            # matching comment on `check_apply_task_suggestions_prerequisite`),
-            # so this notice must not call it "suggestions" either.
-            notice = unapplied_task_groups_notice(
-                actionable_count, valid=bool(cached_task_check.get("counted_valid")))
-            notices.append(notice)
-            # Also on the entry of the phase it concerns, so a reader that
-            # needs "which phase is this notice about" (the next-phase
-            # builder's `optional_before[].why`) reads a key instead of
-            # parsing prose. `notices` itself is unchanged, so `status`
-            # output stays the same.
-            phases["apply-task-suggestions"]["notice"] = notice
-
     # An apply phase with some of its own write batches recorded `completed`
     # — or with a started record, the native leg's note that its batches were
     # handed to the host (`StateManager.mark_phase_started`) — has progress
@@ -1204,6 +1199,31 @@ def get_workflow_status(
             started_at = state.phase_started_at(phase)
             if started_at:
                 phases[phase]["started_at"] = started_at
+
+    # Check for unapplied task suggestions (reuse cached result from above —
+    # cached_task_check is always set when review-tasks is completed, so no
+    # redundant I/O call is needed here). Read after the loop above, so a
+    # run of the phase that started and did not finish is worded as the
+    # resume its command is (fix round 19: the count of every valid group
+    # sat beside a `--resume` that applies only what is left).
+    if (phases["apply-task-suggestions"]["status"] in ("pending", "in_progress")
+            and phases["review-tasks"]["status"] == "completed"
+            and cached_task_check is not None):
+        actionable_count = cached_task_check.get("actionable_count", 0)
+        if actionable_count > 0 and not cached_task_check["met"]:
+            # F9.5: `actionable_count` is a count of valid GROUPS (see the
+            # matching comment on `check_apply_task_suggestions_prerequisite`),
+            # so this notice must not call it "suggestions" either.
+            notice = unapplied_task_groups_notice(
+                actionable_count, valid=bool(cached_task_check.get("counted_valid")),
+                in_progress=phases["apply-task-suggestions"]["status"] == "in_progress")
+            notices.append(notice)
+            # Also on the entry of the phase it concerns, so a reader that
+            # needs "which phase is this notice about" (the next-phase
+            # builder's `optional_before[].why`) reads a key instead of
+            # parsing prose. `notices` itself is unchanged, so `status`
+            # output stays the same.
+            phases["apply-task-suggestions"]["notice"] = notice
 
     suggested_next = _suggested_next(phases, ALL_PHASES)
 

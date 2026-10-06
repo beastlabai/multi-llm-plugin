@@ -1186,6 +1186,17 @@ def _manual_close_note(
         return None
 
 
+def _refuse_answer(message: str) -> int:
+    """Refuse a ``--human-task`` answer: exit 3, the message on stderr and,
+    whole, as the result line's ``error`` (fix round 19, review of round 18:
+    a refused answer printed its reason on stderr alone, and the tool routes
+    said the result line named no error)."""
+    record_error(message.replace("ERROR: ", "", 1))
+    return unattended_mod.fail_closed(
+        message, site_id=unattended_mod.row(9).site_id,
+    )
+
+
 def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
     """The way forward after a stop, in this host's own command spelling.
 
@@ -2416,12 +2427,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         # JSON so the pause is a process boundary rather than a blocked stdin.
         unknown = [tid for tid in human_task_decisions if tid not in decomposer.tasks]
         if unknown:
-            return unattended_mod.fail_closed(
+            return _refuse_answer(
                 "ERROR: --human-task names task(s) that are not in this plan: "
                 f"{', '.join(sorted(unknown))}.\n"
                 f"       Human tasks in this plan: "
                 f"{', '.join(human_task_ids) or 'none'}",
-                site_id=unattended_mod.row(9).site_id,
             )
         not_human = [tid for tid in human_task_decisions if tid not in human_task_ids]
         # A code task is answerable only once it FAILED and only on a resume
@@ -2437,31 +2447,28 @@ def main(argv: Optional[List[str]] = None) -> int:
             if state.get_task_status(tid) == "failed" or tid in held_by
         }
         if not_human and not resume_typed:
-            return unattended_mod.fail_closed(
+            return _refuse_answer(
                 "ERROR: --human-task answers a code task only with --resume, "
                 "after a run recorded it failed or its check reported "
                 "problems; these are code tasks: "
                 f"{', '.join(sorted(not_human))}.",
-                site_id=unattended_mod.row(9).site_id,
             )
         unanswerable = sorted(set(not_human) - failed_ids)
         if unanswerable:
-            return unattended_mod.fail_closed(
+            return _refuse_answer(
                 "ERROR: --human-task answers a human task, a code task the "
                 "last run recorded failed, or a check whose findings hold "
                 "back the tasks after it; these are code tasks that did not "
                 f"fail: {', '.join(unanswerable)}.",
-                site_id=unattended_mod.row(9).site_id,
             )
         retried_human = sorted(
             tid for tid, action in human_task_decisions.items()
             if action == "retry" and tid in human_task_ids
         )
         if retried_human:
-            return unattended_mod.fail_closed(
+            return _refuse_answer(
                 "ERROR: --human-task <id>=retry re-runs a failed code task; a "
                 f"human task is answered done or skip: {', '.join(retried_human)}.",
-                site_id=unattended_mod.row(9).site_id,
             )
         recorded = dict(state.get("human_task_decisions") or {})
         recorded.update({

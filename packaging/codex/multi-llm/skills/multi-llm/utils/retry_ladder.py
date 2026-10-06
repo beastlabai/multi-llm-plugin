@@ -133,6 +133,15 @@ STATUS_BUDGET_EXHAUSTED = "budget_exhausted"
 #: ``budget_exhausted`` and the two D3g verification failures.
 STATUS_SALVAGE_UNRECOVERABLE = "salvage_unrecoverable"
 
+#: Not a failure: the attempt whose readable write report left some of the
+#: batch's items out of both ``ids`` and ``declined``, which drew the report
+#: re-ask (:data:`REPAIR_INCOMPLETE_REPORT`). Fix round 19 (review of round
+#: 18, #4): it was recorded ``schema_invalid`` with a failure capture under
+#: ``failed/``, so a batch that then completed read as a schema failure in
+#: its attempt table. On no rung and in no policy set: nothing about the
+#: dispatch failed, and the re-ask quotes the reply in its own prompt file.
+STATUS_INCOMPLETE_REPORT = "incomplete_report"
+
 #: The D3k ladder, first match wins. Every dispatch failure lands on exactly one
 #: rung, and the status is what ``subagent_batch_report.json`` records verbatim.
 RUNG_BY_STATUS = {
