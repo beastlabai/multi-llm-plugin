@@ -184,6 +184,10 @@ elif mode == "trust":
 elif mode == "foreign":
     with open(os.path.join(home, "config.toml"), "a", encoding="utf-8") as handle:
         handle.write('\n[projects."/elsewhere/other-repo"]\ntrust_level = "trusted"\n')
+elif mode == "subdir":
+    with open(os.path.join(home, "config.toml"), "a", encoding="utf-8") as handle:
+        handle.write('\n[projects."%s"]\ntrust_level = "trusted"\n'
+                     % os.path.join(cwd, "packages", "web"))
 elif mode == "link":
     # What any `uv run` elsewhere does to the uv cache: link and unlink a
     # name of an inode the home's plugin venv shares (moves only its ctime).
@@ -507,17 +511,31 @@ class TestTheHomeCheck:
         assert CODEX_HOME_CHECK_MARKER not in out
         assert _result_file(phase_dir).exists()
 
-    def test_a_foreign_trust_entry_is_named_in_the_closing_summary_only(
+    def test_another_repositorys_trust_entry_is_not_named(
+        self, fake_codex, monkeypatch, capsys
+    ):
+        """Run 6 (#11a): the closing summary listed the trust entries of
+        concurrent runs in other repositories, as though this run made them."""
+        _pin_verdict(monkeypatch, RUNG)
+        monkeypatch.setenv("FAKE_CODEX_MODE", "foreign")
+        phase_dir, _status = _run_review_plan(fake_codex)
+        out = capsys.readouterr().out
+        assert CODEX_HOME_CHECK_MARKER not in out
+        assert "/elsewhere/other-repo" not in out
+        assert _result_file(phase_dir).exists()
+
+    def test_a_trust_entry_inside_the_repository_is_named_in_the_closing_summary_only(
         self, fake_codex, monkeypatch, capsys
     ):
         _pin_verdict(monkeypatch, RUNG)
-        monkeypatch.setenv("FAKE_CODEX_MODE", "foreign")
+        monkeypatch.setenv("FAKE_CODEX_MODE", "subdir")
         phase_dir, _status = _run_review_plan(fake_codex)
         out = capsys.readouterr().out
         assert not _slot_lines(out, CODEX_HOME_CHECK_MARKER)
         lines = [line for line in out.splitlines() if CODEX_HOME_CHECK_MARKER in line]
         assert len(lines) == 1
-        assert "/elsewhere/other-repo" in lines[0] and "not a failure" in lines[0]
+        assert os.path.join("packages", "web") in lines[0]
+        assert "inside this repository" in lines[0] and "not a failure" in lines[0]
         assert _result_file(phase_dir).exists()
 
     def test_a_long_change_is_summarized_and_listed_in_full_elsewhere(

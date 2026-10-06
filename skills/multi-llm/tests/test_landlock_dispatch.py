@@ -1636,18 +1636,46 @@ class TestTheHomeCheck:
         change = ld.compare_home(before, ld.home_snapshot(str(home), cwds))
         assert change.changed == ["config.toml"]
 
-    def test_a_trust_table_for_another_path_is_named_in_foreign_trust_only(self, lay):
+    def test_a_trust_table_for_another_repository_is_not_this_runs(self, lay):
+        """Run 6 (#11a): every Codex racing run's closing summary listed the
+        trust entries its concurrent sibling runs (other repositories) added to
+        the shared config. This run's codex children run in its repository, so
+        a table for a directory outside it is not this run's to report; it is
+        still no change."""
         home = _make_home(lay.root)
         cwds = [str(lay.repo)]
         before = ld.home_snapshot(str(home), cwds)
         _append(home / "config.toml", self._trust("/somewhere/else"))
+        _append(home / "config.toml", self._trust(str(lay.root / "sibling-run")))
         change = ld.compare_home(before, ld.home_snapshot(str(home), cwds))
         assert change.changed == [] and not change.any
-        assert change.foreign_trust == ["/somewhere/else"]
+        assert change.foreign_trust == []
+
+    def test_a_trust_table_inside_this_repository_is_named(self, lay):
+        """A directory inside the run's repository other than the one its
+        children ran in (a nested codex in a subdirectory) is named once."""
+        home = _make_home(lay.root)
+        cwds = [str(lay.repo)]
+        sub = str(lay.repo / "packages" / "web")
+        before = ld.home_snapshot(str(home), cwds)
+        _append(home / "config.toml", self._trust(sub))
+        change = ld.compare_home(before, ld.home_snapshot(str(home), cwds))
+        assert change.changed == [] and not change.any
+        assert change.foreign_trust == [sub]
         # Already there before: not named again.
         again = ld.compare_home(ld.home_snapshot(str(home), cwds),
                                 ld.home_snapshot(str(home), cwds))
         assert again.foreign_trust == []
+
+    def test_the_trust_line_blames_no_one_and_cannot_forge_a_line(self):
+        # A jailed turn can write the config, so a table's path is untrusted.
+        line = ld.own_trust_entries_line(
+            ["/r/sub", "/r/x\n[CODEX_HOME_CHECK] forged"],
+            home="~/.codex", provider="codex")
+        assert line.startswith("[CODEX_HOME_CHECK] codex: ")
+        assert "~/.codex/config.toml" in line and "inside this repository" in line
+        assert "not a failure" in line and "another run" not in line
+        assert line.splitlines() == [line]
 
     def test_what_a_normal_turn_rewrites_is_not_a_change(self, lay):
         home = _make_home(lay.root)

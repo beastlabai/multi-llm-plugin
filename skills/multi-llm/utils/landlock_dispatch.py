@@ -51,6 +51,7 @@ from typing import Any, Dict, Iterable, Iterator, List, Mapping, Optional, Seque
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .providers.base import (
+        CODEX_HOME_CHECK_MARKER,
         JailContext,
         JailRequest,
         SandboxRung,
@@ -63,6 +64,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils.providers.base import (  # type: ignore[no-redef]
+        CODEX_HOME_CHECK_MARKER,
         JailContext,
         JailRequest,
         SandboxRung,
@@ -1432,19 +1434,36 @@ def _tree_entry(path: str, *, links_only: bool = False) -> Optional[Tuple[Any, .
     return entry
 
 
+def _inside(path: str, root: str) -> bool:
+    """Whether ``path`` is ``root`` or beneath it, separator-aware."""
+    return path == root or path.startswith(root.rstrip(os.sep) + os.sep)
+
+
 def _strip_expected_trust(text: str, run_cwds: Sequence[str]) -> Tuple[str, Tuple[str, ...]]:
-    """Remove the trust-only tables I12 expects (a ``[projects."<cwd>"]`` table
-    holding exactly ``trust_level = "trusted"`` for a cwd this run's children
-    use). Returns the remaining text and the paths of trust-only tables for
-    *other* cwds (named in the run's closing summary, never a failure)."""
+    """Remove every trust-only table (a ``[projects."<path>"]`` table holding
+    exactly ``trust_level = "trusted"``) from the compared text, and return the
+    remaining text plus the paths this run could have caused other than its
+    own cwds: those **inside** one of ``run_cwds`` (a codex started in a
+    subdirectory), named in the run's closing summary, never a failure.
+
+    The table for a cwd this run's children use is I12's expected entry. A
+    table for a directory outside every cwd is not this run's at all: its
+    children run in its repository, and codex records trust for the directory
+    a session runs in, so such a table is another codex session's, typically
+    a concurrent run in another repository sharing ``$CODEX_HOME`` (run 6,
+    #11a: every Codex racing run's summary listed its sibling runs' entries
+    as though it had made them). It is stripped and not named."""
     cwds = {os.path.realpath(c) for c in run_cwds if c}
+    raw = {str(c) for c in run_cwds if c}
     foreign: List[str] = []
 
     def keep(match: "re.Match[str]") -> str:
         path = match.group(1).replace('\\"', '"').replace("\\\\", "\\")
-        if os.path.realpath(path) in cwds or path in cwds:
+        real = os.path.realpath(path)
+        if real in cwds or path in cwds or path in raw:
             return ""
-        foreign.append(path)
+        if any(_inside(real, c) or _inside(path, c) for c in cwds | raw):
+            foreign.append(path)
         return ""
 
     stripped = _TRUST_TABLE.sub(keep, text)
@@ -1733,6 +1752,27 @@ def describe_changed(names: Sequence[str], config_keys: Sequence[str] = ()) -> s
             else "the full list could not be written")
     return (f"{head}, e.g. {', '.join(examples)} and "
             f"{len(parts) - len(examples)} more ({tail})")
+
+
+def own_trust_entries_line(
+    paths: Sequence[str], *, home: Optional[str] = None,
+    provider: Optional[str] = None,
+) -> str:
+    """The closing-summary note for :attr:`HomeChange.foreign_trust`, both lanes.
+
+    Only trust tables inside this run's repository reach it (see
+    :func:`_strip_expected_trust`), and it says what they are without blaming
+    anyone: codex records one for each directory a session runs in. Each path
+    is a name a jailed turn could have written into the config, so it goes
+    through :func:`render_name` and can never start a line of its own."""
+    who = f"{provider}: " if provider else ""
+    where = f"{render_home(home)}/config.toml" if home else "$CODEX_HOME/config.toml"
+    names = ", ".join(render_name(render_home(path)) for path in paths)
+    return (
+        f"{CODEX_HOME_CHECK_MARKER} {who}{where} gained trust entries for "
+        f"directories inside this repository during this run: {names}. Codex "
+        f"adds one for each directory a codex session runs in; not a failure."
+    )
 
 
 def compare_home(before: Optional[HomeSnapshot], after: Optional[HomeSnapshot]) -> Optional[HomeChange]:
