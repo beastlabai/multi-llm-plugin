@@ -192,3 +192,23 @@ class TestImplementNamesARefusedAnswer:
             "--human-task answers a human task, a code task the last run "
             "recorded failed"), result
         assert "T002" in result["error"]
+
+
+class TestARefusalWithNoEarlierRun:
+
+    def test_the_mirror_is_this_run_s_own_and_status_reads_it(self, env):
+        from utils import run_status
+
+        refused = env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, []),
+            resume=True, partial_skips=["apply-batch-0"],
+        ).run()
+
+        assert refused.exit_code == 3
+        mirror = _mirror(env.phase_dir)
+        assert mirror["stop"]["kind"] == "answer-refused"
+        assert mirror["kind"] == "apply_suggestions"
+        assert mirror["total"] == 2
+        assert "apply-batch-0 has no result on disk" in mirror["stop"]["headline"]
+        assert run_status._mirror_text("write_subagents", mirror) == [
+            "apply_suggestions 0/2 batches ok, 0/3 items applied"]
