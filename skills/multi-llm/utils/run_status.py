@@ -1818,6 +1818,137 @@ def _attach_finished_during_wait(
 GENERIC_NEEDS_HUMAN_ERROR = "needs_human (exit 3)"
 
 
+#: The phase whose tasks :func:`state_implement_view` reads back from
+#: ``state.json``, and the report whose absence marks a run the host drove.
+_IMPLEMENT_PHASE = "implement"
+_WRITE_REPORT = "write_batch_report.json"
+
+
+def state_implement_view(
+    plan_path: Path, views: Sequence[Dict[str, Any]],
+) -> Optional[Dict[str, Any]]:
+    """Implement's tasks as ``state.json`` records them, when nothing else does.
+
+    Fix round 14 (live run 5, the stop path on Claude Code): the native leg
+    hands its batches to the host, which writes no ``write_batch_report.json``
+    and no write mirror, so ``status --view run`` listed no implement task at
+    all while ``state.json`` held every status, reason, check finding and
+    answer. This reads them back — only when the implement phase dir has no
+    report, no listed view carries a write mirror for it, and the plan has an
+    implement decomposition on record that is started and not completed — as
+    ``{tasks, titles, buckets, reasons, findings, answers}``. Read-only;
+    ``None`` when it does not apply.
+    """
+    from .state_manager import StateManager
+
+    if (phase_dir_path(plan_path, _IMPLEMENT_PHASE) / _WRITE_REPORT).exists():
+        return None
+    for view in views:
+        if (view.get("phase") or os.path.basename(str(view.get("phase_dir") or ""))) \
+                != _IMPLEMENT_PHASE:
+            continue
+        progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
+        if isinstance(progress.get("write_subagents"), dict):
+            return None
+    try:
+        state = StateManager(plan_path, read_only=True)
+    except Exception:  # noqa: BLE001 - advisory: the run view is not
+        return None
+    record = state.state
+    decomposition = record.get("implement_task_ids")
+    statuses = state.implementation_task_statuses()
+    if not isinstance(decomposition, list) or not decomposition:
+        return None
+    if state.is_phase_completed(_IMPLEMENT_PHASE) or not (
+        state.is_phase_started(_IMPLEMENT_PHASE) or statuses
+    ):
+        # A finished implement is the workflow view's to report (its manual
+        # tasks and check findings ride the trailer); this block is for the
+        # run the host stopped part-way.
+        return None
+    reasons = record.get("task_status_reasons") or {}
+    titles = record.get("task_titles") or {}
+    human = set(record.get("implement_human_task_ids") or [])
+    buckets: Dict[str, List[str]] = {
+        "completed": [], "accepted": [], "completed_manual": [], "failed": [],
+        "declined": [], "declined_dependents": [], "deferred": [], "not_run": [],
+    }
+    for task_id in [str(t) for t in decomposition]:
+        status = statuses.get(task_id)
+        reason = str(reasons.get(task_id) or "")
+        if status == "completed":
+            if reason.startswith("accepted — "):
+                buckets["accepted"].append(task_id)
+            elif task_id in human and "--human-task" in reason:
+                buckets["completed_manual"].append(task_id)
+            else:
+                buckets["completed"].append(task_id)
+        elif status == "failed":
+            buckets["failed"].append(task_id)
+        elif status == "skipped":
+            if reason.startswith((state._USER_DECLINED_REASON, state._ANSWERED_SKIP_PREFIX)):
+                buckets["declined"].append(task_id)
+            elif not state._deferred_to_user(task_id):
+                buckets["declined_dependents"].append(task_id)
+            else:
+                buckets["deferred"].append(task_id)
+        else:
+            buckets["not_run"].append(task_id)
+    answers = record.get("human_task_decisions")
+    return {
+        "tasks": [str(t) for t in decomposition],
+        "titles": {str(k): str(v) for k, v in titles.items()},
+        "buckets": buckets,
+        "reasons": {
+            task_id: str(reasons[task_id])
+            for task_id in buckets["failed"] + buckets["not_run"]
+            if reasons.get(task_id)
+        },
+        "findings": state.implementation_check_findings(),
+        "answers": dict(answers) if isinstance(answers, dict) else {},
+    }
+
+
+def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
+    """:func:`state_implement_view` as the run view's text: one block."""
+    buckets = view["buckets"]
+    done = buckets["completed"] + buckets["accepted"] + buckets["completed_manual"]
+    total = len(view["tasks"])
+    lines = [
+        "  implement  no run record — the host ran these tasks itself; read "
+        "from state.json (not marked completed)",
+    ]
+    parts = [f"{len(done)}/{total} done"]
+    labels = (
+        ("completed", "completed"),
+        ("accepted", "accepted with their check findings or after failing"),
+        ("completed_manual", "completed by hand"),
+        ("failed", "failed"),
+        ("declined", "skipped at your request"),
+        ("declined_dependents", "skipped (depend on a task you skipped)"),
+        ("deferred", "deferred manual"),
+        ("not_run", "not run"),
+    )
+    for key, label in labels:
+        if buckets[key]:
+            parts.append(f"{label}: {', '.join(buckets[key])}")
+    lines.append(f"      tasks:          {'; '.join(parts)}")
+    for task_id, reason in view["reasons"].items():
+        lines.append(f"      {task_id}: {reason}")
+    for entry in view["findings"]:
+        findings = entry.get("findings") or []
+        lines.append(
+            f"      check findings {entry['id']}: {'; '.join(findings)[:300]}"
+        )
+    if view["answers"]:
+        lines.append(
+            "      answers on record: "
+            + ", ".join(f"--human-task {task_id}={action}"
+                        for task_id, action in sorted(view["answers"].items()))
+        )
+    return lines
+
+
 def _run_notes(view: Dict[str, Any]) -> List[str]:
     """``progress.notes``: a finished apply phase's lines for the host (fix
     round 14) — a consistency warning, the items left unapplied and why."""
@@ -2778,10 +2909,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 workflow_trailer = [f"workflow {line}" for line in trailer]
                 terminal_notice = "; ".join(trailer)
 
+    # Fix round 14: a native-leg implement leaves no run record and no
+    # report, so its tasks are read back from state.json (`--run-id` and
+    # `--question` name a run, which this is not).
+    implement_tasks = None
+    if (not args.run_id and not args.question
+            and _resolve_phase(args.phase) in (None, _IMPLEMENT_PHASE)):
+        try:
+            implement_tasks = state_implement_view(plan_path, views)
+        except Exception:  # noqa: BLE001 - advisory: the run view is not
+            implement_tasks = None
+
     if args.json:
         payload: Dict[str, Any] = {"runs": views}
         if args.view == VIEW_ALL:
             payload = {"workflow": workflow, "runs": views}
+        if implement_tasks is not None:
+            payload["implement_tasks"] = implement_tasks
         # Plan §7.4a2/b: what discovery skipped, only when there is something
         # to say, so a plan with none keeps today's payload byte for byte.
         if discovery.get("ignored_dirs"):
@@ -2798,6 +2942,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args), resume_workflow=terminal_workflow,
         )
+        if implement_tasks is not None:
+            lines += render_state_implement_lines(implement_tasks)
         # Plan §7.4a2: after the phase views, never silently dropped.
         lines += _ignored_text(
             discovery.get("ignored_dirs") or [], discovery.get("copies") or []
