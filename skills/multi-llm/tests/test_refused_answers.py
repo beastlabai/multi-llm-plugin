@@ -212,3 +212,27 @@ class TestARefusalWithNoEarlierRun:
         assert "apply-batch-0 has no result on disk" in mirror["stop"]["headline"]
         assert run_status._mirror_text("write_subagents", mirror) == [
             "apply_suggestions 0/2 batches ok, 0/3 items applied"]
+
+
+class TestARefusalOnAFinishedPhase:
+
+    def test_the_phase_state_stays_the_earlier_run_s(self, env):
+        """A refused answer changed nothing: a phase whose earlier run
+        finished does not read as stopped in `status` because of it."""
+        respond = _codex_08_respond(env, [])
+        finished = env.scheduler(
+            [env.apply_task(0, expected_ids=["s1"])], respond=respond,
+        ).run()
+        assert finished.exit_code == 0, finished.messages
+        assert json.loads((env.phase_dir / ".status.json").read_text())[
+            "state"] == "complete"
+
+        refused = env.scheduler(
+            [env.apply_task(0, expected_ids=["s1"])], respond=respond,
+            resume=True, partial_skips=["apply-batch-0"],
+        ).run()
+
+        assert refused.exit_code == 3
+        status = json.loads((env.phase_dir / ".status.json").read_text())
+        assert status["state"] == "complete"
+        assert status["progress"]["write_subagents"]["stop"]["kind"] == "answer-refused"
