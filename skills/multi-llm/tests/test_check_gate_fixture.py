@@ -473,7 +473,9 @@ class TestTheNativeLeg:
         assert handoff["tasks_to_dispatch"] == 5
         assert self._line(out, "Tasks to dispatch: ") == (
             "Tasks to dispatch: 5 (pass --total-batches 5 to `util metrics "
-            "start` and `util metrics record`)"
+            "start` and `util metrics record`; the [ETA] line counts tasks, "
+            "not batches, and leaves out a task that a `util batch-done` "
+            "record keeps from running)"
         )
         assert handoff["waiting_on_checks"] == {
             "T007": (

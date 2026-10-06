@@ -342,7 +342,7 @@ your host.
 
 5. **Execute batches sequentially (batches have dependencies):**
 
-   Before the loop, take `{tasks_to_dispatch}` from the task JSON's `tasks_to_dispatch` (step 2's `Tasks to dispatch:` line; never count it yourself, and never take the `Organized into …` batch count) and mark the phase start:
+   Before the loop, take `{tasks_to_dispatch}` from the task JSON's `tasks_to_dispatch` (step 2's `Tasks to dispatch:` line; never count it yourself, and never take the `Organized into …` batch count) and mark the phase start. The `[ETA]` line counts tasks, one `util metrics record` per task you dispatch; pass this same number every time, and `util batch-done` takes out of it a task its record keeps from running (one a check holds back, one after a failed task):
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
      --state-file "$STATE_FILE" --phase "implement" --total-batches {tasks_to_dispatch}
