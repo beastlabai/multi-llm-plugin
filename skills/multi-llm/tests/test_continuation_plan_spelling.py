@@ -180,11 +180,13 @@ class TestEachNativeLegEndsWithTheTypedPlan:
         else:
             first, (finished, result) = _review_leg(repo_dir, env, mode, phase_name)
 
-        # The hand-off: a dispatcher command, fully resolved by design, and the
-        # spelling the user typed recorded beside the checkpoint's plan_file.
+        # The hand-off: a dispatcher command naming the plan as the user typed
+        # it (fix round 14: racing run 5's host ran and quoted the absolute
+        # path), and that spelling recorded beside the checkpoint's plan_file.
         assert first["state"] == "done" and first["next"], first
         assert "--reaggregate" in _verbatim(first["next"])
-        assert absolute in _verbatim(first["next"])
+        assert TYPED in _verbatim(first["next"])
+        assert absolute not in first["next"]
         assert status_file.read_status(
             str(repo_dir / "plans" / "auth" / phase_name)
         )["plan_arg"] == TYPED
@@ -500,3 +502,43 @@ class TestEveryBuilderHandsBackAContinuation:
     def test_anything_else_is_no_continuation(self, command):
         assert multi_llm._continuation_target(command) is None
 
+
+
+class TestTheHandOffNamesThePlanAsTyped:
+    """Fix round 14 (racing run 5, Claude Code 03): generate-tasks' "then
+    continue with: … /tmp/…/plans/racing-game.md … --reaggregate" line and its
+    `next` named the plan absolutely although the user typed it relative, and
+    the host ran and quoted that path."""
+
+    def test_the_printed_line_and_next_carry_the_typed_plan(self, repo):
+        repo_dir, env = repo
+        absolute = str(repo_dir / TYPED)
+        out, first = _dispatch(
+            ["generate-tasks", TYPED, "--host", "claude-code", "--yes"], repo_dir, env
+        )
+        follow = out.stdout.split("then continue with:", 1)[1].splitlines()[1].strip()
+        assert follow == first["next"]
+        assert _verbatim(follow)[:2] == ["generate-tasks", TYPED]
+        assert absolute not in out.stdout.split("then continue with:", 1)[1]
+
+    def test_a_spelling_a_shell_would_act_on_stays_absolute(self, tmp_path, monkeypatch):
+        """The typed spelling passes `recorded_plan_spelling` or the plan is
+        printed as given."""
+        plan = tmp_path / "plans" / "a b$c.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# x\n", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(cli_common, "_INVOCATION", {
+            "mode": "generate-tasks", "argv": ["--plan-file", "plans/a b$c.md"],
+        })
+        assert cli_common.typed_plan_for(str(plan)) == str(plan)
+        monkeypatch.setattr(cli_common, "_INVOCATION", {
+            "mode": "generate-tasks", "argv": ["--plan-file", "plans/other.md"],
+        })
+        assert cli_common.typed_plan_for(str(plan)) == str(plan)
+        safe = tmp_path / "plans" / "ok.md"
+        safe.write_text("# y\n", encoding="utf-8")
+        monkeypatch.setattr(cli_common, "_INVOCATION", {
+            "mode": "generate-tasks", "argv": ["--plan-file", "plans/ok.md"],
+        })
+        assert cli_common.typed_plan_for(str(safe)) == "plans/ok.md"

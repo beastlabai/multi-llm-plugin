@@ -562,3 +562,30 @@ class TestTheNativeLeg:
             "lookup of `references/summary-format.md` still runs"
         ) in core
         assert "never write a resume or `--human-task` command of your own" in core
+
+    def test_the_handoff_carries_the_plan_as_typed_for_finalize_tracking(
+        self, repo, capsys,
+    ):
+        """Fix round 14 (racing run 5, Claude Code 06): the closing
+        finalize-tracking call carried the absolute plan_file, which the host
+        copied; the handoff now carries `plan_arg`, the plan as typed, and the
+        instruction passes that."""
+        code = multi_llm.main(
+            ["implement", "plans/checked.md", "--host", "claude-code", "--yes"]
+        )
+        assert code == 0
+        out = capsys.readouterr().out
+        path = next(
+            line.split(": ", 1)[1] for line in out.splitlines()
+            if line.startswith("Output file: ")
+        )
+        handoff = json.loads(open(path, encoding="utf-8").read())
+        assert handoff["plan_arg"] == "plans/checked.md"
+        assert handoff["plan_file"] == str(repo.plan)
+        from pathlib import Path
+
+        core = (Path(__file__).parent.parent / "instructions" / "implement.md").read_text(
+            encoding="utf-8"
+        )
+        assert '--plan-file "$PLAN_ARG"' in core
+        assert "task JSON's `plan_arg` (the plan as the user typed it)" in core
