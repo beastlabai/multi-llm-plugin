@@ -391,7 +391,9 @@ with the next step its `### Next Steps` rule gives, copied from
   after it under "Optional, before that:", each optional command in its own
   fenced block; "Workflow complete." when
   `complete` is true, with each of its `manual_tasks` listed under it, then its
-  `manual_tasks_note` (the `[MANUAL_TASK_NOTE]` line) verbatim;
+  `manual_tasks_note` (the `[MANUAL_TASK_NOTE]` line) verbatim (a command
+  answer can carry them too: list them after its commands, without "Workflow
+  complete.");
   nothing when there is no `user_next_step`, or one line
   quoting a failed lookup]
 ```

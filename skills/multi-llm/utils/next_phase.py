@@ -145,10 +145,13 @@ class NextPhase:
     #: command is certain to hit), rendered above the block and never part of
     #: ``user_next_step``.
     warning: Optional[str] = None
-    #: On a ``complete`` answer only: the implement tasks the run deferred,
-    #: which the plugin will never run and the user still owes (2026-10-04,
-    #: OpenCode: `[WORKFLOW_COMPLETE]` beside two deferred manual playthroughs
-    #: said nothing about them).
+    #: The implement tasks the run deferred, which the plugin will never run
+    #: and the user still owes (2026-10-04, OpenCode: `[WORKFLOW_COMPLETE]`
+    #: beside two deferred manual playthroughs said nothing about them). On a
+    #: ``complete`` answer since then, and on a command answer too since fix
+    #: round 16 (Codex racing 06r/07: the host named T009 as manual from the
+    #: notice but never the command that records it done; only the complete
+    #: answer of 08 carried it). Only the complete block renders them.
     manual_tasks: Tuple[ManualTask, ...] = ()
     #: On a ``--resume`` of a stopped implement, from ``util next-command``
     #: only: the one command that answers every task the stop waits for
@@ -179,6 +182,11 @@ class NextPhase:
             payload["optional_before"] = [step.to_dict() for step in self.optional_before]
         if self.answers is not None:
             payload["answers"] = self.answers.to_dict()
+        if self.manual_tasks:
+            # Fix round 16: the tool routes relay this key, not the notice.
+            payload["manual_tasks"] = [task.to_dict() for task in self.manual_tasks]
+            if self.manual_tasks_note:
+                payload["manual_tasks_note"] = self.manual_tasks_note
         payload["complete"] = False
         return payload
 
@@ -197,6 +205,22 @@ def _complete(
     host's *template* and the *plan_arg*, the answer also says how to record
     them done (:func:`manual_close_note`).
     """
+    manual, note = _manual_tasks(phases, template=template, plan_arg=plan_arg)
+    return NextPhase(
+        phase=None, command=None, complete=True, manual_tasks=manual,
+        manual_tasks_note=note,
+    )
+
+
+def _manual_tasks(
+    phases: Mapping[str, Mapping[str, Any]],
+    *,
+    template: Optional[str] = None,
+    plan_arg: Optional[str] = None,
+) -> Tuple[Tuple[ManualTask, ...], Optional[str]]:
+    """``(manual_tasks, manual_tasks_note)`` off the workflow payload's
+    ``implement`` entry: the tasks the run deferred to the user and, with the
+    host's *template* and the *plan_arg*, how to record them done."""
     entries = (phases.get("implement") or {}).get("manual_tasks") or ()
     manual = tuple(
         ManualTask(str(entry.get("id")), entry.get("title") or None)
@@ -208,10 +232,24 @@ def _complete(
         note = manual_close_note(
             close_command(template, plan_arg, [task.id for task in manual])
         )
-    return NextPhase(
-        phase=None, command=None, complete=True, manual_tasks=manual,
-        manual_tasks_note=note,
-    )
+    return manual, note
+
+
+def _with_manual_tasks(
+    answer: NextPhase,
+    phases: Mapping[str, Mapping[str, Any]],
+    *,
+    template: str,
+    plan_arg: str,
+) -> NextPhase:
+    """*answer* (a command answer) carrying the deferred manual tasks and the
+    note on recording them done, when the run deferred any (fix round 16)."""
+    manual, note = _manual_tasks(phases, template=template, plan_arg=plan_arg)
+    if not manual:
+        return answer
+    from dataclasses import replace as _replace
+
+    return _replace(answer, manual_tasks=manual, manual_tasks_note=note)
 
 
 def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
@@ -519,6 +557,11 @@ def next_phase_commands(
     def warning_of(phase: str) -> Optional[str]:
         return (phases.get(phase) or {}).get("warning") or None
 
+    def command_answer(answer: NextPhase) -> NextPhase:
+        # Fix round 16: a command answer names the deferred manual tasks
+        # and how to record them done, as the complete answer does.
+        return _with_manual_tasks(answer, phases, template=template, plan_arg=plan_arg)
+
     def command_for(phase: str) -> str:
         mode_word = _mode_word(modes, phase)
         args = f"--{mode_word} {quote_plan_arg(plan_arg)}"
@@ -561,12 +604,12 @@ def next_phase_commands(
              if not is_open(phase)),
             default=-1,
         )
-        return NextPhase(
+        return command_answer(NextPhase(
             phase=primary,
             command=command_for(primary),
             optional_before=optional_steps(order[reached + 1: order.index(primary)]),
             warning=warning_of(primary),
-        )
+        ))
 
     def is_stale(phase: str) -> bool:
         return bool((phases.get(phase) or {}).get("stale"))
@@ -574,9 +617,9 @@ def next_phase_commands(
     status = status_of(start)
     if status == "in_progress":
         # A resumable phase is its own answer; the span walk does not run.
-        return NextPhase(
+        return command_answer(NextPhase(
             phase=start, command=command_for(start), warning=warning_of(start),
-        )
+        ))
     if gated and status not in done:
         # The finished phase is not on record: exit 0 at a pending marker, a
         # native first call, a fresh detach invoker. Not a finished phase.
@@ -609,12 +652,12 @@ def next_phase_commands(
         None,
     )
     if earlier is not None:
-        return NextPhase(
+        return command_answer(NextPhase(
             phase=earlier,
             command=command_for(earlier),
             optional_before=optional_steps(order[: order.index(earlier)]),
             warning=warning_of(earlier),
-        )
+        ))
     if is_stale(start):
         # A stale start (completed before implement's latest completion) is
         # its own answer once nothing earlier is open — the gate is off here,
@@ -623,9 +666,9 @@ def next_phase_commands(
         # next-command --after review-code` on the Codex run of 2026-10-02
         # walked past the stale review to apply-code-fixes while the notice
         # beside it said `suggested next: code-review`.
-        return NextPhase(
+        return command_answer(NextPhase(
             phase=start, command=command_for(start), warning=warning_of(start),
-        )
+        ))
     primary = next(
         (
             phase for phase in order[index + 1:]
@@ -637,12 +680,12 @@ def next_phase_commands(
         # An optional phase never keeps a workflow open, and one the walk did
         # not reach is never suggested: no `optional_before` on completion.
         return _complete(phases, template=template, plan_arg=plan_arg)
-    return NextPhase(
+    return command_answer(NextPhase(
         phase=primary,
         command=command_for(primary),
         optional_before=optional_steps(order[index + 1: order.index(primary)]),
         warning=warning_of(primary),
-    )
+    ))
 
 
 def _mode_word(modes, phase: str) -> str:

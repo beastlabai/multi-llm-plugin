@@ -414,14 +414,19 @@ TOOL_OUTCOMES_LINE = (
 #: server authors the string. "Only then" / "never otherwise" since fix round
 #: 11: on OpenCode racing run 4, phase 06, the host ended an implement result
 #: whose `command` named review-code, and whose notice listed the manual tasks
-#: left, with "Workflow complete. Manual tasks left …".
+#: left, with "Workflow complete. Manual tasks left …". Fix round 16 (Codex
+#: racing 06r/07): a command answer carries `manual_tasks` and its note too,
+#: and the line says to relay them on any result — the hosts named T009 from
+#: the notice but never the command that records it done.
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
     "call to make: copy its `command`, and each `optional_before` command, into your "
-    "report, each in its own fenced block, and stop; when it is `complete`, and "
-    "only then, say \"Workflow complete.\" and list each of its `manual_tasks` "
+    "report, each in its own fenced block; when it is `complete`, and "
+    "only then, say \"Workflow complete.\"; and whenever it carries "
+    "`manual_tasks`, complete or not, list each of them "
     "(id and title): tasks the run deferred to the user, which no phase will run; "
     "then give its `manual_tasks_note` verbatim, which says how to record them done. "
+    "Then stop. "
     "Never say \"Workflow complete.\" otherwise, even when a notice lists manual "
     "tasks left for the user: while `user_next_step` names a `command`, the "
     "workflow goes on. Only `next` is "

@@ -274,13 +274,38 @@ class TestTheCompleteAnswerNamesThem:
         ]
         assert answer.to_dict()["manual_tasks"] == [{"id": "T010", "title": None}]
 
-    def test_a_workflow_not_yet_complete_carries_no_key(self, tmp_path):
-        """The tasks are named where the plugin has nothing left to run; a
-        command answer keeps its shape."""
+    def test_a_command_answer_names_them_and_how_to_close_them(self, tmp_path):
+        """Fix round 16 (run 6, Codex racing 06r/07): the hosts relay
+        `user_next_step`, and only the complete answer of 08 carried the
+        manual task's closing command — 06r and 07 named T009 from the
+        notice without it. A command answer now carries both keys beside
+        its command, and stays a command answer: not complete, and its
+        block is still the one `[NEXT_COMMAND]` line."""
         here = os.getcwd()
         os.chdir(SKILL_ROOT)
         try:
             plan = _build(tmp_path, S(ALL_REQUIRED[:-2], tasks=DEFERRED))
+        finally:
+            os.chdir(here)
+        state = StateManager(plan)
+        state.record_task_titles(TITLES)
+        state.save()
+        answer = np_.next_phase_commands(
+            P, "claude-code", None, "implement", plan_path=plan
+        )
+        assert answer.complete is False
+        payload = answer.to_dict()
+        assert payload["complete"] is False and payload["command"]
+        assert payload["manual_tasks"] == MANUAL
+        assert payload["manual_tasks_note"] == close_note(PLUGIN, P, ["T011", "T012"])
+        assert np_.render_next_phase_lines(answer) == [
+            f"[NEXT_COMMAND] {payload['command']}"]
+
+    def test_a_command_answer_with_nothing_deferred_keeps_its_shape(self, tmp_path):
+        here = os.getcwd()
+        os.chdir(SKILL_ROOT)
+        try:
+            plan = _build(tmp_path, S(ALL_REQUIRED[:-2]))
         finally:
             os.chdir(here)
         answer = np_.next_phase_commands(
@@ -473,6 +498,42 @@ class TestImplementRecordsTheTitles:
             {"id": "T003", "title": "Add tests"},
         ]
 
+    def test_the_executor_leg_result_names_how_to_close_them(self, repo, capsys):
+        """Run 6, Codex racing 06r: implement finished with a manual task
+        deferred, and its result's `user_next_step` (what the tool routes
+        relay) named review-code and nothing about recording the task done;
+        the command was only in the `notice`. It carries the note now."""
+        import implement_orchestrator
+
+        _seed_generate_tasks(repo)
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+            {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+        ]))
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+        original = implement_orchestrator.TaskDecomposer
+
+        class SeededDecomposer(original):
+            def parse_plan(self, content):
+                tasks = super().parse_plan(content)
+                self.tasks["T002"].executor_role = "human"
+                self.tasks["T002"].subagent_type = "human"
+                return tasks
+
+        repo.monkeypatch.setattr(implement_orchestrator, "TaskDecomposer", SeededDecomposer)
+        capsys.readouterr()
+        assert multi_llm.main([
+            "implement", str(repo.plan), "--yes", "--exec-subagents", "--host", "codex",
+        ]) == 0
+        step = cli_common.parse_result_line(capsys.readouterr().out)["user_next_step"]
+        assert step["complete"] is False
+        assert "--review-code" in step["command"]
+        assert [task["id"] for task in step["manual_tasks"]] == ["T002", "T003"]
+        assert (
+            "--implement " in step["manual_tasks_note"]
+            and "--resume --human-task T002=done --human-task T003=done"
+            in step["manual_tasks_note"]
+        ), step
+
 
 def test_the_tool_routes_are_told_to_list_them():
     """OpenCode's and Codex's package routes read no summary-format.md on a
@@ -483,6 +544,29 @@ def test_the_tool_routes_are_told_to_list_them():
     line = modes.TOOL_USER_NEXT_STEP_LINE
     assert "manual_tasks" in line
     assert "Workflow complete." in line
+
+
+def test_the_tool_routes_are_told_to_relay_them_on_any_result():
+    """Fix round 16 (run 6, Codex racing 06r/07): the hosts named the
+    manual task T009 from the notice but not `--human-task T009=done`;
+    only 08's complete answer carried the note. The tool description and
+    every route's relay rule now say to list `manual_tasks` and give the
+    note on any result, complete or not."""
+    import modes
+
+    line = modes.TOOL_USER_NEXT_STEP_LINE
+    assert "whenever it carries `manual_tasks`, complete or not" in line
+    assert "then give its `manual_tasks_note` verbatim" in line
+    for template in ("hosts/codex/plugin-skill.md.tmpl", "hosts/codex/shim.md.tmpl",
+                     "hosts/opencode/shim.md.tmpl", "hosts/opencode/plugin-command.md.tmpl"):
+        text = " ".join((SKILL_ROOT / template).read_text(encoding="utf-8").split())
+        assert (
+            "When it carries `manual_tasks`, complete or not, also list each "
+            "(id and title) and give its `manual_tasks_note` verbatim"
+        ) in text, template
+    rule = " ".join(
+        (SKILL_ROOT / "references/summary-format.md").read_text(encoding="utf-8").split())
+    assert "A `user_next_step` that names a `command` can carry `manual_tasks`" in rule
 
 
 def test_the_tool_routes_say_workflow_complete_only_on_a_complete_result():
