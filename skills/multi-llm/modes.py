@@ -576,24 +576,21 @@ NEEDS_HUMAN_RULE = (
 #: * ``error_known`` — the last error line, quoted: the result's own ``error``
 #:   when it carries one, else the last non-blank line of the *redacted*
 #:   output, else of the redacted stderr;
-#: * ``error_unknown`` — the child left no line to quote; ``log`` and ``argv``
-#:   are what to report.
+#: * ``error_unknown`` — the child left no line to quote; ``log`` is what to
+#:   report.
 #:
 #: The ``options`` sentence is kept word for word from the message it replaces:
 #: it is what tells the model where the redacted commands went.
 #:
-#: Fix round 18 (Codex racing run 7, phase 08): the message named `argv` as
-#: "what was being run", and the host told the user the tool's own
-#: `--exec-subagents --detach`; it now asks for the phase and the plan and says
-#: never to quote `argv` or its flags.
+#: Fix round 18 (Codex racing run 7, phase 08): the message names `argv` as
+#: what was being run, and the host told the user the tool's own
+#: `--exec-subagents --detach`; it now says to say what ran as its phase and
+#: its plan, and never to quote `argv` or its flags.
 NEEDS_HUMAN_MESSAGE = {
     "template": (
         "Stop here: this run is blocked and needs a human. {phase} {error} "
-        "Report to the user which phase was running on which plan, that line, and the "
-        "`options`; never quote `argv` or its flags to the user: it is this tool's own "
-        "command line, with flags the tool adds itself (`--host`, `--yes`, "
-        "`--exec-subagents`, `--detach`), not something the user ran or types; "
-        "an `options` entry is a tool call for you, never a command "
+        "Report to the user what was being run (`argv`), that line, and the "
+        "`options`; an `options` entry is a tool call for you, never a command "
         "for the user to type, so do not print one as a command. The "
         "dispatcher's output is included as it was rendered, except that every "
         "runnable dispatcher command in it was re-spelled the way this host's "
@@ -603,7 +600,10 @@ NEEDS_HUMAN_MESSAGE = {
         "paraphrase the output, and do not lift a command out of it for the "
         "user: only `resume_command` (and each `resume_answers` command) is "
         "theirs to type. Do "
-        "not run a different mode. " + NEEDS_HUMAN_WORK_SENTENCE + " Send back "
+        "not run a different mode. Say what was being run as its phase and its "
+        "plan: never quote `argv` or its flags to the user, which are this tool's "
+        "own (`--host`, `--yes`, `--exec-subagents`, `--detach`) and nothing the "
+        "user ran or types. " + NEEDS_HUMAN_WORK_SENTENCE + " Send back "
         "an `options` entry only after the user has picked one."
     ),
     "phase_incomplete": "The `{phase}` phase did not complete.",

@@ -82,15 +82,14 @@ class TestTheManualTaskNoteIsProse:
     def test_the_claude_code_report_rules_say_so_too(self, path):
         text = _flat(path)
         assert ("as plain text, never inside a fenced block" in text
-                or "verbatim as plain text, never in a fenced block" in text), path
+                or "as plain text and never in a fenced block" in text), path
 
 
 class TestTheStopNamesThePhaseNotTheToolsArgv:
 
     def test_the_message_asks_for_the_phase_and_plan_and_forbids_argv(self):
         text = modes.NEEDS_HUMAN_MESSAGE["template"]
-        assert "what was being run (`argv`)" not in text
-        assert "which phase was running on which plan" in text
+        assert "Say what was being run as its phase and its plan" in text
         assert "never quote `argv` or its flags to the user" in text
         for flag in ("--exec-subagents", "--detach"):
             assert flag in text
