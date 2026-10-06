@@ -4484,6 +4484,10 @@ class WriteBatchScheduler:
             **({"answers": kept} if kept else {}),
         }
         result.stop["headline"] = self._stop_headline(result.stop)
+        if not earlier:
+            # No earlier run left a mirror to patch: this run's own.
+            self._mirror_status(result)
+            return
         try:
             from . import status_file as _status_file
         except ImportError:  # pragma: no cover
