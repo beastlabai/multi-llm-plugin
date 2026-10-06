@@ -88,7 +88,7 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     from . import prior_changes as _prior_changes
@@ -107,7 +107,7 @@ try:
     )
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import check_findings_from
-    from .subagent_tasks import PHASE_BY_WRITE_KIND, snapshot_file_set
+    from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
@@ -142,7 +142,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import check_findings_from  # type: ignore
-    from utils.subagent_tasks import PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
+    from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
@@ -163,6 +163,8 @@ except ImportError:  # pragma: no cover - direct script invocation
 
 
 __all__ = [
+    "BATCH_DECLINED_MARKER",
+    "BATCH_SKIPPED_MARKER",
     "CHECK_BLOCKED_MARKER",
     "CHECK_RESULTS",
     "MARKER",
@@ -179,6 +181,18 @@ MARKER = "[BATCH_DONE]"
 
 #: The line naming the tasks a check with findings holds back (stdout).
 CHECK_BLOCKED_MARKER = "[CHECK_BLOCKED]"
+
+#: Fix round 18: one line per item an apply batch declined with a reason
+#: (``--declined``), and per item the user chose to skip when the batch was
+#: kept as it stood (``--skipped``) — both recorded, neither applied.
+BATCH_DECLINED_MARKER = "[BATCH_DECLINED]"
+BATCH_SKIPPED_MARKER = "[BATCH_SKIPPED]"
+
+#: The reason ``--skipped`` records for an item.
+SKIPPED_REASON = (
+    "skipped at your request: the batch did not report it applied, and you "
+    "chose to keep the batch as it stood"
+)
 
 #: The first line of a refused native ``--resume`` (stderr).
 RESUME_REFUSED_MARKER = "[RESUME_REFUSED]"
@@ -267,9 +281,21 @@ def record_batch(
     check: Optional[str] = None,
     findings: Optional[List[str]] = None,
     own_check: Optional[str] = None,
+    declined: Optional[List[str]] = None,
+    skipped: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Record *task_id*'s outcome; the ``{task_id, status, items, state_file,
     check_findings}`` written.
+
+    *declined* (``<id>=<reason>`` each) and *skipped* (ids) are an apply
+    batch's items it did not apply (fix round 18): the items its reply
+    declined with a reason, and the items the user chose to skip when a
+    batch whose reply left them out was kept as it stood. Each is recorded in
+    ``processed_<phase>`` as ``declined`` / ``skipped`` with its reason —
+    never ``applied`` — so a ``--resume`` does not hand it out again and
+    every reader can name it. Only with ``--status completed``, only for an
+    item of this batch, and never for ``implement`` (a task its subagent
+    will not do is ``--status failed``).
 
     *check* / *findings* are a check task's structured result (its reply's
     ``check`` object, racing re-run 4): ``findings`` records them in
@@ -345,6 +371,7 @@ def record_batch(
             f"{phase_dir / WRITE_TASK_FILENAME} is a {kind!r} task file, not a "
             f"write phase's (known: {', '.join(PHASE_BY_WRITE_KIND)})."
         )
+    not_applied = _not_applied_items(task_id, task, kind, status, declined, skipped)
     if task.get("is_human") or str(task.get("executor_role") or "") == "human":
         raise WritePromptError(
             f"Task {task_id} is a human task: it never dispatches to a "
@@ -445,9 +472,18 @@ def record_batch(
                 item_id = str(item_id)
                 if not item_id:
                     continue
-                mark_item_processed_in_state(
-                    state, phase_word, item_id, _ITEM_STATUS[status], details
-                )
+                if item_id in not_applied:
+                    # Fix round 18: declined by the batch, or skipped at the
+                    # user's request — recorded with its reason, never applied.
+                    word, why = not_applied[item_id]
+                    mark_item_processed_in_state(
+                        state, phase_word, item_id, word,
+                        {**details, "reason": why},
+                    )
+                else:
+                    mark_item_processed_in_state(
+                        state, phase_word, item_id, _ITEM_STATUS[status], details
+                    )
                 items.append(item_id)
         state["updated_at"] = datetime.now().isoformat()
         _write_state(target, state)
@@ -460,6 +496,14 @@ def record_batch(
         "state_file": str(target), "check_findings": check_findings or [],
         "batch_check": batch_check or [],
         "blocked": blocked,
+        "declined": {
+            item: why for item, (word, why) in not_applied.items()
+            if word == "declined"
+        },
+        "skipped": {
+            item: why for item, (word, why) in not_applied.items()
+            if word == "skipped"
+        },
     }
 
 
@@ -497,6 +541,58 @@ def _not_a_check_task_message(
         f"{what}, and --check records only a check task's verdict. {instead} "
         f"Nothing was recorded."
     )
+
+
+def _not_applied_items(
+    task_id: str,
+    task: Dict[str, Any],
+    kind: str,
+    status: str,
+    declined: Optional[List[str]],
+    skipped: Optional[List[str]],
+) -> Dict[str, Tuple[str, str]]:
+    """``{item id: ("declined" | "skipped", reason)}`` from ``--declined`` /
+    ``--skipped``, checked against the batch (fix round 18); raises
+    :class:`WritePromptError` naming the problem."""
+    if not declined and not skipped:
+        return {}
+    if kind not in APPLY_WRITE_KINDS:
+        raise WritePromptError(
+            f"Task {task_id} is an implement task: a task its subagent will not "
+            f"do is recorded --status failed --reason \"<why>\", for the user "
+            f"to answer with --human-task {task_id}=skip|done. --declined and "
+            f"--skipped are for an apply batch's items."
+        )
+    if status != "completed":
+        raise WritePromptError(
+            "--declined and --skipped record the items a finished batch did not "
+            "apply: pass them with --status completed."
+        )
+    expected = [str(i) for i in (task.get("expected_ids") or [])]
+    out: Dict[str, Tuple[str, str]] = {}
+    for value in declined or []:
+        item, sep, why = str(value).partition("=")
+        item, why = item.strip(), " ".join(why.split())
+        if not sep or not item or not why:
+            raise WritePromptError(
+                f"--declined expects <id>=<the reason the batch gave>, got "
+                f"{value!r}: a decline without its reason is not recorded."
+            )
+        out[item] = ("declined", why[:300])
+    for value in skipped or []:
+        item = str(value).strip()
+        if item in out:
+            raise WritePromptError(
+                f"{item} is given to both --declined and --skipped: record it once."
+            )
+        out[item] = ("skipped", SKIPPED_REASON)
+    unknown = [item for item in out if item not in expected]
+    if unknown:
+        raise WritePromptError(
+            f"{', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not an "
+            f"item of {task_id} (its items: {', '.join(expected) or 'none'})."
+        )
+    return out
 
 
 def _changed_a_file_message(phase_dir: Path, task_id: str, changed: List[str]) -> str:
@@ -790,6 +886,19 @@ def _build_parser() -> argparse.ArgumentParser:
         help="One problem a check reported (repeatable; with --check findings "
              "or --own-check findings).",
     )
+    parser.add_argument(
+        "--declined", action="append", default=None, metavar="ID=REASON",
+        help="An apply batch's item its reply declined, with the reason it "
+             "gave (repeatable; with --status completed): recorded as not "
+             "applied, never as applied.",
+    )
+    parser.add_argument(
+        "--skipped", action="append", default=None, metavar="ID",
+        help="An apply batch's item its reply left out of both ids and "
+             "declined, which the user chose to skip, keeping the batch as it "
+             "stood (repeatable; with --status completed): recorded as not "
+             "applied, skipped at the user's request.",
+    )
     return parser
 
 
@@ -805,6 +914,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             check=args.check,
             findings=args.finding,
             own_check=args.own_check,
+            declined=args.declined,
+            skipped=args.skipped,
         )
     except WritePromptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -827,6 +938,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"## Check Findings in the phase's summary.md, and say in your "
             f"final report that this check fails: never report the phase as a "
             f"clean success."
+        )
+    for item, why in (written.get("declined") or {}).items():
+        # Fix round 18: never applied, and never silent.
+        print(
+            f"{BATCH_DECLINED_MARKER} {written['task_id']} {item}: not applied, "
+            f"the batch declined it — {why}. List it in the phase's summary.md "
+            f"as not applied, with this reason, and name it in your report; "
+            f"never count it as applied."
+        )
+    for item, why in (written.get("skipped") or {}).items():
+        print(
+            f"{BATCH_SKIPPED_MARKER} {written['task_id']} {item}: not applied, "
+            f"{why}. List it in the phase's summary.md as not applied, skipped "
+            f"at the user's request, and name it in your report."
         )
     blocked = written.get("blocked") or []
     if blocked:
