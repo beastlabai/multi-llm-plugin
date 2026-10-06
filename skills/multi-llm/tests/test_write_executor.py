@@ -2162,7 +2162,10 @@ class TestScheduler:
         env.edits([_patch_edit(env.plan)])
         env.scheduler([env.apply_task(0)]).run()
         dispatched = [json.loads(l) for l in log.read_text().splitlines() if l]
-        prompt = [r["prompt"] for r in dispatched if r.get("prompt")][-1]
+        # The batch's own prompt: a reply that attests no id is then asked
+        # once to account for its items (fix round 18), a re-ask with no
+        # prior-changes context of its own.
+        prompt = [r["prompt"] for r in dispatched if r.get("prompt")][0]
         assert "(none — this is the first batch)" in prompt
 
     def test_an_apply_prompt_without_the_token_fails_the_dispatch(self, env):

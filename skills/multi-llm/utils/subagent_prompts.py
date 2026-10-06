@@ -1196,6 +1196,7 @@ def build_schema_repair_prompt(
     syntax_error: Optional[str] = None,
     previous_reply: Optional[str] = None,
     expected_ids: Optional[Sequence[str]] = None,
+    incomplete: bool = False,
 ) -> str:
     """The one schema-repair re-ask: why the reply was rejected and what to send.
 
@@ -1224,6 +1225,12 @@ def build_schema_repair_prompt(
     *syntax_error* (``json_extractor.describe_syntax_error``) replaces the
     validator's errors when the reply's document did not parse: those errors
     describe a fragment from inside it, not the reply.
+
+    *incomplete* (an apply kind, fix round 18): the report was read, but it
+    left some of the batch's items out of both ``ids`` and ``declined``
+    (Codex racing run 7: a fix left alone on purpose was mentioned only in
+    ``notes``). The re-ask says so instead of "could not be read"; *errors*
+    name the items.
 
     Raises:
         KeyError: ``kind`` has no entry in :data:`SCHEMA_REPAIR_SHAPES`.
@@ -1273,9 +1280,12 @@ def build_schema_repair_prompt(
                 "\nIf it gave a `check` object (a check task's result), restate "
                 "that object as\nit gave it; do not run the check again."
             )
+        why = (
+            "does not say what\nhappened to every item of the batch"
+            if incomplete else "could not\nbe read"
+        )
         return f'''You are re-sending the report of a batch of edits. A previous turn
-already made the edits — they are on disk now — but its closing report could not
-be read, so the batch cannot be checked yet.
+already made the edits — they are on disk now — but its closing report {why}, so the batch cannot be checked yet.
 
 Do NOT open, edit, create or delete any file, and do not run any command. Do not
 redo or add to the edits. This turn only re-sends the report; the edits are

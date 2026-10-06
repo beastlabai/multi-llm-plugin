@@ -239,6 +239,13 @@ STOP_NOT_REPEATABLE = "not_repeatable"
 #: re-ask, and the value a lane records on the attempt that re-ask produces.
 REPAIR_SCHEMA_INVALID = "schema_invalid"
 
+#: Rule 7's second form (fix round 18): the report re-ask granted to a write
+#: report that reads but leaves some of the batch's items out of both ``ids``
+#: and ``declined``, and the value a lane records on the attempt it produces.
+#: It spends the same allowance as :data:`REPAIR_SCHEMA_INVALID`: one re-ask
+#: per dispatch, whichever way the report fell short.
+REPAIR_INCOMPLETE_REPORT = "incomplete_report"
+
 #: Rule 9's word: the reason an :class:`Action` carries when it grants the
 #: re-send of a write batch whose reply said ``applied`` while no byte moved,
 #: and the value a lane records on the attempt that re-send produces.
@@ -505,6 +512,28 @@ class RetryLadder:
         self._resends_left -= 1
         self._resends_used += 1
         return Action(retry=True, reason=RESEND_NOTHING_CHANGED, resend=True)
+
+    def record_report_reask(self) -> Action:
+        """Rule 7, for a write report that reads but does not account for
+        every item of its batch (fix round 18): may the runner be asked once
+        to restate it?
+
+        Like :meth:`record_resend`, asked for an attempt whose reply was read,
+        so no status is recorded and no stop is decided here: a refusal
+        leaves the reply to be classified as it stands. It spends the
+        schema-repair allowance, never a counter of its own — a dispatch gets
+        one report re-ask, whichever way its report fell short — inside the
+        same deadline and admission test as every other grant.
+        """
+        if self._schema_repairs_left <= 0:
+            return Action(retry=False, reason="the report re-ask was already spent")
+        refusal = self._admission_refusal()
+        if refusal is not None:
+            note = f"no report re-ask: {self._refusal_text(refusal)}"
+            return Action(retry=False, reason=note, note=note)
+        self._schema_repairs_left -= 1
+        self._schema_repairs_used += 1
+        return Action(retry=True, reason=REPAIR_INCOMPLETE_REPORT, repair=True)
 
     def _record_rate_limited(self) -> Action:
         # Rule 6(b): a rate-limit rung may not re-issue an identical dispatch
