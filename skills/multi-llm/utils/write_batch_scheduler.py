@@ -7103,9 +7103,20 @@ class WriteBatchScheduler:
         if outcome.write_outcome == WRITE_PARTIAL:
             return (
                 f"partial application (bytes moved, the batch did not finish)"
+                + (
+                    ": its runner ran past its time limit and was stopped, and "
+                    "what it changed is kept in place"
+                    if self._ran_out_of_time(outcome) else ""
+                )
                 + (f" — {summary}" if summary else "")
             )
         return f"{label}" + (f" — {summary}" if summary else "")
+
+    @staticmethod
+    def _ran_out_of_time(outcome: TaskOutcome) -> bool:
+        """Whether the batch was killed at its time limit after its edits
+        landed (``TaskOutcome.ran_out_of_time``, fix round 16)."""
+        return bool(getattr(outcome, "ran_out_of_time", False))
 
     def _account_lines(self, result: Optional[SchedulerResult]) -> List[str]:
         """Every task of the decomposition, by what became of it."""
@@ -7266,6 +7277,16 @@ class WriteBatchScheduler:
             lines.append(
                 "  - fix what the task reported, then resume this phase; it is "
                 "dispatched again and the tasks after it follow:"
+            )
+            lines.append(f"        {resume}")
+        elif stop.get("timed_out") and any(o.files_touched for o in failed):
+            lines.append(
+                "  - its edits are kept in place: resume this phase and it is "
+                "dispatched again on top of them to finish what is left, then "
+                "the ones never reached follow (or restore the batch with the "
+                "command above first, to start it over; if it runs out of time "
+                "again, raise driver.subagent_timeout_s or run it on a faster "
+                "model):"
             )
             lines.append(f"        {resume}")
         elif any(o.files_touched for o in failed):
@@ -7569,6 +7590,13 @@ class WriteBatchScheduler:
         # round 15: what the sweep observed, not what the rollback store holds,
         # so a file with no rollback point counts — and is named.
         result.stop["bytes_moved"] = any(o.bytes_moved for o in failed)
+        # Fix round 16 (OpenCode racing 06, T006): a batch killed at its time
+        # limit after its edits landed. The edits stay; the plain way forward
+        # is the resume, which dispatches it again on top of them.
+        if first is not None and first.write_outcome == WRITE_PARTIAL and (
+            self._ran_out_of_time(first)
+        ):
+            result.stop["timed_out"] = True
         unrestorable = sorted({p for o in failed for p in o.unrestorable})
         if unrestorable:
             result.stop["unrestorable"] = unrestorable
@@ -7983,6 +8011,14 @@ class WriteBatchScheduler:
                     "resume command."
                     if self.kind == "implement" else ", then resume this phase."
                 )
+            )
+        elif stop.get("bytes_moved", True) and stop.get("timed_out"):
+            head += (
+                f" Its edits are kept in place. To go on: resume this phase, "
+                f"and {task_id} is dispatched again on top of them to finish "
+                f"what is left (or restore the batch first to start it over); "
+                f"if it runs out of time again, raise driver.subagent_timeout_s "
+                f"or run it on a faster model."
             )
         elif stop.get("bytes_moved", True):
             head += (

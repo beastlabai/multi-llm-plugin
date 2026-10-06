@@ -1237,6 +1237,10 @@ class TaskOutcome:
     #: but moved all the same (fix round 15: a partial application that moved
     #: only such a file was announced "Nothing was half-applied").
     unrestorable: List[str] = field(default_factory=list)
+    #: Killed at its time limit (``driver.subagent_timeout_s``, else the
+    #: runner's ``default_timeout``) after its edits landed: a partial
+    #: application whose stop says the edits are kept (fix round 16).
+    ran_out_of_time: bool = False
 
     @property
     def ok(self) -> bool:
@@ -7384,6 +7388,9 @@ def dispatch_task(
                     if _write_report_repairable(capture, reply_text, tree_fingerprint):
                         partial_if_refused = checked_error
                 if partial_if_refused is None:
+                    # Fix round 16: a batch killed at its time limit after its
+                    # edits landed is said so on the stop, edits kept.
+                    outcome.ran_out_of_time = status == STATUS_TIMEOUT
                     status, error = checked_status, checked_error
 
         evidence = getattr(capture, "jail_evidence", None) or {}
