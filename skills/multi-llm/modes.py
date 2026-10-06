@@ -399,10 +399,12 @@ TOOL_DESCRIPTION_LEDE = (
 #: into the tool description after the mode block, so a model meets it in the
 #: same glance as the modes. The four numbers are ``cli_common.EXIT_*``, held
 #: to this line by a test rather than by an import: this module imports nothing
-#: by design.
+#: by design. Fix round 18 (live run 7, Codex racing 08): "report" is the
+#: result's ``error`` line whole — the stop's what, reported and not-run text
+#: and whether anything ran the tests — beside the commands the result names.
 TOOL_OUTCOMES_LINE = (
     "Exit codes: 0 done · 1 error · 2 nothing to do · 3 needs a human: stop, "
-    "report, do not do the phase's work."
+    "report its `error` line whole, do not do the phase's work."
 )
 
 #: The outcomes line's second sibling (plans/next-phase-command.md §2.4): what

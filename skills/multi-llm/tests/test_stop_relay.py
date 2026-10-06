@@ -142,6 +142,10 @@ class TestTheRelayRuleSaysToGiveTheLineWhole:
             "and whether anything ran the repository's tests"
         ) in rule
 
+    def test_the_tool_description(self):
+        assert "3 needs a human: stop, report its `error` line whole" in (
+            modes.TOOL_OUTCOMES_LINE)
+
     def test_the_tool_result_message(self):
         template = modes.NEEDS_HUMAN_MESSAGE["template"]
         assert "that line whole, word for word" in template
