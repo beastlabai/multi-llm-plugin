@@ -653,6 +653,30 @@ class HumanTaskPlan:
         }
 
 
+def _declined_split(plan: "HumanTaskPlan") -> Dict[str, List[str]]:
+    """The write mirror's two keys for the skips the user chose (fix round 14).
+
+    ``declined_task_ids``: the tasks the user skipped themselves (a
+    pause-and-ask "Skip", ``--human-task <id>=skip``);
+    ``declined_dependent_task_ids``: the tasks skipped because they depend on
+    one of those. Both are in ``skipped_task_ids`` too, and neither is a
+    deferral: :meth:`HumanTaskPlan.declined` is the one rule. Empty lists
+    are left out, so a run that declined nothing mirrors what it did before.
+    """
+    declined = plan.declined()
+    seeds = sorted(
+        task_id for task_id, reason in declined.items()
+        if reason.startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))
+    )
+    dependents = sorted(task_id for task_id in declined if task_id not in seeds)
+    out: Dict[str, List[str]] = {}
+    if seeds:
+        out["declined_task_ids"] = seeds
+    if dependents:
+        out["declined_dependent_task_ids"] = dependents
+    return out
+
+
 #: The recorded reason of a human task the user declined at pause-and-ask.
 #: ``StateManager._USER_DECLINED_REASON`` spells the same words, so the
 #: workflow's manual-task list reads a declined task as not owed.
@@ -8266,6 +8290,13 @@ class WriteBatchScheduler:
                         "finalized": result.finalized,
                         "human_task_strategy": result.human_plan.strategy,
                         "skipped_task_ids": sorted(result.human_plan.skipped),
+                        # Fix round 14: which of those the user skipped
+                        # (`--human-task <id>=skip`, a pause-and-ask "Skip")
+                        # and which went with them, so `status` no longer
+                        # lists them as "deferred manual" — work owed by hand
+                        # — beside a summary that says "skipped at your
+                        # request" (Codex stop-path accept 02).
+                        **_declined_split(result.human_plan),
                         "pending_human_task_ids": list(result.human_plan.pending),
                         "tasks": [
                             {
