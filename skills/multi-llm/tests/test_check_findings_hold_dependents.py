@@ -318,6 +318,26 @@ class TestTheCheckRunsAgain:
         )["verdict"]
         assert verdict["outcome_label"] == "verified"
 
+    def test_the_re_run_check_s_pass_replaces_its_findings_entry(self, repo, capsys):
+        """Fix round 14: the prior-changes line T004's prompt reads says the
+        check passed, not what it found the first time (OpenCode fix 02 kept
+        the findings line; its T007 ran only because its runner re-ran the
+        check itself)."""
+        from utils import prior_changes
+
+        _run_one_with_findings(repo, capsys)
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "# fixed by hand\n", encoding="utf-8")
+        _check_passes(repo)
+        repo.log.unlink(missing_ok=True)
+        assert _implement(repo, "--resume") == 0
+        capsys.readouterr()
+
+        out = str(repo.plan.parent / repo.plan.stem)
+        latest = {e["id"]: e["summary"] for e in prior_changes.entries(out)}
+        assert latest["T002"].startswith("(verified"), latest["T002"]
+        assert FINDINGS[0] not in prior_changes.render(out, phase="implement")
+
 
 class TestAnsweringACheckWithFindings:
 
@@ -481,6 +501,39 @@ class TestTheNativeLegHoldsTheDependents:
             "reported problems"
         )
         assert self._prompt(repo, capsys, "T004")[0] == 0
+
+    def test_a_re_recorded_check_s_new_summary_reaches_the_next_prompt(
+        self, repo, capsys,
+    ):
+        """Fix round 14 (Claude Code stop fix 02): the host appended the
+        re-run check's pass and `util prior-changes append` skipped it as
+        "already exists", so T007's prompt still said the check failed."""
+        self._emit(repo, capsys)
+        out = str(repo.plan.parent / repo.plan.stem)
+        self._done(repo, capsys, "T001")
+        self._util(capsys, "prior-changes", "append", "--output-dir", out,
+                   "--id", "T001", "--phase", "implement", "--summary", "made it")
+        self._done(repo, capsys, "T002", "--check", "findings", *self._findings())
+        findings_line = (
+            f"(check findings — 2 problem(s): {FINDINGS[0]}; no file changed)"
+        )
+        self._util(capsys, "prior-changes", "append", "--output-dir", out,
+                   "--id", "T002", "--phase", "implement", "--summary", findings_line)
+
+        assert self._done(repo, capsys, "T002", "--check", "passed")[0] == 0
+        code, _out, err = self._util(
+            capsys, "prior-changes", "append", "--output-dir", out, "--id", "T002",
+            "--phase", "implement", "--summary",
+            "(verified — the check passed, no file changed)",
+        )
+        assert code == 0 and "Replaced entry T002/implement" in err
+
+        assert self._prompt(repo, capsys, "T004")[0] == 0
+        prompt = (repo.phase_dir / "prompts" / "T004.prompt.txt").read_text(
+            encoding="utf-8"
+        )
+        assert "(verified — the check passed, no file changed)" in prompt
+        assert FINDINGS[0] not in prompt
 
     def test_the_native_instructions_say_what_the_plugin_enforces(self):
         text = (Path(__file__).parent.parent / "instructions" / "implement.md").read_text(

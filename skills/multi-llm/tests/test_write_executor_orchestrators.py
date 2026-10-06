@@ -831,15 +831,20 @@ class TestPriorChangesIdsAreUniquePerBatch:
         assert len(prior_changes.entries(out_dir)) == 19
 
     def test_a_redispatched_batch_still_appends_only_once(self, repo, tmp_path):
-        """The idempotency the ids must not break, asserted on the same log."""
+        """The idempotency the ids must not break, asserted on the same log:
+        the same summary is not written twice, and a new one for the same
+        batch replaces it rather than adding an entry (fix round 14)."""
         tasks = self._materialize(repo, "apply_code_fixes", self._fix_batches(4))
         out_dir = str(tmp_path / "out")
         for task in tasks:
             prior_changes.append(out_dir, task["prior_changes_id"], "apply-fixes", "s")
+        assert prior_changes.append(
+            out_dir, tasks[2]["prior_changes_id"], "apply-fixes", "s"
+        ) is False
         again = prior_changes.append(
             out_dir, tasks[2]["prior_changes_id"], "apply-fixes", "s again"
         )
-        assert again is False
+        assert again is True
         assert len(prior_changes.entries(out_dir)) == 4
 
     def test_the_native_batch_dict_carries_the_bridge_s_own_id(self, repo):
