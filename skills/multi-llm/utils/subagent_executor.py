@@ -863,10 +863,29 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     return [CHECK_RESULT_UNKNOWN]
 
 
+#: The finding a code batch's own check carries when its reply said
+#: ``check.could_not_run`` (fix round 15): every surface then says "its check
+#: could not run", never that it fails.
+BATCH_CHECK_COULD_NOT_RUN = "its check could not run"
+
+
+def batch_check_could_not_run(findings: Optional[Sequence[str]]) -> bool:
+    """Whether a code batch's own-check findings say the check could not run."""
+    return bool(findings) and str(findings[0]).startswith(BATCH_CHECK_COULD_NOT_RUN)
+
+
+def batch_check_words(findings: Optional[Sequence[str]]) -> str:
+    """How a surface names a code batch's own check that did not pass:
+    "its check could not run", else "a check it ran fails"."""
+    return (
+        BATCH_CHECK_COULD_NOT_RUN if batch_check_could_not_run(findings)
+        else "a check it ran fails"
+    )
+
+
 def batch_check_findings(result: Any) -> Optional[List[str]]:
     """What a code-writing batch's own ``check`` object says about the checks
-    it ran on its edits (fix round 14), read as :func:`check_findings_from`
-    reads a check task's.
+    it ran on its edits (fix round 14).
 
     ``None`` when the reply reports no usable check — no ``check`` key, or one
     that says neither whether it passed nor what failed (``{}``, ``null``): the
@@ -877,7 +896,31 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
     test fails" in its free-text ``notes``, the repository's test failed
     afterwards, and the run reported every fix applied. Never read from
     ``notes``.
+
+    Not the check task's fail-closed reading (fix round 15, review of round
+    14): a check task's ``check`` is its whole verdict, so a finding beside
+    ``passed: true`` counts there; here ``passed: true`` is the batch's own
+    word that its checks passed, and what it lists beside it ("npm test: 12
+    passed") is informational, never a failing check. ``could_not_run``
+    (read as leniently as ``passed``) is one finding,
+    :data:`BATCH_CHECK_COULD_NOT_RUN` with whatever the reply listed after
+    it, so it reads "its check could not run", never "fails".
     """
+    check = result.get("check") if isinstance(result, dict) else None
+    if isinstance(check, dict):
+        if _check_passed(check.get("could_not_run")) is True:
+            listed = [
+                text for text in (check_findings_from(
+                    {"check": {"passed": False, "findings": check.get("findings")}}
+                ) or [])
+                if text not in (CHECK_FAILED_WITHOUT_FINDINGS, CHECK_RESULT_UNKNOWN)
+            ]
+            text = BATCH_CHECK_COULD_NOT_RUN + (
+                f": {'; '.join(listed)}" if listed else ""
+            )
+            return [text[:CHECK_FINDING_MAX_CHARS]]
+        if _check_passed(check.get("passed")) is True:
+            return []
     findings = check_findings_from(result)
     if findings is None:
         return None

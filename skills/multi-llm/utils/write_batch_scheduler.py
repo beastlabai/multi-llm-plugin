@@ -102,7 +102,9 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         resolve_output_target,
         resolve_task_runner,
         row_outcome_label,
+        batch_check_could_not_run,
         batch_check_findings,
+        batch_check_words,
         check_findings_from,
         check_record,
         read_check_reply,
@@ -196,7 +198,9 @@ except ImportError:  # pragma: no cover - direct-script import shim
         resolve_output_target,
         resolve_task_runner,
         row_outcome_label,
+        batch_check_could_not_run,
         batch_check_findings,
+        batch_check_words,
         check_findings_from,
         check_record,
         read_check_reply,
@@ -370,14 +374,20 @@ def batch_check_section(
     if not found:
         return []
     lines = ["", "## Check Findings", ""] if heading else [""]
+    could_not = any(
+        batch_check_could_not_run(row_batch_check_findings(row)) for row in found
+    )
     lines += [
         "These batches applied their edits, then ran a check that failed "
-        "(their own report says so). The edits are kept: look at each failure "
+        + ("or could not run " if could_not else "")
+        + "(their own report says so). The edits are kept: look at each failure "
         "before you go on — fix it by hand, or run review-code and then "
         "apply-code-fixes.", "",
     ]
     for row in found:
-        lines.append(f"### {row['task_id']}: a check it ran fails")
+        lines.append(
+            f"### {row['task_id']}: {batch_check_words(row_batch_check_findings(row))}"
+        )
         lines.append("")
         lines += [f"- {finding}" for finding in row_batch_check_findings(row)]
         lines.append("")
@@ -413,8 +423,16 @@ def batch_check_summary(found: Dict[str, List[str]]) -> str:
         more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
         parts.append(f"{task_id} ({first}{more})")
     count = len(found)
+    # Fix round 15: a check that could not run is said so, never "failing".
+    could_not = [batch_check_could_not_run(f) for f in found.values()]
+    if all(could_not):
+        said = "their check could not run"
+    elif any(could_not):
+        said = "reported a check that failed or could not run"
+    else:
+        said = "reported a failing check"
     return (
-        f"{count} batch(es) applied their edits but reported a failing check: "
+        f"{count} batch(es) applied their edits but {said}: "
         + "; ".join(parts) + "."
     )[:900]
 
@@ -3128,9 +3146,14 @@ class WriteBatchScheduler:
         if not found:
             return []
         lines = [
-            f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but a "
-            f"check it ran on them fails ({len(findings)} problem(s)): "
-            f"{'; '.join(findings)[:600]}"
+            (
+                f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but "
+                f"{'; '.join(findings)[:600]}"
+                if batch_check_could_not_run(findings) else
+                f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but a "
+                f"check it ran on them fails ({len(findings)} problem(s)): "
+                f"{'; '.join(findings)[:600]}"
+            )
             for task_id, findings in found.items()
         ]
         where = (
@@ -5933,7 +5956,7 @@ class WriteBatchScheduler:
                 )
             elif outcome.ok and outcome.batch_check:
                 verdict = (
-                    f"{verdict}, but a check it ran fails "
+                    f"{verdict}, but {batch_check_words(outcome.batch_check)} "
                     f"({'; '.join(outcome.batch_check)[:300]})"
                 )
             elif outcome.write_outcome and not outcome.ok:
@@ -8368,7 +8391,11 @@ class WriteBatchScheduler:
             outcome_cell = row_outcome_label(row) or row.get("status")
             if row.get("status") == STATUS_OK and row_batch_check_findings(row):
                 # Fix round 14: never a plain success.
-                outcome_cell = f"{outcome_cell}, its check fails"
+                outcome_cell = f"{outcome_cell}, " + (
+                    "its check could not run"
+                    if batch_check_could_not_run(row_batch_check_findings(row))
+                    else "its check fails"
+                )
             lines.append(
                 f"| {task_cell} | {outcome_cell} | "
                 f"{', '.join(row.get('files_touched') or []) or '—'} | "
