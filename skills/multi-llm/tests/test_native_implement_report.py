@@ -339,11 +339,11 @@ class TestStatusAfterACompletedNativeImplement:
         out = self._status(capsys, *flags)
         assert "no run recorded for phase implement" not in out
         assert (
-            "  implement  no run record — the host ran these tasks itself; read "
-            "from state.json (marked completed)"
+            "  implement  done on the host (marked completed) — no run record, "
+            "since the host ran these tasks itself; read from state.json"
         ) in out, out
-        line = next(l for l in out.splitlines() if l.strip().startswith("tasks:"))
-        assert line.split("tasks:", 1)[1].strip() == (
+        line = next(l for l in out.splitlines() if l.strip().startswith("all tasks:"))
+        assert line.split("all tasks:", 1)[1].strip() == (
             "4/6 done; completed: T001, T002, T003, T004; "
             "deferred manual: T005; skipped (depends on manual T005): T006"
         )
@@ -367,7 +367,7 @@ class TestStatusAfterACompletedNativeImplement:
         _util(capsys, "batch-done", "--phase-dir", str(repo.phase_dir),
               "--task-id", "T001", "--status", "completed")
         out = self._status(capsys, "--phase", "implement")
-        assert "read from state.json (not marked completed)" in out
+        assert "implement  not finished on the host (not marked completed)" in out
         assert "1/6 done" in out
 
     def test_its_check_findings_follow_the_trailer_s_rule(self, repo, capsys):
@@ -392,5 +392,5 @@ class TestStatusAfterACompletedNativeImplement:
         state.mark_phase_skipped("code-review", "not reviewing this one")
         state.save()
         out = self._status(capsys)
-        assert "read from state.json (marked completed)" in out
+        assert "implement  done on the host (marked completed)" in out
         assert "check findings" not in out

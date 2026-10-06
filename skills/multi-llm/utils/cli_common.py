@@ -311,27 +311,41 @@ def retry_command(
     to exit 3, which is a better failure than the silently widened panel that
     dropping a selector produces.
     """
-    positionals: List[Union[str, Path]] = []
-    verbs: List[Union[str, Path]] = []
+    positionals, tokens = retry_tokens(*args, flags=flags)
+    return dispatcher_command(mode, *positionals, *tokens, base=base)
+
+
+def retry_tokens(
+    *args: Union[str, Path],
+    flags: Optional[Sequence[str]] = None,
+) -> Tuple[List[str], List[str]]:
+    """:func:`retry_command`'s ``(positionals, flags and verbs)``, unrendered.
+
+    The same edits as that command (recorded verbs stripped, ``--fresh``
+    dropped under ``--resume``, judge spellings folded) without the
+    dispatcher prefix, so ``status`` can spell the same retry the way a
+    host's user types it (fix round 18).
+    """
+    positionals: List[str] = []
+    verbs: List[str] = []
     for arg in args:
         if verbs or str(arg).startswith("-"):
-            verbs.append(arg)
+            verbs.append(str(arg))
         else:
-            positionals.append(arg)
-    drop = set(RETRY_VERBS) | {str(v).split("=", 1)[0] for v in verbs}
+            positionals.append(str(arg))
+    drop = set(RETRY_VERBS) | {v.split("=", 1)[0] for v in verbs}
     if "--resume" in verbs:
         # A retry continues the failed run. Replaying its original --fresh
         # would erase decisions, processed items and the prior-changes log
         # before the apply orchestrator has a chance to resume them.
         drop.add("--fresh")
-    if any(canonical_flag(str(v)) == AGENT_DECIDE_FLAG for v in verbs):
+    if any(canonical_flag(v) == AGENT_DECIDE_FLAG for v in verbs):
         drop.update(AGENT_DECIDE_SPELLINGS)
     kept = fold_judge_flag(
         str(token) for token in (flags or [])
         if str(token).split("=", 1)[0] not in drop
     )
-    verbs = [canonical_flag(str(v)) for v in verbs]
-    return dispatcher_command(mode, *positionals, *kept, *verbs, base=base)
+    return positionals, kept + [canonical_flag(v) for v in verbs]
 
 
 def durable_reaggregate_fields(
@@ -1281,6 +1295,40 @@ def drop_answer_flags(tokens: Iterable[str]) -> List[str]:
     while index < len(items):
         token = items[index]
         takes_value = _matches_any(token.split("=", 1)[0], _REPLAY_DROP_ANSWERS)
+        if takes_value is None:
+            out.append(token)
+            index += 1
+            continue
+        index += 2 if (takes_value and "=" not in token) else 1
+    return out
+
+
+#: The flags a host composes on every call it makes, which a command printed
+#: for its user never carries: exactly the ones the tool routes reserve
+#: (``packaging/common/surface.py``'s ``reserved_flags``: ``exact``, the
+#: ``named_exception`` and the ``--internal-`` prefix; a test holds the two
+#: lists together). Fix round 18 (Codex racing run 7): ``status``'s
+#: ``resume with:`` line was the raw ``uv run … --host codex --detach
+#: --resume`` while every other next-step line was the host's spelling.
+_HOST_COMPOSED = _option_table((
+    "host", "yes", "exec_subagents", "detach", "if_not_running",
+    "max_detached", "interactive", "internal_worker", "internal_run_id",
+))
+
+
+def drop_host_composed_flags(tokens: Iterable[str]) -> List[str]:
+    """*tokens* without the flags a host composes itself (:data:`_HOST_COMPOSED`,
+    any ``--internal-`` flag), each with its value: what is left is what the
+    user typed, for a command spelled the way they type it."""
+    out: List[str] = []
+    items = [str(token) for token in tokens]
+    index = 0
+    while index < len(items):
+        token = items[index]
+        head = token.split("=", 1)[0]
+        takes_value = _matches_any(head, _HOST_COMPOSED)
+        if takes_value is None and head.startswith(INTERNAL_FLAG_PREFIX):
+            takes_value = False
         if takes_value is None:
             out.append(token)
             index += 1

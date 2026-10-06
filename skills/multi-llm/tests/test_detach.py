@@ -1315,7 +1315,8 @@ class TestStatusSurface:
         assert "judged the code before the latest implement; re-run it" in out
         rerun = [line for line in out.splitlines() if "re-run it with:" in line]
         assert len(rerun) == 1
-        assert " review-code " in rerun[0] and "--quick" in rerun[0]
+        # The host's spelling since fix round 18.
+        assert "--review-code " in rerun[0] and "--quick" in rerun[0]
         assert "--reaggregate" not in rerun[0] and "--force" not in rerun[0]
         assert "not yet marked completed" not in out
         assert "advance it with" not in out
@@ -1353,7 +1354,7 @@ class TestStatusSurface:
         assert "re-run code-review first" in out
         rerun = [line for line in out.splitlines() if "re-run it with:" in line]
         assert len(rerun) == 1
-        assert " review-code " in rerun[0] and "apply-code-fixes" not in rerun[0]
+        assert "--review-code " in rerun[0] and "apply-code-fixes" not in rerun[0]
         assert "--agent-decide" not in rerun[0]  # another run's flags never ride along
         assert "--reaggregate" not in out and "advance it with" not in out
 
@@ -4648,7 +4649,8 @@ class TestReplayFlagsAcrossTheDetachBoundary:
         assert run_status.main(["--plan-file", str(plan), "--view", "run"]) == 3
         out = capsys.readouterr().out
         assert "resume with:" in out
-        assert "--quick --detach --reaggregate" in out
+        # The host's spelling since fix round 18: `--detach` is the host's.
+        assert "--quick --reaggregate" in out
         carriers = [line for line in out.splitlines() if "--reaggregate" in line]
         assert carriers
         assert all("--quick" in line for line in carriers), out

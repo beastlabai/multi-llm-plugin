@@ -284,10 +284,13 @@ class TestStatusReadsANativeImplementFromState:
         self._native_stop(repo, capsys)
         assert not (repo.phase_dir / "write_batch_report.json").exists()
         out = _status_run(repo, capsys)
-        assert "implement  no run record — the host ran these tasks itself" in out, out
-        line = next(l for l in out.splitlines() if l.strip().startswith("tasks:"))
+        assert ("implement  not finished on the host (not marked completed) — "
+                "no run record, since the host ran these tasks itself") in out, out
+        # Fix round 18: the executor routes' `all tasks:` tally, word for word.
+        line = next(l for l in out.splitlines() if l.strip().startswith("all tasks:"))
         assert "4/7 done" in line
-        assert "completed: T001, T002, T003, T004" in line
+        assert "completed: T001, T003, T004" in line
+        assert "completed, its check reported problems: T002" in line
         assert "failed: T005" in line
         assert "not run: T006, T007" in line
         assert "T005: refused before dispatch" in out
@@ -298,18 +301,18 @@ class TestStatusReadsANativeImplementFromState:
         leg._emit(repo, capsys, "--resume", "--human-task", "T002=done",
                   "--human-task", "T005=skip")
         out = _status_run(repo, capsys)
-        line = next(l for l in out.splitlines() if l.strip().startswith("tasks:"))
+        line = next(l for l in out.splitlines() if l.strip().startswith("all tasks:"))
         assert "skipped at your request: T005" in line, line
         assert "skipped (depend on a task you skipped): T006" in line, line
         assert "deferred manual" not in line
-        assert "accepted with their check findings or after failing: T002" in line
+        assert "accepted with their check findings: T002" in line
         assert ("answers on record: --human-task T002=done, "
                 "--human-task T005=skip") in out
 
     def test_an_executor_run_keeps_its_own_view(self, repo, capsys):
         _first_run(repo, capsys)
         out = _status_run(repo, capsys)
-        assert "no run record — the host ran these tasks itself" not in out
+        assert "no run record, since the host ran these tasks itself" not in out
 
 
 class TestClosingADeferredManualTask:

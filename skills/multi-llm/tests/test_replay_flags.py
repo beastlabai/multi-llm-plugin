@@ -742,7 +742,8 @@ class TestStatusRoute:
         status["run"] = run
         status_file.write_status(str(phase), status)
         out = _status_out(plan, capsys)
-        assert cli_common.reaggregate_command("review-plan", str(plan)) in out
+        # In the host's spelling since fix round 18 (no `--host`: Claude Code).
+        assert f'/multi-llm:multi-llm --review-plan "{plan}" --reaggregate' in out
 
     def test_ask_replays_the_stored_question_once(self, tmp_path, capsys):
         plan = tmp_path / "p.md"
