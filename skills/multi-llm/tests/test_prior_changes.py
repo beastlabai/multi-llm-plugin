@@ -134,13 +134,16 @@ class TestPriorChanges:
         assert result.stdout.strip() == DEFAULT_TEXT
 
     def test_append_idempotent_same_id_phase(self, tmp_path: Path) -> None:
-        """Same id + phase combination is a no-op; no duplicate entry created."""
+        """Same id + phase + summary is a no-op; a new summary supersedes
+        (fix round 14): readers see one entry, the newest."""
         _append(str(tmp_path), "step_1", "review", "First summary")
-        _append(str(tmp_path), "step_1", "review", "Duplicate summary")
+        _append(str(tmp_path), "step_1", "review", "First summary")
+        assert len(_load_entries(_jsonl_path(str(tmp_path)))) == 1
 
-        entries = _load_entries(_jsonl_path(str(tmp_path)))
+        _append(str(tmp_path), "step_1", "review", "Duplicate summary")
+        entries = read_entries(str(tmp_path))
         assert len(entries) == 1
-        assert entries[0]["summary"] == "First summary"
+        assert entries[0]["summary"] == "Duplicate summary"
 
     def test_append_same_id_different_phase(self, tmp_path: Path) -> None:
         """Same id but different phase creates a separate entry."""
@@ -218,15 +221,17 @@ class TestPriorChanges:
         _append(str(tmp_path), "step_2", "review", "Batch 2")
         _append(str(tmp_path), "step_3", "review", "Batch 3")
 
-        # Re-append batch 1 — should be skipped
-        _append(str(tmp_path), "step_1", "review", "Batch 1 again")
+        # Re-append batch 1 — same summary, so nothing is written
+        _append(str(tmp_path), "step_1", "review", "Batch 1")
         entries = _load_entries(_jsonl_path(str(tmp_path)))
         assert len(entries) == 3
+        # A new summary for it supersedes the old one: still three entries
+        _append(str(tmp_path), "step_1", "review", "Batch 1 again")
+        assert len(read_entries(str(tmp_path))) == 3
 
         # Append truly new batch 4
         _append(str(tmp_path), "step_4", "review", "Batch 4")
-        entries = _load_entries(_jsonl_path(str(tmp_path)))
-        assert len(entries) == 4
+        assert len(read_entries(str(tmp_path))) == 4
 
     def test_full_batch_loop_integration(self, tmp_path: Path) -> None:
         """Full read -> substitute -> append cycle simulating orchestrator flow."""
@@ -496,8 +501,8 @@ class TestEntryId:
     """The id `append` is keyed on: unique per batch AND stable across a redispatch.
 
     Both halves fail silently when they are wrong, in opposite directions — a
-    colliding id DROPS an entry (append is idempotent on `(id, phase)`, so the
-    second batch under a shared key is skipped at exit 0), an unstable id DOUBLES
+    colliding id DROPS an entry (readers see one entry per `(id, phase)`, so the
+    second batch under a shared key replaces the first at exit 0), an unstable id DOUBLES
     one. Which is why the id is a content key plus a digest of the batch's own
     members, and never a loop index.
     """
@@ -556,8 +561,8 @@ class TestEntryId:
             append(out, "src/index.mjs", "apply-fixes", f"batch {n}")
             for n, _ in enumerate(batches)
         )
-        assert collided == 1  # the bug, pinned
-        assert len(read_entries(out)) == 1
+        assert collided == 19  # each one replaces the one before it ...
+        assert len(read_entries(out)) == 1  # ... so one survives: the bug, pinned
 
         keyed = sum(
             append(
@@ -576,8 +581,9 @@ class TestEntryId:
         members = ["a", "b"]
         eid = entry_id("sec", members, fallback="batch-0")
         assert append(out, eid, "apply-suggestions", "first") is True
-        assert append(out, eid, "apply-suggestions", "again") is False
-        assert len(read_entries(out)) == 1
+        assert append(out, eid, "apply-suggestions", "first") is False
+        assert append(out, eid, "apply-suggestions", "again") is True
+        assert [e["summary"] for e in read_entries(out)] == ["again"]
 
 
 class TestRenderPhaseFiltering:
@@ -732,20 +738,22 @@ class TestApplyCodeFixesPhaseAliasing:
         assert append(out, "index.html#abc", "apply-code-fixes", "Fix A") is True
         # A resumed batch re-dispatched under the native leg's documented
         # spelling must be recognised as the same entry, not appended again.
-        assert append(out, "index.html#abc", "apply-fixes", "Fix A (retry)") is False
+        assert append(out, "index.html#abc", "apply-fixes", "Fix A") is False
+        assert append(out, "index.html#abc", "apply-fixes", "Fix A (retry)") is True
 
         stored = read_entries(out)
         assert len(stored) == 1
         # Stored under the canonical (phase-directory) spelling either way.
         assert stored[0]["phase"] == "apply-fixes"
-        assert stored[0]["summary"] == "Fix A"
+        assert stored[0]["summary"] == "Fix A (retry)"
 
     def test_append_dedupes_across_both_spellings_reversed_order(
         self, tmp_path: Path
     ) -> None:
         out = str(tmp_path)
         assert append(out, "index.html#abc", "apply-fixes", "Fix A") is True
-        assert append(out, "index.html#abc", "apply-code-fixes", "Fix A (retry)") is False
+        assert append(out, "index.html#abc", "apply-code-fixes", "Fix A") is False
+        assert append(out, "index.html#abc", "apply-code-fixes", "Fix A (retry)") is True
 
         stored = read_entries(out)
         assert len(stored) == 1
@@ -771,16 +779,19 @@ class TestApplyCodeFixesPhaseAliasing:
         # Executor leg (in-process, mode word).
         assert append(out, "index.html#abc", "apply-code-fixes", "Fix A") is True
         # Native leg (CLI, phase-dir word) resumes the same batch.
+        result = _append(out, "index.html#abc", "apply-fixes", "Fix A")
+        assert "already says this, skipping" in result.stderr
         result = _append(out, "index.html#abc", "apply-fixes", "Fix A (retry)")
-        assert "already exists, skipping" in result.stderr
+        assert "Replaced entry index.html#abc/apply-fixes" in result.stderr
 
         stored = read_entries(out)
         assert len(stored) == 1
-        assert stored[0]["summary"] == "Fix A"
+        assert stored[0]["summary"] == "Fix A (retry)"
 
         # And the reverse direction: native leg first, executor resumes.
         assert append(out, "index.html#def", "apply-fixes", "Fix B") is True
-        assert append(out, "index.html#def", "apply-code-fixes", "Fix B (retry)") is False
+        assert append(out, "index.html#def", "apply-code-fixes", "Fix B") is False
+        assert append(out, "index.html#def", "apply-code-fixes", "Fix B (retry)") is True
         assert len(read_entries(out)) == 2
 
     def test_render_prefers_same_phase_entries_under_either_spelling(
@@ -800,3 +811,80 @@ class TestApplyCodeFixesPhaseAliasing:
         assert "OOB teleport resync" in by_dir_word
         assert "unrelated phase" not in by_dir_word
         assert "... and 1 earlier batches from other phases" in by_dir_word
+
+
+class TestARecordedAgainBatchSupersedesItsEntry:
+    """Fix round 14 (stop fixture, Claude Code fix 02): a check recorded with
+    findings, fixed, and re-run on ``--resume`` passed — but ``append`` kept
+    the first summary for good ("entry T002/implement already exists,
+    skipping"), so T007's prompt still said T002's check failed and its
+    subagent refused. The executor leg appends through the same function: on
+    OpenCode's fix 02 the old findings line stayed in the log too, and T007
+    passed only because its runner happened to run the check itself.
+    """
+
+    FINDINGS = "(check findings — 1 problem(s): retries must be 3 (found 2); no file changed)"
+    VERIFIED = "(verified — the check passed, no file changed)"
+
+    def _log(self, out: str) -> None:
+        append(out, "T001", "implement", "Created src/config.json")
+        append(out, "T002", "implement", self.FINDINGS)
+        append(out, "T003", "implement", "Created src/app.js")
+
+    def test_the_newer_summary_is_what_every_reader_sees(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        self._log(out)
+        assert append(out, "T002", "implement", self.VERIFIED) is True
+
+        latest = read_entries(out)
+        assert [e["id"] for e in latest] == ["T001", "T003", "T002"]
+        assert latest[-1]["summary"] == self.VERIFIED
+        context = render(out, phase="implement")
+        assert self.VERIFIED in context
+        assert "retries must be 3" not in context
+
+    def test_the_cli_says_it_replaced_the_entry(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        self._log(out)
+        result = _append(out, "T002", "implement", self.VERIFIED)
+        assert result.returncode == 0
+        assert "Replaced entry T002/implement" in result.stderr
+        assert "already" not in result.stderr
+        read = _read(out).stdout
+        assert self.VERIFIED in read
+        assert "retries must be 3" not in read
+
+    def test_a_refused_task_that_later_ran_is_read_as_run(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        append(out, "T005", "implement", "(task failed — refused before dispatch: write policy)")
+        append(out, "T005", "implement", "Created src/vendor/stamp.js")
+        assert [e["summary"] for e in read_entries(out)] == ["Created src/vendor/stamp.js"]
+
+    def test_the_same_summary_again_writes_nothing(self, tmp_path: Path) -> None:
+        out = str(tmp_path)
+        self._log(out)
+        assert append(out, "T002", "implement", self.FINDINGS) is False
+        result = _append(out, "T002", "implement", self.FINDINGS)
+        assert "already says this" in result.stderr
+        assert len(_load_entries(_jsonl_path(out))) == 3
+
+    def test_history_keeps_the_superseded_line(self, tmp_path: Path) -> None:
+        from utils.prior_changes import history
+
+        out = str(tmp_path)
+        self._log(out)
+        append(out, "T002", "implement", self.VERIFIED)
+        assert [e["summary"] for e in history(out) if e["id"] == "T002"] == [
+            self.FINDINGS, self.VERIFIED,
+        ]
+
+    def test_another_phase_s_entry_under_the_same_id_is_untouched(
+        self, tmp_path: Path
+    ) -> None:
+        out = str(tmp_path)
+        append(out, "T002", "apply-task-suggestions", "edited T002's text")
+        self._log(out)
+        append(out, "T002", "implement", self.VERIFIED)
+        by_phase = {(e["id"], e["phase"]): e["summary"] for e in read_entries(out)}
+        assert by_phase[("T002", "apply-task-suggestions")] == "edited T002's text"
+        assert by_phase[("T002", "implement")] == self.VERIFIED

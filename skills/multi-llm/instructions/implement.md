@@ -474,7 +474,7 @@ your host.
      {normalized_summary}
      SUMMARY_EOF
      ```
-     `append` is idempotent on `(id, phase)` (a repeat prints a `Notice:` and exits 0). If it fails, log a warning and continue.
+     Append again whenever you record a task again (a check that ran again after its findings were fixed, a task refused before dispatch that later ran): the newer summary replaces the earlier one in every later task's prompt (`Replaced entry …` on stderr). The same summary twice is written once (a `Notice:`, exit 0). If it fails, log a warning and continue.
    - **Record metrics**: Run the metrics utility to store the subagent's metrics:
      ```bash
      uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics record \
