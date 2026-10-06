@@ -50,6 +50,15 @@ NOTICE_ONE_GROUP = (
     "straight to --implement skips it, and implement then works from the "
     "task list as it stands, without that change."
 )
+#: The same notice once a run of the phase started and did not finish: its
+#: command is a `--resume` that applies only what is left (fix round 19).
+NOTICE_ONE_GROUP_IN_PROGRESS = (
+    "review-tasks left 1 valid task suggestion group to apply, and a run of "
+    "--apply-task-suggestions started on it and has not finished. Run "
+    "--apply-task-suggestions --resume first to apply what that run has not "
+    "applied yet; going straight to --implement skips what is left, and "
+    "implement then works from the task list as it stands."
+)
 
 # --- fixture files --------------------------------------------------------
 
@@ -219,7 +228,7 @@ ROWS = [
      "review-tasks", None,
      A(f"--implement {P}",
        ("apply-task-suggestions", f"--apply-task-suggestions {P} --resume",
-        NOTICE_ONE_GROUP))),
+        NOTICE_ONE_GROUP_IN_PROGRESS))),
     ("rerun-review-code-while-apply-code-fixes-in-progress",
      S(UP_TO_CODE_REVIEW, tasks={"apply-fix-batch-0": "completed"}, files=CR_FINDING),
      "review-code", None,
