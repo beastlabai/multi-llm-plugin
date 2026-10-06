@@ -179,6 +179,103 @@ class TestTheNativeEtaEndsAtTheTasksDispatched:
         assert "metrics_progress" not in get_or_create_state(repo.plan).state
 
 
+#: A task held by two causes at once: T004 waits on the check T002 and on
+#: the code task T003 (fix round 19, review of round 18, #3).
+TWO_CAUSES = """# Two causes
+
+## Overview
+A task after a check and after a code task.
+
+## Tasks
+
+### T001: Edit: create the module
+Create it.
+- Depends on: none
+- Files to modify: src/main.py
+
+### T002: Check the module
+Run the release check. Read-only.
+- Depends on: T001
+- Files to modify: none
+
+### T003: Edit: add the greeting module
+Add the greeting.
+- Depends on: T001
+- Files to modify: src/main.py
+
+### T004: Edit: wire both together
+Wire them.
+- Depends on: T002, T003
+- Files to modify: src/main.py
+"""
+
+
+class TestATaskKeptOutForTwoReasons:
+    """Review of round 18, #3: `util batch-done` put a task back in the
+    `[ETA]` total when the record that took it out was replaced, although a
+    second cause still kept it from running, so the native line ended
+    "N/N+1" again."""
+
+    @staticmethod
+    def _repo(tmp_path, monkeypatch):
+        from tests.test_implement_stop_account import make_repo
+
+        return make_repo(tmp_path, monkeypatch, TWO_CAUSES)
+
+    @staticmethod
+    def _progress(repo) -> tuple:
+        progress = get_or_create_state(repo.plan).state["metrics_progress"]["implement"]
+        return progress["total_batches"], progress.get("withdrawn")
+
+    def _started(self, repo, capsys):
+        handoff, _out = _emit(repo, capsys)
+        assert handoff["tasks_to_dispatch"] == 4
+        code, _out, err = _util(
+            capsys, "metrics", "start", "--state-file", handoff["state_file"],
+            "--phase", "implement", "--total-batches", "4")
+        assert code == 0, err
+        self._done(repo, capsys, "T001", "--status", "completed")
+
+    @staticmethod
+    def _done(repo, capsys, task_id, *extra):
+        code, out, err = _util(
+            capsys, "batch-done", "--phase-dir", str(repo.phase_dir),
+            "--task-id", task_id, *extra)
+        assert code == 0, err
+        return out
+
+    def test_a_failed_task_retried_leaves_it_out_while_the_check_holds_it(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        repo = self._repo(tmp_path, monkeypatch)
+        self._started(repo, capsys)
+        self._done(repo, capsys, "T003", "--status", "failed", "--reason", "boom")
+        assert self._progress(repo) == (3, {"T004": "T003"})
+        self._done(repo, capsys, "T002", "--status", "completed", "--check",
+                   "findings", "--finding", FINDINGS[0])
+        assert self._progress(repo) == (3, {"T004": "T003"})
+        # The retried T003 succeeds; T002's findings still hold T004.
+        self._done(repo, capsys, "T003", "--status", "completed")
+        assert self._progress(repo) == (3, {"T004": "T002"})
+        # The check passes on a re-run: nothing keeps T004 out any more.
+        self._done(repo, capsys, "T002", "--status", "completed", "--check", "passed")
+        assert self._progress(repo) == (4, None)
+
+    def test_a_check_that_passes_leaves_it_out_while_its_other_upstream_failed(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        repo = self._repo(tmp_path, monkeypatch)
+        self._started(repo, capsys)
+        self._done(repo, capsys, "T002", "--status", "completed", "--check",
+                   "findings", "--finding", FINDINGS[0])
+        assert self._progress(repo) == (3, {"T004": "T002"})
+        self._done(repo, capsys, "T003", "--status", "failed", "--reason", "boom")
+        assert self._progress(repo) == (3, {"T004": "T002"})
+        # The check passes; T003 is still failed, so the host skips T004.
+        self._done(repo, capsys, "T002", "--status", "completed", "--check", "passed")
+        assert self._progress(repo) == (3, {"T004": "T003"})
+
+
 class TestTheExecutorEtaEndsAtTheTasksDispatched:
 
     def test_the_accept_path_counts_only_the_released_task(self, repo, capsys):
