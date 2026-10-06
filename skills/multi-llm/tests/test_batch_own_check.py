@@ -195,16 +195,17 @@ class TestAFailingCheckOfAnAppliedBatch:
 
         # The batch log line and the result's own lines.
         assert any(
-            "apply-fix-batch-0 applied, but a check it ran fails" in line
+            "apply-fix-batch-0 applied, but its own report says a check it ran fails" in line
             and FAILING in line for line in lines
         ), lines
         blob = "\n".join(result.messages)
         assert (
             f"{BATCH_CHECK_MARKER} apply-fix-batch-0: its edits were applied, "
-            f"but a check it ran on them fails (1 problem(s)): {FAILING}"
+            f"but its own report says a check it ran on them fails "
+            f"(1 problem(s)): \"{FAILING}\""
         ) in blob
-        assert "Not a clean finish: 1 batch(es) applied their edits but reported " \
-               "a failing check: apply-fix-batch-0" in blob
+        assert "Not a clean finish: 1 batch(es) applied their edits, but their own " \
+               "report says a check they ran fails: apply-fix-batch-0 (\"" in blob
 
         # The status mirror, the progress line and the notice a poll relays.
         mirror = json.loads((env.phase_dir / ".status.json").read_text())
@@ -253,12 +254,15 @@ class TestAFailingCheckOfAnAppliedBatch:
         blob = "\n".join(result.messages)
         assert (
             f"{BATCH_CHECK_MARKER} apply-fix-batch-0: its edits were applied, "
-            f"but its check could not run: npx: command not found"
+            f"but its own report says its check could not run: npx: command not found"
         ) in blob, blob
         assert "fails" not in blob.split(BATCH_CHECK_MARKER, 1)[1].splitlines()[0]
-        assert "Not a clean finish: 1 batch(es) applied their edits but their " \
-               "check could not run: apply-fix-batch-0" in blob, blob
-        assert any("applied, but its check could not run" in line for line in lines), lines
+        assert "Not a clean finish: 1 batch(es) applied their edits, but their own " \
+               "report says their check could not run: apply-fix-batch-0" in blob, blob
+        assert any(
+            "applied, but its own report says its check could not run" in line
+            for line in lines
+        ), lines
         assert "a failing check" not in write_result_notice(result)
         assert "### apply-fix-batch-0: its check could not run" in summary.read_text()
         from utils import run_status
@@ -286,6 +290,64 @@ class TestAFailingCheckOfAnAppliedBatch:
         assert outcome.skipped is True
         assert outcome.batch_check == [FAILING]
         assert resumed.batch_check_findings() == {"apply-fix-batch-0": [FAILING]}
+
+
+class TestACorrectedAttemptIsNotAFinding:
+    """Run 6, Codex racing 06r: T006 reported `check.passed: false` with
+    the one finding "The initial `node --check -` invocation used CommonJS
+    mode and failed on top-level await; the corrected `node
+    --input-type=module --check` syntax check passed." — a check that
+    passed. The plugin recorded "applied, its check fails" and the host
+    relayed a failing check that was not real. The contract now asks for
+    the last run of each check, and every surface says the claim is the
+    batch's own report and quotes it; a real failure is still recorded."""
+
+    T006 = (
+        "The initial `node --check -` invocation used CommonJS mode and failed "
+        "on top-level await; the corrected `node --input-type=module --check` "
+        "syntax check passed."
+    )
+
+    def test_the_contract_asks_for_the_last_run_of_each_check(self):
+        assert "Report the last run of each check." in WRITE_CHECK_CONTRACT
+        assert "an attempt you corrected is not a finding" in WRITE_CHECK_CONTRACT
+        assert ("`true` only when the last run of every check you ran passed"
+                in WRITE_CHECK_CONTRACT)
+        # A check task may correct only its own wrong form of the command
+        # the task names, never swap the check for another.
+        assert "Report the last run of each check." in CHECK_RESULT_CONTRACT
+        assert "ran it as the task names it" in CHECK_RESULT_CONTRACT
+        assert "the wrong form is not a finding" in CHECK_RESULT_CONTRACT
+
+    def test_a_reported_failure_is_quoted_as_the_batch_s_own_words(self, env):
+        lines = []
+        summary = env.phase_dir / "summary.md"
+        result = TestAFailingCheckOfAnAppliedBatch()._run(
+            env, {"passed": False, "findings": [self.T006]},
+            state=FakeState(env.tmp_path / "state.json"), lines=lines,
+            summary=str(summary),
+        )
+        # Never second-guessed: still applied with a failing check.
+        assert result.outcomes[0].batch_check == [self.T006]
+        quoted = f'"{self.T006}"'
+        blob = "\n".join(result.messages)
+        assert (
+            f"{BATCH_CHECK_MARKER} apply-fix-batch-0: its edits were applied, "
+            f"but its own report says a check it ran on them fails "
+            f"(1 problem(s)): {quoted}"
+        ) in blob, blob
+        notice = write_result_notice(result)
+        assert notice.startswith(
+            "not a clean finish: 1 batch(es) applied their edits, but their "
+            "own report says a check they ran fails: apply-fix-batch-0 (\""
+        ), notice
+        assert any(
+            "applied, but its own report says a check it ran fails (" + quoted
+            in line for line in lines
+        ), lines
+        text = summary.read_text(encoding="utf-8")
+        assert "each one's own closing report says a check it ran failed" in text
+        assert "in its own words" in text
 
 
 class TestAnImplementTaskWhoseOwnTestFails:
@@ -485,8 +547,8 @@ class TestImplementsResultLineSaysTheCheckFails:
         assert f"{BATCH_CHECK_MARKER} T001: its edits were applied" in out
         notice = parse_result_line(out)["notice"]
         assert notice.startswith(
-            "not a clean finish: 1 batch(es) applied their edits but reported a "
-            "failing check: T001 (")
+            "not a clean finish: 1 batch(es) applied their edits, but their own "
+            "report says a check they ran fails: T001 (\"")
         assert "Nothing ran this repository's tests: driver.verify_command is not set." in notice
         summary = (repo.phase_dir / "summary.md").read_text(encoding="utf-8")
         assert "### T001: a check it ran fails" in summary
@@ -541,8 +603,8 @@ class TestTheApplyReport:
         orch = self._orchestrator(tmp_path, self.ROWS, unverified=unverified_line(None))
         orch.print_write_outcome_summary()
         out = capsys.readouterr().out
-        assert "Not a clean finish: 1 batch(es) applied their edits but reported " \
-               "a failing check: apply-batch-0" in out
+        assert "Not a clean finish: 1 batch(es) applied their edits, but their own " \
+               "report says a check they ran fails: apply-batch-0" in out
         assert "apply-batch-0: ok (applied, its check fails)" in out
         assert "apply-batch-1: ok (applied)," in out
         assert "Nothing ran this repository's tests" in out

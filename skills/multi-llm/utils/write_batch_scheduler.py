@@ -274,8 +274,10 @@ __all__ = [
     "persist_human_task_plan",
     "resolve_human_task_plan",
     "run_write_phase",
+    "batch_check_line",
     "batch_check_section",
     "batch_check_summary",
+    "quoted_findings",
     "unverified_line",
     "write_result_notice",
     "verification_line",
@@ -383,11 +385,12 @@ def batch_check_section(
         batch_check_could_not_run(row_batch_check_findings(row)) for row in found
     )
     lines += [
-        "These batches applied their edits, then ran a check that failed "
-        + ("or could not run " if could_not else "")
-        + "(their own report says so). The edits are kept: look at each failure "
-        "before you go on — fix it by hand, or run review-code and then "
-        "apply-code-fixes.", "",
+        "These batches applied their edits, and each one's own closing report "
+        "says a check it ran failed"
+        + (" or could not run" if could_not else "")
+        + "; what it reported is listed under it, in its own words. The edits "
+        "are kept: look at each failure before you go on — fix it by hand, or "
+        "run review-code and then apply-code-fixes.", "",
     ]
     for row in found:
         lines.append(
@@ -398,6 +401,31 @@ def batch_check_section(
         lines.append("")
     lines.pop()
     return lines
+
+
+def quoted_findings(findings: Sequence[str], limit: int = 600) -> str:
+    """A batch's own check findings, each in double quotes and joined with
+    "; ", bounded at *limit* characters: the batch's words, shown as its words
+    (fix round 16)."""
+    return "; ".join(f'"{" ".join(str(item).split())}"' for item in findings)[:limit]
+
+
+def batch_check_line(task_id: str, findings: Sequence[str]) -> str:
+    """The :data:`BATCH_CHECK_MARKER` line for a code batch whose own report
+    says a check it ran fails, or could not run; both legs print it
+    (``WriteBatchScheduler._batch_check_lines``, ``util batch-done``). Fix
+    round 16 (Codex racing 06r): it says the claim is the batch's own report
+    and quotes it — T006's own words said its corrected check passed."""
+    if batch_check_could_not_run(findings):
+        return (
+            f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but its "
+            f"own report says {'; '.join(findings)[:600]}"
+        )
+    return (
+        f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but its own "
+        f"report says a check it ran on them fails ({len(findings)} "
+        f"problem(s)): {quoted_findings(findings)}"
+    )
 
 
 def write_result_notice(result: Any) -> Optional[str]:
@@ -426,19 +454,21 @@ def batch_check_summary(found: Dict[str, List[str]]) -> str:
     for task_id, findings in found.items():
         first = " ".join(str(findings[0]).split())[:160] if findings else ""
         more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
-        parts.append(f"{task_id} ({first}{more})")
+        # Fix round 16 (Codex racing 06r): quoted, so a reader sees the
+        # batch's own words — T006's said its corrected check passed.
+        parts.append(f'{task_id} ("{first}"{more})')
     count = len(found)
     # Fix round 15: a check that could not run is said so, never "failing".
     could_not = [batch_check_could_not_run(f) for f in found.values()]
     if all(could_not):
         said = "their check could not run"
     elif any(could_not):
-        said = "reported a check that failed or could not run"
+        said = "a check they ran failed or could not run"
     else:
-        said = "reported a failing check"
+        said = "a check they ran fails"
     return (
-        f"{count} batch(es) applied their edits but {said}: "
-        + "; ".join(parts) + "."
+        f"{count} batch(es) applied their edits, but their own report says "
+        f"{said}: " + "; ".join(parts) + "."
     )[:900]
 
 #: How much of the verification command's output travels in the result payload,
@@ -2042,10 +2072,15 @@ WRITE_CHECK_CONTRACT = (
     '{"check": {"passed": false, "findings": ["<one failing check: the '
     'command and what it reported>"]}}\n'
     "```\n\n"
-    "- `passed`: the JSON boolean `true` only when every check you ran "
-    "passed, else `false`.\n"
-    "- `findings`: one string per check that failed; `[]` when `passed` is "
-    "`true`.\n\n"
+    "- `passed`: the JSON boolean `true` only when the last run of every "
+    "check you ran passed, else `false`.\n"
+    "- `findings`: one string per check whose last run failed; `[]` when "
+    "`passed` is `true`.\n\n"
+    "Report the last run of each check. A run that failed because of how you "
+    "ran it (a wrong flag, mode or path) and that you then ran correctly is "
+    "reported by the corrected run, and so is a check you ran again after "
+    "fixing what it found: an attempt you corrected is not a finding. Never "
+    "describe a passing run as a finding.\n\n"
     "Report a failing check here even when you think your change did not "
     "cause it: the batch is then recorded as applied with a failing check, "
     "and the user is told, instead of the run reporting a clean success. "
@@ -2078,6 +2113,10 @@ CHECK_RESULT_CONTRACT = (
     "ran and met its acceptance criteria, else `false`.\n"
     "- `findings`: one string per problem a check reported; `[]` when "
     "`passed` is `true`.\n\n"
+    "Report the last run of each check. If you ran a check in a wrong form of "
+    "your own (a wrong flag or mode for the command the task names) and then "
+    "ran it as the task names it, report that run: the wrong form is not a "
+    "finding.\n\n"
     "A problem a check finds is a finding, not a failure: do not fix it and "
     "do not answer `failed` for it. The findings are recorded for the code "
     "review, and the tasks that depend on this check wait until they are "
@@ -3374,17 +3413,7 @@ class WriteBatchScheduler:
         found = result.batch_check_findings()
         if not found:
             return []
-        lines = [
-            (
-                f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but "
-                f"{'; '.join(findings)[:600]}"
-                if batch_check_could_not_run(findings) else
-                f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but a "
-                f"check it ran on them fails ({len(findings)} problem(s)): "
-                f"{'; '.join(findings)[:600]}"
-            )
-            for task_id, findings in found.items()
-        ]
+        lines = [batch_check_line(task_id, findings) for task_id, findings in found.items()]
         where = (
             f" They are listed under Check Findings in {result.summary_file}."
             if result.summary_file else ""
@@ -6225,8 +6254,9 @@ class WriteBatchScheduler:
                 )
             elif outcome.ok and outcome.batch_check:
                 verdict = (
-                    f"{verdict}, but {batch_check_words(outcome.batch_check)} "
-                    f"({'; '.join(outcome.batch_check)[:300]})"
+                    f"{verdict}, but its own report says "
+                    f"{batch_check_words(outcome.batch_check)} "
+                    f"({quoted_findings(outcome.batch_check, 300)})"
                 )
             elif outcome.write_outcome and not outcome.ok:
                 # Plan step 3: a failed batch whose write outcome reads
