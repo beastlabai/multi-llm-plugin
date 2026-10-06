@@ -976,6 +976,29 @@ class TestNativeTransportPreconditions:
         assert resolved is None
         assert marker != so.MARKER_NATIVE
 
+    def test_an_adapter_declaring_no_support_is_not_warned_about(self, capsys):
+        """Run 6 (#11c): "[WARN] structured output: opencode declares no
+        structured_output_support" opened every generate-tasks log. It guards
+        no choice: such an adapter always takes the prompt-level path, and
+        the result says `recovered`. A schema an adapter that does carry one
+        cannot take is still warned about, once."""
+        from utils.provider_registry import _PROVIDERS
+
+        so.reset_declined_cache()
+        try:
+            resolved, marker = so.schema_for_dispatch(
+                _PROVIDERS["opencode"], "generate-tasks")
+            assert (resolved, marker) == (None, so.MARKER_RECOVERED)
+            assert "structured output" not in capsys.readouterr().err
+
+            so.schema_for_dispatch(ClaudeCodeProvider(), "code-review")
+            so.schema_for_dispatch(ClaudeCodeProvider(), "code-review")
+            warned = [line for line in capsys.readouterr().err.splitlines()
+                      if "[WARN] structured output" in line]
+            assert len(warned) == 1 and "root type" in warned[0]
+        finally:
+            so.reset_declined_cache()
+
 
 #: codex-cli 0.160.0 `exec --json --output-schema <file>`, captured 2026-10-05
 #: verbatim from the real binary driven at a localhost Responses stub (zero
