@@ -59,7 +59,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from . import prior_changes as _prior_changes
-    from .git_utils import pin_repo_root, worktree_file_stats
+    from .git_utils import pin_repo_root, worktree_file_stats, worktree_fingerprint
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import ExecutorError, ResultRejected
     from .subagent_tasks import (
@@ -67,6 +67,7 @@ try:
     )
     from .write_batch_scheduler import (
         SWEEP_MAX_FILES,
+        accepted_upstream_checks,
         bind_prior_changes,
         decomposition_graph,
         is_check_task,
@@ -78,7 +79,9 @@ try:
     from .write_safety import PolicyViolation, WritePolicy, relative_to_root
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
-    from utils.git_utils import pin_repo_root, worktree_file_stats  # type: ignore
+    from utils.git_utils import (  # type: ignore
+        pin_repo_root, worktree_file_stats, worktree_fingerprint,
+    )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import ExecutorError, ResultRejected  # type: ignore
     from utils.subagent_tasks import (  # type: ignore
@@ -86,6 +89,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.write_batch_scheduler import (  # type: ignore
         SWEEP_MAX_FILES,
+        accepted_upstream_checks,
         bind_prior_changes,
         decomposition_graph,
         is_check_task,
@@ -102,7 +106,9 @@ except ImportError:  # pragma: no cover - direct script invocation
 __all__ = [
     "MARKER_REFUSED",
     "PROMPTS_SUBDIR",
+    "check_tree_fingerprint",
     "policy_refusal",
+    "policy_refusal_for",
     "WritePromptError",
     "check_tree_path",
     "changed_since_bound",
@@ -212,7 +218,10 @@ def render_write_prompt(
     # executor leg's `WriteBatchScheduler` (output_dir=<plan dir>) appends.
     output_dir = str(phase_dir.parent)
     try:
-        bound = bind_prior_changes(task, output_dir=output_dir, phase=phase)
+        bound = bind_prior_changes(
+            task, output_dir=output_dir, phase=phase,
+            accepted_checks=_accepted_checks(phase_dir, document, task_id),
+        )
     except ResultRejected as exc:
         raise WritePromptError(str(getattr(exc, "message", exc))) from exc
     text = with_result_contract(kind, task, bound)
@@ -228,6 +237,27 @@ def render_write_prompt(
         "context_entries": len(entries),
     }
     return text, task, info
+
+
+def _accepted_checks(
+    phase_dir: Path, document: Dict[str, Any], task_id: str,
+) -> List[Tuple[str, str, List[str]]]:
+    """The checks upstream of an implement task whose findings the user
+    accepted (``write_batch_scheduler.accepted_upstream_checks``), from the
+    plan dir's ``state.json`` as it is now — what the executor leg reads at
+    dispatch (fix round 14). ``[]`` for any other kind, or a state that
+    cannot be read: the note is advisory and never a refusal."""
+    if str(document.get("kind") or "") != "implement":
+        return []
+    try:
+        state = json.loads((phase_dir.parent / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(state, dict):
+        return []
+    return accepted_upstream_checks(
+        document.get("batches") or document.get("tasks") or [], task_id, state,
+    )
 
 
 #: The warning a prompt bound out of order prints (stderr; never a refusal).
@@ -254,14 +284,36 @@ def policy_refusal(phase_dir: Path, task_id: str) -> Optional[str]:
     phase_dir = Path(os.path.abspath(str(phase_dir)))
     try:
         document, task = load_write_task(phase_dir, task_id)
+    except Exception:  # noqa: BLE001 - never refuse on a task file that cannot be read
+        return None
+    return policy_refusal_for(
+        task, plan_file=str(document.get("plan_file") or "") or None,
+        anchor_dir=phase_dir,
+    )
+
+
+def policy_refusal_for(
+    task: Dict[str, Any], *, plan_file: Optional[str], anchor_dir: Path,
+) -> Optional[str]:
+    """:func:`policy_refusal` for a materialized write task in hand.
+
+    What the native implement emit asks of every task before it hands the
+    task out (fix round 14: a task the policy refuses is recorded failed and
+    left out of the batches, as the executor refuses it before dispatch).
+    *anchor_dir* is any directory inside the repository (the phase dir, or
+    the plan's output folder before the phase dir exists).
+    """
+    try:
         declared = declared_file_set(task)
         if not declared:
             return None
-        root, problem = pin_repo_root(str(phase_dir))
+        anchor = Path(os.path.abspath(str(anchor_dir)))
+        while not anchor.exists() and anchor.parent != anchor:
+            anchor = anchor.parent
+        root, problem = pin_repo_root(str(anchor))
         if root is None or problem:
             return None
-        anchor = str(document.get("plan_file") or "") or None
-        policy = WritePolicy.load(root, anchor=anchor)
+        policy = WritePolicy.load(root, anchor=plan_file)
         policy.check(
             [relative_to_root(path, root) for path in declared], when="pre-dispatch",
         )
@@ -444,6 +496,38 @@ def _tree_now(phase_dir: Path) -> Optional[Tuple[str, Dict[str, List[int]]]]:
     return root, {path: [size, mtime] for path, (size, mtime) in stats.items()}
 
 
+def check_tree_fingerprint(phase_dir: Path) -> Optional[str]:
+    """One digest of the files git sees, the plugin's own trees left out.
+
+    ``git_utils.worktree_fingerprint`` with the exclusions the executor's
+    ``WriteBatchScheduler._tree_fingerprint`` uses (the phase dir, the plan's
+    output folder, ``.multi-llm/``), so both legs mean the same thing by "the
+    files changed". The native leg stamps it on a check with findings
+    (``util batch-done``, re-stamped by ``util finalize-tracking`` with the
+    tree the run left) and compares it on ``--resume`` before handing the
+    check out again (fix round 14). ``None`` when the repository cannot be
+    pinned or read: a caller then runs the check again rather than guess.
+    """
+    anchor = Path(os.path.abspath(str(phase_dir)))
+    while not anchor.exists() and anchor.parent != anchor:
+        anchor = anchor.parent
+    try:
+        root, problem = pin_repo_root(str(anchor))
+    except Exception:  # noqa: BLE001 - the guard is never a crash
+        return None
+    if root is None or problem:
+        return None
+    try:
+        return worktree_fingerprint(
+            root,
+            exclude_prefixes=_tree_exclusions(
+                Path(os.path.abspath(str(phase_dir))), root,
+            ),
+        )
+    except Exception:  # noqa: BLE001 - advisory
+        return None
+
+
 def record_check_tree(phase_dir: Path, task_id: str) -> Optional[Path]:
     """Record the tree a check task's prompt is bound against; the path, or
     ``None`` when the tree cannot be read (an earlier record is removed then,
@@ -577,7 +661,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"depend on {check_id}, close the phase without --mark-completed, "
             f"and report the way forward: fix what {check_id} reported and "
             f"re-run implement with --resume (the check runs again), or accept "
-            f"its findings with --resume --human-task {check_id}=done.",
+            f"its findings with --resume --human-task {check_id}=done (the held "
+            f"tasks then run, told that the findings were accepted).",
             file=sys.stderr,
         )
         return 3

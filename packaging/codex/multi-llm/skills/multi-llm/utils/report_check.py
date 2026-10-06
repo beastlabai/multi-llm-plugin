@@ -9,8 +9,11 @@ prints the next step as a block of marker lines above its result line::
     [NEXT_COMMAND] <command>
     [NEXT_COMMAND_OPTIONAL_WHY] <why>
     [NEXT_COMMAND_OPTIONAL] <command>
+    [NEXT_COMMAND_ANSWERS_WHY] <why>
+    [NEXT_COMMAND_ANSWERS] <command>
 
-or ``[WORKFLOW_COMPLETE]``, followed by one ``[MANUAL_TASK] <id> <title>`` line per
+(the answers pair only from ``util next-command`` on a stopped implement,
+fix round 14), or ``[WORKFLOW_COMPLETE]``, followed by one ``[MANUAL_TASK] <id> <title>`` line per
 implement task the run deferred to the user. The model is told to end its report
 with each command in a fenced block, copied character for character, or with
 "Workflow complete." and those tasks listed. This checks the copy, and only the
@@ -26,8 +29,9 @@ copy:
 * A marker counts only at the start of a line, which is where the emitter puts
   it. An indented example of the block (a plan or a doc quoting it, read by a
   tool) is not a phase result.
-* It passes when every command of that block (the ``[NEXT_COMMAND]`` one and
-  each ``[NEXT_COMMAND_OPTIONAL]`` one) is, byte for byte, a line inside a
+* It passes when every command of that block (the ``[NEXT_COMMAND]`` one,
+  each ``[NEXT_COMMAND_OPTIONAL]`` one and the ``[NEXT_COMMAND_ANSWERS]`` one)
+  is, byte for byte, a line inside a
   fenced code block of the final assistant message. Only the whitespace around
   a line is ignored, so a fence nested in a list item still counts. For
   ``[WORKFLOW_COMPLETE]`` it passes when the message says "Workflow complete."
@@ -60,9 +64,18 @@ copy:
 * On a miss it prints exactly one line, ``{"decision": "block", "reason": …}``,
   the one form Claude Code reads as a ``Stop`` decision. The reason names each
   missing command in its own fenced block and asks for it copied exactly (and
-  repeats the block's other commands, since the reply becomes the final
-  message). The model gets one more turn: the hook script exits at once when
-  ``stop_hook_active`` is true, and so does this.
+  repeats the block's other commands), and it asks for the whole report again
+  (:data:`WHOLE_REPORT`), since the reply becomes the final message: racing
+  run 5's block got back the `### Next Steps` section alone, and the run's
+  result lost its report. The model gets one more turn: the hook script exits
+  at once when ``stop_hook_active`` is true, and so does this.
+* The interactive UI labels a block "Stop hook error occurred" (a
+  ``stop-hook-error`` notification in a ``stream-json`` stream). Measured on
+  racing run 5 (Claude Code 2.1.289): it fired only in the round this hook
+  blocked, while the hook's own record read exit 0, empty stderr, the one
+  JSON line on stdout and ``outcome: success`` — so the label is Claude
+  Code's word for a block, not a fault in this hook, and no documented
+  output field turns it off.
 
 **Advisory, so every error passes silently.** An unreadable or malformed
 transcript, a bad argument, a missing file: exit 0 and no output. A check that
@@ -99,6 +112,10 @@ except ImportError:  # direct script invocation
 NEXT_COMMAND = "[NEXT_COMMAND] "
 NEXT_COMMAND_OPTIONAL = "[NEXT_COMMAND_OPTIONAL] "
 NEXT_COMMAND_OPTIONAL_WHY = "[NEXT_COMMAND_OPTIONAL_WHY] "
+#: A stopped implement's one combined answer (``util next-command``, fix
+#: round 14), after the primary and any optional entries.
+NEXT_COMMAND_ANSWERS = "[NEXT_COMMAND_ANSWERS] "
+NEXT_COMMAND_ANSWERS_WHY = "[NEXT_COMMAND_ANSWERS_WHY] "
 WORKFLOW_COMPLETE = "[WORKFLOW_COMPLETE]"
 #: One per implement task the run deferred, under ``[WORKFLOW_COMPLETE]``:
 #: ``<id> <title>`` (``next_phase.MANUAL_TASK_MARKER``).
@@ -148,6 +165,8 @@ class Block:
         self.command = command
         #: ``(why, command)`` pairs, in the order the block printed them.
         self.optional: List[tuple] = []
+        #: ``(why, command)``: the combined answers line, when printed.
+        self.answers: List[tuple] = []
         #: ``(id, title)`` pairs a ``[WORKFLOW_COMPLETE]`` block names: the
         #: manual tasks the user still owes (``title`` may be ``""``).
         self.manual: List[tuple] = []
@@ -156,7 +175,11 @@ class Block:
         """Every command the report has to carry: the primary one first."""
         if self.complete or self.command is None:
             return []
-        return [self.command] + [command for _why, command in self.optional]
+        return (
+            [self.command]
+            + [command for _why, command in self.optional]
+            + [command for _why, command in self.answers]
+        )
 
 
 def find_blocks(text: str) -> List[Block]:
@@ -185,6 +208,13 @@ def find_blocks(text: str) -> List[Block]:
             pending_why = None
         elif line.startswith(NEXT_COMMAND_OPTIONAL_WHY):
             pending_why = line[len(NEXT_COMMAND_OPTIONAL_WHY):].strip()
+        elif line.startswith(NEXT_COMMAND_ANSWERS_WHY):
+            pending_why = line[len(NEXT_COMMAND_ANSWERS_WHY):].strip()
+        elif line.startswith(NEXT_COMMAND_ANSWERS):
+            command = line[len(NEXT_COMMAND_ANSWERS):].strip()
+            if current is not None and not current.complete and command:
+                current.answers.append((pending_why, command))
+            pending_why = None
         elif line.startswith(NEXT_COMMAND_OPTIONAL):
             command = line[len(NEXT_COMMAND_OPTIONAL):].strip()
             if current is not None and not current.complete and command:
@@ -258,6 +288,19 @@ def missing_commands(block: Block, message: str) -> List[str]:
     return missing
 
 
+#: What every block reason asks for (fix round 14, racing run 5 Claude Code
+#: 08): the reply after a block is what the run's final message becomes, and
+#: a reason that asked for "your report's `### Next Steps` section" got back
+#: that section alone, so the run's result lost the report it had written
+#: (what was fixed, skipped and left out). The whole report is asked for again.
+WHOLE_REPORT = (
+    "Your next reply replaces your last message as the run's final message, "
+    "so send your whole report again — everything your last message said "
+    "(what ran, what changed, what was skipped, failed or left out, the files "
+    "and the counts), unchanged — and end it with"
+)
+
+
 def block_reason(block: Block, missing: Sequence[str]) -> str:
     """The text the model reads when the hook blocks its stop."""
     if block.complete:
@@ -265,8 +308,8 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
             return (
                 "multi-llm report check: the last phase result in this turn printed "
                 f"{WORKFLOW_COMPLETE}, and your final message does not say "
-                f'"{COMPLETE_SENTENCE}". Reply now with your report\'s '
-                f'`### Next Steps` section, saying "{COMPLETE_SENTENCE}" and '
+                f'"{COMPLETE_SENTENCE}". {WHOLE_REPORT} its '
+                f'`### Next Steps` section saying "{COMPLETE_SENTENCE}" and '
                 "carrying no multi-llm command."
             )
         # The reply replaces the final message, so it is told the whole
@@ -287,8 +330,8 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         return (
             "multi-llm report check: the last phase result in this turn printed "
             f"{WORKFLOW_COMPLETE} with the manual tasks the run deferred to the "
-            f"user, and your final message {' and '.join(lacks)}. Reply now "
-            f"with your report's `### Next Steps` section, saying "
+            f"user, and your final message {' and '.join(lacks)}. {WHOLE_REPORT} "
+            f"its `### Next Steps` section saying "
             f'"{COMPLETE_SENTENCE}" and then listing each of these manual '
             "tasks, its id and title, as the user's to do (the plugin will not "
             "run them), carrying no multi-llm command:\n\n" + listed
@@ -297,11 +340,13 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
     parts = [
         "multi-llm report check: the last phase result in this turn printed "
         f"the next step, and your final message does not carry the {noun} "
-        "below exactly. Reply now with your report's `### Next Steps` "
+        f"below exactly. {WHOLE_REPORT} its `### Next Steps` "
         "section, with each command in its own fenced code block, "
-        "copied character for character from its [NEXT_COMMAND] or "
-        "[NEXT_COMMAND_OPTIONAL] line (optional commands after the main one, "
-        "under the line \"Optional, before that:\", each with its why). Do not "
+        "copied character for character from its [NEXT_COMMAND], "
+        "[NEXT_COMMAND_OPTIONAL] or [NEXT_COMMAND_ANSWERS] line (optional "
+        "commands after the main one, under the line \"Optional, before "
+        "that:\", each with its why; the answers command last, with its why). "
+        "Do not "
         "rebuild, shorten, re-quote or rephrase a command, and do not run it: "
         "it is for the user to type.",
         f"Missing {noun}:",

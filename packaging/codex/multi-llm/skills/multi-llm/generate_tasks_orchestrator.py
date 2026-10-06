@@ -763,8 +763,10 @@ def run_generate_tasks(
 
     # Native-subagent host: run `task.prompt`, write the reply to the task's
     # output_path, then hand back exactly one follow-up command (D1c).
+    # The plan as the user typed it (fix round 14: the host ran and quoted
+    # the absolute path).
     follow_up = cli_common.retry_command(
-        MODE_NAME, plan_path, "--reaggregate",
+        MODE_NAME, cli_common.typed_plan_for(plan_path), "--reaggregate",
         flags=cli_common.current_replay_flags(mode=MODE_NAME),
     )
     print(f"\nRun the prompt in {task_file}, write the reply to {result_path},")

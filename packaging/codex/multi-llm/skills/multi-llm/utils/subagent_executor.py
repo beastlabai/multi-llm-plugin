@@ -166,10 +166,14 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STOP_BUDGET,
         STOP_DEADLINE,
         REPAIR_SCHEMA_INVALID,
+        RESEND_NOTHING_CHANGED,
         RetryLadder,
         budget_exhausted_reason,
     )
-    from .subagent_prompts import build_schema_repair_prompt
+    from .subagent_prompts import (
+        build_nothing_changed_resend_prompt,
+        build_schema_repair_prompt,
+    )
     from .schema_validator import (
         validate_human_decision_verdicts,
         validate_with_schema_file,
@@ -178,6 +182,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         KINDS,  # noqa: F401 - re-exported for callers that read it off this module
         READ_KINDS,
         WRITE_KINDS,
+        declared_file_set,
         preferred_prompt_transport,
         refuse_reason,
         tasks_of,
@@ -293,10 +298,14 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STOP_BUDGET,
         STOP_DEADLINE,
         REPAIR_SCHEMA_INVALID,
+        RESEND_NOTHING_CHANGED,
         RetryLadder,
         budget_exhausted_reason,
     )
-    from utils.subagent_prompts import build_schema_repair_prompt
+    from utils.subagent_prompts import (
+        build_nothing_changed_resend_prompt,
+        build_schema_repair_prompt,
+    )
     from utils.schema_validator import (
         validate_human_decision_verdicts,
         validate_with_schema_file,
@@ -305,6 +314,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         KINDS,  # noqa: F401 - re-exported for callers that read it off this module
         READ_KINDS,
         WRITE_KINDS,
+        declared_file_set,
         preferred_prompt_transport,
         refuse_reason,
         tasks_of,
@@ -576,7 +586,12 @@ SCHEMA_PHASE_BY_KIND = {
 #:   original prompt is not re-sent, the runner restates its own previous
 #:   reply without touching a file, and the dispatch fails as a partial
 #:   application if any file moved during it (``tree_fingerprint``).
-#:   ``implement`` keeps rung 6 terminal.
+#: * ``implement`` (fix round 14, OpenCode racing run 5): T013 edited
+#:   ``index.html`` for 442 s, replied in prose ("No valid JSON found in
+#:   text"), and the stop called a finished edit a partial application. The
+#:   same report re-ask, with the same guards: it restates the report and
+#:   edits nothing, a file it moves makes the dispatch a partial application,
+#:   and the byte comparison still decides what was applied.
 #:
 #: Validation and consolidation keep rung 6 terminal: a batch is one of many
 #: and fails alone. A kind listed here must have a shape in
@@ -586,6 +601,7 @@ SCHEMA_REPAIRS_BY_KIND = {
     "apply_suggestions": 1,
     "apply_task_suggestions": 1,
     "apply_code_fixes": 1,
+    "implement": 1,
 }
 
 
@@ -593,10 +609,27 @@ def schema_phase_for_kind(kind: str) -> Optional[str]:
     """The §4.2.2 phase whose schema governs ``kind``'s result, or ``None``."""
     return SCHEMA_PHASE_BY_KIND.get(kind)
 
+
+#: The ladder's rule 9, granted per kind: how many times a write batch whose
+#: reply said ``applied`` while not one byte moved is sent again, told so,
+#: before it is recorded failed (fix round 14, OpenCode racing run 5: T016
+#: said ``applied`` and named ``index.html``, the file was unchanged, and the
+#: task was recorded completed). Every write kind, because the classification
+#: is shared; the scheduler's ``nothing_changed`` hook is what decides an
+#: attempt qualifies (never a check task, which changes nothing by design).
+RESENDS_BY_KIND = {
+    "apply_suggestions": 1,
+    "apply_task_suggestions": 1,
+    "apply_code_fixes": 1,
+    "implement": 1,
+}
+
 #: The four D3g write outcomes, plus the D3l containment failure. Recorded on the
-#: outcome as its own axis rather than being folded into ``status``, because
-#: "applied" and "clean failure" are both successful *dispatches* that the loop
-#: continues past, while "partial application" and "policy violation" stop it.
+#: outcome as its own axis rather than being folded into ``status``. "Applied"
+#: and "no-op" are dispatches the loop continues past; "clean failure" (nothing
+#: moved and the work is not done: a ``failed`` claim, a crash, or — since fix
+#: round 14 — an ``applied`` claim no byte backs, after its one re-send) is
+#: never ``ok``, and "partial application" and "policy violation" stop it too.
 WRITE_APPLIED = "applied"
 WRITE_CLEAN_FAILURE = "clean-failure"
 #: The runner said ``no-op`` and the byte comparison agrees. Its own outcome
@@ -773,8 +806,10 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     Lenient on shape, strict on meaning (fix round 11). The schema admits
     any ``check``, because a near-miss shape (``passed: "false"``,
     ``findings: "one problem"``, a number as a finding) used to be a
-    ``schema_invalid`` reply, and implement has no report re-ask, so the run
-    stopped for good on a check that had answered. Each shape is read here
+    ``schema_invalid`` reply, and implement had no report re-ask then, so the
+    run stopped for good on a check that had answered (it has one since fix
+    round 14; the lenient reading stays, so a near-miss costs no re-ask).
+    Each shape is read here
     instead, and only a clear pass with nothing listed is a pass: a finding
     beside ``passed: true`` still counts, ``passed: false`` with none listed
     gets :data:`CHECK_FAILED_WITHOUT_FINDINGS`, and a ``check`` that says
@@ -826,6 +861,37 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     if passed is False:
         return [CHECK_FAILED_WITHOUT_FINDINGS]
     return [CHECK_RESULT_UNKNOWN]
+
+
+def batch_check_findings(result: Any) -> Optional[List[str]]:
+    """What a code-writing batch's own ``check`` object says about the checks
+    it ran on its edits (fix round 14), read as :func:`check_findings_from`
+    reads a check task's.
+
+    ``None`` when the reply reports no usable check — no ``check`` key, or one
+    that says neither whether it passed nor what failed (``{}``, ``null``): the
+    contract asks a batch for ``check`` only when it ran one, so saying nothing
+    is not a finding here, as it is for a check task, whose whole answer it
+    is. ``[]`` for a clear pass; else the failing checks, bounded. Codex
+    racing run 5 (2026-10-06): an apply-code-fixes batch wrote "the bundled
+    test fails" in its free-text ``notes``, the repository's test failed
+    afterwards, and the run reported every fix applied. Never read from
+    ``notes``.
+    """
+    findings = check_findings_from(result)
+    if findings is None:
+        return None
+    if findings and findings[0].startswith(CHECK_RESULT_UNKNOWN):
+        return None
+    return findings
+
+
+def row_batch_check_findings(row: Dict[str, Any]) -> List[str]:
+    """A serialized row's own-check findings (its ``batch_check``), else ``[]``."""
+    check = row.get("batch_check") if isinstance(row, dict) else None
+    if not isinstance(check, dict):
+        return []
+    return [str(item) for item in (check.get("findings") or []) if str(item)]
 
 
 def row_outcome_label(row: Dict[str, Any]) -> Optional[str]:
@@ -1057,7 +1123,7 @@ class TaskOutcome:
     skipped: bool = False
     #: D3g, write kinds only: which of the four outcomes the snapshot/diff
     #: classification landed on. Its own axis rather than a status, because
-    #: `applied` and `clean-failure` are both dispatches the loop continues past.
+    #: the status says whether the loop goes on and this says what the bytes did.
     write_outcome: Optional[str] = None
     #: The files the post-run byte comparison actually observed as changed — the
     #: set the write policy is enforced against, never the runner's own claim.
@@ -1108,6 +1174,18 @@ class TaskOutcome:
     #: ``[]`` when the check passed, else what the check found. Non-empty on a
     #: ``no-op`` makes the label ``check-findings`` (racing re-run 4).
     check_findings: Optional[List[str]] = None
+    #: A code-writing batch's own ``check`` (:func:`batch_check_findings`):
+    #: the checks it ran on its edits. ``None`` when its reply reported none,
+    #: ``[]`` when they passed, else what failed. Its own axis, never
+    #: ``check_findings``: a write task whose test fails holds nothing back,
+    #: but an ``ok`` row carrying findings is never reported as a plain
+    #: success (fix round 14).
+    batch_check: Optional[List[str]] = None
+    #: A write batch whose reply said ``applied`` while no byte moved, after
+    #: its one re-send (the ladder's rule 9): a ``clean-failure`` that is
+    #: never ``ok``, worded on the stop as a change that did not land (fix
+    #: round 14). ``False`` for every other outcome.
+    applied_without_changes: bool = False
 
     @property
     def ok(self) -> bool:
@@ -1177,10 +1255,16 @@ class TaskOutcome:
                 out["outcome_label"] = self.outcome_label
                 if self.check_findings is not None:
                     out["check"] = check_record(self.check_findings)
+            if self.batch_check is not None:
+                # Additive and only here, so a row whose reply ran no check
+                # is unchanged.
+                out["batch_check"] = check_record(self.batch_check)
             if self.runner_notes:
                 out["runner_notes"] = self.runner_notes
             if self.not_rerun:
                 out["not_rerun"] = True
+            if self.applied_without_changes:
+                out["applied_without_changes"] = True
             out["files_touched"] = list(self.files_touched)
             if self.summary:
                 out["summary"] = self.summary
@@ -6589,6 +6673,7 @@ def dispatch_task(
     changed_files: Optional[Callable[[Dict[str, Any]], Sequence[str]]] = None,
     jail_request: Optional[JailRequest] = None,
     tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]] = None,
+    nothing_changed: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
 ) -> TaskOutcome:
     """Dispatch one task and return its :class:`TaskOutcome` (D3k classified).
 
@@ -6672,7 +6757,7 @@ def dispatch_task(
             with one ``[JAIL_DENIED]`` line, never retried and never moved to
             another rung.
         tree_fingerprint: The write lane's guard on a report re-ask (the
-            ladder's rule 7 for an apply kind, :data:`SCHEMA_REPAIRS_BY_KIND`).
+            ladder's rule 7 for a write kind, :data:`SCHEMA_REPAIRS_BY_KIND`).
             Called with ``{task, task_id, kind, cwd, outcome}`` just before the
             re-ask and again after it; it returns a comparable value naming the
             current bytes of every file the batch may have moved (a dict keyed
@@ -6680,6 +6765,18 @@ def dispatch_task(
             that raises — records the re-ask ``partial_application``: it was
             asked only to restate the batch's report, so a file it moved is an
             edit nobody verified. Without the hook a write kind gets no re-ask.
+        nothing_changed: The write lane's question before ``after_result``
+            (the ladder's rule 9, :data:`RESENDS_BY_KIND`, fix round 14),
+            with the ``after_result`` context: why this schema-valid reply
+            said ``applied`` while not one byte moved, or ``None`` when that
+            is not the case (any byte moved, a check task, a crash, a jail
+            denial — the classification decides those). A reason, while the
+            allowance holds a re-send the deadline admits, sends the batch's
+            own prompt once more with
+            :func:`subagent_prompts.build_nothing_changed_resend_prompt`
+            appended, instead of classifying the attempt; it is recorded
+            ``batch_failed`` with that reason and a failure capture. A hook
+            that raises is "no re-send": the classification decides.
     """
     task_id = str(task.get("task_id", ""))
     kind = str(task.get("kind", ""))
@@ -6851,12 +6948,21 @@ def dispatch_task(
         envelope=getattr(provider, "internal_retries", None),
         now=time.monotonic,
         schema_repairs=SCHEMA_REPAIRS_BY_KIND.get(kind, 0),
+        resends=(
+            RESENDS_BY_KIND.get(kind, 0)
+            if nothing_changed is not None and after_result is not None else 0
+        ),
     )
     # What this attempt sends: the task's prompt, until the ladder grants the
     # schema-repair re-ask and it becomes that prompt plus the validator's
     # errors. A transport retry after the re-ask re-sends the re-ask.
     attempt_prompt = prompt
     attempt_repair: Optional[str] = None
+    # Rule 9's re-send (fix round 14) is the batch again, not a re-ask: it
+    # keeps every guard a first dispatch has (the pre-retry check included),
+    # so it is marked on the attempt it produced and nowhere else.
+    attempt_resend: Optional[str] = None
+    resend_note: Optional[str] = None
     # A write kind's report re-ask: the files' state when it was granted, which
     # the re-ask must leave exactly as it found it (`tree_fingerprint`).
     repair_baseline: Any = None
@@ -7035,13 +7141,78 @@ def dispatch_task(
                     data = None
                 else:
                     outcome.output_path = written
+                    result_context = {
+                        "task": task,
+                        "task_id": task_id,
+                        "kind": kind,
+                        "profile": profile,
+                        "runner": runner,
+                        "cwd": cwd,
+                        "attempt": attempt_index,
+                        "prompt": attempt_prompt,
+                        "result": data,
+                        "exit_code": capture.exit_code,
+                        **_jail_hook_context(capture, jail_request, fallback),
+                    }
+                    resend_why = (
+                        _ask_nothing_changed(nothing_changed, result_context)
+                        if ladder.resends_left > 0 else None
+                    )
+                    if resend_why:
+                        resend = ladder.record_resend()
+                        if resend.retry:
+                            # Rule 9: nothing moved, so the batch goes again,
+                            # told so; this attempt is not classified.
+                            outcome.attempts.append(Attempt(
+                                index=attempt_index,
+                                status=STATUS_BATCH_FAILED,
+                                exit_code=capture.exit_code,
+                                duration_seconds=capture.duration,
+                                error=resend_why,
+                                usage=usage,
+                                capture_path=_write_failure_capture(
+                                    phase_dir=phase_dir, task=task,
+                                    attempt_index=attempt_index,
+                                    argv=capture.argv, prompt=attempt_prompt,
+                                    stdout=capture.stdout, stderr=capture.stderr,
+                                    exit_code=capture.exit_code,
+                                    duration=capture.duration,
+                                    status=STATUS_BATCH_FAILED, error=resend_why,
+                                    repair=attempt_repair or attempt_resend,
+                                ),
+                                repair=attempt_repair or attempt_resend,
+                            ))
+                            _accumulate_usage(outcome, usage)
+                            _notify_after_attempt(after_attempt, outcome.attempts[-1])
+                            attempt_prompt = build_nothing_changed_resend_prompt(
+                                prompt,
+                                declared=_nothing_changed_files(task, cwd),
+                                named=[
+                                    str(path) for path in
+                                    (data.get("files_touched") or [])
+                                    if isinstance(path, str)
+                                ] if isinstance(data, dict) else [],
+                            )
+                            attempt_resend = RESEND_NOTHING_CHANGED
+                            attempt_repair = None
+                            repair_baseline = None
+                            print(
+                                f"[exec-subagents] {task_id}: the reply says the "
+                                f"batch was applied, but no file changed; "
+                                f"sending the batch to {runner} once more, "
+                                f"told so (attempt {attempt_index + 1}). What "
+                                f"was applied is still decided by comparing "
+                                f"the files with the pre-batch snapshot."
+                            )
+                            continue
+                        resend_note = resend.note
                     outcome.attempts.append(Attempt(
                         index=attempt_index,
                         status=STATUS_OK,
                         exit_code=capture.exit_code,
                         duration_seconds=capture.duration,
                         usage=usage,
-                        repair=attempt_repair,
+                        repair=attempt_repair or attempt_resend,
                     ))
                     _notify_after_attempt(after_attempt, outcome.attempts[-1])
                     outcome.status = STATUS_OK
@@ -7076,6 +7247,12 @@ def dispatch_task(
                             "usage": usage,
                             "duration_seconds": outcome.duration_seconds,
                             "outcome": outcome,
+                            # Rule 9: whether this attempt was the re-send of
+                            # a batch that changed nothing, and why a re-send
+                            # the classification would have wanted was not
+                            # granted (the deadline), for its wording.
+                            "resent": attempt_resend is not None,
+                            "resend_note": resend_note,
                             **_jail_hook_context(capture, jail_request, fallback),
                         })
                         if not outcome.ok:
@@ -7109,7 +7286,7 @@ def dispatch_task(
         # timeout, a runner error, a prose reply, a rate limit — is asked first
         # whether it already moved bytes. If it did, the batch is never sent
         # again on top of its own edits: the attempt is a partial application,
-        # or, for an apply kind whose reply could not be read, the one report
+        # or, for a write kind whose reply could not be read, the one report
         # re-ask (rule 7), which restates the report and edits nothing. A re-ask
         # in flight is exempt: its retry re-sends the re-ask, and
         # `repair_baseline` above already fails one that moved a file.
@@ -7171,7 +7348,7 @@ def dispatch_task(
             duration=capture.duration,
             status=status,
             error=error,
-            repair=attempt_repair,
+            repair=attempt_repair or attempt_resend,
         )
         outcome.attempts.append(Attempt(
             index=attempt_index,
@@ -7181,7 +7358,7 @@ def dispatch_task(
             error=error,
             usage=usage,
             capture_path=capture_path,
-            repair=attempt_repair,
+            repair=attempt_repair or attempt_resend,
         ))
         _accumulate_usage(outcome, usage)
         # Before the ladder decides and before any backoff sleep: a caller that
@@ -7351,6 +7528,47 @@ def _denied_write_turn(
         f"retry would send the whole batch again on top of those edits. The "
         f"batch loop stops here and the phase is NOT marked completed."
     )
+
+
+def _ask_nothing_changed(
+    hook: Optional[Callable[[Dict[str, Any]], Optional[str]]],
+    context: Dict[str, Any],
+) -> Optional[str]:
+    """Rule 9's question to the write lane's ``nothing_changed`` hook.
+
+    ``None`` — no re-send, the classification decides — when there is no
+    hook, it answers nothing, or it raises: a re-send is granted only on a
+    measured "not one byte moved", never on "could not tell".
+    """
+    if hook is None:
+        return None
+    try:
+        answer = hook(context)
+    except Exception as exc:  # noqa: BLE001 - no re-send without a measurement
+        print(
+            f"[exec-subagents] warning: could not tell whether "
+            f"{context.get('task_id')} changed any file "
+            f"({type(exc).__name__}); its reply is classified as it stands.",
+            file=sys.stderr,
+        )
+        return None
+    return str(answer) if answer else None
+
+
+def _nothing_changed_files(task: Dict[str, Any], cwd: Optional[str]) -> List[str]:
+    """The batch's declared files, relative to *cwd* when they lie under it,
+    for the rule-9 re-send's prompt."""
+    names: List[str] = []
+    for path in declared_file_set(task):
+        if cwd and os.path.isabs(path):
+            try:
+                relative = os.path.relpath(path, cwd)
+            except ValueError:  # pragma: no cover - another drive on Windows
+                relative = path
+            if not relative.startswith(".."):
+                path = relative
+        names.append(path.replace(os.sep, "/"))
+    return names
 
 
 def _write_report_repairable(

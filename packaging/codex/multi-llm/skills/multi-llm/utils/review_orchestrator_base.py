@@ -7121,6 +7121,10 @@ async def reaggregate_from_existing_files(
                         phase_dir, batched_tasks, grouped, validation_path
                     )
                 else:
+                    # The plan as the user typed it (fix round 14).
+                    reaggregate_cmd = resolved_reaggregate_command(
+                        batched_tasks, typed_plan=True,
+                    )
                     print("\nAfter validation completes, run:")
                     print(f"  {reaggregate_cmd or ''}")
                     # The single follow-up a native-subagent host is owed, also
@@ -7980,6 +7984,10 @@ async def run_review_orchestration(
                             phase_dir, batched_tasks, grouped, validation_path
                         )
                     else:
+                        # The plan as the user typed it (fix round 14).
+                        reaggregate_cmd = resolved_reaggregate_command(
+                            batched_tasks, typed_plan=True,
+                        )
                         print("\nAfter validation completes, run:")
                         print(f"  {reaggregate_cmd or ''}")
                         record_next(reaggregate_cmd or None)

@@ -794,8 +794,13 @@ class ResultContext:
     def set_user_resume(self, obj: Optional[Dict[str, Any]]) -> None:
         """Record the command that *resumes* a stopped write phase, for the user.
 
-        ``{"phase", "command"}``: the same phase, in the host's own spelling
-        (``utils.next_phase.resume_command``). Not ``user_next_step``, which
+        ``{"phase", "command", "flags"}``: the same phase, in the host's own
+        spelling (``utils.next_phase.resume_command``), and the flags it
+        carries after the plan; plus, when the phase's last stop named
+        ``--human-task`` answers, ``answers`` (``[{command, flags, why}]``)
+        and ``answers_text`` (them as one run of text), so a tool route offers
+        each as an option and names each in its message (fix round 14). Not
+        ``user_next_step``, which
         names the *next* phase and is never set on a failed run, and never
         ``next``, which a tool route auto-follows: a needs-human stop is where a
         person decides, so this is for the user to type and nothing may run it.
@@ -1002,6 +1007,18 @@ def record_notice(text: Optional[str]) -> None:
         _ACTIVE.set_notice(text)
 
 
+def add_notice(text: Optional[str]) -> None:
+    """Append *text* to the notice already recorded (``; ``-joined), if any.
+
+    For a phase's own notes (fix round 14: a consistency warning, the items
+    a judge skipped), which must not replace a notice another site set.
+    """
+    if _ACTIVE is None or not text:
+        return
+    current = _ACTIVE.notice
+    _ACTIVE.set_notice(f"{current}; {text}" if current else text)
+
+
 def record_progress(progress: Optional[Dict[str, Any]]) -> None:
     """Record the watched run's ``progress`` object, if a dispatcher run is active."""
     if _ACTIVE is not None:
@@ -1090,6 +1107,30 @@ def invocation_plan_arg() -> Optional[str]:
     if recovered:
         return str(recovered)
     return flag_value(list(record.get("argv") or []), "--plan-file") or None
+
+
+def typed_plan_for(plan: Union[str, Path]) -> str:
+    """*plan* as this invocation's user typed it, when that spelling names it.
+
+    What a native leg's printed hand-off names the plan with (fix round 14,
+    racing run 5, Claude Code 03): generate-tasks' "then continue with: …
+    generate-tasks /tmp/…/plans/racing-game.md --reaggregate" and its
+    ``MULTI_LLM_RESULT.next`` carried the absolute path although the user
+    typed ``plans/racing-game.md``, and the host ran and quoted it. The typed
+    spelling (:func:`invocation_plan_arg`) is used only when
+    ``next_phase.recorded_plan_spelling`` passes it — it resolves from this
+    cwd to the same existing file and holds no character a shell would act
+    on — else *plan* as given. Session-scoped like every printed command:
+    nothing durable stores it.
+    """
+    typed = invocation_plan_arg()
+    if typed:
+        from .next_phase import recorded_plan_spelling
+
+        spelling = recorded_plan_spelling(typed, str(plan))
+        if spelling is not None:
+            return spelling
+    return str(plan)
 
 
 # ---------------------------------------------------------------------------
@@ -1189,6 +1230,42 @@ _REPLAY_DROP_POSITIONAL: Dict[str, Tuple[Tuple[str, ...], bool]] = {
 }
 
 
+#: The answers a replay never carries: ``implement``'s ``--human-task
+#: <id>=done|skip|retry`` (its own parser, ``action='append'``, one value). A
+#: ``done``/``skip`` is recorded in ``state.json``'s ``human_task_decisions``
+#: and a plain ``--resume`` applies it again
+#: (``implement_orchestrator._applicable_task_decisions``), and a ``retry`` is
+#: one-shot. Replayed, the answer was both redundant and wrong (fix round 14,
+#: live run 5): ``status``'s ``resume with:`` line, offered as the tool
+#: route's first option, read ``--human-task T002=done --human-task T005=skip
+#: --resume`` beside a ``resume_command`` of plain ``--resume`` — and run as
+#: printed it is refused, since T005 is ``skipped`` by then and an answer is
+#: taken only for a task still ``failed`` or held by a check.
+_REPLAY_DROP_ANSWERS: Dict[str, Tuple[Tuple[str, ...], bool]] = {
+    "human_task": (("--human-task",), True),
+}
+
+
+def drop_answer_flags(tokens: Iterable[str]) -> List[str]:
+    """*tokens* without any ``--human-task`` answer (:data:`_REPLAY_DROP_ANSWERS`).
+
+    For a stored replay list recorded before the answers were dropped at
+    record time, so an older run's ``resume with:`` line reads the same.
+    """
+    out: List[str] = []
+    items = [str(token) for token in tokens]
+    index = 0
+    while index < len(items):
+        token = items[index]
+        takes_value = _matches_any(token.split("=", 1)[0], _REPLAY_DROP_ANSWERS)
+        if takes_value is None:
+            out.append(token)
+            index += 1
+            continue
+        index += 2 if (takes_value and "=" not in token) else 1
+    return out
+
+
 def _matches_any(head: str, table: Dict[str, Tuple[Tuple[str, ...], bool]]) -> Optional[bool]:
     """``takes_value`` for the table entry ``head`` binds to, else ``None``."""
     for names, takes_value in table.values():
@@ -1217,7 +1294,9 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
     * ``--yes``/``--exec-subagents`` when an implier is present (see
       :data:`_REPLAY_DROP_IMPLIED`);
     * ``--agent-decide`` where ``--yes`` already means it
-      (:func:`drop_implied_judge_flag`).
+      (:func:`drop_implied_judge_flag`);
+    * ``implement``'s ``--human-task`` answers, which ``state.json`` keeps
+      (:data:`_REPLAY_DROP_ANSWERS`).
 
     Everything else stays, in the spelling it was typed, values with spaces
     included: ``--quick``, ``-q``, ``--models=a,b``, ``--host``, ``--detach``.
@@ -1251,6 +1330,8 @@ def replay_flags(mode: str, argv: Sequence[str]) -> List[str]:
         takes_value = _matches_any(head, _REPLAY_DROP_ALWAYS)
         if takes_value is None:
             takes_value = _matches_any(head, _REPLAY_DROP_POSITIONAL)
+        if takes_value is None:
+            takes_value = _matches_any(head, _REPLAY_DROP_ANSWERS)
         if takes_value is None and implied:
             takes_value = _matches_any(head, _REPLAY_DROP_IMPLIED)
         if takes_value is None and head in injected:
@@ -1282,7 +1363,7 @@ def current_replay_flags(
     if record and record.get("mode") and (mode is None or record["mode"] == mode):
         return replay_flags(str(record["mode"]), record.get("argv") or [])
     if isinstance(stored, (list, tuple)):
-        folded = fold_judge_flag(str(token) for token in stored)
+        folded = fold_judge_flag(drop_answer_flags(stored))
         # A list recorded before the judge flag was dropped from `--yes`
         # replays reads the same as one recorded after.
         return drop_implied_judge_flag(mode, folded) if mode else folded
