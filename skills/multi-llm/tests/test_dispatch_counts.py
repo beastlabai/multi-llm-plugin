@@ -331,9 +331,11 @@ class TestTheStatusProgressLineNamesWhatAResumeKept:
         assert _implement(repo, "--resume") == 3
         capsys.readouterr()
         line, result = self._progress(repo, capsys)
+        # T007, held by T002's findings again, is out of the total (fix
+        # round 19), as it is out of the `[ETA]` line's.
         assert (
-            "implement 1/4 batches ok (1 kept from an earlier run: T002), "
-            "0/4 items applied"
+            "implement 1/3 batches ok (1 kept from an earlier run: T002), "
+            "0/3 items applied"
         ) in line, line
         # The OpenCode route shows the poll's own rendered lines.
         assert any(
@@ -369,3 +371,60 @@ class TestTheNativeResumeEmitCountsWhatItHandsOut:
         assert handoff["tasks_to_dispatch"] == 0
         assert "pass --total-batches 0" in out
         assert "Nothing to dispatch" in out
+
+
+def _status_progress(repo, capsys) -> tuple:
+    """``status --view run``'s implement progress line, and the result line's
+    ``progress_lines`` (what the OpenCode poll relays)."""
+    code = multi_llm.main([
+        "status", str(repo.plan), "--view", "run", "--phase", "implement"])
+    out = capsys.readouterr().out
+    lines = [l for l in out.splitlines() if "progress:" in l and "implement " in l]
+    assert lines, (code, out)
+    result = json.loads(
+        [l for l in out.splitlines()
+         if l.startswith("MULTI_LLM_RESULT:")][-1].split(" ", 1)[1])
+    return lines[0], result.get("progress_lines") or []
+
+
+class TestEverySurfaceCountsTheSameTasks:
+    """Fix round 19 (review of round 18, #1): the executor's `[ETA]` line left
+    out a task a check holds (`_eta_total`) while the run mirror kept it, so
+    one run read "batch 6/6 … ALL BATCHES COMPLETE" in its log and
+    "implement 6/7 batches ok, 5/7 items applied" on `status --view run` and
+    the OpenCode poll line."""
+
+    def test_a_task_a_check_holds_is_out_of_both_totals(self, repo, capsys):
+        _policy(repo, ALLOW)
+        _check(repo, passed=False)
+        assert _implement(repo) == 3
+        text = capsys.readouterr()
+        assert _etas(text.out + text.err)[-1] == (6, 6)
+        line, polled = _status_progress(repo, capsys)
+        assert "implement 6/6 batches ok, 5/6 items applied" in line, line
+        # Still named on the line, with the check that holds it.
+        assert "not run (upstream check T002 reported problems) T007" in line, line
+        assert any("implement 6/6 batches ok" in row for row in polled), polled
+        mirror = json.loads((repo.phase_dir / ".status.json").read_text())
+        counts = mirror["progress"]["write_subagents"]
+        assert (counts["total"], counts["items_total"]) == (6, 6), counts
+
+    def test_a_manual_task_answered_done_is_out_of_both_totals(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """No runner runs a manual task: a clean run whose manual T005 was
+        answered done read "implement 4/5 batches ok" beside "batch 4/4 …
+        ALL BATCHES COMPLETE"."""
+        import implement_orchestrator
+        from tests.test_implement_stop_account import _check_passes, make_repo
+
+        stop = make_repo(tmp_path, monkeypatch)
+        _check_passes(stop)
+        assert implement_orchestrator.main([
+            "--plan-file", str(stop.plan), "--no-confirm", "--exec-subagents",
+            "--force-strategy", "pause-and-ask", "--human-task", "T005=done",
+        ]) == 0
+        text = capsys.readouterr()
+        assert _etas(text.out + text.err)[-1] == (4, 4)
+        line, _polled = _status_progress(stop, capsys)
+        assert "implement 4/4 batches ok, 3/4 items applied" in line, line
