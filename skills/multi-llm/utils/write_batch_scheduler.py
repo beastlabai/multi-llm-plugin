@@ -730,6 +730,26 @@ def _declined_split(plan: "HumanTaskPlan") -> Dict[str, List[str]]:
     return out
 
 
+def _deferred_split(plan: "HumanTaskPlan") -> Dict[str, Dict[str, str]]:
+    """The write mirror's key for the tasks skipped with a deferred manual
+    task (fix round 17): ``deferred_waits_on``, ``{task: manual task}``,
+    each followed up :attr:`HumanTaskPlan.chain` to the deferral it waits
+    on. They are in ``skipped_task_ids`` too; ``status`` names them
+    "skipped (depends on manual T005)" instead of "deferred manual", since
+    implement runs them once that task is recorded done. Left out when
+    empty, as :func:`_declined_split`'s keys are.
+    """
+    waits: Dict[str, str] = {}
+    for task_id in plan.deferred():
+        current, seen = task_id, set()
+        while current in plan.chain and current not in seen:
+            seen.add(current)
+            current = plan.chain[current]
+        if current != task_id:
+            waits[task_id] = current
+    return {"deferred_waits_on": dict(sorted(waits.items()))} if waits else {}
+
+
 #: The recorded reason of a human task the user declined at pause-and-ask.
 #: ``StateManager._USER_DECLINED_REASON`` spells the same words, so the
 #: workflow's manual-task list reads a declined task as not owed.
@@ -9231,6 +9251,9 @@ class WriteBatchScheduler:
                         # — beside a summary that says "skipped at your
                         # request" (Codex stop-path accept 02).
                         **_declined_split(result.human_plan),
+                        # Fix round 17: which of the rest wait on a deferred
+                        # manual task, named apart from it on `status`.
+                        **_deferred_split(result.human_plan),
                         "pending_human_task_ids": list(result.human_plan.pending),
                         "tasks": [
                             {

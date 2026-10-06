@@ -48,6 +48,9 @@ from tests.test_implement_stop_account import make_repo  # noqa: E402
 PLAN_ARG = "plans/checked.md"
 MANUAL_TITLE = "Play through by hand"
 DEPENDENT_TITLE = "Edit: after the manual step"
+#: How T006, skipped with the manual T005, is named (fix round 17): implement
+#: runs it on the resume that records T005 done.
+WAITS = "(waits on T005: implement runs it once T005 is recorded done)"
 
 
 @pytest.fixture
@@ -155,7 +158,7 @@ class TestTheReportLookupCarriesIt:
         assert lines[0].endswith(f"--review-code {PLAN_ARG}")
         assert lines[-3:] == [
             f"[MANUAL_TASK] T005 {MANUAL_TITLE}",
-            f"[MANUAL_TASK] T006 {DEPENDENT_TITLE}",
+            f"[MANUAL_TASK] T006 {DEPENDENT_TITLE} {WAITS}",
             f"[MANUAL_TASK_NOTE] {note}",
         ]
         step = cli_common.parse_result_line(out)["user_next_step"]
@@ -163,7 +166,7 @@ class TestTheReportLookupCarriesIt:
         assert step["command"] == lines[0].split(" ", 1)[1]
         assert step["manual_tasks"] == [
             {"id": "T005", "title": MANUAL_TITLE},
-            {"id": "T006", "title": DEPENDENT_TITLE},
+            {"id": "T006", "title": DEPENDENT_TITLE, "waits_on": "T005"},
         ]
         assert step["manual_tasks_note"] == note
 
@@ -183,7 +186,7 @@ class TestTheReportLookupCarriesIt:
         assert lines[0].startswith("[NEXT_COMMAND] ")
         assert lines[-3:] == [
             f"[MANUAL_TASK] T005 {MANUAL_TITLE}",
-            f"[MANUAL_TASK] T006 {DEPENDENT_TITLE}",
+            f"[MANUAL_TASK] T006 {DEPENDENT_TITLE} {WAITS}",
             f"[MANUAL_TASK_NOTE] {note}",
         ]
         step = cli_common.parse_result_line(out)["user_next_step"]
@@ -225,6 +228,63 @@ class TestTheExecutorSummaryCarriesItToo:
         section = summary.split("## Manual Tasks (Deferred)", 1)[1].split("\n## ", 1)[0]
         assert "| T005 |" in section and "| T006 |" in section
         assert _close_note(PLAN_ARG, ["T005"]) in section
+
+
+class TestATaskSkippedWithAManualOneIsNamedApart:
+    """Fix round 17 (review of round 16): T006, a code task skipped because
+    it depends on the manual T005, read "deferred manual" on every `status`
+    surface, and the relay rule called each `[MANUAL_TASK]` a task "no
+    phase will run", though the note's `--resume --human-task T005=done`
+    runs it. Each surface now names it for what it is."""
+
+    def _executor_run(self, repo, capsys):
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(
+            ["T001", "T002", "T003", "T004", "T006"]))
+        assert multi_llm.main(
+            ["implement", PLAN_ARG, "--host", "claude-code", "--yes",
+             "--exec-subagents"]
+        ) == 0
+        capsys.readouterr()
+
+    def test_the_executor_run_s_progress_and_tally_lines(self, repo, capsys):
+        self._executor_run(repo, capsys)
+        multi_llm.main(["status", PLAN_ARG, "--host", "claude-code", "--view", "run"])
+        out = capsys.readouterr().out
+        progress = next(l for l in out.splitlines() if "progress:" in l)
+        assert "deferred manual: T005 (skip-dependents)" in progress, progress
+        assert "skipped (depends on manual T005): T006" in progress, progress
+        assert "T005, T006" not in progress
+        tally = next(l for l in out.splitlines() if "all tasks:" in l)
+        assert tally.endswith(
+            "deferred manual: T005; skipped (depends on manual T005): T006"), tally
+
+    def test_the_workflow_trailer_says_what_it_waits_on(self, repo, capsys):
+        self._executor_run(repo, capsys)
+        multi_llm.main(["status", PLAN_ARG, "--host", "claude-code"])
+        out = capsys.readouterr().out
+        assert (
+            f"manual tasks left for you: T005 {MANUAL_TITLE}; "
+            f"T006 {DEPENDENT_TITLE} {WAITS}"
+        ) in out, out
+
+    def test_the_relay_rule_no_longer_says_no_phase_will_run_them(self):
+        import modes
+
+        line = modes.TOOL_USER_NEXT_STEP_LINE
+        assert "no phase will run" not in line
+        assert (
+            "tasks implement left for the user to do by hand, or, for one with "
+            "`waits_on`, a task skipped with that one, which implement runs once "
+            "that one is recorded done"
+        ) in line
+        reference = " ".join(
+            (SKILL_DIR / "references" / "summary-format.md").read_text(
+                encoding="utf-8").split())
+        assert "the plugin will not run them" not in reference
+        assert (
+            "one with `waits_on` is a task skipped with that manual task, which "
+            "implement runs once that one is recorded done"
+        ) in reference
 
 
 class TestTheHostIsToldToCarryIt:
@@ -285,7 +345,7 @@ class TestStatusAfterACompletedNativeImplement:
         line = next(l for l in out.splitlines() if l.strip().startswith("tasks:"))
         assert line.split("tasks:", 1)[1].strip() == (
             "4/6 done; completed: T001, T002, T003, T004; "
-            "deferred manual: T005, T006"
+            "deferred manual: T005; skipped (depends on manual T005): T006"
         )
 
     def test_json_carries_the_same_tally(self, repo, capsys):
@@ -298,7 +358,9 @@ class TestStatusAfterACompletedNativeImplement:
         tasks = payload["implement_tasks"]
         assert tasks["completed"] is True
         assert tasks["buckets"]["completed"] == ["T001", "T002", "T003", "T004"]
-        assert tasks["buckets"]["deferred"] == ["T005", "T006"]
+        assert tasks["buckets"]["deferred"] == ["T005"]
+        assert tasks["buckets"]["deferred_dependents"] == ["T006"]
+        assert tasks["waits_on"] == {"T006": "T005"}
 
     def test_a_stopped_run_still_reads_not_marked_completed(self, repo, capsys):
         handoff, _out = _emit(capsys)

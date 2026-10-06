@@ -417,14 +417,18 @@ TOOL_OUTCOMES_LINE = (
 #: left, with "Workflow complete. Manual tasks left …". Fix round 16 (Codex
 #: racing 06r/07): a command answer carries `manual_tasks` and its note too,
 #: and the line says to relay them on any result — the hosts named T009 from
-#: the notice but never the command that records it done.
+#: the notice but never the command that records it done. Fix round 17: it
+#: said "which no phase will run" of every entry, while a task skipped with a
+#: manual one (`waits_on`) runs on the resume the note names.
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
     "call to make: copy its `command`, and each `optional_before` command, into your "
     "report, each in its own fenced block; when it is `complete`, and "
     "only then, say \"Workflow complete.\"; and whenever it carries "
     "`manual_tasks`, complete or not, list each of them "
-    "(id and title): tasks the run deferred to the user, which no phase will run; "
+    "(id and title): tasks implement left for the user to do by hand, or, for one "
+    "with `waits_on`, a task skipped with that one, which implement runs once "
+    "that one is recorded done; "
     "then give its `manual_tasks_note` verbatim, which says how to record them done. "
     "Then stop. "
     "Never say \"Workflow complete.\" otherwise, even when a notice lists manual "
