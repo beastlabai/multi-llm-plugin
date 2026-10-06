@@ -240,11 +240,15 @@ class TestTheHostIsToldToCarryIt:
             "`[MANUAL_TASK_NOTE]` text verbatim"
         ) in core
         skill = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
+        # Fix round 17: after any phase, not only implement (the merged
+        # renderer lists them after every command block while owed).
         assert (
-            "After implement those lines can also follow a `[NEXT_COMMAND]` "
-            "block: list those tasks and give that note the same way, after the "
-            "commands."
+            "Those lines also follow a `[NEXT_COMMAND]` block, after any phase, "
+            "while implement's manual tasks are owed: list those tasks and give "
+            "that note the same way, after the commands, and never write "
+            "\"Workflow complete.\" for them."
         ) in skill
+        assert "After implement those lines can also follow" not in skill
         reference = " ".join(
             (SKILL_DIR / "references" / "summary-format.md").read_text(
                 encoding="utf-8").split())

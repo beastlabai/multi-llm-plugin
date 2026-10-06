@@ -151,7 +151,9 @@ class NextPhase:
     #: ``complete`` answer since then, and on a command answer too since fix
     #: round 16 (Codex racing 06r/07: the host named T009 as manual from the
     #: notice but never the command that records it done; only the complete
-    #: answer of 08 carried it). Only the complete block renders them.
+    #: answer of 08 carried it). Every block renders them: under
+    #: ``[WORKFLOW_COMPLETE]``, and after a command block's commands
+    #: (:func:`render_next_phase_lines`).
     manual_tasks: Tuple[ManualTask, ...] = ()
     #: On a ``--resume`` of a stopped implement, from ``util next-command``
     #: only: the one command that answers every task the stop waits for
@@ -904,11 +906,12 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     """The block's lines, primary first (§2.2(2), §2.1 "Primary first").
 
     Complete renders ``[WORKFLOW_COMPLETE]``, then one ``[MANUAL_TASK]`` line
-    per task the run deferred to the user (none when it deferred nothing).
-    Otherwise the ``[NEXT_COMMAND]`` line comes first, then each
-    ``optional_before`` entry's ``[NEXT_COMMAND_OPTIONAL_WHY]`` /
-    ``[NEXT_COMMAND_OPTIONAL]`` pair in the answer's order. A command line holds
-    the command and nothing else.
+    per task the run deferred to the user (none when it deferred nothing) and
+    the ``[MANUAL_TASK_NOTE]`` line. Otherwise the ``[NEXT_COMMAND]`` line
+    comes first, then each ``optional_before`` entry's
+    ``[NEXT_COMMAND_OPTIONAL_WHY]`` / ``[NEXT_COMMAND_OPTIONAL]`` pair in the
+    answer's order, the answers pair, and then the same manual-task lines. A
+    command line holds the command and nothing else.
     """
     manual_lines = [
         f"{MANUAL_TASK_MARKER} {task.line()}" for task in answer.manual_tasks
@@ -927,8 +930,9 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     if answer.answers is not None:
         lines.append(f"{NEXT_COMMAND_ANSWERS_WHY_MARKER} {answer.answers.why}")
         lines.append(f"{NEXT_COMMAND_ANSWERS_MARKER} {answer.answers.command}")
-    # After the commands (fix round 16, `util next-command --after implement`):
-    # the tasks implement deferred to the user, and how to record them done.
+    # After the commands, on every command answer that carries them (fix
+    # round 16): the tasks implement deferred to the user, and how to record
+    # them done.
     return lines + manual_lines
 
 
