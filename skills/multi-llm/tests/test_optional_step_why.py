@@ -86,3 +86,57 @@ class TestTheOptionalStepSaysWhatSkippingMeans:
         lines = next_phase.render_next_phase_lines(answer)
         assert lines[0].startswith(next_phase.NEXT_COMMAND_MARKER + " ")
         assert lines[1] == f"{next_phase.NEXT_COMMAND_OPTIONAL_WHY_MARKER} {step.why}"
+
+
+class TestARunInProgressIsWordedAsTheResumeItsCommandIs:
+    """Fix round 19: a run of --apply-task-suggestions that applied two of
+    its batches and stopped left the optional entry `--apply-task-suggestions
+    <plan> --resume` beside a why that said all 3 valid groups were
+    unapplied and told the user to run the phase "first to apply them"."""
+
+    def _started(self, plan, *, batches_done):
+        from utils.state_manager import StateManager
+
+        _review_tasks_left(plan, 3, validated=True)
+        state = StateManager(plan)
+        state.mark_phase_started("apply-task-suggestions")
+        for index in range(batches_done):
+            state.update_task_status(f"apply-task-batch-{index}", "completed")
+        state.save()
+
+    def test_the_notice_says_a_run_started_and_resume_applies_the_rest(
+        self, tmp_path,
+    ):
+        plan = _workflow_plan(tmp_path)
+        self._started(plan, batches_done=2)
+        payload = _status(plan)
+        entry = payload["phases"]["apply-task-suggestions"]
+        assert entry["status"] == "in_progress"
+        why = entry["notice"]
+        assert why == (
+            "review-tasks left 3 valid task suggestion groups to apply, and a "
+            "run of --apply-task-suggestions started on them and has not "
+            "finished. Run --apply-task-suggestions --resume first to apply "
+            "what that run has not applied yet; going straight to --implement "
+            "skips what is left, and implement then works from the task list "
+            "as it stands."), why
+        assert "unapplied" not in why
+        assert payload["notices"] == [why]
+
+    def test_the_optional_entry_carries_it_beside_its_resume(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        self._started(plan, batches_done=1)
+        answer = next_phase.next_phase_commands(
+            "plans/x.md", "claude-code", None, None, after_mode="review-tasks",
+            plan_path=plan)
+        (step,) = answer.optional_before
+        assert step.command.endswith("--apply-task-suggestions plans/x.md --resume")
+        assert "started on them and has not finished" in step.why
+        assert "--resume" in step.why
+
+    def test_one_never_started_keeps_the_count_of_what_waits(self, tmp_path):
+        plan = _workflow_plan(tmp_path)
+        _review_tasks_left(plan, 3, validated=True)
+        why = _status(plan)["phases"]["apply-task-suggestions"]["notice"]
+        assert why.startswith(
+            "review-tasks left 3 valid task suggestion groups unapplied."), why
