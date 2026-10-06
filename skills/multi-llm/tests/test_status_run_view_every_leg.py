@@ -148,6 +148,48 @@ class TestResumeWithIsTheHostsSpelling:
                 if not s.startswith(cli_common.INTERNAL_FLAG_PREFIX)} == set(names)
 
 
+def _failed_ask(plan: Path, question: str) -> None:
+    from utils.output_handler import output_dir_path, slugify_question
+
+    ask_dir = output_dir_path(plan) / "ask" / (
+        slugify_question(question) + "-20261006-000000")
+    ask_dir.mkdir(parents=True)
+    status_file.claim_run(str(ask_dir), {
+        "run_id": "run-ask-0001", "state": "failed", "exit_code": 1,
+        "error": "boom", "detached": True, "mode": "ask",
+        "replay_flags": ["--host", "claude-code", "--quick"], "plan_arg": TYPED,
+    })
+    status_file.update_status(str(ask_dir), {"question": question})
+
+
+class TestTheAskQuestionIsNeverDropped:
+    """Fix round 19: the control-character filter ran over the question
+    positional, so a question with a newline or a tab vanished from the
+    host-spelled line, and the command printed did not parse."""
+
+    @pytest.mark.parametrize("host", ["claude-code", "codex", "opencode"])
+    @pytest.mark.parametrize("question", [
+        "Is the cache safe?\nWhat about eviction?", "Is it safe?\tAnd fast?"])
+    def test_one_it_cannot_spell_keeps_the_dispatcher_command(
+        self, plan, capsys, host, question,
+    ):
+        _failed_ask(plan, question)
+        assert run_status.main(["--plan-file", TYPED, "--view", "run", "--host",
+                                host, "--run-id", "run-ask-0001"]) == 3
+        out = capsys.readouterr().out
+        assert "resume with: " in out, out
+        command = out.split("resume with: ", 1)[1]
+        assert "multi_llm.py ask " in command, out
+        assert f"'{question}' --host claude-code --quick --force" in command, out
+
+    def test_a_one_line_question_is_spelled_the_hosts_way(self, plan, capsys):
+        _failed_ask(plan, "Is the cache safe?")
+        assert _resume_line(capsys, "--host", "claude-code", "--run-id",
+                            "run-ask-0001") == (
+            '/multi-llm:multi-llm --ask plans/p.md "Is the cache safe?" '
+            "--quick --force")
+
+
 def _status_text(capsys, *flags) -> str:
     multi_llm.main(["status", PLAN_ARG, "--host", "claude-code", "--view", "run", *flags])
     return capsys.readouterr().out
