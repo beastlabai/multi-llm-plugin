@@ -479,10 +479,14 @@ NO_COMMAND_REASON = (
 #: ``{line}`` is the run's own last error line (``result.error``, the line
 #: the exit-3 ``message`` quotes) or ``no_line``; ``resume`` is appended,
 #: ``{command}`` filled with ``resume_command``, when the result carries one.
+#: Fix round 17: ``{line}`` is shown without control characters and cut at
+#: ``max_line`` characters, ending in ``cut``; the command is never cut.
 STOP_TITLE = {
     "template": "stopped and needs you: {line}",
     "no_line": "the run did not finish; the tool output says why.",
     "resume": " Resume with: {command}",
+    "max_line": 300,
+    "cut": "…",
 }
 
 #: The route signal's one owner (plans/next-phase-command.md §2.1, "Knowing the
