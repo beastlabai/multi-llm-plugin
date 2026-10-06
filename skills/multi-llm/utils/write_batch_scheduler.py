@@ -3218,6 +3218,8 @@ class WriteBatchScheduler:
             # human" condition, and dispatching around it would run code tasks
             # against unmet preconditions.
             result.exit_code = EXIT_NEEDS_HUMAN
+            # Fix round 16: a stop says nothing ran the tests too.
+            result.messages.extend(self._note_unverified_on_stop(result))
             result.messages.extend(self._pending_human_message(result.human_plan))
             result.report_path = self._write_report(result)
             self._mirror_status(result)
@@ -3273,6 +3275,8 @@ class WriteBatchScheduler:
                 )
                 # Fix round 15: and the batches whose own check failed.
                 result.messages.extend(self._batch_check_lines(result))
+                # Fix round 16: and that nothing ran the repository's tests.
+                result.messages.extend(self._note_unverified_on_stop(result))
                 result.messages.extend(
                     self._refusal_message(exc, batch_index, result)
                 )
@@ -3306,6 +3310,9 @@ class WriteBatchScheduler:
                     result, batch_index, [o for o in outcomes if not o.ok],
                 )
                 stop_lines = self._stop_message(batch_index, outcomes, result)
+                # Fix round 16 (run 6, stop 01): set before the summary is
+                # written, so its Verification line says it too.
+                unverified_lines = self._note_unverified_on_stop(result)
                 # The partial summary is the cancellation's own record (D3n,
                 # instructions/implement.md): `_finalize` never runs on this
                 # path, so without this write the `## Cancelled` section would be
@@ -3326,6 +3333,7 @@ class WriteBatchScheduler:
                 # Fix round 15 (review of round 14): the batches whose own
                 # check failed are named on a stop too, not only at the end.
                 result.messages.extend(self._batch_check_lines(result))
+                result.messages.extend(unverified_lines)
                 result.messages.extend(stop_lines)
                 if result.summary_file:
                     result.messages.append(
@@ -3342,10 +3350,12 @@ class WriteBatchScheduler:
         if result.blocked_by_check:
             result.exit_code = EXIT_NEEDS_HUMAN
             self._record_check_block(result)
+            unverified_lines = self._note_unverified_on_stop(result)
             if self.summary_file:
                 result.summary_file = self._write_summary(result)
             result.messages.extend(self._check_findings_lines(result))
             result.messages.extend(self._batch_check_lines(result))
+            result.messages.extend(unverified_lines)
             result.messages.extend(self._check_block_message(result))
             if result.summary_file:
                 result.messages.append(
@@ -8089,6 +8099,35 @@ class WriteBatchScheduler:
         return dict(mirror) if isinstance(mirror, dict) else {}
 
     # -- verification ---------------------------------------------------
+
+    def _note_unverified_on_stop(self, result: SchedulerResult) -> List[str]:
+        """The "nothing ran this repository's tests" line on a stop (fix
+        round 16); the lines to print, ``[]`` when none is owed.
+
+        Run 6 (Codex and OpenCode stop 01): a code phase that stopped after
+        code batches ran said nothing about the repository's tests — the line
+        :meth:`_run_verification` adds reached only a finished run's result,
+        notice and summary. Set on ``result.unverified`` (the notice, the
+        Verification line, the report, the mirror) when this is a code phase,
+        a task of it completed (this run or an earlier one: the ``completed``
+        statuses :meth:`_phase_has_applied_batches` reads) and no
+        ``driver.verify_command`` is set. Never runs anything.
+        """
+        if self.kind not in CODE_WRITE_KINDS or self.dry_run or result.unverified:
+            return []
+        ran = any(
+            outcome.ok and not outcome.skipped for outcome in result.outcomes
+        ) or self._phase_has_applied_batches()
+        if not ran:
+            return []
+        try:
+            command = get_verify_command(anchor=self.anchor)
+        except Exception:  # noqa: BLE001 - advisory on a stop
+            return []
+        if command:
+            return []
+        result.unverified = unverified_line(self.repo_root)
+        return [result.unverified]
 
     def _run_verification(self, result: SchedulerResult) -> bool:
         """Run ``driver.verify_command`` once, after the last batch (F4).
