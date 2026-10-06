@@ -879,6 +879,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 f"it takes and the command that carries it.",
                 file=sys.stderr,
             )
+            # Fix round 19 (review of round 18): the refusal is the result
+            # line's `error`, which the tool routes relay; it used to be on
+            # stderr alone, and the line said it named no error.
+            from .cli_common import record_error
+
+            record_error(
+                f"{word} cannot take this --human-task answer: "
+                f"{'; '.join(problems)}. Nothing was changed; the {word} stop "
+                f"names the answer it takes and the command that carries it."
+            )
             raise OrchestratorError(
                 f"Phase _setup, step 6b: --human-task refused: {problems[0]}",
                 exit_code=3,
