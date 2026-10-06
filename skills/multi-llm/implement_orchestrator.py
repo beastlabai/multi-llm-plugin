@@ -806,6 +806,8 @@ def _applicable_task_decisions(
     state: StateManager,
     human_task_ids: List[str],
     this_run: Dict[str, str],
+    *,
+    rerun_task: Optional[str] = None,
 ) -> Dict[str, str]:
     """The ``--human-task`` answers the scheduler applies this run.
 
@@ -816,9 +818,18 @@ def _applicable_task_decisions(
     the answer that skipped it is what keeps it skipped on the next resume,
     now that a skipped code task is materialized again (fix round 8). Once
     it ran again or was accepted, a stale answer must not mark it done
-    behind the user's back.
+    behind the user's back — and once its task has a status the answer did
+    not write, it is gone from the record (``state_manager._consume_answer``,
+    fix round 15).
+
+    *rerun_task* is ``--task <id>``: the user asked to run that code task,
+    so an answer an earlier run recorded for it does not apply (a recorded
+    ``skip`` used to leave ``--task`` nothing to hand out, fix round 15);
+    the status its run writes retires the answer.
     """
     recorded = dict(state.get("human_task_decisions") or {})
+    if rerun_task and rerun_task not in human_task_ids and rerun_task not in this_run:
+        recorded.pop(rerun_task, None)
     decisions: Dict[str, str] = {}
     # A check whose findings hold back the tasks after it is answered like a
     # failed task (fix round 11), until the answer is taken.
@@ -2013,6 +2024,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # task's only while it still applies (`_applicable_task_decisions`).
     applicable_decisions = _applicable_task_decisions(
         state, human_task_ids, human_task_decisions,
+        rerun_task=str(args.task) if args.task else None,
     )
     # The native leg resolves the human-task plan here, from the strategy and
     # the answers it already holds, exactly as the executor resolves it before
