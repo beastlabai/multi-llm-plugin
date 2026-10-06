@@ -889,6 +889,50 @@ def render_repo_wide_warning(spec: str, refusal: str) -> str:
     )
 
 
+def _suggested_next(phases: Dict[str, dict], order: List[str]) -> Optional[str]:
+    """The phase to run next, from where the workflow really is (fix round 14).
+
+    Picked once, after every post-loop mark in :func:`get_workflow_status`,
+    over the required (non-optional) phases, in two steps:
+
+    1. a required phase that was started and not finished — ``in_progress``,
+       a seeded task list (``tasks_total``) or a ``stale`` completion — is
+       the suggestion: resuming it comes first, as the next-step builder's
+       walk says (``next_phase.next_phase_commands``);
+    2. otherwise the first open required phase after the furthest phase on
+       record as completed or skipped, never one before it: starting
+       mid-workflow never sends the user back, and with nothing open after
+       it there is no suggestion. A plan with nothing on record starts at the
+       first required phase.
+
+    Before this the suggestion was the first open required phase in table
+    order, so a plan whose review-plan never ran read "suggested next:
+    review-plan" beside an implement stopped at 4/7, and again after
+    implement completed (racing re-run 5, the stop-path fixture).
+    """
+    required = [phase for phase in order if phase not in OPTIONAL_PHASES]
+
+    def is_open(phase: str) -> bool:
+        return phases[phase]["status"] not in DONE_STATUSES
+
+    for phase in required:
+        info = phases[phase]
+        if is_open(phase) and (
+            info["status"] == "in_progress" or info.get("tasks_total")
+            or info.get("stale")
+        ):
+            return phase
+    furthest = max(
+        (index for index, phase in enumerate(order) if not is_open(phase)),
+        default=-1,
+    )
+    return next(
+        (phase for phase in order[furthest + 1:]
+         if phase in required and is_open(phase)),
+        None,
+    )
+
+
 def get_workflow_status(
     state: StateManager, plan_path: Path, plan_dir: Path,
     *, host_id: Optional[str] = None,
@@ -1100,16 +1144,7 @@ def get_workflow_status(
             if started_at:
                 phases[phase]["started_at"] = started_at
 
-    # Picked once, after every post-loop change above: the first non-optional
-    # phase that is neither completed nor skipped. `in_progress` counts as
-    # open, so a partly implemented plan keeps `suggested_next: implement`.
-    suggested_next = None
-    for phase in ALL_PHASES:
-        if phase in OPTIONAL_PHASES:
-            continue
-        if phases[phase]["status"] not in DONE_STATUSES:
-            suggested_next = phase
-            break
+    suggested_next = _suggested_next(phases, ALL_PHASES)
 
     # Early warning for the two repo-wide write phases (see
     # `repo_wide_sandbox_warning`; the dispatch's own decision, probed once

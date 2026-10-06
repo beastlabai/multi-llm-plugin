@@ -505,10 +505,21 @@ def next_phase_commands(
         primary = workflow.get("suggested_next")
         if primary is None:
             return _complete(phases)
+        # The optional phases offered are the ones between the furthest phase
+        # on record before the suggestion and the suggestion itself, as an
+        # `--after` walk offers them: `suggested_next` follows the phase
+        # position (fix round 14), so a review-code suggested after a
+        # completed implement no longer offers the review-tasks "before
+        # implementing" that the implement it follows made moot.
+        reached = max(
+            (index for index, phase in enumerate(order[: order.index(primary)])
+             if not is_open(phase)),
+            default=-1,
+        )
         return NextPhase(
             phase=primary,
             command=command_for(primary),
-            optional_before=optional_steps(order[: order.index(primary)]),
+            optional_before=optional_steps(order[reached + 1: order.index(primary)]),
             warning=warning_of(primary),
         )
 
