@@ -4191,8 +4191,15 @@ class TestANoOpClaimWithBytesMoved:
         assert outcome.write_outcome == executor.WRITE_APPLIED
         assert outcome.status == executor.STATUS_OK
         assert second.exit_code == 0
-        assert "no-op claimed, bytes moved" in outcome.reason
-        assert "reused from an earlier dispatch" in outcome.reason
+        # Fix round 16 (OpenCode racing 06b): said plainly — the earlier
+        # attempt's edits are kept and count as applied, and this run's
+        # model found them in place — not "no-op claimed, bytes moved".
+        assert outcome.reason.startswith(
+            "APPLIED (kept from an earlier attempt): the edits an earlier "
+            "attempt made to plans/p.md are kept and count as applied; this "
+            "run's model found them already in place"
+        ), outcome.reason
+        assert "no-op claimed" not in outcome.reason
         # This is the documented, expected shape of a resume — no foreign-
         # write warning belongs on the log for it.
         assert not any("claimed 'no-op'" in l for l in lines)
