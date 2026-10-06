@@ -1301,6 +1301,7 @@ def build_nothing_changed_resend_prompt(
     *,
     declared: Sequence[str],
     named: Sequence[str] = (),
+    outside: Sequence[str] = (),
 ) -> str:
     """The batch's own prompt again, told that its last attempt changed nothing.
 
@@ -1311,6 +1312,11 @@ def build_nothing_changed_resend_prompt(
     twice (the retry ladder's rule 9). Unlike the report re-ask, this one
     carries the instructions: the work was not done. *declared* is the files
     the batch may change, *named* the ones the reply said it edited.
+
+    *outside* (fix round 15) is the files that did change, outside the
+    declared one, for a plan or task-list batch: its declared file is the
+    whole contract, so a change elsewhere is not its change, and the heading
+    and the sentence say "no file it declares" instead of "no file".
     """
     files = ", ".join(declared) or "the files this task names"
     verb = "is" if len(declared) == 1 else "are"
@@ -1318,12 +1324,22 @@ def build_nothing_changed_resend_prompt(
         f" and named {', '.join(named[:5])}{', …' if len(named) > 5 else ''} "
         f"as edited" if named else ""
     )
+    if outside:
+        heading = f"{NOTHING_CHANGED_RESEND_HEADING} it declares"
+        what = (
+            f"but {files} {verb} byte-for-byte as before it started; only\n"
+            f"{', '.join(outside[:5])}{', …' if len(outside) > 5 else ''} "
+            f"changed, which is not where this task's change belongs."
+        )
+    else:
+        heading = NOTHING_CHANGED_RESEND_HEADING
+        what = f"but no file changed: {files} {verb} byte-for-byte as before it started."
     return f'''{original_prompt.rstrip()}
 
-{NOTHING_CHANGED_RESEND_HEADING}
+{heading}
 
 A previous attempt at this exact task ended with `"status": "applied"`{said},
-but no file changed: {files} {verb} byte-for-byte as before it started.
+{what}
 Its edits did not land — an edit command that failed, a change made
 to another path, or a change described but never written.
 

@@ -1731,9 +1731,20 @@ class UndeclaredWrites:
     #: ``paths`` (adversarial review, 2026-10-02: a verification-only task
     #: read the sweep-off case as "no file changed" and was VERIFIED).
     observed: bool = True
+    #: Fix round 15: the subset of ``paths`` a task running at the same time
+    #: also saw move (``task_id -> paths``), so the sweep cannot say whose
+    #: change each is. Still observed, policy-checked and restorable; never
+    #: counted as this task's own change when its declared files did not move.
+    shared: Dict[str, List[str]] = field(default_factory=dict)
 
     def __bool__(self) -> bool:
         return bool(self.paths)
+
+    @property
+    def own(self) -> List[str]:
+        """``paths`` minus every path a sibling's window also saw move."""
+        seen = {path for paths in self.shared.values() for path in paths}
+        return [path for path in self.paths if path not in seen]
 
     def __len__(self) -> int:
         return len(self.paths)
@@ -2150,6 +2161,17 @@ class WriteBatchScheduler:
         # writes remain attributable to that sibling even if it finishes first.
         # Keep overlap declarations per census, never for the entire phase.
         self._sweep_ignored: Dict[str, set] = {}
+        #: Fix round 15: ``task_id -> ids of the tasks whose dispatch window
+        #: overlapped this one's`` (registered in `_begin_sweep`), and, for a
+        #: finished task such a sibling is still running beside, its window
+        #: — ``(census before, census after, retained digests)``. A path a
+        #: sibling's window also saw move cannot be told apart from that
+        #: sibling's stray write, so it never makes a code task applied
+        #: (`UndeclaredWrites.shared`).
+        self._sweep_overlap: Dict[str, set] = {}
+        self._finished_windows: Dict[str, Tuple[Dict[str, Tuple[int, int]],
+                                                Dict[str, Tuple[int, int]],
+                                                Dict[str, str]]] = {}
         self._sweep_warned = False
         #: The ignore rules in force when each in-flight dispatch started:
         #: ``source path -> sha256 | None (absent)`` over every `.gitignore`
@@ -3454,6 +3476,7 @@ class WriteBatchScheduler:
                 self._declared_by_task.pop(task_id, None)
                 self._sweep_ignored.pop(task_id, None)
                 self._ignore_sources_before.pop(task_id, None)
+                self._sweep_overlap.pop(task_id, None)
             self._target_identity_before.pop(task_id, None)
         self._record_batch_effects(task, outcome, batch_index, result)
         return outcome
@@ -3777,6 +3800,11 @@ class WriteBatchScheduler:
                     f"take the untracked trees (node_modules/, build output) "
                     f"out of the checkout. Nothing was dispatched."
                 )
+            # Fix round 15: every dispatch still in flight overlaps this one.
+            running = set(self._declared_by_task) - {task_id}
+            self._sweep_overlap[task_id] = set(running)
+            for other in running:
+                self._sweep_overlap.setdefault(other, set()).add(task_id)
             self._census_before[task_id] = census
             self._retained_before[task_id] = self._retain(census)
             self._ignore_sources_before[task_id] = self._ignore_rule_sources(census)
@@ -4079,6 +4107,29 @@ class WriteBatchScheduler:
             after = self._census() if before is not None else None
             self._declared_by_task.pop(task_id, None)
             self._dispatch_started.pop(task_id, None)
+            # Fix round 15: the windows of the siblings that overlapped this
+            # one — a finished one's as it closed, a running one's from its
+            # census to now — and this window kept for any still running.
+            siblings = self._sweep_overlap.pop(task_id, set())
+            windows: Dict[str, Tuple[Dict[str, Tuple[int, int]],
+                                     Optional[Dict[str, Tuple[int, int]]],
+                                     Dict[str, str]]] = {}
+            for sibling in sorted(siblings):
+                if sibling in self._finished_windows:
+                    windows[sibling] = self._finished_windows[sibling]
+                elif self._census_before.get(sibling) is not None:
+                    windows[sibling] = (
+                        self._census_before[sibling], None,
+                        dict(self._retained_before.get(sibling) or {}),
+                    )
+            if (before is not None and after is not None
+                    and siblings & set(self._declared_by_task)):
+                self._finished_windows[task_id] = (before, after, dict(retained))
+            referenced = set().union(*self._sweep_overlap.values()) \
+                if self._sweep_overlap else set()
+            for finished in list(self._finished_windows):
+                if finished not in referenced:
+                    del self._finished_windows[finished]
         if before is None:
             return UndeclaredWrites(observed=False)
         if after is None:
@@ -4088,6 +4139,16 @@ class WriteBatchScheduler:
         moved = self._swept_moves(before, after, ignored, retained)
         moved -= self._ignored_and_harmless(task_id, moved, sources, after)
         observed = UndeclaredWrites(paths=sorted(moved))
+        for sibling, (sib_before, sib_after, sib_retained) in windows.items():
+            seen = [
+                path for path in observed.paths
+                if self._moved_in_window(
+                    path, sib_before, sib_after if sib_after is not None else after,
+                    sib_retained,
+                )
+            ]
+            if seen:
+                observed.shared[sibling] = seen
         adopted = 0
         for relative in observed.paths:
             if adopted >= SWEEP_ADOPT_MAX_FILES:
@@ -4111,6 +4172,27 @@ class WriteBatchScheduler:
         if adopted:
             snapshot.save()
         return observed
+
+    def _moved_in_window(
+        self,
+        relative: str,
+        before: Dict[str, Tuple[int, int]],
+        after: Dict[str, Tuple[int, int]],
+        retained: Dict[str, str],
+    ) -> bool:
+        """Whether *relative* moved between one window's two censuses, by the
+        rule :meth:`_swept_moves` applies: the stamps say where to look, the
+        bytes decide (fix round 15, a sibling's window)."""
+        previous = before.get(relative)
+        current = after.get(relative)
+        if previous == current:
+            return False
+        digest = retained.get(relative) if previous is not None else None
+        if digest and current is not None and file_sha256(
+            os.path.join(self.repo_root, relative)
+        ) == digest:
+            return False
+        return True
 
     def _swept_moves(
         self,
@@ -4495,8 +4577,9 @@ class WriteBatchScheduler:
                 )
                 return outcome
             outcome.output_path = persist_result(task, self.phase_dir, data)
+            asked: Dict[str, Any] = {"result": data, "exit_code": 0}
             if attempt > allowance or not self._applied_without_changes(
-                task, snapshot, {"result": data, "exit_code": 0},
+                task, snapshot, asked,
             ):
                 break
             sent = build_nothing_changed_resend_prompt(
@@ -4505,6 +4588,7 @@ class WriteBatchScheduler:
                     str(path) for path in (data.get("files_touched") or [])
                     if isinstance(path, str)
                 ],
+                outside=list(asked.get("moved_outside") or []),
             )
         self._classify(task, outcome, snapshot, data, runner="native",
                        profile=profile, attempt=attempt, exit_code=0,
@@ -4928,6 +5012,22 @@ class WriteBatchScheduler:
                 ", ".join(e.relative for e in snapshot.declared_entries())
                 or "any declared file"
             )
+            # The files that moved outside the declared set. For a plan or
+            # task-list batch the declared file is the whole contract (fix
+            # round 15), so none of them makes it applied: they are named,
+            # and stay restorable, but the verdict is the declared file's.
+            # A code batch is judged on its stray writes too, but not on one
+            # a task running beside it also saw move: the sweep cannot say
+            # whose that is (fix round 15).
+            outside = list(undeclared.paths)
+            own = (
+                [] if self.kind in SHARED_ARTIFACT_WRITE_KINDS
+                else list(undeclared.own)
+            )
+            siblings = sorted(undeclared.shared)
+            outside_names = ", ".join(outside[:5]) + (
+                ", …" if len(outside) > 5 else ""
+            )
             if crashed or claimed == "failed":
                 # The runner's own verdict, and the bytes agree. Nothing to
                 # restore, but nothing done either: the loop stops here rather
@@ -4943,9 +5043,15 @@ class WriteBatchScheduler:
                 )
                 outcome.reason = (
                     f"FAILED: {what} and the pre-batch snapshot comparison "
-                    f"confirms no byte changes in {declared_names}. Nothing to "
-                    f"restore; the loop stops here and --resume re-dispatches "
-                    f"this batch."
+                    f"confirms no byte changes in {declared_names}. "
+                    + (
+                        f"{len(outside)} file(s) outside it changed "
+                        f"({outside_names}): inspect them, restore them with "
+                        f"util restore-batch or keep them; "
+                        if outside else "Nothing to restore; "
+                    )
+                    + "the loop stops here and --resume re-dispatches this "
+                    "batch."
                     + (f" Runner summary: {summary}" if summary else "")
                 )
             elif claimed == "no-op":
@@ -4957,15 +5063,17 @@ class WriteBatchScheduler:
                     f"snapshot comparison confirms no byte changes in "
                     f"{declared_names}. Recorded; the loop continues."
                 )
-            elif undeclared.paths:
+            elif own:
                 # Success claimed, none of the declared files moved, others
                 # did (the policy check above passed them). The bytes decide,
                 # as when a declared file moved beside undeclared ones: applied
                 # when every expected id came back, a partial application
                 # when not. It used to read as a clean failure at `ok` (fix
-                # round 14 gave that word one meaning: not done).
-                moved_names = ", ".join(undeclared.paths[:5]) + (
-                    ", …" if len(undeclared.paths) > 5 else ""
+                # round 14 gave that word one meaning: not done). A code
+                # batch only: a plan or task-list batch is judged on its
+                # declared file alone (fix round 15).
+                moved_names = ", ".join(own[:5]) + (
+                    ", …" if len(own) > 5 else ""
                 )
                 if missing_ids:
                     outcome.status = STATUS_PARTIAL
@@ -4973,7 +5081,7 @@ class WriteBatchScheduler:
                     outcome.reason = (
                         f"PARTIAL APPLICATION: none of the files the batch "
                         f"declares changed ({declared_names}), while "
-                        f"{len(undeclared.paths)} file(s) outside them did "
+                        f"{len(own)} file(s) outside them did "
                         f"({moved_names}), and not every expected id came "
                         f"back (missing: {', '.join(missing_ids)}). The batch "
                         f"loop stops here, the pre-batch snapshot is kept at "
@@ -4986,16 +5094,16 @@ class WriteBatchScheduler:
                     outcome.write_outcome = WRITE_APPLIED
                     outcome.reason = (
                         f"APPLIED outside the declared files: none of "
-                        f"{declared_names} changed, but {len(undeclared.paths)} "
+                        f"{declared_names} changed, but {len(own)} "
                         f"other file(s) did ({moved_names}) and the reply "
                         f"attests every expected id; the bytes decide."
                     )
             else:
-                # Success claimed and not one byte moved, after the one re-send
-                # (rule 9): the change did not land. Never `ok` (fix round 14,
-                # OpenCode racing run 5: T016 was recorded completed, listed
-                # "done and kept", and the tasks after it built on a function
-                # that never existed).
+                # Success claimed and not one byte of the change moved, after
+                # the one re-send (rule 9): the change did not land. Never
+                # `ok` (fix round 14, OpenCode racing run 5: T016 was recorded
+                # completed, listed "done and kept", and the tasks after it
+                # built on a function that never existed).
                 named = [
                     str(path) for path in ((result or {}).get("files_touched") or [])
                     if isinstance(path, str)
@@ -5003,11 +5111,21 @@ class WriteBatchScheduler:
                 if resent:
                     again = (
                         " — the second time: it was sent once more, told that "
-                        "its previous attempt had changed no file, and that "
-                        "reply said the same"
+                        + (
+                            f"its previous attempt had not changed "
+                            f"{declared_names}"
+                            if outside else
+                            "its previous attempt had changed no file"
+                        )
+                        + ", and that reply said the same"
                     )
                 elif resend_note:
                     again = f" ({resend_note})"
+                elif outside and siblings:
+                    again = (
+                        " (not sent again: files moved during its run, so a "
+                        "second dispatch could apply its work twice)"
+                    )
                 elif not undeclared.observed:
                     again = (
                         " (no re-send: the containment sweep could not see "
@@ -5019,6 +5137,24 @@ class WriteBatchScheduler:
                 outcome.write_outcome = WRITE_CLEAN_FAILURE
                 outcome.status = STATUS_BATCH_FAILED
                 outcome.applied_without_changes = True
+                if outside and siblings:
+                    elsewhere = (
+                        f"; {len(outside)} file(s) outside them changed "
+                        f"({outside_names}), but {', '.join(siblings)}, "
+                        f"running at the same time, saw "
+                        f"{'it' if len(outside) == 1 else 'them'} change too, "
+                        f"so {'it is' if len(outside) == 1 else 'they are'} "
+                        f"not counted as this task's change"
+                    )
+                elif outside:
+                    elsewhere = (
+                        f"; {len(outside)} file(s) outside it changed "
+                        f"({outside_names}), which is not this batch's change"
+                    )
+                elif undeclared.observed:
+                    elsewhere = ", and no other file changed either"
+                else:
+                    elsewhere = ""
                 outcome.reason = (
                     f"NOT APPLIED: the batch reported {claimed or 'no status'!r}"
                     + (
@@ -5028,11 +5164,15 @@ class WriteBatchScheduler:
                     )
                     + f", but the pre-batch snapshot comparison found no byte "
                     f"change in {declared_names}"
-                    + (", and no other file changed either"
-                       if undeclared.observed else "")
+                    + elsewhere
                     + f"{again}. Its change did not land, so it is not recorded "
-                    f"as done: the loop stops here, there is nothing to "
-                    f"restore, and --resume dispatches it again."
+                    f"as done: the loop stops here, "
+                    + (
+                        "the files outside it are left as they are (restore "
+                        "them with util restore-batch, or keep them), "
+                        if outside else "there is nothing to restore, "
+                    )
+                    + "and --resume dispatches it again."
                     + (f" Runner summary: {summary}" if summary else "")
                 )
             self._audit_completion(outcome, runner, profile, attempt, exit_code,
@@ -5081,7 +5221,18 @@ class WriteBatchScheduler:
             before = self._target_identity_before.get(task_id)
             if before is not None and self._identity_of(self._identity_path()) != before:
                 return None
-        if self._moved_since_dispatch(task_id, snapshot):
+        moved = self._moved_since_dispatch(task_id, snapshot)
+        outside: List[str] = []
+        if moved and self.kind in SHARED_ARTIFACT_WRITE_KINDS:
+            # Fix round 15: for a plan or task-list batch the declared file
+            # is the whole contract, so a stray write beside an unchanged
+            # plan does not make it applied, and the plan's own bytes cannot
+            # be applied twice by a re-send. Told which files moved instead.
+            if snapshot.changed():
+                return None
+            outside = list(moved)
+            context["moved_outside"] = outside
+        elif moved:
             return None
         declared = (
             ", ".join(e.relative for e in snapshot.declared_entries())
@@ -5091,12 +5242,18 @@ class WriteBatchScheduler:
             str(path) for path in (result.get("files_touched") or [])
             if isinstance(path, str)
         ]
+        verb = 'is' if len(snapshot.declared_entries()) == 1 else 'are'
         return (
             f"the reply said 'applied'"
             + (f" and named {', '.join(named[:5])} as edited" if named else "")
-            + f", but no file changed: {declared} "
-            f"{'is' if len(snapshot.declared_entries()) == 1 else 'are'} "
-            f"byte-for-byte as before the dispatch"
+            + (
+                f", but {declared} {verb} byte-for-byte as before the dispatch "
+                f"(only {', '.join(outside[:5])}"
+                f"{', …' if len(outside) > 5 else ''} changed, outside it)"
+                if outside else
+                f", but no file changed: {declared} {verb} byte-for-byte as "
+                f"before the dispatch"
+            )
         )
 
     def _verification_only(self, snapshot: TaskSnapshot) -> bool:
@@ -6562,7 +6719,8 @@ class WriteBatchScheduler:
         if outcome.applied_without_changes:
             return (
                 "its change did not land — the reply said it was applied, but "
-                "no file changed"
+                + ("none of the files it declares changed" if outcome.bytes_moved
+                   else "no file changed")
             )
         check = self._task_by_id(outcome.task_id) or {}
         is_check = self.kind == "implement" and not declared_file_set(check)
@@ -7384,6 +7542,14 @@ class WriteBatchScheduler:
                 "then apply-code-fixes), then resume this phase; or accept the "
                 f"failure by adding --human-task {task_id}=done to the resume "
                 f"command (the tasks after it then run)."
+            )
+        elif stop.get("applied_without_changes") and stop.get("bytes_moved"):
+            # Fix round 15: the files it declares did not change, others did
+            # (a plan or task-list batch is judged on its declared file).
+            head += (
+                " Files outside the ones it declares changed: inspect them "
+                "(restore the batch, or keep them), then resume this phase "
+                "and it is dispatched again."
             )
         elif stop.get("applied_without_changes"):
             head += (
