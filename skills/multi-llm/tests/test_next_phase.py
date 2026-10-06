@@ -45,8 +45,10 @@ P = "plans/foo.md"
 WHY_REVIEW_TASKS = "optional: have the models review the tasks before implementing"
 WHY_APPLY_TASKS = "optional: apply the task-review suggestions before implementing"
 NOTICE_ONE_GROUP = (
-    "review-tasks produced 1 unapplied task suggestion groups. Run "
-    "--apply-task-suggestions to apply them, or proceed to --implement to skip."
+    "review-tasks left 1 valid task suggestion group unapplied. Run "
+    "--apply-task-suggestions first to apply it to the task list; going "
+    "straight to --implement skips it, and implement then works from the "
+    "task list as it stands, without that change."
 )
 
 # --- fixture files --------------------------------------------------------

@@ -164,9 +164,9 @@ class TestTheTerminalPoll:
         notice = payload["notice"]
         assert notice.startswith(TASKS_SENTENCE + "; ")
         trailer = notice[len(TASKS_SENTENCE) + 2:]
-        assert "review-tasks produced 1 unapplied task suggestion groups" in trailer
+        assert "review-tasks left 1 valid task suggestion group unapplied" in trailer
         assert "suggested next:" in trailer
-        assert "workflow notice: review-tasks produced 1 unapplied" in out
+        assert "workflow notice: review-tasks left 1 valid" in out
         assert payload["next"] is None
 
     def test_the_workflow_trailer_alone_is_unchanged(self, tmp_path, capsys):

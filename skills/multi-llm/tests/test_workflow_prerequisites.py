@@ -522,7 +522,7 @@ class TestReviewTasksPrerequisites:
 
         notices = output.get("notices") or []
         assert notices, f"expected a notice on the workflow status, got: {output}"
-        assert "2 unapplied task suggestion groups" in notices[0], notices[0]
+        assert "left 2 valid task suggestion groups unapplied" in notices[0], notices[0]
         # The old wording, without "groups", must be gone — it undercounted
         # by calling 2 groups (6 suggestions) "2 suggestions".
         assert "2 unapplied task suggestions." not in notices[0], notices[0]
@@ -1387,9 +1387,10 @@ class TestUnappliedGroupsNoticeOnItsPhase:
         _record(plan, completed=("review-tasks",))
         payload = _status(plan)
         assert payload["notices"] == [
-            "review-tasks produced 1 unapplied task suggestion groups. "
-            "Run --apply-task-suggestions to apply them, or proceed to "
-            "--implement to skip."
+            "review-tasks left 1 valid task suggestion group unapplied. Run "
+            "--apply-task-suggestions first to apply it to the task list; going "
+            "straight to --implement skips it, and implement then works from the "
+            "task list as it stands, without that change."
         ]
         assert payload["phases"]["apply-task-suggestions"]["notice"] == payload["notices"][0]
 

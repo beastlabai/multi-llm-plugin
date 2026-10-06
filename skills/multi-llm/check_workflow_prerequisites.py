@@ -368,6 +368,7 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
 
     # Cross-reference with validation.json if available to count valid ones
     actionable_count = total_groups
+    counted_valid = False
     importance_breakdown = {"HIGH": 0, "MEDIUM": 0, "LOW": 0}
 
     if validation_path.exists():
@@ -399,6 +400,7 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
 
             if valid_count > 0:
                 actionable_count = valid_count
+                counted_valid = True
             # If validation exists but nothing is valid, still count all groups
             # as actionable (user may override validation)
         except (json.JSONDecodeError, OSError):
@@ -415,6 +417,9 @@ def check_apply_task_suggestions_prerequisite(state: StateManager, plan_dir: Pat
         "met": False,
         "reason": f"review-tasks produced {actionable_count} unapplied task suggestion groups",
         "actionable_count": actionable_count,
+        # Whether that count is of groups validation judged valid (fix round
+        # 18: the next-step notice says so when it is).
+        "counted_valid": counted_valid,
         "importance_breakdown": importance_breakdown
     }
 
@@ -962,6 +967,27 @@ def _suggested_next(phases: Dict[str, dict], order: List[str]) -> Optional[str]:
     )
 
 
+def unapplied_task_groups_notice(count: int, *, valid: bool) -> str:
+    """The notice for task suggestion groups review-tasks left unapplied.
+
+    It is also the ``why`` of the optional ``--apply-task-suggestions`` step
+    the next-step command offers before ``--implement`` (``next_phase``), so
+    it names how many groups are waiting and what going straight to
+    implement does with them (fix round 18, live run 7 #11: 11, 9 and 7
+    valid groups sat unapplied while the next step read ``--implement``).
+    """
+    kind = "valid task suggestion" if valid else "task suggestion"
+    noun = "group" if count == 1 else "groups"
+    them = "it" if count == 1 else "them"
+    changes = "that change" if count == 1 else f"those {count} changes"
+    return (
+        f"review-tasks left {count} {kind} {noun} unapplied. Run "
+        f"--apply-task-suggestions first to apply {them} to the task list; going "
+        f"straight to --implement skips {them}, and implement then works from "
+        f"the task list as it stands, without {changes}."
+    )
+
+
 def get_workflow_status(
     state: StateManager, plan_path: Path, plan_dir: Path,
     *, host_id: Optional[str] = None,
@@ -1142,10 +1168,8 @@ def get_workflow_status(
             # F9.5: `actionable_count` is a count of valid GROUPS (see the
             # matching comment on `check_apply_task_suggestions_prerequisite`),
             # so this notice must not call it "suggestions" either.
-            notice = (
-                f"review-tasks produced {actionable_count} unapplied task suggestion groups. "
-                f"Run --apply-task-suggestions to apply them, or proceed to --implement to skip."
-            )
+            notice = unapplied_task_groups_notice(
+                actionable_count, valid=bool(cached_task_check.get("counted_valid")))
             notices.append(notice)
             # Also on the entry of the phase it concerns, so a reader that
             # needs "which phase is this notice about" (the next-phase
