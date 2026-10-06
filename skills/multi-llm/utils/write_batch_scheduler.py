@@ -5236,12 +5236,17 @@ class WriteBatchScheduler:
             outcome.status = STATUS_OK
             changed_names = ", ".join(changed)
             if outcome.task_id in self._snapshot_reused:
+                # Fix round 16 (OpenCode racing 06b): "APPLIED (no-op
+                # claimed, bytes moved)" read as a fault in the summary row.
+                # A resume after an attempt that timed out with its edit on
+                # disk is this case: say what happened, plainly, first.
                 outcome.reason = (
-                    f"APPLIED (no-op claimed, bytes moved): {changed_names} "
-                    f"differ from the pre-batch snapshot, but that snapshot "
-                    f"was reused from an earlier dispatch of this batch — "
-                    f"the diff is that attempt's work, not this dispatch's. "
-                    f"Recorded as applied."
+                    f"APPLIED (kept from an earlier attempt): the edits an "
+                    f"earlier attempt made to {changed_names} are kept and "
+                    f"count as applied; this run's model found them already "
+                    f"in place (it reported no change). The rollback point "
+                    f"is still the pre-batch snapshot taken before that "
+                    f"first attempt."
                 )
             else:
                 outcome.reason = (
