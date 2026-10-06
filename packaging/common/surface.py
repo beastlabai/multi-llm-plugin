@@ -602,6 +602,10 @@ def cli_surface(host_id: str) -> Dict[str, Any]:
         # `resume_command`. Additive within v5: a server whose surface lacks it
         # still sets the null and omits the sentence.
         "no_command_reason": mode_table.NO_COMMAND_REASON,
+        # The OpenCode tool part's title at a stop (``tool.execute.after``),
+        # which ``opencode run`` prints without the model. Additive within v5:
+        # a plugin whose surface lacks it sets no title.
+        "stop_title": dict(mode_table.STOP_TITLE),
         "modes": rows,
         "positional_kinds": {
             "plan": mode_table.POS_PLAN,

@@ -466,6 +466,21 @@ NO_COMMAND_REASON = (
     "compose a command."
 )
 
+#: The title the OpenCode package puts on its tool part when a call ends at a
+#: stop (``tool.execute.after``; fix round 16). ``opencode run`` prints a
+#: plugin tool's title on the tool's own line and the TUI on its header, as
+#: soon as the call returns and whether or not the session's model ever
+#: writes its reply: OpenCode racing run 6's free model never did (28 min
+#: idle), and the stop and its resume command were only in the tool output.
+#: ``{line}`` is the run's own last error line (``result.error``, the line
+#: the exit-3 ``message`` quotes) or ``no_line``; ``resume`` is appended,
+#: ``{command}`` filled with ``resume_command``, when the result carries one.
+STOP_TITLE = {
+    "template": "stopped and needs you: {line}",
+    "no_line": "the run did not finish; the tool output says why.",
+    "resume": " Resume with: {command}",
+}
+
 #: The route signal's one owner (plans/next-phase-command.md §2.1, "Knowing the
 #: route"). The package routes' tool servers set ``ROUTE_ENV`` in every child
 #: env they spawn (polls included) to their surface's

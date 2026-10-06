@@ -3074,7 +3074,70 @@ export const MultiLlmPlugin = async ({ client } = {}) => {
     },
 
     tool: buildToolHook(surface, client),
+
+    // The stop, on the tool's own line (fix round 16): see `stopTitle`.
+    "tool.execute.after": async (input, output) => {
+      try {
+        titleTheStop(input, output, surface)
+      } catch (error) {
+        warn(`could not title the stop on the tool part: ${describe(error)}`)
+      }
+    },
   }
+}
+
+/**
+ * The tool part's title when a call ends at a stop, or null.
+ *
+ * OpenCode racing run 6 (fix round 16): implement stopped at T006, the result
+ * held the stop and `resume_command`, and the session's free model never wrote
+ * its reply — it sat idle for 28 minutes until it was killed, so the user got
+ * nothing. A plugin tool's title is the one thing opencode shows of a tool
+ * call without the model: `opencode run` prints it on the tool's own line
+ * (`⚙ multi_llm <title>`, in place of the call's arguments) the moment the call
+ * returns, `--format json` carries it as `state.title`, and the TUI puts it on
+ * the tool's header (measured offline on 1.18.34 with a stub provider and a
+ * model that never replies). `tool.execute.after` is where a plugin sets it;
+ * `execute` keeps returning one JSON string.
+ *
+ * Only a finished stop is titled: a failed or needs-human result that carries
+ * a `resume_command` or a `no_command_reason` (a run left alive, a handoff or
+ * an abort report carries neither). Every word is the surface's `stop_title`
+ * or the result's own: the run's last error line (`result.error`, the line the
+ * exit-3 `message` quotes) and `resume_command`, verbatim.
+ */
+function stopTitle(outcome, surface) {
+  const text = surface?.stop_title
+  if (!text || typeof text.template !== "string") return null
+  if (!outcome || typeof outcome !== "object" || outcome.ok !== false) return null
+  const command =
+    typeof outcome.resume_command === "string" && outcome.resume_command
+      ? outcome.resume_command
+      : null
+  if (!command && typeof outcome.no_command_reason !== "string") return null
+  const raw = outcome.result?.error
+  const line =
+    typeof raw === "string" && raw.trim() ? raw.trim() : text.no_line
+  if (typeof line !== "string") return null
+  let title = text.template.split("{line}").join(line)
+  if (command && typeof text.resume === "string") {
+    title += text.resume.split("{command}").join(command)
+  }
+  return title
+}
+
+/** `tool.execute.after`: title this tool's stop, leave every other call alone. */
+function titleTheStop(input, output, surface) {
+  if (!surface || input?.tool !== surface.tool_name) return
+  if (!output || typeof output.output !== "string") return
+  let outcome
+  try {
+    outcome = JSON.parse(output.output)
+  } catch {
+    return
+  }
+  const title = stopTitle(outcome, surface)
+  if (title) output.title = title
 }
 
 
