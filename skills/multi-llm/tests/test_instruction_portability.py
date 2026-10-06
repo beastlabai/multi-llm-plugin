@@ -3239,10 +3239,57 @@ class TestDispatcherCommandsRunBare:
         skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
         assert "`tail` is the only trim" not in skill
         assert (
-            "Run every dispatcher command bare: no pipe (not even `| tail`), no "
-            "`2>&1`, no `sleep` before it"
+            "Run every foreground dispatcher call bare: no pipe (not even "
+            "`| tail`), no `2>&1`, no `sleep` before it"
         ) in skill
         assert "a `3` reads as `0`" in skill
+
+    #: Fix round 15 (review of round 14, prompts #4): "no `2>&1`" read as a
+    #: rule for every call, while the run-detached launch redirects stdout and
+    #: stderr into `orchestrator-run.log` — it needs `> … 2>&1`. Every place
+    #: the rule appears scopes it to a foreground call and names that launch
+    #: as the one exception.
+    DETACHED_EXCEPTION = {
+        "SKILL.md": (
+            "The detached launch (*Run detached*, section 5) is the one "
+            "exception: it redirects stdout and stderr into the phase dir's "
+            "`orchestrator-run.log` (`> … 2>&1`)."
+        ),
+        "references/summary-format.md": (
+            "read a foreground call's output whole (only a detached launch "
+            "redirects its output, into the phase dir's `orchestrator-run.log`)"
+        ),
+    }
+    CORE_EXCEPTION = (
+        "Only the detached launch redirects its output (into "
+        "`orchestrator-run.log`); this call runs in the foreground."
+    )
+    VERB_EXCEPTION = (
+        "redirecting stdout and stderr to the phase dir's `orchestrator-run.log` "
+        "(`> … 2>&1`, the one dispatcher command that takes a redirect: every "
+        "foreground call runs bare)"
+    )
+
+    @pytest.mark.parametrize("name", sorted(DETACHED_EXCEPTION))
+    def test_the_rule_names_the_detached_launch_as_its_exception(self, name):
+        text = " ".join((SKILL_ROOT / name).read_text(encoding="utf-8").split())
+        assert self.DETACHED_EXCEPTION[name] in text
+        assert "Run every dispatcher command bare" not in text
+
+    @pytest.mark.parametrize("core", ["review-plan", "review-tasks", "review-code"])
+    def test_each_core_s_bare_rule_names_the_detached_launch(self, core):
+        text = (SKILL_ROOT / "instructions" / f"{core}.md").read_text(encoding="utf-8")
+        assert text.count(self.CORE_EXCEPTION) == text.count(
+            '--plan-file "$PLAN_PATH" --reaggregate\n')
+
+    def test_the_run_detached_sentence_says_its_redirect_is_the_exception(self):
+        from utils import host_capabilities
+
+        sentence = host_capabilities.verb_sentence("claude-code", "detach")
+        assert self.VERB_EXCEPTION in sentence
+        rendered = (SKILL_ROOT / "references" / "host-capabilities.md").read_text(
+            encoding="utf-8")
+        assert self.VERB_EXCEPTION in rendered
 
     @pytest.mark.parametrize("core", ["review-plan", "review-tasks", "review-code"])
     def test_each_reaggregate_block_is_followed_by_the_bare_rule(self, core):

@@ -522,7 +522,7 @@ to bare `python`.
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" review-code \
      --plan-file "$PLAN_PATH" --reaggregate
    ```
-   Run it bare, exactly as shown: no `| tail` or any other pipe, no `2>&1`, nothing chained before it. A pipe reports the last command's exit code, not this one's, and a trim drops the `[MODEL_FAILED]` and `[NEXT_COMMAND]` lines above its result line.
+   Run it bare, exactly as shown: no `| tail` or any other pipe, no `2>&1`, nothing chained before it. A pipe reports the last command's exit code, not this one's, and a trim drops the `[MODEL_FAILED]` and `[NEXT_COMMAND]` lines above its result line. Only the detached launch redirects its output (into `orchestrator-run.log`); this call runs in the foreground.
 
    After reaggregation, mark the validation phase finish (only if `start` was called above):
    ```bash
