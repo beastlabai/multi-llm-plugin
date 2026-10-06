@@ -5535,8 +5535,9 @@ QUOTE_CASES = [
 class TestRestatedComposedFlags:
     """Racing re-run 2026-10-04 (opencode #1): big-pickle put `--yes` in
     extra_flags on four calls and each came back "reserved". A flag this tool
-    composes with the same meaning is now dropped with a note; one whose
-    meaning would differ is still refused."""
+    composes with the same meaning is now dropped, quietly since run 6
+    (#10a/#14: the note was relayed as "`--yes` was dropped from your flags");
+    one whose meaning would differ is still refused."""
 
     ARGS = {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []}
     DONE = {"exit": 0, "stdout": [
@@ -5549,8 +5550,7 @@ class TestRestatedComposedFlags:
         (["--exec-subagents"], "--exec-subagents"), (["--ye"], "--ye"),
         (["--host", "opencode"], "--host opencode"), (["--host=opencode"], "--host=opencode"),
     ])
-    def test_a_restated_flag_runs_and_is_named_in_a_note(self, built_package, uv_stub,
-                                                         flags, shown):
+    def test_a_restated_flag_runs_quietly(self, built_package, uv_stub, flags, shown):
         result, calls = uv_stub.run(
             built_package, dict(self.ARGS, extra_flags=[*flags, "--quick"]),
             [self.DONE, self.FINISHED])
@@ -5562,8 +5562,9 @@ class TestRestatedComposedFlags:
                 assert launch.count(baked) == 1, launch
         assert "--quick" in launch
         assert not set(flags) - set(surface["baked_flags"]) & set(launch)
-        note = surface["reserved_flags"]["redundant"]["note"]
-        assert result["extra_flags_note"] == note.replace("{flags}", shown)
+        assert "extra_flags_note" not in result
+        assert "note" not in surface["reserved_flags"]["redundant"]
+        assert "leave them out" not in json.dumps(result)
 
     @pytest.mark.parametrize("flags", [
         ["--host", "codex"], ["--host=codex"], ["--host"], ["--detach"],

@@ -1231,9 +1231,6 @@ class Call:
         self.log = None
         self.watched = None
         self.polls = 0
-        # The restated composed flags `split_extra_flags` dropped from this
-        # call's extra_flags, named back in `extra_flags_note`.
-        self.dropped = []
         self.deadline = time.monotonic()
         self.hard_deadline = self.deadline
 
@@ -1560,17 +1557,16 @@ class Server:
         host model composed a next command of its own): ``user_next_step`` is
         null and, unless the result carries a ``resume_command``, the surface's
         ``no_command_reason`` says there is none, with its ``no_command`` clause
-        on a dispatcher exit 3. A call whose ``extra_flags`` restated a composed
-        flag gets the surface's note naming what was dropped. Every sentence is
-        the surface's; with no surface, or a key it lacks, only that sentence
-        is lost. The port of ``finishOutcome``.
+        on a dispatcher exit 3. A restated composed flag ``split_extra_flags``
+        dropped is never named back (run 6, #10a/#14: the note was relayed to
+        the user as "`--yes` was dropped from your flags"): it means what the
+        call already does. Every sentence is the surface's; with no surface, or
+        a key it lacks, only that sentence is lost. The port of
+        ``finishOutcome``.
         """
         surface = self.surface
         if surface is None:
             return outcome
-        note = (surface["reserved_flags"].get("redundant") or {}).get("note")
-        if call.dropped and isinstance(note, str):
-            outcome["extra_flags_note"] = note.replace("{flags}", ", ".join(call.dropped))
         if outcome.get("ok") is not False:
             return outcome
         outcome[USER_NEXT_STEP_KEY] = None
@@ -1728,7 +1724,7 @@ class Server:
         row, problem = validate_args(call.args, surface)
         if problem:
             return self.refusal(call, "error", problem)
-        kept_flags, call.dropped, _refused = split_extra_flags(
+        kept_flags, _dropped, _refused = split_extra_flags(
             call.args["extra_flags"], surface)
         if call.anchor is None:
             return self.refusal(call, "needs_human", fill(
@@ -1777,7 +1773,7 @@ class Server:
         values = {"word": args["mode"], "plan": self.normalize_plan(args["plan"], call),
                   "plan_arg": self.plan_spelling(args["plan"]),
                   # What validation forwards: a restated composed flag is
-                  # dropped (`split_extra_flags`) and named in the note.
+                  # dropped quietly (`split_extra_flags`).
                   "question": args["question"], "extra": list(kept_flags)}
         outcome = self.run_workflow(call, row, values)
         hand_back_typed(outcome, values)

@@ -381,9 +381,9 @@ def _argument_descriptions(
             '["--view", "run"], never ["--view run"]. Use [] for none. Passed '
             "verbatim, in order, never reordered or deduplicated. This tool "
             f"composes these itself: {', '.join(reserved_words)}. Restating one "
-            f"with the same meaning ({', '.join(restated)}) is dropped with a "
-            "note in the result; every other one is rejected — including their "
-            'abbreviations and "=" forms.'
+            f"with the same meaning ({', '.join(restated)}) is fine: it is "
+            "ignored, because the call already does what it says. Every other "
+            'one is rejected — including their abbreviations and "=" forms.'
         ),
     }
 
@@ -398,7 +398,14 @@ def _redundant_flags(host_id: str) -> Dict[str, Any]:
     listed with that value. ``--detach`` is composed for some modes only and is
     a refusal on the rest, ``--interactive`` contradicts ``--yes``, and the
     detach controls and ``--internal-*`` are never the caller's: none of them is
-    here, so each stays refused. ``note`` is ``modes.REDUNDANT_FLAG_NOTE``.
+    here, so each stays refused.
+
+    The drop is quiet (run 6, #10a/#14): there is no ``note``. The result used
+    to name each dropped token ("leave them out next time"), and the host
+    relayed it as "`--yes` was dropped from your flags" on every call of a user
+    who typed ``--yes`` on purpose. Every flag here means exactly what the tool
+    already does, so nothing changed that the host or the user needs to hear;
+    a flag whose meaning would differ is refused, never dropped.
     """
     baked = _baked_flags(host_id)
     actions = {
@@ -417,7 +424,7 @@ def _redundant_flags(host_id: str) -> Dict[str, Any]:
         else:
             valued[baked[index]] = baked[index + 1]
             index += 2
-    return {"flags": flags, "valued": valued, "note": mode_table.REDUNDANT_FLAG_NOTE}
+    return {"flags": flags, "valued": valued}
 
 
 def _baked_flags(host_id: str) -> List[str]:
@@ -468,7 +475,7 @@ def _reserved_flags(host_id: str) -> Dict[str, Any]:
         # these never read as an abbreviation of something longer.
         "exact_options": sorted(cli_common._EXACT_OPTIONS),
         # Additive within schema v5: the subset of the above a call may
-        # restate as a no-op, dropped with `note`. A server whose surface lacks
+        # restate as a no-op, dropped quietly. A server whose surface lacks
         # the key refuses every one of them, as before.
         "redundant": _redundant_flags(host_id),
     }

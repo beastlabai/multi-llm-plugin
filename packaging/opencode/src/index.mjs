@@ -3131,7 +3131,7 @@ async function execute(args, ctx, surface, client) {
       planArg: planSpelling(args.plan),
       question: args.question,
       // What `validateArgs` forwards: a restated flag this tool composes with
-      // the same meaning is dropped here and named in `extra_flags_note`.
+      // the same meaning is dropped here, quietly (run 6, #10a/#14).
       extraFlags: checked.extraFlags ?? args.extra_flags,
     }
 
@@ -3200,10 +3200,12 @@ async function execute(args, ctx, surface, client) {
  * model composed a "next phase" of its own): `user_next_step` is null — a phase
  * that did not finish has no next phase — and, unless the result carries a
  * `resume_command`, `no_command_reason` says there is none to give; the
- * dispatcher's exit-3 message gains the surface's `no_command` clause. And a
- * call whose `extra_flags` restated a flag this tool composes gets the
- * surface's note naming what was dropped. Every sentence is the surface's; a
- * surface lacking one only loses that sentence.
+ * dispatcher's exit-3 message gains the surface's `no_command` clause. A flag
+ * `validateArgs` dropped from `extra_flags` (one this tool composes, restated
+ * with the same meaning) is never named back: run 6 (#10a/#14) relayed the old
+ * note to the user as "`--yes` was dropped from your flags" on every call.
+ * Every sentence is the surface's; a surface lacking one only loses that
+ * sentence.
  *
  * Two results get no reason (2026-10-05): one that names a run and no `exit`
  * (`abortAndReport`, `orphanReport`: the run outlived the call, so "did not
@@ -3216,11 +3218,6 @@ function finishOutcome(outcome, checked, surface) {
 }
 
 function finishFields(outcome, checked, surface) {
-  const dropped = checked?.dropped ?? []
-  const note = surface?.reserved_flags?.redundant?.note
-  if (dropped.length && typeof note === "string") {
-    outcome.extra_flags_note = note.split("{flags}").join(dropped.join(", "))
-  }
   if (outcome.ok !== false) return outcome
   outcome.user_next_step = null
   if (outcome.resume_command) return outcome

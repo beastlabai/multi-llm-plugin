@@ -396,8 +396,8 @@ def test_the_redundant_flags_are_derived_from_the_composed_ones(host):
                for a in cli_common.build_parent_parser()._actions}
     assert redundant["flags"] == by_dest["yes"] + by_dest["exec_subagents"]
     assert redundant["valued"] == {"--host": host}
-    assert redundant["note"] == mode_table.REDUNDANT_FLAG_NOTE
-    assert "{flags}" in redundant["note"]
+    # Run 6 (#10a/#14): no note — a restated flag means what the tool does.
+    assert "note" not in redundant
     assert set(redundant["flags"]) | set(redundant["valued"]) <= set(reserved["exact"])
     # The conflicting ones stay refused.
     for kept_refused in ("--detach", "--if-not-running", "--max-detached"):
@@ -405,7 +405,8 @@ def test_the_redundant_flags_are_derived_from_the_composed_ones(host):
         assert kept_refused not in redundant["valued"]
     assert not set(reserved["named_exception"]) & set(redundant["flags"])
     description = rendered["argument_descriptions"]["extra_flags"]
-    assert f"--host {host}" in description and "dropped with a note" in description
+    assert f"--host {host}" in description
+    assert "note" not in description and "ignored" in description
 
 
 @pytest.mark.parametrize("host", HOSTS)
