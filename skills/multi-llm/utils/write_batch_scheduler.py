@@ -8435,6 +8435,15 @@ class WriteBatchScheduler:
         is set. Never runs anything. Fix round 17: it counted any completed
         task, so a stop after a check alone (which edits nothing, and may have
         run the tests itself) said that nothing had run them.
+
+        Fix round 18 (live run 7, Codex and OpenCode stop 01): the line was
+        in the result's ``notice``, and neither host relayed ``notice`` at a
+        stop — both relay the stop's headline, the result line's ``error``
+        (the one line the needs-human ``message`` quotes). So the line also
+        ends the headline of a stop already recorded (``_record_stop`` and
+        ``_record_check_block`` run first): the tool routes carry it where
+        they carry the stop, and ``run.error``, ``status`` and the OpenCode
+        stop title with it.
         """
         if self.kind not in CODE_WRITE_KINDS or self.dry_run or result.unverified:
             return []
@@ -8447,6 +8456,18 @@ class WriteBatchScheduler:
         if command:
             return []
         result.unverified = unverified_line(self.repo_root)
+        headline = (result.stop or {}).get("headline")
+        if headline and result.unverified not in headline:
+            try:
+                from .cli_common import ERROR_MAX_CHARS
+            except ImportError:  # pragma: no cover - direct script invocation
+                from utils.cli_common import ERROR_MAX_CHARS  # type: ignore
+            # The result line's `error` is bounded: a long headline is cut
+            # before this line, so the line itself always reaches the host.
+            room = ERROR_MAX_CHARS - len(result.unverified) - 1
+            if len(headline) > room:
+                headline = headline[:max(room - 1, 0)].rstrip() + "…"
+            result.stop["headline"] = f"{headline} {result.unverified}"
         return [result.unverified]
 
     def _run_verification(self, result: SchedulerResult) -> bool:

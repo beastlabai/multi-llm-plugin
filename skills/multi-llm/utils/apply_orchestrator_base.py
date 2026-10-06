@@ -3337,9 +3337,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(f"[write-subagents] report: {result.report_path}")
         # Fix round 14: a batch whose own check failed after its edits, and
         # a code phase nothing verified, are on the result line a host relays.
-        from .cli_common import record_notice
+        from .cli_common import record_error, record_notice
         from .write_batch_scheduler import write_result_notice
 
+        stop = getattr(result, "stop", None) or {}
+        if stop.get("headline"):
+            # Fix round 18 (live run 7, Codex racing 08): an apply phase's
+            # stop left the result line with no `error`, so the tool's
+            # needs-human message said "Its result line names no error" and
+            # the host relayed only the resume command — not what stopped,
+            # what the batch reported or what did not run. The headline is
+            # that line, as implement records it.
+            record_error(stop["headline"])
         notice = write_result_notice(result)
         if notice:
             record_notice(notice)

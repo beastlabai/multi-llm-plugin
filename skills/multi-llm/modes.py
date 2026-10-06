@@ -551,6 +551,8 @@ NEEDS_HUMAN_WORK_SENTENCE = (
 NEEDS_HUMAN_RULE = (
     "Run `next` verbatim when it is not `null` on `0` and `2`. On `3` stop: "
     "report to the user what was being run, the last error line it printed, "
+    "whole (on a stop it says what stopped, what it reported, what did not "
+    "run and whether anything ran the repository's tests), "
     "and the options its output names (`next` included); do not run a "
     "different mode. " + NEEDS_HUMAN_WORK_SENTENCE + " Run an option only "
     "after the user has picked it."
@@ -589,7 +591,9 @@ NEEDS_HUMAN_RULE = (
 NEEDS_HUMAN_MESSAGE = {
     "template": (
         "Stop here: this run is blocked and needs a human. {phase} {error} "
-        "Report to the user what was being run (`argv`), that line, and the "
+        "Report to the user what was being run (`argv`), that line whole, word "
+        "for word (on a stop it says what stopped, what the task reported, what "
+        "did not run and whether anything ran the repository's tests), and the "
         "`options`; an `options` entry is a tool call for you, never a command "
         "for the user to type, so do not print one as a command. The "
         "dispatcher's output is included as it was rendered, except that every "
