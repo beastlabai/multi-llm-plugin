@@ -321,6 +321,26 @@ class TestAnExplicitNativeResumeSaysWhatItKept:
             "T002 (accepted with its check findings))."
         ], text
 
+    def test_the_emit_lists_an_accepted_check_as_accepted_with_its_findings(
+        self, repo, capsys,
+    ):
+        """Live run 7, Claude Code accept 02: the emit listed T002 under
+        "Accepted after failing … list them in the summary as accepted after
+        failing", and the host's summary said T002 failed, though the check
+        ran and reported findings the user accepted."""
+        self._stop(repo, capsys)
+        text = self._emit(
+            repo, capsys, "--resume", "--human-task", "T002=done",
+            "--human-task", "T005=skip",
+        )
+        assert "Accepted after failing" not in text
+        assert (
+            "Accepted with their check findings (recorded completed in "
+            "state.json; not in the batches, do not dispatch or record them; "
+            "list them in the summary as accepted with their check findings):"
+        ) in text, text
+        assert "  T002 Check the module: accepted — you answered" in text
+
     def test_the_plain_continue_still_prints_its_own_line_once(self, repo, capsys):
         self._stop(repo, capsys)
         text = self._emit(repo, capsys)

@@ -2823,13 +2823,33 @@ def main(argv: Optional[List[str]] = None) -> int:
             for task_id, reason in sorted(declined.items()):
                 print(f"  {_named(task_id)}: {reason}")
         if native_human_plan.accepted:
+            # Fix round 18 (live run 7, Claude Code accept 02): a check whose
+            # findings the user accepted was listed "accepted after failing",
+            # and the host's summary said so of a check that never failed. The
+            # words are the executor's (`answered_done_label`).
+            from utils.write_batch_scheduler import answered_done_label
+
+            labels = {
+                task_id: answered_done_label(native_human_plan, task_id)
+                for task_id in native_human_plan.accepted
+            }
+            kinds = sorted(set(labels.values()))
+            heading = (
+                kinds[0][:1].upper() + kinds[0][1:] if len(kinds) == 1
+                else "Accepted on your answer"
+            ).replace("its check findings", "their check findings")
             print(
-                "Accepted after failing (recorded completed in state.json; "
-                "not in the batches, do not dispatch or record them; list "
-                "them in the summary as accepted after failing):"
+                f"{heading} (recorded completed in state.json; not in the "
+                f"batches, do not dispatch or record them; list them in the "
+                + (
+                    f"summary as {kinds[0].replace('its check findings', 'their check findings')}):"
+                    if len(kinds) == 1 else
+                    "summary with the words in brackets after each id):"
+                )
             )
             for task_id, reason in sorted(native_human_plan.accepted.items()):
-                print(f"  {_named(task_id)}: {reason}")
+                label = f" ({labels[task_id]})" if len(kinds) > 1 else ""
+                print(f"  {_named(task_id)}{label}: {reason}")
         if native_human_plan.completed:
             print(
                 "Completed by hand (manual tasks recorded completed in "
