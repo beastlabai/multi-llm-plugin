@@ -2262,7 +2262,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         from utils.write_batch_scheduler import persist_human_task_plan
 
         persist_human_task_plan(state, native_human_plan)
-    if _closes_a_completed_implement(state, output_data):
+    if not args.task and _closes_a_completed_implement(state, output_data):
         # Fix round 14: a resume of a completed implement that only records
         # answers (`--human-task T007=done` closing a deferred manual task)
         # hands out nothing to run, so it does not reopen the phase: marked
@@ -2285,7 +2285,8 @@ def _closes_a_completed_implement(state: StateManager, output_data: Dict[str, An
 
     True when ``implement`` is on record completed and the handoff holds no
     code task left to run — every task it lists is a manual one or already
-    ``completed``/``skipped`` (fix round 14).
+    ``completed``/``skipped`` (fix round 14). Never asked for ``--task``,
+    which hands one task out to be run again whatever its status.
     """
     if not state.is_phase_completed("implement"):
         return False
