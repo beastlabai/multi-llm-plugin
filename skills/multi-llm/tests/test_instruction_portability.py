@@ -3312,3 +3312,60 @@ class TestDispatcherCommandsRunBare:
             "repeat that one call once if no table printed yet, adding "
             "`--wait --timeout 10` as the wait (never `sleep` before a call"
         ) in sentence
+
+
+class TestTheRepositorysOwnCheckRunsBare:
+    """Fix round 16 (live run 6, Claude Code stop and racing runs): the host
+    ran `npm test 2>&1 | tail -50`, because implement's step 8 told it to.
+    The bare rule covered dispatcher calls only, but a trimmed check hides a
+    failure the same way: the pipe reports `tail`'s exit code, and the trim
+    drops the failures above the cut. The step now runs the command bare and
+    reads its whole output, and no host-facing text tells the host to pipe a
+    command's output through `tail`, `head` or `grep`."""
+
+    def test_step_8_runs_the_repository_s_check_bare(self):
+        core = (SKILL_ROOT / "instructions" / "implement.md").read_text(encoding="utf-8")
+        assert "npm test 2>&1 | tail" not in core
+        assert "--tb=short 2>&1 | tail" not in core
+        assert "with a `test` script: `npm test`\n" in core
+        assert (
+            "Run that command bare, exactly as the repository defines it: no "
+            "`| tail`, `| head` or `| grep`, no `2>&1 |`, nothing chained before "
+            "or after it. Read its whole output and take pass or fail from its "
+            "own exit code"
+        ) in core
+
+    def test_the_shim_says_so_beside_the_dispatcher_rule(self):
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        assert (
+            "Run the repository's own test or check command (implement's "
+            "regression step) the same way: bare, its whole output read."
+        ) in skill
+
+    #: A command, inside a code span or a fenced block, whose output is piped
+    #: into a trim. "no `| tail`" (nothing before the pipe) is the rule
+    #: forbidding one, not a command.
+    TRIM_IN_SPAN = re.compile(r"`[^`\n]*[^`|\s][^`|\n]*\|\s*(?:tail|head|grep)\b[^`\n]*`")
+    TRIM_IN_FENCE = re.compile(r"\S\s*\|\s*(?:tail|head|grep)\b")
+
+    def _host_facing(self):
+        roots = [SKILL_ROOT / "SKILL.md"]
+        roots += sorted((SKILL_ROOT / "instructions").glob("*.md"))
+        roots += sorted((SKILL_ROOT / "references").glob("*.md"))
+        roots += sorted((SKILL_ROOT / "hosts").rglob("*.md"))
+        roots += sorted((SKILL_ROOT / "hosts").rglob("*.tmpl"))
+        return roots
+
+    def test_no_host_facing_text_pipes_output_into_a_trim(self):
+        found = []
+        for path in self._host_facing():
+            fenced = False
+            for number, line in enumerate(
+                    path.read_text(encoding="utf-8").splitlines(), 1):
+                if line.lstrip().startswith("```"):
+                    fenced = not fenced
+                    continue
+                hit = (self.TRIM_IN_FENCE if fenced else self.TRIM_IN_SPAN).search(line)
+                if hit:
+                    found.append(f"{path.relative_to(SKILL_ROOT)}:{number}: {hit.group(0)}")
+        assert found == []
