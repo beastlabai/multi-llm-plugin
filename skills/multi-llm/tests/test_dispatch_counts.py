@@ -204,3 +204,168 @@ class TestTheExecutorEtaEndsAtTheTasksDispatched:
         assert etas[-1] == (6, 6), etas
         assert etas[0] == (1, 7), etas  # T007 counted until T002 reported
         assert "ALL BATCHES COMPLETE" in text
+
+
+def _organized(text: str) -> list:
+    return [line for line in text.splitlines() if line.startswith("Organized into ")]
+
+
+def _run(repo, capsys, *flags) -> tuple:
+    code = _implement(repo, *flags)
+    captured = capsys.readouterr()
+    return code, captured.out + captured.err
+
+
+class TestTheExecutorSaysWhatItsRunDispatches:
+    """Run 7 #3: the executor leg's line counted every task a resume took up.
+    It is the scheduler's now, printed once per run, and counts what the run
+    dispatches, beside the `resume: kept …` line that names what it kept."""
+
+    def test_the_first_run_counts_the_tasks_before_the_refused_one(self, repo, capsys):
+        text = _first_run(repo, capsys)
+        # T005 is refused in its batch and the run stops there: T006 and
+        # T007 (in later batches of this decomposition) are never reached.
+        assert _organized(text) == [
+            "Organized into 3 execution batches: 4 task(s) to dispatch"]
+        assert text.count("[ETA] implement: batch ") == 4
+
+    def test_a_resume_that_changes_nothing_says_it_dispatches_nothing(
+        self, repo, capsys,
+    ):
+        """01b (`--resume`) and 01c (plain): "4 task(s) to dispatch" before
+        "dispatched 0"."""
+        _first_run(repo, capsys)
+        for flags in (("--resume",), ()):
+            code, text = _run(repo, capsys, *flags)
+            assert code == 3, text
+            assert _organized(text) == [
+                "Organized into 0 execution batches: 0 task(s) to dispatch"], text
+            assert "dispatched 0; refused before dispatch 1 (T005)" in text
+        assert _dispatched_titles(repo) == []
+
+    def test_the_fix_path_counts_the_check_and_its_waiter(self, repo, capsys):
+        """Fix 02: the files changed, so T002 runs again and T007 waits on
+        it; T005 and T006 are skipped by the answer. It said 4, ran 2."""
+        _first_run(repo, capsys)
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "retries = 3\n", encoding="utf-8")
+        _check(repo, passed=True)
+        code, text = _run(repo, capsys, "--resume", "--human-task", "T005=skip")
+        assert code == 0, text
+        assert _organized(text) == [
+            "Organized into 2 execution batches: 2 task(s) to dispatch "
+            "(T007 waits on a check's verdict)"], text
+        assert "dispatched 2" in text
+        assert _dispatched_titles(repo) == [
+            "Check the module", "Edit: write the release note"]
+
+    def test_the_accept_path_counts_the_released_task(self, repo, capsys):
+        _first_run(repo, capsys)
+        code, text = _run(
+            repo, capsys, "--resume", "--human-task", "T002=done",
+            "--human-task", "T005=skip")
+        assert code == 0, text
+        assert _organized(text) == [
+            "Organized into 1 execution batch: 1 task(s) to dispatch"], text
+        assert "dispatched 1" in text
+
+    def test_a_policy_widened_since_counts_everything_left(self, repo, capsys):
+        _first_run(repo, capsys)
+        _policy(repo, ALLOW)
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "retries = 3\n", encoding="utf-8")
+        _check(repo, passed=True)
+        code, text = _run(repo, capsys, "--resume")
+        assert code == 0, text
+        assert _organized(text) == [
+            "Organized into 4 execution batches: 4 task(s) to dispatch "
+            "(T007 waits on a check's verdict)"], text
+        assert len(_dispatched_titles(repo)) == 4
+
+
+class TestAFailedCheckAndAManualTask:
+    """The stop-account fixture: T002 a check that fails, T004 after it, T005
+    a manual task the executor never runs."""
+
+    def test_the_manual_task_is_not_counted_and_the_unchanged_failure_stops(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        from tests.test_implement_stop_account import _check_fails, make_repo
+
+        stop = make_repo(tmp_path, monkeypatch)
+        _check_fails(stop)
+        code, text = _run(stop, capsys)
+        assert code == 3, text
+        assert _organized(text) == [
+            "Organized into 3 execution batches: 4 task(s) to dispatch "
+            "(T004 waits on a check's verdict)"], text
+        stop.log.unlink(missing_ok=True)
+        code, text = _run(stop, capsys, "--resume")
+        assert code == 3, text
+        # T002 failed on these very files: not run again, and the run stops.
+        assert _organized(text) == [
+            "Organized into 0 execution batches: 0 task(s) to dispatch"], text
+        assert _dispatched_titles(stop) == []
+
+
+class TestTheStatusProgressLineNamesWhatAResumeKept:
+    """Run 7 #3 (OpenCode 01b/01c): "implement 1/4 batches ok, 0/4 items
+    applied" for a resume that dispatched nothing — the one batch "ok" was
+    the check T002 an earlier run finished, kept on unchanged files."""
+
+    def _progress(self, repo, capsys) -> str:
+        code = multi_llm.main([
+            "status", str(repo.plan), "--view", "run", "--phase", "implement"])
+        captured = capsys.readouterr()
+        line = [
+            l for l in captured.out.splitlines() if "progress:" in l and "implement " in l
+        ]
+        assert line, (code, captured.out)
+        result = json.loads(
+            [l for l in captured.out.splitlines()
+             if l.startswith("MULTI_LLM_RESULT:")][-1].split(" ", 1)[1])
+        return line[0], result
+
+    def test_a_resume_that_kept_the_check_says_so(self, repo, capsys):
+        _first_run(repo, capsys)
+        assert _implement(repo, "--resume") == 3
+        capsys.readouterr()
+        line, result = self._progress(repo, capsys)
+        assert (
+            "implement 1/4 batches ok (1 kept from an earlier run: T002), "
+            "0/4 items applied"
+        ) in line, line
+        # The OpenCode route shows the poll's own rendered lines.
+        assert any(
+            "(1 kept from an earlier run: T002)" in text
+            for text in result.get("progress_lines") or []
+        ), result
+
+    def test_a_first_run_has_nothing_kept_to_name(self, repo, capsys):
+        _first_run(repo, capsys)
+        line, _result = self._progress(repo, capsys)
+        assert "kept from an earlier run" not in line, line
+
+
+class TestTheNativeResumeEmitCountsWhatItHandsOut:
+    """The native leg's resume emits already agreed in run 7 (01b 0/0/0, fix
+    02 2/2/2, accept 02 1/1/1); pinned beside the executor's, so both legs
+    say the same for the same story."""
+
+    def _record_first_run(self, repo, capsys):
+        _emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        for task_id in ("T001", "T003", "T004"):
+            _util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                  task_id, "--status", "completed")
+        _util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
+              "--status", "completed", "--check", "findings", "--finding", FINDINGS[0])
+
+    def test_an_unchanged_resume_hands_out_nothing_and_says_so(self, repo, capsys):
+        self._record_first_run(repo, capsys)
+        handoff, out = _emit(repo, capsys, "--resume")
+        assert _organized(out) == [
+            "Organized into 0 execution batches: 0 task(s) to dispatch"], out
+        assert handoff["tasks_to_dispatch"] == 0
+        assert "pass --total-batches 0" in out
+        assert "Nothing to dispatch" in out

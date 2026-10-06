@@ -1363,7 +1363,8 @@ class TestTaskProcessing:
         """#23 (2026-10-02): `.multi-llm/tmp/` and `implementation_tasks_*.json`
         were created for an `--exec-subagents` run refused at preflight. The
         executor reads `write_tasks.json`; only the native handoff needs the
-        file. The same run's batch line also counts what dispatches (#21)."""
+        file. The executor's batch line is its run's own since fix round 18
+        (`test_dispatch_counts.py`), so a run refused before it prints none."""
         from implement_orchestrator import main
 
         output_path = temp_dir / ".multi-llm" / "tmp" / "implementation_tasks_x.json"
@@ -1384,7 +1385,7 @@ class TestTaskProcessing:
 
         assert not output_path.parent.exists()
         out = capsys.readouterr().out
-        assert "execution batches: 3 task(s) to dispatch" in out
+        assert "Organized into" not in out
 
     def test_task_not_found_exits(self, sample_plan_with_tasks, mock_state_manager, temp_dir):
         """Test that requesting non-existent task exits with error."""

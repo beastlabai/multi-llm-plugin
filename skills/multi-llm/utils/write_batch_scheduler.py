@@ -2179,6 +2179,30 @@ def is_check_task(kind: str, task: Dict[str, Any]) -> bool:
     return kind == "implement" and not snapshot_file_set(task)
 
 
+def dispatch_line(
+    batches: int, dispatch: int, *, manual: int = 0, waiting: Sequence[str] = (),
+) -> str:
+    """``Organized into N execution batches: X task(s) to dispatch …``.
+
+    The one wording both implement legs print: the native emit counts the
+    batches it hands the host, the executor what its run will dispatch
+    (:meth:`WriteBatchScheduler._dispatch_preview`, fix round 18). *waiting*
+    names the tasks that run only if a check dispatched before them passes.
+    """
+    waiting = sorted(waiting)
+    return (
+        f"Organized into {batches} execution "
+        f"{'batch' if batches == 1 else 'batches'}: {dispatch} "
+        f"task(s) to dispatch"
+        + (f", {manual} manual task(s) it does not run" if manual else "")
+        + (
+            f" ({', '.join(waiting)} {'waits' if len(waiting) == 1 else 'wait'} "
+            f"on a check's verdict)"
+            if waiting else ""
+        )
+    )
+
+
 class WriteBatchScheduler:
     """Drives one write phase's batches in ``batch_index`` order (D3n).
 
@@ -3300,6 +3324,13 @@ class WriteBatchScheduler:
             self._mirror_status(result)
             return result
 
+        # What this run will dispatch, counted as the loop below decides it
+        # (fix round 18, run 7 #3): the orchestrator's line counted every
+        # task a resume took up, so "4 task(s) to dispatch" preceded
+        # "dispatched 0".
+        if self.kind == "implement":
+            self.log(self._dispatch_preview(ordered, result))
+
         # 2. Dry run: full preflight, zero dispatch.
         if self.dry_run:
             result.dry_run_path = self._write_dry_run(ordered, result.human_plan)
@@ -3448,6 +3479,112 @@ class WriteBatchScheduler:
         result.report_path = self._write_report(result)
         self._mirror_status(result)
         return result
+
+    def _dispatch_preview(
+        self, ordered: Sequence[Tuple[int, List[Dict[str, Any]]]],
+        result: SchedulerResult,
+    ) -> str:
+        """The ``Organized into …`` line for what this run will dispatch.
+
+        Fix round 18 (live run 7, Codex and OpenCode stop resumes): the line
+        the orchestrator printed counted every task a resume took up, so
+        01b and 01c read "4 task(s) to dispatch" before "dispatched 0" and
+        fix 02 read 4 for the 2 it ran. This walks the batches in the loop's
+        order with the loop's own read-only tests, its log muted, once the
+        human-task plan is resolved:
+
+        * the plan's skipped and accepted tasks and the manual ones are out;
+        * a resume keeps a task with done evidence (``_done_evidence``); a
+          check whose findings stand is kept while the files are as it left
+          them (``_check_findings_rerun``), and the tasks after it are held;
+        * a failed check on unchanged files (``_unchanged_since_failure``) or
+          a task the write policy refuses is not dispatched, and the run
+          stops there: the tasks after it in the batch, and the later
+          batches, are not reached.
+
+        A check this run dispatches is decided by its verdict, which is not
+        known yet: the tasks after it count, and are named as waiting on it.
+        Once a code task of this run was dispatched ahead of it the files
+        have moved, so a check after it counts as run again. A runner that
+        fails is not foreseen; the run's own lines and its ``resume:`` line
+        say what happened.
+        """
+        graph = decomposition_graph(self.tasks, self.state)
+        plan = result.human_plan
+        # A dry run never persists the plan, so an accepted check can still
+        # read as holding its dependents on record.
+        on_record = (
+            set(rerunnable_checks(self.state)) if self.state is not None else set()
+        ) - set(plan.accepted)
+        rerun: set = set()
+        dispatched_checks: List[str] = []
+        waiting: Dict[str, List[str]] = {}
+        picked_batches = 0
+        picked = 0
+        edits_dispatched = False
+        stopped = False
+        quiet_log = self.log
+        self.log = lambda *_args, **_kwargs: None
+        try:
+            for _index, batch_tasks in ordered:
+                if stopped:
+                    break
+                in_batch = 0
+                for task in batch_tasks:
+                    task_id = str(task.get("task_id", ""))
+                    if (plan.is_skipped(task_id) or task_id in plan.accepted
+                            or task.get("is_human")
+                            or task.get("executor_role") == "human"):
+                        continue
+                    if upstream_held_check(graph, task_id, on_record - rerun):
+                        continue
+                    if self.resume:
+                        # A code task this run dispatched before this one
+                        # moves the files the two unchanged-tree tests compare.
+                        moved = edits_dispatched
+                        evidence = self._done_evidence(task)
+                        if evidence is not None:
+                            again = self._check_findings_rerun(task, evidence[0], result)
+                            if again is not True and not (again is False and moved):
+                                continue
+                            rerun.add(task_id)
+                        elif task_id in on_record:
+                            rerun.add(task_id)
+                        if not moved and self._unchanged_since_failure(
+                            task, result,
+                        ) is not None:
+                            stopped = True
+                            break
+                    try:
+                        self.policy.check([
+                            relative_to_root(path, self.repo_root)
+                            for path in declared_file_set(task)
+                        ], when="pre-dispatch")
+                    except PolicyViolation:
+                        stopped = True
+                        break
+                    in_batch += 1
+                    upstream = [
+                        check for check in dispatched_checks
+                        if task_id in transitive_dependents(graph, check)
+                    ]
+                    if upstream:
+                        waiting[task_id] = upstream
+                    if is_check_task(self.kind, task):
+                        dispatched_checks.append(task_id)
+                    else:
+                        edits_dispatched = True
+                if in_batch:
+                    picked_batches += 1
+                    picked += in_batch
+        except Exception:  # noqa: BLE001 - a count line must not fail a phase
+            return dispatch_line(
+                len([1 for _i, b in ordered if b]),
+                sum(len(b) for _i, b in ordered),
+            )
+        finally:
+            self.log = quiet_log
+        return dispatch_line(picked_batches, picked, waiting=list(waiting))
 
     def _check_findings_lines(
         self, result: SchedulerResult, *, stopped: bool = False,
@@ -9394,6 +9531,11 @@ class WriteBatchScheduler:
                         "failed_task_ids": [
                             o.task_id for o in outcomes if not o.ok
                         ],
+                        # Fix round 18 (run 7 #3): the tasks this run kept
+                        # from an earlier one instead of dispatching them, so
+                        # `status` does not read them as this run's batches.
+                        **({"kept_task_ids": [o.task_id for o in outcomes if o.skipped]}
+                           if any(o.skipped for o in outcomes) else {}),
                         **({"check_findings_task_ids": [
                             o.task_id for o in outcomes
                             if o.ok and o.check_findings

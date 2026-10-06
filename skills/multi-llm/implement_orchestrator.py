@@ -1962,20 +1962,15 @@ def _handoff_counts(output_data: Dict[str, Any]) -> Dict[str, int]:
 
 def _dispatch_line(output_data: Dict[str, Any]) -> str:
     """``Organized into N execution batches: X task(s) to dispatch …``,
-    counted from the batches as handed out (both legs)."""
+    counted from the batches as handed out (the native emit and ``--dry-run``;
+    the executor's run prints its own, ``WriteBatchScheduler._dispatch_preview``,
+    in the same words)."""
+    from utils.write_batch_scheduler import dispatch_line
+
     counts = _handoff_counts(output_data)
-    waiting = sorted(output_data.get("waiting_on_checks") or {})
-    return (
-        f"Organized into {counts['batches']} execution "
-        f"{'batch' if counts['batches'] == 1 else 'batches'}: {counts['dispatch']} "
-        f"task(s) to dispatch"
-        + (f", {counts['manual']} manual task(s) it does not run"
-           if counts["manual"] else "")
-        + (
-            f" ({', '.join(waiting)} {'waits' if len(waiting) == 1 else 'wait'} "
-            f"on a check's verdict)"
-            if waiting else ""
-        )
+    return dispatch_line(
+        counts["batches"], counts["dispatch"], manual=counts["manual"],
+        waiting=list(output_data.get("waiting_on_checks") or {}),
     )
 
 
@@ -2479,7 +2474,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # dispatch (`_native_withheld`), so it agrees with "Pending tasks".
         # Both legs count the batches handed out, never the decomposition's
         # layers (fix round 16: "5 execution batches" beside "Batches: 3").
-        if executor_backed or args.dry_run:
+        # The executor leg's line is the scheduler's, printed once it knows
+        # what its run dispatches (fix round 18, run 7 #3: a resume said "4
+        # task(s) to dispatch" and dispatched none).
+        if args.dry_run:
             print(_dispatch_line({"batches": output_batches}))
 
         # Count pending tasks
