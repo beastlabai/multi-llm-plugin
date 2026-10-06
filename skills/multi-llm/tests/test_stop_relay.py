@@ -94,7 +94,8 @@ class TestTheTestsLineTravelsWithTheStop:
 
     def test_a_long_headline_is_cut_before_it_never_through_it(self, repo, capsys):
         """The result line's `error` is bounded; the tests line is the part
-        that must reach the host whole."""
+        that must reach the host whole. Fix round 19: so are the remedy and
+        the answers — the long task title is what gives way."""
         long_title = "Add the build stamp module " + "with a very long title " * 80
         repo.plan.write_text(repo.plan.read_text(encoding="utf-8").replace(
             "### T005: Edit: add the build stamp module",
@@ -103,10 +104,19 @@ class TestTheTestsLineTravelsWithTheStop:
         _text, result = _stop(repo, capsys)
         error = result["error"]
         assert len(error) <= ERROR_MAX_CHARS, len(error)
-        assert error.startswith("implement stopped at T005"), error[:200]
+        assert error.startswith(
+            "implement stopped at T005 (Edit: Add the build stamp module with"
+        ), error[:200]
+        assert "…): refused before it was dispatched" in error, error
         tail = error[error.index(UNVERIFIED):]
         assert tail.endswith("set to the command that runs your tests or checks your build."), tail
-        assert "… " + UNVERIFIED in error
+        assert (
+            "To go on: allow the file it declares in driver.write_paths "
+            "(.multi-llm/providers.yaml), then resume this phase; or leave it "
+            "and the tasks after it undone by adding --human-task T005=skip to "
+            "the resume command."
+        ) in error, error
+        assert "by adding --human-task T002=done to the resume command" in error
 
     def test_a_verify_command_keeps_it_out(self, repo, capsys):
         _policy(repo, DENY + "  verify_command: \"true\"\n")
