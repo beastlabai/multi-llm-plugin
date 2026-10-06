@@ -103,17 +103,36 @@ class OptionalStep:
 
 @dataclass(frozen=True)
 class ManualTask:
-    """One implement task the run deferred to the user (``state.json``: ``skipped``)."""
+    """One implement task the run deferred to the user (``state.json``: ``skipped``).
+
+    ``waits_on`` (fix round 17) is set on a task skipped because it depends
+    on a deferred manual task: a task implement runs itself once that one is
+    recorded done, which the old wording ("no phase will run") denied.
+    """
 
     id: str
     title: Optional[str] = None
+    waits_on: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {"id": self.id, "title": self.title}
+        payload: Dict[str, Any] = {"id": self.id, "title": self.title}
+        if self.waits_on:
+            payload["waits_on"] = self.waits_on
+        return payload
 
     def line(self) -> str:
-        """``<id> <title>``, or the id alone when no title was recorded."""
-        return f"{self.id} {self.title}" if self.title else self.id
+        """``<id> <title>``, or the id alone when no title was recorded; a
+        task that waits on another says so after it."""
+        text = f"{self.id} {self.title}" if self.title else self.id
+        if self.waits_on:
+            text += f" {waits_on_note(self.waits_on)}"
+        return text
+
+
+def waits_on_note(task_id: str) -> str:
+    """What a task skipped with deferred manual task *task_id* is: implement
+    runs it on the resume that records *task_id* done (fix round 17)."""
+    return f"(waits on {task_id}: implement runs it once {task_id} is recorded done)"
 
 
 @dataclass(frozen=True)
@@ -145,8 +164,9 @@ class NextPhase:
     #: command is certain to hit), rendered above the block and never part of
     #: ``user_next_step``.
     warning: Optional[str] = None
-    #: The implement tasks the run deferred, which the plugin will never run
-    #: and the user still owes (2026-10-04, OpenCode: `[WORKFLOW_COMPLETE]`
+    #: The implement tasks the run deferred: the manual tasks the user still
+    #: owes, and the tasks skipped with one, which implement runs once it is
+    #: recorded done (``waits_on``, fix round 17; 2026-10-04, OpenCode: `[WORKFLOW_COMPLETE]`
     #: beside two deferred manual playthroughs said nothing about them). On a
     #: ``complete`` answer since then, and on a command answer too since fix
     #: round 16 (Codex racing 06r/07: the host named T009 as manual from the
@@ -229,7 +249,10 @@ def _manual_tasks(
     implement = phases.get("implement") or {}
     entries = implement.get("manual_tasks") or ()
     manual = tuple(
-        ManualTask(str(entry.get("id")), entry.get("title") or None)
+        ManualTask(
+            str(entry.get("id")), entry.get("title") or None,
+            str(entry.get("waits_on")) if entry.get("waits_on") else None,
+        )
         for entry in entries
         if isinstance(entry, Mapping) and entry.get("id")
     )

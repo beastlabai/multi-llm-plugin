@@ -59,6 +59,9 @@ MANUAL = [
     {"id": "T011", "title": TITLES["T011"]},
     {"id": "T012", "title": TITLES["T012"]},
 ]
+#: The same two when T012 was skipped because it depends on T011 (fix round
+#: 17: the entry says what it waits on).
+WAITING = [MANUAL[0], dict(MANUAL[1], waits_on="T011")]
 
 
 def close_note(prefix: str, plan: str, ids) -> str:
@@ -193,9 +196,11 @@ class TestOnlyTheCurrentDeferralsAreOwed:
         state.save()
 
     def test_a_deferred_human_task_and_its_dependent_are_owed(self, tmp_path):
+        """Both are owed; the dependent says what it waits on (fix round 17:
+        implement runs it once T011 is recorded done)."""
         plan = _complete_plan(tmp_path)
         self._persist(plan, "skip-dependents")
-        assert StateManager(plan).deferred_implementation_tasks() == MANUAL
+        assert StateManager(plan).deferred_implementation_tasks() == WAITING
 
     def test_a_task_the_user_declined_is_not_a_manual_task(self, tmp_path):
         plan = _complete_plan(tmp_path)
@@ -220,7 +225,7 @@ class TestOnlyTheCurrentDeferralsAreOwed:
         deferred = "deferred — user chose to complete manually after implementation"
         dependent = f"skipped — depends on skipped task T011 ({TITLES['T011']})"
         plan = _complete_plan(tmp_path)
-        for parent_reason, owed in ((deferred, MANUAL), (declined, [])):
+        for parent_reason, owed in ((deferred, WAITING), (declined, [])):
             state = StateManager(plan)
             state.update_task_status("T011", "skipped", reason=parent_reason)
             state.update_task_status("T012", "skipped", reason=dependent)
@@ -565,10 +570,7 @@ class TestImplementRecordsTheTitles:
             ["--plan-file", str(repo.plan), "--yes", "--exec-subagents"]
         ) == 0
         workflow = _workflow(repo.plan)
-        assert workflow["phases"]["implement"]["manual_tasks"] == [
-            {"id": "T002", "title": "Implement the core"},
-            {"id": "T003", "title": "Add tests"},
-        ]
+        assert workflow["phases"]["implement"]["manual_tasks"] == OWED_T002_T003
 
     def test_the_executor_leg_result_names_how_to_close_them(self, repo, capsys):
         """Run 6, Codex racing 06r: implement finished with a manual task
@@ -725,7 +727,9 @@ def _host_runs_t001_and_closes(repo, capsys):
 
 OWED_T002_T003 = [
     {"id": "T002", "title": "Implement the core"},
-    {"id": "T003", "title": "Add tests"},
+    # T003 depends on the manual T002: implement runs it once T002 is
+    # recorded done (fix round 17).
+    {"id": "T003", "title": "Add tests", "waits_on": "T002"},
 ]
 
 
@@ -799,7 +803,8 @@ class TestTheNativeLegRecordsItsDeferrals:
         block = [
             "[WORKFLOW_COMPLETE]",
             "[MANUAL_TASK] T002 Implement the core",
-            "[MANUAL_TASK] T003 Add tests",
+            "[MANUAL_TASK] T003 Add tests "
+            "(waits on T002: implement runs it once T002 is recorded done)",
         ]
         code, out, err, result = _run(
             ["apply-code-fixes", plan_arg, "--mark-completed"], capsys
@@ -880,8 +885,9 @@ def test_the_claude_code_host_is_told_to_relay_the_note():
     assert (
         "A lookup that prints `[WORKFLOW_COMPLETE]` ends the report with "
         "\"Workflow complete.\", each `[MANUAL_TASK]` line's task (id and "
-        "title) as the user's to do, then the `[MANUAL_TASK_NOTE]` line's "
-        "text verbatim"
+        "title) as the user's to do, keeping a line's \"(waits on …)\" note "
+        "(implement runs that task once the one it waits on is recorded "
+        "done), then the `[MANUAL_TASK_NOTE]` line's text verbatim"
     ) in skill
     core = " ".join(
         (SKILL_ROOT / "instructions" / "full-workflow.md").read_text(encoding="utf-8").split()
