@@ -1,0 +1,341 @@
+"""A write batch that says `applied` and changes nothing is never done.
+
+Fix round 14, from the fifth live run (OpenCode racing 06, 2026-10-06): T016's
+runner replied `status: applied` and named `index.html`, and `index.html` was
+byte-for-byte unchanged. The verdict was `clean-failure` at `status: ok`, so
+`state.json` recorded T016 `completed`, the stop listed it under "Done and
+kept", the `--resume` reported "2/2 batches ok", and T013/T014 ran on top of a
+function (`checkOpponentFinish`) that never existed. Elsewhere `clean-failure`
+stopped implement (a `failed` claim over an empty diff), so the word had two
+meanings.
+
+Now: nothing moved, so the batch is sent once more, told that its previous
+attempt changed no file (the retry ladder's rule 9 — rule 8 forbids re-sending
+only an attempt that moved bytes). A re-send that lands the change is applied;
+one that honestly answers `no-op` is a no-op; one that again says `applied`
+over an unchanged tree is a failed batch: never `ok`, never `completed`, the
+loop stops, the tasks after it are not run, and `--resume` dispatches it again.
+A check task (no declared files) changes nothing by design and is untouched.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+import implement_orchestrator  # noqa: E402
+from tests.test_write_executor import _patch_edit, env  # noqa: E402,F401
+from tests.test_write_executor_orchestrators import (  # noqa: E402,F401
+    IMPLEMENT_WRITE_IDS,
+    _phase_dir,
+    _seed_generate_tasks,
+    repo,
+)
+from utils import subagent_executor as executor  # noqa: E402
+from utils import subagent_prompts  # noqa: E402
+from utils.retry_ladder import RESEND_NOTHING_CHANGED, RetryLadder  # noqa: E402
+
+HEADING = subagent_prompts.NOTHING_CHANGED_RESEND_HEADING
+
+APPLIED_S0 = {"status": "applied", "ids": ["s0"], "files_touched": ["plans/p.md"],
+              "summary": "added the step"}
+
+
+def _dispatch_prompts(log: Path):
+    rows = [json.loads(line) for line in log.read_text().splitlines() if line]
+    return [r["prompt"] for r in rows if "--version" not in r.get("argv", [])]
+
+
+# ===========================================================================
+# The scheduler, one apply batch
+# ===========================================================================
+
+class TestTheReSend:
+
+    def test_a_re_send_that_lands_the_change_is_applied(self, env):
+        """The common recovery: the runner's edit tool failed silently, and the
+        re-send, told so, makes the edit."""
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)], result=APPLIED_S0)
+        env.monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", HEADING)
+
+        result = env.scheduler([env.apply_task(0), env.apply_task(1)]).run()
+
+        first = result.outcomes[0]
+        assert first.status == executor.STATUS_OK, first.reason
+        assert first.write_outcome == executor.WRITE_APPLIED
+        assert first.files_touched == ["plans/p.md"]
+        assert [(a.status, a.repair) for a in first.attempts] == [
+            (executor.STATUS_BATCH_FAILED, None),
+            (executor.STATUS_OK, RESEND_NOTHING_CHANGED),
+        ]
+        assert "no file changed" in first.attempts[0].error
+        assert first.attempts[0].capture_path, "the attempt that changed nothing is kept"
+        prompts = _dispatch_prompts(log)
+        assert HEADING not in prompts[0] and HEADING in prompts[1]
+        assert "Apply batch 0" in prompts[1], "the re-send is the batch, not a re-ask"
+        # The loop went on.
+        assert [o.task_id for o in result.outcomes] == ["apply-batch-0", "apply-batch-1"]
+
+    def test_a_re_send_that_finds_the_change_present_is_a_no_op(self, env):
+        """Told that nothing changed, an honest runner whose change is already
+        there answers `no-op`: the claim and the bytes agree."""
+        env.edits([], result=APPLIED_S0)
+        env.monkeypatch.setenv(
+            "MOCK_LLM_WRITE_RESULT", json.dumps(APPLIED_S0),
+        )
+        real = executor._spawn
+        prompts = []
+
+        def spawn(**kwargs):
+            prompts.append(kwargs.get("prompt") or "")
+            if HEADING in prompts[-1]:
+                env.monkeypatch.setenv("MOCK_LLM_WRITE_RESULT", json.dumps({
+                    "status": "no-op", "ids": ["s0"], "files_touched": [],
+                    "summary": "already in the plan"}))
+            return real(**kwargs)
+
+        env.monkeypatch.setattr(executor, "_spawn", spawn)
+        result = env.scheduler([env.apply_task(0)]).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_OK, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_NO_OP
+        assert not outcome.applied_without_changes
+        assert result.exit_code == 0
+
+    def test_a_second_unchanged_claim_stops_the_loop_and_is_recorded_failed(self, env):
+        from tests.test_write_executor import FakeState
+
+        state = FakeState(env.tmp_path / "state.json")
+        env.edits([], result=APPLIED_S0)
+
+        result = env.scheduler(
+            [env.apply_task(0), env.apply_task(1)], state=state,
+        ).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_BATCH_FAILED
+        assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
+        assert outcome.applied_without_changes
+        assert result.exit_code == 3
+        assert len(result.outcomes) == 1
+        state.reload()
+        assert state.state["task_status"]["apply-batch-0"] == "failed"
+        row = result.to_dict()["tasks"][0]
+        assert row["applied_without_changes"] is True
+        assert row["status"] == executor.STATUS_BATCH_FAILED
+        stop = result.stop
+        assert stop["applied_without_changes"] is True
+        assert "its change did not land" in stop["headline"]
+        assert "--human-task apply-batch-0=done" in stop["headline"]
+
+    def test_a_check_task_that_changes_nothing_is_verified_without_a_re_send(self, env):
+        """A check declares no files and changes nothing by design: its verdict
+        is VERIFIED (or check-findings), never this one."""
+        log = env.enable_call_log()
+        env.edits([], result={"status": "applied", "ids": ["T009"],
+                              "files_touched": [], "summary": "node --check ok"})
+        task = env.apply_task(
+            0, kind="implement", task_id="T009", expected_ids=["T009"],
+            output_name="implement_batch_T009.json",
+            declared_files=[], snapshot_files=[],
+        )
+        result = env.scheduler([task], kind="implement", finalize=False).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_OK
+        assert outcome.outcome_label == "verified"
+        assert len(_dispatch_prompts(log)) == 1
+
+    def test_a_change_outside_the_declared_files_is_judged_by_its_ids(self, env):
+        """Declared files unchanged, another file moved: the bytes decide, as
+        when a declared file moved too — applied with every id attested, a
+        partial application without (it used to be a clean failure at `ok`)."""
+        other = env.root / "src" / "a.py"
+        env.edits([_patch_edit(other, "# moved\n")], result=APPLIED_S0)
+        attested = env.scheduler([env.apply_task(0)]).run().outcomes[0]
+        assert attested.status == executor.STATUS_OK, attested.reason
+        assert attested.write_outcome == executor.WRITE_APPLIED
+        assert attested.reason.startswith("APPLIED outside the declared files")
+        assert attested.files_touched == ["src/a.py"]
+
+    def test_the_same_change_with_no_ids_is_a_partial_application(self, env):
+        other = env.root / "src" / "a.py"
+        env.edits([_patch_edit(other, "# moved\n")],
+                  result={**APPLIED_S0, "ids": []})
+        outcome = env.scheduler([env.apply_task(0)]).run().outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+
+    def test_a_run_before_the_fix_is_not_resumed_as_done(self, env):
+        """A result file stamped `clean-failure` at `ok` (a run before fix
+        round 14) is dispatched again: nothing moved, so that is safe."""
+        stale = dict(APPLIED_S0, verdict={
+            "write_outcome": "clean-failure", "status": "ok", "ok": True,
+            "files_touched": [], "reason": "CLEAN FAILURE: …",
+        })
+        (env.phase_dir / "apply_batch_0.json").write_text(
+            json.dumps(stale), encoding="utf-8")
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)], result=APPLIED_S0)
+
+        result = env.scheduler([env.apply_task(0)], resume=True).run()
+
+        outcome = result.outcomes[0]
+        assert not outcome.skipped
+        assert outcome.write_outcome == executor.WRITE_APPLIED
+        assert len(_dispatch_prompts(log)) == 1
+
+    def test_the_native_invoker_re_sends_the_same_way(self, env):
+        """`respond=` (the simulated native invoker) classifies with the same
+        code, so it re-sends the same way."""
+        prompts = []
+
+        def respond(task, prompt):
+            prompts.append(prompt)
+            if HEADING in prompt:
+                with env.plan.open("a", encoding="utf-8") as handle:
+                    handle.write("edit\n")
+            return dict(APPLIED_S0)
+
+        result = env.scheduler([env.apply_task(0)], respond=respond).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_OK, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_APPLIED
+        assert len(prompts) == 2 and HEADING in prompts[1]
+
+
+# ===========================================================================
+# implement, end to end: the measured T016 shape
+# ===========================================================================
+
+def test_an_implement_task_that_changed_nothing_is_not_done_and_holds_the_rest(repo, capsys):
+    """T002 says `applied` twice and changes nothing: it is recorded failed,
+    T003 (after it) is not run, the stop does not call it done, and the
+    `--resume` dispatches it again — and records its real summary."""
+    from utils import prior_changes
+    from utils.output_handler import get_output_dir
+    from utils.state_manager import get_or_create_state
+
+    _seed_generate_tasks(repo)
+    repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+        {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+    ]))
+    repo.monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", "Title: Create the module")
+    repo.monkeypatch.setenv("MOCK_LLM_WRITE_RESULT", json.dumps({
+        "status": "applied", "ids": ["T001", "T002", "T003"],
+        "files_touched": ["src/main.py"], "summary": "did the task",
+    }))
+
+    code = implement_orchestrator.main(
+        ["--plan-file", str(repo.plan), "--yes", "--exec-subagents"]
+    )
+    text = "".join(capsys.readouterr())
+
+    assert code == 3, text
+    state = get_or_create_state(repo.plan)
+    assert state.get_task_status("T001") == "completed"
+    assert state.get_task_status("T002") == "failed"
+    assert state.get_task_status("T003") == "pending"
+    assert "implement stopped at T002 (Implement the core): its change did not land" in text
+    assert "Done and kept: 1 task(s) (T001)." in text
+    assert "Not run (the stop came before they were dispatched): T003." in text
+    assert "--human-task T002=done" in text
+    report = json.loads((_phase_dir(repo) / "write_batch_report.json").read_text())
+    rows = {row["task_id"]: row for row in report["tasks"]}
+    assert rows["T002"]["status"] == executor.STATUS_BATCH_FAILED
+    assert rows["T002"]["applied_without_changes"] is True
+    entries = prior_changes.entries(str(get_output_dir(repo.plan)))
+    assert [e["id"] for e in entries] == ["T001"], entries
+
+    # The resume dispatches T002 again; this time the change lands.
+    repo.monkeypatch.delenv("MOCK_LLM_EDITS_IF_PROMPT_HAS")
+    code = implement_orchestrator.main(
+        ["--plan-file", str(repo.plan), "--yes", "--exec-subagents", "--resume"]
+    )
+    text = "".join(capsys.readouterr())
+    assert code == 0, text
+    state = get_or_create_state(repo.plan)
+    assert state.get_task_status("T002") == "completed"
+    entries = prior_changes.entries(str(get_output_dir(repo.plan)))
+    by_id = {e["id"]: e["summary"] for e in entries}
+    assert by_id["T002"] == "did the task", "the resumed task's real entry was dropped"
+
+
+# ===========================================================================
+# The ladder's rule 9 and the prompt
+# ===========================================================================
+
+class TestRuleNine:
+
+    def _ladder(self, **over):
+        clock = {"now": 0.0}
+        kwargs = dict(timeout=100, retries=1, now=lambda: clock["now"])
+        kwargs.update(over)
+        return RetryLadder(**kwargs), clock
+
+    def test_no_grant_by_default(self):
+        ladder, _ = self._ladder()
+        assert ladder.resends_left == 0
+        action = ladder.record_resend()
+        assert action.retry is False and action.resend is False
+
+    def test_one_grant_then_none(self):
+        ladder, _ = self._ladder(resends=1)
+        assert ladder.next_attempt() is not None
+        first = ladder.record_resend()
+        assert first.retry and first.resend and first.reason == RESEND_NOTHING_CHANGED
+        assert ladder.resends_left == 0 and ladder.resends_used == 1
+        assert ladder.next_attempt() is not None, "the granted re-send is admitted"
+        assert ladder.record_resend().retry is False
+        # Neither the transport budget nor the re-ask allowance was spent.
+        assert ladder.transport_retries_left == 1
+
+    def test_a_re_send_the_deadline_cannot_hold_is_refused_with_a_note(self):
+        ladder, clock = self._ladder(resends=1)
+        ladder.next_attempt()
+        clock["now"] = 99.5
+        action = ladder.record_resend()
+        assert action.retry is False
+        assert action.note and action.note.startswith("no re-send:")
+        assert ladder.resends_left == 1
+
+    def test_the_grant_table_covers_every_write_kind(self):
+        from utils.subagent_tasks import WRITE_KINDS
+
+        assert set(executor.RESENDS_BY_KIND) == set(WRITE_KINDS)
+        assert all(value == 1 for value in executor.RESENDS_BY_KIND.values())
+
+
+def test_the_resend_prompt_carries_the_batch_and_says_what_happened():
+    prompt = subagent_prompts.build_nothing_changed_resend_prompt(
+        "Implement the opponent finish check.\n\n## Result (required)\n…",
+        declared=["index.html"], named=["index.html"],
+    )
+    assert prompt.startswith("Implement the opponent finish check.")
+    assert prompt.index("## Result (required)") < prompt.index(HEADING)
+    assert 'ended with `"status": "applied"` and named index.html as edited' in prompt
+    assert "no file changed: index.html is byte-for-byte as before it started" in prompt
+    assert '`"status": "no-op"`' in prompt and '`"status": "failed"`' in prompt
+    assert "only for edits you made in this turn" in prompt
+
+
+@pytest.mark.parametrize("name", [
+    "implement.md", "apply-suggestions.md", "apply-task-suggestions.md",
+    "apply-code-fixes.md",
+])
+def test_the_native_leg_is_told_the_same_rule(name):
+    """The native host classifies its own batches: an `applied` reply over
+    unchanged files is sent once more and then recorded failed, as on the
+    executor leg."""
+    text = (Path(__file__).parent.parent / "instructions" / name).read_text(
+        encoding="utf-8")
+    assert "answered `applied` but changed no file" in text
+    assert "never `completed`" in text or "never a success" in text

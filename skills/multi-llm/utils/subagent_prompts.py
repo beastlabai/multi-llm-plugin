@@ -59,6 +59,8 @@ __all__ = [
     "build_human_decision_judge_prompt",
     "build_task_generation_prompt",
     "build_schema_repair_prompt",
+    "build_nothing_changed_resend_prompt",
+    "NOTHING_CHANGED_RESEND_HEADING",
     "SCHEMA_REPAIR_EXAMPLES",
     "SCHEMA_REPAIR_SHAPES",
     "SCHEMA_REPAIR_TOP_KEYS",
@@ -1283,6 +1285,58 @@ The shape:
 A minimal complete reply with one task — copy its format, not its content:
 
 {example}'''
+
+
+# ===========================================================================
+# the one re-send of a batch that said "applied" and changed nothing
+# ===========================================================================
+
+#: The heading the re-send appends, after the batch's own prompt (whose result
+#: contract already ends it): the newest instruction the runner reads.
+NOTHING_CHANGED_RESEND_HEADING = "## Your previous attempt changed no file"
+
+
+def build_nothing_changed_resend_prompt(
+    original_prompt: str,
+    *,
+    declared: Sequence[str],
+    named: Sequence[str] = (),
+) -> str:
+    """The batch's own prompt again, told that its last attempt changed nothing.
+
+    Pure, like every generator here. Fix round 14 (OpenCode racing run 5): T016
+    replied ``status: applied`` and named ``index.html``, and ``index.html``
+    was byte-for-byte what it had been, so the function it described never
+    existed. Nothing moved, so sending the batch again cannot apply anything
+    twice (the retry ladder's rule 9). Unlike the report re-ask, this one
+    carries the instructions: the work was not done. *declared* is the files
+    the batch may change, *named* the ones the reply said it edited.
+    """
+    files = ", ".join(declared) or "the files this task names"
+    verb = "is" if len(declared) == 1 else "are"
+    said = (
+        f" and named {', '.join(named[:5])}{', …' if len(named) > 5 else ''} "
+        f"as edited" if named else ""
+    )
+    return f'''{original_prompt.rstrip()}
+
+{NOTHING_CHANGED_RESEND_HEADING}
+
+A previous attempt at this exact task ended with `"status": "applied"`{said},
+but no file changed: {files} {verb} byte-for-byte as before it started.
+Its edits did not land — an edit command that failed, a change made
+to another path, or a change described but never written.
+
+Do the task now, and make each change in the file itself. Then:
+
+- answer `"status": "applied"` only for edits you made in this turn and saw
+  land in the file;
+- if every change the task asks for is already present, edit nothing and
+  answer `"status": "no-op"`;
+- if you cannot make the change, answer `"status": "failed"` and say why in
+  `summary`.
+
+End your reply with the JSON object the Result section above asks for.'''
 
 
 # ===========================================================================
