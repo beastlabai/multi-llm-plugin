@@ -91,6 +91,10 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     entries follow it, never precede it: the line "Optional, before that:",
     then each entry in the order the key lists them — its `why` as plain text
     outside the fence, then its `command` alone in its own fenced block. When
+    the lookup also printed `[NEXT_COMMAND_ANSWERS_WHY]` /
+    `[NEXT_COMMAND_ANSWERS]` (`user_next_step.answers`: a stopped implement's
+    one command carrying every `--human-task` answer it waits for), write that
+    why as plain text and that command alone in its own fenced block, last. When
     `complete` is `true` (its `command` is then `null`), write
     "Workflow complete." instead, and when it carries `manual_tasks`, list
     each one under it, its `id` and `title`, as the user's to do: implement

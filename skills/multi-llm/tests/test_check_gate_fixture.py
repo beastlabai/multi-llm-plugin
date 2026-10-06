@@ -483,3 +483,82 @@ class TestTheNativeLeg:
             "--stdout")
         assert code == 0 and "Title: Edit: print the build stamp" in prompt
         assert "Check findings the user accepted" not in prompt
+
+    def test_next_command_prints_the_resume_and_one_combined_answers_command(
+        self, repo, capsys,
+    ):
+        """Fix round 14 (stop fixture, Claude Code fix/accept 01): the native
+        stop printed no command — the host wrote "re-run with --resume" as
+        prose, or two separate commands the user had to merge. The report's
+        `util next-command` lookup prints the resume and, beside it, one
+        command carrying every answer the stop waits for."""
+        self._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        for task_id in ("T001", "T003", "T004"):
+            self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                       task_id, "--status", "completed")
+        self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
+                   "--status", "completed", "--check", "findings",
+                   "--finding", FINDINGS[0])
+        state_file = str(get_or_create_state(repo.plan).state_file)
+        assert self._util(capsys, "finalize-tracking", "--state-file", state_file)[0] == 0
+
+        code, out, err = self._util(
+            capsys, "next-command", "plans/checked.md", "--after", "implement",
+        )
+        assert code == 0, err
+        lines = [line for line in out.splitlines() if line.startswith("[NEXT_COMMAND")]
+        assert lines[0].startswith("[NEXT_COMMAND] ")
+        assert lines[0].endswith("--implement plans/checked.md --resume")
+        assert lines[1].startswith("[NEXT_COMMAND_ANSWERS_WHY] or, in one command: ")
+        assert "accept the findings of T002 (then T007 runs)" in lines[1]
+        assert "leave T005 undone" in lines[1]
+        assert lines[2].startswith("[NEXT_COMMAND_ANSWERS] ")
+        assert lines[2].endswith(
+            "--implement plans/checked.md --resume --human-task T002=done "
+            "--human-task T005=skip"
+        )
+        result = json.loads(out.rsplit("MULTI_LLM_RESULT: ", 1)[1])
+        step = result["user_next_step"]
+        assert step["answers"]["answers"] == ["T002=done", "T005=skip"]
+        assert step["answers"]["command"] == lines[2].split(" ", 1)[1]
+
+    def test_a_resume_that_answered_everything_prints_no_answers_line(
+        self, repo, capsys,
+    ):
+        self._emit(repo, capsys)
+        state = get_or_create_state(repo.plan)
+        for task_id in ("T001", "T002", "T003", "T004"):
+            state.update_task_status(task_id, "completed")
+        state.save()
+        code, out, _err = self._util(
+            capsys, "next-command", "plans/checked.md", "--after", "implement",
+        )
+        assert code == 0
+        assert "--human-task T005=skip" in out  # T005 is still recorded failed
+        state = get_or_create_state(repo.plan)
+        state.update_task_status("T005", "skipped")
+        state.save()
+        code, out, _err = self._util(
+            capsys, "next-command", "plans/checked.md", "--after", "implement",
+        )
+        assert "[NEXT_COMMAND_ANSWERS" not in out
+
+    def test_the_host_instructions_say_to_relay_both_commands(self):
+        from pathlib import Path
+
+        root = Path(__file__).parent.parent
+        skill = (root / "SKILL.md").read_text(encoding="utf-8")
+        assert (
+            "A native `implement` that stopped part-way exited `0`, so look it "
+            "up: it prints the `--resume` command and, when tasks wait for an "
+            "answer, `[NEXT_COMMAND_ANSWERS]`"
+        ) in skill
+        summary = (root / "references" / "summary-format.md").read_text(encoding="utf-8")
+        assert "`[NEXT_COMMAND_ANSWERS]` (`user_next_step.answers`" in summary
+        core = (root / "instructions" / "implement.md").read_text(encoding="utf-8")
+        assert (
+            "At a stop (step 10 ran without `--mark-completed`) the next-step "
+            "lookup of `references/summary-format.md` still runs"
+        ) in core
+        assert "never write a resume or `--human-task` command of your own" in core

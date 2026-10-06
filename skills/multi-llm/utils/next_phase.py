@@ -51,6 +51,13 @@ MANUAL_TASK_MARKER = "[MANUAL_TASK]"
 #: marker: no consumer of the block reads it as one.
 RUNNER_WARNING_MARKER = "[RUNNER_WARNING]"
 
+#: The answers line pair ``util next-command`` prints under a resume of a
+#: stopped native implement (fix round 14): the why on its own line, then one
+#: resume command carrying every ``--human-task`` answer the stop waits for.
+#: A command marker like the others: the text after it is the command alone.
+NEXT_COMMAND_ANSWERS_WHY_MARKER = "[NEXT_COMMAND_ANSWERS_WHY]"
+NEXT_COMMAND_ANSWERS_MARKER = "[NEXT_COMMAND_ANSWERS]"
+
 #: The one line :func:`emit_resume` prints: the command that resumes a stopped
 #: write phase, and nothing else on the line (same rule as ``[NEXT_COMMAND]``).
 RESUME_COMMAND_MARKER = "[RESUME_COMMAND]"
@@ -106,6 +113,19 @@ class ManualTask:
 
 
 @dataclass(frozen=True)
+class AnswersStep:
+    """One resume of a stopped implement carrying every answer it waits for."""
+
+    command: str
+    why: str
+    #: ``("T002=done", "T005=skip")``, in the command's order.
+    answers: Tuple[str, ...] = ()
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {"command": self.command, "why": self.why, "answers": list(self.answers)}
+
+
+@dataclass(frozen=True)
 class NextPhase:
     """The builder's answer: a command to run next, or ``complete``.
 
@@ -126,6 +146,11 @@ class NextPhase:
     #: OpenCode: `[WORKFLOW_COMPLETE]` beside two deferred manual playthroughs
     #: said nothing about them).
     manual_tasks: Tuple[ManualTask, ...] = ()
+    #: On a ``--resume`` of a stopped implement, from ``util next-command``
+    #: only: the one command that answers every task the stop waits for
+    #: (:func:`implement_answers`). Rendered after the primary and the
+    #: optional entries, and carried as ``user_next_step.answers``.
+    answers: Optional[AnswersStep] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
@@ -143,6 +168,8 @@ class NextPhase:
         payload: Dict[str, Any] = {"phase": self.phase, "command": self.command}
         if self.optional_before:
             payload["optional_before"] = [step.to_dict() for step in self.optional_before]
+        if self.answers is not None:
+            payload["answers"] = self.answers.to_dict()
         payload["complete"] = False
         return payload
 
@@ -775,7 +802,72 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     for step in answer.optional_before:
         lines.append(f"{NEXT_COMMAND_OPTIONAL_WHY_MARKER} {step.why}")
         lines.append(f"{NEXT_COMMAND_OPTIONAL_MARKER} {step.command}")
+    if answer.answers is not None:
+        lines.append(f"{NEXT_COMMAND_ANSWERS_WHY_MARKER} {answer.answers.why}")
+        lines.append(f"{NEXT_COMMAND_ANSWERS_MARKER} {answer.answers.command}")
     return lines
+
+
+def implement_answers(
+    plan_arg: str,
+    host_id: str,
+    route: Optional[str],
+    *,
+    plan_path: Optional[Union[str, Path]] = None,
+) -> Optional[AnswersStep]:
+    """One ``--resume`` carrying every answer a stopped implement waits for.
+
+    Fix round 14 (stop fixture, Claude Code fix/accept 01): the native leg's
+    stop printed no command, so the host wrote "re-run with --resume" as
+    prose, or two separate commands (``--human-task T002=done`` in one,
+    ``T005=skip`` in another) the user had to merge. ``util next-command``
+    already answers the resume; this is the second command beside it, the
+    executor stop's combined answer (``user_commands["answers"]``): accept the
+    findings of each check that holds tasks back (``=done``: the tasks after
+    it then run) and leave each failed task undone (``=skip``, with the tasks
+    after it). Read from ``state.json`` as recorded — the checks
+    ``write_batch_scheduler.held_back_by_checks`` names, and the implement
+    tasks recorded ``failed`` in the decomposition implement ran last.
+    ``None`` when no task waits for an answer.
+    """
+    import json as _json
+
+    source = plan_arg if plan_path is None else plan_path
+    state_file = _state_file(os.path.abspath(str(source)))
+    try:
+        state = _json.loads(state_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(state, dict):
+        return None
+    from .write_batch_scheduler import held_back_by_checks
+
+    holding: Dict[str, List[str]] = {}
+    for task_id, check_id in held_back_by_checks([], state):
+        holding.setdefault(check_id, []).append(task_id)
+    scope = state.get("implement_task_ids")
+    statuses = state.get("task_status") or {}
+    failed = sorted(
+        str(task_id) for task_id, status in statuses.items()
+        if status == "failed" and re.fullmatch(r"T\d+", str(task_id))
+        and (not isinstance(scope, list) or task_id in scope)
+    )
+    answers = [f"{check_id}=done" for check_id in sorted(holding)] + [
+        f"{task_id}=skip" for task_id in failed
+    ]
+    if not answers:
+        return None
+    flags: List[str] = []
+    for answer in answers:
+        flags.extend(["--human-task", answer])
+    command = phase_command(plan_arg, host_id, route, "implement", "--resume", *flags)
+    parts = [
+        f"accept the findings of {check_id} (then {', '.join(sorted(waiting))} "
+        f"{'runs' if len(waiting) == 1 else 'run'})"
+        for check_id, waiting in sorted(holding.items())
+    ] + [f"leave {task_id} undone (and the tasks after it)" for task_id in failed]
+    why = "or, in one command: " + "; ".join(parts)
+    return AnswersStep(command=command, why=why, answers=tuple(answers))
 
 
 # ---------------------------------------------------------------------------
@@ -816,6 +908,7 @@ def emit_answer(
     stream=None,
     stderr=None,
     strict: bool = False,
+    with_answers: bool = False,
 ) -> Optional[NextPhase]:
     """Build the answer, print its block and set ``user_next_step``: all or nothing.
 
@@ -855,6 +948,19 @@ def emit_answer(
         )
         if answer is None:
             return None
+        if (
+            with_answers and not answer.complete and answer.phase == "implement"
+            and str(answer.command or "").endswith(f" {RESUME_FLAG}")
+        ):
+            # `util next-command` only (with_answers): a stopped implement's
+            # one combined answer, beside its resume (fix round 14).
+            from dataclasses import replace as _replace
+
+            answers = implement_answers(
+                plan_arg, host_id, route, plan_path=plan_path,
+            )
+            if answers is not None:
+                answer = _replace(answer, answers=answers)
         payload = answer.to_dict()
         out = sys.stdout if stream is None else stream
         for line in render_next_phase_lines(answer):
@@ -1012,6 +1118,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         emit_answer(
             args.plan, host_id, None,
             after_mode=args.after, plan_path=plan_path, strict=True,
+            with_answers=True,
         )
     except LookupFailed:
         return 3
