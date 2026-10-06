@@ -630,6 +630,7 @@ your host.
    - Number of tasks completed/failed
    - Each check task that reported problems, with its findings (the code review is told about them), and the tasks it held back with the way forward (fix and `--resume`, or `--resume --human-task {id}=done`)
    - Each task whose own check failed after its edits (`[BATCH_CHECK_FAILED]`), with what failed: the phase applied it but is not a clean finish
+   - At a stop (step 10 ran without `--mark-completed`) the next-step lookup of `references/summary-format.md` still runs: it prints the resume command (`[NEXT_COMMAND]`) and, when tasks wait for an answer, one command carrying every `--human-task` answer (`[NEXT_COMMAND_ANSWERS]`). End the report with both, each alone in its own fenced block, copied verbatim; never write a resume or `--human-task` command of your own
    - Implementation summary file location
    - State file location
    - Any errors encountered

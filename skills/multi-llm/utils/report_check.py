@@ -9,8 +9,11 @@ prints the next step as a block of marker lines above its result line::
     [NEXT_COMMAND] <command>
     [NEXT_COMMAND_OPTIONAL_WHY] <why>
     [NEXT_COMMAND_OPTIONAL] <command>
+    [NEXT_COMMAND_ANSWERS_WHY] <why>
+    [NEXT_COMMAND_ANSWERS] <command>
 
-or ``[WORKFLOW_COMPLETE]``, followed by one ``[MANUAL_TASK] <id> <title>`` line per
+(the answers pair only from ``util next-command`` on a stopped implement,
+fix round 14), or ``[WORKFLOW_COMPLETE]``, followed by one ``[MANUAL_TASK] <id> <title>`` line per
 implement task the run deferred to the user. The model is told to end its report
 with each command in a fenced block, copied character for character, or with
 "Workflow complete." and those tasks listed. This checks the copy, and only the
@@ -26,8 +29,9 @@ copy:
 * A marker counts only at the start of a line, which is where the emitter puts
   it. An indented example of the block (a plan or a doc quoting it, read by a
   tool) is not a phase result.
-* It passes when every command of that block (the ``[NEXT_COMMAND]`` one and
-  each ``[NEXT_COMMAND_OPTIONAL]`` one) is, byte for byte, a line inside a
+* It passes when every command of that block (the ``[NEXT_COMMAND]`` one,
+  each ``[NEXT_COMMAND_OPTIONAL]`` one and the ``[NEXT_COMMAND_ANSWERS]`` one)
+  is, byte for byte, a line inside a
   fenced code block of the final assistant message. Only the whitespace around
   a line is ignored, so a fence nested in a list item still counts. For
   ``[WORKFLOW_COMPLETE]`` it passes when the message says "Workflow complete."
@@ -99,6 +103,10 @@ except ImportError:  # direct script invocation
 NEXT_COMMAND = "[NEXT_COMMAND] "
 NEXT_COMMAND_OPTIONAL = "[NEXT_COMMAND_OPTIONAL] "
 NEXT_COMMAND_OPTIONAL_WHY = "[NEXT_COMMAND_OPTIONAL_WHY] "
+#: A stopped implement's one combined answer (``util next-command``, fix
+#: round 14), after the primary and any optional entries.
+NEXT_COMMAND_ANSWERS = "[NEXT_COMMAND_ANSWERS] "
+NEXT_COMMAND_ANSWERS_WHY = "[NEXT_COMMAND_ANSWERS_WHY] "
 WORKFLOW_COMPLETE = "[WORKFLOW_COMPLETE]"
 #: One per implement task the run deferred, under ``[WORKFLOW_COMPLETE]``:
 #: ``<id> <title>`` (``next_phase.MANUAL_TASK_MARKER``).
@@ -148,6 +156,8 @@ class Block:
         self.command = command
         #: ``(why, command)`` pairs, in the order the block printed them.
         self.optional: List[tuple] = []
+        #: ``(why, command)``: the combined answers line, when printed.
+        self.answers: List[tuple] = []
         #: ``(id, title)`` pairs a ``[WORKFLOW_COMPLETE]`` block names: the
         #: manual tasks the user still owes (``title`` may be ``""``).
         self.manual: List[tuple] = []
@@ -156,7 +166,11 @@ class Block:
         """Every command the report has to carry: the primary one first."""
         if self.complete or self.command is None:
             return []
-        return [self.command] + [command for _why, command in self.optional]
+        return (
+            [self.command]
+            + [command for _why, command in self.optional]
+            + [command for _why, command in self.answers]
+        )
 
 
 def find_blocks(text: str) -> List[Block]:
@@ -185,6 +199,13 @@ def find_blocks(text: str) -> List[Block]:
             pending_why = None
         elif line.startswith(NEXT_COMMAND_OPTIONAL_WHY):
             pending_why = line[len(NEXT_COMMAND_OPTIONAL_WHY):].strip()
+        elif line.startswith(NEXT_COMMAND_ANSWERS_WHY):
+            pending_why = line[len(NEXT_COMMAND_ANSWERS_WHY):].strip()
+        elif line.startswith(NEXT_COMMAND_ANSWERS):
+            command = line[len(NEXT_COMMAND_ANSWERS):].strip()
+            if current is not None and not current.complete and command:
+                current.answers.append((pending_why, command))
+            pending_why = None
         elif line.startswith(NEXT_COMMAND_OPTIONAL):
             command = line[len(NEXT_COMMAND_OPTIONAL):].strip()
             if current is not None and not current.complete and command:
@@ -299,9 +320,11 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         f"the next step, and your final message does not carry the {noun} "
         "below exactly. Reply now with your report's `### Next Steps` "
         "section, with each command in its own fenced code block, "
-        "copied character for character from its [NEXT_COMMAND] or "
-        "[NEXT_COMMAND_OPTIONAL] line (optional commands after the main one, "
-        "under the line \"Optional, before that:\", each with its why). Do not "
+        "copied character for character from its [NEXT_COMMAND], "
+        "[NEXT_COMMAND_OPTIONAL] or [NEXT_COMMAND_ANSWERS] line (optional "
+        "commands after the main one, under the line \"Optional, before "
+        "that:\", each with its why; the answers command last, with its why). "
+        "Do not "
         "rebuild, shorten, re-quote or rephrase a command, and do not run it: "
         "it is for the user to type.",
         f"Missing {noun}:",

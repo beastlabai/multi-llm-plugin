@@ -630,3 +630,41 @@ class TestTheScriptEndToEnd:
         completed, _log = _run_hook(tmp_path, hook, broken)
         assert completed.returncode == 0
         assert completed.stdout == "" and completed.stderr == ""
+
+
+class TestTheAnswersCommandIsCarriedToo:
+    """Fix round 14: a stopped implement's `util next-command` prints, beside
+    the resume, one command carrying every answer the stop waits for; the
+    report has to carry it like the others."""
+
+    RESUME = "/multi-llm:multi-llm --implement plans/check-gate.md --resume"
+    ANSWERS = (
+        "/multi-llm:multi-llm --implement plans/check-gate.md --resume "
+        "--human-task T002=done --human-task T005=skip"
+    )
+    ANSWERS_WHY = "or, in one command: accept the findings of T002 (then T007 runs)"
+
+    def _output(self) -> str:
+        return (
+            f"[NEXT_COMMAND] {self.RESUME}\n"
+            f"[NEXT_COMMAND_ANSWERS_WHY] {self.ANSWERS_WHY}\n"
+            f"[NEXT_COMMAND_ANSWERS] {self.ANSWERS}\n"
+            'MULTI_LLM_RESULT: {"mode": "util next-command", "exit": 0}\n'
+        )
+
+    def test_the_block_holds_it_and_its_why_is_no_command(self):
+        block = report_check.find_blocks(self._output())[-1]
+        assert block.commands() == [self.RESUME, self.ANSWERS]
+
+    def test_a_report_without_it_blocks_naming_it(self, tmp_path, capsys):
+        path = (Transcript().prompt("go").bash(self._output())
+                .say(report(self.RESUME)).write(tmp_path / "t.jsonl"))
+        reason = decision_of(run_check(capsys, path))["reason"]
+        missing, _, _others = reason.partition("Carry the block's other command")
+        assert f"```\n{self.ANSWERS}\n```" in missing
+        assert "[NEXT_COMMAND_ANSWERS]" in reason
+
+    def test_both_copied_passes(self, tmp_path, capsys):
+        path = (Transcript().prompt("go").bash(self._output())
+                .say(report(self.RESUME, self.ANSWERS)).write(tmp_path / "t.jsonl"))
+        assert run_check(capsys, path) == ""
