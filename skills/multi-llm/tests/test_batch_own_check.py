@@ -319,6 +319,33 @@ class TestACorrectedAttemptIsNotAFinding:
         assert "ran it as the task names it" in CHECK_RESULT_CONTRACT
         assert "the wrong form is not a finding" in CHECK_RESULT_CONTRACT
 
+    def test_the_corrected_run_is_the_same_check_in_full(self):
+        """Fix round 17 (review of round 16): the code batch's contract let
+        "the corrected run" be the reported one without pinning it to the
+        command, so `npm test` failing and `npm test -- src/x.test.js` (or
+        `--passWithNoTests`) passing was a pass within the letter. The check
+        task's contract pins "as the task names it"; this one now says the
+        same: the full command the task or the repository names, never a
+        narrower one, and a narrower pass leaves the failure to report."""
+        text = " ".join(WRITE_CHECK_CONTRACT.split())
+        assert (
+            "The corrected run is the same check over the same scope: the full "
+            "command the task or the repository names, with only what you ran "
+            "wrongly put right."
+        ) in text
+        assert "never a narrower one" in text
+        assert "`--passWithNoTests`" in text
+        assert (
+            "If the only run that passed was narrower, the failing run is the "
+            "last run of that check: report it."
+        ) in text
+        schema = json.loads(
+            (Path(__file__).parent.parent / "schemas" / "write_batch_result.schema.json")
+            .read_text(encoding="utf-8"))
+        check = schema["properties"]["check"]["properties"]
+        for key in ("passed", "findings"):
+            assert "never a narrower one" in check[key]["description"], key
+
     def test_a_reported_failure_is_quoted_as_the_batch_s_own_words(self, env):
         lines = []
         summary = env.phase_dir / "summary.md"
