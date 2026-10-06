@@ -584,12 +584,17 @@ class TestThePartialApplicationOffersAWayForward:
     def test_a_batch_that_stopped_otherwise_is_not_offered_the_answer(self, env):
         """Nothing attested (no `ids`), or the runner said it failed: the
         bytes it left are not "what it applied", so only the resume and the
-        restore are offered — and an answer for it is refused."""
+        restore are offered — and an answer for it is refused. Fix round 19
+        (review of round 18, #2): a report that only declined an item and
+        attests none applied is the first case, not a batch to keep."""
         for reply in (
             {"status": "applied", "ids": [], "files_touched": ["plans/p.md"],
              "summary": "s"},
             {"status": "failed", "ids": ["s1"], "files_touched": ["plans/p.md"],
              "summary": "s"},
+            {"status": "applied", "ids": [],
+             "declined": [{"id": "s0", "reason": REASON}],
+             "files_touched": ["plans/p.md"], "summary": "s"},
         ):
             respond = _respond_with(env, reply)
             result = env.scheduler(
@@ -832,32 +837,34 @@ class TestTheNativeLegRecordsADeclinedItem:
         plan, out, phase_dir = self._phase(plan_dir)
         code, stdout, err, _result = _run([
             "util", "batch-done", "--phase-dir", str(phase_dir),
-            "--task-id", "apply-batch-0", "--status", "completed",
-            "--declined", f"g-email={REASON}",
+            "--task-id", "apply-batch-1", "--status", "completed",
+            "--declined", f"g-rate={REASON}",
         ], capsys)
         assert code == 0, err
-        assert (f"{batch_done.BATCH_DECLINED_MARKER} apply-batch-0 g-email: not "
+        assert (f"{batch_done.BATCH_DECLINED_MARKER} apply-batch-1 g-rate: not "
                 f"applied, the batch declined it — {REASON}.") in stdout
         assert "never count it as applied" in stdout
         processed = _state(out)["processed_apply-suggestions"]
-        assert processed["g-email"]["status"] == "declined"
-        assert processed["g-email"]["details"]["reason"] == REASON
-        assert processed["g-password"]["status"] == "applied"
+        assert processed["g-rate"]["status"] == "declined"
+        assert processed["g-rate"]["details"]["reason"] == REASON
         assert validate_state_file(_state(out))[0]
 
         code, stdout, err, _result = _run([
             "util", "batch-done", "--phase-dir", str(phase_dir),
-            "--task-id", "apply-batch-1", "--status", "completed",
-            "--skipped", "g-rate",
+            "--task-id", "apply-batch-0", "--status", "completed",
+            "--skipped", "g-password",
         ], capsys)
         assert code == 0, err
-        assert f"{batch_done.BATCH_SKIPPED_MARKER} apply-batch-1 g-rate: not applied" in stdout
+        assert (f"{batch_done.BATCH_SKIPPED_MARKER} apply-batch-0 g-password: "
+                f"not applied") in stdout
         processed = _state(out)["processed_apply-suggestions"]
-        assert processed["g-rate"]["status"] == "skipped"
-        assert processed["g-rate"]["details"]["reason"].startswith("skipped at your request")
+        assert processed["g-password"]["status"] == "skipped"
+        assert processed["g-password"]["details"]["reason"].startswith(
+            "skipped at your request")
+        assert processed["g-email"]["status"] == "applied"
         # A native resume hands neither out again (the base's step 23).
         reloaded = StateManager(plan, read_only=True)
-        assert reloaded.is_item_processed("apply-suggestions", "g-email")
+        assert reloaded.is_item_processed("apply-suggestions", "g-password")
         assert reloaded.is_item_processed("apply-suggestions", "g-rate")
 
     @pytest.mark.parametrize("argv,said", [
@@ -884,6 +891,27 @@ class TestTheNativeLegRecordsADeclinedItem:
         assert code == 3
         assert said in err
         assert "apply-batch-0" not in (_state(out).get("task_status") or {})
+
+    @pytest.mark.parametrize("task_id,argv", [
+        ("apply-batch-1", ["--skipped", "g-rate"]),
+        ("apply-batch-0", ["--declined", f"g-email={REASON}",
+                           "--skipped", "g-password"]),
+    ])
+    def test_a_batch_that_applied_nothing_is_not_kept(
+        self, plan_dir, capsys, task_id, argv,
+    ):
+        """Fix round 19 (review of round 18, #2): `--skipped` keeps what a
+        batch applied; a batch whose every item is declined or skipped
+        applied nothing by its report, as the executor's `=skip` reads it."""
+        _plan, out, phase_dir = self._phase(plan_dir)
+        code, _stdout, err, _result = _run([
+            "util", "batch-done", "--phase-dir", str(phase_dir),
+            "--task-id", task_id, "--status", "completed", *argv,
+        ], capsys)
+        assert code == 3
+        assert (f"every item of {task_id} is declined or skipped, so by its "
+                f"report it applied nothing to keep") in err
+        assert task_id not in (_state(out).get("task_status") or {})
 
     def test_implement_has_no_decline(self, plan_dir, capsys):
         from tests.test_batch_done import _implement_batches
@@ -913,5 +941,9 @@ class TestTheNativeLegRecordsADeclinedItem:
         assert "`[BATCH_DECLINED]`" in text
         assert (f"record it with step {record}'s `util batch-done` as "
                 f"`--status completed` plus one `--skipped <id>`") in text
+        # Fix round 19: only a report that attests an item applied.
+        assert ("attests at least one fix applied" in text
+                or "attests at least one suggestion applied" in text)
+        assert "(in `ids`, with a `status` other than `failed`)" in text
         assert f"append its summary (step {append})" in text
         assert "declined by their batch (not applied): N" in text

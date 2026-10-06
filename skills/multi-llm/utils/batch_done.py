@@ -592,6 +592,20 @@ def _not_applied_items(
             f"{', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not an "
             f"item of {task_id} (its items: {', '.join(expected) or 'none'})."
         )
+    if (
+        any(word == "skipped" for word, _why in out.values())
+        and all(item in out for item in expected)
+    ):
+        # Fix round 19 (review of round 18, decline #2): `--skipped` keeps
+        # what a batch applied, as the executor's `=skip` does, and that
+        # answer is offered only for a report that attests an item applied.
+        raise WritePromptError(
+            f"--skipped keeps what {task_id} applied and goes on without the "
+            f"items its report left out, but here every item of {task_id} is "
+            f"declined or skipped, so by its report it applied nothing to "
+            f"keep. Restore the batch (util restore-batch) or fix the cause, "
+            f"then resume; it is handed out again."
+        )
     return out
 
 
