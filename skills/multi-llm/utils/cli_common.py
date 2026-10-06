@@ -1355,6 +1355,21 @@ def file_route_composed_flags(
     return _option_table(dests)
 
 
+def replay_host(tokens: Iterable[str]) -> Optional[str]:
+    """The ``--host`` value a replay list carries (any spelling argparse
+    binds to it), or ``None``: the host whose skill or shim composed it."""
+    items = [str(token) for token in tokens]
+    table = _option_table(("host",))
+    for index, token in enumerate(items):
+        head, sep, value = token.partition("=")
+        if _matches_any(head, table) is None:
+            continue
+        if sep:
+            return value or None
+        return items[index + 1] if index + 1 < len(items) else None
+    return None
+
+
 def drop_host_composed_flags(
     tokens: Iterable[str],
     composed: Optional[Dict[str, Tuple[Tuple[str, ...], bool]]] = None,
