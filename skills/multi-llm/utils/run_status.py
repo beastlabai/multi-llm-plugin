@@ -681,13 +681,17 @@ def render_run_text(
     scope: Optional[str] = None,
     resume_workflow: Optional[Dict[str, Any]] = None,
     implement_tally: Optional[Dict[str, Any]] = None,
+    state_block: bool = False,
 ) -> List[str]:
     # The workflow payload the resume block may consult without rendering the
     # workflow lines above it (`--view run`'s terminal read); see `_resume_lines`.
     resume_workflow = workflow if workflow is not None else resume_workflow
     lines = ["runs ({phase}/.status.json) — is a launched run still alive:"]
     if not views:
-        lines.append(f"  no run recorded for {scope or 'this plan'}")
+        if not state_block:
+            # A native implement read back from state.json follows instead
+            # (`render_state_implement_lines`, fix round 16).
+            lines.append(f"  no run recorded for {scope or 'this plan'}")
         return lines
     for view in views:
         run = view["run"]
@@ -1924,6 +1928,11 @@ def state_implement_view(
     implement decomposition on record that is started and not completed — as
     ``{tasks, titles, buckets, reasons, findings, answers}``. Read-only;
     ``None`` when it does not apply.
+
+    Fix round 16 (live run 6, Claude Code racing 06): a native implement the
+    host completed is read back too (``completed: true``): `status --view
+    run` printed "no run recorded for phase implement" after it, since the
+    native leg leaves nothing else that view reads.
     """
     from .state_manager import StateManager
 
@@ -1945,12 +1954,8 @@ def state_implement_view(
     statuses = state.implementation_task_statuses()
     if not isinstance(decomposition, list) or not decomposition:
         return None
-    if state.is_phase_completed(_IMPLEMENT_PHASE) or not (
-        state.is_phase_started(_IMPLEMENT_PHASE) or statuses
-    ):
-        # A finished implement is the workflow view's to report (its manual
-        # tasks and check findings ride the trailer); this block is for the
-        # run the host stopped part-way.
+    completed = state.is_phase_completed(_IMPLEMENT_PHASE)
+    if not (completed or state.is_phase_started(_IMPLEMENT_PHASE) or statuses):
         return None
     reasons = record.get("task_status_reasons") or {}
     titles = record.get("task_titles") or {}
@@ -1982,6 +1987,7 @@ def state_implement_view(
             buckets["not_run"].append(task_id)
     answers = record.get("human_task_decisions")
     return {
+        "completed": completed,
         "tasks": [str(t) for t in decomposition],
         "titles": {str(k): str(v) for k, v in titles.items()},
         "buckets": buckets,
@@ -2004,7 +2010,9 @@ def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
     total = len(view["tasks"])
     lines = [
         "  implement  no run record — the host ran these tasks itself; read "
-        "from state.json (not marked completed)",
+        "from state.json ("
+        + ("marked completed" if view.get("completed") else "not marked completed")
+        + ")",
     ]
     parts = [f"{len(done)}/{total} done"]
     labels = (
@@ -3237,6 +3245,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args), resume_workflow=terminal_workflow,
             implement_tally=implement_tally,
+            state_block=implement_tasks is not None,
         )
         if implement_tasks is not None:
             lines += render_state_implement_lines(implement_tasks)

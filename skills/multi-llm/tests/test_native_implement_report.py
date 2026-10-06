@@ -238,3 +238,54 @@ class TestTheHostIsToldToCarryIt:
             "A `user_next_step` that names a `command` can carry `manual_tasks` "
             "and `manual_tasks_note` too"
         ) in reference
+
+
+class TestStatusAfterACompletedNativeImplement:
+    """Live run 6 (Claude Code racing 06): after a native implement that
+    completed, `status plans/racing-game.md --host claude-code --view run`
+    printed "no run recorded for phase implement". The native leg writes no
+    run record, report or mirror, so `status` reads its tasks back from
+    `state.json` (fix round 14) — but only for a run the host stopped
+    part-way; a completed one was left to the workflow view."""
+
+    def _status(self, capsys, *flags):
+        multi_llm.main(
+            ["status", PLAN_ARG, "--host", "claude-code", "--view", "run", *flags])
+        return capsys.readouterr().out
+
+    @pytest.mark.parametrize("flags", [(), ("--phase", "implement")])
+    def test_the_run_view_reads_it_back_from_state(self, repo, capsys, flags):
+        handoff, _out = _emit(capsys)
+        _finish_the_native_run(repo, capsys, handoff)
+        assert not (repo.phase_dir / "write_batch_report.json").exists()
+        out = self._status(capsys, *flags)
+        assert "no run recorded for phase implement" not in out
+        assert (
+            "  implement  no run record — the host ran these tasks itself; read "
+            "from state.json (marked completed)"
+        ) in out, out
+        line = next(l for l in out.splitlines() if l.strip().startswith("tasks:"))
+        assert line.split("tasks:", 1)[1].strip() == (
+            "4/6 done; completed: T001, T002, T003, T004; "
+            "deferred manual: T005, T006"
+        )
+
+    def test_json_carries_the_same_tally(self, repo, capsys):
+        handoff, _out = _emit(capsys)
+        _finish_the_native_run(repo, capsys, handoff)
+        multi_llm.main(["status", PLAN_ARG, "--host", "claude-code", "--view", "run",
+                        "--json"])
+        out = capsys.readouterr().out
+        payload = json.loads(out[: out.index("MULTI_LLM_RESULT")])
+        tasks = payload["implement_tasks"]
+        assert tasks["completed"] is True
+        assert tasks["buckets"]["completed"] == ["T001", "T002", "T003", "T004"]
+        assert tasks["buckets"]["deferred"] == ["T005", "T006"]
+
+    def test_a_stopped_run_still_reads_not_marked_completed(self, repo, capsys):
+        handoff, _out = _emit(capsys)
+        _util(capsys, "batch-done", "--phase-dir", str(repo.phase_dir),
+              "--task-id", "T001", "--status", "completed")
+        out = self._status(capsys, "--phase", "implement")
+        assert "read from state.json (not marked completed)" in out
+        assert "1/6 done" in out
