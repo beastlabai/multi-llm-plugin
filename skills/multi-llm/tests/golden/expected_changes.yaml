@@ -791,8 +791,10 @@ changes:
   # host-neutral (`utils/judge_vocab.py`). On Codex the judge was
   # `codex:gpt-6-astra`, yet everything it left on disk said `claude_*`.
   # `human_review_config.claude_decide_item_ids` became `judge_decide_item_ids`
-  # in the same place; it is an empty list in this fixture, which flattens to no
-  # leaf, so only the mode value is reported.
+  # in the same place; it is an empty list in this fixture, which flattened to
+  # no leaf until fix round 14, so only the mode value was reported. An empty
+  # container is a leaf of its own now, and the rename shows as the old key
+  # gone and the new one added (the four entries after the mode values).
   # ---------------------------------------------------------------------------
   - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/human_review_config/decision_mode
     rationale: >
@@ -803,6 +805,19 @@ changes:
     rationale: >
       The same rename in apply-suggestions' output, from the shared
       `ApplyOrchestratorBase.build_human_review_config`.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/human_review_config/claude_decide_item_ids
+    rationale: >
+      The same rename: the old key (an empty list here) is gone. Invisible
+      until fix round 14 made an empty list a leaf of the comparison.
+  - pointer: /phases/apply-fixes/artifacts/orchestrator_output.json/human_review_config/judge_decide_item_ids
+    rationale: >
+      The same rename: the new key, an empty list in this fixture.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/human_review_config/claude_decide_item_ids
+    rationale: >
+      The same rename in apply-suggestions' output: the old key is gone.
+  - pointer: /phases/apply-suggestions/artifacts/orchestrator_output.json/human_review_config/judge_decide_item_ids
+    rationale: >
+      The same rename in apply-suggestions' output: the new key.
 
   # ---------------------------------------------------------------------------
   # Issue 4 of the 2026-10-04 racing re-run (Claude Code host): a write phase's

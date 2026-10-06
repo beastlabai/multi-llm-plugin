@@ -297,6 +297,36 @@ class TestBatchListsCompareAsMultisets:
             "/phases/x/created_paths/0", "/phases/x/created_paths/1",
         ]
 
+    def test_an_added_or_removed_empty_object_or_list_is_a_diff(self):
+        """Fix round 14: an empty container has no leaf under it, so an added
+        `blocked_by_check: {}` used to flatten to nothing on either side and
+        pass the container golden comparison unseen (round 11)."""
+        base = {"report": {"exit": 0}}
+        for empty in ({}, []):
+            added = {"report": {"exit": 0, "blocked_by_check": empty}}
+            assert diff_bundles(base, added) == [
+                ("/report/blocked_by_check", "<absent>", empty)
+            ]
+            assert diff_bundles(added, base) == [
+                ("/report/blocked_by_check", empty, "<absent>")
+            ]
+            assert diff_bundles(added, added) == []
+        # An empty object turned into an empty list is a change too.
+        assert diff_bundles({"a": {}}, {"a": []}) == [("/a", {}, [])]
+        # Inside a list (positional) and inside an aligned `batches` list.
+        assert diff_bundles({"a": [1]}, {"a": [1, {}]}) == [("/a/1", "<absent>", {})]
+        assert [p for p, _b, _a in diff_bundles(
+            self._bundle(self._batch("A")),
+            self._bundle({**self._batch("A"), "extra": []}),
+        )] == [f"{self.LEAF}/0/extra"]
+
+    def test_a_container_that_gains_its_first_member_is_reported_once(self):
+        """The empty leaf is not repeated beside the member that replaced it:
+        the member's own leaf is the change (and the one an existing
+        leaf-exact allowlist entry names)."""
+        assert diff_bundles({"a": []}, {"a": ["x"]}) == [("/a/0", "<absent>", "x")]
+        assert diff_bundles({"a": {"k": 1}}, {"a": {}}) == [("/a/k", 1, "<absent>")]
+
     def test_the_container_lane_diffs_through_the_same_function(self):
         """One definition of "the same run" (C8): the container lane's
         `diff_bundles` is this one, alignment included."""
