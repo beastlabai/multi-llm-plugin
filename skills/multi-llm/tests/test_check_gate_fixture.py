@@ -300,6 +300,33 @@ class TestTheAcceptPath:
         assert prompt.index("## Check findings the user accepted") < prompt.index(
             "## Result (required")
 
+    def test_the_summary_says_the_findings_were_accepted_and_who_ran(
+        self, repo, capsys,
+    ):
+        """Fix round 18 (live run 7, Codex and OpenCode accept 02): the
+        accept path's `## Check Findings` and its `Check findings:` log line
+        said "No task waits for them, so implement went on", although T007
+        had waited on T002 and ran only because the user accepted the
+        findings."""
+        _first_run(repo, capsys)
+        assert _implement(
+            repo, "--resume", "--human-task", "T002=done", "--human-task", "T005=skip",
+        ) == 0
+        text = capsys.readouterr()
+        text = text.out + text.err
+        said = (
+            "you accepted T002's findings (--human-task T002=done), so T007, "
+            "which waits on it, ran, told that you accepted them"
+        )
+        summary = (repo.phase_dir / "summary.md").read_text(encoding="utf-8")
+        section = summary.split("## Check Findings", 1)[1].split("\n## ", 1)[0]
+        assert "No task waits for them" not in section, section
+        assert "went on" not in section, section
+        assert said[0].upper() + said[1:] + ". Review-code is told about them" in section
+        line = next(l for l in text.splitlines() if l.startswith("Check findings: T002"))
+        assert "no task waits for them" not in line, line
+        assert f"reported problems; {said}" in line, line
+
     def test_the_dispatched_prompts_are_kept_beside_the_native_legs(
         self, repo, capsys,
     ):
