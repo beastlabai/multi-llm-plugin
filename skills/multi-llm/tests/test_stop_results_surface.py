@@ -276,9 +276,8 @@ class TestStatusReadsANativeImplementFromState:
         leg._util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
                   "--status", "completed", "--check", "findings",
                   "--finding", FINDINGS[0])
-        assert leg._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
-                         "T005", "--status", "failed", "--reason",
-                         "refused before dispatch: the write policy")[0] == 0
+        # Since fix round 14 the native emit records T005, which the write
+        # policy refuses, failed itself; it hands it out to no one.
         return leg
 
     def test_the_run_view_lists_every_task_and_why(self, repo, capsys):
@@ -291,7 +290,7 @@ class TestStatusReadsANativeImplementFromState:
         assert "completed: T001, T002, T003, T004" in line
         assert "failed: T005" in line
         assert "not run: T006, T007" in line
-        assert "T005: refused before dispatch: the write policy" in out
+        assert "T005: refused before dispatch" in out
         assert "check findings T002: retries must be 3 (found 2)" in out
 
     def test_answers_and_skips_read_as_the_user_gave_them(self, repo, capsys):
