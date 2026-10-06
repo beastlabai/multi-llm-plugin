@@ -140,7 +140,7 @@ class TestTheDependentsAreNotRun:
             "1 deferred manual (T005)."
         ) in summary, summary
         assert "## Check Findings" in summary
-        assert "the tasks that do were not run (see below)" in summary
+        assert "the ones that do were not run (see below)" in summary
         assert "## Not Run: Upstream Check Reported Problems" in summary
         assert "| T004 | T002 |" in summary
         assert "| T004 | not run |" in summary

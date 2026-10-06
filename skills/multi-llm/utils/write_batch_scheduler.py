@@ -3616,18 +3616,7 @@ class WriteBatchScheduler:
             f"; they are listed in {result.summary_file}"
             if result.summary_file else ""
         )
-        blocked = sorted(result.blocked_by_check)
-        if stopped:
-            went_on = (
-                f"the tasks that depend on them are held ({', '.join(blocked)})"
-                if blocked else "no task waits for them"
-            )
-        else:
-            went_on = (
-                f"the tasks that do not depend on them went on, and the ones "
-                f"that do were not run ({', '.join(blocked)})"
-                if blocked else "no task waits for them, so implement went on"
-            )
+        went_on = "; ".join(self._check_findings_fate(result, found, stopped=stopped))
         lines.append(
             f"Check findings: {', '.join(found)} ran, changed no file and "
             f"reported problems; {went_on}{where}. Review-code is told about "
@@ -3635,6 +3624,70 @@ class WriteBatchScheduler:
             f"validates."
         )
         return lines
+
+    def _check_findings_fate(
+        self, result: SchedulerResult, found: Dict[str, List[str]], *,
+        stopped: bool = False, see_below: bool = False,
+    ) -> List[str]:
+        """What became of the tasks after the checks in *found*, one clause
+        per kind of check (lowercase, no closing stop), for the
+        ``[CHECK_FINDINGS]`` summary line and summary.md's ``## Check
+        Findings``.
+
+        Fix round 18 (live run 7, accept path): a check whose findings the
+        user accepted (``--human-task <id>=done``) read "No task waits for
+        them, so implement went on", although T007 had waited on it and ran
+        only because the findings were accepted. Such a check is named with
+        the answer and the tasks after it that ran; the others keep the hold
+        (*stopped*: the run ended on a stop) or "no task waits" wording.
+        *see_below*: the summary, which lists the held tasks in a section of
+        their own instead of by id.
+        """
+        reasons = getattr(result.human_plan, "accepted", None) or {}
+        accepted = [
+            check_id for check_id in found
+            if ACCEPTED_WITH_FINDINGS_MARK in str(reasons.get(check_id) or "")
+        ]
+        others = [check_id for check_id in found if check_id not in accepted]
+        clauses: List[str] = []
+        if accepted:
+            done = {
+                str(row.get("task_id")) for row in result.report_rows()
+                if row.get("status") == STATUS_OK
+            }
+            for check_id in accepted:
+                ran = [dep for dep in self._dependents_of(check_id) if dep in done]
+                clauses.append(
+                    f"you accepted {check_id}'s findings (--human-task "
+                    f"{check_id}=done), so "
+                    + (
+                        f"{', '.join(ran)}, which "
+                        f"{'waits' if len(ran) == 1 else 'wait'} on it, ran, "
+                        f"told that you accepted them"
+                        if ran else
+                        "the tasks that wait on it are no longer held back by it"
+                    )
+                )
+        if not others:
+            return clauses
+        them = "them" if not accepted else (
+            f"{', '.join(others)}'s findings" if len(others) == 1
+            else f"the findings of {', '.join(others)}"
+        )
+        blocked = sorted(result.blocked_by_check)
+        held = "(see below)" if see_below else f"({', '.join(blocked)})"
+        if blocked and stopped:
+            clauses.append(f"the tasks that depend on {them} are held {held}")
+        elif blocked:
+            clauses.append(
+                f"the tasks that do not depend on {them} went on, and the ones "
+                f"that do were not run {held}"
+            )
+        else:
+            clauses.append(
+                f"no task waits for {them}" + ("" if stopped else ", so implement went on")
+            )
+        return clauses
 
     def _batch_check_lines(self, result: SchedulerResult) -> List[str]:
         """One :data:`BATCH_CHECK_MARKER` line per code batch whose own check
@@ -9202,15 +9255,18 @@ class WriteBatchScheduler:
             # read VERIFIED here and lived only in the runner's notes. They
             # are listed whole, for the reader and for review-code, which is
             # given this file and state.json's record of them.
+            fate = "; ".join(self._check_findings_fate(
+                result, findings_by_task,
+                # A check-findings stop is the end of a run whose other
+                # tasks went on; a failed task's stop is not.
+                stopped=bool(result.stop)
+                and (result.stop or {}).get("kind") != "check-findings",
+                see_below=True,
+            ))
             lines += [
                 "", "## Check Findings", "",
                 "These checks ran and changed no file, but reported problems. "
-                + (
-                    "The tasks that do not depend on them went on; the tasks "
-                    "that do were not run (see below). "
-                    if result.blocked_by_check else
-                    "No task waits for them, so implement went on. "
-                )
+                + fate[:1].upper() + fate[1:] + ". "
                 + "Review-code is told about them, and apply-code-fixes "
                 "applies the fixes review-code validates.", "",
             ]
