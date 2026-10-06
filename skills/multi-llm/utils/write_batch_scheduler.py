@@ -5435,6 +5435,11 @@ class WriteBatchScheduler:
             # follows it.
             return self._applied_without_changes(task, snapshot, context)
 
+        def incomplete_report(context: Dict[str, Any]) -> Optional[str]:
+            # Fix round 18: asked before `after_result`, read-only, like rule
+            # 9's question; a reason sends the one report re-ask.
+            return self._incomplete_report(task, snapshot, context)
+
         def changed_files(context: Dict[str, Any]) -> List[str]:
             # T4.8 (plan opencode-validator-false-rate-limit-and-denied-turn
             # §4.4 step 4): a turn a denial ended has no result, so `_classify`
@@ -5463,6 +5468,10 @@ class WriteBatchScheduler:
             extra["tree_fingerprint"] = tree_fingerprint
         if _accepts_keyword(dispatch_task, "nothing_changed"):
             extra["nothing_changed"] = nothing_changed
+        if self.kind in APPLY_WRITE_KINDS and _accepts_keyword(
+            dispatch_task, "incomplete_report"
+        ):
+            extra["incomplete_report"] = incomplete_report
         return dispatch_task(
             task,
             phase_dir=self.phase_dir,
@@ -6323,6 +6332,61 @@ class WriteBatchScheduler:
                 if outside else
                 f", but no file changed: {declared} {verb} byte-for-byte as "
                 f"before the dispatch"
+            )
+        )
+
+    def _incomplete_report(
+        self, task: Dict[str, Any], snapshot: TaskSnapshot, context: Dict[str, Any],
+    ) -> Optional[str]:
+        """Why an apply batch's readable report, after edits that moved
+        bytes, leaves some of its items out of both ``ids`` and ``declined``
+        — the one problem its report re-ask names — or ``None`` (fix round 18).
+
+        Read-only, asked before ``_classify``. ``None`` whenever the
+        classification would not read the reply as a partial application for
+        that reason: a ``failed`` claim, a non-zero exit, a jail denial (its
+        verdict is read off this stream), every item accounted for, or no byte
+        moved (for a plan or task-list batch, its declared file).
+        """
+        if self.kind not in APPLY_WRITE_KINDS:
+            return None
+        result = context.get("result")
+        if not isinstance(result, dict) or str(result.get("status") or "") == "failed":
+            return None
+        if context.get("exit_code") not in (0, None):
+            return None
+        denials = _as_jail_denials(context.get("jail_denials"))
+        if denials is not None and denials.total:
+            return None
+        expected = [str(i) for i in (task.get("expected_ids") or [])]
+        raw = result.get("ids")
+        reported = [str(i) for i in raw] if isinstance(raw, list) else []
+        declined = declined_items(result, expected)
+        attested = {i for i in reported if i not in declined.conflicting}
+        missing = [
+            i for i in expected if i not in attested and i not in declined.items
+        ]
+        if not missing:
+            return None
+        task_id = str(task.get("task_id", ""))
+        moved = bool(snapshot.changed()) or (
+            self.kind not in SHARED_ARTIFACT_WRITE_KINDS
+            and bool(self._moved_since_dispatch(task_id, snapshot))
+        )
+        if not moved:
+            return None
+        accounted = len(expected) - len(missing)
+        return (
+            f"The report accounts for {accounted} of the batch's "
+            f"{len(expected)} items: {self._unapplied_words(missing)} "
+            f"{'is' if len(missing) == 1 else 'are'} in neither `ids` nor "
+            f"`declined`. Every item goes in exactly one of them: `ids` if the "
+            f"previous turn applied it (or found it already applied), "
+            f"`declined` with the reason it gave if it left the item unapplied "
+            f"on purpose."
+            + (
+                f" Also: {'; '.join(declined.problems[:5])}."
+                if declined.problems else ""
             )
         )
 

@@ -675,3 +675,131 @@ class TestTheCodex08ShapeThroughTheApplyPhase(_PairRig):
             "--human-task", "apply-batch-0=skip",
         ]) == 3
         assert "util batch-done --skipped" in capsys.readouterr().err
+
+
+# ===========================================================================
+# The executor leg asks once for an account of every item before stopping
+# ===========================================================================
+
+REASK_MARKER = "You are re-sending the report of a batch of edits."
+
+
+class TestAReportThatLeavesItemsOutIsReAskedOnce:
+    """Rule 7's second form: a readable report, after edits, that leaves an
+    item out of both lists gets the one report re-ask (never the batch's own
+    instructions again), told which items it left out."""
+
+    def _first_reply(self, env, **over):
+        env.edits([_patch_edit(env.plan)], result=dict(CODEX_08_REPLY, **over))
+
+    def test_the_restated_report_declines_the_item_and_the_batch_completes(self, env):
+        log = env.enable_call_log()
+        self._first_reply(env)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps({
+            "status": "applied", "ids": ["s1"],
+            "declined": [{"id": "s0", "reason": REASON}],
+            "files_touched": ["plans/p.md"], "summary": "applied s1",
+        }))
+
+        result = env.scheduler([_two_item_task(env)]).run()
+
+        first, second = _prompts(log)
+        assert "Apply batch 0" in first
+        assert second.startswith(REASK_MARKER)
+        assert "Apply batch 0" not in second, "the batch is never sent twice"
+        assert "does not say what\nhappened to every item of the batch" in second
+        assert ("The report accounts for 1 of the batch's 2 items: suggestion 1 "
+                "(`s0`) is in neither `ids` nor `declined`.") in second
+        assert "Not applied; T011 records it as deliberate" in second
+        outcome = result.outcomes[0]
+        assert [(a.status, a.repair) for a in outcome.attempts] == [
+            (executor.STATUS_SCHEMA_INVALID, None),
+            (executor.STATUS_OK, executor.REPAIR_INCOMPLETE_REPORT),
+        ]
+        assert outcome.ok and outcome.write_outcome == executor.WRITE_APPLIED
+        assert outcome.declined == {"s0": REASON}
+        assert env.plan.read_text(encoding="utf-8").count("edit\n") == 1
+        assert result.exit_code == 0
+
+    def test_a_restatement_that_still_leaves_it_out_stops_with_the_answer(self, env):
+        log = env.enable_call_log()
+        self._first_reply(env)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(CODEX_08_REPLY))
+
+        result = env.scheduler([_two_item_task(env)]).run()
+
+        assert len(_prompts(log)) == 2
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert outcome.unapplied_ids == ["s0"]
+        assert result.stop["answers"] == [{"flags": SKIP_FLAGS, "why": SKIP_WHY}]
+        assert result.exit_code == 3
+
+    def test_a_re_ask_that_cannot_restate_leaves_the_first_report_to_decide(self, env):
+        log = env.enable_call_log()
+        self._first_reply(env)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", "I already told you.")
+
+        result = env.scheduler([_two_item_task(env)]).run()
+
+        prompts = _prompts(log)
+        assert sum("Apply batch 0" in p for p in prompts) == 1
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert outcome.unapplied_ids == ["s0"], outcome.reason
+        assert "(its report re-ask did not restate the report:" in outcome.reason
+        assert result.stop["answers"] == [{"flags": SKIP_FLAGS, "why": SKIP_WHY}]
+        assert result.exit_code == 3
+
+    def test_a_re_ask_that_moves_a_file_is_a_partial_application_without_the_answer(
+        self, env,
+    ):
+        self._first_reply(env)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_EDITS", "1")
+
+        result = env.scheduler([_two_item_task(env)]).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL
+        assert "files changed while it ran" in outcome.reason
+        assert outcome.unapplied_ids == []
+        assert "answers" not in result.stop
+        assert result.exit_code == 3
+
+    def test_no_re_ask_when_nothing_moved_or_for_implement(self, env):
+        log = env.enable_call_log()
+        # Nothing moved: the classification does not stop on the account, so
+        # nothing is re-asked (a no-op claim stays a no-op).
+        env.edits([], result={"status": "no-op", "ids": ["s1"],
+                              "files_touched": [], "summary": "already there"})
+        result = env.scheduler([_two_item_task(env)]).run()
+        assert len(_prompts(log)) == 1
+        assert result.outcomes[0].write_outcome == executor.WRITE_NO_OP
+        # implement has no decline, so no re-ask about one.
+        log.unlink()
+        env.edits([_patch_edit(env.plan)], result={
+            "status": "applied", "ids": [], "files_touched": ["plans/p.md"],
+            "summary": "s"})
+        task = env.apply_task(0, kind="implement", task_id="T001",
+                              expected_ids=["T001"],
+                              output_name="implement_batch_0.json")
+        result = env.scheduler([task], kind="implement", finalize=False).run()
+        assert len(_prompts(log)) == 1
+        assert result.outcomes[0].write_outcome == executor.WRITE_PARTIAL
+
+    def test_a_prose_reply_spends_the_one_re_ask(self, env):
+        """The allowance is one re-ask per dispatch, whichever way the report
+        fell short: a prose reply's restatement that leaves an item out is
+        classified as it stands."""
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.plan)], prose=True)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps(CODEX_08_REPLY))
+
+        result = env.scheduler([_two_item_task(env)]).run()
+
+        assert len(_prompts(log)) == 2
+        outcome = result.outcomes[0]
+        assert [a.repair for a in outcome.attempts] == [
+            None, executor.REPAIR_SCHEMA_INVALID]
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert outcome.unapplied_ids == ["s0"]
