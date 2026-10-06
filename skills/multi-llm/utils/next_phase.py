@@ -46,6 +46,10 @@ WORKFLOW_COMPLETE_MARKER = "[WORKFLOW_COMPLETE]"
 #: One line per deferred implement task under ``[WORKFLOW_COMPLETE]``: the id,
 #: then the title when ``state.json`` recorded one. Not a command marker.
 MANUAL_TASK_MARKER = "[MANUAL_TASK]"
+#: One line after the ``[MANUAL_TASK]`` lines: how to record them done
+#: (:func:`manual_close_note`, fix round 14). Not a command marker: the line
+#: is a sentence that carries the command, never the command alone.
+MANUAL_TASK_NOTE_MARKER = "[MANUAL_TASK_NOTE]"
 #: One line above the block when the command it names is certain to be refused
 #: (``check_workflow_prerequisites.repo_wide_sandbox_warning``). Not a command
 #: marker: no consumer of the block reads it as one.
@@ -151,6 +155,9 @@ class NextPhase:
     #: (:func:`implement_answers`). Rendered after the primary and the
     #: optional entries, and carried as ``user_next_step.answers``.
     answers: Optional[AnswersStep] = None
+    #: Beside ``manual_tasks``: how the user records them done, in the host's
+    #: spelling (:func:`manual_close_note`, fix round 14).
+    manual_tasks_note: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
         """The ``user_next_step`` value (§2.1's outcome table).
@@ -164,6 +171,8 @@ class NextPhase:
             payload = {"phase": None, "command": None, "complete": True}
             if self.manual_tasks:
                 payload["manual_tasks"] = [task.to_dict() for task in self.manual_tasks]
+                if self.manual_tasks_note:
+                    payload["manual_tasks_note"] = self.manual_tasks_note
             return payload
         payload: Dict[str, Any] = {"phase": self.phase, "command": self.command}
         if self.optional_before:
@@ -174,21 +183,57 @@ class NextPhase:
         return payload
 
 
-def _complete(phases: Mapping[str, Mapping[str, Any]]) -> NextPhase:
+def _complete(
+    phases: Mapping[str, Mapping[str, Any]],
+    *,
+    template: Optional[str] = None,
+    plan_arg: Optional[str] = None,
+) -> NextPhase:
     """The ``complete`` answer, naming the implement tasks the run deferred.
 
     Read off the workflow payload's ``implement`` entry
     (``check_workflow_prerequisites.get_workflow_status``), which reads them
-    from ``state.json``: no status logic of this module's own.
+    from ``state.json``: no status logic of this module's own. With the
+    host's *template* and the *plan_arg*, the answer also says how to record
+    them done (:func:`manual_close_note`).
     """
     entries = (phases.get("implement") or {}).get("manual_tasks") or ()
+    manual = tuple(
+        ManualTask(str(entry.get("id")), entry.get("title") or None)
+        for entry in entries
+        if isinstance(entry, Mapping) and entry.get("id")
+    )
+    note = None
+    if manual and template is not None and plan_arg is not None:
+        note = manual_close_note(
+            close_command(template, plan_arg, [task.id for task in manual])
+        )
     return NextPhase(
-        phase=None, command=None, complete=True,
-        manual_tasks=tuple(
-            ManualTask(str(entry.get("id")), entry.get("title") or None)
-            for entry in entries
-            if isinstance(entry, Mapping) and entry.get("id")
-        ),
+        phase=None, command=None, complete=True, manual_tasks=manual,
+        manual_tasks_note=note,
+    )
+
+
+def close_command(template: str, plan_arg: str, task_ids: Sequence[str]) -> str:
+    """``--implement <plan> --resume --human-task <id>=done …``, host-spelled.
+
+    How the user records deferred manual tasks done (fix round 14, Codex
+    racing 06/08: T007 was deferred and nothing said how to close it). On
+    implement's resume a ``done`` answer completes a manual task under every
+    strategy, and a resume that only records answers keeps implement's
+    completion date, so the review after it does not go stale.
+    """
+    answers = " ".join(f"--human-task {task_id}=done" for task_id in task_ids)
+    args = f"--implement {quote_plan_arg(plan_arg)} {RESUME_FLAG} {answers}"
+    return template.replace(ARGS_SLOT, args)
+
+
+def manual_close_note(command: str) -> str:
+    """The one plain line that says how to close deferred manual tasks."""
+    return (
+        "No later phase waits for these manual tasks. Once you have done one "
+        f"by hand, record it done with {command} (keep a --human-task answer "
+        "only for each task you did)."
     )
 
 
@@ -504,7 +549,7 @@ def next_phase_commands(
     if start is None:
         primary = workflow.get("suggested_next")
         if primary is None:
-            return _complete(phases)
+            return _complete(phases, template=template, plan_arg=plan_arg)
         # The optional phases offered are the ones between the furthest phase
         # on record before the suggestion and the suggestion itself, as an
         # `--after` walk offers them: `suggested_next` follows the phase
@@ -591,7 +636,7 @@ def next_phase_commands(
     if primary is None:
         # An optional phase never keeps a workflow open, and one the walk did
         # not reach is never suggested: no `optional_before` on completion.
-        return _complete(phases)
+        return _complete(phases, template=template, plan_arg=plan_arg)
     return NextPhase(
         phase=primary,
         command=command_for(primary),
@@ -803,9 +848,12 @@ def render_next_phase_lines(answer: NextPhase) -> List[str]:
     the command and nothing else.
     """
     if answer.complete:
-        return [WORKFLOW_COMPLETE_MARKER] + [
+        lines = [WORKFLOW_COMPLETE_MARKER] + [
             f"{MANUAL_TASK_MARKER} {task.line()}" for task in answer.manual_tasks
         ]
+        if answer.manual_tasks and answer.manual_tasks_note:
+            lines.append(f"{MANUAL_TASK_NOTE_MARKER} {answer.manual_tasks_note}")
+        return lines
     lines = []
     if answer.warning:
         lines.append(f"{RUNNER_WARNING_MARKER} {answer.warning}")

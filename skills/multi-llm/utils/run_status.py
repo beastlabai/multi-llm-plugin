@@ -499,7 +499,62 @@ def _reader_host(args) -> str:
     return host_capabilities.resolve_host_id(explicit=getattr(args, "host", None))
 
 
-def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> List[str]:
+def _plan_spelling(
+    args: argparse.Namespace, views: Sequence[Dict[str, Any]], plan_path: Path,
+) -> str:
+    """The plan as its user typed it, for a command this view prints.
+
+    A poll pinned to one run takes that run's recorded ``plan_arg`` when
+    ``next_phase.recorded_plan_spelling`` passes it (a tool route polls with
+    the absolute path); anything else is the plan as this call received it.
+    """
+    from . import next_phase
+
+    if len(views) == 1 and (args.phase or args.question or args.run_id):
+        recorded = next_phase.recorded_plan_spelling(
+            (views[0].get("run") or {}).get("plan_arg"), str(plan_path),
+        )
+        if recorded:
+            return recorded
+    return str(args.plan_file)
+
+
+def manual_close_note(
+    payload: Dict[str, Any], plan_spelling: str, host_id: Optional[str],
+) -> Optional[str]:
+    """How to record the deferred manual tasks done, in *host_id*'s spelling.
+
+    ``next_phase.manual_close_note`` over the workflow payload's
+    ``phases.implement.manual_tasks`` (fix round 14: Codex racing 06/08
+    listed T007 and never said how to close it). ``None`` when nothing is
+    owed or the host has no command template for this route.
+    """
+    manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
+    ids = [str(entry["id"]) for entry in manual or []
+           if isinstance(entry, dict) and entry.get("id")]
+    if not ids:
+        return None
+    import io
+
+    from . import next_phase
+
+    try:
+        host = host_capabilities.resolve_host_id(explicit=host_id)
+        # The route's one stderr line, if any, is the emitter's to print.
+        template = host_capabilities.next_command_template(
+            host, next_phase.resolve_route(host, stderr=io.StringIO()),
+        )
+    except Exception:  # noqa: BLE001 - advisory: the list still stands
+        return None
+    return next_phase.manual_close_note(
+        next_phase.close_command(template, plan_spelling, ids)
+    )
+
+
+def _workflow_trailer_lines(
+    payload: Dict[str, Any], *, prefix: str = "  ",
+    close_note: Optional[str] = None,
+) -> List[str]:
     """The workflow view's ``suggested next``/``notice`` lines, alone.
 
     Split out of ``render_workflow_text`` so the terminal ``--view run`` carry-
@@ -544,7 +599,10 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
             if isinstance(entry, dict) and entry.get("id")
         )
         if named:
-            lines.append(f"{prefix}manual tasks left for you: {named}")
+            lines.append(
+                f"{prefix}manual tasks left for you: {named}"
+                + (f". {close_note}" if close_note else "")
+            )
     # The implement check tasks that ran and reported problems
     # (`phases.implement.check_findings`, from state.json; racing re-run 4,
     # 2026-10-05). Shown while implement is unfinished — its findings are
@@ -576,7 +634,9 @@ def _workflow_trailer_lines(payload: Dict[str, Any], *, prefix: str = "  ") -> L
     return lines
 
 
-def render_workflow_text(payload: Dict[str, Any]) -> List[str]:
+def render_workflow_text(
+    payload: Dict[str, Any], *, close_note: Optional[str] = None,
+) -> List[str]:
     lines = ["workflow (state.json) — which phases are done:"]
     width = max((len(p) for p in payload.get("phases", {})), default=0)
     for phase, info in payload.get("phases", {}).items():
@@ -591,7 +651,7 @@ def render_workflow_text(payload: Dict[str, Any]) -> List[str]:
             extra.append(str(info["timestamp"]))
         suffix = f"  ({', '.join(extra)})" if extra else ""
         lines.append(f"  {phase.ljust(width)}  {info.get('status', '?')}{suffix}")
-    lines.extend(_workflow_trailer_lines(payload))
+    lines.extend(_workflow_trailer_lines(payload, close_note=close_note))
     return lines
 
 
@@ -2904,7 +2964,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         except Exception:
             terminal_workflow = None
         if terminal_workflow:
-            trailer = _workflow_trailer_lines(terminal_workflow, prefix="")
+            trailer = _workflow_trailer_lines(
+                terminal_workflow, prefix="",
+                close_note=manual_close_note(
+                    terminal_workflow, _plan_spelling(args, views, plan_path),
+                    _reader_host(args),
+                ),
+            )
             if trailer:
                 workflow_trailer = [f"workflow {line}" for line in trailer]
                 terminal_notice = "; ".join(trailer)
@@ -2936,7 +3002,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     else:
         lines: List[str] = []
         if args.view == VIEW_ALL and workflow is not None:
-            lines += render_workflow_text(workflow)
+            lines += render_workflow_text(
+                workflow,
+                close_note=manual_close_note(
+                    workflow, _plan_spelling(args, views, plan_path),
+                    _reader_host(args),
+                ),
+            )
             lines.append("")
         lines += render_run_text(
             views, plan_path=plan_path, workflow=workflow,
