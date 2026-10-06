@@ -14,10 +14,10 @@ Read the result's `exit` and `next` the way the dispatcher's own contract reads
 them. {NEEDS_HUMAN_RULE}
 
 `user_next_step` is the phase after this one, for the user to type: never run it
-yourself; end your report with its `command`, and each `optional_before` command, every one in its own fenced block, verbatim. It is
+yourself; end your report with its `command`, and each `optional_before` command, every one in its own fenced block, verbatim: the `command` first, then the line "Optional, before that:" and each `optional_before` entry's `why` as plain text above its command. It is
 never a tool call, unlike `next`, which is one. When it carries `manual_tasks`,
 complete or not, also list each (id and title) and give its `manual_tasks_note`
-verbatim: it names the command that records them done.
+verbatim, as plain text outside any fenced block (a fenced block holds one command and nothing else): it names the command that records them done.
 
 When the result carries `validation_counts` (a review phase's does), report
 them, and if `needs_human_decision` or `validation_failed` is non-zero point at

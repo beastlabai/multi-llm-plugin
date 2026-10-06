@@ -419,17 +419,26 @@ TOOL_OUTCOMES_LINE = (
 #: and the line says to relay them on any result — the hosts named T009 from
 #: the notice but never the command that records it done. Fix round 17: it
 #: said "which no phase will run" of every entry, while a task skipped with a
-#: manual one (`waits_on`) runs on the resume the note names.
+#: manual one (`waits_on`) runs on the resume the note names. Fix round 18
+#: (live run 7): the `command` first and each optional entry after it with its
+#: `why` (plans/next-phase-command.md §2.1, "Primary first"; Codex had put the
+#: optional step first, OpenCode had dropped its `why`), and the note as prose
+#: (Codex racing 06 put it in a ```text fence).
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
     "call to make: copy its `command`, and each `optional_before` command, into your "
-    "report, each in its own fenced block; when it is `complete`, and "
+    "report, each in its own fenced block, the `command` first; then the line "
+    "\"Optional, before that:\" and, for each `optional_before` entry, its `why` "
+    "as plain text above its command (the `why` says what the optional step "
+    "would do and what skipping it means); when it is `complete`, and "
     "only then, say \"Workflow complete.\"; and whenever it carries "
     "`manual_tasks`, complete or not, list each of them "
     "(id and title): tasks implement left for the user to do by hand, or, for one "
     "with `waits_on`, a task skipped with that one, which implement runs once "
     "that one is recorded done; "
-    "then give its `manual_tasks_note` verbatim, which says how to record them done. "
+    "then give its `manual_tasks_note` verbatim, which says how to record them done, "
+    "as plain text and never inside a fenced block: a fenced block holds one command "
+    "and nothing else. "
     "Then stop. "
     "Never say \"Workflow complete.\" otherwise, even when a notice lists manual "
     "tasks left for the user: while `user_next_step` names a `command`, the "
@@ -447,7 +456,9 @@ TOOL_USER_NEXT_STEP_LINE = (
 #: one says they are the only commands, and what a result carrying neither
 #: means — every failed or needs-human result now says so explicitly, with
 #: ``user_next_step: null`` and :data:`NO_COMMAND_REASON`. Rendered directly
-#: after :data:`TOOL_USER_NEXT_STEP_LINE` on both package hosts.
+#: after :data:`TOOL_USER_NEXT_STEP_LINE` on both package hosts. Fix round 18
+#: (live run 7, the Claude Code stop path): a host offered "remove the deny
+#: rule" as a way past a task the write policy refused; it never suggests that.
 TOOL_NO_COMPOSED_COMMAND_LINE = (
     "Never compose a command for the user yourself, and never spell one from "
     "this tool's arguments: the only commands you may give them are "
@@ -455,7 +466,11 @@ TOOL_NO_COMPOSED_COMMAND_LINE = (
     "`resume_command` and each `resume_answers` command, each copied verbatim. "
     "A result whose `user_next_step` is "
     "null and that carries no `resume_command` has no command to give "
-    "(`no_command_reason` says why): name no command and no next phase."
+    "(`no_command_reason` says why): name no command and no next phase. "
+    "Offer only the ways forward the result itself names: never suggest loosening "
+    "the write policy (`driver.write_paths` in `.multi-llm/providers.yaml`, a "
+    "`deny` rule removed or `allow` widened) to get past a task it refused; that "
+    "policy is the user's own setting."
 )
 
 #: The value of ``no_command_reason``, the key both package servers set beside
@@ -566,11 +581,19 @@ NEEDS_HUMAN_RULE = (
 #:
 #: The ``options`` sentence is kept word for word from the message it replaces:
 #: it is what tells the model where the redacted commands went.
+#:
+#: Fix round 18 (Codex racing run 7, phase 08): the message named `argv` as
+#: "what was being run", and the host told the user the tool's own
+#: `--exec-subagents --detach`; it now asks for the phase and the plan and says
+#: never to quote `argv` or its flags.
 NEEDS_HUMAN_MESSAGE = {
     "template": (
         "Stop here: this run is blocked and needs a human. {phase} {error} "
-        "Report to the user what was being run (`argv`), that line, and the "
-        "`options`; an `options` entry is a tool call for you, never a command "
+        "Report to the user which phase was running on which plan, that line, and the "
+        "`options`; never quote `argv` or its flags to the user: it is this tool's own "
+        "command line, with flags the tool adds itself (`--host`, `--yes`, "
+        "`--exec-subagents`, `--detach`), not something the user ran or types; "
+        "an `options` entry is a tool call for you, never a command "
         "for the user to type, so do not print one as a command. The "
         "dispatcher's output is included as it was rendered, except that every "
         "runnable dispatcher command in it was re-spelled the way this host's "
@@ -625,12 +648,12 @@ NEEDS_HUMAN_MESSAGE = {
     "phase_unnamed": "Nothing in the result line names the phase that was running.",
     "phase_unknown": (
         "The dispatcher exited without a result line, so nothing here names the "
-        "phase that was running; `log` and `argv` say what ran."
+        "phase that was running; `log` says what ran."
     ),
     "error_known": "The last line it left is: {error}",
     "error_unknown": (
         "Its result line names no error, and what it printed is in `output` and "
-        "`stderr`; `log` and `argv` are what to report."
+        "`stderr`; `log` is what to report."
     ),
 }
 
