@@ -180,10 +180,20 @@ def manifest_text(version: Optional[str] = None) -> str:
     return text
 
 
+#: The skill template's one codex-only slot: ``surface.long_call_rule``,
+#: filled from the same ``tool_timeout_sec`` the server enforces (fix round 16).
+LONG_CALL_SLOT = "{LONG_CALL_RULE}"
+
+
 def skill_md(base: Optional[Path] = None) -> str:
     """The plugin's ``SKILL.md`` — D1's mapping-table call, spelled once."""
     root = Path(base) if base else SKILL_DIR
     template = (root / SKILL_TEMPLATE).read_text(encoding="utf-8")
+    if template.count(LONG_CALL_SLOT) != 1:
+        raise PayloadError(
+            f"{SKILL_TEMPLATE} must carry exactly one {LONG_CALL_SLOT} slot"
+        )
+    template = template.replace(LONG_CALL_SLOT, surface.long_call_rule(HOST_ID))
     return host_install.render(
         HOST_ID, base=str(root), skill=SKILL_DIR_TOKEN, template=template
     )

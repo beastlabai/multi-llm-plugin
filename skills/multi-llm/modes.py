@@ -729,6 +729,25 @@ TOOL_WRITE_CAPABLE_NOTE = (
     + WRITE_POSTURE_LEVER_ENV + "=" + WRITE_POSTURE_LEVER_VALUE + "."
 )
 
+#: The codex host's rule for waiting on a call (fix round 16, Codex racing run
+#: 6). Under codex's code mode the model calls this tool from a JavaScript
+#: ``exec`` cell that hands control back after ``yield_time_ms`` (30 s by
+#: default) while the call is still running, and a model that then ends its
+#: turn ends ``codex exec``, whose teardown aborts the run. Measured offline on
+#: codex 0.160.1: a cell whose first line is the pragma below waited for a
+#: 75 s call and returned only with its result. ``{BUDGET_MIN}`` and
+#: ``{YIELD_MS}`` are filled from the plugin's ``tool_timeout_sec``
+#: (``packaging/codex/mcp.json``) by ``packaging/common/surface.py``, so the
+#: wait and the budget cannot drift. Rendered into the codex tool description
+#: and the codex plugin's skill; no other host has the cell.
+TOOL_LONG_CALL_RULE = (
+    "A call can run for up to its {BUDGET_MIN}-minute budget. When you call this "
+    "tool from an `exec` cell, start the cell with "
+    '`// @exec: {"yield_time_ms": {YIELD_MS}}`, so the cell waits for the '
+    'result. If a cell hands back "Script running" anyway, call `wait` until '
+    "this call returns, and never end your turn while it is running."
+)
+
 
 # The `util` namespace is a mode word for routing purposes but is deliberately
 # *not* a mode: it is excluded from `--help`'s mode list and from

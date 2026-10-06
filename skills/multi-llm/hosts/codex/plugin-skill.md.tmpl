@@ -9,7 +9,7 @@ Call the `multi_llm` tool with the argument text, converted to its four properti
 as that tool's own argument descriptions specify. The tool is the only supported entry point
 on this host: it appends the flags this host requires, refuses the ones it owns, and
 supervises the run to a terminal result. Do not reach the dispatcher any other way. The tool
-runs outside the exec sandbox, and on the modes that apply changes it writes to the workspace.
+runs outside the exec sandbox, and on the modes that apply changes it writes to the workspace. {LONG_CALL_RULE}
 
 Read the result's `exit` and `next` the way the dispatcher's own contract reads them; on `state: partial`, name the failed models and their reasons from `progress.models`; when the result carries `validation_counts` (a review phase's does), report them, and if `needs_human_decision` or `validation_failed` is non-zero point at `report.md` for those groups; they are decided later, when the suggestions are applied. A result without that key has no counts to report, so do not mention them.
 On this host `next` arrives as arguments for this same tool, not as a command: "running" it means calling the tool again with exactly those arguments, never a shell.
