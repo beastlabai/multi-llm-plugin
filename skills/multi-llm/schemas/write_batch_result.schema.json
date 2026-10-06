@@ -9,12 +9,24 @@
   "properties": {
     "status": {
       "enum": ["applied", "no-op", "failed"],
-      "description": "The runner's own claim. `applied` = it edited files; `no-op` = nothing needed changing (already applied by a prior batch); `failed` = it could not apply the batch. Never the verdict on its own: a claim of `applied` with an empty snapshot diff is a clean failure, and a claim of `failed` with a non-empty diff is a partial application."
+      "description": "The runner's own claim. `applied` = it edited files; `no-op` = nothing needed changing (already applied by a prior batch, or every item declined); `failed` = it could not apply the batch. Never the verdict on its own: a claim of `applied` with an empty snapshot diff is a clean failure, and a claim of `failed` with a non-empty diff is a partial application."
     },
     "ids": {
       "type": "array",
       "items": {"type": "string"},
       "description": "The suggestion/group/task ids this batch actually applied. Compared against the task's `expected_ids` so 'some of them landed' is detected as a partial application rather than read as success."
+    },
+    "declined": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": true,
+        "properties": {
+          "id": {"type": "string"},
+          "reason": {"type": "string"}
+        }
+      },
+      "description": "The apply phases' items the batch deliberately did not apply, each with the reason (fix round 18, Codex racing run 7: a batch said in `notes` that it left a fix out because the implementation record calls that code deliberate, `ids` could only list the applied one, and the batch stopped as a partial application on every resume). An expected id that comes back here with a non-empty reason is declined: not applied, never counted as applied, named with its reason in summary.md, the result notice and `status`, and not a partial application; a batch whose every expected id is applied or declined is complete. An id in both `ids` and `declined`, an id the batch does not hold, and an entry without a reason are read as that id not coming back (`subagent_executor.declined_items`). `implement` has no such field: a task its runner will not do is `failed`, answered with `--human-task <id>=skip|done`, so a `declined` naming the task is read as `failed`. Optional, so an older reply stays valid; `id` and `reason` are not `required` on purpose, so an incomplete entry is a named contract problem rather than a schema rejection."
     },
     "files_touched": {
       "type": "array",
