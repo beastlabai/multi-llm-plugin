@@ -8146,16 +8146,16 @@ class WriteBatchScheduler:
         :meth:`_run_verification` adds reached only a finished run's result,
         notice and summary. Set on ``result.unverified`` (the notice, the
         Verification line, the report, the mirror) when this is a code phase,
-        a task of it completed (this run or an earlier one: the ``completed``
-        statuses :meth:`_phase_has_applied_batches` reads) and no
-        ``driver.verify_command`` is set. Never runs anything.
+        a task of it applied an edit (this run or an earlier one,
+        :meth:`_phase_has_applied_batches` — the rule
+        :meth:`_run_verification` keeps too) and no ``driver.verify_command``
+        is set. Never runs anything. Fix round 17: it counted any completed
+        task, so a stop after a check alone (which edits nothing, and may have
+        run the tests itself) said that nothing had run them.
         """
         if self.kind not in CODE_WRITE_KINDS or self.dry_run or result.unverified:
             return []
-        ran = any(
-            outcome.ok and not outcome.skipped for outcome in result.outcomes
-        ) or self._phase_has_applied_batches()
-        if not ran:
+        if not self._phase_has_applied_batches(result):
             return []
         try:
             command = get_verify_command(anchor=self.anchor)
@@ -8182,9 +8182,13 @@ class WriteBatchScheduler:
           edit the plan and the tasks file; a typecheck has nothing to say about
           them, so they skip silently rather than nagging about a command that
           was never going to apply.
-        * **Nothing applied.** No batch dispatched by this run **and** none
-          recorded applied by an earlier run of this phase
-          (:meth:`_phase_has_applied_batches`) means no edit to check.
+        * **Nothing applied.** No task of this run **and** none recorded by an
+          earlier run of this phase applied an edit
+          (:meth:`_phase_has_applied_batches`) means no edit to check. Fix
+          round 17: a dispatched batch used to be enough, so a run whose only
+          batches were checks or no-ops ran the command (or said nothing had
+          run the tests) about edits nobody made; the stop's line
+          (:meth:`_note_unverified_on_stop`) asks the same question.
 
         The command is a **shell string** (`&&` is in its documented shape), run
         with `cwd` at the pinned repo root — the same root every containment
@@ -8195,7 +8199,7 @@ class WriteBatchScheduler:
         """
         if self.kind not in CODE_WRITE_KINDS:
             return True
-        if not result.batches_dispatched and not self._phase_has_applied_batches():
+        if not self._phase_has_applied_batches(result):
             return True
         command = get_verify_command(anchor=self.anchor)
         if not command:
@@ -8248,8 +8252,11 @@ class WriteBatchScheduler:
         result.messages.extend(self._verification_message(result))
         return False
 
-    def _phase_has_applied_batches(self) -> bool:
-        """Whether an earlier run of this phase left applied batches behind (F3).
+    def _phase_has_applied_batches(
+        self, result: Optional[SchedulerResult] = None,
+    ) -> bool:
+        """Whether a task of this phase applied an edit that is still owed a
+        check: one of *result*'s outcomes, or one an earlier run left (F3).
 
         The check used to gate on ``result.batches_dispatched`` alone. The
         apply kinds re-materialize their full batch list on ``--resume`` and a
@@ -8261,7 +8268,23 @@ class WriteBatchScheduler:
         — the exact ``--resume`` the exit-3 message had told the user to run
         (2026-09-16). ``state.json``'s task statuses are the record that
         survives that filter, so they answer here.
+
+        Fix round 17: only an edit counts. This run's ``ok`` outcomes count
+        when they ``applied`` (a resume skip carries the earlier verdict); a
+        task ``state.json`` records ``completed`` counts when the phase's
+        audit log's last completion of it applied or partly applied an edit
+        (a failed batch the user accepted keeps what it moved). A check task
+        (``no-op``, ``verification_only``), a ``no-op`` batch and a manual
+        task answered ``done`` (no dispatch at all) edit nothing. A completed
+        task with no completion in the audit log (the native leg records
+        none) still counts unless it is a manual or a check task this run
+        knows of: the conservative reading, which runs the check.
         """
+        if result is not None and any(
+            outcome.ok and outcome.write_outcome == WRITE_APPLIED
+            for outcome in result.outcomes
+        ):
+            return True
         if self.state is None or not hasattr(self.state, "get_all_task_statuses"):
             return False
         try:
@@ -8277,7 +8300,40 @@ class WriteBatchScheduler:
                 task_id for task_id in statuses if _IMPLEMENT_TASK_ID.match(task_id)
             }
         candidates.discard("")
-        return any(statuses.get(task_id) == "completed" for task_id in candidates)
+        completed = sorted(
+            task_id for task_id in candidates if statuses.get(task_id) == "completed"
+        )
+        if not completed:
+            return False
+        record = getattr(self.state, "state", None)
+        human = {
+            str(task_id) for task_id in (
+                (record.get("implement_human_task_ids") if isinstance(record, dict)
+                 else None) or []
+            )
+        }
+        for task_id in completed:
+            task = self._task_by_id(task_id)
+            expected = [str(i) for i in ((task or {}).get("expected_ids") or [])]
+            try:
+                done = self.audit.completion_for(
+                    task_id, expected_ids=expected or None,
+                )
+            except Exception:  # noqa: BLE001 - an unreadable log is no record
+                done = None
+            if done is not None:
+                if done.get("write_outcome") in (WRITE_APPLIED, WRITE_PARTIAL):
+                    return True
+                continue
+            if task_id in human:
+                continue
+            if task is not None and (
+                is_check_task(self.kind, task)
+                or task.get("executor_role") == "human" or task.get("is_human")
+            ):
+                continue
+            return True
+        return False
 
     def _run_verify_command(self, command: str, timeout: int) -> Tuple[int, str]:
         """Run the shell string; return ``(exit_code, output)`` (F3/F4, F6).
