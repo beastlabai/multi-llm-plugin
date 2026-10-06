@@ -84,7 +84,10 @@ class TestTheNativeLegRecordsIt:
 
         run_status.main(["--plan-file", str(repo.plan)])
         out = capsys.readouterr().out
-        assert "a check its own task ran fails (see implement/summary.md): T001" in out
+        assert (
+            "a task's own report says a check it ran fails (see "
+            "implement/summary.md): T001 (\""
+        ) in out
 
         record = code_review_orchestrator.build_implementation_record(repo.plan)
         assert (

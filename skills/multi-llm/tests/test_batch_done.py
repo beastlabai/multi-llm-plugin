@@ -437,8 +437,9 @@ class TestACheckTaskRecordsWhatItFound:
         assert code == 0, err
         assert "[BATCH_DONE] T001 completed" in stdout
         assert (
-            "[BATCH_CHECK_FAILED] T001: its edits were applied, but a check it "
-            f"ran on them fails (1 problem(s)): {failing}. The edits are kept."
+            "[BATCH_CHECK_FAILED] T001: its edits were applied, but its own "
+            "report says a check it ran on them fails (1 problem(s)): "
+            f"\"{failing}\". The edits are kept."
         ) in stdout
         assert "## Check Findings" in stdout
         assert "never report the phase as a clean success" in stdout

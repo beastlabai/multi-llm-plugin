@@ -636,15 +636,16 @@ def _workflow_trailer_lines(
     # same rule as the check findings above.
     failing = (phases.get("implement") or {}).get("batch_check_findings")
     if isinstance(failing, list) and failing and not (implement_done and review_settled):
+        # Fix round 16: the task's own report, quoted (Codex racing 06r).
         named = "; ".join(
-            f"{entry['id']} ({(entry.get('findings') or [''])[0][:120]}"
+            f"{entry['id']} (\"{(entry.get('findings') or [''])[0][:120]}\""
             f"{', …' if len(entry.get('findings') or []) > 1 else ''})"
             for entry in failing
             if isinstance(entry, dict) and entry.get("id")
         )
         if named:
             lines.append(
-                f"{prefix}a check its own task ran fails (see "
+                f"{prefix}a task's own report says a check it ran fails (see "
                 f"implement/summary.md): {named}"
             )
     return lines
