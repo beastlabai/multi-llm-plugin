@@ -2414,8 +2414,19 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         # "batches" appears only here, precisely because there is now an
         # item count to contrast it with; the read path's `subagents` mirror
         # carries neither key and keeps the plain `<kind> <ok>/<total> ok`.
+        kept = [
+            str(task_id) for task_id in (mirror.get("kept_task_ids") or [])
+            if task_id
+        ] if isinstance(mirror.get("kept_task_ids"), list) else []
+        # Fix round 18 (run 7 #3): a resume that dispatched nothing read
+        # "1/4 batches ok", the one being a check an earlier run finished.
+        kept_note = (
+            f" ({len(kept)} kept from an earlier run: "
+            f"{', '.join(kept[:5])}{', …' if len(kept) > 5 else ''})"
+            if kept else ""
+        )
         parts = [
-            f"{kind} {ok}/{total} batches ok, "
+            f"{kind} {ok}/{total} batches ok{kept_note}, "
             f"{items_applied}/{items_total} items applied"
         ]
     else:
