@@ -67,6 +67,7 @@ try:
     )
     from .write_batch_scheduler import (
         SWEEP_MAX_FILES,
+        accepted_upstream_checks,
         bind_prior_changes,
         decomposition_graph,
         is_check_task,
@@ -86,6 +87,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.write_batch_scheduler import (  # type: ignore
         SWEEP_MAX_FILES,
+        accepted_upstream_checks,
         bind_prior_changes,
         decomposition_graph,
         is_check_task,
@@ -212,7 +214,10 @@ def render_write_prompt(
     # executor leg's `WriteBatchScheduler` (output_dir=<plan dir>) appends.
     output_dir = str(phase_dir.parent)
     try:
-        bound = bind_prior_changes(task, output_dir=output_dir, phase=phase)
+        bound = bind_prior_changes(
+            task, output_dir=output_dir, phase=phase,
+            accepted_checks=_accepted_checks(phase_dir, document, task_id),
+        )
     except ResultRejected as exc:
         raise WritePromptError(str(getattr(exc, "message", exc))) from exc
     text = with_result_contract(kind, task, bound)
@@ -228,6 +233,27 @@ def render_write_prompt(
         "context_entries": len(entries),
     }
     return text, task, info
+
+
+def _accepted_checks(
+    phase_dir: Path, document: Dict[str, Any], task_id: str,
+) -> List[Tuple[str, str, List[str]]]:
+    """The checks upstream of an implement task whose findings the user
+    accepted (``write_batch_scheduler.accepted_upstream_checks``), from the
+    plan dir's ``state.json`` as it is now — what the executor leg reads at
+    dispatch (fix round 14). ``[]`` for any other kind, or a state that
+    cannot be read: the note is advisory and never a refusal."""
+    if str(document.get("kind") or "") != "implement":
+        return []
+    try:
+        state = json.loads((phase_dir.parent / "state.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(state, dict):
+        return []
+    return accepted_upstream_checks(
+        document.get("batches") or document.get("tasks") or [], task_id, state,
+    )
 
 
 #: The warning a prompt bound out of order prints (stderr; never a refusal).
@@ -577,7 +603,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"depend on {check_id}, close the phase without --mark-completed, "
             f"and report the way forward: fix what {check_id} reported and "
             f"re-run implement with --resume (the check runs again), or accept "
-            f"its findings with --resume --human-task {check_id}=done.",
+            f"its findings with --resume --human-task {check_id}=done (the held "
+            f"tasks then run, told that the findings were accepted).",
             file=sys.stderr,
         )
         return 3

@@ -423,6 +423,8 @@ class TestTheNativeLegHoldsTheDependents:
         )
         assert code == 0, err
         assert "[CHECK_BLOCKED] T004 depends on T002, whose check reported problems" in out
+        # Fix round 14: what `=done` does to the held tasks.
+        assert "--human-task T002=done (they then run, told that the findings were accepted)" in out
         state = get_or_create_state(repo.plan)
         assert state.get_task_status("T004") == "pending"
         assert state.get_task_status_reason("T004").startswith(
@@ -434,7 +436,7 @@ class TestTheNativeLegHoldsTheDependents:
         code, _out, err = self._prompt(repo, capsys, "T004")
         assert code == 3
         assert f"[WRITE_PROMPT_BLOCKED] T004 depends on T002, whose check reported problems: {FINDINGS[0]}" in err
-        assert "--human-task T002=done" in err
+        assert "--human-task T002=done (the held tasks then run, told that the findings were accepted)" in err
         assert not (repo.phase_dir / "prompts" / "T004.prompt.txt").exists()
 
         state_file = str(state.state_file)
@@ -443,6 +445,7 @@ class TestTheNativeLegHoldsTheDependents:
         )
         assert code == 3
         assert "T004 (waits for T002) did not run" in err
+        assert "=done (the held tasks then run, told that the findings were accepted)" in err
         assert not get_or_create_state(repo.plan).is_phase_completed("implement")
         assert self._util(capsys, "finalize-tracking", "--state-file", state_file)[0] == 0
 
@@ -485,6 +488,8 @@ class TestTheNativeLegHoldsTheDependents:
         )
         assert "[CHECK_BLOCKED]" in text
         assert "[WRITE_PROMPT_BLOCKED]" in text
+        # Fix round 14: the host says what accepting does to the held tasks.
+        assert "(the held tasks then run, and their prompts say the findings were accepted)" in text
         assert "## Not Run: Upstream Check Reported Problems" in text
         assert "refuses it while a held task is left" in text
         assert "a check that could not run" in text

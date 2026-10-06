@@ -133,6 +133,17 @@ def _first_run(repo, capsys, reply_status=None) -> str:
     return captured.out + captured.err
 
 
+def _dispatched_prompt(repo, title: str) -> str:
+    """The last prompt the mock runner was handed for the task titled *title*."""
+    found = ""
+    for line in repo.log.read_text().splitlines():
+        prompt = json.loads(line).get("prompt") or ""
+        if f"Title: {title}\n" in prompt:
+            found = prompt
+    assert found, f"no dispatch of {title!r} in the mock log"
+    return found
+
+
 def _reason(repo, task_id: str) -> str:
     return get_or_create_state(repo.plan).get_task_status_reason(task_id) or ""
 
@@ -174,6 +185,8 @@ class TestThePolicyStop:
         for answer in ("T002=done", "T002=skip", "T002=retry"):
             assert f"--human-task {answer}" in text, answer
         assert "--human-task T002=done --human-task T005=skip" in text
+        # Fix round 14: what `=done` does to the held task, in a few words.
+        assert "(T007 then run, told that you accepted the findings" in text
 
     def test_the_result_line_names_both_answers(self, repo, capsys):
         _check(repo, passed=False)
@@ -261,6 +274,31 @@ class TestTheAcceptPath:
         assert state.is_phase_completed("implement")
         assert [e["id"] for e in state.implementation_check_findings()] == ["T002"]
 
+    @pytest.mark.parametrize("reply_status", [None, "failed"])
+    def test_the_released_task_is_told_the_findings_were_accepted(
+        self, repo, capsys, reply_status,
+    ):
+        """Fix round 14 (rerun 5, every host's accept path): T007's prompt
+        showed T002's failure and nothing said the user had accepted it, so
+        every runner refused T007 and implement stopped again."""
+        _first_run(repo, capsys, reply_status)
+        assert _implement(
+            repo, "--resume", "--human-task", "T002=done", "--human-task", "T005=skip",
+        ) == 0
+        capsys.readouterr()
+        prompt = _dispatched_prompt(repo, NOTE)
+        assert "## Check findings the user accepted" in prompt
+        assert (
+            "T002, a check this task depends on, reported problems, and the "
+            "user accepted them (`--human-task T002=done`)" in prompt
+        ), prompt
+        assert "do not wait for that check to pass" in prompt
+        assert "say in your `summary` what you left out and why" in prompt
+        assert f'  - "{FINDINGS[0]}"' in prompt
+        # After the prior-batch context, before the task's instructions.
+        assert prompt.index("## Check findings the user accepted") < prompt.index(
+            "## Result (required")
+
     def test_retry_checks_the_policy_again(self, repo, capsys):
         _first_run(repo, capsys)
         assert _implement(repo, "--resume", "--human-task", "T005=retry") == 3
@@ -295,6 +333,7 @@ class TestTheFixPath:
         assert sorted(_dispatched_titles(repo)) == sorted(
             ["Check the module", STAMP, PRINT, NOTE])
         assert _dispatched_titles(repo)[0] == "Check the module"
+        assert "Check findings the user accepted" not in _dispatched_prompt(repo, NOTE)
         assert set(_statuses(repo).values()) == {"completed"}, _statuses(repo)
         state = get_or_create_state(repo.plan)
         assert state.is_phase_completed("implement")
@@ -368,3 +407,17 @@ class TestTheNativeLeg:
         assert emitted["T007"]["status"] == "pending"
         assert self._util(
             capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T007")[0] == 0
+        # Fix round 14: the released task is told, as on the executor leg.
+        code, prompt, _err = self._util(
+            capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T007",
+            "--stdout")
+        assert code == 0
+        assert "## Check findings the user accepted" in prompt
+        assert "(`--human-task T002=done`)" in prompt
+        assert f'  - "{FINDINGS[0]}"' in prompt
+        # A task the check never held is told nothing.
+        code, prompt, _err = self._util(
+            capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T006",
+            "--stdout")
+        assert code == 0 and "Title: Edit: print the build stamp" in prompt
+        assert "Check findings the user accepted" not in prompt

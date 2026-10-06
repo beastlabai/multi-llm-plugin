@@ -382,7 +382,8 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
                 f"--mark-completed (the phase stays in progress), and report "
                 f"the way forward: fix what the check reported and re-run "
                 f"implement with --resume, or accept its findings with "
-                f"--resume --human-task <check id>=done.",
+                f"--resume --human-task <check id>=done (the held tasks then "
+                f"run, told that the findings were accepted).",
                 file=sys.stderr,
             )
             return 3
