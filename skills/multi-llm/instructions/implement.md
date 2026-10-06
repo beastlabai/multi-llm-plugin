@@ -317,7 +317,10 @@ dependents undone, whatever the human-task strategy; a `--resume` after that kee
 them skipped). A `--resume` that changes nothing does not run a failed check
 again: when the files git sees have the same sizes and timestamps as when it failed
 (`verdict.tree_fingerprint` on its result file), the stop is repeated with the remedy
-and no dispatch is spent; `--human-task <id>=retry` runs it anyway.
+and no dispatch is spent; `--human-task <id>=retry` runs it anyway. A stop after a
+code task of the phase completed, with no `driver.verify_command` configured, also
+says that nothing ran the repository's tests (its log, `notice` and `summary.md`), as
+a finished run does.
 
 A check that ran and reported problems (`check-findings`, also from a reply that said `failed` but listed findings and not `could_not_run`) is not a stop: the tasks that
 do not depend on it run. The tasks that depend on it, directly or through another task,
@@ -632,6 +635,7 @@ your host.
    - Number of tasks completed/failed
    - Each check task that reported problems, with its findings (the code review is told about them), and the tasks it held back with the way forward (fix and `--resume`, or `--resume --human-task {id}=done`)
    - Each task whose own check failed after its edits (`[BATCH_CHECK_FAILED]`), with what failed: the phase applied it but is not a clean finish
+   - At a stop after a code task completed, with no `driver.verify_command` configured: step 8's one plain line saying nothing in the plugin ran the repository's tests and naming the setting to add (step 8 itself does not run at a stop)
    - At a stop (step 10 ran without `--mark-completed`) the next-step lookup of `references/summary-format.md` still runs: it prints the resume command (`[NEXT_COMMAND]`) and, when tasks wait for an answer, one command carrying every `--human-task` answer (`[NEXT_COMMAND_ANSWERS]`). End the report with both, each alone in its own fenced block, copied verbatim; never write a resume or `--human-task` command of your own
    - Implementation summary file location
    - State file location
