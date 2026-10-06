@@ -51,6 +51,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
     from . import landlock_dispatch as _landlock
+    from . import prompt_files as _prompt_files
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
     from . import subagent_executor as _executor
@@ -148,6 +149,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import git_utils as _git_utils
     from utils import landlock_dispatch as _landlock
+    from utils import prompt_files as _prompt_files
     from utils import prior_changes as _prior_changes
     from utils import process_control as _process_control
     from utils import subagent_executor as _executor
@@ -265,6 +267,7 @@ __all__ = [
     "blocked_by_check_reason",
     "decomposition_graph",
     "DISPATCHED_PROMPTS_SUBDIR",
+    "dispatched_prompt_name",
     "dispatched_prompt_path",
     "held_back_by_checks",
     "rerunnable_checks",
@@ -1964,7 +1967,16 @@ def bind_prior_changes(
 #: Where a write batch's dispatched prompt is kept, under the phase dir: the
 #: layout the native leg's ``util write-prompt`` writes (``write_prompt``
 #: imports it), which the executor leg keeps too since fix round 16.
-DISPATCHED_PROMPTS_SUBDIR = "prompts"
+DISPATCHED_PROMPTS_SUBDIR = _prompt_files.FOLDER
+
+
+def dispatched_prompt_name(task_id: str, attempt: Optional[int] = None) -> str:
+    """``{task_id}.prompt.txt``, or ``{task_id}.attempt-{attempt}.prompt.txt``
+    (see :func:`dispatched_prompt_path`)."""
+    return (
+        f"{task_id}.prompt.txt" if attempt is None
+        else f"{task_id}.attempt-{attempt}.prompt.txt"
+    )
 
 
 def dispatched_prompt_path(
@@ -1974,14 +1986,12 @@ def dispatched_prompt_path(
 
     With ``attempt``, ``{task_id}.attempt-{attempt}.prompt.txt``: what one
     attempt sent when it was not the batch's prompt (a report re-ask, rule 9's
-    re-send).
+    re-send). The path to name; the files are written through
+    :mod:`utils.prompt_files`, never by this path.
     """
-    name = (
-        f"{task_id}.prompt.txt" if attempt is None
-        else f"{task_id}.attempt-{attempt}.prompt.txt"
-    )
     return os.path.join(
-        os.path.abspath(str(phase_dir)), DISPATCHED_PROMPTS_SUBDIR, name
+        os.path.abspath(str(phase_dir)), DISPATCHED_PROMPTS_SUBDIR,
+        dispatched_prompt_name(task_id, attempt),
     )
 
 
@@ -2293,6 +2303,16 @@ class WriteBatchScheduler:
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
         self.jail_request = self._build_jail_request()
         self.audit = AuditLog(self.phase_dir)
+        #: Fix round 17: the phase dir the dispatched prompts are kept in,
+        #: pinned (``prompt_files.pin_phase_dir``) before any batch of this
+        #: run can replace it — a jailed repo-wide batch can write the phase
+        #: dir, and this process is not jailed. ``None`` until it exists.
+        self._prompt_pin: Optional[_prompt_files.PhasePin] = None
+        self._prompt_pin_lock = threading.Lock()
+        try:
+            self._pinned_phase_dir()
+        except OSError:
+            pass  # named on the first prompt kept, with that task's id
         #: Whether `_decide_rollback_storage` ran for the admitted group.
         self._rollback_storage_decided = False
         self._rollback_storage_lock = threading.Lock()
@@ -2848,6 +2868,19 @@ class WriteBatchScheduler:
         """Append the write-batch result contract (:func:`with_result_contract`)."""
         return with_result_contract(self.kind, task, prompt)
 
+    def _pinned_phase_dir(self) -> "_prompt_files.PhasePin":
+        """The phase dir as pinned for the prompt files (fix round 17): its
+        ``realpath`` inside the repository root and its identity, taken once
+        — at construction, or on the first prompt kept when the phase dir did
+        not exist yet. Raises ``OSError`` naming why it cannot be pinned."""
+        lock = getattr(self, "_prompt_pin_lock", None) or threading.Lock()
+        with lock:
+            pin = getattr(self, "_prompt_pin", None)
+            if pin is None:
+                pin = _prompt_files.pin_phase_dir(self.phase_dir, self.repo_root)
+                self._prompt_pin = pin
+            return pin
+
     def _keep_dispatched_prompt(
         self, task_id: str, attempt: int, sent: str, batch_prompt: str
     ) -> None:
@@ -2876,11 +2909,14 @@ class WriteBatchScheduler:
           already on disk in the phase and plan dirs — and it lies inside the
           phase dir, which the containment sweep never attributes to a runner.
 
-        A jailed repo-wide batch can write the phase dir, so the folder is
-        resolved and must be a real directory inside it, never a planted
-        symlink (the parent is not jailed, and following one would write
-        outside the repository); a file name is replaced by rename, which
-        never follows a link either.
+        A jailed repo-wide batch can write the phase dir and this process is
+        not jailed, so nothing here follows a link (fix round 17: round 16
+        checked ``prompts`` once by path, which a phase dir replaced by a link
+        or a ``prompts`` swapped after the check still redirected outside the
+        repository): the phase dir is the one pinned before any batch ran,
+        reached from the repository root without following a link, and every
+        file is created, renamed and unlinked relative to the folder's own
+        descriptor (:mod:`utils.prompt_files`).
 
         Best-effort: a write that fails warns once and never fails the
         dispatch.
@@ -2889,35 +2925,19 @@ class WriteBatchScheduler:
             if not task_id or os.path.basename(task_id) != task_id or task_id in (
                     ".", ".."):
                 raise OSError(f"{task_id!r} is not a file name")
-            phase = os.path.realpath(self.phase_dir)
-            folder = os.path.join(phase, DISPATCHED_PROMPTS_SUBDIR)
-            if os.path.islink(folder):
-                raise OSError(f"{folder} is a symlink")
-            os.makedirs(folder, exist_ok=True)
-            if os.path.realpath(folder) != folder or not os.path.isdir(folder):
-                raise OSError(f"{folder} is not a directory inside {phase}")
-            if sent == batch_prompt:
-                target = dispatched_prompt_path(phase, task_id)
-                if attempt <= 1:
-                    head, tail = f"{task_id}.attempt-", ".prompt.txt"
-                    for name in os.listdir(folder):
-                        if (name.startswith(head) and name.endswith(tail)
-                                and name[len(head):-len(tail)].isdigit()):
-                            os.unlink(os.path.join(folder, name))
-            else:
-                target = dispatched_prompt_path(phase, task_id, attempt)
-            handle, temporary = tempfile.mkstemp(prefix=".prompt-", dir=folder)
-            try:
-                with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
-                    stream.write(sent)
-                os.replace(temporary, target)
-            except BaseException:
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    pass
-                raise
-        except OSError as exc:
+            with _prompt_files.PromptFolder.open(self._pinned_phase_dir()) as folder:
+                if sent == batch_prompt:
+                    name = dispatched_prompt_name(task_id)
+                    if attempt <= 1:
+                        head, tail = f"{task_id}.attempt-", ".prompt.txt"
+                        for entry in folder.names():
+                            if (entry.startswith(head) and entry.endswith(tail)
+                                    and entry[len(head):-len(tail)].isdigit()):
+                                folder.remove(entry)
+                else:
+                    name = dispatched_prompt_name(task_id, attempt)
+                folder.write(name, sent)
+        except (OSError, ValueError) as exc:
             if not getattr(self, "_prompt_keep_warned", False):
                 self._prompt_keep_warned = True
                 self.log(
