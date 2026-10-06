@@ -289,3 +289,28 @@ class TestStatusAfterACompletedNativeImplement:
         out = self._status(capsys, "--phase", "implement")
         assert "read from state.json (not marked completed)" in out
         assert "1/6 done" in out
+
+    def test_its_check_findings_follow_the_trailer_s_rule(self, repo, capsys):
+        """Shown, like the workflow trailer's, until a review-code that judged
+        them completed or was skipped (fix round 11); a completed native
+        implement's block must not bring them back after that."""
+        handoff, _out = _emit(capsys)
+        phase = str(repo.phase_dir)
+        for batch in handoff["batches"]:
+            for task in batch["tasks"]:
+                extra = (["--check", "findings", "--finding", "doctype must be lowercase"]
+                         if task["id"] == "T002" else [])
+                _util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                      task["id"], "--status", "completed", *extra)
+        state = get_or_create_state(repo.plan)
+        state.update_task_status("T004", "completed")
+        state.save()
+        out = self._status(capsys)
+        assert "check findings T002: doctype must be lowercase" in out
+        state = get_or_create_state(repo.plan)
+        state.mark_phase_completed("implement")
+        state.mark_phase_skipped("code-review", "not reviewing this one")
+        state.save()
+        out = self._status(capsys)
+        assert "read from state.json (marked completed)" in out
+        assert "check findings" not in out
