@@ -22,6 +22,7 @@ import ast
 import json
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 
@@ -593,6 +594,7 @@ class TestTheUpgradeIsWrittenBack:
     def test_a_read_only_load_upgrades_in_memory_and_writes_nothing(self, tmp_path):
         plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
         pinned = _pin_file(state_file)
+        files_before = set(state_file.parent.iterdir())
         state = StateManager(plan_path, read_only=True)
         records = state.get_all_human_decisions(MockApplyOrchestrator.phase_name)
         assert not LEGACY_TOKEN.search(json.dumps(records))
@@ -600,6 +602,7 @@ class TestTheUpgradeIsWrittenBack:
         with pytest.raises(RuntimeError, match="read-only"):
             state.save()
         assert _identity(state_file) == pinned
+        assert set(state_file.parent.iterdir()) == files_before
 
     def test_reload_writes_an_upgrade_back(self, tmp_path):
         plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "current")
@@ -616,20 +619,106 @@ class TestTheUpgradeIsWrittenBack:
     def test_a_save_that_lands_after_the_read_is_not_overwritten(
         self, tmp_path, monkeypatch
     ):
-        from utils import state_manager
+        from utils import metrics, state_manager
 
         plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
         newer = json.loads(_fixture_text("human_decisions.json", "current"))
         real_upgrade = state_manager.upgrade_legacy
 
         def upgrade_while_another_process_saves(document):
-            state_file.write_text(json.dumps({"concurrent": newer}), encoding="utf-8")
+            with metrics.state_file_lock(state_file):
+                metrics._write_state(state_file, {"concurrent": newer})
             return real_upgrade(document)
 
         monkeypatch.setattr(state_manager, "upgrade_legacy",
                             upgrade_while_another_process_saves)
         StateManager(plan_path)
         assert json.loads(state_file.read_text(encoding="utf-8")) == {"concurrent": newer}
+
+    def test_a_native_completion_between_comparison_and_replace_is_preserved(
+        self, tmp_path, monkeypatch
+    ):
+        """Pause migration at its replacement and try a real competing writer.
+
+        The child's zero-timeout lock attempt observes contention directly,
+        without sleeps or assuming how fast a subprocess gets scheduled. If
+        migration holds the lock, retry the completion after it releases it.
+        Previously the first write succeeded and migration then erased T001.
+        """
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
+        writer = """
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from utils import metrics
+metrics.STATE_LOCK_TIMEOUT_S = 0
+path = Path(sys.argv[2])
+try:
+    with metrics.state_file_lock(path):
+        document = metrics._read_state(path)
+        document.setdefault("task_status", {})["T001"] = "completed"
+        metrics._write_state(path, document)
+except metrics.StateLockTimeout:
+    sys.exit(75)
+"""
+
+        def record_completion():
+            child = subprocess.run(
+                [sys.executable, "-c", writer, str(SKILL_ROOT), str(state_file)],
+                capture_output=True, text=True, timeout=15,
+            )
+            assert child.returncode in (0, 75), child.stderr
+            return child.returncode
+
+        first_attempt = []
+        real_write = StateManager._write_atomic
+
+        def write_with_competing_completion(self, document):
+            first_attempt.append(record_completion())
+            real_write(self, document)
+
+        monkeypatch.setattr(StateManager, "_write_atomic", write_with_competing_completion)
+        StateManager(plan_path)
+        if first_attempt == [75]:
+            assert record_completion() == 0
+        on_disk = state_file.read_text(encoding="utf-8")
+        assert json.loads(on_disk)["task_status"].get("T001") == "completed"
+        assert not LEGACY_TOKEN.search(on_disk)
+        assert first_attempt == [75]
+
+    def test_an_upgrade_under_the_native_state_lock_is_reentrant(
+        self, tmp_path, monkeypatch
+    ):
+        from utils import metrics
+
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
+        # A second OS-lock acquisition would fail immediately rather than
+        # waiting on our own lock for the production timeout.
+        monkeypatch.setattr(metrics, "STATE_LOCK_TIMEOUT_S", 0)
+        with metrics.state_file_lock(state_file):
+            StateManager(plan_path)
+        assert not LEGACY_TOKEN.search(state_file.read_text(encoding="utf-8"))
+
+    @pytest.mark.parametrize("failure", ["lock", "write"])
+    def test_a_failed_upgrade_writeback_is_advisory(
+        self, failure, tmp_path, monkeypatch, caplog
+    ):
+        from utils import metrics
+
+        plan_path, state_file = _plan_with_recorded_decisions(tmp_path, "legacy")
+        pinned = _pin_file(state_file)
+        if failure == "lock":
+            monkeypatch.setattr(metrics.process_control.FileMutex, "acquire",
+                                lambda *_args, **_kwargs: False)
+        else:
+            def fail_write(*_args):
+                raise OSError("writeback refused")
+
+            monkeypatch.setattr(StateManager, "_write_atomic", fail_write)
+        state = StateManager(plan_path)
+        assert not LEGACY_TOKEN.search(json.dumps(state.state))
+        assert _identity(state_file) == pinned
+        assert "Could not write the judge-name upgrade back" in caplog.text
 
     def test_the_read_only_commands_never_write(self, tmp_path, capsys):
         """`status`, `util next-command`, `--status` and the tasks staleness probe."""

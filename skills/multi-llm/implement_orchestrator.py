@@ -865,6 +865,53 @@ def _applicable_task_decisions(
     return decisions
 
 
+def _prepare_selected_task(
+    task: Task, state: StateManager, plan_path: Path, *, dry_run: bool,
+) -> None:
+    """Hand an explicit code-task rerun out pending on either write leg.
+
+    A completed task starts a new attempt, so its successful result and old
+    rollback point are retained aside rather than reused. This also makes
+    an interrupted native handoff resumable by the executor without trusting
+    the previous run's result. A failed task keeps its original snapshot:
+    retrying partial work must still be able to restore its first baseline.
+    """
+    if task.executor_role == "human":
+        return
+    task.status = TaskStatus.PENDING
+    if dry_run:
+        return
+    if state.get_task_status(task.id) == TaskStatus.COMPLETED.value:
+        from utils.subagent_tasks import implement_output_name
+        from utils.write_safety import TaskSnapshot, resolve_repo_root
+
+        phase_dir = get_phase_dir(plan_path, "implement")
+        stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+        snapshot = TaskSnapshot.load(
+            str(phase_dir), task.id,
+            expected_root=resolve_repo_root(str(plan_path)),
+        )
+        if snapshot is not None:
+            directory = Path(snapshot.directory)
+            directory.rename(directory.with_name(f"{directory.name}.rerun-{stamp}"))
+        result = phase_dir / implement_output_name(task.id)
+        if result.exists():
+            result.rename(result.with_name(f"{result.name}.rerun-{stamp}"))
+    state.update_task_status(task.id, TaskStatus.PENDING.value)
+    # A fresh result replaces these; until then the old verdict is not the
+    # selected attempt's verdict, including after a host dies mid-handoff.
+    from utils.state_manager import (
+        set_task_batch_check_in_state, set_task_check_findings_in_state,
+        set_task_check_tree_in_state,
+    )
+
+    set_task_check_findings_in_state(state.state, task.id, None)
+    set_task_check_tree_in_state(state.state, task.id, None)
+    set_task_batch_check_in_state(state.state, task.id, None)
+    state.mark_phase_started("implement")
+    state.save()
+
+
 def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
     """The way forward after a stop, in this host's own command spelling.
 
@@ -1461,7 +1508,14 @@ def _native_withheld(
     present = {str(task.get("id") or "") for task in entries}
 
     held: Dict[str, str] = {}
-    for check_id in sorted(kept_checks):
+    # An explicit selection can omit its upstream check altogether. Its
+    # recorded findings still hold; a check present in these batches can
+    # instead run before its dependent and release the hold normally.
+    held_checks = set(kept_checks) | (
+        set(rerunnable_checks(state.state)) - present
+        - set(output_data.get("accepted_tasks") or {})
+    )
+    for check_id in sorted(held_checks):
         for dependent in transitive_dependents(graph, check_id):
             if dependent in present and dependent not in gone | human:
                 held.setdefault(dependent, blocked_by_check_reason(check_id))
@@ -1969,6 +2023,12 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"ERROR: Task not found: {args.task}")
             sys.exit(1)
 
+        if human_task_decisions.get(task.id) not in ("done", "skip"):
+            _prepare_selected_task(
+                task, state, plan_path,
+                dry_run=bool(args.dry_run or getattr(args, "dry_run_subagents", False)),
+            )
+
         # Compute related file paths (in phase-based subdirectories)
         tasks_file_path = get_output_paths(plan_path, "tasks", phase='tasks')
         summary_file_path = get_output_paths(plan_path, "implementation_summary", phase='implement')
@@ -2194,7 +2254,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         # implement log already holds and no record says finished is refused
         # rather than handed out a second time (reviewer repro, 2026-10-05).
         if _refuse_unrecorded_native_resume(
-            native_tasks, plan_path=plan_path, state=state, resume=bool(args.resume),
+            native_tasks, plan_path=plan_path, state=state,
+            resume=bool(args.resume and not args.task),
         ):
             return 3
 

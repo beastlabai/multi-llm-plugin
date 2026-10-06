@@ -796,12 +796,17 @@ class StateManager:
         plan-change flag — so the write renames keys and values and changes
         nothing else. Skipped when the file no longer holds *read_text*:
         another process saved in between, and its file is the newer one.
+        The native writers' shared lock covers both comparison and replacement
+        so a completion cannot land between them and then be overwritten.
         """
+        from .metrics import state_file_lock
+
         try:
-            with open(self.state_file, "r", encoding="utf-8") as f:
-                if f.read() != read_text:
-                    return
-            self._write_atomic(document)
+            with state_file_lock(self.state_file):
+                with open(self.state_file, "r", encoding="utf-8") as f:
+                    if f.read() != read_text:
+                        return
+                self._write_atomic(document)
         except OSError as exc:
             # The in-memory upgrade still holds, and every Python reader maps
             # the old names; the host's raw read is the only one that misses.

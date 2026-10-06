@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence
@@ -196,7 +197,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     )
     args = parser.parse_args(list(argv) if argv is not None else None)
 
-    phase_dir = str(Path(args.phase_dir).resolve())
+    # Keep the lexical alias until trusted discovery checks it: resolving a
+    # replaced symlink here would discard the identity bound before dispatch.
+    phase_dir = os.path.abspath(args.phase_dir)
     if not Path(phase_dir).is_dir():
         print(f"ERROR: phase dir not found: {phase_dir}", file=sys.stderr)
         return EXIT_ERROR
@@ -209,7 +212,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         )
         return EXIT_NEEDS_HUMAN
 
-    task_ids = _task_ids(phase_dir, args)
+    try:
+        safety_dir(phase_dir)
+        task_ids = _task_ids(phase_dir, args)
+    except WriteSafetyError as exc:
+        print(f"ERROR: {exc.message}", file=sys.stderr)
+        return EXIT_NEEDS_HUMAN
     if not task_ids:
         print(
             f"Nothing to restore: {AuditLog(phase_dir).path} records no failed "

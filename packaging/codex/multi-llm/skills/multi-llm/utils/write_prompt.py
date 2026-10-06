@@ -466,19 +466,13 @@ def check_tree_path(phase_dir: Path, task_id: str) -> Path:
 
 
 def _tree_exclusions(phase_dir: Path, repo_root: str) -> List[str]:
-    """The plugin's own trees, repo-relative: the phase dir, the plan's
-    output folder (its parent) and ``.multi-llm/`` — what the executor's
-    ``_tree_fingerprint`` leaves out too."""
-    excluded: List[str] = []
-    for path in (phase_dir, phase_dir.parent, Path(repo_root) / ".multi-llm"):
-        try:
-            relative = os.path.relpath(os.path.abspath(str(path)), repo_root)
-        except ValueError:  # pragma: no cover - another drive on Windows
-            continue
-        if relative == "." or relative.startswith(".."):
-            continue
-        excluded.append(relative.replace(os.sep, "/"))
-    return excluded
+    """The precise workflow-artifact exclusions shared with the executor."""
+    try:
+        from .check_tree import check_tree_exclusions
+    except ImportError:  # pragma: no cover - direct script invocation
+        from utils.check_tree import check_tree_exclusions
+
+    return check_tree_exclusions(phase_dir, repo_root)
 
 
 def _tree_now(phase_dir: Path) -> Optional[Tuple[str, Dict[str, List[int]]]]:
@@ -502,8 +496,8 @@ def check_tree_fingerprint(phase_dir: Path) -> Optional[str]:
     """One digest of the files git sees, the plugin's own trees left out.
 
     ``git_utils.worktree_fingerprint`` with the exclusions the executor's
-    ``WriteBatchScheduler._tree_fingerprint`` uses (the phase dir, the plan's
-    output folder, ``.multi-llm/``), so both legs mean the same thing by "the
+    ``WriteBatchScheduler._tree_fingerprint`` uses (workflow artifacts and
+    ``.multi-llm/``, keeping colocated code), so both legs mean the same thing by "the
     files changed". The native leg stamps it on a check with findings
     (``util batch-done``, re-stamped by ``util finalize-tracking`` with the
     tree the run left) and compares it on ``--resume`` before handing the
