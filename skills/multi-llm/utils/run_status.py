@@ -2357,7 +2357,11 @@ def _failed_batches_moved_nothing(view: Dict[str, Any]) -> bool:
     """Whether every failed row of a write run's mirror records that no file
     moved (``files_touched`` present and empty). A row without the key — an
     older mirror — says nothing, so the answer is ``False`` and the status
-    line keeps its "half-applied" wording."""
+    line keeps its "half-applied" wording.
+
+    ``files_touched`` is the rollback set, so a row also has to name no
+    ``unrestorable`` file (moved, with no rollback point) and must not be a
+    partial application, which moved bytes by definition (fix round 15)."""
     progress = view.get("progress") or {}
     mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
     if not isinstance(mirror, dict):
@@ -2371,6 +2375,8 @@ def _failed_batches_moved_nothing(view: Dict[str, Any]) -> bool:
         return False
     return all(
         isinstance(row.get("files_touched"), list) and not row["files_touched"]
+        and not row.get("unrestorable")
+        and row.get("write_outcome") != "partial-application"
         for row in rows
     )
 
