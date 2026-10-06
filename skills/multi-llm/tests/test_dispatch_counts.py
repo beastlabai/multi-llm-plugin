@@ -380,6 +380,77 @@ class TestTheExecutorSaysWhatItsRunDispatches:
         assert len(_dispatched_titles(repo)) == 4
 
 
+#: Three tasks of one batch on disjoint files, the middle one on a file the
+#: policy denies, and a fourth after them (fix round 19, review of round 18,
+#: #4).
+PARALLEL = """# Parallel
+
+## Overview
+Three independent edits and one after them.
+
+## Tasks
+
+### T001: Edit: add the first module
+Add it.
+- Depends on: none
+- Files to modify: src/first.py
+
+### T002: Edit: add the vendored stamp
+Add it.
+- Depends on: none
+- Files to modify: src/vendor/stamp.js
+
+### T003: Edit: add the third module
+Add it.
+- Depends on: none
+- Files to modify: src/third.py
+
+### T004: Edit: wire them together
+Wire them.
+- Depends on: T001, T002, T003
+- Files to modify: src/main.py
+"""
+
+
+class TestARefusedTaskInAGroupThatRunsTogether:
+    """Review of round 18, #4: with `write_ceiling()` above 1 a batch's
+    disjoint tasks are dispatched together (`admit_disjoint_groups`) and the
+    loop stops only once the group settled, so the siblings of a task the
+    write policy refuses run; the `Organized into …` line stopped counting
+    at the refused task."""
+
+    def test_the_line_counts_the_siblings_dispatched_beside_it(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        from tests.test_implement_stop_account import make_repo
+        from utils.write_batch_scheduler import WriteBatchScheduler
+
+        repo = make_repo(tmp_path, monkeypatch, PARALLEL)
+        _policy(repo, DENY)
+        monkeypatch.setattr(WriteBatchScheduler, "write_ceiling", lambda self: 3)
+        code, text = _run(repo, capsys)
+        assert code == 3, text
+        assert "T002 refused before dispatch" in text, text
+        dispatched = sorted(set(_dispatched_titles(repo)))
+        assert dispatched == [
+            "Edit: add the first module", "Edit: add the third module"], dispatched
+        assert _organized(text) == [
+            "Organized into 1 execution batch: 2 task(s) to dispatch"], text
+
+    def test_one_at_a_time_the_line_still_stops_at_the_refused_task(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        from tests.test_implement_stop_account import make_repo
+
+        repo = make_repo(tmp_path, monkeypatch, PARALLEL)
+        _policy(repo, DENY)
+        code, text = _run(repo, capsys)
+        assert code == 3, text
+        assert sorted(set(_dispatched_titles(repo))) == ["Edit: add the first module"]
+        assert _organized(text) == [
+            "Organized into 1 execution batch: 1 task(s) to dispatch"], text
+
+
 class TestAFailedCheckAndAManualTask:
     """The stop-account fixture: T002 a check that fails, T004 after it, T005
     a manual task the executor never runs."""
