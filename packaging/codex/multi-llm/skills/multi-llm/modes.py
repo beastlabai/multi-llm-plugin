@@ -414,14 +414,19 @@ TOOL_OUTCOMES_LINE = (
 #: server authors the string. "Only then" / "never otherwise" since fix round
 #: 11: on OpenCode racing run 4, phase 06, the host ended an implement result
 #: whose `command` named review-code, and whose notice listed the manual tasks
-#: left, with "Workflow complete. Manual tasks left …".
+#: left, with "Workflow complete. Manual tasks left …". Fix round 16 (Codex
+#: racing 06r/07): a command answer carries `manual_tasks` and its note too,
+#: and the line says to relay them on any result — the hosts named T009 from
+#: the notice but never the command that records it done.
 TOOL_USER_NEXT_STEP_LINE = (
     "`user_next_step` in a result is a command for the user to type, never a "
     "call to make: copy its `command`, and each `optional_before` command, into your "
-    "report, each in its own fenced block, and stop; when it is `complete`, and "
-    "only then, say \"Workflow complete.\" and list each of its `manual_tasks` "
+    "report, each in its own fenced block; when it is `complete`, and "
+    "only then, say \"Workflow complete.\"; and whenever it carries "
+    "`manual_tasks`, complete or not, list each of them "
     "(id and title): tasks the run deferred to the user, which no phase will run; "
     "then give its `manual_tasks_note` verbatim, which says how to record them done. "
+    "Then stop. "
     "Never say \"Workflow complete.\" otherwise, even when a notice lists manual "
     "tasks left for the user: while `user_next_step` names a `command`, the "
     "workflow goes on. Only `next` is "
@@ -461,18 +466,20 @@ NO_COMMAND_REASON = (
     "compose a command."
 )
 
-#: The note a package server returns when ``extra_flags`` restated a flag it
-#: already composes with the same meaning (``--yes`` and its spellings,
-#: ``--exec-subagents``, ``--host`` naming this host): the token is dropped and
-#: the call runs, where it used to be refused and cost the model a call (racing
-#: re-run 2026-10-04: four refusals in one session). ``{flags}`` is the dropped
-#: tokens, comma-joined, by plain substitution. A flag whose meaning would
-#: differ — ``--interactive``, ``--detach``, ``--host`` naming another host, the
-#: ``--internal-`` prefix — is still refused.
-REDUNDANT_FLAG_NOTE = (
-    "Dropped from extra_flags because this tool already composes them with the "
-    "same meaning: {flags}. Nothing else changed; leave them out next time."
-)
+#: The title the OpenCode package puts on its tool part when a call ends at a
+#: stop (``tool.execute.after``; fix round 16). ``opencode run`` prints a
+#: plugin tool's title on the tool's own line (the TUI's header reads it too,
+#: not measured) as soon as the call returns and whether or not the session's model ever
+#: writes its reply: OpenCode racing run 6's free model never did (28 min
+#: idle), and the stop and its resume command were only in the tool output.
+#: ``{line}`` is the run's own last error line (``result.error``, the line
+#: the exit-3 ``message`` quotes) or ``no_line``; ``resume`` is appended,
+#: ``{command}`` filled with ``resume_command``, when the result carries one.
+STOP_TITLE = {
+    "template": "stopped and needs you: {line}",
+    "no_line": "the run did not finish; the tool output says why.",
+    "resume": " Resume with: {command}",
+}
 
 #: The route signal's one owner (plans/next-phase-command.md §2.1, "Knowing the
 #: route"). The package routes' tool servers set ``ROUTE_ENV`` in every child
@@ -720,6 +727,25 @@ TOOL_WRITE_CAPABLE_NOTE = (
     "working tree through agent CLIs; under a read-only posture, or one this "
     "tool cannot read, they are refused unless the user has set "
     + WRITE_POSTURE_LEVER_ENV + "=" + WRITE_POSTURE_LEVER_VALUE + "."
+)
+
+#: The codex host's rule for waiting on a call (fix round 16, Codex racing run
+#: 6). Under codex's code mode the model calls this tool from a JavaScript
+#: ``exec`` cell that hands control back after ``yield_time_ms`` (30 s by
+#: default) while the call is still running, and a model that then ends its
+#: turn ends ``codex exec``, whose teardown aborts the run. Measured offline on
+#: codex 0.160.1: a cell whose first line is the pragma below waited for a
+#: 75 s call and returned only with its result. ``{BUDGET_MIN}`` and
+#: ``{YIELD_MS}`` are filled from the plugin's ``tool_timeout_sec``
+#: (``packaging/codex/mcp.json``) by ``packaging/common/surface.py``, so the
+#: wait and the budget cannot drift. Rendered into the codex tool description
+#: and the codex plugin's skill; no other host has the cell.
+TOOL_LONG_CALL_RULE = (
+    "A call can run for up to its {BUDGET_MIN}-minute budget. When you call this "
+    "tool from an `exec` cell, start the cell with "
+    '`// @exec: {"yield_time_ms": {YIELD_MS}}`, so the cell waits for the '
+    'result. If a cell hands back "Script running" anyway, call `wait` until '
+    "this call returns, and never end your turn while it is running."
 )
 
 

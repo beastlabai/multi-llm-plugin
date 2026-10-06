@@ -2045,11 +2045,31 @@ def install_worker_signal_handlers(on_abort: Callable[[int], None]) -> None:
     with no controlling terminal so a host shell's exit cannot deliver one, and
     ignoring it means a host that kills its whole process tree on session
     teardown cannot take the run down silently either.
+
+    One abort per process: the first signal ignores every later one before
+    *on_abort* runs. ``status --abort`` signals the worker's process group,
+    which holds ``uv run`` and its python child, and ``uv run`` forwards the
+    SIGTERM it gets to that child, so the worker always receives the signal
+    twice (Codex racing run 6: the copy re-entered the handler mid-``print``
+    and the run ended in a traceback instead of its ``aborted`` record).
     """
+    names = ["SIGTERM", "SIGINT", "SIGBREAK"]
+    handling = []
+
     def handler(signum, _frame):
+        if handling:
+            return  # a copy, or a repeat: the abort is already under way
+        handling.append(signum)
+        for other in names:
+            sig = getattr(signal, other, None)
+            if sig is None:
+                continue
+            try:
+                signal.signal(sig, signal.SIG_IGN)
+            except (OSError, ValueError):  # pragma: no cover
+                pass
         on_abort(signum)
 
-    names = ["SIGTERM", "SIGINT", "SIGBREAK"]
     for name in names:
         sig = getattr(signal, name, None)
         if sig is None:

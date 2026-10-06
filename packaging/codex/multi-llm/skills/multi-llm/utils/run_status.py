@@ -529,14 +529,15 @@ def manual_close_note(
     listed T007 and never said how to close it). ``None`` when nothing is
     owed or the host has no command template for this route.
     """
-    manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
-    ids = [str(entry["id"]) for entry in manual or []
-           if isinstance(entry, dict) and entry.get("id")]
-    if not ids:
-        return None
     import io
 
     from . import next_phase
+
+    # The manual tasks themselves, never a code task skipped with one
+    # (`next_phase.manual_close_ids`, fix round 16).
+    ids = next_phase.manual_close_ids(payload.get("phases", {}).get("implement") or {})
+    if not ids:
+        return None
 
     try:
         host = host_capabilities.resolve_host_id(explicit=host_id)
@@ -636,15 +637,16 @@ def _workflow_trailer_lines(
     # same rule as the check findings above.
     failing = (phases.get("implement") or {}).get("batch_check_findings")
     if isinstance(failing, list) and failing and not (implement_done and review_settled):
+        # Fix round 16: the task's own report, quoted (Codex racing 06r).
         named = "; ".join(
-            f"{entry['id']} ({(entry.get('findings') or [''])[0][:120]}"
+            f"{entry['id']} (\"{(entry.get('findings') or [''])[0][:120]}\""
             f"{', …' if len(entry.get('findings') or []) > 1 else ''})"
             for entry in failing
             if isinstance(entry, dict) and entry.get("id")
         )
         if named:
             lines.append(
-                f"{prefix}a check its own task ran fails (see "
+                f"{prefix}a task's own report says a check it ran fails (see "
                 f"implement/summary.md): {named}"
             )
     return lines
@@ -678,13 +680,18 @@ def render_run_text(
     workflow: Optional[Dict[str, Any]],
     scope: Optional[str] = None,
     resume_workflow: Optional[Dict[str, Any]] = None,
+    implement_tally: Optional[Dict[str, Any]] = None,
+    state_block: bool = False,
 ) -> List[str]:
     # The workflow payload the resume block may consult without rendering the
     # workflow lines above it (`--view run`'s terminal read); see `_resume_lines`.
     resume_workflow = workflow if workflow is not None else resume_workflow
     lines = ["runs ({phase}/.status.json) — is a launched run still alive:"]
     if not views:
-        lines.append(f"  no run recorded for {scope or 'this plan'}")
+        if not state_block:
+            # A native implement read back from state.json follows instead
+            # (`render_state_implement_lines`, fix round 16).
+            lines.append(f"  no run recorded for {scope or 'this plan'}")
         return lines
     for view in views:
         run = view["run"]
@@ -770,6 +777,13 @@ def render_run_text(
                 f"      progress:       "
                 f"{_progress_text(view['progress'], phase=_view_dir_name(view))}"
             )
+            if implement_tally is not None and _is_executor_implement_view(view):
+                # Fix round 16: the line above counts this run's batches; this
+                # one every task of the phase, every run (state.json).
+                lines.append(
+                    f"      all tasks:      "
+                    f"{implement_tally_text(implement_tally, live=_run_is_live(view))}"
+                )
             # Between the counts and the table, and INSIDE this guard by
             # decision rather than by accident: the delta is computed from
             # `progress.models` (see `_attach_finished_during_wait`), so a
@@ -1914,6 +1928,11 @@ def state_implement_view(
     implement decomposition on record that is started and not completed — as
     ``{tasks, titles, buckets, reasons, findings, answers}``. Read-only;
     ``None`` when it does not apply.
+
+    Fix round 16 (live run 6, Claude Code racing 06): a native implement the
+    host completed is read back too (``completed: true``): `status --view
+    run` printed "no run recorded for phase implement" after it, since the
+    native leg leaves nothing else that view reads.
     """
     from .state_manager import StateManager
 
@@ -1935,12 +1954,8 @@ def state_implement_view(
     statuses = state.implementation_task_statuses()
     if not isinstance(decomposition, list) or not decomposition:
         return None
-    if state.is_phase_completed(_IMPLEMENT_PHASE) or not (
-        state.is_phase_started(_IMPLEMENT_PHASE) or statuses
-    ):
-        # A finished implement is the workflow view's to report (its manual
-        # tasks and check findings ride the trailer); this block is for the
-        # run the host stopped part-way.
+    completed = state.is_phase_completed(_IMPLEMENT_PHASE)
+    if not (completed or state.is_phase_started(_IMPLEMENT_PHASE) or statuses):
         return None
     reasons = record.get("task_status_reasons") or {}
     titles = record.get("task_titles") or {}
@@ -1971,7 +1986,14 @@ def state_implement_view(
         else:
             buckets["not_run"].append(task_id)
     answers = record.get("human_task_decisions")
+    # The workflow trailer's rule for both kinds of findings (fix round 11):
+    # once implement completed, shown until a review-code that judged them
+    # completed or was skipped.
+    settled = completed and (
+        state.is_phase_completed("code-review") or state.is_phase_skipped("code-review")
+    )
     return {
+        "completed": completed,
         "tasks": [str(t) for t in decomposition],
         "titles": {str(k): str(v) for k, v in titles.items()},
         "buckets": buckets,
@@ -1980,9 +2002,9 @@ def state_implement_view(
             for task_id in buckets["failed"] + buckets["not_run"]
             if reasons.get(task_id)
         },
-        "findings": state.implementation_check_findings(),
+        "findings": [] if settled else state.implementation_check_findings(),
         # A code task whose own check failed after its edits (fix round 15).
-        "batch_checks": state.implementation_batch_check_findings(),
+        "batch_checks": [] if settled else state.implementation_batch_check_findings(),
         "answers": dict(answers) if isinstance(answers, dict) else {},
     }
 
@@ -1994,7 +2016,9 @@ def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
     total = len(view["tasks"])
     lines = [
         "  implement  no run record — the host ran these tasks itself; read "
-        "from state.json (not marked completed)",
+        "from state.json ("
+        + ("marked completed" if view.get("completed") else "not marked completed")
+        + ")",
     ]
     parts = [f"{len(done)}/{total} done"]
     labels = (
@@ -2044,6 +2068,125 @@ def _run_notes(view: Dict[str, Any]) -> List[str]:
 def _id_list(value: Any) -> List[str]:
     """A mirror's id list as strings; anything that is not a list is none."""
     return [str(item) for item in value] if isinstance(value, list) else []
+
+
+#: The buckets of :func:`implement_task_tally`, in the order the line names
+#: them, with their words. The first five are done.
+_TALLY_LABELS: Tuple[Tuple[str, str], ...] = (
+    ("completed", "completed"),
+    ("check_findings", "completed, its check reported problems"),
+    ("accepted_findings", "accepted with their check findings"),
+    ("accepted_failed", "accepted after failing"),
+    ("completed_manual", "completed by hand"),
+    ("failed", "failed"),
+    ("declined", "skipped at your request"),
+    ("declined_dependents", "skipped (depend on a task you skipped)"),
+    ("deferred", "deferred manual"),
+    ("not_run", "not run"),
+)
+_TALLY_DONE = (
+    "completed", "check_findings", "accepted_findings", "accepted_failed",
+    "completed_manual",
+)
+
+
+def implement_task_tally(plan_path: Path) -> Optional[Dict[str, Any]]:
+    """Every task of implement's decomposition as ``state.json`` records it.
+
+    Fix round 16 (run 6, Codex and OpenCode stop paths): after a resume,
+    ``status``'s implement run block counted only that run's batches ("2/2
+    batches ok, 1/2 items applied", then "1/1" on the accept path) and never
+    added up to the fixture's seven tasks, while summary.md and the stop's
+    own account did. The run mirror holds one run; ``state.json`` holds the
+    phase. ``{"total", "done", "buckets"}`` over :data:`_TALLY_LABELS`, each
+    task in exactly one bucket; ``None`` without a decomposition on record.
+    Read-only.
+    """
+    from .state_manager import StateManager
+    from .write_batch_scheduler import (
+        ACCEPTED_REASON_PREFIX,
+        ACCEPTED_WITH_FINDINGS_MARK,
+    )
+
+    try:
+        state = StateManager(plan_path, read_only=True)
+    except Exception:  # noqa: BLE001 - advisory: the run view is not
+        return None
+    record = state.state
+    decomposition = record.get("implement_task_ids")
+    if not isinstance(decomposition, list) or not decomposition:
+        return None
+    statuses = state.implementation_task_statuses()
+    reasons = record.get("task_status_reasons") or {}
+    human = {str(t) for t in (record.get("implement_human_task_ids") or [])}
+    findings = {entry["id"] for entry in state.implementation_check_findings()}
+    buckets: Dict[str, List[str]] = {key: [] for key, _ in _TALLY_LABELS}
+    for task_id in [str(t) for t in decomposition]:
+        status = statuses.get(task_id)
+        reason = str(reasons.get(task_id) or "")
+        if status == "completed":
+            if reason.startswith(ACCEPTED_REASON_PREFIX):
+                key = ("accepted_findings" if ACCEPTED_WITH_FINDINGS_MARK in reason
+                       else "accepted_failed")
+            elif task_id in human and "--human-task" in reason:
+                key = "completed_manual"
+            elif task_id in findings:
+                key = "check_findings"
+            else:
+                key = "completed"
+        elif status == "failed":
+            key = "failed"
+        elif status == "skipped":
+            if reason.startswith((state._USER_DECLINED_REASON, state._ANSWERED_SKIP_PREFIX)):
+                key = "declined"
+            elif not state._deferred_to_user(task_id):
+                key = "declined_dependents"
+            else:
+                key = "deferred"
+        else:
+            key = "not_run"
+        buckets[key].append(task_id)
+    return {
+        "total": len(decomposition),
+        "done": sum(len(buckets[key]) for key in _TALLY_DONE),
+        "buckets": buckets,
+    }
+
+
+def implement_tally_text(tally: Dict[str, Any], *, live: bool = False) -> str:
+    """:func:`implement_task_tally` as one clause list: ``5/7 done;
+    completed: …; accepted with their check findings: …``. A task not run
+    yet reads "pending" while the run is *live*, "not run" once it ended."""
+    parts = [f"{tally['done']}/{tally['total']} done"]
+    for key, label in _TALLY_LABELS:
+        ids = tally["buckets"].get(key) or []
+        if ids:
+            if key == "not_run" and live:
+                label = "pending"
+            parts.append(f"{label}: {', '.join(ids)}")
+    return "; ".join(parts)
+
+
+def _run_is_live(view: Dict[str, Any]) -> bool:
+    """Whether *view*'s run is still going: starting, running, or slow to
+    beat but not provably gone (the reading ``render_run_text`` gives
+    ``re-running since``). A foreground run (no record) is not."""
+    verdict = view.get("verdict")
+    return verdict in (detach.VERDICT_STARTING, detach.VERDICT_RUNNING) or (
+        verdict == detach.VERDICT_STALE and not _died(view)
+    )
+
+
+def _is_executor_implement_view(view: Dict[str, Any]) -> bool:
+    """An implement view whose run record carries the executor's mirror (the
+    tool routes and ``--exec-subagents``): the run whose own counts
+    :func:`implement_task_tally` completes. The native leg's run is read by
+    :func:`state_implement_view` instead."""
+    phase = view.get("phase") or os.path.basename(str(view.get("phase_dir") or ""))
+    if phase != _IMPLEMENT_PHASE:
+        return False
+    progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
+    return isinstance(progress.get("write_subagents"), dict)
 
 
 def _mirror_text(key: str, mirror: Any) -> List[str]:
@@ -2167,8 +2310,16 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             f"not run (upstream check {check_id} reported problems) {', '.join(waiting)}"
         )
     accepted = mirror.get("accepted_task_ids") if isinstance(mirror.get("accepted_task_ids"), list) else []
-    if accepted:
-        parts.append(f"accepted after failing {', '.join(map(str, accepted))}")
+    # Fix round 16 (Codex stop-path accept 02): a check accepted with its
+    # findings read "accepted after failing T002"; the mirror names those
+    # apart (a mirror without the key reads as before).
+    with_findings = set(_id_list(mirror.get("accepted_with_findings_task_ids")))
+    accepted_checks = [str(t) for t in accepted if str(t) in with_findings]
+    accepted_failed = [str(t) for t in accepted if str(t) not in with_findings]
+    if accepted_checks:
+        parts.append(f"accepted with their check findings {', '.join(accepted_checks)}")
+    if accepted_failed:
+        parts.append(f"accepted after failing {', '.join(accepted_failed)}")
     # F9: `skipped_task_ids`/`human_task_strategy` (resolved before dispatch,
     # `write_batch_scheduler._mirror_status`) were on `.status.json` already
     # but rendered nowhere, so the one task `--yes`'s default strategy defers
@@ -2932,6 +3083,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return EXIT_NEEDS_HUMAN
         views = _wait_for_terminal(plan_path, args, views)
 
+    # Fix round 16 (run 6): an executor implement run's own counts are that
+    # run's; every task of the phase is tallied from state.json beside them.
+    implement_tally = None
+    if any(_is_executor_implement_view(view) for view in views):
+        try:
+            implement_tally = implement_task_tally(plan_path)
+        except Exception:  # noqa: BLE001 - advisory: the run view is not
+            implement_tally = None
+
     # N5, 2026-09-16: the dispatcher stamped `ctx.mode = "status"`,
     # `ctx.phase = None` before this ever ran (`status` is a command, not a
     # phase) — right for a plain multi-run listing, but the opencode plugin's
@@ -2976,7 +3136,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         # the run, which is precisely what the OpenCode plugin may not do. A
         # separate key rather than one more key inside `progress`, so that
         # object stays what the status file wrote.
-        record_progress_lines(_progress_lines(watched))
+        progress_lines = _progress_lines(watched)
+        if implement_tally is not None and _is_executor_implement_view(watched):
+            # Fix round 16: the OpenCode route shows these lines and nothing
+            # else, so the whole phase's tally rides them too.
+            progress_lines.append(
+                "implement tasks: "
+                + implement_tally_text(implement_tally, live=_run_is_live(watched))
+            )
+        record_progress_lines(progress_lines)
         # The run's own stop line (`run.error`, written by the worker from
         # the result context's `error`): the hosts read a terminal poll's
         # `payload.error` as "the last line it left", so a stopped implement's
@@ -3059,6 +3227,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             payload = {"workflow": workflow, "runs": views}
         if implement_tasks is not None:
             payload["implement_tasks"] = implement_tasks
+        if implement_tally is not None:
+            payload["implement_tally"] = implement_tally
         # Plan §7.4a2/b: what discovery skipped, only when there is something
         # to say, so a plan with none keeps today's payload byte for byte.
         if discovery.get("ignored_dirs"):
@@ -3080,6 +3250,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         lines += render_run_text(
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args), resume_workflow=terminal_workflow,
+            implement_tally=implement_tally,
+            state_block=implement_tasks is not None,
         )
         if implement_tasks is not None:
             lines += render_state_implement_lines(implement_tasks)

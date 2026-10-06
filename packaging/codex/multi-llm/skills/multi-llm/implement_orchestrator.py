@@ -19,7 +19,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -64,6 +64,7 @@ from check_workflow_prerequisites import (
     build_unmet_message,
     check_apply_suggestions_prerequisite as _shared_apply_suggestions_prerequisite,
     check_apply_task_suggestions_prerequisite,
+    implement_records_predate_task_list,
     record_prerequisite_skip,
     upstream_skip_notices,
 )
@@ -176,6 +177,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         '--resume',
         action='store_true',
         help='Resume from previous session state (skip completed tasks)'
+    )
+
+    parser.add_argument(
+        '--fresh',
+        action='store_true',
+        help='Start over: dispatch every task again, ignoring the tasks an '
+             'earlier run of this implement finished. Without it, a run on an '
+             'implement that started and did not finish continues it as '
+             '--resume; one that finished starts over either way. --resume '
+             'wins over --fresh.'
     )
 
     parser.add_argument(
@@ -912,6 +923,26 @@ def _prepare_selected_task(
     state.save()
 
 
+def _manual_close_note(
+    args: argparse.Namespace, plan_arg: str, task_ids: Sequence[str],
+) -> Optional[str]:
+    """``next_phase.manual_close_note`` for *task_ids*, in this host's own
+    command spelling (the template the result line's ``user_next_step``
+    uses); ``None`` when nothing can be spelled."""
+    import io
+
+    try:
+        from utils import host_capabilities as _hosts
+        from utils import next_phase as _next
+
+        host_id = _hosts.resolve_host_id(explicit=getattr(args, "host", None))
+        template = _hosts.next_command_template(
+            host_id, _next.resolve_route(host_id, stderr=io.StringIO()))
+        return _next.manual_close_note(_next.close_command(template, plan_arg, task_ids))
+    except Exception:  # noqa: BLE001 - advisory: the deferred list still stands
+        return None
+
+
 def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
     """The way forward after a stop, in this host's own command spelling.
 
@@ -1575,6 +1606,18 @@ def _native_withheld(
     output_data["batches"] = kept_batches
     if "pending_tasks" in output_data:
         output_data["pending_tasks"] = sum(len(b["tasks"]) for b in kept_batches)
+    waiting = _waiting_on_checks(kept_batches, graph)
+    if waiting:
+        output_data["waiting_on_checks"] = {
+            task_id: (
+                f"waits on check {', '.join(checks)}: dispatch it only after "
+                f"{' and '.join(checks)} {'is' if len(checks) == 1 else 'are'} "
+                f"recorded with `--check passed`; if "
+                f"{' or '.join(checks)} reports problems, `util batch-done` "
+                f"prints [CHECK_BLOCKED] for it and it is not run"
+            )
+            for task_id, checks in sorted(waiting.items())
+        }
     if kept_checks:
         output_data["not_rerun_checks"] = {
             check_id: (
@@ -1593,16 +1636,103 @@ def _native_withheld(
     return {"held": held, "refused": refused, "not_run": not_run}
 
 
-def _dispatch_line(output_data: Dict[str, Any], decomposed_batches: int) -> str:
-    """``Organized into N execution batches: X task(s) to dispatch …``,
-    counted from the batches as handed out."""
-    entries = [t for b in output_data.get("batches") or [] for t in b.get("tasks") or []]
-    manual = sum(1 for t in entries if t.get("executor_role") == "human")
-    dispatching = len(entries) - manual
+def _started_and_unfinished(state: StateManager, task_ids: Iterable[str]) -> List[str]:
+    """The tasks a run without ``--resume`` keeps: those an earlier run of an
+    implement that started and did not finish recorded ``completed``.
+
+    Empty — the run starts over, as it always did — when implement finished,
+    when nothing of this decomposition was finished, or when generate-tasks or
+    apply-task-suggestions wrote the task list after implement's last run,
+    whose ids may name other tasks now (nothing clears ``task_status``).
+    """
+    if state.is_phase_completed("implement"):
+        return []
+    statuses = state.implementation_task_statuses()
+    kept = sorted(str(t) for t in task_ids if statuses.get(str(t)) == "completed")
+    if not kept or implement_records_predate_task_list(state):
+        return []
+    return kept
+
+
+def _continued_line(kept: Sequence[str]) -> str:
+    """The one line a continued run prints (fix round 16)."""
+    named = ", ".join(kept[:8]) + (", …" if len(kept) > 8 else "")
     return (
-        f"Organized into {decomposed_batches} execution batches: {dispatching} "
+        "resume: implement started earlier and did not finish, so this run "
+        f"continues it as --resume: kept {len(kept)} task(s) an earlier run "
+        f"finished ({named}) and runs what is left. To run every task again "
+        "instead, add --fresh."
+    )
+
+
+def _waiting_on_checks(
+    batches: Sequence[Dict[str, Any]], graph: Sequence[Dict[str, Any]],
+) -> Dict[str, List[str]]:
+    """Each handed-out task that depends, directly or through another task,
+    on a check task handed out in the same batches: ``{task id: [check ids]}``.
+
+    Fix round 16 (live run 6, Claude Code stop 01): T007 sat in the first
+    emit's batches beside T004 although it depends on check T002, whose
+    verdict nobody knows until T002 runs — rightly, since a pass releases it,
+    but nothing said so, and the counts read as one more task than ran. Its
+    hold is decided by ``util batch-done --check findings`` (``[CHECK_BLOCKED]``)
+    and ``util write-prompt`` (``[WRITE_PROMPT_BLOCKED]``); this only names it
+    in advance. A manual task waits on nothing (no subagent runs it).
+    """
+    from utils.write_batch_scheduler import is_check_task, transitive_dependents
+
+    entries = [task for batch in batches for task in batch.get("tasks") or []]
+
+    def manual(task: Dict[str, Any]) -> bool:
+        return bool(task.get("is_human")) or task.get("executor_role") == "human"
+
+    present = {str(task.get("id") or ""): task for task in entries}
+    checks = sorted(
+        task_id for task_id, task in present.items()
+        if not manual(task) and is_check_task("implement", task)
+    )
+    waiting: Dict[str, List[str]] = {}
+    for check_id in checks:
+        for dependent in transitive_dependents(graph, check_id):
+            task = present.get(dependent)
+            if task is not None and not manual(task):
+                waiting.setdefault(dependent, []).append(check_id)
+    return waiting
+
+
+def _handoff_counts(output_data: Dict[str, Any]) -> Dict[str, int]:
+    """Every count the emit prints and hands over, read off one source: the
+    batches as handed out (fix round 16, live run 6: "5 execution batches"
+    beside "Batches: 3")."""
+    batches = output_data.get("batches") or []
+    entries = [t for b in batches for t in b.get("tasks") or []]
+    manual = sum(
+        1 for t in entries if t.get("executor_role") == "human" or t.get("is_human")
+    )
+    return {
+        "batches": len(batches),
+        "tasks": len(entries),
+        "manual": manual,
+        "dispatch": len(entries) - manual,
+    }
+
+
+def _dispatch_line(output_data: Dict[str, Any]) -> str:
+    """``Organized into N execution batches: X task(s) to dispatch …``,
+    counted from the batches as handed out (both legs)."""
+    counts = _handoff_counts(output_data)
+    waiting = sorted(output_data.get("waiting_on_checks") or {})
+    return (
+        f"Organized into {counts['batches']} execution "
+        f"{'batch' if counts['batches'] == 1 else 'batches'}: {counts['dispatch']} "
         f"task(s) to dispatch"
-        + (f", {manual} manual task(s) it does not run" if manual else "")
+        + (f", {counts['manual']} manual task(s) it does not run"
+           if counts["manual"] else "")
+        + (
+            f" ({', '.join(waiting)} {'waits' if len(waiting) == 1 else 'wait'} "
+            f"on a check's verdict)"
+            if waiting else ""
+        )
     )
 
 
@@ -1911,6 +2041,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     ):
         state.save()
 
+    # A run without `--resume` on an implement that started and did not
+    # finish continues it (fix round 16): Codex racing 06r re-dispatched the
+    # three tasks an aborted run had finished, which came back `no-op` and
+    # lost their "applied" rows. Starting over is `--fresh`, and a finished
+    # implement still starts over without it; `--task` reruns what it names.
+    # A code task's `--human-task` answer still needs the `--resume` typed:
+    # the commands that carry one always do, and an answer is a decision.
+    resume_typed = bool(args.resume)
+    if not args.resume and not args.task and not getattr(args, "fresh", False):
+        kept = _started_and_unfinished(state, decomposer.tasks)
+        if kept:
+            args.resume = True
+            print(_continued_line(kept))
+            if state.has_plan_changed():
+                print("WARNING: Plan has changed since last session")
+                state.clear_plan_changed_flag()
+
     # Restore previous statuses if resuming
     if args.resume:
         for task_id, status in state.get_all_task_statuses().items():
@@ -1968,7 +2115,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             tid for tid in not_human
             if state.get_task_status(tid) == "failed" or tid in held_by
         }
-        if not_human and not args.resume:
+        if not_human and not resume_typed:
             return unattended_mod.fail_closed(
                 "ERROR: --human-task answers a code task only with --resume, "
                 "after a run recorded it failed or its check reported "
@@ -2014,7 +2161,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     # A check whose findings stand is handed out again on a native resume only
     # once the files moved (fix round 14); the executor decides at dispatch.
     kept_checks: Dict[str, List[str]] = {}
-    decomposed_batches = 1
 
     # If specific task requested
     if args.task:
@@ -2053,7 +2199,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         # Get parallel batches
         batches = decomposer.get_parallel_batches()
-        decomposed_batches = len(batches)
         rerun_ids = rerunnable_checks(state.state) if args.resume else None
         if rerun_ids and not executor_backed:
             rerun_ids, kept_checks = _native_check_reruns(
@@ -2078,8 +2223,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # batches" read as two more than the run would ever report (2026-10-01).
         # The native leg prints it once it has taken out what the host must not
         # dispatch (`_native_withheld`), so it agrees with "Pending tasks".
+        # Both legs count the batches handed out, never the decomposition's
+        # layers (fix round 16: "5 execution batches" beside "Batches: 3").
         if executor_backed or args.dry_run:
-            print(_dispatch_line({"batches": output_batches}, decomposed_batches))
+            print(_dispatch_line({"batches": output_batches}))
 
         # Count pending tasks
         pending_count = sum(len(b["tasks"]) for b in output_batches)
@@ -2190,14 +2337,30 @@ def main(argv: Optional[List[str]] = None) -> int:
             check_findings_ids=rerunnable_checks(state.state),
             state_record=state.state,
         )
+    if native_human_plan is not None:
+        # How to record the deferred manual tasks done, in this host's
+        # spelling, for the host's summary and report (fix round 16, live
+        # run 6: the native implement said only "T011 … deferred" and the
+        # command first appeared two phases later). The manual tasks only: a
+        # code task skipped with one runs on that resume.
+        manual_ids = sorted(
+            set(native_human_plan.deferred()) & {str(t) for t in human_task_ids}
+        )
+        note = (
+            _manual_close_note(args, str(output_data["plan_arg"]), manual_ids)
+            if manual_ids else None
+        )
+        if note:
+            output_data["manual_tasks_note"] = note
     native_withheld: Optional[Dict[str, Dict[str, str]]] = None
     if not executor_backed:
         native_withheld = _native_withheld(
             output_data, state, plan_path,
             kept_checks=kept_checks, tasks_file=implement_tasks_file,
         )
+        output_data["tasks_to_dispatch"] = _handoff_counts(output_data)["dispatch"]
         if not args.task:
-            print(_dispatch_line(output_data, decomposed_batches))
+            print(_dispatch_line(output_data))
         write_native_handoff()
 
     # --- the detach boundary (D4) ---------------------------------------------
@@ -2268,6 +2431,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Total tasks: {output_data['total_tasks']}")
     print(f"Pending tasks: {output_data.get('pending_tasks', output_data['total_tasks'])}")
     print(f"Batches: {len(output_data['batches'])}")
+    if "tasks_to_dispatch" in output_data:
+        # The one number the host passes to `util metrics` (fix round 16:
+        # the host counted "5 execution batches" and passed that).
+        dispatch = output_data["tasks_to_dispatch"]
+        print(
+            f"Tasks to dispatch: {dispatch} (pass --total-batches {dispatch} to "
+            f"`util metrics start` and `util metrics record`)"
+        )
 
     if native_human_plan is not None:
         titles = dict(state.get("task_titles") or {})
@@ -2279,13 +2450,20 @@ def main(argv: Optional[List[str]] = None) -> int:
         deferred = native_human_plan.deferred()
         declined = native_human_plan.declined()
         if deferred:
+            note = output_data.get("manual_tasks_note")
             print(
                 "Deferred tasks (recorded skipped in state.json; do not "
                 "dispatch them, and list them in the summary's Manual Tasks "
-                "(Deferred) section):"
+                "(Deferred) section"
+                + (", with the text of the [MANUAL_TASK_NOTE] line below the "
+                   "list under it, verbatim; give that text in your report "
+                   "too" if note else "")
+                + "):"
             )
             for task_id, reason in sorted(deferred.items()):
                 print(f"  {_named(task_id)}: {reason}")
+            if note:
+                print(f"[MANUAL_TASK_NOTE] {note}")
         if declined:
             # Not owed: the workflow's `[MANUAL_TASK]` lines leave these out,
             # so a summary that filed them under Manual Tasks (Deferred)
@@ -2364,6 +2542,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "summary as not run):"
             )
             for task_id, reason in sorted(native_withheld["not_run"].items()):
+                print(f"  {_titled(task_id)}: {reason}")
+        if output_data.get("waiting_on_checks"):
+            print(
+                "Waiting on a check's verdict (in the batches after the check "
+                "they depend on; if the check reports problems, do not dispatch "
+                "them — they stay pending and the phase closes without "
+                "--mark-completed):"
+            )
+            for task_id, reason in sorted(output_data["waiting_on_checks"].items()):
                 print(f"  {_titled(task_id)}: {reason}")
         stopped_short = bool(
             kept_checks or any(native_withheld[key] for key in native_withheld)

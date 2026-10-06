@@ -256,6 +256,7 @@ __all__ = [
     "HumanTaskPlan",
     "WriteBatchScheduler",
     "answered_done_on_record",
+    "answered_done_label",
     "accepted_checks_on_record",
     "accepted_checks_section",
     "accepted_upstream_checks",
@@ -263,6 +264,8 @@ __all__ = [
     "bind_prior_changes",
     "blocked_by_check_reason",
     "decomposition_graph",
+    "DISPATCHED_PROMPTS_SUBDIR",
+    "dispatched_prompt_path",
     "held_back_by_checks",
     "rerunnable_checks",
     "transitive_dependents",
@@ -271,8 +274,10 @@ __all__ = [
     "persist_human_task_plan",
     "resolve_human_task_plan",
     "run_write_phase",
+    "batch_check_line",
     "batch_check_section",
     "batch_check_summary",
+    "quoted_findings",
     "unverified_line",
     "write_result_notice",
     "verification_line",
@@ -380,11 +385,12 @@ def batch_check_section(
         batch_check_could_not_run(row_batch_check_findings(row)) for row in found
     )
     lines += [
-        "These batches applied their edits, then ran a check that failed "
-        + ("or could not run " if could_not else "")
-        + "(their own report says so). The edits are kept: look at each failure "
-        "before you go on — fix it by hand, or run review-code and then "
-        "apply-code-fixes.", "",
+        "These batches applied their edits, and each one's own closing report "
+        "says a check it ran failed"
+        + (" or could not run" if could_not else "")
+        + "; what it reported is listed under it, in its own words. The edits "
+        "are kept: look at each failure before you go on — fix it by hand, or "
+        "run review-code and then apply-code-fixes.", "",
     ]
     for row in found:
         lines.append(
@@ -395,6 +401,31 @@ def batch_check_section(
         lines.append("")
     lines.pop()
     return lines
+
+
+def quoted_findings(findings: Sequence[str], limit: int = 600) -> str:
+    """A batch's own check findings, each in double quotes and joined with
+    "; ", bounded at *limit* characters: the batch's words, shown as its words
+    (fix round 16)."""
+    return "; ".join(f'"{" ".join(str(item).split())}"' for item in findings)[:limit]
+
+
+def batch_check_line(task_id: str, findings: Sequence[str]) -> str:
+    """The :data:`BATCH_CHECK_MARKER` line for a code batch whose own report
+    says a check it ran fails, or could not run; both legs print it
+    (``WriteBatchScheduler._batch_check_lines``, ``util batch-done``). Fix
+    round 16 (Codex racing 06r): it says the claim is the batch's own report
+    and quotes it — T006's own words said its corrected check passed."""
+    if batch_check_could_not_run(findings):
+        return (
+            f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but its "
+            f"own report says {'; '.join(findings)[:600]}"
+        )
+    return (
+        f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but its own "
+        f"report says a check it ran on them fails ({len(findings)} "
+        f"problem(s)): {quoted_findings(findings)}"
+    )
 
 
 def write_result_notice(result: Any) -> Optional[str]:
@@ -423,19 +454,21 @@ def batch_check_summary(found: Dict[str, List[str]]) -> str:
     for task_id, findings in found.items():
         first = " ".join(str(findings[0]).split())[:160] if findings else ""
         more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
-        parts.append(f"{task_id} ({first}{more})")
+        # Fix round 16 (Codex racing 06r): quoted, so a reader sees the
+        # batch's own words — T006's said its corrected check passed.
+        parts.append(f'{task_id} ("{first}"{more})')
     count = len(found)
     # Fix round 15: a check that could not run is said so, never "failing".
     could_not = [batch_check_could_not_run(f) for f in found.values()]
     if all(could_not):
         said = "their check could not run"
     elif any(could_not):
-        said = "reported a check that failed or could not run"
+        said = "a check they ran failed or could not run"
     else:
-        said = "reported a failing check"
+        said = "a check they ran fails"
     return (
-        f"{count} batch(es) applied their edits but {said}: "
-        + "; ".join(parts) + "."
+        f"{count} batch(es) applied their edits, but their own report says "
+        f"{said}: " + "; ".join(parts) + "."
     )[:900]
 
 #: How much of the verification command's output travels in the result payload,
@@ -720,6 +753,22 @@ ACCEPTED_WITH_FINDINGS_MARK = "after its check reported problems"
 #: The recorded reason of a manual task answered ``--human-task <id>=done``
 #: (:func:`persist_human_task_plan`; the ``<id>`` is literal).
 COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
+
+
+def answered_done_label(plan: Any, task_id: str) -> str:
+    """How a task answered ``--human-task <id>=done`` reads in an account:
+    "accepted with its check findings" (a check whose findings the user
+    accepted), "accepted after failing" (a failed code task) or "completed by
+    hand" (a manual task). One wording for summary.md's rows and the resume
+    tally (fix round 16)."""
+    accepted = getattr(plan, "accepted", None) or {}
+    if task_id in accepted:
+        return (
+            "accepted with its check findings"
+            if ACCEPTED_WITH_FINDINGS_MARK in str(accepted.get(task_id) or "")
+            else "accepted after failing"
+        )
+    return "completed by hand"
 
 
 def answered_done_on_record(
@@ -1892,6 +1941,30 @@ def bind_prior_changes(
     return prompt.replace(PRIOR_CHANGES_TOKEN, context)
 
 
+#: Where a write batch's dispatched prompt is kept, under the phase dir: the
+#: layout the native leg's ``util write-prompt`` writes (``write_prompt``
+#: imports it), which the executor leg keeps too since fix round 16.
+DISPATCHED_PROMPTS_SUBDIR = "prompts"
+
+
+def dispatched_prompt_path(
+    phase_dir: str, task_id: str, attempt: Optional[int] = None
+) -> str:
+    """``{phase_dir}/prompts/{task_id}.prompt.txt``, the batch's prompt.
+
+    With ``attempt``, ``{task_id}.attempt-{attempt}.prompt.txt``: what one
+    attempt sent when it was not the batch's prompt (a report re-ask, rule 9's
+    re-send).
+    """
+    name = (
+        f"{task_id}.prompt.txt" if attempt is None
+        else f"{task_id}.attempt-{attempt}.prompt.txt"
+    )
+    return os.path.join(
+        os.path.abspath(str(phase_dir)), DISPATCHED_PROMPTS_SUBDIR, name
+    )
+
+
 def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
     """Append the write-batch result contract the classification reads.
 
@@ -1999,10 +2072,15 @@ WRITE_CHECK_CONTRACT = (
     '{"check": {"passed": false, "findings": ["<one failing check: the '
     'command and what it reported>"]}}\n'
     "```\n\n"
-    "- `passed`: the JSON boolean `true` only when every check you ran "
-    "passed, else `false`.\n"
-    "- `findings`: one string per check that failed; `[]` when `passed` is "
-    "`true`.\n\n"
+    "- `passed`: the JSON boolean `true` only when the last run of every "
+    "check you ran passed, else `false`.\n"
+    "- `findings`: one string per check whose last run failed; `[]` when "
+    "`passed` is `true`.\n\n"
+    "Report the last run of each check. A run that failed because of how you "
+    "ran it (a wrong flag, mode or path) and that you then ran correctly is "
+    "reported by the corrected run, and so is a check you ran again after "
+    "fixing what it found: an attempt you corrected is not a finding. Never "
+    "describe a passing run as a finding.\n\n"
     "Report a failing check here even when you think your change did not "
     "cause it: the batch is then recorded as applied with a failing check, "
     "and the user is told, instead of the run reporting a clean success. "
@@ -2035,6 +2113,10 @@ CHECK_RESULT_CONTRACT = (
     "ran and met its acceptance criteria, else `false`.\n"
     "- `findings`: one string per problem a check reported; `[]` when "
     "`passed` is `true`.\n\n"
+    "Report the last run of each check. If you ran a check in a wrong form of "
+    "your own (a wrong flag or mode for the command the task names) and then "
+    "ran it as the task names it, report that run: the wrong form is not a "
+    "finding.\n\n"
     "A problem a check finds is a finding, not a failure: do not fix it and "
     "do not answer `failed` for it. The findings are recorded for the code "
     "review, and the tasks that depend on this check wait until they are "
@@ -2738,6 +2820,85 @@ class WriteBatchScheduler:
         """Append the write-batch result contract (:func:`with_result_contract`)."""
         return with_result_contract(self.kind, task, prompt)
 
+    def _keep_dispatched_prompt(
+        self, task_id: str, attempt: int, sent: str, batch_prompt: str
+    ) -> None:
+        """Keep the prompt this attempt sends, beside the native leg's.
+
+        Run 6 (#10b): on the executor leg the prompt a task was dispatched
+        with was in no plan artifact — the audit line keeps its sha256 and
+        length only — so T007's prompt with "## Check findings the user
+        accepted" could not be audited on Codex at all, and on OpenCode only
+        from the host's session database. The native leg's ``util
+        write-prompt`` always wrote ``{phase}/prompts/<id>.prompt.txt``; this
+        writes the same file, the same bytes, just before the child starts.
+
+        * The batch's prompt **overwrites** the file on every dispatch, as a
+          ``--resume`` rebinds the native one: it is what the task was last
+          told, and the audit log's ``prompt_sha256`` on that ``dispatched``
+          line verifies it.
+        * An attempt that sends something else (a report re-ask, rule 9's
+          re-send) goes to ``<id>.attempt-<n>.prompt.txt`` instead, so the
+          batch's file is never replaced by a re-ask; the task's next first
+          attempt clears those, so none outlives the dispatch it belongs to.
+        * Never for a task refused before dispatch: the policy check and the
+          snapshot run first, so a task declaring a denied path leaves no
+          file. The text is the native file's, unredacted — plan and task
+          text, the prior-changes summaries, accepted check findings, all
+          already on disk in the phase and plan dirs — and it lies inside the
+          phase dir, which the containment sweep never attributes to a runner.
+
+        A jailed repo-wide batch can write the phase dir, so the folder is
+        resolved and must be a real directory inside it, never a planted
+        symlink (the parent is not jailed, and following one would write
+        outside the repository); a file name is replaced by rename, which
+        never follows a link either.
+
+        Best-effort: a write that fails warns once and never fails the
+        dispatch.
+        """
+        try:
+            if not task_id or os.path.basename(task_id) != task_id or task_id in (
+                    ".", ".."):
+                raise OSError(f"{task_id!r} is not a file name")
+            phase = os.path.realpath(self.phase_dir)
+            folder = os.path.join(phase, DISPATCHED_PROMPTS_SUBDIR)
+            if os.path.islink(folder):
+                raise OSError(f"{folder} is a symlink")
+            os.makedirs(folder, exist_ok=True)
+            if os.path.realpath(folder) != folder or not os.path.isdir(folder):
+                raise OSError(f"{folder} is not a directory inside {phase}")
+            if sent == batch_prompt:
+                target = dispatched_prompt_path(phase, task_id)
+                if attempt <= 1:
+                    head, tail = f"{task_id}.attempt-", ".prompt.txt"
+                    for name in os.listdir(folder):
+                        if (name.startswith(head) and name.endswith(tail)
+                                and name[len(head):-len(tail)].isdigit()):
+                            os.unlink(os.path.join(folder, name))
+            else:
+                target = dispatched_prompt_path(phase, task_id, attempt)
+            handle, temporary = tempfile.mkstemp(prefix=".prompt-", dir=folder)
+            try:
+                with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
+                    stream.write(sent)
+                os.replace(temporary, target)
+            except BaseException:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+                raise
+        except OSError as exc:
+            if not getattr(self, "_prompt_keep_warned", False):
+                self._prompt_keep_warned = True
+                self.log(
+                    f"[write-subagents] could not keep {task_id}'s dispatched "
+                    f"prompt under {os.path.join(self.phase_dir, DISPATCHED_PROMPTS_SUBDIR)}: "
+                    f"{exc}. The dispatch goes ahead; the audit log keeps its "
+                    f"sha256."
+                )
+
     # -- the loop -------------------------------------------------------
 
     def run(self) -> SchedulerResult:
@@ -2805,7 +2966,15 @@ class WriteBatchScheduler:
                 continue
             seen.add(task_id)
             kept.append(row)
-        if not kept:
+        # Fix round 16 (Codex stop-path accept 02): a task answered
+        # `--human-task <id>=done` is kept too, and the line says how — the
+        # accepted check T002 was missing from "kept 3 … T001, T003, T004".
+        answered_kept = [
+            f"{task_id} ({answered_done_label(result.human_plan, task_id)})"
+            for task_id in sorted(answered)
+            if task_id not in this_run and task_id not in seen
+        ]
+        if not kept and not answered_kept:
             return
         # Dispatched: the tasks a runner was started for. A task refused
         # before dispatch and a check not run again started none (fix round
@@ -2840,9 +3009,15 @@ class WriteBatchScheduler:
 
         kept_ids = [str(row.get("task_id")) for row in kept]
         dispatched_ids = [o.task_id for o in dispatched]
+        kept_named = ", ".join(
+            part for part in (
+                named(kept_ids) + counted(kept_ids, kept) if kept_ids else "",
+                ", ".join(answered_kept),
+            ) if part
+        )
         self.log(
-            f"[write-subagents] resume: kept {len(kept_ids)} task(s) an earlier "
-            f"run finished — {named(kept_ids)}{counted(kept_ids, kept)}; "
+            f"[write-subagents] resume: kept {len(kept_ids) + len(answered_kept)} "
+            f"task(s) an earlier run finished — {kept_named}; "
             f"dispatched {len(dispatched_ids)}{counted(dispatched_ids)}"
             + (
                 f"; refused before dispatch {len(refused)} "
@@ -3043,6 +3218,8 @@ class WriteBatchScheduler:
             # human" condition, and dispatching around it would run code tasks
             # against unmet preconditions.
             result.exit_code = EXIT_NEEDS_HUMAN
+            # Fix round 16: a stop says nothing ran the tests too.
+            result.messages.extend(self._note_unverified_on_stop(result))
             result.messages.extend(self._pending_human_message(result.human_plan))
             result.report_path = self._write_report(result)
             self._mirror_status(result)
@@ -3098,6 +3275,8 @@ class WriteBatchScheduler:
                 )
                 # Fix round 15: and the batches whose own check failed.
                 result.messages.extend(self._batch_check_lines(result))
+                # Fix round 16: and that nothing ran the repository's tests.
+                result.messages.extend(self._note_unverified_on_stop(result))
                 result.messages.extend(
                     self._refusal_message(exc, batch_index, result)
                 )
@@ -3131,6 +3310,9 @@ class WriteBatchScheduler:
                     result, batch_index, [o for o in outcomes if not o.ok],
                 )
                 stop_lines = self._stop_message(batch_index, outcomes, result)
+                # Fix round 16 (run 6, stop 01): set before the summary is
+                # written, so its Verification line says it too.
+                unverified_lines = self._note_unverified_on_stop(result)
                 # The partial summary is the cancellation's own record (D3n,
                 # instructions/implement.md): `_finalize` never runs on this
                 # path, so without this write the `## Cancelled` section would be
@@ -3151,6 +3333,7 @@ class WriteBatchScheduler:
                 # Fix round 15 (review of round 14): the batches whose own
                 # check failed are named on a stop too, not only at the end.
                 result.messages.extend(self._batch_check_lines(result))
+                result.messages.extend(unverified_lines)
                 result.messages.extend(stop_lines)
                 if result.summary_file:
                     result.messages.append(
@@ -3167,10 +3350,12 @@ class WriteBatchScheduler:
         if result.blocked_by_check:
             result.exit_code = EXIT_NEEDS_HUMAN
             self._record_check_block(result)
+            unverified_lines = self._note_unverified_on_stop(result)
             if self.summary_file:
                 result.summary_file = self._write_summary(result)
             result.messages.extend(self._check_findings_lines(result))
             result.messages.extend(self._batch_check_lines(result))
+            result.messages.extend(unverified_lines)
             result.messages.extend(self._check_block_message(result))
             if result.summary_file:
                 result.messages.append(
@@ -3238,17 +3423,7 @@ class WriteBatchScheduler:
         found = result.batch_check_findings()
         if not found:
             return []
-        lines = [
-            (
-                f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but "
-                f"{'; '.join(findings)[:600]}"
-                if batch_check_could_not_run(findings) else
-                f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but a "
-                f"check it ran on them fails ({len(findings)} problem(s)): "
-                f"{'; '.join(findings)[:600]}"
-            )
-            for task_id, findings in found.items()
-        ]
+        lines = [batch_check_line(task_id, findings) for task_id, findings in found.items()]
         where = (
             f" They are listed under Check Findings in {result.summary_file}."
             if result.summary_file else ""
@@ -4596,6 +4771,9 @@ class WriteBatchScheduler:
                     entry.relative: entry.sha256 for entry in snapshot.entries
                 },
             )
+            self._keep_dispatched_prompt(
+                task_id, int(context["attempt"]), sent, prompt
+            )
 
         def after_result(context: Dict[str, Any]) -> None:
             # The executor's own record of the rung this attempt ran on wins;
@@ -4699,6 +4877,7 @@ class WriteBatchScheduler:
                 snapshot_dir=snapshot.directory,
                 snapshot_before={e.relative: e.sha256 for e in snapshot.entries},
             )
+            self._keep_dispatched_prompt(task_id, attempt, sent, prompt)
             data = self.respond(task, sent)  # type: ignore[misc]
             if isinstance(data, str):
                 try:
@@ -5127,12 +5306,17 @@ class WriteBatchScheduler:
             outcome.status = STATUS_OK
             changed_names = ", ".join(changed)
             if outcome.task_id in self._snapshot_reused:
+                # Fix round 16 (OpenCode racing 06b): "APPLIED (no-op
+                # claimed, bytes moved)" read as a fault in the summary row.
+                # A resume after an attempt that timed out with its edit on
+                # disk is this case: say what happened, plainly, first.
                 outcome.reason = (
-                    f"APPLIED (no-op claimed, bytes moved): {changed_names} "
-                    f"differ from the pre-batch snapshot, but that snapshot "
-                    f"was reused from an earlier dispatch of this batch — "
-                    f"the diff is that attempt's work, not this dispatch's. "
-                    f"Recorded as applied."
+                    f"APPLIED (kept from an earlier attempt): the edits an "
+                    f"earlier attempt made to {changed_names} are kept and "
+                    f"count as applied; this run's model found them already "
+                    f"in place (it reported no change). The rollback point "
+                    f"is still the pre-batch snapshot taken before that "
+                    f"first attempt."
                 )
             else:
                 outcome.reason = (
@@ -6080,8 +6264,9 @@ class WriteBatchScheduler:
                 )
             elif outcome.ok and outcome.batch_check:
                 verdict = (
-                    f"{verdict}, but {batch_check_words(outcome.batch_check)} "
-                    f"({'; '.join(outcome.batch_check)[:300]})"
+                    f"{verdict}, but its own report says "
+                    f"{batch_check_words(outcome.batch_check)} "
+                    f"({quoted_findings(outcome.batch_check, 300)})"
                 )
             elif outcome.write_outcome and not outcome.ok:
                 # Plan step 3: a failed batch whose write outcome reads
@@ -6918,9 +7103,20 @@ class WriteBatchScheduler:
         if outcome.write_outcome == WRITE_PARTIAL:
             return (
                 f"partial application (bytes moved, the batch did not finish)"
+                + (
+                    ": its runner ran past its time limit and was stopped, and "
+                    "what it changed is kept in place"
+                    if self._ran_out_of_time(outcome) else ""
+                )
                 + (f" — {summary}" if summary else "")
             )
         return f"{label}" + (f" — {summary}" if summary else "")
+
+    @staticmethod
+    def _ran_out_of_time(outcome: TaskOutcome) -> bool:
+        """Whether the batch was killed at its time limit after its edits
+        landed (``TaskOutcome.ran_out_of_time``, fix round 16)."""
+        return bool(getattr(outcome, "ran_out_of_time", False))
 
     def _account_lines(self, result: Optional[SchedulerResult]) -> List[str]:
         """Every task of the decomposition, by what became of it."""
@@ -7081,6 +7277,16 @@ class WriteBatchScheduler:
             lines.append(
                 "  - fix what the task reported, then resume this phase; it is "
                 "dispatched again and the tasks after it follow:"
+            )
+            lines.append(f"        {resume}")
+        elif stop.get("timed_out") and any(o.files_touched for o in failed):
+            lines.append(
+                "  - its edits are kept in place: resume this phase and it is "
+                "dispatched again on top of them to finish what is left, then "
+                "the ones never reached follow (or restore the batch with the "
+                "command above first, to start it over; if it runs out of time "
+                "again, raise driver.subagent_timeout_s or run it on a faster "
+                "model):"
             )
             lines.append(f"        {resume}")
         elif any(o.files_touched for o in failed):
@@ -7384,6 +7590,13 @@ class WriteBatchScheduler:
         # round 15: what the sweep observed, not what the rollback store holds,
         # so a file with no rollback point counts — and is named.
         result.stop["bytes_moved"] = any(o.bytes_moved for o in failed)
+        # Fix round 16 (OpenCode racing 06, T006): a batch killed at its time
+        # limit after its edits landed. The edits stay; the plain way forward
+        # is the resume, which dispatches it again on top of them.
+        if first is not None and first.write_outcome == WRITE_PARTIAL and (
+            self._ran_out_of_time(first)
+        ):
+            result.stop["timed_out"] = True
         unrestorable = sorted({p for o in failed for p in o.unrestorable})
         if unrestorable:
             result.stop["unrestorable"] = unrestorable
@@ -7497,8 +7710,9 @@ class WriteBatchScheduler:
             each.append({
                 "flags": answer(check_id, "done"),
                 "why": (f"accept {check_id}'s check findings: "
-                        f"{', '.join(waiting)} then run, and the findings stay "
-                        "listed for review-code"
+                        f"{', '.join(waiting)} then run, told that you accepted "
+                        "the findings, and the findings stay listed for "
+                        "review-code"
                         + (f" ({'; '.join(found.get(check_id) or [])[:200]})"
                            if found.get(check_id) else "")),
             })
@@ -7799,6 +8013,14 @@ class WriteBatchScheduler:
                     if self.kind == "implement" else ", then resume this phase."
                 )
             )
+        elif stop.get("bytes_moved", True) and stop.get("timed_out"):
+            head += (
+                f" Its edits are kept in place. To go on: resume this phase, "
+                f"and {task_id} is dispatched again on top of them to finish "
+                f"what is left (or restore the batch first to start it over); "
+                f"if it runs out of time again, raise driver.subagent_timeout_s "
+                f"or run it on a faster model."
+            )
         elif stop.get("bytes_moved", True):
             head += (
                 " To go on: inspect the half-applied state, restore or keep it, "
@@ -7914,6 +8136,35 @@ class WriteBatchScheduler:
         return dict(mirror) if isinstance(mirror, dict) else {}
 
     # -- verification ---------------------------------------------------
+
+    def _note_unverified_on_stop(self, result: SchedulerResult) -> List[str]:
+        """The "nothing ran this repository's tests" line on a stop (fix
+        round 16); the lines to print, ``[]`` when none is owed.
+
+        Run 6 (Codex and OpenCode stop 01): a code phase that stopped after
+        code batches ran said nothing about the repository's tests — the line
+        :meth:`_run_verification` adds reached only a finished run's result,
+        notice and summary. Set on ``result.unverified`` (the notice, the
+        Verification line, the report, the mirror) when this is a code phase,
+        a task of it completed (this run or an earlier one: the ``completed``
+        statuses :meth:`_phase_has_applied_batches` reads) and no
+        ``driver.verify_command`` is set. Never runs anything.
+        """
+        if self.kind not in CODE_WRITE_KINDS or self.dry_run or result.unverified:
+            return []
+        ran = any(
+            outcome.ok and not outcome.skipped for outcome in result.outcomes
+        ) or self._phase_has_applied_batches()
+        if not ran:
+            return []
+        try:
+            command = get_verify_command(anchor=self.anchor)
+        except Exception:  # noqa: BLE001 - advisory on a stop
+            return []
+        if command:
+            return []
+        result.unverified = unverified_line(self.repo_root)
+        return [result.unverified]
 
     def _run_verification(self, result: SchedulerResult) -> bool:
         """Run ``driver.verify_command`` once, after the last batch (F4).
@@ -8509,6 +8760,30 @@ class WriteBatchScheduler:
             return None
         return _parse_local_timestamp(completed.get(review))
 
+    def _manual_close_note(self, deferred: Dict[str, str]) -> Optional[str]:
+        """How to record the deferred manual tasks done, in the host's
+        spelling (``user_commands["answers"]``), or ``None``.
+
+        Fix round 16 (live run 6): the how-to-close note rode implement's
+        result only, never its summary.md, on either leg. The manual tasks
+        only: a code task skipped with one is not answerable ``done`` and
+        runs on that resume.
+        """
+        template = self.user_commands.get("answers")
+        if self.kind != "implement" or not template or "{answers}" not in template:
+            return None
+        manual = sorted(
+            task_id for task_id in deferred
+            if (self._task_by_id(task_id) or {}).get("executor_role") == "human"
+            or (self._task_by_id(task_id) or {}).get("is_human")
+        )
+        if not manual:
+            return None
+        from .next_phase import manual_close_note
+
+        return manual_close_note(template.replace(
+            "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)))
+
     def _write_summary(self, result: SchedulerResult) -> str:
         """The implementation summary, with the three conditional sections (D3n)."""
         plan_name = Path(self.plan_file).name if self.plan_file else "(plan)"
@@ -8577,10 +8852,7 @@ class WriteBatchScheduler:
                 f"{(row.get('reason') or row.get('summary') or '').replace('|', '/')[:160]} |"
             )
         for task_id, reason in sorted(result.human_plan.accepted.items()):
-            label = (
-                "accepted with its check findings"
-                if ACCEPTED_WITH_FINDINGS_MARK in reason else "accepted after failing"
-            )
+            label = answered_done_label(result.human_plan, task_id)
             lines.append(f"| {task_id} | {label} | — | {reason.replace('|', '/')[:160]} |")
         for task_id in sorted(result.human_plan.completed):
             lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
@@ -8627,6 +8899,9 @@ class WriteBatchScheduler:
             lines += ["| Task | Reason |", "|------|--------|"]
             for task_id, reason in sorted(deferred.items()):
                 lines.append(f"| {task_id} | {reason} |")
+            note = self._manual_close_note(deferred)
+            if note:
+                lines += ["", note]
         if declined:
             # The user's own decision, not work left for them: a pause-and-ask
             # "Skip", a failed task answered `--human-task <id>=skip`, and the
@@ -8946,6 +9221,17 @@ class WriteBatchScheduler:
                         **({"blocked_by_check": dict(sorted(result.blocked_by_check.items()))}
                            if result.blocked_by_check else {}),
                         "accepted_task_ids": sorted(result.human_plan.accepted),
+                        # Fix round 16: which of them are checks accepted with
+                        # their findings, so `status` does not read them
+                        # "accepted after failing" (Codex accept 02).
+                        **({"accepted_with_findings_task_ids": sorted(
+                            task_id for task_id, reason
+                            in result.human_plan.accepted.items()
+                            if ACCEPTED_WITH_FINDINGS_MARK in str(reason or "")
+                        )} if any(
+                            ACCEPTED_WITH_FINDINGS_MARK in str(reason or "")
+                            for reason in result.human_plan.accepted.values()
+                        ) else {}),
                         **({"stop": copy.deepcopy(result.stop)}
                            if result.stop else {}),
                     }

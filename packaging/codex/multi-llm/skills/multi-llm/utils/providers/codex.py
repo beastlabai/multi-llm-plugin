@@ -1135,8 +1135,12 @@ class CodexProvider(LLMProvider):
     # key shapes for the five scripted cases (`tests/fixtures/codex/0.160.0/`
     # keeps three), so the version-lag WARN every run printed was this pin
     # lagging the install. The `web_search_*` / `code_mode_*` fixtures are live
-    # captures no stub can redo; they stay at 0.156.1.
-    verified_version = "0.160.0"
+    # captures no stub can redo; they stay at 0.156.1. 0.160.1 since 2026-10-06
+    # (run 6, #11b, the same WARN on every phase): the rig re-run on the
+    # installed 0.160.1 gave byte-identical streams for the three kept cases
+    # (thread ids aside) and the same event kinds and keys for
+    # `writes_patches_sessions` and `exec_session` (`tests/fixtures/codex/0.160.1/`).
+    verified_version = "0.160.1"
 
     # M14/§5.4.1(a) — the exemption, as data. Each of these was re-verified
     # FUNCTIONALLY (not merely found in help text) at the declared floor above

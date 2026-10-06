@@ -52,7 +52,7 @@ import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from . import process_control, run_registry, status_file
+from . import process_control, run_registry, status_file, stream_bootstrap
 from .cli_common import (
     EXIT_ERROR,
     EXIT_NEEDS_HUMAN,
@@ -1421,6 +1421,13 @@ class RunHandle:
         # exactly that reason (F1, 2026-09-20); nothing may be added here that
         # expects to run after it.
         name = _signal_name(signum)
+        # Every line from here on goes straight to the fd: the signal may
+        # have landed inside a buffered write to the very stream this would
+        # print through, and a second copy may land inside this handler's
+        # own (Codex racing run 6: `RuntimeError: reentrant call` instead of
+        # the `aborted` record). `install_worker_signal_handlers` already
+        # ignores the copies.
+        stream_bootstrap.streams_for_a_signal_handler()
         print(f"\nReceived {name}: aborting this detached run.", file=sys.stderr)
         # First, while the snapshots still name them: the provider CLIs this
         # worker is waiting on, and every process group they spawned. The
