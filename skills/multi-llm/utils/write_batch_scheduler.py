@@ -106,6 +106,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         batch_check_could_not_run,
         batch_check_findings,
         batch_check_words,
+        CHECK_FINDING_MAX_CHARS,
         check_findings_from,
         check_record,
         read_check_reply,
@@ -204,6 +205,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         batch_check_could_not_run,
         batch_check_findings,
         batch_check_words,
+        CHECK_FINDING_MAX_CHARS,
         check_findings_from,
         check_record,
         read_check_reply,
@@ -1082,10 +1084,16 @@ def upstream_held_check(
 
 #: Bounds on the note a task's prompt carries about the checks upstream of it
 #: whose findings the user accepted (:func:`accepted_checks_section`): the
-#: findings are a model's words, so a prompt quotes a few of them, short.
+#: findings are a model's words, so a prompt quotes a few of them. Each one is
+#: quoted whole as recorded (fix round 18, live run 7: the native leg's T007
+#: prompt cut a 211-character finding at 200 with "…", while the executor
+#: routes' shorter findings read whole): a finding is bounded once, where it
+#: is recorded (``check_findings_from``, both legs), and the note's cut is
+#: that same bound, so it only ever shortens a finding written to
+#: ``state.json`` by hand.
 ACCEPTED_NOTE_MAX_CHECKS = 5
 ACCEPTED_NOTE_MAX_FINDINGS = 5
-ACCEPTED_NOTE_FINDING_CHARS = 200
+ACCEPTED_NOTE_FINDING_CHARS = CHECK_FINDING_MAX_CHARS
 ACCEPTED_NOTE_TITLE_CHARS = 80
 
 
