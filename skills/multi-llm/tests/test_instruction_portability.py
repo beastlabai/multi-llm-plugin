@@ -3226,3 +3226,42 @@ class TestCrossCuttingFlagsAreShared:
         assert cli_common.skill_dir().is_absolute()
         assert cli_common.skill_dir() == Path(
             os.path.abspath(str(SKILL_ROOT / "utils" / "..")))
+
+
+class TestDispatcherCommandsRunBare:
+    """Fix round 14 (racing run 5, Claude Code 01/07; old issue #14): the
+    host piped `--reaggregate` through `2>&1 | tail -n 40` and put `sleep 5;`
+    in front of status calls. The shim allowed `tail` as "the only trim";
+    it now says no pipe at all, and the cores say so where the host runs the
+    reaggregate, the run-detached sentence where it repeats the roster call."""
+
+    def test_the_shim_forbids_every_pipe_and_a_sleep_prefix(self):
+        skill = (SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8")
+        assert "`tail` is the only trim" not in skill
+        assert (
+            "Run every dispatcher command bare: no pipe (not even `| tail`), no "
+            "`2>&1`, no `sleep` before it"
+        ) in skill
+        assert "a `3` reads as `0`" in skill
+
+    @pytest.mark.parametrize("core", ["review-plan", "review-tasks", "review-code"])
+    def test_each_reaggregate_block_is_followed_by_the_bare_rule(self, core):
+        text = (SKILL_ROOT / "instructions" / f"{core}.md").read_text(encoding="utf-8")
+        blocks = text.count('--plan-file "$PLAN_PATH" --reaggregate\n')
+        assert blocks >= 1
+        assert text.count(
+            "Run it bare, exactly as shown: no `| tail` or any other pipe, no "
+            "`2>&1`, nothing chained before it."
+        ) == blocks
+
+    def test_the_roster_repeat_waits_with_wait_not_sleep(self):
+        from utils import host_capabilities
+
+        sentence = next(
+            s for s in host_capabilities.verb_sentences("claude-code")
+            if "Run detached" in s
+        )
+        assert (
+            "repeat that one call once if no table printed yet, adding "
+            "`--wait --timeout 10` as the wait (never `sleep` before a call"
+        ) in sentence
