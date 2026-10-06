@@ -49,7 +49,8 @@ Usage::
 
     multi_llm.py util batch-done --phase-dir <dir> --task-id <id> \\
         --status completed|failed [--reason TEXT] [--state-file PATH] \\
-        [--check passed|findings|could-not-run [--finding TEXT ...]]
+        [--check passed|findings|could-not-run [--finding TEXT ...]] \\
+        [--own-check passed|findings [--finding TEXT ...]]
 
 ``--check`` is a check task's structured result (an implement task that
 declares no files; its reply's ``check`` object): ``findings`` records each
@@ -69,9 +70,14 @@ defaults to saying so), never as findings; a ``failed`` reply that lists
 findings without it ran, and is recorded ``--status completed --check
 findings``. A batch that edits code (implement's tasks that declare files,
 apply-code-fixes' batches; fix round 14) records the checks it ran on its
-own edits the same way, ``--check passed|findings``: a failing one prints a
+own edits with ``--own-check passed|findings``: a failing one prints a
 ``[BATCH_CHECK_FAILED]`` line telling the host to list it in summary.md and
-report it, and holds nothing back.
+report it, and holds nothing back. ``--check`` on such a batch is refused,
+naming the ``--own-check`` call (fix round 18, live run 7: Claude Code
+recorded ``--check passed`` for T008, a "check" task that declares
+``index.html``, and its summary then called the code task ``Verified``), and
+``--own-check`` on a check task is refused naming ``--check``: the two words
+are two kinds of task, and the plugin says which one the host has.
 
 Import is side-effect free: argparse and all I/O live inside :func:`main`.
 """
@@ -82,11 +88,14 @@ import argparse
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
     from . import prior_changes as _prior_changes
-    from .metrics import _read_state, _write_state, state_file_lock
+    from .metrics import (
+        _read_state, _write_state, restore_to_progress_in_state,
+        state_file_lock, withdraw_from_progress_in_state,
+    )
     from .state_manager import (
         TASK_RESET_AT_KEY,
         _parse_completion_time,
@@ -98,7 +107,7 @@ try:
     )
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import check_findings_from
-    from .subagent_tasks import PHASE_BY_WRITE_KIND
+    from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
@@ -118,7 +127,10 @@ try:
     )
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
-    from utils.metrics import _read_state, _write_state, state_file_lock  # type: ignore
+    from utils.metrics import (  # type: ignore
+        _read_state, _write_state, restore_to_progress_in_state,
+        state_file_lock, withdraw_from_progress_in_state,
+    )
     from utils.state_manager import (  # type: ignore
         TASK_RESET_AT_KEY,
         _parse_completion_time,
@@ -130,7 +142,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import check_findings_from  # type: ignore
-    from utils.subagent_tasks import PHASE_BY_WRITE_KIND  # type: ignore
+    from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
@@ -151,6 +163,8 @@ except ImportError:  # pragma: no cover - direct script invocation
 
 
 __all__ = [
+    "BATCH_DECLINED_MARKER",
+    "BATCH_SKIPPED_MARKER",
     "CHECK_BLOCKED_MARKER",
     "CHECK_RESULTS",
     "MARKER",
@@ -167,6 +181,18 @@ MARKER = "[BATCH_DONE]"
 
 #: The line naming the tasks a check with findings holds back (stdout).
 CHECK_BLOCKED_MARKER = "[CHECK_BLOCKED]"
+
+#: Fix round 18: one line per item an apply batch declined with a reason
+#: (``--declined``), and per item the user chose to skip when the batch was
+#: kept as it stood (``--skipped``) — both recorded, neither applied.
+BATCH_DECLINED_MARKER = "[BATCH_DECLINED]"
+BATCH_SKIPPED_MARKER = "[BATCH_SKIPPED]"
+
+#: The reason ``--skipped`` records for an item.
+SKIPPED_REASON = (
+    "skipped at your request: the batch did not report it applied, and you "
+    "chose to keep the batch as it stood"
+)
 
 #: The first line of a refused native ``--resume`` (stderr).
 RESUME_REFUSED_MARKER = "[RESUME_REFUSED]"
@@ -186,6 +212,12 @@ _ITEM_STATUS = {"completed": "applied", "failed": "failed"}
 #: object (``passed: true`` and no finding, problems found, or — fix round
 #: 12 — ``could_not_run: true``).
 CHECK_RESULTS = ("passed", "findings", "could-not-run")
+
+#: ``--own-check``'s words: what a code batch's reply said in its ``check``
+#: object about the checks it ran on its own edits (fix round 18). A code
+#: batch has no ``could-not-run``: a check of its own that could not run is
+#: one of its findings.
+OWN_CHECK_RESULTS = ("passed", "findings")
 
 #: The reason ``--check could-not-run`` records when ``--reason`` gives none.
 COULD_NOT_RUN_REASON = (
@@ -248,19 +280,37 @@ def record_batch(
     state_file: Optional[Path] = None,
     check: Optional[str] = None,
     findings: Optional[List[str]] = None,
+    own_check: Optional[str] = None,
+    declined: Optional[List[str]] = None,
+    skipped: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Record *task_id*'s outcome; the ``{task_id, status, items, state_file,
     check_findings}`` written.
+
+    *declined* (``<id>=<reason>`` each) and *skipped* (ids) are an apply
+    batch's items it did not apply (fix round 18): the items its reply
+    declined with a reason, and the items the user chose to skip when a
+    batch whose reply left them out was kept as it stood. Each is recorded in
+    ``processed_<phase>`` as ``declined`` / ``skipped`` with its reason —
+    never ``applied`` — so a ``--resume`` does not hand it out again and
+    every reader can name it. Only with ``--status completed``, only for an
+    item of this batch, and never for ``implement`` (a task its subagent
+    will not do is ``--status failed``).
 
     *check* / *findings* are a check task's structured result (its reply's
     ``check`` object, racing re-run 4): ``findings`` records them in
     ``state.json``'s ``task_check_findings`` beside a ``completed`` status,
     as the executor leg does; every other record of an implement task clears
-    that task's entry.
+    that task's entry. *own_check* / *findings* are a code batch's report of
+    the checks it ran on its own edits (fix round 14; its own flag since fix
+    round 18): a failing one is recorded beside the status
+    (``task_batch_check``) and holds nothing back.
 
     Raises :class:`WritePromptError` (exit 3) for a missing task file, an
     unknown id, a human task, a status outside :data:`STATUSES`, or a check
-    result that does not fit the task or the status.
+    result that does not fit the task or the status — ``--check`` on a task
+    that is not a check task included, naming the call to make instead.
+    Nothing is recorded on a refusal.
     """
     if status not in STATUSES:
         raise WritePromptError(
@@ -270,10 +320,30 @@ def record_batch(
         raise WritePromptError(
             f"--check must be one of {', '.join(CHECK_RESULTS)}, not {check!r}."
         )
-    if findings and check != "findings":
+    if own_check is not None and own_check not in OWN_CHECK_RESULTS:
         raise WritePromptError(
-            "--finding is recorded only with --check findings: pass "
-            "--check findings and one --finding per problem the check reported."
+            f"--own-check must be one of {', '.join(OWN_CHECK_RESULTS)}, not "
+            f"{own_check!r}."
+        )
+    if check is not None and own_check is not None:
+        raise WritePromptError(
+            "Pass --check or --own-check, not both: --check records a check "
+            "task's verdict (an implement task that declares no files), "
+            "--own-check the checks a task that edits files ran on its own "
+            "edits. Nothing was recorded."
+        )
+    if findings and check != "findings" and own_check != "findings":
+        raise WritePromptError(
+            "--finding is recorded only with --check findings (a check task) "
+            "or --own-check findings (a task that edits files): pass one of "
+            "them and one --finding per problem the check reported."
+        )
+    if own_check == "findings" and status != "completed":
+        raise WritePromptError(
+            "--own-check findings is recorded with --status completed: the "
+            "task's edits are kept and the check it ran on them is reported "
+            "as failing. A task that failed is recorded --status failed "
+            "(with --reason), without --own-check. Nothing was recorded."
         )
     if check == "findings" and status != "completed":
         raise WritePromptError(
@@ -301,6 +371,7 @@ def record_batch(
             f"{phase_dir / WRITE_TASK_FILENAME} is a {kind!r} task file, not a "
             f"write phase's (known: {', '.join(PHASE_BY_WRITE_KIND)})."
         )
+    not_applied = _not_applied_items(task_id, task, kind, status, declined, skipped)
     if task.get("is_human") or str(task.get("executor_role") or "") == "human":
         raise WritePromptError(
             f"Task {task_id} is a human task: it never dispatches to a "
@@ -308,22 +379,31 @@ def record_batch(
             f"through the phase's human-task strategy instead."
         )
     checking = is_check_task(kind, task)
+    flag = "--check" if check is not None else "--own-check"
+    if (check is not None or own_check is not None) and kind not in CODE_WRITE_KINDS:
+        raise WritePromptError(
+            f"Task {task_id} edits the plan or the task list, not code, "
+            f"so it has no check result: record it without {flag}. Nothing "
+            f"was recorded."
+        )
     if check is not None and not checking:
-        # Fix round 14: a code batch reports the checks it ran on its own
-        # edits in the same `check` object; a plan or task-list batch has none.
-        if kind not in CODE_WRITE_KINDS:
-            raise WritePromptError(
-                f"Task {task_id} edits the plan or the task list, not code, "
-                f"so it has no check result: record it without --check."
-            )
-        if check == "could-not-run":
-            raise WritePromptError(
-                f"Task {task_id} is not a check task (a check task is an "
-                f"implement task that declares no files): its reply's `check` "
-                f"reports the checks it ran on its own edits, so record --check "
-                f"passed, or --check findings with one --finding per failing "
-                f"check, or leave --check out when it reported none."
-            )
+        # Fix round 18 (live run 7, Claude Code racing 06): `--check passed`
+        # was accepted for T008, which declares index.html, and the host's
+        # summary called the code task `Verified`. A code batch's own checks
+        # are `--own-check` (fix round 14 spelled them `--check` too).
+        raise WritePromptError(
+            _not_a_check_task_message(phase_dir, task_id, task, kind, status)
+        )
+    if own_check is not None and checking:
+        raise WritePromptError(
+            f"{task_id} declares no files, so it is a check task: its reply's "
+            f"`check` is its verdict. Record it with --check instead of "
+            f"--own-check: util batch-done --phase-dir \"{phase_dir}\" "
+            f"--task-id {task_id} --status completed --check passed (or "
+            f"--check findings with one --finding per problem, or --status "
+            f"failed --check could-not-run when its check could not run). "
+            f"Nothing was recorded."
+        )
     if checking and status == "completed":
         changed = changed_since_bound(
             phase_dir, task_id,
@@ -337,14 +417,14 @@ def record_batch(
     if check == "could-not-run":
         reason = reason or COULD_NOT_RUN_REASON
     elif check is not None:
-        read = check_findings_from({
+        check_findings = check_findings_from({
             "check": {"passed": check == "passed", "findings": list(findings or [])}
         }) or []
-        if checking:
-            check_findings = read
-        else:
-            # A code batch's own check: reported, never a hold (fix round 14).
-            batch_check = read
+    elif own_check is not None:
+        # A code batch's own check: reported, never a hold (fix round 14).
+        batch_check = check_findings_from({
+            "check": {"passed": own_check == "passed", "findings": list(findings or [])}
+        }) or []
     # The tree a check with findings leaves (fix round 14): a native
     # `--resume` hands the check out again only once the files moved since,
     # as the executor does from its verdict's stamp. `util finalize-tracking`
@@ -377,6 +457,7 @@ def record_batch(
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )
+            _settle_eta_total(state, document, task_id, status, reason, blocked)
         tracked = _tracked_after_batch(state, target, kind)
         if tracked is not None:
             state["tracked_files"] = tracked
@@ -391,9 +472,18 @@ def record_batch(
                 item_id = str(item_id)
                 if not item_id:
                     continue
-                mark_item_processed_in_state(
-                    state, phase_word, item_id, _ITEM_STATUS[status], details
-                )
+                if item_id in not_applied:
+                    # Fix round 18: declined by the batch, or skipped at the
+                    # user's request — recorded with its reason, never applied.
+                    word, why = not_applied[item_id]
+                    mark_item_processed_in_state(
+                        state, phase_word, item_id, word,
+                        {**details, "reason": why},
+                    )
+                else:
+                    mark_item_processed_in_state(
+                        state, phase_word, item_id, _ITEM_STATUS[status], details
+                    )
                 items.append(item_id)
         state["updated_at"] = datetime.now().isoformat()
         _write_state(target, state)
@@ -406,7 +496,103 @@ def record_batch(
         "state_file": str(target), "check_findings": check_findings or [],
         "batch_check": batch_check or [],
         "blocked": blocked,
+        "declined": {
+            item: why for item, (word, why) in not_applied.items()
+            if word == "declined"
+        },
+        "skipped": {
+            item: why for item, (word, why) in not_applied.items()
+            if word == "skipped"
+        },
     }
+
+
+def _not_a_check_task_message(
+    phase_dir: Path, task_id: str, task: Dict[str, Any], kind: str, status: str,
+) -> str:
+    """The refusal of ``--check`` for a task that edits code (fix round 18):
+    what the task is, and the call that records it."""
+    files = snapshot_file_set(task)
+    shown = ", ".join(files[:5]) + (f" (+{len(files) - 5} more)" if len(files) > 5 else "")
+    what = (
+        f"{task_id} declares files ({shown}), so it is a code task, not a "
+        f"check task (a check task is an implement task that declares no "
+        f"files)" if kind == "implement" and shown else
+        f"{task_id} is an apply-code-fixes batch, so it is a code task, not a "
+        f"check task (a check task is an implement task that declares no "
+        f"files)" if kind != "implement" else
+        f"{task_id} is a code task, not a check task"
+    )
+    call = f"util batch-done --phase-dir \"{phase_dir}\" --task-id {task_id}"
+    if status == "completed":
+        instead = (
+            f"Record the checks its subagent ran on its own edits with "
+            f"--own-check instead: {call} --status completed --own-check passed "
+            f"when its reply's `check` says \"passed\": true, or --own-check "
+            f"findings with one --finding per failing check; leave --own-check "
+            f"out when its reply carries no `check`."
+        )
+    else:
+        instead = (
+            f"A code task that failed is recorded without a check result: "
+            f"{call} --status failed --reason \"<why it failed>\"."
+        )
+    return (
+        f"{what}, and --check records only a check task's verdict. {instead} "
+        f"Nothing was recorded."
+    )
+
+
+def _not_applied_items(
+    task_id: str,
+    task: Dict[str, Any],
+    kind: str,
+    status: str,
+    declined: Optional[List[str]],
+    skipped: Optional[List[str]],
+) -> Dict[str, Tuple[str, str]]:
+    """``{item id: ("declined" | "skipped", reason)}`` from ``--declined`` /
+    ``--skipped``, checked against the batch (fix round 18); raises
+    :class:`WritePromptError` naming the problem."""
+    if not declined and not skipped:
+        return {}
+    if kind not in APPLY_WRITE_KINDS:
+        raise WritePromptError(
+            f"Task {task_id} is an implement task: a task its subagent will not "
+            f"do is recorded --status failed --reason \"<why>\", for the user "
+            f"to answer with --human-task {task_id}=skip|done. --declined and "
+            f"--skipped are for an apply batch's items."
+        )
+    if status != "completed":
+        raise WritePromptError(
+            "--declined and --skipped record the items a finished batch did not "
+            "apply: pass them with --status completed."
+        )
+    expected = [str(i) for i in (task.get("expected_ids") or [])]
+    out: Dict[str, Tuple[str, str]] = {}
+    for value in declined or []:
+        item, sep, why = str(value).partition("=")
+        item, why = item.strip(), " ".join(why.split())
+        if not sep or not item or not why:
+            raise WritePromptError(
+                f"--declined expects <id>=<the reason the batch gave>, got "
+                f"{value!r}: a decline without its reason is not recorded."
+            )
+        out[item] = ("declined", why[:300])
+    for value in skipped or []:
+        item = str(value).strip()
+        if item in out:
+            raise WritePromptError(
+                f"{item} is given to both --declined and --skipped: record it once."
+            )
+        out[item] = ("skipped", SKIPPED_REASON)
+    unknown = [item for item in out if item not in expected]
+    if unknown:
+        raise WritePromptError(
+            f"{', '.join(unknown)} {'is' if len(unknown) == 1 else 'are'} not an "
+            f"item of {task_id} (its items: {', '.join(expected) or 'none'})."
+        )
+    return out
 
 
 def _changed_a_file_message(phase_dir: Path, task_id: str, changed: List[str]) -> str:
@@ -426,6 +612,62 @@ def _changed_a_file_message(phase_dir: Path, task_id: str, changed: List[str]) -
         f"write-prompt --phase-dir \"{phase_dir}\" --task-id {task_id} and run "
         f"the check again. Nothing was recorded."
     )
+
+
+#: How a ``--reason`` starts when ``util write-prompt`` refused the task, so
+#: no subagent ran it (``[WRITE_PROMPT_REFUSED]`` prints the record to make).
+REFUSED_BEFORE_DISPATCH_REASON = "refused before dispatch"
+
+
+def _settle_eta_total(
+    state: Dict[str, Any], document: Dict[str, Any], task_id: str,
+    status: str, reason: Optional[str], held: List[str],
+) -> None:
+    """Take out of this run's ``[ETA]`` total the handed-out tasks this record
+    keeps from being dispatched (fix round 18, live run 7 #2).
+
+    The native emit's ``tasks_to_dispatch`` — what the host passes as
+    ``--total-batches``, one ``util metrics record`` per task it dispatches —
+    counts every task in the batches, a task waiting on a check's verdict
+    included. A record that settles one of them as never dispatched in this
+    run takes it out (``metrics.withdraw_from_progress_in_state``):
+
+    * the tasks a check with findings holds (*held*, the ``[CHECK_BLOCKED]``
+      list);
+    * after a ``failed`` record, every task that depends on it and has no
+      record yet — the host skips them (``instructions/implement.md`` step
+      6) — and the task itself when ``util write-prompt`` refused it, since
+      no subagent ran.
+
+    Only tasks of this phase's ``write_tasks.json`` (what was handed out) and
+    never a manual task (``tasks_to_dispatch`` does not count one). A record
+    of the same task again first puts back what its earlier record took out.
+    Nothing happens when the host never ran ``util metrics start``.
+    """
+    phase = PHASE_BY_WRITE_KIND.get(str(document.get("kind") or ""), "implement")
+    restore_to_progress_in_state(state, phase, task_id)
+    handed = {
+        str(task.get("task_id") or ""): task
+        for task in (document.get("batches") or document.get("tasks") or [])
+        if isinstance(task, dict)
+    }
+
+    def manual(task: Dict[str, Any]) -> bool:
+        return bool(task.get("is_human")) or str(task.get("executor_role") or "") == "human"
+
+    out = [t for t in held if t in handed and not manual(handed[t])]
+    if status == "failed":
+        if str(reason or "").strip().lower().startswith(REFUSED_BEFORE_DISPATCH_REASON):
+            out.append(task_id)
+        statuses = state.get("task_status") or {}
+        graph = decomposition_graph(list(handed.values()), state)
+        for dependent in transitive_dependents(graph, task_id):
+            task = handed.get(dependent)
+            if task is None or manual(task):
+                continue
+            if statuses.get(dependent) in (None, "pending"):
+                out.append(dependent)
+    withdraw_from_progress_in_state(state, phase, out, task_id)
 
 
 def _hold_or_release_dependents(
@@ -624,17 +866,38 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--check", default=None, choices=CHECK_RESULTS,
-        help="For a check task (an implement task that declares no files): "
-             "its reply's check result — passed, findings (the check ran "
-             "and reported problems; recorded with --status completed), or "
-             "could-not-run (its check said could_not_run: true; recorded "
-             "with --status failed). For a batch that edits code (implement, "
-             "apply-code-fixes): the checks it ran on its own edits, passed "
-             "or findings, with --status completed.",
+        help="For a check task (an implement task that declares no files) "
+             "only: its reply's check result — passed, findings (the check "
+             "ran and reported problems; recorded with --status completed), "
+             "or could-not-run (its check said could_not_run: true; recorded "
+             "with --status failed). A task that edits files takes "
+             "--own-check instead.",
+    )
+    parser.add_argument(
+        "--own-check", default=None, choices=OWN_CHECK_RESULTS, dest="own_check",
+        help="For a task that edits files (an implement task that declares "
+             "files, an apply-code-fixes batch): the checks its subagent ran "
+             "on its own edits, from its reply's check object — passed, or "
+             "findings (one --finding per failing check), with --status "
+             "completed. Never --check on such a task.",
     )
     parser.add_argument(
         "--finding", action="append", default=None, metavar="TEXT",
-        help="One problem a check reported (repeatable; with --check findings).",
+        help="One problem a check reported (repeatable; with --check findings "
+             "or --own-check findings).",
+    )
+    parser.add_argument(
+        "--declined", action="append", default=None, metavar="ID=REASON",
+        help="An apply batch's item its reply declined, with the reason it "
+             "gave (repeatable; with --status completed): recorded as not "
+             "applied, never as applied.",
+    )
+    parser.add_argument(
+        "--skipped", action="append", default=None, metavar="ID",
+        help="An apply batch's item its reply left out of both ids and "
+             "declined, which the user chose to skip, keeping the batch as it "
+             "stood (repeatable; with --status completed): recorded as not "
+             "applied, skipped at the user's request.",
     )
     return parser
 
@@ -650,6 +913,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             state_file=Path(args.state_file) if args.state_file else None,
             check=args.check,
             findings=args.finding,
+            own_check=args.own_check,
+            declined=args.declined,
+            skipped=args.skipped,
         )
     except WritePromptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -672,6 +938,20 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"## Check Findings in the phase's summary.md, and say in your "
             f"final report that this check fails: never report the phase as a "
             f"clean success."
+        )
+    for item, why in (written.get("declined") or {}).items():
+        # Fix round 18: never applied, and never silent.
+        print(
+            f"{BATCH_DECLINED_MARKER} {written['task_id']} {item}: not applied, "
+            f"the batch declined it — {why}. List it in the phase's summary.md "
+            f"as not applied, with this reason, and name it in your report; "
+            f"never count it as applied."
+        )
+    for item, why in (written.get("skipped") or {}).items():
+        print(
+            f"{BATCH_SKIPPED_MARKER} {written['task_id']} {item}: not applied, "
+            f"{why}. List it in the phase's summary.md as not applied, skipped "
+            f"at the user's request, and name it in your report."
         )
     blocked = written.get("blocked") or []
     if blocked:

@@ -365,6 +365,22 @@ def build_common_arg_parser(
         ),
     )
 
+    parser.add_argument(
+        "--human-task",
+        action="append",
+        default=None,
+        metavar="BATCH=skip",
+        help=(
+            "With --resume and --exec-subagents, answer a batch that stopped "
+            "as a partial application because its report left items out "
+            "(the stop names it): --human-task apply-fix-batch-1=skip keeps "
+            "what that batch applied as it stands, records each item it did "
+            "not report applied as skipped at your request (never counted "
+            "as applied), and goes on with the batches after it. Refused "
+            "when the files it changed no longer hold what it left."
+        ),
+    )
+
     # --- Batch Review Mode ---
     parser.add_argument(
         "--batch-review-mode",
@@ -819,6 +835,83 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # Phase 1 — _setup
     # ==================================================================
 
+    def _batch_answers(self) -> List[str]:
+        """The batches answered ``--human-task <batch>=skip``, checked (fix round 18).
+
+        An apply phase takes only ``skip``, only on ``--resume`` and only on
+        the ``--exec-subagents`` leg, whose own stop record the answer is
+        checked against (``WriteBatchScheduler._check_partial_skips``). The
+        native leg's host records such a batch itself (``util batch-done
+        --skipped``). Anything else is exit 3, before any work.
+        """
+        values = getattr(self.args, "human_task", None) or []
+        if not values:
+            return []
+        word = self.confirmation_phase_name or self.phase_name
+        problems: List[str] = []
+        try:
+            decisions = _unattended.parse_human_task_decisions(values)
+        except _unattended.NeedsHuman as exc:
+            decisions = {}
+            problems.append(str(exc).replace("ERROR: ", "", 1).strip())
+        for task_id, action in decisions.items():
+            if action != "skip":
+                problems.append(
+                    f"--human-task {task_id}={action}: an apply batch takes "
+                    f"only =skip (keep what a stopped batch applied and go on "
+                    f"without the items it left out)"
+                )
+        if not getattr(self.args, "resume", False):
+            problems.append(
+                "--human-task answers a stopped batch, so it needs --resume"
+            )
+        if not getattr(self.args, "exec_subagents", False):
+            problems.append(
+                "--human-task answers a batch the --exec-subagents leg stopped; "
+                "on this leg the batch loop is yours, and a batch kept as it "
+                "stands is recorded with util batch-done --skipped <id>"
+            )
+        if problems:
+            for line in problems:
+                print(f"ERROR: {line}", file=sys.stderr)
+            print(
+                f"       Nothing was changed. The {word} stop names the answer "
+                f"it takes and the command that carries it.",
+                file=sys.stderr,
+            )
+            raise OrchestratorError(
+                f"Phase _setup, step 6b: --human-task refused: {problems[0]}",
+                exit_code=3,
+            )
+        return sorted(decisions)
+
+    def _stop_user_commands(self) -> Dict[str, str]:
+        """The stop's answer in this host's own spelling (fix round 18):
+        ``skip``, the resume carrying ``--human-task {task_id}=skip``. Empty
+        when nothing can be spelled; the stop then names the flags."""
+        try:
+            from . import detach as _detach
+            from . import host_capabilities as _hosts
+            from . import next_phase as _next
+
+            host_id = _hosts.resolve_host_id(explicit=getattr(self.args, "host", None))
+            route = _next.resolve_route(host_id)
+            handle = _detach.active_run()
+            plan_arg = (
+                (handle.plan_arg if handle is not None else None)
+                or os.environ.get(_detach.PLAN_ARG_ENV)
+                or str(self.args.plan_file)
+            )
+            word = self.confirmation_phase_name or self.phase_name
+            return {
+                "skip": _next.phase_command(
+                    plan_arg, host_id, route, word,
+                    "--resume", "--human-task", "{task_id}=skip",
+                ),
+            }
+        except Exception:  # noqa: BLE001 - advisory: the flags are named instead
+            return {}
+
     def _setup(self) -> None:
         """Phase 1: Environment and argument validation.
 
@@ -951,6 +1044,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     "Phase _setup, step 6: --approve-all requires --yes or --force",
                     exit_code=1,
                 )
+
+        # Step 6b (fix round 18): `--human-task <batch>=skip` answers a stopped
+        # partial application on the executor leg's resume, and nothing else.
+        self.partial_skips = self._batch_answers()
 
         # Step 7: Deprecation warnings
         if getattr(self.args, "skip_human_review", False):
@@ -2594,12 +2691,58 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         :meth:`_phase_rows`, the rows the report lists, so the count lines
         agree with the table under them.
         """
-        counts = {"applied": 0, "no-op": 0, "clean-failure": 0}
+        counts = {
+            "applied": 0, "no-op": 0, "clean-failure": 0,
+            "declined": 0, "skipped": 0,
+        }
         for row in rows:
             verdict = row.get("write_outcome")
             if self._row_ok(row) and verdict in counts:
-                counts[verdict] += len(self._row_item_ids(row))
+                # Fix round 18: an item its batch declined, or one skipped at
+                # the user's request, is never counted under the batch's
+                # verdict (an `applied` batch did not apply it).
+                declined, skipped = self._row_not_applied(row)
+                counts[verdict] += len([
+                    item for item in self._row_item_ids(row)
+                    if item not in declined and item not in skipped
+                ])
+                counts["declined"] += len(declined)
+                counts["skipped"] += len(skipped)
         return counts
+
+    def _not_applied_lines(self, rows: List[Dict[str, Any]]) -> List[str]:
+        """One plain line per item a finished batch did not apply on purpose
+        (fix round 18): ``<title> [<id8>] (fix 2 of apply-fix-batch-1) not
+        applied: the batch declined it — <reason>``, and the same for an item
+        skipped at the user's request. Over the finished (``ok``) rows only:
+        a stopped batch is dispatched again."""
+        word = "fix" if self.write_kind == "apply_code_fixes" else "suggestion"
+        lines: List[str] = []
+        for row in rows:
+            if not self._row_ok(row):
+                continue
+            declined, skipped = self._row_not_applied(row)
+            if not declined and not skipped:
+                continue
+            item_ids = self._row_item_ids(row)
+            titles = {
+                member: str(item.get("title") or item.get("theme") or "").strip()
+                for member, item in self._row_items_with_ids(row, item_ids)
+                if member
+            }
+            for member in item_ids:
+                if member in declined:
+                    why = f"the batch declined it — {declined[member]}"
+                elif member in skipped:
+                    why = f"skipped at your request — {skipped[member]}"
+                else:
+                    continue
+                title = titles.get(member) or "Untitled"
+                lines.append(
+                    f"{title} [{member[:8]}] ({word} {item_ids.index(member) + 1} "
+                    f"of {row.get('task_id')}) not applied: {why}"
+                )
+        return lines
 
     def print_write_outcome_summary(self) -> None:
         """Report what the batch loop DID, plus the decision summary.
@@ -2638,6 +2781,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             + self._rows_provenance_note(rows)
         )
         print(f"{self.item_noun_plural.capitalize()} applied: {item_counts['applied']}")
+        if item_counts["declined"]:
+            print(
+                f"{self.item_noun_plural.capitalize()} declined by their batch "
+                f"(not applied): {item_counts['declined']}"
+            )
+        if item_counts["skipped"]:
+            print(
+                f"{self.item_noun_plural.capitalize()} skipped at your request "
+                f"(not applied): {item_counts['skipped']}"
+            )
         if item_counts["no-op"]:
             print(f"{self.item_noun_plural.capitalize()} needing no changes: {item_counts['no-op']}")
         if item_counts["clean-failure"]:
@@ -2680,6 +2833,11 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 reason = row.get("reason")
                 if reason:
                     print(f"      reason: {reason}")
+            not_applied = self._not_applied_lines(rows)
+            if not_applied:
+                print(f"\n{self.item_noun_plural.capitalize()} not applied:")
+                for line in not_applied:
+                    print(f"  - {line}")
 
         for warning in self.consistency_warnings():
             print(f"\n[CONSISTENCY_WARNING] {warning}")
@@ -2742,6 +2900,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         notes = [
             f"consistency warning: {warning}" for warning in self.consistency_warnings()
         ]
+        # Fix round 18: an item a batch declined (or one skipped at the
+        # user's request) is named with its reason, never only counted.
+        notes.extend(self._not_applied_lines(self._phase_rows()))
         skipped = list(self.formatted_skipped or [])
         if skipped:
             applied = self._write_item_counts(self._phase_rows())["applied"]
@@ -2915,16 +3076,40 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
         else the items found by member id: an earlier run's row whose
         positional id now names another batch.
         """
+        return [item for _member, item in self._row_items_with_ids(row, item_ids)]
+
+    def _row_items_with_ids(
+        self, row: Dict[str, Any], item_ids: List[str]
+    ) -> List[Tuple[Optional[str], Dict[str, Any]]]:
+        """:meth:`_row_items` with each item's own id beside it (fix round 18:
+        a declined item is named by its id on the row). ``None`` for an item
+        whose id cannot be told."""
         task_id = str(row.get("task_id", ""))
         for task, batch in zip(self.write_tasks, self.batches):
             if str(task.get("task_id", "")) != task_id or not isinstance(batch, dict):
                 continue
             task_ids = [str(i) for i in task.get("expected_ids") or []]
             if not row.get("expected_ids") or sorted(task_ids) == sorted(item_ids):
-                return self._batch_member_items(batch)
+                members = self._batch_member_items(batch)
+                return [
+                    (task_ids[index] if index < len(task_ids) else None, item)
+                    for index, item in enumerate(members)
+                ]
             break
         by_id = self._items_by_member_id()
-        return [by_id[i] for i in item_ids if i in by_id]
+        return [(i, by_id[i]) for i in item_ids if i in by_id]
+
+    @staticmethod
+    def _row_not_applied(row: Dict[str, Any]) -> Tuple[Dict[str, str], Dict[str, str]]:
+        """``(declined, skipped)``: a row's items its batch declined and the
+        items a ``--human-task <id>=skip`` answer recorded as skipped at the
+        user's request, each ``{id: reason}`` (fix round 18). Never applied."""
+        from .subagent_executor import row_declined
+
+        return (
+            row_declined(row),
+            row_declined({"declined": row.get("skipped_items")}),
+        )
 
     def write_apply_summary_report(self) -> Optional[str]:
         """Write ``{phase}/summary.md`` — the report the instructions promise (F3).
@@ -2995,6 +3180,16 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             f"- Batches processed: {len(ok)}/{len(rows)}"
             + self._rows_provenance_note(rows),
             f"- {nouns.capitalize()} applied: {item_counts['applied']}",
+            *(
+                [f"- {nouns.capitalize()} declined by their batch (not "
+                 f"applied): {item_counts['declined']}"]
+                if item_counts["declined"] else []
+            ),
+            *(
+                [f"- {nouns.capitalize()} skipped at your request (not "
+                 f"applied): {item_counts['skipped']}"]
+                if item_counts["skipped"] else []
+            ),
             f"- {nouns.capitalize()} skipped: {len(self.formatted_skipped)}",
             f"- Decided by the judge agent: {len(decided)}"
             + self._judge_breakdown(decided),
@@ -3041,7 +3236,9 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     f"**Duration**: {float(row.get('duration_seconds') or 0.0):.1f}s  "
                     f"**Runner**: {row.get('runner') or '(none)'}"
                 )
-                items = self._row_items(row, item_ids)
+                members = self._row_items_with_ids(row, item_ids)
+                items = [item for _member, item in members]
+                declined, skipped = self._row_not_applied(row)
                 if not items and item_ids and row.get("from_earlier_run"):
                     # An earlier batch whose items this run no longer selects:
                     # its ids are all that is left to name them by.
@@ -3055,9 +3252,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         "clean-failure": "No verified changes",
                         "partial-application": "Partial application; inspect batch",
                     }.get(verdict, "Not applied")
-                    for item_index, item in enumerate(items, 1):
+                    for item_index, (member, item) in enumerate(members, 1):
                         item_title = item.get("title") or item.get("theme") or "Untitled"
-                        lines.append(f"{item_index}. **{item_title}** - {item_status}")
+                        # Fix round 18: an item its batch declined (or one
+                        # skipped at your request) says so, with the reason,
+                        # never the batch's own verdict.
+                        own_status = (
+                            f"Not applied: the batch declined it — {declined[member]}"
+                            if member in declined else
+                            f"Not applied: skipped at your request — {skipped[member]}"
+                            if member in skipped else item_status
+                        )
+                        lines.append(f"{item_index}. **{item_title}** - {own_status}")
                         file_path = item.get("file")
                         if file_path:
                             line_range = item.get("line_range") or []
@@ -3319,6 +3525,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 resume=not fresh,
                 dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
                 write_target=write_target,
+                # Fix round 18: the stopped batches answered `=skip`, and the
+                # answer the stop offers, in this host's spelling.
+                partial_skips=getattr(self, "partial_skips", None) or None,
+                user_commands=self._stop_user_commands(),
             )
         except (ExecutorError, WriteSafetyError) as exc:
             # A target that cannot be granted (gone, a symlink, not a regular
@@ -3337,9 +3547,18 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
             print(f"[write-subagents] report: {result.report_path}")
         # Fix round 14: a batch whose own check failed after its edits, and
         # a code phase nothing verified, are on the result line a host relays.
-        from .cli_common import record_notice
+        from .cli_common import record_error, record_notice
         from .write_batch_scheduler import write_result_notice
 
+        stop = getattr(result, "stop", None) or {}
+        if stop.get("headline"):
+            # Fix round 18 (live run 7, Codex racing 08): an apply phase's
+            # stop left the result line with no `error`, so the tool's
+            # needs-human message said "Its result line names no error" and
+            # the host relayed only the resume command — not what stopped,
+            # what the batch reported or what did not run. The headline is
+            # that line, as implement records it.
+            record_error(stop["headline"])
         notice = write_result_notice(result)
         if notice:
             record_notice(notice)

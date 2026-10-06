@@ -97,7 +97,10 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     the lookup also printed `[NEXT_COMMAND_ANSWERS_WHY]` /
     `[NEXT_COMMAND_ANSWERS]` (`user_next_step.answers`: a stopped implement's
     one command carrying every `--human-task` answer it waits for), write that
-    why as plain text and that command alone in its own fenced block, last. When
+    why as plain text and that command alone in its own fenced block, last. A
+    stopped implement's lookup can also print a `[TESTS_NOT_RUN]` line above
+    them, saying nothing ran the repository's tests: give its text verbatim in
+    the report, above `### Next Steps`; it is never a command. When
     `complete` is `true` (its `command` is then `null`), write
     "Workflow complete." instead, and when it carries `manual_tasks`, list
     each one under it, its `id` and `title`, as the user's to do: implement
@@ -106,6 +109,8 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     `[MANUAL_TASK]` lines below `[WORKFLOW_COMPLETE]` are the same tasks, and
     such a line says what it waits on), then its `manual_tasks_note`
     (the `[MANUAL_TASK_NOTE]` line) verbatim: it says how to record them done.
+    Give the note as plain text, never inside a fenced block: a fence holds one
+    command alone, and the note is a sentence that carries one.
     A `user_next_step` that names a `command` can carry `manual_tasks` and
     `manual_tasks_note` too, while the run's manual tasks are still owed (on
     Claude Code the same lines follow the `[NEXT_COMMAND]` block): list them

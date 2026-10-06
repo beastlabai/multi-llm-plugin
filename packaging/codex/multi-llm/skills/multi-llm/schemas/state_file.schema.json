@@ -164,7 +164,7 @@
       "additionalProperties": {
         "type": "object",
         "properties": {
-          "status": { "type": "string", "enum": ["applied", "skipped", "failed"] },
+          "status": { "type": "string", "enum": ["applied", "skipped", "failed", "declined"] },
           "details": { "type": "object" },
           "timestamp": { "type": "string", "format": "date-time" }
         },

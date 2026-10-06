@@ -961,6 +961,12 @@ def _start_over(
     The prompts kept in ``{phase}/prompts/`` are removed
     (:func:`_remove_kept_prompts`), and implement is recorded started on both
     legs, as the native emit records it.
+
+    A first implement has nothing to set aside, and this writes nothing then
+    (fix round 18, run 7 #9: a plain first run stamped a reset for every code
+    task and recorded implement started, which the executor's completion
+    popped into an empty ``phases_started``): see
+    :func:`_has_earlier_implement_records`.
     """
     from utils.state_manager import (
         set_task_batch_check_in_state, set_task_check_findings_in_state,
@@ -983,6 +989,8 @@ def _start_over(
             f"WARNING: start over: the pre-batch snapshots are left in place: "
             f"{exc.message}", file=sys.stderr,
         )
+    if not _has_earlier_implement_records(state, phase_dir, code_ids, repo_root):
+        return
     set_aside: List[str] = []
     for task_id in code_ids:
         touched = False
@@ -1033,6 +1041,74 @@ def _start_over(
             f"start over: removed {removed} prompt file(s) an earlier run kept "
             f"in {phase_dir}/prompts/."
         )
+
+
+def _has_earlier_implement_records(
+    state: StateManager, phase_dir: Path, code_ids: Sequence[str],
+    repo_root: Optional[str],
+) -> bool:
+    """Whether an earlier implement left anything a start-over sets aside.
+
+    Read-only, and the same records :func:`_start_over` acts on: a status
+    other than ``pending`` without a reason, a check finding, check tree
+    stamp or own-check finding, a result file, a pre-batch snapshot, for any
+    code task in *code_ids*; a line the prior-changes log holds for one of
+    them under implement; a kept prompt. Absent all of these the run is the
+    plan's first implement, and starting it over would only stamp resets and
+    a started record for work that never ran (fix round 18, run 7 #9). A
+    snapshot that cannot be read counts as a record, so the start-over that
+    would warn about it still runs.
+    """
+    from utils import prior_changes as _prior_changes
+    from utils.state_manager import (
+        TASK_BATCH_CHECK_KEY, TASK_CHECK_FINDINGS_KEY, TASK_CHECK_TREES_KEY,
+    )
+    from utils.subagent_tasks import implement_output_name
+    from utils.write_batch_scheduler import DISPATCHED_PROMPTS_SUBDIR
+    from utils.write_safety import TaskSnapshot, WriteSafetyError
+
+    ids = set(code_ids)
+    for task_id in code_ids:
+        status = state.get_task_status(task_id)
+        if status not in (None, TaskStatus.PENDING.value) or (
+            status == TaskStatus.PENDING.value
+            and state.get_task_status_reason(task_id)
+        ):
+            return True
+    for key in (TASK_CHECK_FINDINGS_KEY, TASK_CHECK_TREES_KEY, TASK_BATCH_CHECK_KEY):
+        recorded = state.get(key)
+        if isinstance(recorded, dict) and ids & {str(k) for k in recorded}:
+            return True
+    for task_id in code_ids:
+        result = phase_dir / implement_output_name(task_id)
+        if result.exists() or result.is_symlink():
+            return True
+        if repo_root is not None:
+            try:
+                if TaskSnapshot.load(
+                    str(phase_dir), task_id, expected_root=repo_root,
+                ) is not None:
+                    return True
+            except (WriteSafetyError, OSError):
+                return True
+    try:
+        logged = _prior_changes.entries(str(phase_dir.parent))
+    except Exception:  # noqa: BLE001 - an unreadable log is a record
+        return True
+    implement = _prior_changes.canonical_phase("implement")
+    if any(
+        _prior_changes.canonical_phase(entry.get("phase")) == implement
+        and str(entry.get("id") or "") in ids
+        for entry in logged
+    ):
+        return True
+    prompts = phase_dir / DISPATCHED_PROMPTS_SUBDIR
+    try:
+        return prompts.is_dir() and any(
+            name.endswith(".prompt.txt") for name in os.listdir(prompts)
+        )
+    except OSError:
+        return True
 
 
 def _remove_kept_prompts(phase_dir: Path) -> int:
@@ -1821,15 +1897,87 @@ def _started_and_unfinished(state: StateManager, task_ids: Iterable[str]) -> Lis
     return kept
 
 
-def _continued_line(kept: Sequence[str]) -> str:
+def _kept_labels(state: StateManager, plan: Any = None) -> Dict[str, str]:
+    """How each task answered ``--human-task <id>=done`` reads in a kept
+    list — "accepted with its check findings", "accepted after failing",
+    "completed by hand" — from *plan* (this run's human-task plan) and the
+    answers on record, in the words the executor's ``resume: kept`` line and
+    summary.md use (``write_batch_scheduler.answered_done_label``)."""
+    from types import SimpleNamespace
+
+    from utils.write_batch_scheduler import (
+        answered_done_label,
+        answered_done_on_record,
+    )
+
+    accepted, completed = answered_done_on_record(state)
+    accepted = dict(accepted)
+    completed = list(completed)
+    if plan is not None:
+        accepted.update(getattr(plan, "accepted", None) or {})
+        completed += list(getattr(plan, "completed", None) or [])
+    view = SimpleNamespace(accepted=accepted)
+    return {
+        task_id: answered_done_label(view, task_id)
+        for task_id in list(accepted) + completed
+    }
+
+
+def _kept_named(kept: Sequence[str], labels: Dict[str, str]) -> str:
+    """The kept tasks as a resume line names them: the plain ones first (at
+    most eight), then each answered one with how it was answered."""
+    plain = [task_id for task_id in kept if task_id not in labels]
+    shown = ", ".join(plain[:8]) + (", …" if len(plain) > 8 else "")
+    answered = ", ".join(
+        f"{task_id} ({labels[task_id]})" for task_id in kept if task_id in labels
+    )
+    return ", ".join(part for part in (shown, answered) if part)
+
+
+def _continued_line(kept: Sequence[str], labels: Optional[Dict[str, str]] = None) -> str:
     """The one line a continued run prints (fix round 16)."""
-    named = ", ".join(kept[:8]) + (", …" if len(kept) > 8 else "")
+    named = _kept_named(kept, labels or {})
     return (
         "resume: implement started earlier and did not finish, so this run "
         f"continues it as --resume: kept {len(kept)} task(s) an earlier run "
         f"finished ({named}) and runs what is left. To run every task again "
         "instead, add --fresh."
     )
+
+
+def _native_kept_line(
+    state: StateManager, task_ids: Iterable[str], output_data: Dict[str, Any],
+    plan: Any = None,
+) -> Optional[str]:
+    """The ``resume: kept …`` line of a native ``--resume`` typed by the user,
+    or ``None`` when it keeps nothing.
+
+    Fix round 18 (live run 7, Claude Code stop 01b and accept 02): only the
+    plain ``--implement`` that continues a started run said what it kept, so
+    on the native leg an explicit ``--resume`` never showed "T002 (accepted
+    with its check findings)", which both tool routes print (the executor's
+    ``[write-subagents] resume: kept …`` line). Kept: every task of the
+    decomposition an earlier run recorded ``completed``, or this run's
+    answers record done, that this emit does not hand out again.
+    """
+    handed = {
+        str(task.get("id") or "")
+        for batch in output_data.get("batches") or []
+        for task in batch.get("tasks") or []
+    }
+    statuses = state.implementation_task_statuses()
+    answered = set(getattr(plan, "accepted", None) or {}) | set(
+        getattr(plan, "completed", None) or []
+    )
+    kept = [
+        str(task_id) for task_id in task_ids
+        if (statuses.get(str(task_id)) == "completed" or str(task_id) in answered)
+        and str(task_id) not in handed
+    ]
+    if not kept:
+        return None
+    named = _kept_named(kept, _kept_labels(state, plan))
+    return f"resume: kept {len(kept)} task(s) an earlier run finished ({named})."
 
 
 def _waiting_on_checks(
@@ -1886,20 +2034,15 @@ def _handoff_counts(output_data: Dict[str, Any]) -> Dict[str, int]:
 
 def _dispatch_line(output_data: Dict[str, Any]) -> str:
     """``Organized into N execution batches: X task(s) to dispatch …``,
-    counted from the batches as handed out (both legs)."""
+    counted from the batches as handed out (the native emit and ``--dry-run``;
+    the executor's run prints its own, ``WriteBatchScheduler._dispatch_preview``,
+    in the same words)."""
+    from utils.write_batch_scheduler import dispatch_line
+
     counts = _handoff_counts(output_data)
-    waiting = sorted(output_data.get("waiting_on_checks") or {})
-    return (
-        f"Organized into {counts['batches']} execution "
-        f"{'batch' if counts['batches'] == 1 else 'batches'}: {counts['dispatch']} "
-        f"task(s) to dispatch"
-        + (f", {counts['manual']} manual task(s) it does not run"
-           if counts["manual"] else "")
-        + (
-            f" ({', '.join(waiting)} {'waits' if len(waiting) == 1 else 'wait'} "
-            f"on a check's verdict)"
-            if waiting else ""
-        )
+    return dispatch_line(
+        counts["batches"], counts["dispatch"], manual=counts["manual"],
+        waiting=list(output_data.get("waiting_on_checks") or {}),
     )
 
 
@@ -2220,7 +2363,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         kept = _started_and_unfinished(state, decomposer.tasks)
         if kept:
             args.resume = True
-            print(_continued_line(kept))
+            print(_continued_line(kept, _kept_labels(state)))
             if state.has_plan_changed():
                 print("WARNING: Plan has changed since last session")
                 state.clear_plan_changed_flag()
@@ -2403,7 +2546,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # dispatch (`_native_withheld`), so it agrees with "Pending tasks".
         # Both legs count the batches handed out, never the decomposition's
         # layers (fix round 16: "5 execution batches" beside "Batches: 3").
-        if executor_backed or args.dry_run:
+        # The executor leg's line is the scheduler's, printed once it knows
+        # what its run dispatches (fix round 18, run 7 #3: a resume said "4
+        # task(s) to dispatch" and dispatched none).
+        if args.dry_run:
             print(_dispatch_line({"batches": output_batches}))
 
         # Count pending tasks
@@ -2608,6 +2754,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         ):
             return 3
 
+    # Fix round 18: an explicit native `--resume` says what it kept, as the
+    # continued run above and the executor leg's scheduler do.
+    if resume_typed and not args.task:
+        kept_line = _native_kept_line(
+            state, decomposer.tasks, output_data, native_human_plan,
+        )
+        if kept_line:
+            print(kept_line)
+
     # Print summary
     print("\n" + "=" * 60)
     print("Tasks Prepared for Claude Code")
@@ -2619,11 +2774,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Batches: {len(output_data['batches'])}")
     if "tasks_to_dispatch" in output_data:
         # The one number the host passes to `util metrics` (fix round 16:
-        # the host counted "5 execution batches" and passed that).
+        # the host counted "5 execution batches" and passed that). Fix round
+        # 18 (run 7 #2): it is in the [ETA] line's unit, one record per task
+        # dispatched, and `util batch-done` takes a task out of it once a
+        # record keeps that task from running (T007 behind check T002).
         dispatch = output_data["tasks_to_dispatch"]
         print(
             f"Tasks to dispatch: {dispatch} (pass --total-batches {dispatch} to "
-            f"`util metrics start` and `util metrics record`)"
+            f"`util metrics start` and `util metrics record`; the [ETA] line "
+            f"counts tasks, not batches, and leaves out a task that a "
+            f"`util batch-done` record keeps from running)"
         )
 
     if native_human_plan is not None:
@@ -2663,13 +2823,33 @@ def main(argv: Optional[List[str]] = None) -> int:
             for task_id, reason in sorted(declined.items()):
                 print(f"  {_named(task_id)}: {reason}")
         if native_human_plan.accepted:
+            # Fix round 18 (live run 7, Claude Code accept 02): a check whose
+            # findings the user accepted was listed "accepted after failing",
+            # and the host's summary said so of a check that never failed. The
+            # words are the executor's (`answered_done_label`).
+            from utils.write_batch_scheduler import answered_done_label
+
+            labels = {
+                task_id: answered_done_label(native_human_plan, task_id)
+                for task_id in native_human_plan.accepted
+            }
+            kinds = sorted(set(labels.values()))
+            heading = (
+                kinds[0][:1].upper() + kinds[0][1:] if len(kinds) == 1
+                else "Accepted on your answer"
+            ).replace("its check findings", "their check findings")
             print(
-                "Accepted after failing (recorded completed in state.json; "
-                "not in the batches, do not dispatch or record them; list "
-                "them in the summary as accepted after failing):"
+                f"{heading} (recorded completed in state.json; not in the "
+                f"batches, do not dispatch or record them; list them in the "
+                + (
+                    f"summary as {kinds[0].replace('its check findings', 'their check findings')}):"
+                    if len(kinds) == 1 else
+                    "summary with the words in brackets after each id):"
+                )
             )
             for task_id, reason in sorted(native_human_plan.accepted.items()):
-                print(f"  {_named(task_id)}: {reason}")
+                label = f" ({labels[task_id]})" if len(kinds) > 1 else ""
+                print(f"  {_named(task_id)}{label}: {reason}")
         if native_human_plan.completed:
             print(
                 "Completed by hand (manual tasks recorded completed in "

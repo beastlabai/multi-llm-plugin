@@ -66,6 +66,7 @@ __all__ = [
     "READ_KINDS",
     "WRITE_KINDS",
     "SHARED_ARTIFACT_WRITE_KINDS",
+    "APPLY_WRITE_KINDS",
     "PHASE_BY_WRITE_KIND",
     "WRITE_KIND_BY_PHASE",
     "PRIOR_CHANGES_TOKEN",
@@ -129,6 +130,12 @@ KINDS = READ_KINDS + WRITE_KINDS
 #: sequential no matter what the driver config permits (D3h — this is the
 #: batchers' own invariant, enforced here rather than trusted from them).
 SHARED_ARTIFACT_WRITE_KINDS = ("apply_suggestions", "apply_task_suggestions")
+
+#: The apply phases' write kinds: a batch of review items, any of which the
+#: batch may decline with a reason (the result contract's ``declined``, fix
+#: round 18). ``implement`` is not one: its batch is one task of the plan, and
+#: a task its runner will not do is ``failed``, for the user to answer.
+APPLY_WRITE_KINDS = ("apply_suggestions", "apply_task_suggestions", "apply_code_fixes")
 
 #: The phase name each write kind belongs to, so the scheduler's ``prior_changes``
 #: and ``metrics`` calls use the same ``--phase`` value the markdown specifies.
