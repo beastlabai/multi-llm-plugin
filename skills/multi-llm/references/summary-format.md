@@ -42,8 +42,9 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
   report nothing as a next step that the run did not name. Copy it character
   for character, never re-typed: its plan path as printed, no flag added or
   dropped (not a `--plan-file` spelling, not without the `--quick --yes` it
-  carries), and read the dispatcher's output whole: piping it through `cut`,
-  `head` or `grep` chops the very `MULTI_LLM_RESULT` line you must read.
+  carries), and read the dispatcher's output whole: a pipe, even through
+  `tail`, hands you the pipe's exit code instead of the dispatcher's and
+  drops the marker lines above the `MULTI_LLM_RESULT` line you must read.
   `user_next_step`
   *starts the next phase*: it is the user's to type, never yours to run, and it
   ends the report as the next rule says.
