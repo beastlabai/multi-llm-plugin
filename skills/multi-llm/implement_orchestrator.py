@@ -49,6 +49,7 @@ from utils.cli_common import (
     typed_plan_for,
 )
 from utils.output_handler import get_phase_dir, get_output_dir
+from utils.state_manager import mark_tasks_reset_in_state
 from utils.git_utils import get_project_root
 from utils.provider_registry import set_run_anchor
 from utils import unattended as unattended_mod
@@ -182,10 +183,11 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         '--fresh',
         action='store_true',
-        help='Start over: dispatch every task again, ignoring the tasks an '
-             'earlier run of this implement finished. Without it, a run on an '
-             'implement that started and did not finish continues it as '
-             '--resume; one that finished starts over either way. --resume '
+        help='Start over: dispatch every task again, setting aside what '
+             'earlier runs of this implement recorded for each task (a later '
+             '--resume keeps only what this run finishes). Without it, a run '
+             'on an implement that started and did not finish continues it '
+             'as --resume; one that finished starts over either way. --resume '
              'wins over --fresh.'
     )
 
@@ -919,8 +921,111 @@ def _prepare_selected_task(
     set_task_check_findings_in_state(state.state, task.id, None)
     set_task_check_tree_in_state(state.state, task.id, None)
     set_task_batch_check_in_state(state.state, task.id, None)
+    # Fix round 17: the log line its earlier run wrote is not this rerun's
+    # (`batch_done.unrecorded_logged_batches`): a host gone before its
+    # `batch-done` left T001 refused on the next plain emit.
+    mark_tasks_reset_in_state(state.state, [task.id])
     state.mark_phase_started("implement")
     state.save()
+
+
+def _start_over(
+    state: StateManager, plan_path: Path, tasks: Iterable[Task],
+) -> None:
+    """Set aside what earlier runs recorded for each code task, and record
+    implement started (fix round 17, review of fix round 16).
+
+    A start-over (``--fresh``, or a plain run on an implement that finished)
+    hands every task out again. It used to leave the earlier run's records in
+    place: a task this run did not reach before it stopped still read
+    ``completed``, beside its result file and pre-batch snapshot, so a later
+    ``--resume`` (typed, or a plain run continuing this one) kept it on the
+    evidence of a run before; and the executor leg, which never recorded
+    implement started, let the next plain run start over yet again once an
+    implement had finished. For every code task of the decomposition (a
+    manual task's answer stands):
+
+    * its status, unless ``skipped`` (the human-task plan decides that
+      again), goes back to ``pending`` without a reason — a recorded
+      ``--human-task`` answer for it goes with it
+      (``state_manager._consume_answer``) — and its check findings, check
+      tree stamp and own-check findings are dropped;
+    * its result file is kept as ``<name>.rerun-<stamp>`` and its pre-batch
+      snapshot set aside beside its slot (``TaskSnapshot.set_aside``, what
+      the executor's own start-over does to a slot it dispatches into),
+      never deleted;
+    * its reset is stamped (``state_manager.TASK_RESET_AT_KEY``), so a native
+      ``--resume`` does not read the earlier run's prior-changes line as one
+      this run left unrecorded.
+
+    Implement is recorded started on both legs, as the native emit records
+    it.
+    """
+    from utils.state_manager import (
+        set_task_batch_check_in_state, set_task_check_findings_in_state,
+        set_task_check_tree_in_state,
+    )
+    from utils.subagent_tasks import implement_output_name
+    from utils.write_safety import TaskSnapshot, WriteSafetyError, resolve_repo_root
+
+    phase_dir = get_phase_dir(plan_path, "implement")
+    stamp = datetime.now().strftime("%Y%m%dT%H%M%S%f")
+    code_ids = [
+        str(task.id) for task in tasks
+        if getattr(task, "executor_role", "") != "human"
+    ]
+    try:
+        repo_root: Optional[str] = resolve_repo_root(str(plan_path))
+    except WriteSafetyError as exc:
+        repo_root = None
+        print(
+            f"WARNING: start over: the pre-batch snapshots are left in place: "
+            f"{exc.message}", file=sys.stderr,
+        )
+    set_aside: List[str] = []
+    for task_id in code_ids:
+        touched = False
+        result = phase_dir / implement_output_name(task_id)
+        if result.exists() or result.is_symlink():
+            result.rename(result.with_name(f"{result.name}.rerun-{stamp}"))
+            touched = True
+        if repo_root is not None:
+            try:
+                snapshot = TaskSnapshot.load(
+                    str(phase_dir), task_id, expected_root=repo_root)
+                if snapshot is not None and snapshot.set_aside():
+                    touched = True
+            except (WriteSafetyError, OSError) as exc:
+                print(
+                    f"WARNING: start over: {task_id}'s pre-batch snapshot is "
+                    f"left in place: {getattr(exc, 'message', exc)}",
+                    file=sys.stderr,
+                )
+        status = state.get_task_status(task_id)
+        if status not in (None, TaskStatus.SKIPPED.value, TaskStatus.PENDING.value):
+            touched = True
+            state.update_task_status(task_id, TaskStatus.PENDING.value)
+        elif status == TaskStatus.PENDING.value and state.get_task_status_reason(task_id):
+            # A reason an earlier run gave it (held behind a check) is not
+            # this run's.
+            state.update_task_status(task_id, TaskStatus.PENDING.value)
+        set_task_check_findings_in_state(state.state, task_id, None)
+        set_task_check_tree_in_state(state.state, task_id, None)
+        set_task_batch_check_in_state(state.state, task_id, None)
+        if touched:
+            set_aside.append(task_id)
+    mark_tasks_reset_in_state(state.state, code_ids)
+    state.mark_phase_started("implement")
+    state.save()
+    if set_aside:
+        named = ", ".join(set_aside[:8]) + (", …" if len(set_aside) > 8 else "")
+        print(
+            f"start over: this run hands every task out again, so what an "
+            f"earlier run recorded for {named} is set aside (each is pending "
+            f"again; a result file is kept as <its name>.rerun-{stamp} and a "
+            f"pre-batch snapshot beside its slot), and a later --resume keeps "
+            f"only what this run finishes."
+        )
 
 
 def _manual_close_note(
@@ -2057,6 +2162,17 @@ def main(argv: Optional[List[str]] = None) -> int:
             if state.has_plan_changed():
                 print("WARNING: Plan has changed since last session")
                 state.clear_plan_changed_flag()
+    # A run that is no resume (typed or continued), no `--task` rerun and no
+    # dry run starts over: it hands every task out again, so it sets aside
+    # what earlier runs recorded for them (`_start_over`, fix round 17) once
+    # nothing can still refuse it — on the native leg before the emit reads
+    # the records, on the executor leg past the detach boundary, in the
+    # process that owns the phase dir (never in a `--detach` launcher, which
+    # may be re-attaching to a live run).
+    start_over = not (
+        args.resume or args.task or args.dry_run
+        or getattr(args, "dry_run_subagents", False)
+    )
 
     # Restore previous statuses if resuming
     if args.resume:
@@ -2298,6 +2414,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         _write_temp_dir_gitignore(output_path.parent)
         output_path.write_text(json.dumps(output_data, indent=2), encoding="utf-8")
 
+    if start_over and not executor_backed and not (
+        getattr(args, "detach", False) and not getattr(args, "internal_worker", False)
+    ):
+        _start_over(state, plan_path, decomposer.tasks.values())
+
     # The answers both legs apply this run: every human task's, and a code
     # task's only while it still applies (`_applicable_task_decisions`).
     applicable_decisions = _applicable_task_decisions(
@@ -2383,6 +2504,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             unattended_mod.record_resolution(
                 resolutions_phase_dir, site_id, decision, quiet=True
             )
+
+    if start_over and executor_backed:
+        _start_over(state, plan_path, decomposer.tasks.values())
 
     # --- the write executor (D3n): schedule the batches in this process --------
     # Strictly additive: with neither flag set this returns None and everything

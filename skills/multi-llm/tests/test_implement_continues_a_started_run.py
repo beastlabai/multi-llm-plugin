@@ -305,3 +305,217 @@ class TestAHostThatLeftMidCall:
         assert code == 0, text
         assert CONTINUED in text, text
         assert _ids_in(calls.read_text(encoding="utf-8")) == {"T002", "T003"}
+
+
+# --- fix round 17: a later cycle, a start-over's earlier records ------------
+
+def _finish_once(repo) -> None:
+    """Cycle 1 on the executor leg: every task done, implement completed."""
+    _seed_generate_tasks(repo)
+    repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+        {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+    ]))
+    repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+    assert implement_orchestrator.main([
+        "--plan-file", str(repo.plan), "--yes", "--exec-subagents",
+    ]) == 0
+
+
+def _stop_again_after_t001(repo, capsys, *flags) -> str:
+    """A later cycle on the executor leg that stops at T002 (T003 not reached)."""
+    repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001"]))
+    capsys.readouterr()
+    code = implement_orchestrator.main([
+        "--plan-file", str(repo.plan), "--yes", "--exec-subagents", *flags,
+    ])
+    captured = capsys.readouterr()
+    assert code == 3, captured.out + captured.err
+    return captured.out + captured.err
+
+
+class TestALaterCycleOnTheExecutorLeg:
+    """Review of fix round 16 (abort #1): the executor leg never recorded
+    implement started, so once an implement had finished, a later run that
+    stopped left the old completion standing and the next plain
+    ``--implement`` started over again; and a start-over left the earlier
+    cycle's ``completed`` statuses and result files behind, so a later
+    ``--resume`` kept T003 on the evidence of a cycle that ran before."""
+
+    def test_a_stopped_second_cycle_is_continued_by_a_plain_run(self, repo, capsys):
+        from utils.state_manager import get_or_create_state
+
+        _finish_once(repo)
+        _stop_again_after_t001(repo, capsys)
+        state = get_or_create_state(repo.plan)
+        assert state.is_phase_started("implement")
+        assert not state.is_phase_completed("implement")
+        # T003 was not reached in this cycle: nothing says it is done.
+        assert state.implementation_task_statuses() == {
+            "T001": "completed", "T002": "failed", "T003": "pending",
+        }
+
+        code, text, log = _second_run(repo, capsys)
+        assert code == 0, text
+        assert CONTINUED in text, text
+        assert "kept 1 task(s) an earlier run finished (T001)" in text, text
+        assert _ids_in(log.read_text(encoding="utf-8")) == {"T002", "T003"}
+        assert get_or_create_state(repo.plan).is_phase_completed("implement")
+
+    def test_a_third_cycle_started_with_fresh_is_continued_too(self, repo, capsys):
+        """Cycle 2 finishes again (a plain run after a finished one starts
+        over); cycle 3 is `--fresh` and stops; cycle 4, plain, continues it."""
+        _finish_once(repo)
+        code, text, log = _second_run(repo, capsys)
+        assert code == 0, text
+        assert CONTINUED not in text
+        assert _ids_in(log.read_text(encoding="utf-8")) == {"T001", "T002", "T003"}
+
+        _stop_again_after_t001(repo, capsys, "--fresh")
+        log.unlink()  # the call log is appended to by every run
+        code, text, log = _second_run(repo, capsys)
+        assert code == 0, text
+        assert CONTINUED in text, text
+        assert _ids_in(log.read_text(encoding="utf-8")) == {"T002", "T003"}
+
+    def test_a_resume_never_keeps_a_task_on_an_earlier_cycles_result(
+        self, repo, capsys
+    ):
+        from utils.write_safety import TaskSnapshot
+
+        _finish_once(repo)
+        phase_dir = _phase_dir(repo)
+        assert (phase_dir / "implement_batch_T003.json").is_file()
+        assert TaskSnapshot.load(str(phase_dir), "T003") is not None
+
+        text = _stop_again_after_t001(repo, capsys)
+        assert "start over:" in text, text
+        # Cycle 1's result and rollback point for T003 are set aside, never
+        # deleted, and never read as this cycle's.
+        assert not (phase_dir / "implement_batch_T003.json").exists()
+        assert list(phase_dir.glob("implement_batch_T003.json.rerun-*"))
+        assert TaskSnapshot.load(str(phase_dir), "T003") is None
+
+        code, text, log = _second_run(repo, capsys, "--resume")
+        assert code == 0, text
+        assert _ids_in(log.read_text(encoding="utf-8")) == {"T002", "T003"}
+
+
+    def test_a_resume_that_dispatches_on_a_finished_implement_records_it_started(
+        self, repo, capsys
+    ):
+        """A `--resume` of a finished implement that hands a task out again
+        (here T003, back to `failed` on record) and stops: implement is
+        started again, so the next plain run continues it."""
+        from utils.state_manager import get_or_create_state
+
+        _finish_once(repo)
+        state = get_or_create_state(repo.plan)
+        state.update_task_status("T003", "failed", "an earlier run's failure")
+        state.save()
+        assert get_or_create_state(repo.plan).is_phase_completed("implement")
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001"]))
+        capsys.readouterr()
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--exec-subagents", "--resume",
+        ]) == 3
+        state = get_or_create_state(repo.plan)
+        assert state.is_phase_started("implement")
+        assert not state.is_phase_completed("implement")
+
+        code, text, log = _second_run(repo, capsys)
+        assert code == 0, text
+        assert CONTINUED in text, text
+        assert _ids_in(log.read_text(encoding="utf-8")) == {"T003"}
+
+
+class TestALaterCycleOnTheNativeLeg:
+    """The same three cycles on the emit Claude Code's host dispatches from,
+    with `util batch-done` as the per-task record."""
+
+    _emit = TestTheNativeEmit._emit
+    _record = TestTheNativeEmit._record
+
+    def _finish_natively(self, repo, capsys):
+        from test_stop_results_surface import multi_llm_util
+        from utils.state_manager import get_or_create_state
+
+        _seed_generate_tasks(repo)
+        code, text, handed = self._emit(repo, capsys)
+        assert code == 0, text
+        for task_id in handed:
+            self._record(repo, task_id)
+        state = get_or_create_state(repo.plan)
+        assert multi_llm_util([
+            "finalize-tracking", "--state-file", str(state.state_file),
+            "--mark-completed",
+        ]) == 0
+        capsys.readouterr()
+        assert get_or_create_state(repo.plan).is_phase_completed("implement")
+
+    def test_a_stopped_second_cycle_hands_out_what_it_did_not_reach(
+        self, repo, capsys
+    ):
+        from utils import prior_changes
+        from utils.output_handler import get_output_dir
+        from utils.state_manager import get_or_create_state
+
+        self._finish_natively(repo, capsys)
+        code, text, handed = self._emit(repo, capsys)
+        assert code == 0, text
+        assert CONTINUED not in text
+        assert handed == ["T001", "T002", "T003"]
+        assert get_or_create_state(repo.plan).implementation_task_statuses() == {
+            "T001": "pending", "T002": "pending", "T003": "pending",
+        }
+        # The host runs T001 again, records it and leaves.
+        from utils import batch_done
+
+        assert batch_done.main([
+            "--phase-dir", str(_phase_dir(repo)), "--task-id", "T001",
+            "--status", "completed",
+        ]) == 0
+        prior_changes.append(str(get_output_dir(repo.plan)), "T001", "implement",
+                             "did T001 again")
+        capsys.readouterr()
+
+        code, text, handed = self._emit(repo, capsys)
+        # T002 and T003 are in the prior-changes log from cycle 1: that is
+        # not this cycle's run of them, so the resume is not refused.
+        assert code == 0, text
+        assert "RESUME_REFUSED" not in text, text
+        assert CONTINUED in text, text
+        assert "kept 1 task(s) an earlier run finished (T001)" in text, text
+        assert handed == ["T002", "T003"]
+
+    def test_a_task_logged_in_this_cycle_but_not_recorded_is_still_refused(
+        self, repo, capsys
+    ):
+        from utils import prior_changes
+        from utils.output_handler import get_output_dir
+
+        self._finish_natively(repo, capsys)
+        assert self._emit(repo, capsys)[0] == 0
+        prior_changes.append(str(get_output_dir(repo.plan)), "T001", "implement",
+                             "did T001 again")
+        capsys.readouterr()
+        code = implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--resume"])
+        text = "".join(capsys.readouterr())
+        assert code == 3, text
+        assert "[RESUME_REFUSED]" in text, text
+        assert "T001" in text and "T002 (" not in text and "T003 (" not in text, text
+
+    def test_an_interrupted_task_rerun_is_handed_out_again(self, repo, capsys):
+        """4ca1f34's `--task` rerun of a completed task, the host gone before
+        its `batch-done`: the plain emit continues it and hands T001 out,
+        instead of refusing it on the log line of the run before."""
+        _finish_once(repo)
+        capsys.readouterr()
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--task", "T001"]) == 0
+        capsys.readouterr()
+        code, text, handed = self._emit(repo, capsys)
+        assert code == 0, text
+        assert "RESUME_REFUSED" not in text, text
+        assert CONTINUED in text, text
+        assert handed == ["T001"]

@@ -88,6 +88,8 @@ try:
     from . import prior_changes as _prior_changes
     from .metrics import _read_state, _write_state, state_file_lock
     from .state_manager import (
+        TASK_RESET_AT_KEY,
+        _parse_completion_time,
         mark_item_processed_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
@@ -118,6 +120,8 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils.metrics import _read_state, _write_state, state_file_lock  # type: ignore
     from utils.state_manager import (  # type: ignore
+        TASK_RESET_AT_KEY,
+        _parse_completion_time,
         mark_item_processed_in_state,
         set_task_batch_check_in_state,
         set_task_check_findings_in_state,
@@ -475,12 +479,28 @@ def _hold_or_release_dependents(
 
 
 def _logged_ids(output_dir: str, phase: Optional[str]) -> set:
+    return set(_logged_at(output_dir, phase))
+
+
+def _logged_at(output_dir: str, phase: Optional[str]) -> Dict[str, Optional[str]]:
+    """``{entry id: timestamp of its newest line}`` in this phase's log."""
     scoped = _prior_changes.canonical_phase(phase)
     return {
-        str(entry.get("id") or "")
+        str(entry.get("id") or ""): entry.get("timestamp")
         for entry in _prior_changes.entries(output_dir)
         if _prior_changes.canonical_phase(entry.get("phase")) == scoped
     }
+
+
+def _logged_before_reset(logged_at: Any, reset_at: Any) -> bool:
+    """Whether a log line was written no later than its task's reset.
+
+    False when either time is missing or unreadable: the line then counts as
+    this run's, which keeps the refusal (absence of a date is not a reset).
+    """
+    logged = _parse_completion_time(logged_at)
+    reset = _parse_completion_time(reset_at)
+    return logged is not None and reset is not None and logged <= reset
 
 
 def unrecorded_logged_batches(
@@ -503,13 +523,20 @@ def unrecorded_logged_batches(
     A task is recorded when ``task_status`` holds a terminal word for its id
     or, for an apply kind, when any of its ``expected_ids`` is in the
     processed map (``failed`` included: that record keeps the batch eligible
-    and says the log's failure entry is accounted for).
+    and says the log's failure entry is accounted for). A log line no newer
+    than the task's ``state_manager.TASK_RESET_AT_KEY`` stamp is the run's
+    before a start-over or a ``--task`` rerun handed the task out again, and
+    does not count (fix round 17). A line the run since wrote with the same
+    summary is not appended again (``prior_changes.append``), so such a task
+    is handed out again rather than refused.
     """
-    logged = _logged_ids(output_dir, phase)
+    logged = _logged_at(output_dir, phase)
     if not logged:
         return []
     task_status = state.get("task_status") or {}
     processed = state.get(f"processed_{processed_phase or phase}") or {}
+    reset_at = state.get(TASK_RESET_AT_KEY)
+    reset_at = reset_at if isinstance(reset_at, dict) else {}
     unrecorded: List[Dict[str, Any]] = []
     for task in tasks:
         if not isinstance(task, dict):
@@ -523,6 +550,11 @@ def unrecorded_logged_batches(
         if task_status.get(task_id) in _RECORDED_TASK_STATUSES:
             continue
         if any(str(i) in processed for i in (task.get("expected_ids") or [])):
+            continue
+        if _logged_before_reset(logged[entry_id], reset_at.get(task_id)):
+            # Fix round 17: an earlier run's line, for a task a start-over
+            # or a `--task` rerun handed out again since — not one this run
+            # applied and left unrecorded.
             continue
         unrecorded.append(task)
     return unrecorded
