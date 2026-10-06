@@ -59,7 +59,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from . import prior_changes as _prior_changes
-    from .git_utils import pin_repo_root, worktree_file_stats
+    from .git_utils import pin_repo_root, worktree_file_stats, worktree_fingerprint
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import ExecutorError, ResultRejected
     from .subagent_tasks import (
@@ -79,7 +79,9 @@ try:
     from .write_safety import PolicyViolation, WritePolicy, relative_to_root
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
-    from utils.git_utils import pin_repo_root, worktree_file_stats  # type: ignore
+    from utils.git_utils import (  # type: ignore
+        pin_repo_root, worktree_file_stats, worktree_fingerprint,
+    )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import ExecutorError, ResultRejected  # type: ignore
     from utils.subagent_tasks import (  # type: ignore
@@ -104,7 +106,9 @@ except ImportError:  # pragma: no cover - direct script invocation
 __all__ = [
     "MARKER_REFUSED",
     "PROMPTS_SUBDIR",
+    "check_tree_fingerprint",
     "policy_refusal",
+    "policy_refusal_for",
     "WritePromptError",
     "check_tree_path",
     "changed_since_bound",
@@ -280,14 +284,36 @@ def policy_refusal(phase_dir: Path, task_id: str) -> Optional[str]:
     phase_dir = Path(os.path.abspath(str(phase_dir)))
     try:
         document, task = load_write_task(phase_dir, task_id)
+    except Exception:  # noqa: BLE001 - never refuse on a task file that cannot be read
+        return None
+    return policy_refusal_for(
+        task, plan_file=str(document.get("plan_file") or "") or None,
+        anchor_dir=phase_dir,
+    )
+
+
+def policy_refusal_for(
+    task: Dict[str, Any], *, plan_file: Optional[str], anchor_dir: Path,
+) -> Optional[str]:
+    """:func:`policy_refusal` for a materialized write task in hand.
+
+    What the native implement emit asks of every task before it hands the
+    task out (fix round 14: a task the policy refuses is recorded failed and
+    left out of the batches, as the executor refuses it before dispatch).
+    *anchor_dir* is any directory inside the repository (the phase dir, or
+    the plan's output folder before the phase dir exists).
+    """
+    try:
         declared = declared_file_set(task)
         if not declared:
             return None
-        root, problem = pin_repo_root(str(phase_dir))
+        anchor = Path(os.path.abspath(str(anchor_dir)))
+        while not anchor.exists() and anchor.parent != anchor:
+            anchor = anchor.parent
+        root, problem = pin_repo_root(str(anchor))
         if root is None or problem:
             return None
-        anchor = str(document.get("plan_file") or "") or None
-        policy = WritePolicy.load(root, anchor=anchor)
+        policy = WritePolicy.load(root, anchor=plan_file)
         policy.check(
             [relative_to_root(path, root) for path in declared], when="pre-dispatch",
         )
@@ -468,6 +494,38 @@ def _tree_now(phase_dir: Path) -> Optional[Tuple[str, Dict[str, List[int]]]]:
     if stats is None or len(stats) > SWEEP_MAX_FILES:
         return None
     return root, {path: [size, mtime] for path, (size, mtime) in stats.items()}
+
+
+def check_tree_fingerprint(phase_dir: Path) -> Optional[str]:
+    """One digest of the files git sees, the plugin's own trees left out.
+
+    ``git_utils.worktree_fingerprint`` with the exclusions the executor's
+    ``WriteBatchScheduler._tree_fingerprint`` uses (the phase dir, the plan's
+    output folder, ``.multi-llm/``), so both legs mean the same thing by "the
+    files changed". The native leg stamps it on a check with findings
+    (``util batch-done``, re-stamped by ``util finalize-tracking`` with the
+    tree the run left) and compares it on ``--resume`` before handing the
+    check out again (fix round 14). ``None`` when the repository cannot be
+    pinned or read: a caller then runs the check again rather than guess.
+    """
+    anchor = Path(os.path.abspath(str(phase_dir)))
+    while not anchor.exists() and anchor.parent != anchor:
+        anchor = anchor.parent
+    try:
+        root, problem = pin_repo_root(str(anchor))
+    except Exception:  # noqa: BLE001 - the guard is never a crash
+        return None
+    if root is None or problem:
+        return None
+    try:
+        return worktree_fingerprint(
+            root,
+            exclude_prefixes=_tree_exclusions(
+                Path(os.path.abspath(str(phase_dir))), root,
+            ),
+        )
+    except Exception:  # noqa: BLE001 - advisory
+        return None
 
 
 def record_check_tree(phase_dir: Path, task_id: str) -> Optional[Path]:

@@ -488,6 +488,9 @@ class TestTheNativeLegHoldsTheDependents:
         self._done(repo, capsys, "T002", "--check", "findings", *self._findings())
         self._done(repo, capsys, "T003")
 
+        # Fixed by hand: the files changed since the check, so it runs again.
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "# fixed by hand\n", encoding="utf-8")
         handoff = self._emit(repo, capsys, "--resume")
         emitted = {t["id"]: t for b in handoff["batches"] for t in b["tasks"]}
         assert emitted["T002"]["status"] == "pending", "the check runs again"
@@ -501,6 +504,93 @@ class TestTheNativeLegHoldsTheDependents:
             "reported problems"
         )
         assert self._prompt(repo, capsys, "T004")[0] == 0
+
+    def _stopped_run(self, repo, capsys) -> str:
+        """The first native run as the stop fixture's host ran it: the check
+        records findings, an independent task edits a file after it, and the
+        run closes without --mark-completed."""
+        self._emit(repo, capsys)
+        self._done(repo, capsys, "T001")
+        assert self._done(
+            repo, capsys, "T002", "--check", "findings", *self._findings(),
+        )[0] == 0
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "# T003's edit\n", encoding="utf-8")
+        self._done(repo, capsys, "T003")
+        state_file = str(get_or_create_state(repo.plan).state_file)
+        assert self._util(capsys, "finalize-tracking", "--state-file", state_file)[0] == 0
+        return state_file
+
+    def _emit_text(self, repo, capsys, *flags) -> tuple:
+        assert implement_orchestrator.main(
+            ["--plan-file", str(repo.plan), "--yes", *flags]
+        ) == 0
+        out = capsys.readouterr().out
+        path = next(
+            line.split(": ", 1)[1] for line in out.splitlines()
+            if line.startswith("Output file: ")
+        )
+        return json.loads(Path(path).read_text(encoding="utf-8")), out
+
+    def test_a_resume_on_unchanged_files_does_not_hand_the_check_out_again(
+        self, repo, capsys,
+    ):
+        """Fix round 14 (stop fixture, Claude Code 01b): a `--resume` with
+        nothing changed re-dispatched T002's check (~23k tokens) for the same
+        findings, where the executor leg runs nothing. The run's own edit
+        after the check (T003) is not a change: `util finalize-tracking`
+        re-stamps the tree the run left."""
+        self._stopped_run(repo, capsys)
+
+        handoff, out = self._emit_text(repo, capsys, "--resume")
+        emitted = {t["id"] for b in handoff["batches"] for t in b["tasks"]}
+        assert "T002" not in emitted and "T004" not in emitted
+        assert handoff["not_rerun_checks"]["T002"].startswith(
+            "not run again — nothing in the repository changed since its check "
+            "reported problems"
+        )
+        assert handoff["held_tasks"]["T004"].startswith(
+            "not run — upstream check T002 reported problems"
+        )
+        assert (
+            "[CHECK_NOT_RERUN] T002 is not run again: nothing in the repository "
+            "changed since its check reported problems"
+        ) in out
+        assert "T004 stays held behind it" in out
+        written = json.loads((repo.phase_dir / "write_tasks.json").read_text())
+        assert {t["task_id"] for t in written["batches"]} == emitted
+        state = get_or_create_state(repo.plan)
+        assert state.get("task_check_findings") == {"T002": FINDINGS}
+        assert "T002" in state.get("task_check_trees")
+
+    def test_retry_or_a_changed_file_hands_the_check_out_again(self, repo, capsys):
+        self._stopped_run(repo, capsys)
+
+        handoff, out = self._emit_text(
+            repo, capsys, "--resume", "--human-task", "T002=retry",
+        )
+        emitted = {t["id"] for b in handoff["batches"] for t in b["tasks"]}
+        assert {"T002", "T004"} <= emitted
+        assert "[CHECK_NOT_RERUN]" not in out
+        # Handed out again: its stamp is gone, so a run that never re-runs it
+        # cannot have finalize-tracking stamp it as checked.
+        assert "T002" not in (get_or_create_state(repo.plan).get("task_check_trees") or {})
+
+        self._stopped_run(repo, capsys)
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "# fixed by hand\n", encoding="utf-8")
+        handoff, out = self._emit_text(repo, capsys, "--resume")
+        emitted = {t["id"] for b in handoff["batches"] for t in b["tasks"]}
+        assert {"T002", "T004"} <= emitted
+        assert "not_rerun_checks" not in handoff
+
+    def test_a_passed_or_failed_record_drops_the_stamp(self, repo, capsys):
+        self._emit(repo, capsys)
+        self._done(repo, capsys, "T001")
+        self._done(repo, capsys, "T002", "--check", "findings", *self._findings())
+        assert "T002" in get_or_create_state(repo.plan).get("task_check_trees")
+        self._done(repo, capsys, "T002", "--check", "passed")
+        assert get_or_create_state(repo.plan).get("task_check_trees") is None
 
     def test_a_re_recorded_check_s_new_summary_reaches_the_next_prompt(
         self, repo, capsys,
@@ -680,6 +770,8 @@ class TestTheNativeLegHoldsThroughAFinishedTask:
         assert "T004" in out and "T006" in out
         self._done(repo, capsys, "T003")
 
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "# fixed by hand\n", encoding="utf-8")
         written = self._emit(repo, capsys, "--resume")
         assert "T005" not in {t["task_id"] for t in written["batches"]}
         code, _out, err = self._prompt(repo, capsys, "T006")

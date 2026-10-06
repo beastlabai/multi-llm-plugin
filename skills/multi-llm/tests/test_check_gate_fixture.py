@@ -364,8 +364,63 @@ class TestTheNativeLeg:
         captured = capsys.readouterr()
         return code, captured.out, captured.err
 
-    def test_write_prompt_refuses_the_task_the_policy_denies(self, repo, capsys):
+    def _emit_text(self, repo, capsys, *flags):
+        import implement_orchestrator
+
+        assert implement_orchestrator.main(
+            ["--plan-file", str(repo.plan), "--yes", *flags]
+        ) == 0
+        out = capsys.readouterr().out
+        path = next(
+            line.split(": ", 1)[1] for line in out.splitlines()
+            if line.startswith("Output file: ")
+        )
+        return json.loads(open(path, encoding="utf-8").read()), out
+
+    @staticmethod
+    def _counts(out: str) -> tuple:
+        dispatch = next(
+            line for line in out.splitlines() if line.startswith("Organized into ")
+        )
+        pending = next(
+            line for line in out.splitlines() if line.startswith("Pending tasks: ")
+        )
+        return (
+            int(dispatch.split(": ", 1)[1].split(" ", 1)[0]),
+            int(pending.split(": ", 1)[1]),
+        )
+
+    def test_the_emit_hands_out_nothing_the_policy_refuses(self, repo, capsys):
+        """Fix round 14: the native emit refuses T005 before handing it out,
+        as the executor refuses it before dispatch — recorded failed, out of
+        the batches with T006 after it, and the counts agree."""
+        handoff, out = self._emit_text(repo, capsys)
+        emitted = {t["id"] for b in handoff["batches"] for t in b["tasks"]}
+        assert emitted == {"T001", "T002", "T003", "T004", "T007"}
+        assert handoff["refused_tasks"]["T005"].startswith(
+            "refused before dispatch: Write policy violation (pre-dispatch): "
+            "src/vendor/stamp.js"
+        )
+        assert handoff["not_run_tasks"]["T006"].startswith(
+            "not run — depends on T005, which was refused before dispatch"
+        )
+        assert _statuses(repo)["T005"] == "failed"
+        assert _reason(repo, "T005").startswith("refused before dispatch: ")
+        written = json.loads((repo.phase_dir / "write_tasks.json").read_text())
+        assert {t["task_id"] for t in written["batches"]} == emitted
+        assert self._counts(out) == (5, 5)
+        assert handoff["pending_tasks"] == 5
+        assert "Refused before dispatch (recorded failed in state.json" in out
+        assert "without --mark-completed" in out
+
+    def test_write_prompt_still_refuses_a_task_the_policy_denies_later(
+        self, repo, capsys,
+    ):
+        """The emit's refusal is the gate; `util write-prompt` keeps its own
+        for a policy that changed after the batches were handed out."""
+        _policy(repo, ALLOW)
         self._emit(repo, capsys)
+        _policy(repo, DENY)
         phase = str(repo.phase_dir)
         code, _out, err = self._util(
             capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T005")
@@ -381,7 +436,13 @@ class TestTheNativeLeg:
         assert self._util(
             capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T004")[0] == 0
 
-    def test_the_accept_answers_after_the_refusal_is_recorded(self, repo, capsys):
+    def test_the_accept_answers_leave_only_what_runs_in_the_batches(
+        self, repo, capsys,
+    ):
+        """Fix round 14 (stop fixture, Claude Code accept 02): T005 and T006,
+        skipped by `--human-task T005=skip`, sat in `batches` 3 and 4 beside
+        `skipped_tasks`, and the emit said "4 task(s) to dispatch" against
+        "Pending tasks: 3"."""
         self._emit(repo, capsys)
         phase = str(repo.phase_dir)
         for task_id in ("T001", "T003", "T004"):
@@ -392,19 +453,20 @@ class TestTheNativeLeg:
             capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
             "--status", "completed", "--check", "findings",
             "--finding", FINDINGS[0])[0] == 0
-        assert self._util(
-            capsys, "batch-done", "--phase-dir", phase, "--task-id", "T005",
-            "--status", "failed", "--reason", "refused before dispatch")[0] == 0
 
-        handoff = self._emit(
+        handoff, out = self._emit_text(
             repo, capsys, "--resume", "--human-task", "T002=done",
             "--human-task", "T005=skip",
         )
         emitted = {t["id"]: t for b in handoff["batches"] for t in b["tasks"]}
-        assert "T002" not in emitted, "accepted: not handed out again"
-        assert emitted["T005"]["status"] == "skipped"
-        assert emitted["T006"]["status"] == "skipped"
+        assert list(emitted) == ["T007"]
         assert emitted["T007"]["status"] == "pending"
+        assert set(handoff["skipped_tasks"]) == {"T005", "T006"}
+        assert "T002" in handoff["accepted_tasks"]
+        assert self._counts(out) == (1, 1)
+        assert handoff["pending_tasks"] == 1
+        written = json.loads((repo.phase_dir / "write_tasks.json").read_text())
+        assert [t["task_id"] for t in written["batches"]] == ["T007"]
         assert self._util(
             capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T007")[0] == 0
         # Fix round 14: the released task is told, as on the executor leg.

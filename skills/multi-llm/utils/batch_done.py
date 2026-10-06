@@ -90,6 +90,7 @@ try:
     from .state_manager import (
         mark_item_processed_in_state,
         set_task_check_findings_in_state,
+        set_task_check_tree_in_state,
         update_task_status_in_state,
     )
     from .stream_bootstrap import bootstrap_streams
@@ -108,7 +109,8 @@ try:
         upstream_held_check,
     )
     from .write_prompt import (
-        WritePromptError, changed_since_bound, discard_check_tree, load_write_task,
+        WritePromptError, changed_since_bound, check_tree_fingerprint,
+        discard_check_tree, load_write_task,
     )
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
@@ -116,6 +118,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.state_manager import (  # type: ignore
         mark_item_processed_in_state,
         set_task_check_findings_in_state,
+        set_task_check_tree_in_state,
         update_task_status_in_state,
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
@@ -134,7 +137,8 @@ except ImportError:  # pragma: no cover - direct script invocation
         upstream_held_check,
     )
     from utils.write_prompt import (  # type: ignore
-        WritePromptError, changed_since_bound, discard_check_tree, load_write_task,
+        WritePromptError, changed_since_bound, check_tree_fingerprint,
+        discard_check_tree, load_write_task,
     )
 
 
@@ -333,6 +337,11 @@ def record_batch(
         else:
             # A code batch's own check: reported, never a hold (fix round 14).
             batch_check = read
+    # The tree a check with findings leaves (fix round 14): a native
+    # `--resume` hands the check out again only once the files moved since,
+    # as the executor does from its verdict's stamp. `util finalize-tracking`
+    # re-stamps it with the tree the run ends on.
+    tree = check_tree_fingerprint(phase_dir) if check_findings else None
     target = Path(state_file) if state_file else phase_dir.parent / "state.json"
     if not target.is_file():
         raise WritePromptError(
@@ -352,6 +361,7 @@ def record_batch(
         blocked: List[str] = []
         if kind == "implement":
             set_task_check_findings_in_state(state, task_id, check_findings)
+            set_task_check_tree_in_state(state, task_id, tree)
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )

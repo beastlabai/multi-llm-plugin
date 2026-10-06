@@ -311,7 +311,61 @@ def main(argv=None) -> int:
         if code:
             return code
         _restamp_plan_hash(state_path, Path(args.plan_file))
+    if args.phase == "implement":
+        # Last, after this command's own edit to the plan: the tree the run
+        # ends on is the one a `--resume` compares against.
+        _restamp_check_trees(state_path)
     return 0
+
+
+def _restamp_check_trees(state_path: Path) -> None:
+    """Stamp each check whose findings hold tasks with the tree as the run
+    leaves it (fix round 14, the native counterpart of the executor's
+    ``WriteBatchScheduler._restamp_check_trees``).
+
+    ``util batch-done --check findings`` stamps the tree when the check is
+    recorded, and the tasks that do not depend on it go on and edit files
+    after it, so a ``--resume`` the user changed nothing for would read "the
+    files changed" and hand the check out again: on the stop fixture's
+    resume with nothing changed, Claude Code re-ran T002 (a new subagent,
+    ~23k tokens) for the same findings. The run's own edits are not a change
+    the user made, so this command — the native run's closing call — re-stamps
+    every stamp still standing; a stamp on a check that passed, failed or was
+    accepted is dropped. Only a check stamped before keeps one: one the emit
+    handed out again and nobody re-ran has none, and runs on the next resume.
+    Best-effort and silent: a check with no stamp is run again.
+    """
+    try:
+        from utils.state_manager import (
+            TASK_CHECK_TREES_KEY,
+            set_task_check_tree_in_state,
+        )
+        from utils.write_batch_scheduler import rerunnable_checks
+        from utils.write_prompt import check_tree_fingerprint
+    except ImportError:  # pragma: no cover - the skill is always on the path
+        return
+    try:
+        with state_file_lock(state_path):
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict):
+                return
+            stamped = state.get(TASK_CHECK_TREES_KEY)
+            if not isinstance(stamped, dict) or not stamped:
+                return
+            held = set(rerunnable_checks(state))
+            current = check_tree_fingerprint(state_path.parent / "implement")
+            changed = False
+            for task_id in sorted(stamped):
+                if task_id not in held:
+                    set_task_check_tree_in_state(state, task_id, None)
+                    changed = True
+                elif current is not None and stamped[task_id] != current:
+                    set_task_check_tree_in_state(state, task_id, current)
+                    changed = True
+            if changed:
+                _write_state_atomic(state_path, state)
+    except (StateLockTimeout, OSError, ValueError):
+        return
 
 
 def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):

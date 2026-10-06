@@ -154,6 +154,32 @@ def set_task_check_findings_in_state(
         state.pop(TASK_CHECK_FINDINGS_KEY, None)
 
 
+#: ``task id -> tree fingerprint`` for each check with findings on the native
+#: leg (fix round 14): the files git saw when the run that recorded the
+#: findings ended (``write_prompt.check_tree_fingerprint``). A native
+#: ``--resume`` hands the check out again only when the tree moved since —
+#: the executor keeps the same stamp on the check's verdict
+#: (``verdict.tree_fingerprint``).
+TASK_CHECK_TREES_KEY = "task_check_trees"
+
+
+def set_task_check_tree_in_state(
+    state: Dict[str, Any], task_id: str, fingerprint: Optional[str],
+) -> None:
+    """Record (or, with ``None``, drop) *task_id*'s check tree stamp; the key
+    is dropped when the map empties."""
+    recorded = state.get(TASK_CHECK_TREES_KEY)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    if fingerprint:
+        current[str(task_id)] = str(fingerprint)
+    else:
+        current.pop(str(task_id), None)
+    if current:
+        state[TASK_CHECK_TREES_KEY] = current
+    else:
+        state.pop(TASK_CHECK_TREES_KEY, None)
+
+
 def mark_item_processed_in_state(
     state: Dict[str, Any],
     phase: str,
