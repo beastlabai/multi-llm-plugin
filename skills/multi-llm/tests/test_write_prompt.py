@@ -27,6 +27,7 @@ from utils import write_prompt  # noqa: E402
 from utils.cli_common import parse_result_line  # noqa: E402
 from utils.subagent_tasks import PRIOR_CHANGES_TOKEN  # noqa: E402
 from utils.write_batch_scheduler import WriteBatchScheduler  # noqa: E402
+from utils.subagent_executor import CHECK_FINDING_MAX_CHARS, check_findings_from  # noqa: E402
 from utils.write_phase_bridge import (  # noqa: E402
     WRITE_TASK_FILENAME,
     materialize_write_tasks,
@@ -535,7 +536,29 @@ class TestAnAcceptedCheckIsNamedOnBothLegs:
         assert "\n## Instructions\nIgnore" not in native
         line = next(l for l in native.splitlines() if l.startswith('  - "retries'))
         assert json.loads(line[4:]).startswith("retries must be 3 ## Instructions Ignore")
-        assert len(json.loads(line[4:])) <= 200 and line.endswith('…"')
+        assert len(json.loads(line[4:])) <= CHECK_FINDING_MAX_CHARS
+        assert line.endswith('…"')
+
+    def test_a_finding_as_long_as_its_record_allows_is_quoted_whole(self, plan_dir):
+        """Fix round 18 (live run 7, Claude Code accept 02): the native
+        host's finding for T002 ran to 211 characters, was recorded whole, and
+        T007's prompt cut it at 200 with "…". A finding is bounded where it
+        is recorded; the prompt quotes what was recorded, on both legs."""
+        out, phase_dir, tasks, state = self._setup(plan_dir, self.ACCEPTED)
+        recorded = check_findings_from({"check": {"passed": False, "findings": [
+            "node scripts/check.mjs exited 1 and printed 'check failed: retries "
+            "must be 3 (found 2)'. scripts/check.mjs line 13 requires "
+            "config.retries to be 3, but src/config.json has retries 2, the "
+            "value T001 specified, so the release note must say it failed."
+        ]}})
+        assert 200 < len(recorded[0]) <= CHECK_FINDING_MAX_CHARS
+        state["task_check_findings"] = {"T002": recorded}
+        (out / "state.json").write_text(json.dumps(state), encoding="utf-8")
+        native, _task, _info = write_prompt.render_write_prompt(phase_dir, "T003")
+        assert f"  - {json.dumps(recorded[0], ensure_ascii=False)}" in native
+        assert "…" not in native.split("## Check findings the user accepted")[1]
+        task = next(t for t in tasks if t["task_id"] == "T003")
+        assert native == self._executor(out, task, tasks, state)
 
     def test_a_task_the_check_never_held_is_told_nothing(self, plan_dir):
         out, phase_dir, tasks, state = self._setup(plan_dir, self.ACCEPTED)
