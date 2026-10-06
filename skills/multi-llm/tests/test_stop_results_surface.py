@@ -406,3 +406,29 @@ class TestTheResumeCostCountsEveryKeptTask:
                          "--run-id", "R1B"])
         out = capsys.readouterr().out
         assert "keeps the 4 already applied" in out, out
+
+
+class TestASingleTaskRerunStillReopensImplement:
+
+    def test_task_hands_a_completed_task_out_and_reopens_the_phase(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        import implement_orchestrator
+        from tests.test_implement_stop_account import _check_passes, make_repo
+        from utils import provider_registry as registry
+        from utils.state_manager import get_or_create_state
+
+        repo = make_repo(tmp_path, monkeypatch)
+        try:
+            _check_passes(repo)
+            assert _implement(repo) == 0
+            capsys.readouterr()
+            assert implement_orchestrator.main([
+                "--plan-file", str(repo.plan), "--output", str(tmp_path / "h.json"),
+                "--yes", "--resume", "--task", "T003",
+            ]) == 0
+            assert "Nothing is left to run" not in capsys.readouterr().out
+            assert get_or_create_state(repo.plan).is_phase_started("implement")
+        finally:
+            registry._config = None
+            registry._config_key = None
