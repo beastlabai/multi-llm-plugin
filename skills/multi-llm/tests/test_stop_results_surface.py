@@ -15,6 +15,8 @@ routes and on Claude Code's native leg. Each class pins one finding:
   command in the host's spelling (the servers make them options);
 * an apply phase's ``[CONSISTENCY_WARNING]`` and the item its judge skipped
   lived only in the log, and the host reported "Applied 10 of 10";
+* ``status --view run`` listed no task of an implement the Claude Code host
+  ran itself (the native leg writes no report and no write mirror);
 """
 
 from __future__ import annotations
@@ -250,3 +252,56 @@ class TestAnApplyPhasesNotesReachTheResult:
         status = json.loads(
             (Path(orch.out_dir) / orch.phase_name / ".status.json").read_text())
         assert status["progress"]["notes"][0] == f"consistency warning: {WARNING}"
+
+
+class TestStatusReadsANativeImplementFromState:
+    """The native leg (Claude Code): the host records each task with
+    `util batch-done`, and `status --view run` showed none of them."""
+
+    def _native_stop(self, repo, capsys):
+        from tests.test_check_gate_fixture import FINDINGS, TestTheNativeLeg
+
+        leg = TestTheNativeLeg()
+        leg._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        for task_id in ("T001", "T003", "T004"):
+            assert leg._util(capsys, "batch-done", "--phase-dir", phase,
+                             "--task-id", task_id, "--status", "completed")[0] == 0
+        leg._util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
+                  "--status", "completed", "--check", "findings",
+                  "--finding", FINDINGS[0])
+        assert leg._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                         "T005", "--status", "failed", "--reason",
+                         "refused before dispatch: the write policy")[0] == 0
+        return leg
+
+    def test_the_run_view_lists_every_task_and_why(self, repo, capsys):
+        self._native_stop(repo, capsys)
+        assert not (repo.phase_dir / "write_batch_report.json").exists()
+        out = _status_run(repo, capsys)
+        assert "implement  no run record — the host ran these tasks itself" in out, out
+        line = next(l for l in out.splitlines() if l.strip().startswith("tasks:"))
+        assert "4/7 done" in line
+        assert "completed: T001, T002, T003, T004" in line
+        assert "failed: T005" in line
+        assert "not run: T006, T007" in line
+        assert "T005: refused before dispatch: the write policy" in out
+        assert "check findings T002: retries must be 3 (found 2)" in out
+
+    def test_answers_and_skips_read_as_the_user_gave_them(self, repo, capsys):
+        leg = self._native_stop(repo, capsys)
+        leg._emit(repo, capsys, "--resume", "--human-task", "T002=done",
+                  "--human-task", "T005=skip")
+        out = _status_run(repo, capsys)
+        line = next(l for l in out.splitlines() if l.strip().startswith("tasks:"))
+        assert "skipped at your request: T005" in line, line
+        assert "skipped (depend on a task you skipped): T006" in line, line
+        assert "deferred manual" not in line
+        assert "accepted with their check findings or after failing: T002" in line
+        assert ("answers on record: --human-task T002=done, "
+                "--human-task T005=skip") in out
+
+    def test_an_executor_run_keeps_its_own_view(self, repo, capsys):
+        _first_run(repo, capsys)
+        out = _status_run(repo, capsys)
+        assert "no run record — the host ran these tasks itself" not in out
