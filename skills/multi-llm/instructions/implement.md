@@ -621,7 +621,7 @@ your host.
    the phase *started* when it wrote the task JSON (step 2), and this is the only
    command that records it *completed* — **pass it only when every task ran and
    step 8's `driver.verify_command` (if configured) passed** (it is refused, exit 3,
-   while a task a check with findings held back is left); on a cancelled run,
+   while a task a check with findings held back is left: after a `[CHECK_BLOCKED]` line, a failed task or a stop, run it without `--mark-completed`); on a cancelled run,
    a failed contract check or a loop that stopped early, run the command without
    it, so the phase stays `in_progress` and `status` offers `--resume` instead of
    calling it done.

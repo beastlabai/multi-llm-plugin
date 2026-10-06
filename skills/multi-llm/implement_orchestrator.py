@@ -1299,6 +1299,13 @@ def _native_check_reruns(
     A check handed out again because the files changed (or with no stamp to
     compare) loses its stamp, so a run that never re-runs it cannot re-stamp
     it as checked. The kept map is ``check id -> its findings``.
+
+    A check whose findings the ``--exec-subagents`` leg recorded has no
+    ``task_check_trees`` stamp: the executor stamps its verdict instead
+    (:func:`_executor_check_stamp`), which is read when the state holds none
+    (fix round 15: an executor stop resumed natively handed the check out
+    again on unchanged files). A check kept on that stamp adopts it, so the
+    native run's closing ``util finalize-tracking`` re-stamps it like its own.
     """
     from utils.state_manager import (
         TASK_CHECK_TREES_KEY,
@@ -1320,6 +1327,12 @@ def _native_check_reruns(
             rerun.append(check_id)
             continue
         recorded = stamps.get(check_id)
+        adopted = False
+        if not recorded and answer != "retry":
+            recorded = _executor_check_stamp(
+                plan_path, check_id, findings_on_record.get(check_id),
+            )
+            adopted = bool(recorded)
         if answer != "retry" and recorded:
             if not measured:
                 current = check_tree_fingerprint(get_phase_dir(plan_path, "implement"))
@@ -1328,10 +1341,46 @@ def _native_check_reruns(
                 kept[check_id] = [
                     str(item) for item in (findings_on_record.get(check_id) or [])
                 ]
+                if adopted:
+                    set_task_check_tree_in_state(state.state, check_id, recorded)
                 continue
         rerun.append(check_id)
         set_task_check_tree_in_state(state.state, check_id, None)
     return rerun, kept
+
+
+def _executor_check_stamp(
+    plan_path: Path, check_id: str, findings: Any,
+) -> Optional[str]:
+    """The tree the ``--exec-subagents`` leg stamped on *check_id*'s verdict.
+
+    ``verdict.tree_fingerprint`` of ``{phase}/implement_batch_<id>.json``
+    (``WriteBatchScheduler._stamp_verdict``, re-stamped with the tree the run
+    left by its ``_restamp_check_trees``), the same digest
+    ``write_prompt.check_tree_fingerprint`` takes. Only a verdict that is an
+    ``ok`` check with findings, and the very findings ``state.json`` holds
+    (*findings*), so a stamp is never read off another run of the check than
+    the one on record. ``None`` otherwise.
+    """
+    from utils.subagent_executor import row_check_findings
+    from utils.subagent_tasks import implement_output_name
+
+    if not isinstance(findings, list) or not findings:
+        return None
+    path = Path(get_phase_dir(plan_path, "implement")) / implement_output_name(check_id)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    verdict = data.get("verdict") if isinstance(data, dict) else None
+    if not isinstance(verdict, dict) or verdict.get("ok") is not True:
+        return None
+    if not verdict.get("verification_only"):
+        return None
+    if row_check_findings(verdict) != [str(item) for item in findings]:
+        return None
+    stamp = verdict.get("tree_fingerprint")
+    return stamp if isinstance(stamp, str) and stamp else None
 
 
 def _native_withheld(
@@ -2256,7 +2305,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             "report with the commands `util next-command` prints"
         )
     else:
-        print("  6. Close the phase with `util finalize-tracking … --mark-completed`")
+        # The emit cannot know how the run ends: a check that records
+        # findings holds tasks back mid-run (fix round 15, stop fixture).
+        print(
+            "  6. Close the phase with `util finalize-tracking … --mark-completed` "
+            "once every task ran; after a [CHECK_BLOCKED] line, a failed task or "
+            "a stop, run it without --mark-completed and end the report with "
+            "the commands `util next-command` prints"
+        )
 
     # The batches are now the host's to run, so the phase is recorded
     # *started*, never completed: completion is the instruction's closing
