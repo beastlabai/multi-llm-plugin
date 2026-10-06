@@ -59,35 +59,55 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from . import prior_changes as _prior_changes
+    from .git_utils import pin_repo_root, worktree_file_stats
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import ExecutorError, ResultRejected
-    from .subagent_tasks import PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION
+    from .subagent_tasks import (
+        PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
+    )
     from .write_batch_scheduler import (
+        SWEEP_MAX_FILES,
         bind_prior_changes,
         decomposition_graph,
+        is_check_task,
         rerunnable_checks,
         upstream_held_check,
         with_result_contract,
     )
     from .write_phase_bridge import WRITE_TASK_FILENAME
+    from .write_safety import PolicyViolation, WritePolicy, relative_to_root
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
+    from utils.git_utils import pin_repo_root, worktree_file_stats  # type: ignore
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import ExecutorError, ResultRejected  # type: ignore
-    from utils.subagent_tasks import PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION  # type: ignore
+    from utils.subagent_tasks import (  # type: ignore
+        PHASE_BY_WRITE_KIND, TASKS_SCHEMA_VERSION, declared_file_set,
+    )
     from utils.write_batch_scheduler import (  # type: ignore
+        SWEEP_MAX_FILES,
         bind_prior_changes,
         decomposition_graph,
+        is_check_task,
         rerunnable_checks,
         upstream_held_check,
         with_result_contract,
     )
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
+    from utils.write_safety import (  # type: ignore
+        PolicyViolation, WritePolicy, relative_to_root,
+    )
 
 
 __all__ = [
+    "MARKER_REFUSED",
     "PROMPTS_SUBDIR",
+    "policy_refusal",
     "WritePromptError",
+    "check_tree_path",
+    "changed_since_bound",
+    "discard_check_tree",
+    "record_check_tree",
     "held_by_check",
     "load_write_task",
     "ordering_warnings",
@@ -216,6 +236,41 @@ MARKER_ORDER = "[WRITE_PROMPT_ORDER]"
 #: The refusal for a task a check with findings holds back (stderr, exit 3).
 MARKER_BLOCKED = "[WRITE_PROMPT_BLOCKED]"
 
+#: The refusal for a task the write policy forbids (stderr, exit 3).
+MARKER_REFUSED = "[WRITE_PROMPT_REFUSED]"
+
+
+def policy_refusal(phase_dir: Path, task_id: str) -> Optional[str]:
+    """The executor's pre-dispatch write-policy check, for the native leg.
+
+    Fix round 13 (the check-gate fixture): ``driver.write_paths`` refuses a
+    task whose declared files it does not allow before the executor starts
+    a runner, and the native leg handed the same task to the host to run.
+    The same check, on the same declared set (``declared_file_set``) against
+    the same merged policy (``WritePolicy.load``, anchored on the task
+    file's plan); the refusal's text, or ``None`` when the policy allows the
+    task or cannot be read (the prompt step is never refused on a guess).
+    """
+    phase_dir = Path(os.path.abspath(str(phase_dir)))
+    try:
+        document, task = load_write_task(phase_dir, task_id)
+        declared = declared_file_set(task)
+        if not declared:
+            return None
+        root, problem = pin_repo_root(str(phase_dir))
+        if root is None or problem:
+            return None
+        anchor = str(document.get("plan_file") or "") or None
+        policy = WritePolicy.load(root, anchor=anchor)
+        policy.check(
+            [relative_to_root(path, root) for path in declared], when="pre-dispatch",
+        )
+    except PolicyViolation as exc:
+        return exc.message
+    except Exception:  # noqa: BLE001 - never refuse on a policy that cannot be read
+        return None
+    return None
+
 
 def held_by_check(phase_dir: Path, task_id: str) -> Optional[Tuple[str, List[str]]]:
     """``(check id, its findings)`` when a check with findings holds *task_id*.
@@ -328,6 +383,142 @@ def default_output_path(phase_dir: Path, task_id: str) -> Path:
     return Path(os.path.abspath(str(phase_dir))) / PROMPTS_SUBDIR / f"{task_id}.prompt.txt"
 
 
+# ---------------------------------------------------------------------------
+# The check guard (fix round 13)
+# ---------------------------------------------------------------------------
+#
+# A check task declares no files: it promised to change nothing. On the
+# executor leg the post-run sweep holds it to that (any path it moved is a
+# partial application); on the native leg the host records it, and `util
+# batch-done --status completed --check findings` verified nothing about the
+# tree, so a host following a `failed` reply that listed findings after its
+# subagent edited a file recorded check-findings and the edit rode along. The
+# guard: `util write-prompt` records the files git sees (size and mtime, the
+# plugin's own trees left out) when it binds a check's prompt, and `util
+# batch-done` refuses to record that check `completed` while a file changed
+# since then that no other task of the phase declares (a task running beside
+# it may change its own files). One record verifies one dispatch: any record
+# of the check consumes it.
+
+#: The suffix of a check's bind-time tree record, beside its prompt file.
+TREE_RECORD_SUFFIX = ".tree.json"
+
+
+def check_tree_path(phase_dir: Path, task_id: str) -> Path:
+    """``{phase_dir}/prompts/{task_id}.tree.json``."""
+    return default_output_path(phase_dir, task_id).with_name(
+        f"{task_id}{TREE_RECORD_SUFFIX}"
+    )
+
+
+def _tree_exclusions(phase_dir: Path, repo_root: str) -> List[str]:
+    """The plugin's own trees, repo-relative: the phase dir, the plan's
+    output folder (its parent) and ``.multi-llm/`` — what the executor's
+    ``_tree_fingerprint`` leaves out too."""
+    excluded: List[str] = []
+    for path in (phase_dir, phase_dir.parent, Path(repo_root) / ".multi-llm"):
+        try:
+            relative = os.path.relpath(os.path.abspath(str(path)), repo_root)
+        except ValueError:  # pragma: no cover - another drive on Windows
+            continue
+        if relative == "." or relative.startswith(".."):
+            continue
+        excluded.append(relative.replace(os.sep, "/"))
+    return excluded
+
+
+def _tree_now(phase_dir: Path) -> Optional[Tuple[str, Dict[str, List[int]]]]:
+    """``(repo root, path -> [size, mtime_ns])``, or ``None`` when the
+    repository cannot be pinned or read, or holds more files than the
+    executor's sweep looks at (:data:`SWEEP_MAX_FILES`)."""
+    phase_dir = Path(os.path.abspath(str(phase_dir)))
+    try:
+        root, problem = pin_repo_root(str(phase_dir))
+    except Exception:  # noqa: BLE001 - the guard is never a crash
+        return None
+    if root is None or problem:
+        return None
+    stats = worktree_file_stats(root, exclude_prefixes=_tree_exclusions(phase_dir, root))
+    if stats is None or len(stats) > SWEEP_MAX_FILES:
+        return None
+    return root, {path: [size, mtime] for path, (size, mtime) in stats.items()}
+
+
+def record_check_tree(phase_dir: Path, task_id: str) -> Optional[Path]:
+    """Record the tree a check task's prompt is bound against; the path, or
+    ``None`` when the tree cannot be read (an earlier record is removed then,
+    so it never verifies this dispatch)."""
+    target = check_tree_path(phase_dir, task_id)
+    taken = _tree_now(phase_dir)
+    if taken is None:
+        discard_check_tree(phase_dir, task_id)
+        return None
+    root, files = taken
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        temp = target.with_name(target.name + ".tmp")
+        temp.write_text(json.dumps({
+            "task_id": task_id, "repo_root": root, "files": files,
+        }), encoding="utf-8")
+        os.replace(str(temp), str(target))
+    except OSError:
+        discard_check_tree(phase_dir, task_id)
+        return None
+    return target
+
+
+def discard_check_tree(phase_dir: Path, task_id: str) -> None:
+    """Remove a check's bind-time record (a record of the check consumed it)."""
+    try:
+        check_tree_path(phase_dir, task_id).unlink()
+    except OSError:
+        pass
+
+
+def _repo_relative(path: str, repo_root: str) -> str:
+    text = str(path).strip().replace(os.sep, "/")
+    if os.path.isabs(text):
+        try:
+            text = os.path.relpath(text, repo_root).replace(os.sep, "/")
+        except ValueError:  # pragma: no cover - another drive on Windows
+            return text
+    while text.startswith("./"):
+        text = text[2:]
+    return text
+
+
+def changed_since_bound(
+    phase_dir: Path, task_id: str, tasks: List[Dict[str, Any]],
+) -> Optional[List[str]]:
+    """The files that changed since *task_id*'s prompt was bound and that no
+    other task of *tasks* declares, sorted; ``None`` when there is no record
+    to compare (the prompt was not bound through ``util write-prompt``, or
+    the tree could not be read then or now): the guard never refuses on a
+    guess."""
+    record_path = check_tree_path(phase_dir, task_id)
+    try:
+        record = json.loads(record_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(record, dict) or not isinstance(record.get("files"), dict):
+        return None
+    taken = _tree_now(phase_dir)
+    if taken is None or taken[0] != record.get("repo_root"):
+        return None
+    root, after = taken
+    before = record["files"]
+    others = {
+        _repo_relative(path, root)
+        for task in tasks if isinstance(task, dict)
+        and str(task.get("task_id") or "") != task_id
+        for path in declared_file_set(task)
+    }
+    return sorted(
+        path for path in set(before) | set(after)
+        if before.get(path) != after.get(path) and path not in others
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="multi_llm.py util write-prompt",
@@ -391,9 +582,39 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return 3
 
+    refused = policy_refusal(Path(args.phase_dir), args.task_id)
+    if refused is not None:
+        task_id = args.task_id
+        implement = info.get("kind") == "implement"
+        print(
+            f"{MARKER_REFUSED} {task_id} is refused before dispatch: {refused} "
+            f"Do not dispatch {task_id}. Record it with util batch-done "
+            f"--phase-dir \"{os.path.abspath(args.phase_dir)}\" --task-id {task_id} "
+            f"--status failed --reason \"refused before dispatch: the write "
+            f"policy (driver.write_paths) does not allow a file it declares\""
+            + (
+                f", skip the tasks that depend on it, run the others, close "
+                f"the phase without --mark-completed, and report the way "
+                f"forward: allow the file in driver.write_paths "
+                f"(.multi-llm/providers.yaml) and re-run implement with "
+                f"--resume, or leave it and the tasks after it undone with "
+                f"--resume --human-task {task_id}=skip."
+                if implement else
+                f", stop, and report the way forward: allow the file in "
+                f"driver.write_paths (.multi-llm/providers.yaml) and re-run "
+                f"this phase with --resume."
+            ),
+            file=sys.stderr,
+        )
+        return 3
+
     # Advisory, on stderr so `--stdout` stays the prompt text alone.
     for line in ordering_warnings(Path(args.phase_dir), args.task_id):
         print(line, file=sys.stderr)
+
+    if is_check_task(str(info.get("kind") or ""), _task):
+        # What `util batch-done` holds this check to: it changes no file.
+        record_check_tree(Path(args.phase_dir), args.task_id)
 
     if args.stdout:
         sys.stdout.write(text)

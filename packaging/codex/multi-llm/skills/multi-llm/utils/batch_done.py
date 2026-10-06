@@ -101,7 +101,9 @@ try:
         transitive_dependents,
         upstream_held_check,
     )
-    from .write_prompt import WritePromptError, load_write_task
+    from .write_prompt import (
+        WritePromptError, changed_since_bound, discard_check_tree, load_write_task,
+    )
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils.metrics import _read_state, _write_state, state_file_lock  # type: ignore
@@ -123,7 +125,9 @@ except ImportError:  # pragma: no cover - direct script invocation
         transitive_dependents,
         upstream_held_check,
     )
-    from utils.write_prompt import WritePromptError, load_write_task  # type: ignore
+    from utils.write_prompt import (  # type: ignore
+        WritePromptError, changed_since_bound, discard_check_tree, load_write_task,
+    )
 
 
 __all__ = [
@@ -289,6 +293,15 @@ def record_batch(
             f"task that declares no files), so it has no check result: record "
             f"it without --check."
         )
+    checking = is_check_task(kind, task)
+    if checking and status == "completed":
+        changed = changed_since_bound(
+            phase_dir, task_id,
+            [t for t in (document.get("batches") or document.get("tasks") or [])
+             if isinstance(t, dict)],
+        )
+        if changed:
+            raise WritePromptError(_changed_a_file_message(phase_dir, task_id, changed))
     check_findings: Optional[List[str]] = None
     if check == "could-not-run":
         reason = reason or COULD_NOT_RUN_REASON
@@ -338,11 +351,34 @@ def record_batch(
                 items.append(item_id)
         state["updated_at"] = datetime.now().isoformat()
         _write_state(target, state)
+    if checking:
+        # One record verifies one dispatch: a later record of this check
+        # without a new `util write-prompt` has nothing to compare against.
+        discard_check_tree(phase_dir, task_id)
     return {
         "task_id": task_id, "status": status, "items": items,
         "state_file": str(target), "check_findings": check_findings or [],
         "blocked": blocked,
     }
+
+
+def _changed_a_file_message(phase_dir: Path, task_id: str, changed: List[str]) -> str:
+    """The refusal of a ``completed`` record for a check that changed files."""
+    shown = ", ".join(changed[:10]) + (
+        f" (+{len(changed) - 10} more)" if len(changed) > 10 else ""
+    )
+    return (
+        f"{task_id} is a check task (it declares no files), and since its "
+        f"prompt was bound with util write-prompt these files changed, which "
+        f"no other task in {WRITE_TASK_FILENAME} declares: {shown}. A check "
+        f"whose subagent changed a file did not only check, so it is not "
+        f"recorded completed (passed or findings): record it --status failed "
+        f"--reason \"its subagent changed {changed[0]}\" and keep or undo the "
+        f"change. If something other than its subagent changed them (you, or "
+        f"a task running beside it), bind its prompt again with util "
+        f"write-prompt --phase-dir \"{phase_dir}\" --task-id {task_id} and run "
+        f"the check again. Nothing was recorded."
+    )
 
 
 def _hold_or_release_dependents(

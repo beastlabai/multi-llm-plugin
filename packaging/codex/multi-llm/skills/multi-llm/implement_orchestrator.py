@@ -870,6 +870,9 @@ def _stop_user_commands(args: argparse.Namespace) -> Dict[str, str]:
             "accept": command("implement", "--resume", "--human-task", "{task_id}=done"),
             "skip": command("implement", "--resume", "--human-task", "{task_id}=skip"),
             "retry": command("implement", "--resume", "--human-task", "{task_id}=retry"),
+            # One resume carrying several answers (fix round 13: a stop that
+            # needs a check's findings accepted and a refused task skipped).
+            "answers": command("implement", "--resume", "{answers}"),
         }
     except Exception:  # noqa: BLE001 - advisory: the flags are named instead
         return {}
