@@ -481,7 +481,19 @@ def capture(skill_dir: Path, workdir: Path) -> Dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 def _flatten(value: Any, prefix: str = "") -> Dict[str, Any]:
+    """Every leaf of *value* by JSON pointer.
+
+    An empty object or list is a leaf of its own (``{}`` / ``[]``): it has
+    no children to address, so without one an added or removed
+    ``"blocked_by_check": {}`` produced no pointer on either side and passed
+    the comparison unseen (fix round 11; caught in round 14). A container
+    that gains its first member is reported by that member's own leaf, not
+    twice (:func:`diff_bundles`).
+    """
     out: Dict[str, Any] = {}
+    if isinstance(value, (dict, list)) and not value:
+        out[prefix or "/"] = {} if isinstance(value, dict) else []
+        return out
     if isinstance(value, dict):
         for key in sorted(value):
             token = str(key).replace("~", "~0").replace("/", "~1")
@@ -494,15 +506,37 @@ def _flatten(value: Any, prefix: str = "") -> Dict[str, Any]:
     return out
 
 
+def _is_empty_container(value: Any) -> bool:
+    return isinstance(value, (dict, list)) and not value
+
+
+def _holds_members(flat: Dict[str, Any], pointer: str) -> bool:
+    """Whether *flat* has a leaf strictly under *pointer*."""
+    prefix = pointer.rstrip("/") + "/"
+    return any(key.startswith(prefix) for key in flat)
+
+
 def diff_bundles(baseline: Any, fresh: Any) -> List[Tuple[str, Any, Any]]:
-    """Every difference as ``(json-pointer, baseline, fresh)``, pointer-sorted."""
+    """Every difference as ``(json-pointer, baseline, fresh)``, pointer-sorted.
+
+    An empty container's own leaf (:func:`_flatten`) is reported when the
+    container was added or removed, or changed between ``{}`` and ``[]``;
+    when the other side holds the same container *with* members, those
+    members' leaves already report the change and the empty leaf is not
+    repeated.
+    """
     left, right = _flatten(baseline), _flatten(fresh)
     diffs: List[Tuple[str, Any, Any]] = []
     for pointer in sorted(set(left) | set(right)):
         before = left.get(pointer, "<absent>")
         after = right.get(pointer, "<absent>")
-        if before != after:
-            diffs.append((pointer, before, after))
+        if before == after:
+            continue
+        if before == "<absent>" and _is_empty_container(after) and _holds_members(left, pointer):
+            continue
+        if after == "<absent>" and _is_empty_container(before) and _holds_members(right, pointer):
+            continue
+        diffs.append((pointer, before, after))
     return diffs
 
 
