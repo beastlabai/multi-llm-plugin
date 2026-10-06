@@ -2870,9 +2870,9 @@ class TestStatusSurface:
         out = capsys.readouterr().out
 
         assert "workflow suggested next:" in out
-        assert "workflow notice: review-tasks produced 1 unapplied task suggestion groups" in out
+        assert "workflow notice: review-tasks left 1 valid task suggestion group unapplied" in out
         assert payload["notice"] is not None
-        assert "review-tasks produced 1 unapplied task suggestion groups" in payload["notice"]
+        assert "review-tasks left 1 valid task suggestion group unapplied" in payload["notice"]
         assert "suggested next:" in payload["notice"]
         # The notice is advisory prose, never a mechanical continuation.
         assert payload["next"] is None
