@@ -2658,7 +2658,9 @@ def user_speller(
     next-step line of the same view (the manual-task note, the next phase) was
     the host's own spelling. Built from the same ``next_command`` template and
     quoting as ``next_phase.phase_command``, with the plan as typed and only
-    the flags the user typed (:func:`cli_common.drop_host_composed_flags`).
+    the flags the user typed (:func:`cli_common.drop_host_composed_flags`
+    over what this host's own skill or shim composes, fix round 19:
+    :func:`cli_common.file_route_composed_flags`).
 
     ``None`` on a tool route (``modes.TOOL_ROUTES``): there the tool's server
     re-spells every dispatcher command in the output itself and also hands it
@@ -2677,6 +2679,7 @@ def user_speller(
         if route in modes.TOOL_ROUTES:
             return None
         template = host_capabilities.next_command_template(host, route)
+        composed = cli_common.file_route_composed_flags(host)
     except Exception:  # noqa: BLE001 - advisory: the dispatcher command stands
         return None
 
@@ -2685,7 +2688,7 @@ def user_speller(
         if resolved is None:
             return None
         kept = [str(token) for token in [
-            *extra, *cli_common.drop_host_composed_flags(tokens)]]
+            *extra, *cli_common.drop_host_composed_flags(tokens, composed)]]
         # A token this one-line spelling cannot carry as it is — an `ask`
         # question with a newline or a tab, an empty value — keeps the
         # dispatcher command, which quotes it whole. Fix round 19: those

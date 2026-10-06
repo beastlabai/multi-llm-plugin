@@ -1310,30 +1310,68 @@ def drop_answer_flags(tokens: Iterable[str]) -> List[str]:
     return out
 
 
-#: The flags a host composes on every call it makes, which a command printed
-#: for its user never carries: exactly the ones the tool routes reserve
-#: (``packaging/common/surface.py``'s ``reserved_flags``: ``exact``, the
-#: ``named_exception`` and the ``--internal-`` prefix; a test holds the two
+#: The flags a tool route composes on every call it makes, which a command
+#: printed for its user never carries: exactly the ones the tool routes
+#: reserve (``packaging/common/surface.py``'s ``reserved_flags``: ``exact``,
+#: the ``named_exception`` and the ``--internal-`` prefix; a test holds the two
 #: lists together). Fix round 18 (Codex racing run 7): ``status``'s
 #: ``resume with:`` line was the raw ``uv run … --host codex --detach
-#: --resume`` while every other next-step line was the host's spelling.
+#: --resume`` while every other next-step line was the host's spelling. A file
+#: route composes less (:func:`file_route_composed_flags`).
 _HOST_COMPOSED = _option_table((
     "host", "yes", "exec_subagents", "detach", "if_not_running",
     "max_detached", "interactive", "internal_worker", "internal_run_id",
 ))
 
 
-def drop_host_composed_flags(tokens: Iterable[str]) -> List[str]:
-    """*tokens* without the flags a host composes itself (:data:`_HOST_COMPOSED`,
-    any ``--internal-`` flag), each with its value: what is left is what the
-    user typed, for a command spelled the way they type it."""
+def file_route_composed_flags(
+    host_id: str,
+) -> Dict[str, Tuple[Tuple[str, ...], bool]]:
+    """The flags *host_id*'s own skill or shim composes on its file route.
+
+    Read off the host's capability entry, the data its shim's dispatcher
+    command and verb sentences are rendered from: ``--host`` (every one bakes
+    it), ``--yes`` (an installable shim bakes it; Claude Code's SKILL.md does
+    not, and offers ``--yes`` and ``--interactive`` to the user),
+    ``--exec-subagents`` (the *spawn subagents* verb of an ``executor`` host)
+    and ``--detach`` (the *run detached* verb of a host that is not
+    ``native``: Claude Code never passes it). Fix round 19: the tool routes'
+    reserved set was dropped on every route, so a Claude Code run the user
+    started with ``--exec-subagents --yes`` printed a resume without them,
+    which ran on the other leg, and the shims lost ``--interactive``, the one
+    flag that replaces their baked ``--yes``. A test holds this to each
+    host's template.
+    """
+    from . import host_capabilities
+
+    entry = host_capabilities.entry(host_id)
+    dests = ["host"]
+    if entry.get("installable") is True:
+        dests.append("yes")
+    if entry.get("subagents") == "executor":
+        dests.append("exec_subagents")
+    if entry.get("detach") != "native":
+        dests.append("detach")
+    return _option_table(dests)
+
+
+def drop_host_composed_flags(
+    tokens: Iterable[str],
+    composed: Optional[Dict[str, Tuple[Tuple[str, ...], bool]]] = None,
+) -> List[str]:
+    """*tokens* without the flags a host composes itself, each with its value,
+    and without any ``--internal-`` flag: what is left is what the user typed,
+    for a command spelled the way they type it. *composed* is the host's own
+    set (:func:`file_route_composed_flags`); ``None`` is the tool routes'
+    (:data:`_HOST_COMPOSED`)."""
+    table = _HOST_COMPOSED if composed is None else composed
     out: List[str] = []
     items = [str(token) for token in tokens]
     index = 0
     while index < len(items):
         token = items[index]
         head = token.split("=", 1)[0]
-        takes_value = _matches_any(head, _HOST_COMPOSED)
+        takes_value = _matches_any(head, table)
         if takes_value is None and head.startswith(INTERNAL_FLAG_PREFIX):
             takes_value = False
         if takes_value is None:
