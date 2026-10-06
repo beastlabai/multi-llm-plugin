@@ -86,7 +86,10 @@ from typing import Any, Dict, Iterable, List, Optional
 
 try:
     from . import prior_changes as _prior_changes
-    from .metrics import _read_state, _write_state, state_file_lock
+    from .metrics import (
+        _read_state, _write_state, restore_to_progress_in_state,
+        state_file_lock, withdraw_from_progress_in_state,
+    )
     from .state_manager import (
         TASK_RESET_AT_KEY,
         _parse_completion_time,
@@ -118,7 +121,10 @@ try:
     )
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
-    from utils.metrics import _read_state, _write_state, state_file_lock  # type: ignore
+    from utils.metrics import (  # type: ignore
+        _read_state, _write_state, restore_to_progress_in_state,
+        state_file_lock, withdraw_from_progress_in_state,
+    )
     from utils.state_manager import (  # type: ignore
         TASK_RESET_AT_KEY,
         _parse_completion_time,
@@ -377,6 +383,7 @@ def record_batch(
             blocked = _hold_or_release_dependents(
                 state, document, task_id, held=bool(check_findings),
             )
+            _settle_eta_total(state, document, task_id, status, reason, blocked)
         tracked = _tracked_after_batch(state, target, kind)
         if tracked is not None:
             state["tracked_files"] = tracked
@@ -426,6 +433,62 @@ def _changed_a_file_message(phase_dir: Path, task_id: str, changed: List[str]) -
         f"write-prompt --phase-dir \"{phase_dir}\" --task-id {task_id} and run "
         f"the check again. Nothing was recorded."
     )
+
+
+#: How a ``--reason`` starts when ``util write-prompt`` refused the task, so
+#: no subagent ran it (``[WRITE_PROMPT_REFUSED]`` prints the record to make).
+REFUSED_BEFORE_DISPATCH_REASON = "refused before dispatch"
+
+
+def _settle_eta_total(
+    state: Dict[str, Any], document: Dict[str, Any], task_id: str,
+    status: str, reason: Optional[str], held: List[str],
+) -> None:
+    """Take out of this run's ``[ETA]`` total the handed-out tasks this record
+    keeps from being dispatched (fix round 18, live run 7 #2).
+
+    The native emit's ``tasks_to_dispatch`` — what the host passes as
+    ``--total-batches``, one ``util metrics record`` per task it dispatches —
+    counts every task in the batches, a task waiting on a check's verdict
+    included. A record that settles one of them as never dispatched in this
+    run takes it out (``metrics.withdraw_from_progress_in_state``):
+
+    * the tasks a check with findings holds (*held*, the ``[CHECK_BLOCKED]``
+      list);
+    * after a ``failed`` record, every task that depends on it and has no
+      record yet — the host skips them (``instructions/implement.md`` step
+      6) — and the task itself when ``util write-prompt`` refused it, since
+      no subagent ran.
+
+    Only tasks of this phase's ``write_tasks.json`` (what was handed out) and
+    never a manual task (``tasks_to_dispatch`` does not count one). A record
+    of the same task again first puts back what its earlier record took out.
+    Nothing happens when the host never ran ``util metrics start``.
+    """
+    phase = PHASE_BY_WRITE_KIND.get(str(document.get("kind") or ""), "implement")
+    restore_to_progress_in_state(state, phase, task_id)
+    handed = {
+        str(task.get("task_id") or ""): task
+        for task in (document.get("batches") or document.get("tasks") or [])
+        if isinstance(task, dict)
+    }
+
+    def manual(task: Dict[str, Any]) -> bool:
+        return bool(task.get("is_human")) or str(task.get("executor_role") or "") == "human"
+
+    out = [t for t in held if t in handed and not manual(handed[t])]
+    if status == "failed":
+        if str(reason or "").strip().lower().startswith(REFUSED_BEFORE_DISPATCH_REASON):
+            out.append(task_id)
+        statuses = state.get("task_status") or {}
+        graph = decomposition_graph(list(handed.values()), state)
+        for dependent in transitive_dependents(graph, task_id):
+            task = handed.get(dependent)
+            if task is None or manual(task):
+                continue
+            if statuses.get(dependent) in (None, "pending"):
+                out.append(dependent)
+    withdraw_from_progress_in_state(state, phase, out, task_id)
 
 
 def _hold_or_release_dependents(

@@ -2695,11 +2695,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Batches: {len(output_data['batches'])}")
     if "tasks_to_dispatch" in output_data:
         # The one number the host passes to `util metrics` (fix round 16:
-        # the host counted "5 execution batches" and passed that).
+        # the host counted "5 execution batches" and passed that). Fix round
+        # 18 (run 7 #2): it is in the [ETA] line's unit, one record per task
+        # dispatched, and `util batch-done` takes a task out of it once a
+        # record keeps that task from running (T007 behind check T002).
         dispatch = output_data["tasks_to_dispatch"]
         print(
             f"Tasks to dispatch: {dispatch} (pass --total-batches {dispatch} to "
-            f"`util metrics start` and `util metrics record`)"
+            f"`util metrics start` and `util metrics record`; the [ETA] line "
+            f"counts tasks, not batches, and leaves out a task that a "
+            f"`util batch-done` record keeps from running)"
         )
 
     if native_human_plan is not None:

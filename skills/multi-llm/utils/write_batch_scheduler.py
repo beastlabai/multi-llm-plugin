@@ -6443,9 +6443,8 @@ class WriteBatchScheduler:
         ``batch 9/14 · ~Nm remaining``, never reached ``N/N`` and never printed
         ``ALL BATCHES COMPLETE``. ``self._tasks_finished`` is the count
         ``_mirror_status`` publishes as ``completed`` (resume skips included),
-        and ``len(self.tasks) - len(result.human_plan.skipped)`` is the same
-        denominator it publishes as ``total``, so the log and ``status`` now mean
-        the same thing by the same number.
+        and :meth:`_eta_total` counts the tasks that numerator can reach (fix
+        round 18: not an accepted task, a manual one, or one a check holds).
         """
         if self.state is None or not hasattr(self.state, "record_metric"):
             return
@@ -6455,8 +6454,16 @@ class WriteBatchScheduler:
             f"{task.get('task_title') or self.kind} "
             f"[{outcome.write_outcome or outcome.status}]"
         ).strip()
-        total_batches = len(self.tasks) - len(result.human_plan.skipped)
+        total_batches = self._eta_total(result)
         run_batch_index = self._tasks_finished
+        live = getattr(self.state, "state", None)
+        progress = (
+            (live.get("metrics_progress") or {}).get(self.phase)
+            if isinstance(live, dict) else None
+        )
+        if isinstance(progress, dict):
+            # The stored baseline follows the line it is printed beside (N1).
+            progress["total_batches"] = total_batches
         try:
             eta_line = self.state.record_metric(
                 self.phase,
@@ -8700,6 +8707,28 @@ class WriteBatchScheduler:
             except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
                 pass
 
+    def _eta_total(self, result: SchedulerResult) -> int:
+        """The ``[ETA]`` denominator: the tasks this run finishes or keeps.
+
+        Every materialized task but the ones it never dispatches: a task the
+        human-task plan skips or accepts, a manual task (no runner ever runs
+        one), and a task a check with findings holds back
+        (``result.blocked_by_check``, which grows as checks report). Fix round
+        18 (live run 7): the accept path's resume counted the accepted check
+        T002 and its last line read "batch 1/2 … ~0m 24s remaining" after the
+        one task it dispatched; a check holding T007 left "6/7" the same way.
+        The numerator, ``self._tasks_finished``, never counts those tasks.
+        """
+        out = (
+            set(result.human_plan.skipped) | set(result.human_plan.accepted)
+            | set(result.blocked_by_check)
+        )
+        return sum(
+            1 for task in self.tasks
+            if str(task.get("task_id", "")) not in out
+            and not task.get("is_human") and task.get("executor_role") != "human"
+        )
+
     def _metrics_start(self, result: SchedulerResult) -> None:
         """Stamp the phase's ETA baseline before the first dispatch.
 
@@ -8708,8 +8737,8 @@ class WriteBatchScheduler:
         `[ETA]` line `instructions/implement.md` step 5 describes (F4).
 
         The baseline is the number of **tasks** this run will actually dispatch
-        or resume-skip — ``len(self.tasks) - len(result.human_plan.skipped)``,
-        the same total ``_record_metrics``/``_mirror_status`` use — never the
+        or resume-skip — :meth:`_eta_total`, the same total ``_record_metrics``
+        uses (and keeps the stored baseline at) — never the
         bare materialized count, which still counts a deferred human task that is
         never dispatched (N1, 2026-09-16: with the bare count, the stored
         ``metrics_progress.total_batches`` disagreed with every ``[ETA]`` line
@@ -8718,7 +8747,7 @@ class WriteBatchScheduler:
         """
         if self.state is None or not hasattr(self.state, "start_metrics_phase"):
             return
-        total_batches = len(self.tasks) - len(result.human_plan.skipped)
+        total_batches = self._eta_total(result)
         try:
             self.state.start_metrics_phase(self.phase, total_batches)
             self.state.save()

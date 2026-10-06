@@ -14,7 +14,7 @@ import threading
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 
 try:
     from . import process_control
@@ -257,6 +257,68 @@ def start_phase_in_state(state: dict, phase: str, total_batches: int) -> None:
         "total_batches": int(total_batches),
         "run_id": uuid.uuid4().hex,
     }
+
+
+#: ``metrics_progress.{phase}.withdrawn``: ``{task id: the task whose record
+#: took it out}`` — the tasks this run's started total counted that it will
+#: not dispatch after all (fix round 18).
+WITHDRAWN_KEY = "withdrawn"
+
+
+def withdraw_from_progress_in_state(
+    state: dict, phase: str, task_ids: Iterable[str], cause: str,
+) -> List[str]:
+    """Take *task_ids* out of this run's started total; the ones taken out.
+
+    Fix round 18 (live run 7, Claude Code stop 01): the native implement emit
+    hands out a task that waits on a check's verdict (T007 behind check
+    T002), so ``tasks_to_dispatch`` — what the host passes as
+    ``--total-batches`` — counts it. When T002 reported problems, T007 was
+    held and never dispatched, and the ``[ETA]`` line stopped at "batch 4/5"
+    for good. ``util batch-done`` calls this for each handed-out task its
+    record keeps from running (held by a check's findings, after a failed
+    task, refused before dispatch): the stored ``total_batches`` drops by
+    one per task, once, and :func:`record_metric_in_state` then counts
+    against it. No-op when the phase was not started (no ``metrics start``)
+    or the task is already out.
+    """
+    progress = (state.get("metrics_progress") or {}).get(phase)
+    if not isinstance(progress, dict) or not _is_index(progress.get("total_batches")):
+        return []
+    withdrawn = progress.get(WITHDRAWN_KEY)
+    if not isinstance(withdrawn, dict):
+        withdrawn = {}
+    taken: List[str] = []
+    for task_id in task_ids:
+        task_id = str(task_id)
+        if not task_id or task_id in withdrawn:
+            continue
+        withdrawn[task_id] = str(cause)
+        taken.append(task_id)
+    if taken:
+        progress[WITHDRAWN_KEY] = withdrawn
+        progress["total_batches"] = max(int(progress["total_batches"]) - len(taken), 0)
+    return taken
+
+
+def restore_to_progress_in_state(state: dict, phase: str, cause: str) -> List[str]:
+    """Put back the tasks *cause*'s earlier record took out of the total
+    (:func:`withdraw_from_progress_in_state`): that task is recorded again,
+    and its new record decides afresh. The ones put back."""
+    progress = (state.get("metrics_progress") or {}).get(phase)
+    if not isinstance(progress, dict) or not _is_index(progress.get("total_batches")):
+        return []
+    withdrawn = progress.get(WITHDRAWN_KEY)
+    if not isinstance(withdrawn, dict):
+        return []
+    back = sorted(t for t, by in withdrawn.items() if by == str(cause))
+    for task_id in back:
+        del withdrawn[task_id]
+    if back:
+        progress["total_batches"] = int(progress["total_batches"]) + len(back)
+    if not withdrawn:
+        progress.pop(WITHDRAWN_KEY, None)
+    return back
 
 
 def start_phase(state_path: Path, phase: str, total_batches: int) -> None:
@@ -706,6 +768,14 @@ def record_metric_in_state(
     if total_batches is None or batch_index is None:
         return None
     progress = (state.get("metrics_progress") or {}).get(phase)
+    if (
+        isinstance(progress, dict) and progress.get(WITHDRAWN_KEY)
+        and _is_index(progress.get("total_batches"))
+    ):
+        # Fix round 18: this run's total lost the tasks a record took out
+        # (`withdraw_from_progress_in_state`); the host still passes the
+        # count it was handed at the emit.
+        total_batches = int(progress["total_batches"])
     result = _compute_eta(
         entries=entries,
         progress=progress,
