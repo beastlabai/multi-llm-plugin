@@ -1812,6 +1812,11 @@ def _attach_finished_during_wait(
 GENERIC_NEEDS_HUMAN_ERROR = "needs_human (exit 3)"
 
 
+def _id_list(value: Any) -> List[str]:
+    """A mirror's id list as strings; anything that is not a list is none."""
+    return [str(item) for item in value] if isinstance(value, list) else []
+
+
 def _mirror_text(key: str, mirror: Any) -> List[str]:
     """One clause per executor mirror: ``<kind> <ok>/<total> ok`` and, when any
     task did not end ``ok``, the non-ok statuses and the failed ids."""
@@ -1924,10 +1929,27 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     # but rendered nowhere, so the one task `--yes`'s default strategy defers
     # to a human was invisible in the finished run's own progress line.
     skipped_ids = mirror.get("skipped_task_ids") if isinstance(mirror.get("skipped_task_ids"), list) else []
-    if skipped_ids:
+    # Fix round 14: a task the user skipped (`--human-task <id>=skip`), and
+    # the tasks skipped with it, are not manual work left for the user, so
+    # they are named apart from the deferral (Codex stop-path accept 02 read
+    # "deferred manual: T005, T006" beside a summary saying "Skipped at your
+    # request"). A mirror without the keys reads as before.
+    declined = _id_list(mirror.get("declined_task_ids"))
+    with_them = _id_list(mirror.get("declined_dependent_task_ids"))
+    deferred = [
+        str(task_id) for task_id in skipped_ids
+        if str(task_id) not in declined and str(task_id) not in with_them
+    ]
+    if deferred:
         strategy = mirror.get("human_task_strategy")
         suffix = f" ({strategy})" if strategy else ""
-        parts.append(f"deferred manual: {', '.join(map(str, skipped_ids))}{suffix}")
+        parts.append(f"deferred manual: {', '.join(deferred)}{suffix}")
+    if declined:
+        parts.append(f"skipped at your request: {', '.join(declined)}")
+    if with_them:
+        parts.append(
+            f"skipped (depend on a task you skipped): {', '.join(with_them)}"
+        )
     # F4: `driver.verify_command`'s outcome. Without it a run that applied every
     # batch and then failed the repository's own check renders as
     # `apply_code_fixes 3/3 batches ok` with no failed id anywhere — the only
