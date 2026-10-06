@@ -13,11 +13,14 @@ routes and on Claude Code's native leg. Each class pins one finding:
   ``--resume``, the answers sitting in ``error``: the stop now records its
   answers as data and ``util next-command --blocked`` hands each back as a
   command in the host's spelling (the servers make them options);
+* an apply phase's ``[CONSISTENCY_WARNING]`` and the item its judge skipped
+  lived only in the log, and the host reported "Applied 10 of 10";
 """
 
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -131,3 +134,119 @@ class TestTheStopRecordsItsAnswers:
         text = resume["answers_text"]
         for answer in resume["answers"]:
             assert f"`{answer['command']}` ({answer['why']})" in text
+
+
+WARNING = ("T003 depends on T004, listed after it: a task added by an edit "
+           "batch belongs where its dependents can follow it")
+
+
+class TestAnApplyPhasesNotesReachTheResult:
+
+    def _orchestrator(self, tmp_path):
+        from tests.test_apply_orchestrator_base import (
+            _FakeOutcome, _FakeSchedulerResult, _orchestrator_on,
+        )
+
+        orch = _orchestrator_on(tmp_path, yes=True)
+        orch.write_tasks = [{"task_id": "apply-batch-0", "expected_ids": ["a", "b"]}]
+        orch.write_result = _FakeSchedulerResult([_FakeOutcome("apply-batch-0")])
+        orch.formatted_skipped = [
+            {"group_id": "934916bf899472b7", "status": "judge_skipped",
+             "title": "T002 combines scene, track generation, validation, and helpers",
+             "reason": "a scope trade-off"},
+        ]
+        orch.consistency_warnings = lambda: [WARNING]
+        return orch
+
+    def test_the_notes_name_the_warning_and_the_skipped_item(self, tmp_path):
+        orch = self._orchestrator(tmp_path)
+        notes = orch.run_notes()
+        assert notes[0] == f"consistency warning: {WARNING}"
+        assert notes[1].startswith(
+            f"1 {orch.item_noun} not applied, beside the 2 applied — skipped by "
+            "judge: T002 combines scene, track generation, validation, and "
+            "helpers [934916bf]")
+
+    def test_they_reach_the_notice_and_the_status_file(self, tmp_path):
+        from utils import cli_common
+
+        orch = self._orchestrator(tmp_path)
+        (Path(orch.out_dir) / orch.phase_name).mkdir(parents=True, exist_ok=True)
+        context = cli_common.activate_result(cli_common.ResultContext())
+        try:
+            cli_common.record_notice("an earlier notice")
+            orch._publish_run_notes()
+            notice = context.notice
+        finally:
+            cli_common.deactivate_result()
+        assert notice.startswith("an earlier notice; consistency warning: ")
+        assert "1 " + orch.item_noun + " not applied" in notice
+        status = json.loads(
+            (Path(orch.out_dir) / orch.phase_name / ".status.json").read_text())
+        assert status["progress"]["notes"] == orch.run_notes()
+
+    def test_a_terminal_poll_carries_them(self, tmp_path, capsys):
+        import multi_llm
+        from utils import status_file
+
+        plan = tmp_path / "plans" / "p.md"
+        plan.parent.mkdir(parents=True)
+        plan.write_text("# p\n", encoding="utf-8")
+        phase_dir = tmp_path / "plans" / "p" / "apply-task-suggestions"
+        phase_dir.mkdir(parents=True)
+        notes = [f"consistency warning: {WARNING}",
+                 "1 task suggestion not applied, beside the 10 applied — "
+                 "skipped by judge: T002 [934916bf] (reasons in summary.md)"]
+        status_file.write_status(str(phase_dir), {
+            "phase": "apply-task-suggestions", "state": "complete",
+            "progress": {"step": "complete", "notes": notes},
+            "run": {"run_id": "R1", "state": "done", "exit_code": 0,
+                    "mode": "apply-task-suggestions"},
+        })
+        capsys.readouterr()
+        multi_llm.main(["status", str(plan), "--view", "run", "--run-id", "R1"])
+        out = capsys.readouterr().out
+        line = [l for l in out.splitlines() if l.startswith("MULTI_LLM_RESULT:")][-1]
+        result = json.loads(line.split(" ", 1)[1])
+        assert result["notice"].startswith("; ".join(notes))
+        assert [f"note: {note}" for note in notes] == result["progress_lines"][-2:]
+        assert f"      note: {notes[1]}" in out
+
+    def test_the_executor_leg_publishes_them_when_it_finishes(self, tmp_path, capsys):
+        """The wiring: `_write_outputs` publishes the notes after the RESULT
+        block, on the leg that dispatched."""
+        from tests.test_apply_orchestrator_base import (
+            MockApplyOrchestrator, _FakeOutcome, _FakeSchedulerResult, _make_args,
+            _setup_plan_with_output,
+        )
+        from utils import cli_common
+
+        plan_path = _setup_plan_with_output(tmp_path)
+
+        class WarnedOrch(MockApplyOrchestrator):
+            phase_name = "apply-noted-leg"
+            review_subdir = "review-plan"
+            item_noun = "suggestion"
+            supports_revalidation = False
+            supports_skip_flag = False
+
+            def run_write_executor(self):
+                self.write_tasks = [{"task_id": "apply-batch-0", "expected_ids": ["a"]}]
+                self.write_result = _FakeSchedulerResult([_FakeOutcome("apply-batch-0")])
+                return 0
+
+            def consistency_warnings(self):
+                return [WARNING]
+
+        orch = WarnedOrch(_make_args(plan_file=str(plan_path), yes=True))
+        context = cli_common.activate_result(cli_common.ResultContext(
+            mode="apply-noted-leg", phase="apply-noted-leg"))
+        try:
+            assert orch.run() == 0
+        finally:
+            cli_common.deactivate_result()
+        capsys.readouterr()
+        assert f"consistency warning: {WARNING}" in (context.notice or "")
+        status = json.loads(
+            (Path(orch.out_dir) / orch.phase_name / ".status.json").read_text())
+        assert status["progress"]["notes"][0] == f"consistency warning: {WARNING}"

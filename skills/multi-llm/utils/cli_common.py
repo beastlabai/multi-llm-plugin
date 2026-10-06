@@ -1007,6 +1007,18 @@ def record_notice(text: Optional[str]) -> None:
         _ACTIVE.set_notice(text)
 
 
+def add_notice(text: Optional[str]) -> None:
+    """Append *text* to the notice already recorded (``; ``-joined), if any.
+
+    For a phase's own notes (fix round 14: a consistency warning, the items
+    a judge skipped), which must not replace a notice another site set.
+    """
+    if _ACTIVE is None or not text:
+        return
+    current = _ACTIVE.notice
+    _ACTIVE.set_notice(f"{current}; {text}" if current else text)
+
+
 def record_progress(progress: Optional[Dict[str, Any]]) -> None:
     """Record the watched run's ``progress`` object, if a dispatcher run is active."""
     if _ACTIVE is not None:

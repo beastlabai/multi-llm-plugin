@@ -35,7 +35,7 @@ writing a second file with a private shape — ``run`` only ever on a detached r
   apply to it, and ``claim_run`` writes it once at start and never again.
 * ``progress``: ``{step, batch_index, batches_total, tasks_done, tasks_total,
   tasks_generated, failed_task_ids, models, models_done, models_succeeded,
-  models_total, interval_s}`` — reporting only; no external actor advances it, and nothing
+  models_total, interval_s, notes}`` — reporting only; no external actor advances it, and nothing
   resumes, reaggregates or branches on it. That is why it is the one reserved
   object a **foreground** run writes too, and why ``detach.report_progress``
   writes on *every* path: the run handle it consults picks the **door**, never
@@ -72,7 +72,10 @@ writing a second file with a private shape — ``run`` only ever on a detached r
   which is why it never walks backwards mid-run) and its sibling
   ``models_succeeded`` counts the slots that produced a usable result;
   ``models_total`` is the number of specs requested. ``interval_s`` is the
-  ticker cadence the run resolved. This enumeration is the in-code contract for
+  ticker cadence the run resolved. ``notes`` is a finished apply phase's list
+  of plain lines a host must relay beside its counts — a consistency warning,
+  the items left unapplied and why (fix round 14) — which ``status`` renders
+  and carries into a terminal poll's ``notice``. This enumeration is the in-code contract for
   the object — a reader who finds a key missing from it concludes the key is not
   part of the schema and writes a second file for it, so a new ``progress`` key
   lands here in the same commit as its writer.
