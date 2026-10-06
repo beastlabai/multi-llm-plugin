@@ -19,7 +19,9 @@ file, through the same ``utils/write_phase_bridge``), and for one task id
 this binds the prompt **late** — against the prior-changes log as it is on
 disk at that moment, so it reflects exactly the batches already finished —
 and appends the write-batch result contract. Both invokers therefore produce
-byte-identical text for the same state: it calls the scheduler's own
+byte-identical text for the same prior-changes log (each leg appends a
+summary per finished batch and a failure line per failed one, fix round 15;
+a native host words a failure's reason itself): it calls the scheduler's own
 :func:`utils.write_batch_scheduler.bind_prior_changes` and
 :func:`utils.write_batch_scheduler.with_result_contract`, and
 ``tests/test_write_prompt.py`` pins the two renderings against each other.

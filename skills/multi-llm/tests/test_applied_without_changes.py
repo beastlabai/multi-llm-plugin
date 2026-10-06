@@ -406,7 +406,9 @@ def test_an_implement_task_that_changed_nothing_is_not_done_and_holds_the_rest(r
     assert rows["T002"]["status"] == executor.STATUS_BATCH_FAILED
     assert rows["T002"]["applied_without_changes"] is True
     entries = prior_changes.entries(str(get_output_dir(repo.plan)))
-    assert [e["id"] for e in entries] == ["T001"], entries
+    assert [e["id"] for e in entries] == ["T001", "T002"], entries
+    # Fix round 15: the native leg's failure line, written on this leg too.
+    assert entries[1]["summary"] == "(task failed — said applied, but its change did not land)"
 
     # The resume dispatches T002 again; this time the change lands.
     repo.monkeypatch.delenv("MOCK_LLM_EDITS_IF_PROMPT_HAS")

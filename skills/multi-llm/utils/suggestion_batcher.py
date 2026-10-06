@@ -112,9 +112,10 @@ class SuggestionBatch:
         """The stable, per-batch ``--id`` for the prior-changes append.
 
         NOT ``section_key``: a section that overflows the batch size or the char
-        cap starts a NEW batch under the SAME key, and ``prior_changes.append`` is
-        idempotent on ``(id, phase)`` — so a section-keyed id records the first
-        batch of that section and silently drops the rest. Computed here so a
+        cap starts a NEW batch under the SAME key, and ``prior_changes.append``
+        keeps one entry per ``(id, phase)`` (the newest, since fix round 14) — so
+        a section-keyed id keeps only the last batch of that section and silently
+        drops the rest. Computed here so a
         native invoker reads it off the serialized batch instead of picking a key,
         and byte-identical to what ``utils/write_phase_bridge`` derives for the
         same batch.

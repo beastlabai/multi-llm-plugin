@@ -517,10 +517,15 @@ class TestFourWriteOutcomes:
         assert "Apply batch 0" in prompts[1], "the re-send carries the batch"
         assert subagent_prompts.NOTHING_CHANGED_RESEND_HEADING in prompts[1]
         assert subagent_prompts.NOTHING_CHANGED_RESEND_HEADING not in prompts[0]
-        # No "(batch failed — …)" line: --resume dispatches it again, and that
-        # dispatch's real entry would be dropped as a duplicate.
-        log_file = env.out_dir / "prior_changes.jsonl"
-        assert not log_file.exists() or "apply-batch" not in log_file.read_text()
+        # Fix round 15: the native leg's "(batch failed — …)" line, so both
+        # legs write the same log; a --resume that applies it supersedes it.
+        from utils import prior_changes
+
+        entries = prior_changes.entries(str(env.out_dir))
+        assert [e["id"] for e in entries] == ["sec-0"], entries
+        assert entries[0]["summary"].startswith(
+            "(batch failed — said applied, but its change did not land")
+        assert entries[0]["summary"].endswith(", verified no file changes)")
 
     def test_partial_application_is_bytes_moved_plus_a_reported_failure(self, env):
         env.edits([_patch_edit(env.plan)],
@@ -655,6 +660,73 @@ class TestFourWriteOutcomes:
         assert "(after the one schema-repair re-ask)" in outcome.reason
         assert result.exit_code == 3
         assert not (env.phase_dir / "apply_batch_0.json").exists()
+
+
+class TestTheFailedBatchLine:
+    """Fix round 15 (review of round 14): the native leg appends `(task failed
+    — …)` / `(batch failed — …)` for a failed batch, the executor appended
+    nothing, so later prompts differed between the legs for the same history.
+    Round 14 made `append` supersede a changed summary per `(id, phase)`, so a
+    resumed dispatch's real entry replaces the failure line, and the executor
+    now writes it too — where the native leg does: never for a batch refused
+    before dispatch (the native emit records it, no host appends), never for
+    an apply batch that moved bytes (the native loop stops before its append),
+    and never for a check not run again (its earlier line stands)."""
+
+    @staticmethod
+    def _entries(env):
+        from utils import prior_changes
+
+        return {e["id"]: e["summary"] for e in prior_changes.entries(str(env.out_dir))}
+
+    @staticmethod
+    def _implement_task(env, task_id="T009", **over):
+        from utils.write_batch_scheduler import PRIOR_CHANGES_TOKEN as token
+
+        kwargs = dict(
+            kind="implement", task_id=task_id, expected_ids=[task_id],
+            declared_files=[str(env.root / "src" / "a.py")],
+            prior_changes_id=task_id,
+            prompt=f"Do {task_id}\n\n## Changes Applied in Prior Batches\n\n{token}\n",
+        )
+        kwargs.update(over)
+        return env.apply_task(0, **kwargs)
+
+    def test_a_failed_implement_task_leaves_its_task_failed_line(self, env):
+        env.edits([], result={"status": "failed", "ids": [], "files_touched": [],
+                              "summary": "the build broke"})
+        env.scheduler([self._implement_task(env)], kind="implement",
+                      finalize=False).run()
+        assert self._entries(env) == {
+            "T009": "(task failed — the build broke, no file changed)"}
+
+    def test_a_resume_that_applies_it_supersedes_the_line(self, env):
+        env.edits([], result={"status": "failed", "ids": [], "files_touched": [],
+                              "summary": "the build broke"})
+        env.scheduler([self._implement_task(env)], kind="implement",
+                      finalize=False).run()
+        env.edits([_patch_edit(env.root / "src" / "a.py")],
+                  result={"status": "applied", "ids": ["T009"],
+                          "files_touched": ["src/a.py"], "summary": "fixed the build"})
+        env.scheduler([self._implement_task(env)], kind="implement",
+                      finalize=False, resume=True).run()
+        assert self._entries(env) == {"T009": "fixed the build"}
+
+    def test_a_partial_apply_batch_leaves_no_line(self, env):
+        env.edits([_patch_edit(env.plan)],
+                  result={"status": "failed", "ids": [], "files_touched": [],
+                          "summary": "gave up"})
+        result = env.scheduler([env.apply_task(0)]).run()
+        assert result.outcomes[0].status == executor.STATUS_PARTIAL
+        assert self._entries(env) == {}
+
+    def test_a_task_refused_before_dispatch_leaves_no_line(self, env):
+        secret = env.root / ".env"
+        secret.write_text("x\n", encoding="utf-8")
+        task = self._implement_task(env, declared_files=[str(secret)])
+        result = env.scheduler([task], kind="implement", finalize=False).run()
+        assert result.stop["refused_before_dispatch"] is True
+        assert self._entries(env) == {}
 
 
 class TestReportReAsk:
@@ -3854,7 +3926,13 @@ class TestTheEmptyDiffBranch:
         assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
         assert outcome.status == executor.STATUS_BATCH_FAILED
         assert result.exit_code == 3
-        assert not (env.out_dir / "prior_changes.jsonl").exists()
+        # Fix round 15: the native leg's failure line, superseded on resume.
+        from utils import prior_changes
+
+        assert [e["summary"] for e in prior_changes.entries(str(env.out_dir))] == [
+            "(batch failed — said applied, but its change did not land, "
+            "verified no file changes)"
+        ]
 
     def test_a_failed_claim_with_no_bytes_moved_stops_the_loop(self, env):
         """The runner said it could not do the work, and the bytes agree.
