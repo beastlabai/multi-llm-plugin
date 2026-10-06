@@ -1986,6 +1986,12 @@ def state_implement_view(
         else:
             buckets["not_run"].append(task_id)
     answers = record.get("human_task_decisions")
+    # The workflow trailer's rule for both kinds of findings (fix round 11):
+    # once implement completed, shown until a review-code that judged them
+    # completed or was skipped.
+    settled = completed and (
+        state.is_phase_completed("code-review") or state.is_phase_skipped("code-review")
+    )
     return {
         "completed": completed,
         "tasks": [str(t) for t in decomposition],
@@ -1996,9 +2002,9 @@ def state_implement_view(
             for task_id in buckets["failed"] + buckets["not_run"]
             if reasons.get(task_id)
         },
-        "findings": state.implementation_check_findings(),
+        "findings": [] if settled else state.implementation_check_findings(),
         # A code task whose own check failed after its edits (fix round 15).
-        "batch_checks": state.implementation_batch_check_findings(),
+        "batch_checks": [] if settled else state.implementation_batch_check_findings(),
         "answers": dict(answers) if isinstance(answers, dict) else {},
     }
 
