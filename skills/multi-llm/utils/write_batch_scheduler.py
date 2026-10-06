@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
@@ -109,14 +109,18 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         CHECK_FINDING_MAX_CHARS,
         check_findings_from,
         check_record,
+        declined_items,
+        declined_record,
         read_check_reply,
         row_batch_check_findings,
         row_check_findings,
+        row_declined,
         validate_result,
     )
     from .subagent_tasks import (
         PHASE_BY_WRITE_KIND,
         PRIOR_CHANGES_TOKEN,
+        APPLY_WRITE_KINDS,
         SHARED_ARTIFACT_WRITE_KINDS,
         WRITE_KINDS,
         declared_file_set,
@@ -208,14 +212,18 @@ except ImportError:  # pragma: no cover - direct-script import shim
         CHECK_FINDING_MAX_CHARS,
         check_findings_from,
         check_record,
+        declined_items,
+        declined_record,
         read_check_reply,
         row_batch_check_findings,
         row_check_findings,
+        row_declined,
         validate_result,
     )
     from utils.subagent_tasks import (
         PHASE_BY_WRITE_KIND,
         PRIOR_CHANGES_TOKEN,
+        APPLY_WRITE_KINDS,
         SHARED_ARTIFACT_WRITE_KINDS,
         WRITE_KINDS,
         declared_file_set,
@@ -282,6 +290,8 @@ __all__ = [
     "batch_check_line",
     "batch_check_section",
     "batch_check_summary",
+    "declined_words",
+    "item_word",
     "quoted_findings",
     "unverified_line",
     "native_stop_unverified_line",
@@ -450,6 +460,31 @@ def write_result_notice(result: Any) -> Optional[str]:
     if unverified:
         parts.append(str(unverified))
     return "; ".join(parts)[:1200] or None
+
+
+def item_word(kind: str) -> str:
+    """What an apply kind calls one of its items: ``fix`` or ``suggestion``."""
+    return "fix" if kind == "apply_code_fixes" else "suggestion"
+
+
+def declined_words(
+    kind: str,
+    positions: Mapping[str, Tuple[str, int]],
+    declined: Mapping[str, str],
+) -> str:
+    """``fix 1 (`<id>`) — <reason>; …`` for an apply batch's declined items.
+
+    *positions* maps an item id to its batch and its 1-based number there,
+    the number the result contract gave it ("fix 1 = `<id>`"), so the words
+    match what the batch was told (fix round 18).
+    """
+    item = item_word(kind)
+    parts = []
+    for member, reason in declined.items():
+        where = positions.get(str(member))
+        label = f"{item} {where[1]} (`{member}`)" if where else f"`{member}`"
+        parts.append(f"{label} — {reason}")
+    return "; ".join(parts)
 
 
 def batch_check_summary(found: Dict[str, List[str]]) -> str:
@@ -2112,6 +2147,7 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
     step reads.
     """
     expected = [str(i) for i in (task.get("expected_ids") or [])]
+    declining = kind in APPLY_WRITE_KINDS
     if kind == "implement":
         id_lines = (
             f"- `ids`: this task's id, `{expected[0]}`, when you applied it "
@@ -2121,16 +2157,46 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
         )
     else:
         item = "fix" if kind == "apply_code_fixes" else "suggestion"
+        plural = "fixes" if item == "fix" else f"{item}s"
         listed = ", ".join(
             f"{item} {index} = `{member}`"
             for index, member in enumerate(expected, 1)
         )
+        # Fix round 18 (Codex racing run 7, apply-code-fixes 08): a batch
+        # left a fix out on purpose, said so in `notes`, could not say so in
+        # the contract, and stopped as a partial application on every resume.
         id_lines = (
-            f"- `ids`: the ids of the {item}s you applied **or found already "
+            f"- `ids`: the ids of the {plural} you applied **or found already "
             f"applied by a prior batch**, from this list (numbered in the "
-            f"order they appear above): {listed}. Leave out only the ones "
-            f"you could not apply."
+            f"order they appear above): {listed}.\n"
+            f"- `declined`: each {item} from that list you deliberately left "
+            f"unapplied — one the implementation record says was a deliberate "
+            f"decision, one that needs a plan decision, one you judge wrong "
+            f"for this code — as `{{\"id\": \"<its id>\", \"reason\": "
+            f"\"<why, in one sentence>\"}}`; `[]` when you applied every one. "
+            f"Every {item} goes in exactly one of `ids` and `declined`: one "
+            f"left out of both reads as a {item} you meant to apply and did "
+            f"not finish, and the run stops for a human to inspect it."
         )
+    shape = (
+        '{"status": "applied", "ids": ["<id>", "..."], '
+        + (
+            '"declined": [{"id": "<id>", "reason": "<why you did not apply '
+            'it>"}], ' if declining else ""
+        )
+        + '"files_touched": ["<repo-relative path>"], '
+        '"summary": "<one line, at most 200 characters>", '
+        '"notes": "<the per-item summary requested above>"}\n'
+    )
+    status_line = (
+        "- `status`: `applied` if you edited any file; `no-op` if you edited "
+        "nothing because every change was already present or you declined "
+        "it; `failed` if you could not apply the batch.\n"
+        if declining else
+        "- `status`: `applied` if you edited any file; `no-op` if every "
+        "change was already present and you edited nothing; `failed` if "
+        "you could not apply the batch.\n"
+    )
     return (
         f"{prompt.rstrip()}\n\n"
         "## Process safety (required)\n\n"
@@ -2152,14 +2218,9 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
         "Do the work above, then end your reply with ONE JSON object (a "
         "fenced ```json block is fine) of exactly this shape:\n\n"
         "```json\n"
-        '{"status": "applied", "ids": ["<id>", "..."], '
-        '"files_touched": ["<repo-relative path>"], '
-        '"summary": "<one line, at most 200 characters>", '
-        '"notes": "<the per-item summary requested above>"}\n'
+        f"{shape}"
         "```\n\n"
-        "- `status`: `applied` if you edited any file; `no-op` if every "
-        "change was already present and you edited nothing; `failed` if "
-        "you could not apply the batch.\n"
+        f"{status_line}"
         f"{id_lines}\n"
         "- `files_touched`: repo-root-relative paths you edited (empty for "
         "`no-op` and `failed`).\n"
@@ -3966,6 +4027,14 @@ class WriteBatchScheduler:
             if isinstance(verdict.get("batch_check"), dict):
                 # And a code batch keeps what its own checks reported.
                 outcome.batch_check = row_batch_check_findings(verdict)
+            if self.kind in APPLY_WRITE_KINDS:
+                # Fix round 18: and an apply batch the items it declined, or
+                # that an answer recorded as skipped, so the resumed row
+                # still names them (the batch is finished; nothing re-asks).
+                outcome.declined = row_declined(verdict)
+                outcome.skipped_items = row_declined(
+                    {"declined": verdict.get("skipped_items")}
+                )
             if kept_findings:
                 outcome.reason = (
                     f"NOT RE-RUN: nothing in the repository changed since "
@@ -5438,6 +5507,24 @@ class WriteBatchScheduler:
         outcome.runner_notes = " ".join(notes.split())[:600] or None
         reported_ids = [str(i) for i in ((result or {}).get("ids") or [])]
         expected_ids = [str(i) for i in (task.get("expected_ids") or [])]
+        # Fix round 18: the items the batch declined, with their reasons.
+        # An apply batch's declined item is not applied and not missing; an
+        # id it put in both `ids` and `declined` is neither. `implement` has
+        # no decline: a reply declining its task did not do it (`failed`).
+        declined = declined_items(result, expected_ids)
+        attested_ids = [i for i in reported_ids if i not in declined.conflicting]
+        declined_task: Optional[str] = None
+        if self.kind in APPLY_WRITE_KINDS:
+            outcome.declined = dict(declined.items)
+        elif declined.items:
+            declined_task = next(iter(declined.items.values()))
+            claimed = "failed"
+            outcome.runner_notes = outcome.runner_notes or (
+                f"declined: {declined_task}"
+            )
+        all_declined = bool(expected_ids) and all(
+            item in outcome.declined for item in expected_ids
+        )
         changed = snapshot.changed()
         undeclared = self._undeclared_writes(outcome.task_id, snapshot)
         observed = self._observed_with_undeclared(snapshot, undeclared)
@@ -5584,10 +5671,8 @@ class WriteBatchScheduler:
         # spot-check ("this batch's expected changes landed, rather than merely
         # that bytes moved") silently never happened. An unattested batch that
         # moved bytes is a partial application until something attests it.
-        if expected_ids and not reported_ids:
-            missing_ids = list(expected_ids)
-        else:
-            missing_ids = [i for i in expected_ids if i not in reported_ids]
+        accounted = set(attested_ids) | set(outcome.declined)
+        missing_ids = [i for i in expected_ids if i not in accounted]
 
         # D3k inverts the exit-code rule for write tasks. On the read path a
         # schema-valid result wins over a non-zero exit (CLIs exit non-zero on
@@ -5602,16 +5687,23 @@ class WriteBatchScheduler:
         # ``None`` is "no exit code observed" (the native invoker), not zero.
         crashed = exit_code not in (0, None)
 
-        if changed and (crashed or claimed == "failed" or missing_ids):
+        if changed and (crashed or claimed == "failed" or missing_ids or all_declined):
             details = []
             if crashed:
                 details.append(
                     f"the runner exited {exit_code} (claiming "
                     f"{claimed or 'no status'!r})"
                 )
-            if claimed == "failed":
+            if declined_task is not None:
+                details.append(f"the runner declined the task ({declined_task})")
+            elif claimed == "failed":
                 details.append(f"the batch reported {claimed!r}")
-            elif missing_ids and not reported_ids:
+            elif all_declined and not missing_ids:
+                details.append(
+                    f"the batch declined every item it held "
+                    f"({self._declined_words(outcome.declined)})"
+                )
+            elif missing_ids and not reported_ids and not outcome.declined:
                 details.append(
                     f"it reported no `ids` at all, so nothing attests that the "
                     f"{len(expected_ids)} expected change(s) "
@@ -5632,12 +5724,26 @@ class WriteBatchScheduler:
                     + f" expected id(s) came back (missing: "
                     f"{', '.join(missing_ids)})"
                     + (
+                        f" — {len(outcome.declined)} of them declined"
+                        if outcome.declined else ""
+                    )
+                    + (
                         f"; the reply named {len(unexpected)} id(s) this batch "
                         f"does not hold ({', '.join(repr(i) for i in unexpected[:5])}"
                         f"{', …' if len(unexpected) > 5 else ''})"
                         if unexpected else ""
                     )
+                    + (
+                        f"; its `declined` could not be read for: "
+                        f"{'; '.join(declined.problems[:5])}"
+                        if declined.problems else ""
+                    )
                 )
+                if not crashed and claimed != "failed" and len(missing_ids) < len(expected_ids):
+                    # Fix round 18: a readable report that attests some items
+                    # and leaves these out of both lists — the items a
+                    # `--human-task <id>=skip` answer records as skipped.
+                    outcome.unapplied_ids = list(missing_ids)
             detail = " and ".join(details)
             outcome.status = STATUS_PARTIAL
             outcome.write_outcome = WRITE_PARTIAL
@@ -5726,7 +5832,10 @@ class WriteBatchScheduler:
                 what = (
                     f"the runner exited {exit_code} (claiming "
                     f"{claimed or 'no status'!r})"
-                    if crashed else f"the batch reported {claimed!r}"
+                    if crashed else
+                    f"the runner declined the task ({declined_task})"
+                    if declined_task is not None else
+                    f"the batch reported {claimed!r}"
                 )
                 outcome.reason = (
                     f"FAILED: {what} and the pre-batch snapshot comparison "
@@ -5741,14 +5850,24 @@ class WriteBatchScheduler:
                     "batch."
                     + (f" Runner summary: {summary}" if summary else "")
                 )
-            elif claimed == "no-op":
+            elif claimed == "no-op" or (all_declined and not own):
                 # The claim and the verdict agree: nothing needed changing.
+                # Fix round 18: so does a batch that declined every item and
+                # changed nothing, whatever word it put in `status`.
                 outcome.write_outcome = WRITE_NO_OP
                 outcome.status = STATUS_OK
                 outcome.reason = (
-                    f"NO-OP: the batch reported 'no-op' and the pre-batch "
-                    f"snapshot comparison confirms no byte changes in "
-                    f"{declared_names}. Recorded; the loop continues."
+                    (
+                        f"NO-OP: the batch declined every item it held "
+                        f"({self._declined_words(outcome.declined)}) and the "
+                        f"pre-batch snapshot comparison confirms no byte "
+                        f"changes in {declared_names}. Recorded; the loop "
+                        f"continues."
+                    ) if all_declined else (
+                        f"NO-OP: the batch reported 'no-op' and the pre-batch "
+                        f"snapshot comparison confirms no byte changes in "
+                        f"{declared_names}. Recorded; the loop continues."
+                    )
                 )
             elif own:
                 # Success claimed, none of the declared files moved, others
@@ -5762,15 +5881,21 @@ class WriteBatchScheduler:
                 moved_names = ", ".join(own[:5]) + (
                     ", …" if len(own) > 5 else ""
                 )
-                if missing_ids:
+                if missing_ids or all_declined:
                     outcome.status = STATUS_PARTIAL
                     outcome.write_outcome = WRITE_PARTIAL
                     outcome.reason = (
                         f"PARTIAL APPLICATION: none of the files the batch "
                         f"declares changed ({declared_names}), while "
                         f"{len(own)} file(s) outside them did "
-                        f"({moved_names}), and not every expected id came "
-                        f"back (missing: {', '.join(missing_ids)}). The batch "
+                        f"({moved_names}), and "
+                        + (
+                            f"not every expected id came back (missing: "
+                            f"{', '.join(missing_ids)})"
+                            if missing_ids else
+                            "the batch declined every item it held"
+                        )
+                        + f". The batch "
                         f"loop stops here, the pre-batch snapshot is kept at "
                         f"{snapshot.directory}, and the phase is NOT marked "
                         f"completed — an automatic revert would destroy the "
@@ -5871,8 +5996,29 @@ class WriteBatchScheduler:
         # failure, so no non-zero exit can land on APPLIED (D3k).
         outcome.write_outcome = WRITE_APPLIED
         outcome.status = STATUS_OK
+        if outcome.declined:
+            # Fix round 18: complete, and what it left out is said.
+            applied = len(expected_ids) - len(outcome.declined)
+            outcome.reason = (
+                f"APPLIED {applied} of {len(expected_ids)} item(s); the batch "
+                f"declined the rest, so they are not applied: "
+                f"{self._declined_words(outcome.declined)}."
+            )
         self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                observed, duration)
+
+    def _declined_words(self, declined: Dict[str, str]) -> str:
+        """``fix 1 (`<id>`) — <reason>; …``: an apply batch's declined items,
+        numbered as its result contract numbers them (fix round 18)."""
+        return declined_words(self.kind, self._task_ids_in_order(), declined)
+
+    def _task_ids_in_order(self) -> Dict[str, Tuple[str, int]]:
+        """``member id -> (task id, 1-based position)`` over this run's tasks."""
+        positions: Dict[str, Tuple[str, int]] = {}
+        for task in self.tasks:
+            for index, member in enumerate(task.get("expected_ids") or [], 1):
+                positions.setdefault(str(member), (str(task.get("task_id", "")), index))
+        return positions
 
     def _applied_without_changes(
         self, task: Dict[str, Any], snapshot: TaskSnapshot, context: Dict[str, Any],
@@ -5893,6 +6039,12 @@ class WriteBatchScheduler:
         if not isinstance(result, dict) or str(result.get("status") or "") != "applied":
             return None
         if self._verification_only(snapshot):
+            return None
+        expected = [str(i) for i in (task.get("expected_ids") or [])]
+        declined = declined_items(result, expected).items
+        if expected and all(item in declined for item in expected):
+            # Fix round 18: it declined every item, so nothing was meant to
+            # land; sending it again would ask for what it refused.
             return None
         if context.get("exit_code") not in (0, None):
             return None
@@ -6455,6 +6607,16 @@ class WriteBatchScheduler:
                 data["verdict"]["batch_check"] = check_record(outcome.batch_check)
             if outcome.runner_notes:
                 data["verdict"]["runner_notes"] = outcome.runner_notes
+            # Fix round 18: the items it declined (a resume skip carries
+            # them), the items a partial application left out of both lists
+            # (what `--human-task <id>=skip` answers), and the items such an
+            # answer recorded as skipped at the user's request.
+            if outcome.declined:
+                data["verdict"]["declined"] = declined_record(outcome.declined)
+            if outcome.unapplied_ids:
+                data["verdict"]["unapplied_ids"] = list(outcome.unapplied_ids)
+            if outcome.skipped_items:
+                data["verdict"]["skipped_items"] = declined_record(outcome.skipped_items)
             # The batch's identity beyond its positional name (2026-10-02):
             # the items it was materialized for and the inputs binding they
             # were materialized from, so a resume whose selection renumbered

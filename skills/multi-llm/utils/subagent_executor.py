@@ -352,6 +352,10 @@ __all__ = [
     "WRITE_SCHEMA_REJECTED",
     "WRITE_POLICY_VIOLATION",
     "WRITE_STOP_OUTCOMES",
+    "DeclinedItems",
+    "declined_items",
+    "declined_record",
+    "row_declined",
     "RUNG_BY_STATUS",
     "RETRYABLE_STATUSES",
     "FATAL_STATUSES",
@@ -930,6 +934,96 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
     return findings
 
 
+#: How much of one declined item's reason a row, a stamp or a notice carries.
+DECLINED_REASON_MAX_CHARS = 300
+
+
+@dataclass
+class DeclinedItems:
+    """What a write reply's ``declined`` says, read against its batch (fix round 18).
+
+    ``items`` maps each expected id the batch declined — not also in ``ids``,
+    with a non-empty reason — to that reason, in the batch's own order.
+    ``conflicting`` holds the ids the reply put in both ``ids`` and
+    ``declined``: neither claim stands, so such an id is not attested at all.
+    ``problems`` names every other entry that could not be read as a decline
+    (an id the batch does not hold, an entry without an id or a reason, a
+    value that is not a list of objects), in plain words for the stop.
+    """
+
+    items: Dict[str, str] = field(default_factory=dict)
+    conflicting: List[str] = field(default_factory=list)
+    problems: List[str] = field(default_factory=list)
+
+
+def declined_items(
+    result: Any, expected_ids: Sequence[str],
+) -> DeclinedItems:
+    """Read a write reply's ``declined`` leniently against *expected_ids*.
+
+    Codex racing run 7 (2026-10-06, apply-code-fixes 08): a batch applied
+    one fix and left the other on purpose ("Not applied; T011 records the
+    clamp removal as deliberate"), said so only in ``notes``, and stopped as
+    a partial application on the run and on its resume; the contract had no
+    place for a decline. A reason is what makes a decline: an entry without
+    one is a problem, and its id reads as not having come back, as an id
+    missing from ``ids`` always has. Never read from ``notes``.
+    """
+    out = DeclinedItems()
+    raw = result.get("declined") if isinstance(result, dict) else None
+    if raw is None:
+        return out
+    expected = [str(item) for item in expected_ids]
+    reported = result.get("ids") if isinstance(result, dict) else None
+    applied = {str(item) for item in reported} if isinstance(reported, list) else set()
+    if not isinstance(raw, list):
+        out.problems.append("`declined` is not a list")
+        return out
+    found: Dict[str, str] = {}
+    for index, entry in enumerate(raw, 1):
+        if not isinstance(entry, dict):
+            out.problems.append(f"`declined` entry {index} is not an object")
+            continue
+        item = entry.get("id")
+        item = str(item).strip() if isinstance(item, (str, int)) else ""
+        if not item:
+            out.problems.append(f"`declined` entry {index} names no id")
+            continue
+        if item not in expected:
+            out.problems.append(
+                f"`declined` names {item!r}, which this batch does not hold"
+            )
+            continue
+        if item in applied:
+            if item not in out.conflicting:
+                out.conflicting.append(item)
+                out.problems.append(f"{item} is in both `ids` and `declined`")
+            continue
+        reason = entry.get("reason")
+        reason = " ".join(str(reason).split()) if isinstance(reason, str) else ""
+        if not reason:
+            out.problems.append(f"`declined` gives no reason for {item}")
+            continue
+        found.setdefault(item, reason[:DECLINED_REASON_MAX_CHARS])
+    out.items = {item: found[item] for item in expected if item in found}
+    return out
+
+
+def row_declined(row: Any) -> Dict[str, str]:
+    """A serialized row's (or verdict stamp's) declined items, ``{id: reason}``."""
+    raw = row.get("declined") if isinstance(row, dict) else None
+    out: Dict[str, str] = {}
+    for entry in raw if isinstance(raw, list) else []:
+        if isinstance(entry, dict) and entry.get("id") and entry.get("reason"):
+            out.setdefault(str(entry["id"]), str(entry["reason"]))
+    return out
+
+
+def declined_record(items: Dict[str, str]) -> List[Dict[str, str]]:
+    """The ``declined`` list a row, a verdict stamp and a mirror row carry."""
+    return [{"id": item, "reason": reason} for item, reason in items.items()]
+
+
 def row_batch_check_findings(row: Dict[str, Any]) -> List[str]:
     """A serialized row's own-check findings (its ``batch_check``), else ``[]``."""
     check = row.get("batch_check") if isinstance(row, dict) else None
@@ -1242,6 +1336,21 @@ class TaskOutcome:
     #: runner's ``default_timeout``) after its edits landed: a partial
     #: application whose stop says the edits are kept (fix round 16).
     ran_out_of_time: bool = False
+    #: An apply batch's items it deliberately left unapplied, ``{id: reason}``
+    #: in the batch's order (:func:`declined_items`, fix round 18). Never
+    #: counted as applied, named on every surface, and a batch whose every
+    #: item is applied or declined is complete.
+    declined: Dict[str, str] = field(default_factory=dict)
+    #: A partial application whose readable report attests some items and
+    #: leaves these out of both ``ids`` and ``declined`` (fix round 18): the
+    #: items ``--human-task <id>=skip`` records as skipped at the user's
+    #: request, keeping what the batch applied. Empty for every other outcome,
+    #: and so the stop offers that answer only here.
+    unapplied_ids: List[str] = field(default_factory=list)
+    #: The items a ``--human-task <id>=skip`` answer recorded as skipped at
+    #: the user's request when it kept the batch as it stood, ``{id:
+    #: reason}`` (fix round 18). Never counted as applied.
+    skipped_items: Dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -1331,6 +1440,13 @@ class TaskOutcome:
             if self.unrestorable:
                 # Additive and only here (fix round 15).
                 out["unrestorable"] = list(self.unrestorable)
+            if self.declined:
+                # Additive and only here (fix round 18).
+                out["declined"] = declined_record(self.declined)
+            if self.unapplied_ids:
+                out["unapplied_ids"] = list(self.unapplied_ids)
+            if self.skipped_items:
+                out["skipped_items"] = declined_record(self.skipped_items)
             if self.summary:
                 out["summary"] = self.summary
             if self.snapshot_dir:
