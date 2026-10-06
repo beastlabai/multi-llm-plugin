@@ -175,3 +175,87 @@ class TestTheStatusLine:
 
     def test_an_older_mirror_without_the_key_keeps_the_restore(self):
         assert "restore-batch" in self._cost(None)
+
+
+# ===========================================================================
+# Fix round 15: "bytes moved" is what the sweep observed, not what it can
+# restore. `files_touched` is the rollback set; a moved file the store kept no
+# bytes for (over the per-file cap, past the budget, unreadable, or a path the
+# write policy denies) was absent from it, and the stop announced "Nothing was
+# half-applied … nothing to restore" over a file the batch had just changed.
+# ===========================================================================
+
+class TestAMoveWithNoRollbackPointIsStillAMove:
+
+    @staticmethod
+    def _implement_task(env, task_id="T009"):
+        from utils import write_batch_scheduler as wbs
+
+        return env.apply_task(
+            0, kind="implement", task_id=task_id, expected_ids=[task_id],
+            declared_files=[str(env.root / "src" / "a.py")],
+            prompt=f"Do {task_id}\n\n## Changes Applied in Prior Batches\n\n"
+                   f"{wbs.PRIOR_CHANGES_TOKEN}\n",
+        )
+
+    def test_a_partial_that_moved_only_an_unrestorable_file_says_so(self, env):
+        from utils import write_batch_scheduler as wbs
+
+        # The store keeps no bytes for a file over the per-file cap; a small
+        # cap stands in for a 16 MB file.
+        env.monkeypatch.setattr(wbs, "MAX_SNAPSHOT_BYTES", 64)
+        big = env.root / "big.bin"
+        big.write_bytes(b"x" * 100)
+        env.edits([_patch_edit(big, "more\n")],
+                  result={"status": "applied", "ids": [], "files_touched": ["big.bin"],
+                          "summary": "wrote the wrong file"})
+        result = env.scheduler(
+            [self._implement_task(env)], kind="implement", finalize=False,
+        ).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL, outcome.reason
+        assert outcome.files_touched == [], "nothing restorable joined the rollback set"
+        assert outcome.unrestorable == ["big.bin"]
+        assert result.stop["bytes_moved"] is True
+        joined = "\n".join(result.messages)
+        assert "Nothing was half-applied" not in joined
+        assert "nothing to restore" not in joined
+        assert "Nothing changed" not in result.stop["headline"]
+        assert "big.bin" in joined and "cannot undo" in joined, joined
+        row = result.to_dict()["tasks"][0]
+        assert row["unrestorable"] == ["big.bin"]
+        mirror = json.loads((env.phase_dir / ".status.json").read_text())
+        mirror_row = mirror["progress"]["write_subagents"]["tasks"][0]
+        assert mirror_row["unrestorable"] == ["big.bin"]
+
+    def test_a_policy_violation_on_a_denied_file_is_not_nothing_half_applied(self, env):
+        """`.env` is denied by default, so its bytes are never copied into the
+        rollback store: the violation cannot restore it, and it stays changed."""
+        secret = env.root / ".env"
+        secret.write_text("TOKEN=old\n", encoding="utf-8")
+        env.edits([_patch_edit(secret, "TOKEN=new\n")],
+                  result={"status": "applied", "ids": ["T009"],
+                          "files_touched": [".env"], "summary": "set the token"})
+        result = env.scheduler(
+            [self._implement_task(env)], kind="implement", finalize=False,
+        ).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.write_outcome == executor.WRITE_POLICY_VIOLATION, outcome.reason
+        assert ".env" not in outcome.files_touched
+        assert outcome.unrestorable == [".env"]
+        assert "TOKEN=new" in secret.read_text()
+        assert result.stop["bytes_moved"] is True
+        joined = "\n".join(result.messages)
+        assert "Nothing was half-applied" not in joined
+        assert "nothing to restore" not in joined
+
+    def test_the_status_line_reads_an_unrestorable_move_as_a_move(self):
+        view = TestTheStatusLine._view([])
+        row = view["progress"]["write_subagents"]["tasks"][1]
+        row["unrestorable"] = ["big.bin"]
+        workflow = {"phases": {"implement": {"status": "in_progress"}}}
+        cost = run_status._resume_lines(view, Path("plans/p.md"), workflow=workflow)[1]
+        assert "nothing was half-applied" not in cost
+        assert "the half-applied state is left in place" in cost

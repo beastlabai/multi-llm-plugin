@@ -1186,10 +1186,24 @@ class TaskOutcome:
     #: never ``ok``, worded on the stop as a change that did not land (fix
     #: round 14). ``False`` for every other outcome.
     applied_without_changes: bool = False
+    #: The files this dispatch moved that have no rollback point: observed by
+    #: the post-run sweep outside the declared set, with no pre-run bytes in
+    #: the rollback store (a path the write policy denies, a file over the
+    #: per-file cap or past the store's budget, one unreadable before the
+    #: run). Never in ``files_touched``, which ``util restore-batch`` reads,
+    #: but moved all the same (fix round 15: a partial application that moved
+    #: only such a file was announced "Nothing was half-applied").
+    unrestorable: List[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return self.status == STATUS_OK
+
+    @property
+    def bytes_moved(self) -> bool:
+        """Whether this dispatch left any file changed: the rollback set
+        (``files_touched``) or a moved file with no rollback point."""
+        return bool(self.files_touched or self.unrestorable)
 
     @property
     def outcome_label(self) -> Optional[str]:
@@ -1266,6 +1280,9 @@ class TaskOutcome:
             if self.applied_without_changes:
                 out["applied_without_changes"] = True
             out["files_touched"] = list(self.files_touched)
+            if self.unrestorable:
+                # Additive and only here (fix round 15).
+                out["unrestorable"] = list(self.unrestorable)
             if self.summary:
                 out["summary"] = self.summary
             if self.snapshot_dir:

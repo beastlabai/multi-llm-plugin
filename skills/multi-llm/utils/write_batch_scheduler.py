@@ -3682,6 +3682,8 @@ class WriteBatchScheduler:
         observed = self._observed_with_undeclared(snapshot, undeclared)
         if not outcome.files_touched:
             outcome.files_touched = snapshot.changed()
+        if not outcome.unrestorable:
+            outcome.unrestorable = list(undeclared.unrecoverable)
         # After the fill, never before it: the fill is what would put the
         # replaced target back into the restore set.
         if not self._replaced_target_unclassified(outcome, snapshot):
@@ -3722,7 +3724,10 @@ class WriteBatchScheduler:
             return
         if outcome.write_outcome not in (None, WRITE_SCHEMA_REJECTED):
             return
-        moved = [str(path) for path in (outcome.files_touched or [])]
+        moved = [str(path) for path in (outcome.files_touched or [])] + [
+            str(path) for path in (outcome.unrestorable or [])
+            if str(path) not in (outcome.files_touched or [])
+        ]
         if not moved:
             return
         what = outcome.reason or outcome.status
@@ -4697,8 +4702,12 @@ class WriteBatchScheduler:
         # carries the undeclared writes the sweep retained bytes for; an
         # undeclared path with no rollback point is deliberately absent, because
         # `util restore-batch` reads this list and would report a file it cannot
-        # actually restore.
+        # actually restore. Fix round 15: those paths moved all the same, and
+        # `unrestorable` carries them, so "did this batch move bytes" is
+        # answered from what was observed (`TaskOutcome.bytes_moved`), never
+        # from what can be restored.
         outcome.files_touched = list(changed) + list(undeclared.restorable)
+        outcome.unrestorable = list(undeclared.unrecoverable)
         outcome.summary = summary or None
 
         # D3l post-run: recompute the touched set and enforce the policy on it.
@@ -6476,6 +6485,16 @@ class WriteBatchScheduler:
                     f"      restore: multi_llm.py util restore-batch --phase-dir "
                     f'"{self.phase_dir}" --task-id {outcome.task_id}'
                 )
+            if outcome.unrestorable:
+                # Fix round 15: moved, and outside every rollback point.
+                lines.append(
+                    f"      no rollback point: {', '.join(outcome.unrestorable[:5])}"
+                    f"{', …' if len(outcome.unrestorable) > 5 else ''} changed "
+                    f"and util restore-batch cannot undo "
+                    f"{'it' if len(outcome.unrestorable) == 1 else 'them'} (no "
+                    f"pre-run copy was kept); inspect "
+                    f"{'it' if len(outcome.unrestorable) == 1 else 'them'} by hand"
+                )
         if not failed:
             lines.append(
                 f"ERROR: the write loop stopped at batch {batch_index}; no later "
@@ -6498,10 +6517,11 @@ class WriteBatchScheduler:
                 "Nothing was half-applied: the stopped task never started, and "
                 "the tasks before it keep what they changed."
             )
-        elif failed and not any(o.files_touched for o in failed):
+        elif failed and not any(o.bytes_moved for o in failed):
             # Fix round 14 (stop fixture, accept 02): a clean failure, a
             # timeout or a prose reply that moved no byte left nothing
-            # half-applied either.
+            # half-applied either. Fix round 15: "moved" is what the sweep
+            # observed, a file with no rollback point included.
             lines.append(
                 "Nothing was half-applied: the stopped task changed no file, "
                 "and the tasks before it keep what they changed."
@@ -6642,7 +6662,7 @@ class WriteBatchScheduler:
         lines = ["To go on:"]
         acceptable = [
             o for o in failed
-            if o.write_outcome == WRITE_CLEAN_FAILURE and not o.files_touched
+            if o.write_outcome == WRITE_CLEAN_FAILURE and not o.bytes_moved
         ]
         checks = [
             o for o in acceptable
@@ -6723,6 +6743,16 @@ class WriteBatchScheduler:
                 "command above, or keep it), fix the cause, then resume this "
                 "phase; the failed batch is dispatched again and the ones never "
                 "reached follow:"
+            )
+            lines.append(f"        {resume}")
+        elif any(o.bytes_moved for o in failed):
+            # Fix round 15: it moved only files with no rollback point, so
+            # there is no restore command to name.
+            lines.append(
+                "  - inspect the files it changed that cannot be restored "
+                "automatically (named above) and put them right by hand, fix "
+                "the cause, then resume this phase; the failed batch is "
+                "dispatched again and the ones never reached follow:"
             )
             lines.append(f"        {resume}")
         else:
@@ -6824,7 +6854,7 @@ class WriteBatchScheduler:
         answers = [f"--human-task {check_id}=done" for check_id in checks] + [
             f"--human-task {o.task_id}=skip" for o in failed
             if o.task_id in self._refused_before_dispatch
-            or (o.write_outcome == WRITE_CLEAN_FAILURE and not o.files_touched)
+            or (o.write_outcome == WRITE_CLEAN_FAILURE and not o.bytes_moved)
         ]
         if len(answers) > 1:
             combined = " ".join(answers)
@@ -6971,7 +7001,7 @@ class WriteBatchScheduler:
         )
         acceptable = bool(
             first is not None and first.write_outcome == WRITE_CLEAN_FAILURE
-            and not first.files_touched
+            and not first.bytes_moved
         )
         result.stop = {
             "batch_index": batch_index,
@@ -6996,8 +7026,13 @@ class WriteBatchScheduler:
             result.stop["applied_without_changes"] = True
         # Whether the stop left bytes a human has to look at (fix round 14:
         # "the half-applied state is left in place" followed a refusal before
-        # dispatch and a clean failure, where nothing was half-applied).
-        result.stop["bytes_moved"] = any(o.files_touched for o in failed)
+        # dispatch and a clean failure, where nothing was half-applied). Fix
+        # round 15: what the sweep observed, not what the rollback store holds,
+        # so a file with no rollback point counts — and is named.
+        result.stop["bytes_moved"] = any(o.bytes_moved for o in failed)
+        unrestorable = sorted({p for o in failed for p in o.unrestorable})
+        if unrestorable:
+            result.stop["unrestorable"] = unrestorable
         if result.blocked_by_check:
             # The tasks a check with findings holds, which this stop's own
             # remedy does not release (fix round 13).
@@ -7060,7 +7095,7 @@ class WriteBatchScheduler:
         acceptable = [
             o for o in failed
             if o.task_id not in self._refused_before_dispatch
-            and o.write_outcome == WRITE_CLEAN_FAILURE and not o.files_touched
+            and o.write_outcome == WRITE_CLEAN_FAILURE and not o.bytes_moved
         ]
         blocked = result.blocked_by_check
         checks = self._blocking_checks(result) if blocked else []
@@ -7381,6 +7416,14 @@ class WriteBatchScheduler:
                 " To go on: inspect the half-applied state, restore or keep it, "
                 "fix the cause, then resume this phase."
             )
+            if stop.get("unrestorable"):
+                # Fix round 15: a moved file with no rollback point.
+                names = stop["unrestorable"]
+                head += (
+                    f" {', '.join(names[:5])}{', …' if len(names) > 5 else ''} "
+                    f"changed and cannot be restored automatically: inspect "
+                    f"{'it' if len(names) == 1 else 'them'} by hand."
+                )
         else:
             head += (
                 " Nothing changed, so there is nothing to restore. To go on: "
@@ -8469,6 +8512,9 @@ class WriteBatchScheduler:
                                 **({"batch_check_findings": list(o.batch_check)}
                                    if o.ok and o.batch_check else {}),
                                 "files_touched": list(o.files_touched),
+                                # Fix round 15: moved, with no rollback point.
+                                **({"unrestorable": list(o.unrestorable)}
+                                   if o.unrestorable else {}),
                                 # Plan step 3: the rung, only when there was one.
                                 **({"sandbox_rung": self._dispatch_rungs[o.task_id]}
                                    if self._dispatch_rungs.get(o.task_id) else {}),
