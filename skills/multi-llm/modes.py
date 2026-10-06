@@ -586,14 +586,17 @@ NEEDS_HUMAN_RULE = (
 #: The ``options`` sentence is kept word for word from the message it replaces:
 #: it is what tells the model where the redacted commands went.
 #:
-#: Fix round 18 (Codex racing run 7, phase 08): the message names `argv` as
+#: Fix round 18 (Codex racing run 7, phase 08): the message named `argv` as
 #: what was being run, and the host told the user the tool's own
-#: `--exec-subagents --detach`; it now says to say what ran as its phase and
-#: its plan, and never to quote `argv` or its flags.
+#: `--exec-subagents --detach`; it now says to report the phase and the plan,
+#: and never to quote `argv` or its flags. Fix round 19: the round's merge had
+#: kept "what was being run (`argv`)" as the opening instruction beside the
+#: later prohibition, telling the host both; the opening asks for the phase
+#: and the plan, and a test fails any host-facing text that asks for `argv`.
 NEEDS_HUMAN_MESSAGE = {
     "template": (
         "Stop here: this run is blocked and needs a human. {phase} {error} "
-        "Report to the user what was being run (`argv`), that line whole, word "
+        "Report to the user which phase was running on which plan, that line whole, word "
         "for word (on a stop it says what stopped, what the task reported, what "
         "did not run and whether anything ran the repository's tests), and the "
         "`options`; an `options` entry is a tool call for you, never a command "
@@ -606,10 +609,10 @@ NEEDS_HUMAN_MESSAGE = {
         "paraphrase the output, and do not lift a command out of it for the "
         "user: only `resume_command` (and each `resume_answers` command) is "
         "theirs to type. Do "
-        "not run a different mode. Say what was being run as its phase and its "
-        "plan: never quote `argv` or its flags to the user, which are this tool's "
-        "own (`--host`, `--yes`, `--exec-subagents`, `--detach`) and nothing the "
-        "user ran or types. " + NEEDS_HUMAN_WORK_SENTENCE + " Send back "
+        "not run a different mode. Never quote `argv` or its flags to the user, "
+        "which are this tool's own (`--host`, `--yes`, `--exec-subagents`, "
+        "`--detach`) and nothing the user ran or types. "
+        + NEEDS_HUMAN_WORK_SENTENCE + " Send back "
         "an `options` entry only after the user has picked one."
     ),
     "phase_incomplete": "The `{phase}` phase did not complete.",

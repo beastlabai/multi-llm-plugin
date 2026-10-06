@@ -22,6 +22,7 @@ From the seventh live run (2026-10-06):
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 
@@ -85,14 +86,107 @@ class TestTheManualTaskNoteIsProse:
                 or "as plain text and never in a fenced block" in text), path
 
 
+#: A word that asks the host to tell the user something.
+_REPORTING = {"report", "say", "says", "tell", "relay", "quote", "name", "names",
+              "show", "give", "print", "mention"}
+#: A negation that binds the `argv` right after it ("never quote `argv`").
+_NEGATIONS = {"never", "not", "don't", "no"}
+
+
+def _words(text: str) -> list:
+    words = (word.strip("`()*,:\"'").lower() for word in text.split())
+    return [word for word in words if word]
+
+
+def _argv_reporting_clauses(text: str) -> list:
+    """Each place *text* asks for `argv` to be reported: a reporting word in
+    the eight words of its sentence before `argv` (``report … what was being
+    run (`argv`)``) or in the three after it (```argv` says what ran``), and
+    no negation in the six words before it. Code spans other than `argv`
+    itself are not words here, and a line wrap ends nothing."""
+    text = " ".join(re.sub(
+        r"`([^`\n]*)`",
+        lambda span: span.group(0) if span.group(1) == "argv" else " ",
+        text).split())
+    found = []
+    for match in re.finditer(r"\bargv\b", text):
+        head = re.split(r"[.;:!?](?:\s|$)", text[:match.start()])[-1]
+        tail = re.split(r"[.;:!?](?:\s|$)", text[match.end():])[0]
+        before, after = _words(head), _words(tail)
+        if _NEGATIONS & set(before[-6:]):
+            continue
+        if _REPORTING & set(before[-8:]) or _REPORTING & set(after[:3]):
+            found.append(text[max(0, match.start() - 120):match.end() + 80])
+    return found
+
+
+def _strings(value):
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from _strings(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _strings(item)
+
+
+def _host_facing_texts():
+    """Every text a host reads: the mode table's strings, both tool routes'
+    generated surfaces, and the skill's, shims' and cores' markdown."""
+    for name, value in vars(modes).items():
+        if not name.startswith("__"):
+            for text in _strings(value):
+                yield f"modes.{name}", text
+    repo = SKILL_ROOT.parent.parent
+    if str(repo / "packaging") not in sys.path:
+        sys.path.insert(0, str(repo / "packaging"))
+    from common import surface
+
+    for host in ("codex", "opencode"):
+        for text in _strings(surface.cli_surface(host)):
+            yield f"{host} surface", text
+    for pattern in ("SKILL.md", "hosts/*/*.tmpl", "hosts/snippets/*.md",
+                    "instructions/*.md", "references/*.md"):
+        for path in sorted(SKILL_ROOT.glob(pattern)):
+            yield str(path.relative_to(SKILL_ROOT)), path.read_text(encoding="utf-8")
+
+
 class TestTheStopNamesThePhaseNotTheToolsArgv:
 
     def test_the_message_asks_for_the_phase_and_plan_and_forbids_argv(self):
         text = modes.NEEDS_HUMAN_MESSAGE["template"]
-        assert "Say what was being run as its phase and its plan" in text
-        assert "never quote `argv` or its flags to the user" in text
+        assert "Report to the user which phase was running on which plan" in text
+        assert "Never quote `argv` or its flags to the user" in text
         for flag in ("--exec-subagents", "--detach"):
             assert flag in text
+
+    def test_no_host_facing_text_asks_for_argv(self):
+        """Fix round 19: the merge of round 18 kept "Report to the user what
+        was being run (`argv`)" as the message's opening beside the later
+        "never quote `argv`", so both tool routes were told both. Any text a
+        host reads that asks for `argv` fails here, wherever it is."""
+        offenders = [
+            f"{where}: {clause}"
+            for where, text in _host_facing_texts()
+            for clause in _argv_reporting_clauses(text)
+        ]
+        assert not offenders, "\n".join(offenders)
+
+    @pytest.mark.parametrize("clause", [
+        "Report to the user what was being run (`argv`), that line whole",
+        "`log` and `argv` say what ran",
+        "tell the user the argv it ran",
+    ])
+    def test_the_scan_catches_an_argv_report(self, clause):
+        assert _argv_reporting_clauses(clause), clause
+
+    @pytest.mark.parametrize("clause", [
+        "Never quote `argv` or its flags to the user",
+        "The plan path, as exactly one argv element — never split",
+    ])
+    def test_the_scan_passes_a_prohibition_and_a_plain_mention(self, clause):
+        assert not _argv_reporting_clauses(clause), clause
 
     @pytest.mark.parametrize("key", ["error_unknown", "phase_unknown"])
     def test_no_clause_sends_the_model_back_to_argv(self, key):

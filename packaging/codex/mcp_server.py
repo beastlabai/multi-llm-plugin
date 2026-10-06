@@ -2086,9 +2086,10 @@ class Server:
             terminal = self.terminal_result(call, poll, call.watched)
             # `argv` names what this call ran: the launch, never the internal
             # `status … --wait --run-id` poll whose answer this is. The model
-            # is told to report `argv` as "what was being run", and on Codex
-            # racing re-run 5 it told the user the poll was "the dispatcher's
-            # final argv" (fix round 14). The poll is not the user's business.
+            # was told to report `argv` as "what was being run" (it is told the
+            # phase and the plan since fix round 19), and on Codex racing
+            # re-run 5 it told the user the poll was "the dispatcher's final
+            # argv" (fix round 14). The poll is not the user's business.
             terminal["argv"] = launch.argv
             terminal["launch_state"] = (launch.result or {}).get("state")
             return "terminal", terminal
