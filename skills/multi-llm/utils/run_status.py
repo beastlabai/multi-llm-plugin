@@ -2684,14 +2684,17 @@ def user_speller(
         resolved = modes.resolve(mode)
         if resolved is None:
             return None
+        kept = [str(token) for token in [
+            *extra, *cli_common.drop_host_composed_flags(tokens)]]
+        # A token this one-line spelling cannot carry as it is — an `ask`
+        # question with a newline or a tab, an empty value — keeps the
+        # dispatcher command, which quotes it whole. Fix round 19: those
+        # tokens were dropped, so a two-line question vanished from the
+        # line and the command printed did not parse.
+        if any(not token or not token.isprintable() for token in kept):
+            return None
         words = [f"--{resolved.name}", next_phase.quote_plan_arg(plan_arg)]
-        # A token with a control character is not something a user typed
-        # (a replay list is read from the run's output folder).
-        words += [
-            next_phase.quote_plan_arg(str(token))
-            for token in [*extra, *cli_common.drop_host_composed_flags(tokens)]
-            if str(token) and str(token).isprintable()
-        ]
+        words += [next_phase.quote_plan_arg(token) for token in kept]
         return template.replace(next_phase.ARGS_SLOT, " ".join(words))
 
     return spell
