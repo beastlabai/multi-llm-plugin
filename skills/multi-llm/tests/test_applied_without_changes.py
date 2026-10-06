@@ -133,7 +133,12 @@ class TestTheReSend:
         stop = result.stop
         assert stop["applied_without_changes"] is True
         assert "its change did not land" in stop["headline"]
-        assert "--human-task apply-batch-0=done" in stop["headline"]
+        # `--human-task` is implement's flag: an apply phase has no answer to
+        # name (fix round 15), only the resume that dispatches it again.
+        assert "--human-task" not in stop["headline"]
+        assert "--human-task" not in "\n".join(result.messages)
+        assert "resume this phase" in stop["headline"]
+        assert "answers" not in stop
 
     def test_a_check_task_that_changes_nothing_is_verified_without_a_re_send(self, env):
         """A check declares no files and changes nothing by design: its verdict
@@ -291,6 +296,73 @@ class TestTheReSend:
         assert outcome.status == executor.STATUS_OK, outcome.reason
         assert outcome.write_outcome == executor.WRITE_APPLIED
         assert len(prompts) == 2 and HEADING in prompts[1]
+
+
+# ===========================================================================
+# The answers an applied-without-changes stop offers (fix round 15)
+# ===========================================================================
+
+class TestTheAnswersOfAChangeThatDidNotLand:
+    """Review of round 14 (R1): the stop's message said "once you have made
+    its change yourself", while the recorded answers offered "accept T009's
+    failure: T009 counts as done and the tasks after it run" first — relayed
+    verbatim by `util next-command` and the tool routes. A change that did
+    not land is not a failure to accept: going on without it comes first,
+    and `done` says it is for a change the user made by hand."""
+
+    @staticmethod
+    def _run(env):
+        from utils import write_batch_scheduler as wbs
+
+        task = env.apply_task(
+            0, kind="implement", task_id="T009", expected_ids=["T009"],
+            declared_files=[str(env.root / "src" / "a.py")],
+            prompt="Do T009\n\n## Changes Applied in Prior Batches\n\n"
+                   f"{wbs.PRIOR_CHANGES_TOKEN}\n",
+        )
+        env.edits([], result={**APPLIED_S0, "ids": ["T009"],
+                              "files_touched": ["src/a.py"]})
+        result = env.scheduler([task], kind="implement", finalize=False).run()
+        assert result.outcomes[0].applied_without_changes
+        return result
+
+    def test_skip_comes_first_and_done_is_for_a_change_made_by_hand(self, env):
+        answers = self._run(env).stop["answers"]
+        assert [a["flags"] for a in answers] == [
+            ["--resume", "--human-task", "T009=skip"],
+            ["--resume", "--human-task", "T009=done"],
+        ]
+        done = answers[1]["why"]
+        assert done.startswith("once you have made T009's change yourself"), done
+        assert "accept" not in done and "failure" not in done
+        assert all("accept T009's failure" not in a["why"] for a in answers)
+
+    def test_the_stop_message_offers_them_in_the_same_order(self, env):
+        result = self._run(env)
+        joined = "\n".join(result.messages)
+        assert "accept the failure" not in joined
+        assert joined.index("T009=skip") < joined.index("T009=done"), joined
+        head = result.stop["headline"]
+        assert "T009=done" in head and head.index("T009=skip") < head.index("T009=done")
+
+    def test_a_clean_failure_keeps_its_accept_answer(self, env):
+        """A task that said `failed`: accepting the failure is still the
+        answer the stop offers first."""
+        from utils import write_batch_scheduler as wbs
+
+        task = env.apply_task(
+            0, kind="implement", task_id="T009", expected_ids=["T009"],
+            declared_files=[str(env.root / "src" / "a.py")],
+            prompt="Do T009\n\n## Changes Applied in Prior Batches\n\n"
+                   f"{wbs.PRIOR_CHANGES_TOKEN}\n",
+        )
+        env.edits([], result={"status": "failed", "ids": [], "files_touched": [],
+                              "summary": "could not"})
+        answers = env.scheduler(
+            [task], kind="implement", finalize=False,
+        ).run().stop["answers"]
+        assert answers[0]["flags"] == ["--resume", "--human-task", "T009=done"]
+        assert answers[0]["why"].startswith("accept T009's failure")
 
 
 # ===========================================================================
