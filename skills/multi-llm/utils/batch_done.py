@@ -598,7 +598,8 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"close the phase without --mark-completed and report the way "
             f"forward: fix what {task_id} reported and re-run implement with "
             f"--resume (the check runs again), or accept its findings with "
-            f"--resume --human-task {task_id}=done, or leave it and them "
+            f"--resume --human-task {task_id}=done (they then run, told that "
+            f"the findings were accepted), or leave it and them "
             f"undone with --resume --human-task {task_id}=skip."
         )
     return 0
