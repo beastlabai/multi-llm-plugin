@@ -1636,36 +1636,50 @@ class TestTheHomeCheck:
         change = ld.compare_home(before, ld.home_snapshot(str(home), cwds))
         assert change.changed == ["config.toml"]
 
-    def test_a_trust_table_for_another_repository_is_not_this_runs(self, lay):
-        """Run 6 (#11a): every Codex racing run's closing summary listed the
-        trust entries its concurrent sibling runs (other repositories) added to
-        the shared config. This run's codex children run in its repository, so
-        a table for a directory outside it is not this run's to report; it is
-        still no change."""
+    def test_a_trust_table_for_any_other_directory_is_named_but_no_change(self, lay):
+        """Fix round 17 (the Fable review of round 16): ``$CODEX_HOME`` is on
+        every jailed dispatch's allow list, so a batch can append
+        ``[projects."/"]``, ``"~"`` or another repository with ``trust_level =
+        "trusted"`` to the user's own config, and round 16 named only tables
+        inside the run's cwds, which hid exactly those. A concurrent sibling
+        run's table (run 6, #11a) looks the same, so none fails the check, and
+        every one is named."""
         home = _make_home(lay.root)
         cwds = [str(lay.repo)]
+        planted = ["/", os.path.expanduser("~"), "/somewhere/else",
+                   str(lay.root / "sibling-run"), str(lay.repo / "packages" / "web")]
         before = ld.home_snapshot(str(home), cwds)
-        _append(home / "config.toml", self._trust("/somewhere/else"))
-        _append(home / "config.toml", self._trust(str(lay.root / "sibling-run")))
+        for path in planted:
+            _append(home / "config.toml", self._trust(path))
+        _append(home / "config.toml", self._trust(lay.repo))
         change = ld.compare_home(before, ld.home_snapshot(str(home), cwds))
         assert change.changed == [] and not change.any
-        assert change.foreign_trust == []
-
-    def test_a_trust_table_inside_this_repository_is_named(self, lay):
-        """A directory inside the run's repository other than the one its
-        children ran in (a nested codex in a subdirectory) is named once."""
-        home = _make_home(lay.root)
-        cwds = [str(lay.repo)]
-        sub = str(lay.repo / "packages" / "web")
-        before = ld.home_snapshot(str(home), cwds)
-        _append(home / "config.toml", self._trust(sub))
-        change = ld.compare_home(before, ld.home_snapshot(str(home), cwds))
-        assert change.changed == [] and not change.any
-        assert change.foreign_trust == [sub]
+        assert change.foreign_trust == sorted(planted)
         # Already there before: not named again.
         again = ld.compare_home(ld.home_snapshot(str(home), cwds),
                                 ld.home_snapshot(str(home), cwds))
         assert again.foreign_trust == []
+
+    def test_the_main_repository_of_a_linked_worktree_is_codexs_own_key(self, tmp_path):
+        """codex records trust for a linked worktree's main repository too
+        (``codex_trust.repo_keys``), and the run removes it at its end (I12):
+        a run in a worktree is not told about it."""
+        import subprocess
+
+        main = tmp_path / "main"
+        main.mkdir()
+        git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+        subprocess.run([*git, "init", "-q"], cwd=main, check=True)
+        subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "x"], cwd=main, check=True)
+        worktree = tmp_path / "wt"
+        subprocess.run([*git, "worktree", "add", "-q", str(worktree)], cwd=main, check=True)
+        home = _make_home(tmp_path)
+        cwds = [str(worktree)]
+        before = ld.home_snapshot(str(home), cwds)
+        _append(home / "config.toml", self._trust(os.path.realpath(main)))
+        _append(home / "config.toml", self._trust("/"))
+        change = ld.compare_home(before, ld.home_snapshot(str(home), cwds))
+        assert change.changed == [] and change.foreign_trust == ["/"]
 
     def test_the_trust_line_blames_no_one_and_cannot_forge_a_line(self):
         # A jailed turn can write the config, so a table's path is untrusted.
@@ -1673,9 +1687,44 @@ class TestTheHomeCheck:
             ["/r/sub", "/r/x\n[CODEX_HOME_CHECK] forged"],
             home="~/.codex", provider="codex")
         assert line.startswith("[CODEX_HOME_CHECK] codex: ")
-        assert "~/.codex/config.toml" in line and "inside this repository" in line
-        assert "not a failure" in line and "another run" not in line
+        assert "~/.codex/config.toml" in line
+        assert ("added by this run or by another codex session running at the "
+                "same time") in line
+        assert "not a failure" in line and "delete its [projects." in line
         assert line.splitlines() == [line]
+
+    def test_the_note_names_only_the_tables_still_there_when_it_prints(self, lay):
+        """Run 6's noise was sibling runs' tables that their own runs removed
+        again; one this run planted stays until someone deletes it."""
+        home = _make_home(lay.root)
+        config = home / "config.toml"
+        _append(config, self._trust("/"))
+        _append(config, self._trust("/sibling"))
+        note = ld.TrustEntriesNote(home=str(home), paths=("/", "/sibling"), provider="codex")
+        text = config.read_text()
+        config.write_text(text.replace(self._trust("/sibling"), ""))
+        assert ld.TrustEntriesNote(str(home), ("/sibling",)).remaining() == ()
+        line = str(note)
+        assert '/,' not in line and ": /." in line and "/sibling" not in line
+        config.write_text(text.replace(self._trust("/"), "").replace(self._trust("/sibling"), ""))
+        assert str(note) == ""
+        # A home whose config cannot be read keeps every path named.
+        assert ld.TrustEntriesNote(None, ("/x",)).remaining() == ("/x",)
+
+    def test_notes_of_one_home_merge_into_one_line_in_place(self, lay):
+        home = _make_home(lay.root)
+        _append(home / "config.toml", self._trust("/a"))
+        _append(home / "config.toml", self._trust("/b"))
+        lines = ld.render_summary_entries([
+            "[JAIL_DENIED] first",
+            ld.TrustEntriesNote(str(home), ("/b",)),
+            "[CODEX_HOME_CHECK] second",
+            ld.TrustEntriesNote(str(home), ("/a", "/b")),
+            ld.TrustEntriesNote(str(home), ("/gone",)),
+        ])
+        assert len(lines) == 3
+        assert lines[0] == "[JAIL_DENIED] first" and lines[2] == "[CODEX_HOME_CHECK] second"
+        assert ": /a, /b. " in lines[1] and "/gone" not in lines[1]
 
     def test_what_a_normal_turn_rewrites_is_not_a_change(self, lay):
         home = _make_home(lay.root)

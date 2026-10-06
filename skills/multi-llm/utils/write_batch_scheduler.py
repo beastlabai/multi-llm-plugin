@@ -3108,10 +3108,10 @@ class WriteBatchScheduler:
     @staticmethod
     def _jail_line_count() -> int:
         try:
-            from .subagent_executor import jail_summary_lines
+            from .subagent_executor import jail_summary_count
         except Exception:  # noqa: BLE001 - an older executor has no summary
             return 0
-        return len(jail_summary_lines())
+        return jail_summary_count()
 
     def _repeat_jail_lines(self, before: int) -> None:
         """Repeat this phase's ``[JAIL_DENIED]`` / ``[CODEX_HOME_CHECK]`` lines
@@ -3123,7 +3123,7 @@ class WriteBatchScheduler:
             from .subagent_executor import jail_summary_lines
         except Exception:  # noqa: BLE001 - an older executor has no summary
             return
-        for line in jail_summary_lines()[before:]:
+        for line in jail_summary_lines(before):
             self.log(f"[write-subagents] closing summary: {line}")
 
     def _report_rollback_store_utilization(self) -> None:
