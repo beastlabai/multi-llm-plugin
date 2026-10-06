@@ -648,12 +648,12 @@ class TestTheApplyReport:
 @pytest.mark.parametrize("core", ["implement.md", "apply-code-fixes.md"])
 def test_the_native_instructions_record_and_report_a_batch_s_own_check(core):
     """The native leg's half: the host records the reply's `check` with
-    `util batch-done --check`, lists a failing one under Check Findings and
+    `util batch-done --own-check` (fix round 18; `--check` until then), lists a failing one under Check Findings and
     says so in its report, and names the setting nothing ran the tests for."""
     text = (Path(__file__).parent.parent / "instructions" / core).read_text(
         encoding="utf-8")
     assert "`[BATCH_CHECK_FAILED]`" in text
-    assert "`--check findings` and one `--finding \"{finding}\"` per entry" in text
+    assert "`--own-check findings` and one `--finding \"{finding}\"` per entry" in text
     assert "## Check Findings" in text
     assert "`verify_command` under `driver:` in `.multi-llm/providers.yaml`" in text
 
@@ -664,6 +664,6 @@ def test_the_native_host_reads_a_clear_pass_as_a_pass(core):
     listed beside it, so the native host is told the same."""
     text = (Path(__file__).parent.parent / "instructions" / core).read_text(
         encoding="utf-8")
-    assert ('add `--check passed` when it says `"passed": true` (what it lists '
+    assert ('add `--own-check passed` when it says `"passed": true` (what it lists '
             'beside a pass, such as `npm test: 12 passed`, is not a failing '
             'check)') in text
