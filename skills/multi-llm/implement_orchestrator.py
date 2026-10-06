@@ -1897,15 +1897,87 @@ def _started_and_unfinished(state: StateManager, task_ids: Iterable[str]) -> Lis
     return kept
 
 
-def _continued_line(kept: Sequence[str]) -> str:
+def _kept_labels(state: StateManager, plan: Any = None) -> Dict[str, str]:
+    """How each task answered ``--human-task <id>=done`` reads in a kept
+    list — "accepted with its check findings", "accepted after failing",
+    "completed by hand" — from *plan* (this run's human-task plan) and the
+    answers on record, in the words the executor's ``resume: kept`` line and
+    summary.md use (``write_batch_scheduler.answered_done_label``)."""
+    from types import SimpleNamespace
+
+    from utils.write_batch_scheduler import (
+        answered_done_label,
+        answered_done_on_record,
+    )
+
+    accepted, completed = answered_done_on_record(state)
+    accepted = dict(accepted)
+    completed = list(completed)
+    if plan is not None:
+        accepted.update(getattr(plan, "accepted", None) or {})
+        completed += list(getattr(plan, "completed", None) or [])
+    view = SimpleNamespace(accepted=accepted)
+    return {
+        task_id: answered_done_label(view, task_id)
+        for task_id in list(accepted) + completed
+    }
+
+
+def _kept_named(kept: Sequence[str], labels: Dict[str, str]) -> str:
+    """The kept tasks as a resume line names them: the plain ones first (at
+    most eight), then each answered one with how it was answered."""
+    plain = [task_id for task_id in kept if task_id not in labels]
+    shown = ", ".join(plain[:8]) + (", …" if len(plain) > 8 else "")
+    answered = ", ".join(
+        f"{task_id} ({labels[task_id]})" for task_id in kept if task_id in labels
+    )
+    return ", ".join(part for part in (shown, answered) if part)
+
+
+def _continued_line(kept: Sequence[str], labels: Optional[Dict[str, str]] = None) -> str:
     """The one line a continued run prints (fix round 16)."""
-    named = ", ".join(kept[:8]) + (", …" if len(kept) > 8 else "")
+    named = _kept_named(kept, labels or {})
     return (
         "resume: implement started earlier and did not finish, so this run "
         f"continues it as --resume: kept {len(kept)} task(s) an earlier run "
         f"finished ({named}) and runs what is left. To run every task again "
         "instead, add --fresh."
     )
+
+
+def _native_kept_line(
+    state: StateManager, task_ids: Iterable[str], output_data: Dict[str, Any],
+    plan: Any = None,
+) -> Optional[str]:
+    """The ``resume: kept …`` line of a native ``--resume`` typed by the user,
+    or ``None`` when it keeps nothing.
+
+    Fix round 18 (live run 7, Claude Code stop 01b and accept 02): only the
+    plain ``--implement`` that continues a started run said what it kept, so
+    on the native leg an explicit ``--resume`` never showed "T002 (accepted
+    with its check findings)", which both tool routes print (the executor's
+    ``[write-subagents] resume: kept …`` line). Kept: every task of the
+    decomposition an earlier run recorded ``completed``, or this run's
+    answers record done, that this emit does not hand out again.
+    """
+    handed = {
+        str(task.get("id") or "")
+        for batch in output_data.get("batches") or []
+        for task in batch.get("tasks") or []
+    }
+    statuses = state.implementation_task_statuses()
+    answered = set(getattr(plan, "accepted", None) or {}) | set(
+        getattr(plan, "completed", None) or []
+    )
+    kept = [
+        str(task_id) for task_id in task_ids
+        if (statuses.get(str(task_id)) == "completed" or str(task_id) in answered)
+        and str(task_id) not in handed
+    ]
+    if not kept:
+        return None
+    named = _kept_named(kept, _kept_labels(state, plan))
+    return f"resume: kept {len(kept)} task(s) an earlier run finished ({named})."
 
 
 def _waiting_on_checks(
@@ -2291,7 +2363,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         kept = _started_and_unfinished(state, decomposer.tasks)
         if kept:
             args.resume = True
-            print(_continued_line(kept))
+            print(_continued_line(kept, _kept_labels(state)))
             if state.has_plan_changed():
                 print("WARNING: Plan has changed since last session")
                 state.clear_plan_changed_flag()
@@ -2681,6 +2753,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             resume=bool(args.resume and not args.task),
         ):
             return 3
+
+    # Fix round 18: an explicit native `--resume` says what it kept, as the
+    # continued run above and the executor leg's scheduler do.
+    if resume_typed and not args.task:
+        kept_line = _native_kept_line(
+            state, decomposer.tasks, output_data, native_human_plan,
+        )
+        if kept_line:
+            print(kept_line)
 
     # Print summary
     print("\n" + "=" * 60)
