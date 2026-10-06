@@ -270,6 +270,30 @@ def set_task_check_tree_in_state(
         state.pop(TASK_CHECK_TREES_KEY, None)
 
 
+#: ``task id -> when a run that hands the implement task out again set its
+#: earlier record aside`` (fix round 17): a start-over (``--fresh``, or a
+#: plain run after a finished implement) for every code task, an explicit
+#: ``--task`` rerun for the one it names. The task is ``pending`` again, but
+#: the prior-changes log still holds the line its earlier run wrote, and a
+#: native ``--resume`` refuses a task the log holds and no status records
+#: (``batch_done.unrecorded_logged_batches``): a line no newer than this stamp
+#: is the earlier run's, not one this run left unrecorded.
+TASK_RESET_AT_KEY = "implement_task_reset_at"
+
+
+def mark_tasks_reset_in_state(state: Dict[str, Any], task_ids: Iterable[str]) -> None:
+    """Stamp *task_ids* in :data:`TASK_RESET_AT_KEY` with the current time."""
+    ids = [str(task_id) for task_id in task_ids if str(task_id)]
+    if not ids:
+        return
+    recorded = state.get(TASK_RESET_AT_KEY)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    now = datetime.now().isoformat()
+    for task_id in ids:
+        current[task_id] = now
+    state[TASK_RESET_AT_KEY] = current
+
+
 def mark_item_processed_in_state(
     state: Dict[str, Any],
     phase: str,
@@ -1127,6 +1151,29 @@ class StateManager:
         seen.add(task_id)
         return self._deferred_to_user(match.group(1), seen)
 
+    def deferral_root(self, task_id: str) -> Optional[str]:
+        """The task a dependent skipped with a deferral waits on: the end of
+        its ``skipped — depends on skipped task …`` chain (the manual task),
+        or ``None`` when *task_id* was not skipped as a dependent.
+
+        Fix round 17: such a task is a code task (or a check) the run did not
+        do, not manual work. It runs on the resume that records its manual
+        task done (``--human-task <id>=done``), so every surface names it
+        apart: ``waits_on`` on its :meth:`deferred_implementation_tasks`
+        entry, "skipped (depends on manual T005)" on ``status``.
+        """
+        reasons = self.state.get("task_status_reasons") or {}
+        root: Optional[str] = None
+        current = task_id
+        seen: set = set()
+        while current not in seen:
+            seen.add(current)
+            match = self._DEPENDS_ON_SKIPPED.match(str(reasons.get(current) or ""))
+            if match is None:
+                break
+            root = current = match.group(1)
+        return root
+
     def deferred_implementation_tasks(self) -> List[Dict[str, Optional[str]]]:
         """The implement tasks the run left for the user, as ``{id, title}``, by id.
 
@@ -1138,7 +1185,10 @@ class StateManager:
         deferrals (:meth:`_deferred_to_user`), since 2026-10-05: an earlier
         cycle's skip and a task the user declined are not owed. ``title`` is
         ``None`` when ``task_titles`` has no entry (a state written before
-        titles were recorded).
+        titles were recorded). A task skipped because it depends on a
+        deferral also carries ``waits_on``, the deferred task it waits on
+        (:meth:`deferral_root`, fix round 17): implement runs it once that
+        one is recorded done.
         """
         titles = self.state.get("task_titles") or {}
         current = self.state.get("implement_task_ids")
@@ -1157,11 +1207,18 @@ class StateManager:
             for task_id in self.state.get("implement_human_task_ids") or []:
                 if statuses.get(task_id) not in ("completed", "skipped"):
                     owed.add(str(task_id))
-        return [
-            {"id": task_id, "title": titles.get(task_id) or None}
-            for task_id in sorted(owed)
-            if scope is None or task_id in scope
-        ]
+        out: List[Dict[str, Optional[str]]] = []
+        for task_id in sorted(owed):
+            if scope is not None and task_id not in scope:
+                continue
+            entry: Dict[str, Optional[str]] = {
+                "id": task_id, "title": titles.get(task_id) or None,
+            }
+            root = self.deferral_root(task_id)
+            if root is not None and root != task_id:
+                entry["waits_on"] = root
+            out.append(entry)
+        return out
 
     def manual_tasks_to_close(self, deferred: Sequence[Dict[str, Any]]) -> List[str]:
         """The ids of *deferred* (:meth:`deferred_implementation_tasks`) that a

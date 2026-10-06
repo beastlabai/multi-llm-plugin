@@ -61,7 +61,10 @@ from typing import Any, Dict, List, Optional, Tuple
 
 try:
     from . import prior_changes as _prior_changes
-    from .git_utils import pin_repo_root, worktree_file_stats, worktree_fingerprint
+    from . import prompt_files as _prompt_files
+    from .git_utils import (
+        find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
+    )
     from .stream_bootstrap import bootstrap_streams
     from .subagent_executor import ExecutorError, ResultRejected
     from .subagent_tasks import (
@@ -83,8 +86,9 @@ try:
     from .write_safety import PolicyViolation, WritePolicy, relative_to_root
 except ImportError:  # pragma: no cover - direct script invocation
     from utils import prior_changes as _prior_changes  # type: ignore
+    from utils import prompt_files as _prompt_files  # type: ignore
     from utils.git_utils import (  # type: ignore
-        pin_repo_root, worktree_file_stats, worktree_fingerprint,
+        find_git_entry_root, pin_repo_root, worktree_file_stats, worktree_fingerprint,
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
     from utils.subagent_executor import ExecutorError, ResultRejected  # type: ignore
@@ -125,6 +129,7 @@ __all__ = [
     "ordering_warnings",
     "render_write_prompt",
     "default_output_path",
+    "phase_dir_pin",
     "main",
 ]
 
@@ -439,8 +444,33 @@ def ordering_warnings(phase_dir: Path, task_id: str) -> List[str]:
 
 def default_output_path(phase_dir: Path, task_id: str) -> Path:
     """``{phase_dir}/prompts/{task_id}.prompt.txt``, the file the executor leg
-    keeps for the same task (:func:`dispatched_prompt_path`)."""
+    keeps for the same task (:func:`dispatched_prompt_path`). The path to
+    print; the file is written through :func:`phase_dir_pin`."""
     return Path(dispatched_prompt_path(str(phase_dir), task_id))
+
+
+def phase_dir_pin(phase_dir: Path, *, identity: bool = True) -> "_prompt_files.PhasePin":
+    """Where this command writes under the phase dir, without following a link.
+
+    Fix round 17: the host's subagents can write the phase dir, and this
+    command wrote ``prompts/<id>.prompt.txt`` by path — through a ``prompts``
+    link, a link planted at the file's own name (which overwrote the file it
+    named), or a phase dir replaced by one. The walk starts at the repository
+    holding the phase dir's parent (that parent itself when no repository
+    does) and opens every component below it, the phase dir included,
+    without following a link (:mod:`utils.prompt_files`). With ``identity``
+    the phase dir it reaches now is pinned, so a write later in the same
+    call reaches the same directory or is refused. Raises ``OSError``.
+    """
+    given = os.path.abspath(str(phase_dir))
+    parent = os.path.realpath(os.path.dirname(given))
+    root = find_git_entry_root(parent) or parent
+    relative = os.path.relpath(parent, root)
+    parts = tuple(
+        part for part in relative.split(os.sep) if part and part != os.curdir
+    ) + (os.path.basename(given),)
+    pin = _prompt_files.PhasePin(root=root, parts=parts)
+    return _prompt_files.identify(pin) if identity else pin
 
 
 # ---------------------------------------------------------------------------
@@ -530,33 +560,45 @@ def check_tree_fingerprint(phase_dir: Path) -> Optional[str]:
         return None
 
 
-def record_check_tree(phase_dir: Path, task_id: str) -> Optional[Path]:
+def record_check_tree(
+    phase_dir: Path, task_id: str,
+    pin: Optional["_prompt_files.PhasePin"] = None,
+) -> Optional[Path]:
     """Record the tree a check task's prompt is bound against; the path, or
     ``None`` when the tree cannot be read (an earlier record is removed then,
-    so it never verifies this dispatch)."""
+    so it never verifies this dispatch). Written like the prompt, never
+    through a link (:func:`phase_dir_pin`, or the caller's ``pin``)."""
     target = check_tree_path(phase_dir, task_id)
     taken = _tree_now(phase_dir)
     if taken is None:
-        discard_check_tree(phase_dir, task_id)
+        discard_check_tree(phase_dir, task_id, pin)
         return None
     root, files = taken
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        temp = target.with_name(target.name + ".tmp")
-        temp.write_text(json.dumps({
-            "task_id": task_id, "repo_root": root, "files": files,
-        }), encoding="utf-8")
-        os.replace(str(temp), str(target))
+        with _prompt_files.PromptFolder.open(
+            pin or phase_dir_pin(phase_dir, identity=False)
+        ) as folder:
+            folder.write(target.name, json.dumps({
+                "task_id": task_id, "repo_root": root, "files": files,
+            }))
     except OSError:
-        discard_check_tree(phase_dir, task_id)
+        discard_check_tree(phase_dir, task_id, pin)
         return None
     return target
 
 
-def discard_check_tree(phase_dir: Path, task_id: str) -> None:
-    """Remove a check's bind-time record (a record of the check consumed it)."""
+def discard_check_tree(
+    phase_dir: Path, task_id: str,
+    pin: Optional["_prompt_files.PhasePin"] = None,
+) -> None:
+    """Remove a check's bind-time record (a record of the check consumed it):
+    the entry itself, never a file a link names or one reached through a
+    linked folder."""
     try:
-        check_tree_path(phase_dir, task_id).unlink()
+        with _prompt_files.PromptFolder.open(
+            pin or phase_dir_pin(phase_dir, identity=False), create=False,
+        ) as folder:
+            folder.remove(check_tree_path(phase_dir, task_id).name)
     except OSError:
         pass
 
@@ -642,6 +684,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     bootstrap_streams()
     parser = _build_parser()
     args = parser.parse_args(argv)
+    # The phase dir as it is now, before anything is read from it: the
+    # prompt and the check's tree record are written to this directory or
+    # not at all (fix round 17).
+    try:
+        pin: Optional[_prompt_files.PhasePin] = phase_dir_pin(Path(args.phase_dir))
+        pin_problem: Optional[OSError] = None
+    except OSError as exc:
+        pin, pin_problem = None, exc
     try:
         text, _task, info = render_write_prompt(Path(args.phase_dir), args.task_id)
     except (WritePromptError, ExecutorError) as exc:
@@ -701,7 +751,10 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     if is_check_task(str(info.get("kind") or ""), _task):
         # What `util batch-done` holds this check to: it changes no file.
-        record_check_tree(Path(args.phase_dir), args.task_id)
+        if pin is not None:
+            record_check_tree(Path(args.phase_dir), args.task_id, pin)
+        else:
+            discard_check_tree(Path(args.phase_dir), args.task_id)
 
     if args.stdout:
         sys.stdout.write(text)
@@ -712,8 +765,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         Path(args.phase_dir), args.task_id
     )
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+        if args.output:
+            # A path the caller named: written where it says.
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text(text, encoding="utf-8")
+        else:
+            if pin is None:
+                raise pin_problem or OSError(f"{args.phase_dir} cannot be opened")
+            with _prompt_files.PromptFolder.open(pin) as folder:
+                folder.write(target.name, text)
     except OSError as exc:
         print(f"ERROR: cannot write {target}: {exc}", file=sys.stderr)
         return 1

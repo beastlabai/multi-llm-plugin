@@ -51,6 +51,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
     from . import landlock_dispatch as _landlock
+    from . import prompt_files as _prompt_files
     from . import prior_changes as _prior_changes
     from . import process_control as _process_control
     from . import subagent_executor as _executor
@@ -148,6 +149,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
 except ImportError:  # pragma: no cover - direct-script import shim
     from utils import git_utils as _git_utils
     from utils import landlock_dispatch as _landlock
+    from utils import prompt_files as _prompt_files
     from utils import prior_changes as _prior_changes
     from utils import process_control as _process_control
     from utils import subagent_executor as _executor
@@ -265,6 +267,7 @@ __all__ = [
     "blocked_by_check_reason",
     "decomposition_graph",
     "DISPATCHED_PROMPTS_SUBDIR",
+    "dispatched_prompt_name",
     "dispatched_prompt_path",
     "held_back_by_checks",
     "rerunnable_checks",
@@ -728,6 +731,26 @@ def _declined_split(plan: "HumanTaskPlan") -> Dict[str, List[str]]:
     if dependents:
         out["declined_dependent_task_ids"] = dependents
     return out
+
+
+def _deferred_split(plan: "HumanTaskPlan") -> Dict[str, Dict[str, str]]:
+    """The write mirror's key for the tasks skipped with a deferred manual
+    task (fix round 17): ``deferred_waits_on``, ``{task: manual task}``,
+    each followed up :attr:`HumanTaskPlan.chain` to the deferral it waits
+    on. They are in ``skipped_task_ids`` too; ``status`` names them
+    "skipped (depends on manual T005)" instead of "deferred manual", since
+    implement runs them once that task is recorded done. Left out when
+    empty, as :func:`_declined_split`'s keys are.
+    """
+    waits: Dict[str, str] = {}
+    for task_id in plan.deferred():
+        current, seen = task_id, set()
+        while current in plan.chain and current not in seen:
+            seen.add(current)
+            current = plan.chain[current]
+        if current != task_id:
+            waits[task_id] = current
+    return {"deferred_waits_on": dict(sorted(waits.items()))} if waits else {}
 
 
 #: The recorded reason of a human task the user declined at pause-and-ask.
@@ -1944,7 +1967,16 @@ def bind_prior_changes(
 #: Where a write batch's dispatched prompt is kept, under the phase dir: the
 #: layout the native leg's ``util write-prompt`` writes (``write_prompt``
 #: imports it), which the executor leg keeps too since fix round 16.
-DISPATCHED_PROMPTS_SUBDIR = "prompts"
+DISPATCHED_PROMPTS_SUBDIR = _prompt_files.FOLDER
+
+
+def dispatched_prompt_name(task_id: str, attempt: Optional[int] = None) -> str:
+    """``{task_id}.prompt.txt``, or ``{task_id}.attempt-{attempt}.prompt.txt``
+    (see :func:`dispatched_prompt_path`)."""
+    return (
+        f"{task_id}.prompt.txt" if attempt is None
+        else f"{task_id}.attempt-{attempt}.prompt.txt"
+    )
 
 
 def dispatched_prompt_path(
@@ -1954,14 +1986,12 @@ def dispatched_prompt_path(
 
     With ``attempt``, ``{task_id}.attempt-{attempt}.prompt.txt``: what one
     attempt sent when it was not the batch's prompt (a report re-ask, rule 9's
-    re-send).
+    re-send). The path to name; the files are written through
+    :mod:`utils.prompt_files`, never by this path.
     """
-    name = (
-        f"{task_id}.prompt.txt" if attempt is None
-        else f"{task_id}.attempt-{attempt}.prompt.txt"
-    )
     return os.path.join(
-        os.path.abspath(str(phase_dir)), DISPATCHED_PROMPTS_SUBDIR, name
+        os.path.abspath(str(phase_dir)), DISPATCHED_PROMPTS_SUBDIR,
+        dispatched_prompt_name(task_id, attempt),
     )
 
 
@@ -2063,7 +2093,10 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
 #: run 5 (2026-10-06): an apply-code-fixes batch said in its free-text
 #: `notes` that the bundled test failed, the repository's test failed
 #: afterwards, and the run reported "All 6 valid fixes were applied". Read by
-#: `subagent_executor.batch_check_findings`, never from `notes`.
+#: `subagent_executor.batch_check_findings`, never from `notes`. Fix round 17:
+#: the corrected run that replaces a failing one is pinned to the same check
+#: over the same scope, as :data:`CHECK_RESULT_CONTRACT` pins it to the task's
+#: own command; a narrower re-run passing never launders the failure.
 WRITE_CHECK_CONTRACT = (
     "\n## Checks you ran (required when you ran any)\n\n"
     "If you ran any check on your edits — a test, a build, a type check, a "
@@ -2079,8 +2112,13 @@ WRITE_CHECK_CONTRACT = (
     "Report the last run of each check. A run that failed because of how you "
     "ran it (a wrong flag, mode or path) and that you then ran correctly is "
     "reported by the corrected run, and so is a check you ran again after "
-    "fixing what it found: an attempt you corrected is not a finding. Never "
-    "describe a passing run as a finding.\n\n"
+    "fixing what it found: an attempt you corrected is not a finding. The "
+    "corrected run is the same check over the same scope: the full command "
+    "the task or the repository names, with only what you ran wrongly put "
+    "right. It is never a narrower one (fewer files or tests, a filter, or a "
+    "flag such as `--passWithNoTests` that lets it pass on less). If the only "
+    "run that passed was narrower, the failing run is the last run of that "
+    "check: report it. Never describe a passing run as a finding.\n\n"
     "Report a failing check here even when you think your change did not "
     "cause it: the batch is then recorded as applied with a failing check, "
     "and the user is told, instead of the run reporting a clean success. "
@@ -2265,6 +2303,16 @@ class WriteBatchScheduler:
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
         self.jail_request = self._build_jail_request()
         self.audit = AuditLog(self.phase_dir)
+        #: Fix round 17: the phase dir the dispatched prompts are kept in,
+        #: pinned (``prompt_files.pin_phase_dir``) before any batch of this
+        #: run can replace it — a jailed repo-wide batch can write the phase
+        #: dir, and this process is not jailed. ``None`` until it exists.
+        self._prompt_pin: Optional[_prompt_files.PhasePin] = None
+        self._prompt_pin_lock = threading.Lock()
+        try:
+            self._pinned_phase_dir()
+        except OSError:
+            pass  # named on the first prompt kept, with that task's id
         #: Whether `_decide_rollback_storage` ran for the admitted group.
         self._rollback_storage_decided = False
         self._rollback_storage_lock = threading.Lock()
@@ -2820,6 +2868,19 @@ class WriteBatchScheduler:
         """Append the write-batch result contract (:func:`with_result_contract`)."""
         return with_result_contract(self.kind, task, prompt)
 
+    def _pinned_phase_dir(self) -> "_prompt_files.PhasePin":
+        """The phase dir as pinned for the prompt files (fix round 17): its
+        ``realpath`` inside the repository root and its identity, taken once
+        — at construction, or on the first prompt kept when the phase dir did
+        not exist yet. Raises ``OSError`` naming why it cannot be pinned."""
+        lock = getattr(self, "_prompt_pin_lock", None) or threading.Lock()
+        with lock:
+            pin = getattr(self, "_prompt_pin", None)
+            if pin is None:
+                pin = _prompt_files.pin_phase_dir(self.phase_dir, self.repo_root)
+                self._prompt_pin = pin
+            return pin
+
     def _keep_dispatched_prompt(
         self, task_id: str, attempt: int, sent: str, batch_prompt: str
     ) -> None:
@@ -2848,56 +2909,70 @@ class WriteBatchScheduler:
           already on disk in the phase and plan dirs — and it lies inside the
           phase dir, which the containment sweep never attributes to a runner.
 
-        A jailed repo-wide batch can write the phase dir, so the folder is
-        resolved and must be a real directory inside it, never a planted
-        symlink (the parent is not jailed, and following one would write
-        outside the repository); a file name is replaced by rename, which
-        never follows a link either.
+        A jailed repo-wide batch can write the phase dir and this process is
+        not jailed, so nothing here follows a link (fix round 17: round 16
+        checked ``prompts`` once by path, which a phase dir replaced by a link
+        or a ``prompts`` swapped after the check still redirected outside the
+        repository): the phase dir is the one pinned before any batch ran,
+        reached from the repository root without following a link, and every
+        file is created, renamed and unlinked relative to the folder's own
+        descriptor (:mod:`utils.prompt_files`).
 
-        Best-effort: a write that fails warns once and never fails the
-        dispatch.
+        Best-effort: a write that fails never fails the dispatch, and warns
+        once for that task, naming it (fix round 17: one warning for the
+        whole run let a directory planted under one task's file name silence
+        every later task's failure). An earlier re-ask file that cannot be
+        removed is named and left; the batch's own prompt is still kept.
         """
+        where = os.path.join(self.phase_dir, DISPATCHED_PROMPTS_SUBDIR)
         try:
             if not task_id or os.path.basename(task_id) != task_id or task_id in (
                     ".", ".."):
                 raise OSError(f"{task_id!r} is not a file name")
-            phase = os.path.realpath(self.phase_dir)
-            folder = os.path.join(phase, DISPATCHED_PROMPTS_SUBDIR)
-            if os.path.islink(folder):
-                raise OSError(f"{folder} is a symlink")
-            os.makedirs(folder, exist_ok=True)
-            if os.path.realpath(folder) != folder or not os.path.isdir(folder):
-                raise OSError(f"{folder} is not a directory inside {phase}")
-            if sent == batch_prompt:
-                target = dispatched_prompt_path(phase, task_id)
-                if attempt <= 1:
-                    head, tail = f"{task_id}.attempt-", ".prompt.txt"
-                    for name in os.listdir(folder):
-                        if (name.startswith(head) and name.endswith(tail)
-                                and name[len(head):-len(tail)].isdigit()):
-                            os.unlink(os.path.join(folder, name))
-            else:
-                target = dispatched_prompt_path(phase, task_id, attempt)
-            handle, temporary = tempfile.mkstemp(prefix=".prompt-", dir=folder)
-            try:
-                with os.fdopen(handle, "w", encoding="utf-8", newline="") as stream:
-                    stream.write(sent)
-                os.replace(temporary, target)
-            except BaseException:
-                try:
-                    os.unlink(temporary)
-                except OSError:
-                    pass
-                raise
-        except OSError as exc:
-            if not getattr(self, "_prompt_keep_warned", False):
-                self._prompt_keep_warned = True
-                self.log(
-                    f"[write-subagents] could not keep {task_id}'s dispatched "
-                    f"prompt under {os.path.join(self.phase_dir, DISPATCHED_PROMPTS_SUBDIR)}: "
-                    f"{exc}. The dispatch goes ahead; the audit log keeps its "
-                    f"sha256."
-                )
+            with _prompt_files.PromptFolder.open(self._pinned_phase_dir()) as folder:
+                if sent == batch_prompt:
+                    name = dispatched_prompt_name(task_id)
+                    if attempt <= 1:
+                        head, tail = f"{task_id}.attempt-", ".prompt.txt"
+                        for entry in folder.names():
+                            if not (entry.startswith(head) and entry.endswith(tail)
+                                    and entry[len(head):-len(tail)].isdigit()):
+                                continue
+                            try:
+                                folder.remove(entry)
+                            except OSError as exc:
+                                self._warn_prompt_keep(
+                                    task_id, entry,
+                                    f"[write-subagents] could not remove "
+                                    f"{task_id}'s earlier re-ask prompt {entry} "
+                                    f"under {where}: {exc}. It is not this "
+                                    f"dispatch's prompt; {task_id}'s own prompt "
+                                    f"is kept beside it.",
+                                )
+                else:
+                    name = dispatched_prompt_name(task_id, attempt)
+                folder.write(name, sent)
+        except (OSError, ValueError) as exc:
+            self._warn_prompt_keep(
+                task_id, None,
+                f"[write-subagents] could not keep {task_id}'s dispatched "
+                f"prompt under {where}: {exc}. The dispatch goes ahead; the "
+                f"audit log keeps its sha256.",
+            )
+
+    def _warn_prompt_keep(
+        self, task_id: str, entry: Optional[str], line: str
+    ) -> None:
+        """Log ``line`` once per task (and per leftover ``entry`` it names):
+        a retried dispatch that meets the same problem says nothing new,
+        another task always does."""
+        warned = getattr(self, "_prompt_keep_warnings", None)
+        if warned is None:
+            warned = self._prompt_keep_warnings = set()
+        if (task_id, entry) in warned:
+            return
+        warned.add((task_id, entry))
+        self.log(line)
 
     # -- the loop -------------------------------------------------------
 
@@ -3033,10 +3108,10 @@ class WriteBatchScheduler:
     @staticmethod
     def _jail_line_count() -> int:
         try:
-            from .subagent_executor import jail_summary_lines
+            from .subagent_executor import jail_summary_count
         except Exception:  # noqa: BLE001 - an older executor has no summary
             return 0
-        return len(jail_summary_lines())
+        return jail_summary_count()
 
     def _repeat_jail_lines(self, before: int) -> None:
         """Repeat this phase's ``[JAIL_DENIED]`` / ``[CODEX_HOME_CHECK]`` lines
@@ -3048,7 +3123,7 @@ class WriteBatchScheduler:
             from .subagent_executor import jail_summary_lines
         except Exception:  # noqa: BLE001 - an older executor has no summary
             return
-        for line in jail_summary_lines()[before:]:
+        for line in jail_summary_lines(before):
             self.log(f"[write-subagents] closing summary: {line}")
 
     def _report_rollback_store_utilization(self) -> None:
@@ -3664,6 +3739,9 @@ class WriteBatchScheduler:
                     )
                     self.state.save()
             return outcome
+
+        # Past the resume skips, the task is this run's to handle.
+        self._mark_implement_started()
 
         # A resumed verification-only task that failed, with nothing in the
         # repository changed since: not dispatched again (racing re-run 3,
@@ -8146,16 +8224,16 @@ class WriteBatchScheduler:
         :meth:`_run_verification` adds reached only a finished run's result,
         notice and summary. Set on ``result.unverified`` (the notice, the
         Verification line, the report, the mirror) when this is a code phase,
-        a task of it completed (this run or an earlier one: the ``completed``
-        statuses :meth:`_phase_has_applied_batches` reads) and no
-        ``driver.verify_command`` is set. Never runs anything.
+        a task of it applied an edit (this run or an earlier one,
+        :meth:`_phase_has_applied_batches` — the rule
+        :meth:`_run_verification` keeps too) and no ``driver.verify_command``
+        is set. Never runs anything. Fix round 17: it counted any completed
+        task, so a stop after a check alone (which edits nothing, and may have
+        run the tests itself) said that nothing had run them.
         """
         if self.kind not in CODE_WRITE_KINDS or self.dry_run or result.unverified:
             return []
-        ran = any(
-            outcome.ok and not outcome.skipped for outcome in result.outcomes
-        ) or self._phase_has_applied_batches()
-        if not ran:
+        if not self._phase_has_applied_batches(result):
             return []
         try:
             command = get_verify_command(anchor=self.anchor)
@@ -8182,9 +8260,13 @@ class WriteBatchScheduler:
           edit the plan and the tasks file; a typecheck has nothing to say about
           them, so they skip silently rather than nagging about a command that
           was never going to apply.
-        * **Nothing applied.** No batch dispatched by this run **and** none
-          recorded applied by an earlier run of this phase
-          (:meth:`_phase_has_applied_batches`) means no edit to check.
+        * **Nothing applied.** No task of this run **and** none recorded by an
+          earlier run of this phase applied an edit
+          (:meth:`_phase_has_applied_batches`) means no edit to check. Fix
+          round 17: a dispatched batch used to be enough, so a run whose only
+          batches were checks or no-ops ran the command (or said nothing had
+          run the tests) about edits nobody made; the stop's line
+          (:meth:`_note_unverified_on_stop`) asks the same question.
 
         The command is a **shell string** (`&&` is in its documented shape), run
         with `cwd` at the pinned repo root — the same root every containment
@@ -8195,7 +8277,7 @@ class WriteBatchScheduler:
         """
         if self.kind not in CODE_WRITE_KINDS:
             return True
-        if not result.batches_dispatched and not self._phase_has_applied_batches():
+        if not self._phase_has_applied_batches(result):
             return True
         command = get_verify_command(anchor=self.anchor)
         if not command:
@@ -8248,8 +8330,11 @@ class WriteBatchScheduler:
         result.messages.extend(self._verification_message(result))
         return False
 
-    def _phase_has_applied_batches(self) -> bool:
-        """Whether an earlier run of this phase left applied batches behind (F3).
+    def _phase_has_applied_batches(
+        self, result: Optional[SchedulerResult] = None,
+    ) -> bool:
+        """Whether a task of this phase applied an edit that is still owed a
+        check: one of *result*'s outcomes, or one an earlier run left (F3).
 
         The check used to gate on ``result.batches_dispatched`` alone. The
         apply kinds re-materialize their full batch list on ``--resume`` and a
@@ -8261,7 +8346,23 @@ class WriteBatchScheduler:
         — the exact ``--resume`` the exit-3 message had told the user to run
         (2026-09-16). ``state.json``'s task statuses are the record that
         survives that filter, so they answer here.
+
+        Fix round 17: only an edit counts. This run's ``ok`` outcomes count
+        when they ``applied`` (a resume skip carries the earlier verdict); a
+        task ``state.json`` records ``completed`` counts when the phase's
+        audit log's last completion of it applied or partly applied an edit
+        (a failed batch the user accepted keeps what it moved). A check task
+        (``no-op``, ``verification_only``), a ``no-op`` batch and a manual
+        task answered ``done`` (no dispatch at all) edit nothing. A completed
+        task with no completion in the audit log (the native leg records
+        none) still counts unless it is a manual or a check task this run
+        knows of: the conservative reading, which runs the check.
         """
+        if result is not None and any(
+            outcome.ok and outcome.write_outcome == WRITE_APPLIED
+            for outcome in result.outcomes
+        ):
+            return True
         if self.state is None or not hasattr(self.state, "get_all_task_statuses"):
             return False
         try:
@@ -8277,7 +8378,40 @@ class WriteBatchScheduler:
                 task_id for task_id in statuses if _IMPLEMENT_TASK_ID.match(task_id)
             }
         candidates.discard("")
-        return any(statuses.get(task_id) == "completed" for task_id in candidates)
+        completed = sorted(
+            task_id for task_id in candidates if statuses.get(task_id) == "completed"
+        )
+        if not completed:
+            return False
+        record = getattr(self.state, "state", None)
+        human = {
+            str(task_id) for task_id in (
+                (record.get("implement_human_task_ids") if isinstance(record, dict)
+                 else None) or []
+            )
+        }
+        for task_id in completed:
+            task = self._task_by_id(task_id)
+            expected = [str(i) for i in ((task or {}).get("expected_ids") or [])]
+            try:
+                done = self.audit.completion_for(
+                    task_id, expected_ids=expected or None,
+                )
+            except Exception:  # noqa: BLE001 - an unreadable log is no record
+                done = None
+            if done is not None:
+                if done.get("write_outcome") in (WRITE_APPLIED, WRITE_PARTIAL):
+                    return True
+                continue
+            if task_id in human:
+                continue
+            if task is not None and (
+                is_check_task(self.kind, task)
+                or task.get("executor_role") == "human" or task.get("is_human")
+            ):
+                continue
+            return True
+        return False
 
     def _run_verify_command(self, command: str, timeout: int) -> Tuple[int, str]:
         """Run the shell string; return ``(exit_code, output)`` (F3/F4, F6).
@@ -8535,6 +8669,36 @@ class WriteBatchScheduler:
             reload()
         except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
             self.log(f"[write-subagents] warning: state reload failed: {exc}")
+
+    def _mark_implement_started(self) -> None:
+        """Record implement started, once per run, as the native emit does.
+
+        Fix round 17 (review of fix round 16): the executor leg never wrote
+        ``phases_started.implement``, so once an implement had finished, a
+        later run that stopped left that completion standing — ``status``
+        read implement done, and the next plain ``--implement`` started over
+        instead of continuing. Called as a task is handed to this run (past
+        the resume skips), so a resume that dispatches nothing — a
+        ``--human-task <id>=done`` closing a manual task, a check whose
+        findings stand — leaves a completed implement completed, and
+        :meth:`_finalize` completes one that ran. A start-over already
+        stamped it (``implement_orchestrator._start_over``). Best-effort.
+        """
+        if (
+            self.kind != "implement" or self.dry_run or self.state is None
+            or getattr(self, "_implement_started_marked", False)
+        ):
+            return
+        with self._effects_lock:
+            if getattr(self, "_implement_started_marked", False):
+                return
+            self._implement_started_marked = True
+            try:
+                if not self.state.is_phase_started(self.phase):
+                    self.state.mark_phase_started(self.phase)
+                    self.state.save()
+            except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
+                pass
 
     def _metrics_start(self, result: SchedulerResult) -> None:
         """Stamp the phase's ETA baseline before the first dispatch.
@@ -9167,6 +9331,9 @@ class WriteBatchScheduler:
                         # — beside a summary that says "skipped at your
                         # request" (Codex stop-path accept 02).
                         **_declined_split(result.human_plan),
+                        # Fix round 17: which of the rest wait on a deferred
+                        # manual task, named apart from it on `status`.
+                        **_deferred_split(result.human_plan),
                         "pending_human_task_ids": list(result.human_plan.pending),
                         "tasks": [
                             {
