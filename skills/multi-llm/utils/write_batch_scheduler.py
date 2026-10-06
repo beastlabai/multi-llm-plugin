@@ -3008,6 +3008,8 @@ class WriteBatchScheduler:
                 result.messages.extend(
                     self._check_findings_lines(result, stopped=True)
                 )
+                # Fix round 15: and the batches whose own check failed.
+                result.messages.extend(self._batch_check_lines(result))
                 result.messages.extend(
                     self._refusal_message(exc, batch_index, result)
                 )
@@ -3058,6 +3060,9 @@ class WriteBatchScheduler:
                 result.messages.extend(
                     self._check_findings_lines(result, stopped=True)
                 )
+                # Fix round 15 (review of round 14): the batches whose own
+                # check failed are named on a stop too, not only at the end.
+                result.messages.extend(self._batch_check_lines(result))
                 result.messages.extend(stop_lines)
                 if result.summary_file:
                     result.messages.append(
