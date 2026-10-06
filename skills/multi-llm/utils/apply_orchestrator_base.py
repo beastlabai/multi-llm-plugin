@@ -365,6 +365,22 @@ def build_common_arg_parser(
         ),
     )
 
+    parser.add_argument(
+        "--human-task",
+        action="append",
+        default=None,
+        metavar="BATCH=skip",
+        help=(
+            "With --resume and --exec-subagents, answer a batch that stopped "
+            "as a partial application because its report left items out "
+            "(the stop names it): --human-task apply-fix-batch-1=skip keeps "
+            "what that batch applied as it stands, records each item it did "
+            "not report applied as skipped at your request (never counted "
+            "as applied), and goes on with the batches after it. Refused "
+            "when the files it changed no longer hold what it left."
+        ),
+    )
+
     # --- Batch Review Mode ---
     parser.add_argument(
         "--batch-review-mode",
@@ -819,6 +835,83 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # Phase 1 — _setup
     # ==================================================================
 
+    def _batch_answers(self) -> List[str]:
+        """The batches answered ``--human-task <batch>=skip``, checked (fix round 18).
+
+        An apply phase takes only ``skip``, only on ``--resume`` and only on
+        the ``--exec-subagents`` leg, whose own stop record the answer is
+        checked against (``WriteBatchScheduler._check_partial_skips``). The
+        native leg's host records such a batch itself (``util batch-done
+        --skipped``). Anything else is exit 3, before any work.
+        """
+        values = getattr(self.args, "human_task", None) or []
+        if not values:
+            return []
+        word = self.confirmation_phase_name or self.phase_name
+        problems: List[str] = []
+        try:
+            decisions = _unattended.parse_human_task_decisions(values)
+        except _unattended.NeedsHuman as exc:
+            decisions = {}
+            problems.append(str(exc).replace("ERROR: ", "", 1).strip())
+        for task_id, action in decisions.items():
+            if action != "skip":
+                problems.append(
+                    f"--human-task {task_id}={action}: an apply batch takes "
+                    f"only =skip (keep what a stopped batch applied and go on "
+                    f"without the items it left out)"
+                )
+        if not getattr(self.args, "resume", False):
+            problems.append(
+                "--human-task answers a stopped batch, so it needs --resume"
+            )
+        if not getattr(self.args, "exec_subagents", False):
+            problems.append(
+                "--human-task answers a batch the --exec-subagents leg stopped; "
+                "on this leg the batch loop is yours, and a batch kept as it "
+                "stands is recorded with util batch-done --skipped <id>"
+            )
+        if problems:
+            for line in problems:
+                print(f"ERROR: {line}", file=sys.stderr)
+            print(
+                f"       Nothing was changed. The {word} stop names the answer "
+                f"it takes and the command that carries it.",
+                file=sys.stderr,
+            )
+            raise OrchestratorError(
+                f"Phase _setup, step 6b: --human-task refused: {problems[0]}",
+                exit_code=3,
+            )
+        return sorted(decisions)
+
+    def _stop_user_commands(self) -> Dict[str, str]:
+        """The stop's answer in this host's own spelling (fix round 18):
+        ``skip``, the resume carrying ``--human-task {task_id}=skip``. Empty
+        when nothing can be spelled; the stop then names the flags."""
+        try:
+            from . import detach as _detach
+            from . import host_capabilities as _hosts
+            from . import next_phase as _next
+
+            host_id = _hosts.resolve_host_id(explicit=getattr(self.args, "host", None))
+            route = _next.resolve_route(host_id)
+            handle = _detach.active_run()
+            plan_arg = (
+                (handle.plan_arg if handle is not None else None)
+                or os.environ.get(_detach.PLAN_ARG_ENV)
+                or str(self.args.plan_file)
+            )
+            word = self.confirmation_phase_name or self.phase_name
+            return {
+                "skip": _next.phase_command(
+                    plan_arg, host_id, route, word,
+                    "--resume", "--human-task", "{task_id}=skip",
+                ),
+            }
+        except Exception:  # noqa: BLE001 - advisory: the flags are named instead
+            return {}
+
     def _setup(self) -> None:
         """Phase 1: Environment and argument validation.
 
@@ -951,6 +1044,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                     "Phase _setup, step 6: --approve-all requires --yes or --force",
                     exit_code=1,
                 )
+
+        # Step 6b (fix round 18): `--human-task <batch>=skip` answers a stopped
+        # partial application on the executor leg's resume, and nothing else.
+        self.partial_skips = self._batch_answers()
 
         # Step 7: Deprecation warnings
         if getattr(self.args, "skip_human_review", False):
@@ -3428,6 +3525,10 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                 resume=not fresh,
                 dry_run=bool(getattr(self.args, "dry_run_subagents", False)),
                 write_target=write_target,
+                # Fix round 18: the stopped batches answered `=skip`, and the
+                # answer the stop offers, in this host's spelling.
+                partial_skips=getattr(self, "partial_skips", None) or None,
+                user_commands=self._stop_user_commands(),
             )
         except (ExecutorError, WriteSafetyError) as exc:
             # A target that cannot be granted (gone, a symlink, not a regular
