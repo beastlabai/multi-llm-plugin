@@ -342,13 +342,13 @@ your host.
 
 5. **Execute batches sequentially (batches have dependencies):**
 
-   Before the loop, count the total number of tasks across all batches as `{total_tasks}` and mark the phase start:
+   Before the loop, take `{tasks_to_dispatch}` from the task JSON's `tasks_to_dispatch` (step 2's `Tasks to dispatch:` line; never count it yourself, and never take the `Organized into …` batch count) and mark the phase start:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
-     --state-file "$STATE_FILE" --phase "implement" --total-batches {total_tasks}
+     --state-file "$STATE_FILE" --phase "implement" --total-batches {tasks_to_dispatch}
    ```
 
-   `batches` holds exactly the tasks you dispatch (and a manual task still waiting for its answer); its count is the `Pending tasks:` line. Step 2 left out, and named in top-level maps with their reasons, every task you must neither dispatch nor record: `skipped_tasks`, `accepted_tasks` and `completed_manual_tasks` (above); `refused_tasks`, a task the write policy (`driver.write_paths`) does not allow, already recorded `failed` as the `--exec-subagents` leg refuses it before dispatch, and `not_run_tasks`, the tasks that depend on one; `not_rerun_checks`, a check whose findings stand because nothing changed since they were recorded (`[CHECK_NOT_RERUN]`), and `held_tasks`, the tasks a check with findings holds back. List them in the summary (refused: `Failed`, refused before dispatch; the others: `Not run`). When `batches` is empty step 2 says `Nothing to dispatch`: spawn nothing and go on to step 7 (this run reopened implement; one that printed `Nothing is left to run` ended at step 3).
+   `batches` holds exactly the tasks you dispatch (and a manual task still waiting for its answer); its count is the `Pending tasks:` line. Step 2 left out, and named in top-level maps with their reasons, every task you must neither dispatch nor record: `skipped_tasks`, `accepted_tasks` and `completed_manual_tasks` (above); `refused_tasks`, a task the write policy (`driver.write_paths`) does not allow, already recorded `failed` as the `--exec-subagents` leg refuses it before dispatch, and `not_run_tasks`, the tasks that depend on one; `not_rerun_checks`, a check whose findings stand because nothing changed since they were recorded (`[CHECK_NOT_RERUN]`), and `held_tasks`, the tasks a check with findings holds back. List them in the summary (refused: `Failed`, refused before dispatch; the others: `Not run`). A task named in `waiting_on_checks` (step 2's "Waiting on a check's verdict" list) is in `batches`, after the check task it depends on, because that check's verdict is not known until it runs: dispatch it once the check is recorded `--check passed`; if the check is recorded with findings, `util batch-done` prints `[CHECK_BLOCKED]` for it, so do not dispatch it — it stays pending, the summary lists it as `Not run`, and step 10 runs without `--mark-completed`. When `batches` is empty step 2 says `Nothing to dispatch`: spawn nothing and go on to step 7 (this run reopened implement; one that printed `Nothing is left to run` ended at step 3).
 
    For each batch in `batches` array:
    - Execute all tasks in the batch (can be parallel if `can_parallelize` is true)
@@ -489,9 +489,9 @@ your host.
        --state-file "$STATE_FILE" --phase "implement" \
        --label "{task_id}: {task_title}" --subagent-type "{executor_role}" \
        --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
-       --total-batches {total_tasks} --batch-index {N}
+       --total-batches {tasks_to_dispatch} --batch-index {N}
      ```
-     Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based task index across all batches. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
+     Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based index of the tasks you dispatched, across all batches. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
 
    **The last subagent returning is not the end of the phase.** Steps 6 through 11
    still owe work — the finalization that computes which files this phase
