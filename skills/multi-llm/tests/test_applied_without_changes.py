@@ -153,25 +153,106 @@ class TestTheReSend:
         assert outcome.outcome_label == "verified"
         assert len(_dispatch_prompts(log)) == 1
 
+    @staticmethod
+    def _code_task(env, task_id="T009"):
+        from utils import write_batch_scheduler as wbs
+
+        return env.apply_task(
+            0, kind="implement", task_id=task_id, expected_ids=[task_id],
+            declared_files=[str(env.root / "src" / "a.py")],
+            prompt=f"Do {task_id}\n\n## Changes Applied in Prior Batches\n\n"
+                   f"{wbs.PRIOR_CHANGES_TOKEN}\n",
+        )
+
     def test_a_change_outside_the_declared_files_is_judged_by_its_ids(self, env):
-        """Declared files unchanged, another file moved: the bytes decide, as
-        when a declared file moved too — applied with every id attested, a
-        partial application without (it used to be a clean failure at `ok`)."""
-        other = env.root / "src" / "a.py"
-        env.edits([_patch_edit(other, "# moved\n")], result=APPLIED_S0)
-        attested = env.scheduler([env.apply_task(0)]).run().outcomes[0]
+        """An implement task: declared files unchanged, another file moved:
+        the bytes decide, as when a declared file moved too — applied with
+        every id attested, a partial application without (it used to be a
+        clean failure at `ok`)."""
+        other = env.root / "src" / "b.py"
+        env.edits([_patch_edit(other, "# moved\n")],
+                  result={**APPLIED_S0, "ids": ["T009"], "files_touched": ["src/b.py"]})
+        attested = env.scheduler(
+            [self._code_task(env)], kind="implement", finalize=False,
+        ).run().outcomes[0]
         assert attested.status == executor.STATUS_OK, attested.reason
         assert attested.write_outcome == executor.WRITE_APPLIED
         assert attested.reason.startswith("APPLIED outside the declared files")
-        assert attested.files_touched == ["src/a.py"]
+        assert attested.files_touched == ["src/b.py"]
 
     def test_the_same_change_with_no_ids_is_a_partial_application(self, env):
-        other = env.root / "src" / "a.py"
+        other = env.root / "src" / "b.py"
         env.edits([_patch_edit(other, "# moved\n")],
                   result={**APPLIED_S0, "ids": []})
-        outcome = env.scheduler([env.apply_task(0)]).run().outcomes[0]
+        outcome = env.scheduler(
+            [self._code_task(env)], kind="implement", finalize=False,
+        ).run().outcomes[0]
         assert outcome.status == executor.STATUS_PARTIAL, outcome.reason
         assert outcome.write_outcome == executor.WRITE_PARTIAL
+
+    @pytest.mark.parametrize("ids", [["s0"], []])
+    def test_a_plan_batch_whose_plan_did_not_change_is_not_applied(self, env, ids):
+        """Fix round 15 (review of round 14): for a plan or task-list batch the
+        declared file is the whole contract. One stray write beside an
+        untouched plan read APPLIED ("the bytes decide"), which routed the T016
+        shape around rule 9 — and could upgrade a sibling's stray file into
+        this batch's "applied". It is sent once more, told that the plan did
+        not change, and then recorded failed."""
+        from tests.test_write_executor import FakeState
+
+        log = env.enable_call_log()
+        state = FakeState(env.tmp_path / "state.json")
+        stray = env.root / "scratch-notes.md"
+        env.edits([{"path": str(stray), "mode": "create", "content": "notes\n"}],
+                  result={**APPLIED_S0, "ids": ids})
+        plan_before = env.plan.read_bytes()
+
+        result = env.scheduler(
+            [env.apply_task(0), env.apply_task(1)], state=state,
+        ).run()
+
+        assert env.plan.read_bytes() == plan_before
+        outcome = result.outcomes[0]
+        assert not outcome.ok, outcome.reason
+        assert outcome.status == executor.STATUS_BATCH_FAILED
+        assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
+        assert outcome.applied_without_changes
+        assert outcome.reason.startswith("NOT APPLIED"), outcome.reason
+        assert "scratch-notes.md" in outcome.reason
+        assert "no other file changed" not in outcome.reason
+        assert outcome.files_touched == ["scratch-notes.md"], "the stray stays restorable"
+        assert len(result.outcomes) == 1, "the next batch was dispatched"
+        state.reload()
+        assert state.state["task_status"]["apply-batch-0"] == "failed"
+        prompts = _dispatch_prompts(log)
+        assert len(prompts) == 2, "rule 9 sends it once more"
+        assert HEADING in prompts[1]
+        assert "plans/p.md is byte-for-byte as before it started" in prompts[1]
+        assert "scratch-notes.md" in prompts[1]
+        # The stop does not say nothing changed: a file outside the plan did.
+        assert result.stop["bytes_moved"] is True
+        assert "Nothing changed" not in result.stop["headline"]
+        joined = "\n".join(result.messages)
+        assert "Nothing was half-applied" not in joined
+
+    def test_a_plan_batch_whose_re_send_lands_the_plan_edit_is_applied(self, env):
+        stray = env.root / "scratch-notes.md"
+        env.edits([{"path": str(stray), "mode": "create", "content": "notes\n"}],
+                  result=APPLIED_S0)
+        prompts = []
+        real = executor._spawn
+
+        def spawn(**kwargs):
+            prompts.append(kwargs.get("prompt") or "")
+            if HEADING in prompts[-1]:
+                env.edits([_patch_edit(env.plan)], result=APPLIED_S0)
+            return real(**kwargs)
+
+        env.monkeypatch.setattr(executor, "_spawn", spawn)
+        outcome = env.scheduler([env.apply_task(0)]).run().outcomes[0]
+        assert outcome.status == executor.STATUS_OK, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_APPLIED
+        assert "plans/p.md" in outcome.files_touched
 
     def test_a_run_before_the_fix_is_not_resumed_as_done(self, env):
         """A result file stamped `clean-failure` at `ok` (a run before fix

@@ -7201,6 +7201,10 @@ def dispatch_task(
                             ))
                             _accumulate_usage(outcome, usage)
                             _notify_after_attempt(after_attempt, outcome.attempts[-1])
+                            outside = [
+                                str(path) for path in
+                                (result_context.get("moved_outside") or [])
+                            ]
                             attempt_prompt = build_nothing_changed_resend_prompt(
                                 prompt,
                                 declared=_nothing_changed_files(task, cwd),
@@ -7209,13 +7213,15 @@ def dispatch_task(
                                     (data.get("files_touched") or [])
                                     if isinstance(path, str)
                                 ] if isinstance(data, dict) else [],
+                                outside=outside,
                             )
                             attempt_resend = RESEND_NOTHING_CHANGED
                             attempt_repair = None
                             repair_baseline = None
                             print(
                                 f"[exec-subagents] {task_id}: the reply says the "
-                                f"batch was applied, but no file changed; "
+                                f"batch was applied, but "
+                                f"{'none of the files it declares changed' if outside else 'no file changed'}; "
                                 f"sending the batch to {runner} once more, "
                                 f"told so (attempt {attempt_index + 1}). What "
                                 f"was applied is still decided by comparing "
