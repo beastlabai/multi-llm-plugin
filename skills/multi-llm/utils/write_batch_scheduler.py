@@ -1428,6 +1428,13 @@ def resolve_human_task_plan(
                 plan.pending.append(task_id)
     else:
         for task_id in sorted(human_ids):
+            if decisions.get(task_id) == "done":
+                # The user did it (fix round 14): `--human-task <id>=done` is
+                # how a deferred manual task is closed after the run, and under
+                # a skip strategy the answer was printed and ignored, so the
+                # task stayed owed on every surface. Its dependents run.
+                plan.completed.append(task_id)
+                continue
             plan.skipped[task_id] = _deferred_reason(strategy)
             seeds.append(task_id)
 
@@ -7773,7 +7780,14 @@ class WriteBatchScheduler:
             return
         if self.state is not None:
             self._metrics_finish()
-            self.state.mark_phase_completed(self.phase)
+            # A resume of a phase already completed that dispatched nothing —
+            # `implement --resume --human-task T007=done` closing a deferred
+            # manual task — changed no code, so its completion keeps its date:
+            # re-stamping it made review-code and apply-code-fixes read stale,
+            # and the closing answer cost a review cycle (fix round 14).
+            if not (result.batches_dispatched == []
+                    and self.state.is_phase_completed(self.phase)):
+                self.state.mark_phase_completed(self.phase)
             # F5: re-stamp `plan_hash` to what this run actually left on disk.
             # Every batch's edit is already written by the time `_finalize`
             # runs, so without this the *next* `StateManager` built on this
