@@ -3666,8 +3666,11 @@ class WriteBatchScheduler:
           them (``_check_findings_rerun``), and the tasks after it are held;
         * a failed check on unchanged files (``_unchanged_since_failure``) or
           a task the write policy refuses is not dispatched, and the run
-          stops there: the tasks after it in the batch, and the later
-          batches, are not reached.
+          stops there: the tasks after its group in the batch, and the later
+          batches, are not reached. A group is what ``_run_batch`` dispatches
+          together (``admit_disjoint_groups`` under :meth:`write_ceiling`;
+          one task each at the default ceiling of 1), so the tasks dispatched
+          beside the refused one count (fix round 19).
 
         A check this run dispatches is decided by its verdict, which is not
         known yet: the tasks after it count, and are named as waiting on it.
@@ -3693,54 +3696,73 @@ class WriteBatchScheduler:
         quiet_log = self.log
         self.log = lambda *_args, **_kwargs: None
         try:
+            ceiling = self.write_ceiling()
             for _index, batch_tasks in ordered:
                 if stopped:
                     break
                 in_batch = 0
-                for task in batch_tasks:
-                    task_id = str(task.get("task_id", ""))
-                    if (plan.is_skipped(task_id) or task_id in plan.accepted
-                            or task.get("is_human")
-                            or task.get("executor_role") == "human"):
-                        continue
-                    if upstream_held_check(graph, task_id, on_record - rerun):
-                        continue
-                    if self.resume:
-                        # A code task this run dispatched before this one
-                        # moves the files the two unchanged-tree tests compare.
-                        moved = edits_dispatched
-                        evidence = self._done_evidence(task)
-                        if evidence is not None:
-                            again = self._check_findings_rerun(task, evidence[0], result)
-                            if again is not True and not (again is False and moved):
+                # The loop's runnable list, as far as a preview can tell, in
+                # the groups `_run_batch` admits together (fix round 19,
+                # review of round 18, #4): with a write ceiling above 1 a
+                # group's tasks are dispatched at once and a stop takes
+                # effect only once the whole group settled, so a refused
+                # task's siblings in its group run.
+                runnable = [
+                    task for task in batch_tasks
+                    if not (
+                        plan.is_skipped(str(task.get("task_id", "")))
+                        or str(task.get("task_id", "")) in plan.accepted
+                        or task.get("is_human")
+                        or task.get("executor_role") == "human"
+                        or upstream_held_check(
+                            graph, str(task.get("task_id", "")), on_record - rerun)
+                    )
+                ]
+                for group in admit_disjoint_groups(
+                    runnable, ceiling=ceiling, root=self.repo_root,
+                ):
+                    # A code task this run dispatched before this group moves
+                    # the files the two unchanged-tree tests compare; one
+                    # dispatched beside it has not moved them yet.
+                    moved = edits_dispatched
+                    for task in group:
+                        task_id = str(task.get("task_id", ""))
+                        if self.resume:
+                            evidence = self._done_evidence(task)
+                            if evidence is not None:
+                                again = self._check_findings_rerun(
+                                    task, evidence[0], result)
+                                if again is not True and not (again is False and moved):
+                                    continue
+                                rerun.add(task_id)
+                            elif task_id in on_record:
+                                rerun.add(task_id)
+                            if not moved and self._unchanged_since_failure(
+                                task, result,
+                            ) is not None:
+                                stopped = True
                                 continue
-                            rerun.add(task_id)
-                        elif task_id in on_record:
-                            rerun.add(task_id)
-                        if not moved and self._unchanged_since_failure(
-                            task, result,
-                        ) is not None:
+                        try:
+                            self.policy.check([
+                                relative_to_root(path, self.repo_root)
+                                for path in declared_file_set(task)
+                            ], when="pre-dispatch")
+                        except PolicyViolation:
                             stopped = True
-                            break
-                    try:
-                        self.policy.check([
-                            relative_to_root(path, self.repo_root)
-                            for path in declared_file_set(task)
-                        ], when="pre-dispatch")
-                    except PolicyViolation:
-                        stopped = True
+                            continue
+                        in_batch += 1
+                        upstream = [
+                            check for check in dispatched_checks
+                            if task_id in transitive_dependents(graph, check)
+                        ]
+                        if upstream:
+                            waiting[task_id] = upstream
+                        if is_check_task(self.kind, task):
+                            dispatched_checks.append(task_id)
+                        else:
+                            edits_dispatched = True
+                    if stopped:
                         break
-                    in_batch += 1
-                    upstream = [
-                        check for check in dispatched_checks
-                        if task_id in transitive_dependents(graph, check)
-                    ]
-                    if upstream:
-                        waiting[task_id] = upstream
-                    if is_check_task(self.kind, task):
-                        dispatched_checks.append(task_id)
-                    else:
-                        edits_dispatched = True
                 if in_batch:
                     picked_batches += 1
                     picked += in_batch
