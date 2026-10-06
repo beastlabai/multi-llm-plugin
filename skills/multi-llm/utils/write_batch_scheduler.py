@@ -6788,6 +6788,12 @@ class WriteBatchScheduler:
                     f"{batch_check_words(outcome.batch_check)} "
                     f"({quoted_findings(outcome.batch_check, 300)})"
                 )
+            if outcome.ok and outcome.declined:
+                # Fix round 18: what it left out on purpose, and why.
+                verdict = (
+                    f"{verdict}; declined {len(outcome.declined)}, not applied: "
+                    f"{self._declined_words(outcome.declined)[:300]}"
+                )
             elif outcome.write_outcome and not outcome.ok:
                 # Plan step 3: a failed batch whose write outcome reads
                 # "clean-failure" says which failure it was.
@@ -9763,9 +9769,24 @@ class WriteBatchScheduler:
             )
             items_total = sum(len(ids) for ids in expected_ids_by_task.values())
             items_applied = sum(
-                len(expected_ids_by_task.get(o.task_id, []))
+                len([
+                    # Fix round 18: an item its batch declined, or one
+                    # skipped at the user's request, was not applied.
+                    item for item in expected_ids_by_task.get(o.task_id, [])
+                    if item not in o.declined and item not in o.skipped_items
+                ])
                 for o in outcomes if o.write_outcome == WRITE_APPLIED
             )
+            declined_rows = [
+                {"task_id": o.task_id, "id": item, "reason": reason}
+                for o in outcomes if o.ok
+                for item, reason in o.declined.items()
+            ]
+            skipped_rows = [
+                {"task_id": o.task_id, "id": item, "reason": reason}
+                for o in outcomes if o.ok
+                for item, reason in o.skipped_items.items()
+            ]
             # F10: a dispatch that has started and not yet been classified —
             # `_dispatch_started`, added in `_begin_sweep` and removed in
             # `_undeclared_writes`. Read under the same lock those methods take,
@@ -9800,6 +9821,12 @@ class WriteBatchScheduler:
                         ],
                         "items_total": items_total,
                         "items_applied": items_applied,
+                        # Fix round 18: what finished batches did not apply
+                        # on purpose, and why — `status` names each one.
+                        **({"declined_items": declined_rows}
+                           if declined_rows else {}),
+                        **({"skipped_items": skipped_rows}
+                           if skipped_rows else {}),
                         # F7: the run's own resolved runner, so `status` polled
                         # outside the session that launched it names what the
                         # batches actually dispatched to — `render_runner_text`

@@ -679,6 +679,15 @@ def write_batch_result(applied: List[Dict[str, Any]], prompt: str = "") -> str:
             if touched else "nothing needed changing"
         ),
     }
+    # Fix round 18: the items a batch declines (MOCK_LLM_WRITE_DECLINED, a
+    # JSON list of {"id", "reason"}), each only on a batch whose prompt
+    # names its id — the result contract spells every id of the batch.
+    declined = json.loads(os.environ.get("MOCK_LLM_WRITE_DECLINED") or "[]")
+    if declined:
+        derived["declined"] = [
+            entry for entry in declined
+            if isinstance(entry, dict) and str(entry.get("id")) in (prompt or "")
+        ]
     # Fix round 14: a code batch reporting the checks it ran on its edits
     # (MOCK_LLM_WRITE_BATCH_CHECK, JSON), only on a batch whose prompt holds
     # MOCK_LLM_WRITE_BATCH_CHECK_IF_PROMPT_HAS when that is set.
