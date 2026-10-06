@@ -106,6 +106,30 @@ class TestTheReader:
         reply = {"status": "applied", "notes": "the bundled test fails"}
         assert executor.batch_check_findings(reply) is None
 
+    # Fix round 15 (review of round 14, R3): the check task's fail-closed
+    # reading made a passing code batch "not a clean finish".
+
+    @pytest.mark.parametrize("findings", [
+        ["npm test: 12 passed"], "npm test: 12 passed", ["all 3 suites green"],
+    ])
+    def test_a_clear_pass_is_a_pass_whatever_it_lists(self, findings):
+        """`passed: true` is the batch's own verdict on its checks; what it
+        lists beside it is informational, never a failing check."""
+        assert executor.batch_check_findings(
+            {"check": {"passed": True, "findings": findings}}) == []
+        # A check TASK keeps the fail-closed reading: a finding beside a
+        # pass still counts there.
+        assert executor.check_findings_from(
+            {"check": {"passed": True, "findings": findings}})
+
+    def test_a_check_that_could_not_run_says_so_not_that_it_fails(self):
+        assert executor.batch_check_findings(
+            {"check": {"passed": False, "could_not_run": True, "findings": []}}
+        ) == [executor.BATCH_CHECK_COULD_NOT_RUN]
+        assert executor.batch_check_findings(
+            {"check": {"could_not_run": "yes", "findings": ["npx: not found"]}}
+        ) == [f"{executor.BATCH_CHECK_COULD_NOT_RUN}: npx: not found"]
+
 
 # ---------------------------------------------------------------------------
 # The executor leg
@@ -205,6 +229,45 @@ class TestAFailingCheckOfAnAppliedBatch:
         assert BATCH_CHECK_MARKER not in "\n".join(result.messages)
         mirror = json.loads((env.phase_dir / ".status.json").read_text())
         assert "batch_check_task_ids" not in mirror["progress"]["write_subagents"]
+
+    def test_a_pass_listing_what_it_ran_reads_clean(self, env):
+        result = self._run(env, {"passed": True, "findings": ["npm test: 12 passed"]},
+                           state=FakeState(env.tmp_path / "state.json"))
+        assert result.outcomes[0].batch_check == []
+        assert result.batch_check_findings() == {}
+        blob = "\n".join(result.messages)
+        assert BATCH_CHECK_MARKER not in blob and "Not a clean finish" not in blob
+
+    def test_a_check_that_could_not_run_is_named_so_on_every_surface(self, env):
+        lines = []
+        summary = env.phase_dir / "summary.md"
+        result = self._run(
+            env, {"passed": False, "could_not_run": True,
+                  "findings": ["npx: command not found"]},
+            state=FakeState(env.tmp_path / "state.json"), lines=lines,
+            summary=str(summary),
+        )
+        outcome = result.outcomes[0]
+        assert outcome.ok and outcome.batch_check == [
+            f"{executor.BATCH_CHECK_COULD_NOT_RUN}: npx: command not found"]
+        blob = "\n".join(result.messages)
+        assert (
+            f"{BATCH_CHECK_MARKER} apply-fix-batch-0: its edits were applied, "
+            f"but its check could not run: npx: command not found"
+        ) in blob, blob
+        assert "fails" not in blob.split(BATCH_CHECK_MARKER, 1)[1].splitlines()[0]
+        assert "Not a clean finish: 1 batch(es) applied their edits but their " \
+               "check could not run: apply-fix-batch-0" in blob, blob
+        assert any("applied, but its check could not run" in line for line in lines), lines
+        assert "a failing check" not in write_result_notice(result)
+        assert "### apply-fix-batch-0: its check could not run" in summary.read_text()
+        from utils import run_status
+
+        write = json.loads((env.phase_dir / ".status.json").read_text())[
+            "progress"]["write_subagents"]
+        text = ", ".join(run_status._mirror_text("write_subagents", write))
+        assert "own check could not run apply-fix-batch-0" in text, text
+        assert "own check fails" not in text
 
     def test_a_reply_that_reports_no_check_leaves_every_row_as_it_was(self, env):
         result = self._run(env, None, state=FakeState(env.tmp_path / "state.json"))
@@ -478,3 +541,14 @@ def test_the_native_instructions_record_and_report_a_batch_s_own_check(core):
     assert "`--check findings` and one `--finding \"{finding}\"` per entry" in text
     assert "## Check Findings" in text
     assert "`verify_command` under `driver:` in `.multi-llm/providers.yaml`" in text
+
+
+@pytest.mark.parametrize("core", ["implement.md", "apply-code-fixes.md"])
+def test_the_native_host_reads_a_clear_pass_as_a_pass(core):
+    """Fix round 15: the executor reads `passed: true` as a pass whatever is
+    listed beside it, so the native host is told the same."""
+    text = (Path(__file__).parent.parent / "instructions" / core).read_text(
+        encoding="utf-8")
+    assert ('add `--check passed` when it says `"passed": true` (what it lists '
+            'beside a pass, such as `npm test: 12 passed`, is not a failing '
+            'check)') in text

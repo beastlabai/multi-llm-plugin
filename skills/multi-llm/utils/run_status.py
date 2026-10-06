@@ -2135,7 +2135,23 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     # failed — never only an `ok` count.
     failing = mirror.get("batch_check_task_ids")
     if isinstance(failing, list) and failing:
-        parts.append(f"own check fails {', '.join(map(str, failing))}")
+        # Fix round 15: a check that could not run is named so (the prefix is
+        # `subagent_executor.BATCH_CHECK_COULD_NOT_RUN`, spelled here so this
+        # sub-second path imports nothing heavy).
+        could_not = {
+            str(row.get("task_id")) for row in (mirror.get("tasks") or [])
+            if isinstance(row, dict)
+            and isinstance(row.get("batch_check_findings"), list)
+            and row["batch_check_findings"]
+            and str(row["batch_check_findings"][0]).startswith(
+                "its check could not run")
+        }
+        fails = [str(t) for t in failing if str(t) not in could_not]
+        if fails:
+            parts.append(f"own check fails {', '.join(fails)}")
+        unrun = [str(t) for t in failing if str(t) in could_not]
+        if unrun:
+            parts.append(f"own check could not run {', '.join(unrun)}")
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
