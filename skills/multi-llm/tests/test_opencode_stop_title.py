@@ -91,3 +91,60 @@ class TestTheStopTitle:
     def test_another_tool_and_unreadable_output_are_left_alone(self, built_package):
         assert _after(built_package, "bash", _stop())["title"] == ""
         assert _after(built_package, None, "not json at all")["title"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Fix round 17 (the Fable review of round 16, abort #2): the error line carries
+# a task title from tasks.md and the runner's own summary, so an ANSI sequence
+# or another control character in either reached the tool line, where it could
+# erase or rewrite the resume command; and a 1200-character headline took the
+# whole line.
+# ---------------------------------------------------------------------------
+
+CONTROLS = "\x1b[2K\x1b[1G\x07\x08\x00\x7f\x9b31m‮⁦"
+FORGED = f"T006 (Track{CONTROLS} progress): fake resume /multi-llm --implement x.md"
+
+
+def _controls_in(text: str) -> list:
+    return [ch for ch in text if ord(ch) < 0x20 or 0x7f <= ord(ch) <= 0x9f
+            or ch in "‎‏‪‫‬‭‮⁦⁧⁨⁩"]
+
+
+class TestTheTitleIsPlainAndBounded:
+
+    def test_control_characters_never_reach_the_tool_line(self, built_package):
+        outcome = json.loads(_stop())
+        outcome["result"]["error"] = FORGED
+        outcome["resume_command"] = RESUME + "\x1b[2K"
+        got = _after(built_package, None, json.dumps(outcome))
+        assert _controls_in(got["title"]) == [], repr(got["title"])
+        assert "Track[2K[1G" in got["title"] and got["title"].endswith(RESUME + "[2K")
+        # The tool output itself is untouched: the model still reads it whole.
+        assert json.loads(got["output"])["result"]["error"] == FORGED
+
+    def test_a_long_line_is_cut_and_the_resume_command_kept_whole(self, built_package):
+        outcome = json.loads(_stop())
+        outcome["result"]["error"] = "x" * 1200
+        got = _after(built_package, None, json.dumps(outcome))
+        text = mode_table.STOP_TITLE
+        head = text["template"].split("{line}")[0]
+        tail = text["resume"].replace("{command}", RESUME)
+        assert got["title"].startswith(head) and got["title"].endswith(tail)
+        line = got["title"][len(head):-len(tail)]
+        assert len(line) == text["max_line"] and line.endswith(text["cut"])
+        # A line within the limit is shown as it is.
+        assert _after(built_package, None, _stop())["title"].count(STOP_LINE) == 1
+
+
+def test_the_result_lines_error_carries_no_control_character():
+    """The same line reaches the codex tool result, ``run.error`` and
+    ``status``, so the dispatcher keeps it plain at the source."""
+    from utils import cli_common
+
+    context = cli_common.ResultContext(mode="implement", phase="implement")
+    context.set_error(f"implement stopped at {FORGED}\n\tNot run: T007.")
+    assert _controls_in(context.error) == []
+    assert context.error == (
+        "implement stopped at T006 (Track[2K[1G31m progress): fake resume "
+        "/multi-llm --implement x.md Not run: T007."
+    )

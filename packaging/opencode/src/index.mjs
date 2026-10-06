@@ -3104,26 +3104,58 @@ export const MultiLlmPlugin = async ({ client } = {}) => {
  * a `resume_command` or a `no_command_reason` (a run left alive, a handoff or
  * an abort report carries neither). Every word is the surface's `stop_title`
  * or the result's own: the run's last error line (`result.error`, the line the
- * exit-3 `message` quotes) and `resume_command`, verbatim.
+ * exit-3 `message` quotes) and `resume_command`.
+ *
+ * Fix round 17: the error line carries a task title from tasks.md and the
+ * runner's own summary, so both parts are shown without control characters
+ * (`plainTitleText`: an ANSI sequence could erase or rewrite the tool line,
+ * the resume command included), and the error line is cut at the surface's
+ * `max_line` characters, ending in its `cut`; the resume command is appended
+ * after it and never cut.
  */
 function stopTitle(outcome, surface) {
   const text = surface?.stop_title
   if (!text || typeof text.template !== "string") return null
   if (!outcome || typeof outcome !== "object" || outcome.ok !== false) return null
   const command =
-    typeof outcome.resume_command === "string" && outcome.resume_command
-      ? outcome.resume_command
+    typeof outcome.resume_command === "string" && plainTitleText(outcome.resume_command)
+      ? plainTitleText(outcome.resume_command)
       : null
   if (!command && typeof outcome.no_command_reason !== "string") return null
   const raw = outcome.result?.error
-  const line =
-    typeof raw === "string" && raw.trim() ? raw.trim() : text.no_line
+  const own = typeof raw === "string" ? plainTitleText(raw) : ""
+  const line = own ? capTitleLine(own, text) : text.no_line
   if (typeof line !== "string") return null
   let title = text.template.split("{line}").join(line)
   if (command && typeof text.resume === "string") {
     title += text.resume.split("{command}").join(command)
   }
   return title
+}
+
+/**
+ * `value` as one plain line for a tool title: whitespace runs one space, and
+ * no C0 or C1 control, DEL, or bidirectional override or isolate left (the
+ * set `cli_common.plain_line` removes from the result's `error`).
+ */
+function plainTitleText(value) {
+  return String(value)
+    .replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, (ch) =>
+      /[\t\n\v\f\r\u0085]/.test(ch) ? " " : "",
+    )
+    .replace(/\s+/g, " ")
+    .trim()
+}
+
+/** `line` cut to the surface's `max_line` characters, ending in its `cut`. */
+function capTitleLine(line, text) {
+  const max = text.max_line
+  if (!Number.isInteger(max) || max <= 0) return line
+  const chars = Array.from(line)
+  if (chars.length <= max) return line
+  const cut = typeof text.cut === "string" ? text.cut : ""
+  const keep = Math.max(0, max - Array.from(cut).length)
+  return chars.slice(0, keep).join("").trimEnd() + cut
 }
 
 /** `tool.execute.after`: title this tool's stop, leave every other call alone. */

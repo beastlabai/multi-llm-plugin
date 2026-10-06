@@ -49,6 +49,7 @@ import argparse
 import copy
 import json
 import os
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -68,6 +69,26 @@ INTERNAL_FLAG_PREFIX = "--internal-"
 
 #: The marker every dispatcher invocation ends its stdout with.
 RESULT_MARKER = "MULTI_LLM_RESULT:"
+
+#: What :func:`plain_line` removes after collapsing whitespace: the C0
+#: controls, DEL, the C1 controls and the bidirectional overrides and
+#: isolates. A terminal acts on any of them — an ESC sequence can erase or
+#: rewrite the line it sits on — and none belongs in a line a host shows.
+_CONTROL_CHARACTERS = re.compile(
+    "[\x00-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]"
+)
+
+
+def plain_line(text: Any) -> str:
+    """``text`` as one plain line: whitespace runs collapsed to one space and
+    every control character removed (:data:`_CONTROL_CHARACTERS`).
+
+    Fix round 17 (the Fable review of round 16): the stop headline carries a
+    task title from tasks.md and the runner's own summary, and ``set_error``
+    only collapsed whitespace, so an ANSI sequence in either reached the
+    OpenCode tool line, the codex tool result and ``status`` intact."""
+    collapsed = " ".join(str(text).split()) if text else ""
+    return " ".join(_CONTROL_CHARACTERS.sub("", collapsed).split())
 
 #: Uniform exit codes across every mode. The dispatcher never remaps a target's
 #: code and invents one of its own only for an unknown mode or a rejected flag
@@ -785,8 +806,10 @@ class ResultContext:
         self.user_next_step = copy.deepcopy(obj) if obj is not None else None
 
     def set_error(self, text: Optional[str]) -> None:
-        """Record the one-line reason the run stopped (``MULTI_LLM_RESULT.error``)."""
-        cleaned = " ".join(str(text).split()) if text else ""
+        """Record the one-line reason the run stopped (``MULTI_LLM_RESULT.error``),
+        as a :func:`plain_line`: every host shows it, and it carries text a
+        runner or a task file wrote."""
+        cleaned = plain_line(text)
         # One line the hosts quote inside their message: bounded, so a long
         # refusal cannot bury the message it decorates.
         self.error = cleaned[:1200] or None
