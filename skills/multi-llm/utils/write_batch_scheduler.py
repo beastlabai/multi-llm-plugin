@@ -123,6 +123,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         IMPLEMENT_TASK_GRAPH_KEY,
         set_task_check_findings_in_state,
     )
+    from .subagent_prompts import build_nothing_changed_resend_prompt
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
         DRY_RUN_FILENAME,
@@ -216,6 +217,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         IMPLEMENT_TASK_GRAPH_KEY,
         set_task_check_findings_in_state,
     )
+    from utils.subagent_prompts import build_nothing_changed_resend_prompt  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME
     from utils.write_safety import (
         DRY_RUN_FILENAME,
@@ -4271,7 +4273,15 @@ class WriteBatchScheduler:
                            exit_code=context["exit_code"],
                            duration=context["duration_seconds"],
                            sandbox_rung=seen,
-                           jail_denials=context.get("jail_denials"))
+                           jail_denials=context.get("jail_denials"),
+                           resent=bool(context.get("resent")),
+                           resend_note=context.get("resend_note"))
+
+        def nothing_changed(context: Dict[str, Any]) -> Optional[str]:
+            # Rule 9 (fix round 14): asked before `after_result`, read-only,
+            # so a re-send leaves the census for the classification that
+            # follows it.
+            return self._applied_without_changes(task, snapshot, context)
 
         def changed_files(context: Dict[str, Any]) -> List[str]:
             # T4.8 (plan opencode-validator-false-rate-limit-and-denied-turn
@@ -4299,6 +4309,8 @@ class WriteBatchScheduler:
             extra["jail_request"] = request
         if _accepts_keyword(dispatch_task, "tree_fingerprint"):
             extra["tree_fingerprint"] = tree_fingerprint
+        if _accepts_keyword(dispatch_task, "nothing_changed"):
+            extra["nothing_changed"] = nothing_changed
         return dispatch_task(
             task,
             phase_dir=self.phase_dir,
@@ -4333,42 +4345,61 @@ class WriteBatchScheduler:
             profile=profile,
         )
         started = time.time()
-        self.audit.dispatched(
-            task_id=task_id, kind=self.kind, attempt=1, runner="native",
-            profile=profile, cwd=self.repo_root, sandbox_root=self.repo_root,
-            argv=["<native subagent>"], prompt=prompt,
-            declared_files=[
-                relative_to_root(p, self.repo_root) for p in declared_file_set(task)
-            ],
-            snapshot_dir=snapshot.directory,
-            snapshot_before={e.relative: e.sha256 for e in snapshot.entries},
-        )
-        data = self.respond(task, prompt)  # type: ignore[misc]
-        if isinstance(data, str):
-            try:
-                from .json_extractor import extract_json_from_text
-            except ImportError:  # pragma: no cover
-                from utils.json_extractor import extract_json_from_text
-            extracted = extract_json_from_text(data, prefer_arrays=False)
-            if not extracted.get("success"):
+        declared = [
+            relative_to_root(p, self.repo_root) for p in declared_file_set(task)
+        ]
+        # Rule 9 (fix round 14), the same as the executor's: a reply that
+        # said `applied` while not one byte moved is sent once more, told so.
+        allowance = _executor.RESENDS_BY_KIND.get(self.kind, 0)
+        sent = prompt
+        attempt = 0
+        while True:
+            attempt += 1
+            self.audit.dispatched(
+                task_id=task_id, kind=self.kind, attempt=attempt, runner="native",
+                profile=profile, cwd=self.repo_root, sandbox_root=self.repo_root,
+                argv=["<native subagent>"], prompt=sent,
+                declared_files=declared,
+                snapshot_dir=snapshot.directory,
+                snapshot_before={e.relative: e.sha256 for e in snapshot.entries},
+            )
+            data = self.respond(task, sent)  # type: ignore[misc]
+            if isinstance(data, str):
+                try:
+                    from .json_extractor import extract_json_from_text
+                except ImportError:  # pragma: no cover
+                    from utils.json_extractor import extract_json_from_text
+                extracted = extract_json_from_text(data, prefer_arrays=False)
+                if not extracted.get("success"):
+                    outcome.status = STATUS_SCHEMA_INVALID
+                    outcome.write_outcome = WRITE_SCHEMA_REJECTED
+                    outcome.reason = extracted.get("error") or "no JSON in the reply"
+                    return outcome
+                data = extracted["data"]
+            errors = validate_result(self.kind, data)
+            if errors:
                 outcome.status = STATUS_SCHEMA_INVALID
                 outcome.write_outcome = WRITE_SCHEMA_REJECTED
-                outcome.reason = extracted.get("error") or "no JSON in the reply"
+                outcome.reason = (
+                    f"the reply does not match the {self.kind} result shape: "
+                    + "; ".join(errors[:5])
+                )
                 return outcome
-            data = extracted["data"]
-        errors = validate_result(self.kind, data)
-        if errors:
-            outcome.status = STATUS_SCHEMA_INVALID
-            outcome.write_outcome = WRITE_SCHEMA_REJECTED
-            outcome.reason = (
-                f"the reply does not match the {self.kind} result shape: "
-                + "; ".join(errors[:5])
+            outcome.output_path = persist_result(task, self.phase_dir, data)
+            if attempt > allowance or not self._applied_without_changes(
+                task, snapshot, {"result": data, "exit_code": 0},
+            ):
+                break
+            sent = build_nothing_changed_resend_prompt(
+                prompt, declared=declared,
+                named=[
+                    str(path) for path in (data.get("files_touched") or [])
+                    if isinstance(path, str)
+                ],
             )
-            return outcome
-        outcome.output_path = persist_result(task, self.phase_dir, data)
         self._classify(task, outcome, snapshot, data, runner="native",
-                       profile=profile, attempt=1, exit_code=0,
-                       duration=time.time() - started)
+                       profile=profile, attempt=attempt, exit_code=0,
+                       duration=time.time() - started, resent=attempt > 1)
         return outcome
 
     def _render_argv(self, runner: str, prompt: str, profile: str) -> List[str]:
@@ -4444,6 +4475,8 @@ class WriteBatchScheduler:
         duration: float,
         sandbox_rung: Optional[str] = None,
         jail_denials: Any = None,
+        resent: bool = False,
+        resend_note: Optional[str] = None,
     ) -> None:
         """Decide which of the four D3g outcomes this dispatch landed on.
 
@@ -4451,9 +4484,17 @@ class WriteBatchScheduler:
 
         * The runner **claimed** something (``status``) and the snapshot **shows**
           something (bytes moved or not). The claim is never the verdict.
-        * ``applied`` claimed + empty diff → **clean failure**: recorded, the
-          loop continues, and the prior-changes entry takes the documented
-          ``(batch failed — …, verified no file changes)`` form.
+        * ``applied`` claimed + empty diff + no other file moved → **clean
+          failure**, never ``ok`` (fix round 14, OpenCode racing run 5: T016
+          said ``applied``, named ``index.html``, changed nothing, and was
+          recorded completed, listed "done and kept" and built on). The batch
+          was sent once more first (the ladder's rule 9, *resent*; *resend_note*
+          says why it was not); this is the verdict on that last reply. Not
+          done, so the loop stops at the boundary like any failed batch, and
+          ``--resume`` dispatches it again; ``applied_without_changes`` marks it
+          for the stop's wording. When files outside the declared set moved
+          instead, the bytes decide as for any moved file: **applied** when
+          every expected id came back, a **partial application** when not.
         * ``no-op`` claimed + empty diff → **no-op**: the claim and the verdict
           agree, so it is recorded under its own name (``(no-op — …, verified
           no file changes)``) and the loop continues. Labelling it a clean
@@ -4803,16 +4844,83 @@ class WriteBatchScheduler:
                     f"snapshot comparison confirms no byte changes in "
                     f"{declared_names}. Recorded; the loop continues."
                 )
+            elif undeclared.paths:
+                # Success claimed, none of the declared files moved, others
+                # did (the policy check above passed them). The bytes decide,
+                # as when a declared file moved beside undeclared ones: applied
+                # when every expected id came back, a partial application
+                # when not. It used to read as a clean failure at `ok` (fix
+                # round 14 gave that word one meaning: not done).
+                moved_names = ", ".join(undeclared.paths[:5]) + (
+                    ", …" if len(undeclared.paths) > 5 else ""
+                )
+                if missing_ids:
+                    outcome.status = STATUS_PARTIAL
+                    outcome.write_outcome = WRITE_PARTIAL
+                    outcome.reason = (
+                        f"PARTIAL APPLICATION: none of the files the batch "
+                        f"declares changed ({declared_names}), while "
+                        f"{len(undeclared.paths)} file(s) outside them did "
+                        f"({moved_names}), and not every expected id came "
+                        f"back (missing: {', '.join(missing_ids)}). The batch "
+                        f"loop stops here, the pre-batch snapshot is kept at "
+                        f"{snapshot.directory}, and the phase is NOT marked "
+                        f"completed — an automatic revert would destroy the "
+                        f"half-applied state a human needs to inspect."
+                    )
+                else:
+                    outcome.status = STATUS_OK
+                    outcome.write_outcome = WRITE_APPLIED
+                    outcome.reason = (
+                        f"APPLIED outside the declared files: none of "
+                        f"{declared_names} changed, but {len(undeclared.paths)} "
+                        f"other file(s) did ({moved_names}) and the reply "
+                        f"attests every expected id; the bytes decide."
+                    )
             else:
-                # Success claimed, nothing moved. Recorded as a clean failure
-                # and the loop continues: the plan may simply already contain
-                # the change.
+                # Success claimed and not one byte moved, after the one re-send
+                # (rule 9): the change did not land. Never `ok` (fix round 14,
+                # OpenCode racing run 5: T016 was recorded completed, listed
+                # "done and kept", and the tasks after it built on a function
+                # that never existed).
+                named = [
+                    str(path) for path in ((result or {}).get("files_touched") or [])
+                    if isinstance(path, str)
+                ]
+                if resent:
+                    again = (
+                        " — the second time: it was sent once more, told that "
+                        "its previous attempt had changed no file, and that "
+                        "reply said the same"
+                    )
+                elif resend_note:
+                    again = f" ({resend_note})"
+                elif not undeclared.observed:
+                    again = (
+                        " (no re-send: the containment sweep could not see "
+                        "whether any other file changed, so the batch was not "
+                        "sent again)"
+                    )
+                else:
+                    again = ""
                 outcome.write_outcome = WRITE_CLEAN_FAILURE
-                outcome.status = STATUS_OK
+                outcome.status = STATUS_BATCH_FAILED
+                outcome.applied_without_changes = True
                 outcome.reason = (
-                    f"CLEAN FAILURE: the batch reported {claimed or 'no status'!r} "
-                    f"but the pre-batch snapshot comparison found no byte changes "
-                    f"in {declared_names}. Recorded; the loop continues."
+                    f"NOT APPLIED: the batch reported {claimed or 'no status'!r}"
+                    + (
+                        f" and named {', '.join(named[:5])}"
+                        f"{', …' if len(named) > 5 else ''} as edited"
+                        if named else ""
+                    )
+                    + f", but the pre-batch snapshot comparison found no byte "
+                    f"change in {declared_names}"
+                    + (", and no other file changed either"
+                       if undeclared.observed else "")
+                    + f"{again}. Its change did not land, so it is not recorded "
+                    f"as done: the loop stops here, there is nothing to "
+                    f"restore, and --resume dispatches it again."
+                    + (f" Runner summary: {summary}" if summary else "")
                 )
             self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                    observed, duration)
@@ -4825,6 +4933,58 @@ class WriteBatchScheduler:
         outcome.status = STATUS_OK
         self._audit_completion(outcome, runner, profile, attempt, exit_code,
                                observed, duration)
+
+    def _applied_without_changes(
+        self, task: Dict[str, Any], snapshot: TaskSnapshot, context: Dict[str, Any],
+    ) -> Optional[str]:
+        """Rule 9's measurement: why a schema-valid reply that said ``applied``
+        moved not one byte, or ``None`` when that is not what happened.
+
+        Read-only — the census stays registered for the classification —
+        and asked before ``_classify`` (fix round 14). ``None`` whenever the
+        classification decides on something else, or a re-send could land on
+        moved bytes: a claim other than ``applied``, a check task (it changes
+        nothing by design, and its verdict is VERIFIED or check-findings), a
+        non-zero exit, a jail denial, a replaced target, a sweep that could
+        not look (the tree outgrew the census), or any path — declared or
+        not — that moved.
+        """
+        result = context.get("result")
+        if not isinstance(result, dict) or str(result.get("status") or "") != "applied":
+            return None
+        if self._verification_only(snapshot):
+            return None
+        if context.get("exit_code") not in (0, None):
+            return None
+        denials = _as_jail_denials(context.get("jail_denials"))
+        if denials is not None and denials.total:
+            return None
+        task_id = str(task.get("task_id", ""))
+        with self._sweep_lock:
+            looked = self._census_before.get(task_id) is not None
+        if not looked:
+            return None
+        if context.get("sandbox_rung") == SANDBOX_RUNG_PLUGIN_LANDLOCK:
+            before = self._target_identity_before.get(task_id)
+            if before is not None and self._identity_of(self._identity_path()) != before:
+                return None
+        if self._moved_since_dispatch(task_id, snapshot):
+            return None
+        declared = (
+            ", ".join(e.relative for e in snapshot.declared_entries())
+            or "the files it declares"
+        )
+        named = [
+            str(path) for path in (result.get("files_touched") or [])
+            if isinstance(path, str)
+        ]
+        return (
+            f"the reply said 'applied'"
+            + (f" and named {', '.join(named[:5])} as edited" if named else "")
+            + f", but no file changed: {declared} "
+            f"{'is' if len(snapshot.declared_entries()) == 1 else 'are'} "
+            f"byte-for-byte as before the dispatch"
+        )
 
     def _verification_only(self, snapshot: TaskSnapshot) -> bool:
         """Whether this dispatch declared no files at all (``implement`` only)."""
@@ -5419,20 +5579,16 @@ class WriteBatchScheduler:
                 f"(no-op — {outcome.summary or 'nothing needed changing'}, "
                 f"verified no file changes)"
             )
-        elif outcome.write_outcome == WRITE_CLEAN_FAILURE:
-            # The documented clean-failure form, so a later batch reads why the
-            # earlier one contributed nothing rather than assuming it succeeded.
-            summary = (
-                f"(batch failed — {outcome.summary or 'no changes reported'}, "
-                f"verified no file changes)"
-            )
         else:
             summary = None
-        if task_id in self._jail_failed or outcome.not_rerun:
-            # Plan step 3: a batch the jail's verdict failed is re-dispatched by
-            # --resume, and `append` is idempotent on `(id, phase)` — a
-            # "(batch failed — …)" line here would drop that run's real entry.
-            # A not-re-run check keeps the line its failure already wrote.
+        if not outcome.ok or task_id in self._jail_failed or outcome.not_rerun:
+            # A batch that is not done stops the loop, so no later batch of
+            # this run reads its line, and --resume dispatches it again — and
+            # `append` is idempotent on `(id, phase)`, so a "(batch failed — …)"
+            # line here would drop that dispatch's real entry (plan step 3 for
+            # the jail's failures; fix round 14 for every failed batch: a clean
+            # failure resumed and applied read "batch failed" to every task
+            # after it). A not-re-run check is not done either.
             summary = None
 
         # Plan step 3 (2026-09-30): the rung the batch ran on, named on its
@@ -6048,11 +6204,16 @@ class WriteBatchScheduler:
             # unless the verdict stamped on it read it as a check's findings
             # (fix round 13), whose re-run `_check_findings_rerun` decides.
             return False
-        if isinstance(verdict, dict) and not verdict.get("ok", True):
+        if isinstance(verdict, dict) and (
+            not verdict.get("ok", True)
+            or verdict.get("write_outcome") == WRITE_CLEAN_FAILURE
+        ):
             # The scheduler's own classification, stamped by `_stamp_verdict`
             # once `_classify` decided (F1): the file reads `applied` because
             # that is what the runner printed before it died, and the loop
-            # stopped on it promising a re-dispatch.
+            # stopped on it promising a re-dispatch. A `clean-failure` stamped
+            # `ok` is a run before fix round 14 reading an `applied` claim that
+            # moved nothing as done: nothing moved, so it is dispatched again.
             self.log(
                 f"[write-subagents] {task_id}: {target.name} claims "
                 f"{data.get('status')!r} but the previous run classified it "
@@ -6254,6 +6415,11 @@ class WriteBatchScheduler:
                 "file it declares"
                 if outcome.write_outcome == WRITE_POLICY_VIOLATION else ""
             )
+        if outcome.applied_without_changes:
+            return (
+                "its change did not land — the reply said it was applied, but "
+                "no file changed"
+            )
         check = self._task_by_id(outcome.task_id) or {}
         is_check = self.kind == "implement" and not declared_file_set(check)
         label = outcome.outcome_label or outcome.write_outcome or outcome.status
@@ -6412,6 +6578,15 @@ class WriteBatchScheduler:
                 "tasks after it follow:"
             )
             lines.append(f"        {resume}")
+        elif acceptable and all(o.applied_without_changes for o in acceptable):
+            lines.append(
+                "  - nothing changed, so there is nothing to restore: resume "
+                "this phase and it is dispatched again, then the tasks after "
+                "it (if its runner again says it made the change without "
+                "making it, run the phase on another model, or make the "
+                "change yourself and answer as below):"
+            )
+            lines.append(f"        {resume}")
         elif acceptable:
             lines.append(
                 "  - fix what the task reported, then resume this phase; it is "
@@ -6440,15 +6615,24 @@ class WriteBatchScheduler:
             skip = cmds.get("skip", "").replace("{task_id}", task_id) or (
                 f"add --human-task {task_id}=skip to the resume command"
             )
-            lines.append(
-                f"  - or accept the failure and go on without it: {accept} "
-                f"({task_id} is treated as satisfied"
-                + (f"; {', '.join(after)} then run" if after else "")
-                + f"), or {skip} ({task_id}"
-                + (f" and the tasks that depend on it, {', '.join(dependents)},"
-                   if dependents else "")
-                + " stay undone)."
+            undone = (
+                f" and the tasks that depend on it, {', '.join(dependents)}, "
+                f"stay undone)." if dependents else " stays undone)."
             )
+            if outcome.applied_without_changes:
+                lines.append(
+                    f"  - or, once you have made its change yourself: {accept} "
+                    f"({task_id} is treated as done"
+                    + (f"; {', '.join(after)} then run" if after else "")
+                    + f"), or go on without it: {skip} ({task_id}" + undone
+                )
+            else:
+                lines.append(
+                    f"  - or accept the failure and go on without it: {accept} "
+                    f"({task_id} is treated as satisfied"
+                    + (f"; {', '.join(after)} then run" if after else "")
+                    + f"), or {skip} ({task_id}" + undone
+                )
             if outcome.not_rerun:
                 retry = cmds.get("retry", "").replace("{task_id}", task_id) or (
                     f"add --human-task {task_id}=retry to the resume command"
@@ -6674,6 +6858,9 @@ class WriteBatchScheduler:
             # half-applied, and the task can be skipped or accepted.
             result.stop["refused_before_dispatch"] = True
             result.stop["policy"] = first.write_outcome == WRITE_POLICY_VIOLATION
+        if first is not None and first.applied_without_changes:
+            # Fix round 14: it said `applied` and changed nothing, twice.
+            result.stop["applied_without_changes"] = True
         if result.blocked_by_check:
             # The tasks a check with findings holds, which this stop's own
             # remedy does not release (fix round 13).
@@ -6898,6 +7085,14 @@ class WriteBatchScheduler:
                 "then apply-code-fixes), then resume this phase; or accept the "
                 f"failure by adding --human-task {task_id}=done to the resume "
                 f"command (the tasks after it then run)."
+            )
+        elif stop.get("applied_without_changes"):
+            head += (
+                " Nothing changed, so there is nothing to restore. To go on: "
+                "resume this phase and it is dispatched again; or make its "
+                f"change yourself and add --human-task {task_id}=done to the "
+                "resume command, or leave it and the tasks after it undone "
+                f"with --human-task {task_id}=skip."
             )
         elif stop.get("acceptable"):
             head += (

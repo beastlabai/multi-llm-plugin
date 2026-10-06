@@ -489,22 +489,38 @@ class TestFourWriteOutcomes:
         assert result.exit_code == 0
 
     def test_clean_failure_is_success_claimed_with_no_bytes_moved(self, env):
-        """The batch says `applied`; nothing changed. Recorded, loop continues."""
+        """The batch says `applied`; nothing changed. Fix round 14 (OpenCode
+        racing run 5, T016): sent once more, told so; when that moves nothing
+        either it is a failed batch — never `ok`, never completed — and the
+        loop stops before the next batch."""
+        log = env.enable_call_log()
         env.edits([], result={"status": "applied", "ids": ["s0"],
                               "files_touched": ["plans/p.md"],
                               "summary": "claimed to apply"})
-        result = env.scheduler([env.apply_task(0)]).run()
+        result = env.scheduler([env.apply_task(0), env.apply_task(1)]).run()
         outcome = result.outcomes[0]
         assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
-        assert outcome.status == executor.STATUS_OK
+        assert outcome.status == executor.STATUS_BATCH_FAILED
+        assert not outcome.ok and outcome.applied_without_changes
         assert outcome.files_touched == []
-        assert "CLEAN FAILURE" in outcome.reason
-        # The loop continued and the phase still completed.
-        assert result.exit_code == 0
-        # And the documented clean-failure form reached the prior-changes log, so a
-        # later batch reads why this one contributed nothing.
-        log = (env.out_dir / "prior_changes.jsonl").read_text()
-        assert "verified no file changes" in log
+        assert outcome.reason.startswith("NOT APPLIED: the batch reported 'applied'")
+        assert "and named plans/p.md as edited" in outcome.reason
+        assert "the second time" in outcome.reason
+        assert [(a.status, a.repair) for a in outcome.attempts] == [
+            (executor.STATUS_BATCH_FAILED, None),
+            (executor.STATUS_OK, executor.RESEND_NOTHING_CHANGED),
+        ]
+        assert result.exit_code == 3
+        assert len(result.outcomes) == 1, "the next batch was dispatched"
+        prompts = [json.loads(line)["prompt"] for line in log.read_text().splitlines()]
+        assert len(prompts) == 2
+        assert "Apply batch 0" in prompts[1], "the re-send carries the batch"
+        assert subagent_prompts.NOTHING_CHANGED_RESEND_HEADING in prompts[1]
+        assert subagent_prompts.NOTHING_CHANGED_RESEND_HEADING not in prompts[0]
+        # No "(batch failed — …)" line: --resume dispatches it again, and that
+        # dispatch's real entry would be dropped as a duplicate.
+        log_file = env.out_dir / "prior_changes.jsonl"
+        assert not log_file.exists() or "apply-batch" not in log_file.read_text()
 
     def test_partial_application_is_bytes_moved_plus_a_reported_failure(self, env):
         env.edits([_patch_edit(env.plan)],
@@ -3828,19 +3844,17 @@ class TestTheEmptyDiffBranch:
         ]
 
     def test_an_applied_claim_with_no_bytes_moved_is_still_a_clean_failure(self, env):
+        """Still `clean-failure`, and since fix round 14 that word has one
+        meaning: nothing moved and the work is not done, so never `ok`."""
         env.edits([], result={"status": "applied", "ids": ["s0"],
                               "files_touched": ["plans/p.md"],
                               "summary": "claimed to apply"})
         result = env.scheduler([env.apply_task(0)]).run()
         outcome = result.outcomes[0]
         assert outcome.write_outcome == executor.WRITE_CLEAN_FAILURE
-        assert outcome.status == executor.STATUS_OK
-        assert result.exit_code == 0
-        entries = [json.loads(l) for l in
-                   (env.out_dir / "prior_changes.jsonl").read_text().splitlines() if l]
-        assert [e["summary"] for e in entries] == [
-            "(batch failed — claimed to apply, verified no file changes)"
-        ]
+        assert outcome.status == executor.STATUS_BATCH_FAILED
+        assert result.exit_code == 3
+        assert not (env.out_dir / "prior_changes.jsonl").exists()
 
     def test_a_failed_claim_with_no_bytes_moved_stops_the_loop(self, env):
         """The runner said it could not do the work, and the bytes agree.

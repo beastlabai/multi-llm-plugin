@@ -301,6 +301,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
 4. **Verify batch outcome** — After the subagent completes (or fails), determine the batch outcome by inspecting actual file/diff state rather than relying solely on the subagent's exit status. Classify the result:
    - **Success**: The expected changes are present in the target files (verified via diff or content check).
    - **Failure (clean)**: The subagent failed and no file modifications were made (verified by checking that target files are unchanged from their pre-batch state).
+   - **Not applied**: The subagent reported `applied` **and** no file was modified: its edits did not land. Dispatch the batch once more, with one sentence added to its prompt saying the previous attempt answered `applied` but changed no file, and verify again; if nothing changed this time either, it is a clean failure (record it `failed`), never a success.
    - **Partial application**: Some but not all expected changes are present, or the subagent failed but file modifications were detected.
 
    **Partial application handling**: If verification detects a partial application, **stop the batch loop and surface the issue for human review**. Do not continue to subsequent batches. Log the partial application details and prompt the human operator to resolve the state before resuming.
