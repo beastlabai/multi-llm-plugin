@@ -105,18 +105,21 @@ class TestResumeWithIsTheHostsSpelling:
 
     def test_claude_code_and_opencode_too(self, plan, capsys):
         _failed_run(plan, mode="apply-code-fixes", directory="apply-fixes",
-                    flags=["--host", "claude-code", "--yes", "--exec-subagents"])
-        assert _resume_line(capsys, "--host", "claude-code") == (
-            "/multi-llm:multi-llm --apply-code-fixes plans/p.md --resume")
+                    flags=["--host", "claude-code", "--detach"])
         assert _resume_line(capsys, "--host", "opencode") == (
             "/multi-llm --apply-code-fixes plans/p.md --resume")
+        _failed_run(plan, mode="apply-code-fixes", directory="apply-fixes",
+                    flags=["--host", "claude-code"])
+        assert _resume_line(capsys, "--host", "claude-code") == (
+            "/multi-llm:multi-llm --apply-code-fixes plans/p.md --resume")
 
     def test_the_flags_the_user_typed_ride_along_and_no_other(self, plan, capsys):
         _failed_run(plan, mode="review-plan", directory="review-plan",
                     flags=["--quick", "--host", "opencode", "--detach",
-                           "--max-detached", "2", "--yes"])
+                           "--max-detached", "2", "--yes", "--internal-x"])
         assert _resume_line(capsys, "--host", "opencode") == (
-            "/multi-llm --review-plan plans/p.md --quick --reaggregate")
+            "/multi-llm --review-plan plans/p.md --quick --max-detached 2 "
+            "--reaggregate")
 
     def test_a_tool_route_keeps_the_dispatcher_command_its_server_re_spells(
         self, plan, capsys, monkeypatch,
@@ -146,6 +149,72 @@ class TestResumeWithIsTheHostsSpelling:
         }
         assert {s for s in spellings
                 if not s.startswith(cli_common.INTERNAL_FLAG_PREFIX)} == set(names)
+
+
+def _template_composed(host: str) -> set:
+    """What *host*'s own template bakes into its dispatcher command, plus
+    `--detach` when its *run detached* sentence passes it, as parser dests."""
+    import re
+
+    from utils import host_capabilities
+
+    path = SKILL_DIR / ("SKILL.md" if host == "claude-code"
+                        else f"hosts/{host}/shim.md.tmpl")
+    (baked,) = re.findall(r'<mode> "<plan-path>" (.*?) \[flags…\]',
+                          path.read_text(encoding="utf-8"))
+    dests = {
+        action.dest: action
+        for action in cli_common.build_parent_parser()._actions
+        for _name in action.option_strings
+    }
+    by_name = {name: dest for dest, action in dests.items()
+               for name in action.option_strings}
+    out = {by_name[word] for word in baked.split() if word.startswith("--")}
+    if host_capabilities.verb_sentence(host, "detach").startswith(
+            "**Run detached** — pass `--detach`"):
+        out.add("detach")
+    return out
+
+
+class TestEachHostDropsOnlyWhatItsOwnShimComposes:
+    """Fix round 19: the tool routes' reserved set was dropped on every file
+    route, so a Claude Code run started with `--exec-subagents --yes` printed
+    a resume without them (the native leg, not the one that stopped), and the
+    shims lost `--interactive`, which replaces their baked `--yes`."""
+
+    @pytest.mark.parametrize("host", ["claude-code", "codex", "opencode"])
+    def test_the_set_is_what_the_hosts_template_bakes(self, host):
+        assert set(cli_common.file_route_composed_flags(host)) == (
+            _template_composed(host)), host
+
+    def test_every_host_is_held_to_its_template(self):
+        from utils import host_capabilities
+
+        assert set(host_capabilities.host_ids()) == {
+            "claude-code", "codex", "opencode"}
+
+    def test_claude_code_keeps_the_leg_and_the_approval_the_user_chose(
+        self, plan, capsys,
+    ):
+        _failed_run(plan, mode="apply-code-fixes", directory="apply-fixes",
+                    flags=["--host", "claude-code", "--exec-subagents", "--yes",
+                           "--models", "a:b"])
+        assert _resume_line(capsys, "--host", "claude-code") == (
+            "/multi-llm:multi-llm --apply-code-fixes plans/p.md "
+            "--exec-subagents --yes --models a:b --resume")
+
+    @pytest.mark.parametrize("host,prefix", [
+        ("codex", "Use the multi-llm skill with exactly these arguments: "),
+        ("opencode", "/multi-llm "),
+    ])
+    def test_a_shim_keeps_interactive_and_drops_what_it_bakes(
+        self, plan, capsys, host, prefix,
+    ):
+        _failed_run(plan, mode="review-plan", directory="review-plan",
+                    flags=["--host", host, "--interactive", "--exec-subagents",
+                           "--quick"])
+        assert _resume_line(capsys, "--host", host) == (
+            f"{prefix}--review-plan plans/p.md --interactive --quick --reaggregate")
 
 
 def _failed_ask(plan: Path, question: str) -> None:
