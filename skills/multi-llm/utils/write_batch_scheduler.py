@@ -5734,6 +5734,18 @@ class WriteBatchScheduler:
                         self.state.state, task_id,
                         outcome.check_findings if outcome.ok else None,
                     )
+                    # A code task's own failing check, beside (never among)
+                    # them, as `util batch-done` records it (fix round 15).
+                    try:
+                        from .state_manager import set_task_batch_check_in_state
+                    except ImportError:  # pragma: no cover - direct script runs
+                        from utils.state_manager import (  # type: ignore
+                            set_task_batch_check_in_state,
+                        )
+                    set_task_batch_check_in_state(
+                        self.state.state, task_id,
+                        outcome.batch_check if outcome.ok else None,
+                    )
                 # Persists the metric recorded just above too: it is a mutation
                 # of this object's dict now, not a second writer's file (F4).
                 self.state.save()

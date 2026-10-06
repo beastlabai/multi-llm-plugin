@@ -1094,6 +1094,11 @@ def get_workflow_status(
     check_findings = state.implementation_check_findings()
     if check_findings:
         phases["implement"]["check_findings"] = check_findings
+    # And the code tasks whose own check failed after their edits
+    # (`task_batch_check`, fix round 15): kept edits, nothing held back.
+    batch_checks = state.implementation_batch_check_findings()
+    if batch_checks:
+        phases["implement"]["batch_check_findings"] = batch_checks
 
     notices = []
 

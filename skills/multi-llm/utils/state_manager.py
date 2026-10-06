@@ -215,6 +215,35 @@ def set_task_check_findings_in_state(
         state.pop(TASK_CHECK_FINDINGS_KEY, None)
 
 
+#: ``state.json``'s map of what the checks an implement task ran on its OWN
+#: edits reported when one failed: ``{task_id: [finding, ...]}``, present only
+#: while some task's own check fails (fix round 15). Never
+#: :data:`TASK_CHECK_FINDINGS_KEY`: a code task whose own test fails keeps its
+#: edits and holds nothing back, where a check task's findings hold its
+#: dependents. Written by both legs (``util batch-done --check findings`` on a
+#: task that declares files, the scheduler from ``TaskOutcome.batch_check``);
+#: ``status`` and review-code's implementation record read it.
+TASK_BATCH_CHECK_KEY = "task_batch_check"
+
+
+def set_task_batch_check_in_state(
+    state: Dict[str, Any], task_id: str, findings: Optional[Iterable[str]],
+) -> None:
+    """Record (or, with no findings, clear) *task_id*'s failing own check;
+    the key is dropped when the map empties."""
+    recorded = state.get(TASK_BATCH_CHECK_KEY)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    kept = [str(item) for item in (findings or []) if str(item).strip()]
+    if kept:
+        current[str(task_id)] = kept
+    else:
+        current.pop(str(task_id), None)
+    if current:
+        state[TASK_BATCH_CHECK_KEY] = current
+    else:
+        state.pop(TASK_BATCH_CHECK_KEY, None)
+
+
 #: ``task id -> tree fingerprint`` for each check with findings on the native
 #: leg (fix round 14): the files git saw when the run that recorded the
 #: findings ended (``write_prompt.check_tree_fingerprint``). A native
@@ -1153,6 +1182,37 @@ class StateManager:
             if not isinstance(findings, list) or not findings:
                 continue
             if statuses.get(task_id) not in ("completed", "skipped"):
+                continue
+            if scope is not None and task_id not in scope:
+                continue
+            out.append({
+                "id": task_id,
+                "title": titles.get(task_id) or None,
+                "findings": [str(item) for item in findings],
+            })
+        return out
+
+    def implementation_batch_check_findings(self) -> List[Dict[str, Any]]:
+        """The implement tasks whose own check failed after their edits.
+
+        ``[{id, title, findings}]`` from :data:`TASK_BATCH_CHECK_KEY`, for
+        tasks recorded ``completed`` (a later record of the task clears its
+        entry) and scoped to the decomposition implement ran last, as
+        :meth:`implementation_check_findings` is (fix round 15).
+        """
+        recorded = self.state.get(TASK_BATCH_CHECK_KEY)
+        if not isinstance(recorded, dict) or not recorded:
+            return []
+        titles = self.state.get("task_titles") or {}
+        current = self.state.get("implement_task_ids")
+        scope = set(current) if isinstance(current, list) else None
+        statuses = self.implementation_task_statuses()
+        out: List[Dict[str, Any]] = []
+        for task_id in sorted(recorded):
+            findings = recorded.get(task_id)
+            if not isinstance(findings, list) or not findings:
+                continue
+            if statuses.get(task_id) != "completed":
                 continue
             if scope is not None and task_id not in scope:
                 continue

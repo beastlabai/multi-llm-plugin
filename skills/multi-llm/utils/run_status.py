@@ -631,6 +631,22 @@ def _workflow_trailer_lines(
                 f"{prefix}check findings for review-code (see "
                 f"implement/summary.md): {named}"
             )
+    # The implement tasks whose own check failed after their edits
+    # (`phases.implement.batch_check_findings`, fix round 15), shown by the
+    # same rule as the check findings above.
+    failing = (phases.get("implement") or {}).get("batch_check_findings")
+    if isinstance(failing, list) and failing and not (implement_done and review_settled):
+        named = "; ".join(
+            f"{entry['id']} ({(entry.get('findings') or [''])[0][:120]}"
+            f"{', …' if len(entry.get('findings') or []) > 1 else ''})"
+            for entry in failing
+            if isinstance(entry, dict) and entry.get("id")
+        )
+        if named:
+            lines.append(
+                f"{prefix}a check its own task ran fails (see "
+                f"implement/summary.md): {named}"
+            )
     return lines
 
 
@@ -1965,6 +1981,8 @@ def state_implement_view(
             if reasons.get(task_id)
         },
         "findings": state.implementation_check_findings(),
+        # A code task whose own check failed after its edits (fix round 15).
+        "batch_checks": state.implementation_batch_check_findings(),
         "answers": dict(answers) if isinstance(answers, dict) else {},
     }
 
@@ -1999,6 +2017,11 @@ def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
         findings = entry.get("findings") or []
         lines.append(
             f"      check findings {entry['id']}: {'; '.join(findings)[:300]}"
+        )
+    for entry in view.get("batch_checks") or []:
+        findings = entry.get("findings") or []
+        lines.append(
+            f"      own check fails {entry['id']}: {'; '.join(findings)[:300]}"
         )
     if view["answers"]:
         lines.append(

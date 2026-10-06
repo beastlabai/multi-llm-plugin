@@ -1359,6 +1359,14 @@ def build_implementation_record(plan_path: Path) -> str:
                 f"report each one that still holds in the code as an issue): "
                 + "; ".join(entry["findings"])
             )
+        # A task whose own check (a test it ran on its edits) failed: the
+        # edits were kept, recorded `completed` (fix round 15).
+        for entry in state.implementation_batch_check_findings():
+            lines.append(
+                f"- Task {entry['id']}'s own check failed after its edits (the "
+                f"edits were kept; report each failure that still holds in the "
+                f"code as an issue): " + "; ".join(entry["findings"])
+            )
 
     changes = prior_changes.render(
         str(output_dir),
