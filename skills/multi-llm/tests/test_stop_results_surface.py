@@ -107,7 +107,7 @@ class TestTheStopRecordsItsAnswers:
         assert answers[0]["why"].startswith(
             "accept T002's check findings and leave T005 undone, with the "
             "tasks that depend on it (T006)")
-        assert "T007 then run" in answers[3]["why"]
+        assert "T007 then run, told that you accepted the findings" in answers[3]["why"]
         mirror = json.loads(
             (repo.phase_dir / ".status.json").read_text()
         )["progress"]["write_subagents"]["stop"]

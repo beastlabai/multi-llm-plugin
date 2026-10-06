@@ -963,9 +963,13 @@ def implement_answers(
     for answer in answers:
         flags.extend(["--human-task", answer])
     command = phase_command(plan_arg, host_id, route, "implement", "--resume", *flags)
+    # Fix round 16 (live run 6, Claude Code stop 01): "(then T007 runs)"
+    # alone, while the tool routes' stop says the held tasks run told that
+    # the user accepted the findings, which `util write-prompt` tells them.
     parts = [
         f"accept the findings of {check_id} (then {', '.join(sorted(waiting))} "
-        f"{'runs' if len(waiting) == 1 else 'run'})"
+        f"{'runs' if len(waiting) == 1 else 'run'}, told that you accepted "
+        f"the findings)"
         for check_id, waiting in sorted(holding.items())
     ] + [f"leave {task_id} undone (and the tasks after it)" for task_id in failed]
     why = "or, in one command: " + "; ".join(parts)

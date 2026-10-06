@@ -653,7 +653,12 @@ class TestTheNativeLeg:
         assert lines[0].startswith("[NEXT_COMMAND] ")
         assert lines[0].endswith("--implement plans/checked.md --resume")
         assert lines[1].startswith("[NEXT_COMMAND_ANSWERS_WHY] or, in one command: ")
-        assert "accept the findings of T002 (then T007 runs)" in lines[1]
+        # Fix round 16 (live run 6, Claude Code 01): the released task is
+        # told the findings were accepted, as the tool routes' stop says.
+        assert (
+            "accept the findings of T002 (then T007 runs, told that you "
+            "accepted the findings)" in lines[1]
+        )
         assert "leave T005 undone" in lines[1]
         assert lines[2].startswith("[NEXT_COMMAND_ANSWERS] ")
         assert lines[2].endswith(
