@@ -6844,7 +6844,7 @@ class WriteBatchScheduler:
                 "dispatched, and the tasks after it follow:"
             )
             lines.append(f"        {resume}")
-            for outcome in refused:
+            for outcome in (refused if self.kind == "implement" else ()):
                 task_id = outcome.task_id
                 dependents = [
                     dep for dep in self._dependents_of(task_id)
@@ -6922,6 +6922,10 @@ class WriteBatchScheduler:
                 "batch is dispatched again and the ones never reached follow:"
             )
             lines.append(f"        {resume}")
+        if self.kind != "implement":
+            # `--human-task` is implement's flag (fix round 15): an apply
+            # phase's failed batch has no answer to name, only the resume.
+            return lines
         for outcome in acceptable:
             task_id = outcome.task_id
             dependents = [
@@ -6941,11 +6945,15 @@ class WriteBatchScheduler:
                 f"stay undone)." if dependents else " stays undone)."
             )
             if outcome.applied_without_changes:
+                # Fix round 15: going on without it first, as the recorded
+                # answers order them (`_stop_answers`).
                 lines.append(
-                    f"  - or, once you have made its change yourself: {accept} "
+                    f"  - or go on without it: {skip} ({task_id}"
+                    + undone[:-1]
+                    + f", or, once you have made its change yourself: {accept} "
                     f"({task_id} is treated as done"
                     + (f"; {', '.join(after)} then run" if after else "")
-                    + f"), or go on without it: {skip} ({task_id}" + undone
+                    + ")."
                 )
             else:
                 lines.append(
@@ -7270,6 +7278,20 @@ class WriteBatchScheduler:
             })
         for outcome in acceptable:
             task_id = outcome.task_id
+            if outcome.applied_without_changes:
+                # Fix round 15 (review R1): its change did not land, so there
+                # is no failure to accept — going on without it comes first,
+                # and `done` is for a change the user made by hand, as the
+                # stop message says.
+                each.append({"flags": answer(task_id, "skip"),
+                             "why": skipped_clause(task_id)})
+                each.append({
+                    "flags": answer(task_id, "done"),
+                    "why": (f"once you have made {task_id}'s change yourself: "
+                            f"{task_id} counts as done and the tasks after it "
+                            "run"),
+                })
+                continue
             each.append({
                 "flags": answer(task_id, "done"),
                 "why": (f"accept {task_id}'s failure: {task_id} counts as done "
@@ -7554,16 +7576,25 @@ class WriteBatchScheduler:
         elif stop.get("applied_without_changes"):
             head += (
                 " Nothing changed, so there is nothing to restore. To go on: "
-                "resume this phase and it is dispatched again; or make its "
-                f"change yourself and add --human-task {task_id}=done to the "
-                "resume command, or leave it and the tasks after it undone "
-                f"with --human-task {task_id}=skip."
+                "resume this phase and it is dispatched again"
+                + (
+                    # Fix round 15: going on without it first, and `done`
+                    # only for a change made by hand; implement's flag only.
+                    f"; or leave it and the tasks after it undone with "
+                    f"--human-task {task_id}=skip, or make its change "
+                    f"yourself and add --human-task {task_id}=done to the "
+                    f"resume command."
+                    if self.kind == "implement" else "."
+                )
             )
         elif stop.get("acceptable"):
             head += (
-                " To go on: fix what it reported, then resume this phase; or "
-                f"accept the failure by adding --human-task {task_id}=done to "
-                "the resume command."
+                " To go on: fix what it reported, then resume this phase"
+                + (
+                    f"; or accept the failure by adding --human-task "
+                    f"{task_id}=done to the resume command."
+                    if self.kind == "implement" else "."
+                )
             )
         elif stop.get("refused_before_dispatch"):
             head += (
@@ -7573,9 +7604,12 @@ class WriteBatchScheduler:
                     "(.multi-llm/providers.yaml)"
                     if stop.get("policy") else "fix what refused it"
                 )
-                + ", then resume this phase; or leave it and the tasks after "
-                f"it undone by adding --human-task {task_id}=skip to the "
-                "resume command."
+                + (
+                    ", then resume this phase; or leave it and the tasks after "
+                    f"it undone by adding --human-task {task_id}=skip to the "
+                    "resume command."
+                    if self.kind == "implement" else ", then resume this phase."
+                )
             )
         elif stop.get("bytes_moved", True):
             head += (
