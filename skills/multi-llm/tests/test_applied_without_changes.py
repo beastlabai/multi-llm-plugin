@@ -424,6 +424,48 @@ def test_an_implement_task_that_changed_nothing_is_not_done_and_holds_the_rest(r
     assert by_id["T002"] == "did the task", "the resumed task's real entry was dropped"
 
 
+def test_a_task_a_run_before_round_14_recorded_done_is_dispatched_again(repo, capsys):
+    """Fix round 15 (review of round 14, #5): a run before fix round 14
+    recorded an `applied` reply that moved nothing `completed` (OpenCode
+    racing run 5's T016: its result file is stamped `clean-failure` at
+    `ok`). Implement's `--resume` materializes only unfinished tasks, so the
+    scheduler's re-dispatch of that verdict never got the chance: the task
+    is handed out again, and the resume dispatches it."""
+    from utils.state_manager import get_or_create_state
+
+    _seed_generate_tasks(repo)
+    repo.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps([
+        {"path": "src/main.py", "mode": "patch", "content": "# edited\n"}
+    ]))
+    repo.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", IMPLEMENT_WRITE_IDS)
+    assert implement_orchestrator.main(
+        ["--plan-file", str(repo.plan), "--yes", "--exec-subagents"]) == 0
+    capsys.readouterr()
+    # What a run before fix round 14 left for T002.
+    result_file = _phase_dir(repo) / "implement_batch_T002.json"
+    data = json.loads(result_file.read_text(encoding="utf-8"))
+    data["verdict"].update({"write_outcome": "clean-failure", "status": "ok",
+                            "ok": True, "files_touched": []})
+    result_file.write_text(json.dumps(data), encoding="utf-8")
+    assert get_or_create_state(repo.plan).get_task_status("T002") == "completed"
+
+    log = repo.tmp_path / "calls.jsonl"
+    repo.monkeypatch.setenv("MOCK_LLM_CALL_LOG", str(log))
+    code = implement_orchestrator.main(
+        ["--plan-file", str(repo.plan), "--yes", "--exec-subagents", "--resume"])
+    text = "".join(capsys.readouterr())
+    assert code == 0, text
+    prompts = _dispatch_prompts(log)
+    titles = [line[len("Title: "):] for p in prompts for line in p.splitlines()
+              if line.startswith("Title: ")]
+    assert titles == ["Implement the core"], titles
+    assert "T002" in text and "never landed" in text, text
+    state = get_or_create_state(repo.plan)
+    assert state.get_task_status("T002") == "completed"
+    verdict = json.loads(result_file.read_text(encoding="utf-8"))["verdict"]
+    assert verdict["write_outcome"] == executor.WRITE_APPLIED
+
+
 # ===========================================================================
 # The ladder's rule 9 and the prompt
 # ===========================================================================
