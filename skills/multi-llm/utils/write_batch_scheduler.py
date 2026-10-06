@@ -9157,6 +9157,17 @@ class WriteBatchScheduler:
                         **({"blocked_by_check": dict(sorted(result.blocked_by_check.items()))}
                            if result.blocked_by_check else {}),
                         "accepted_task_ids": sorted(result.human_plan.accepted),
+                        # Fix round 16: which of them are checks accepted with
+                        # their findings, so `status` does not read them
+                        # "accepted after failing" (Codex accept 02).
+                        **({"accepted_with_findings_task_ids": sorted(
+                            task_id for task_id, reason
+                            in result.human_plan.accepted.items()
+                            if ACCEPTED_WITH_FINDINGS_MARK in str(reason or "")
+                        )} if any(
+                            ACCEPTED_WITH_FINDINGS_MARK in str(reason or "")
+                            for reason in result.human_plan.accepted.values()
+                        ) else {}),
                         **({"stop": copy.deepcopy(result.stop)}
                            if result.stop else {}),
                     }
