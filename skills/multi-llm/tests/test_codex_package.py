@@ -648,8 +648,14 @@ class TestPluginSkill:
 
 class TestRender:
     def test_skill_md_matches_render(self):
-        """(tree) Byte-identical to D1's mapping-table call, spelled once."""
+        """(tree) Byte-identical to D1's mapping-table call, spelled once —
+        with the template's one codex-build slot filled from the tool budget
+        (fix round 16, ``surface.long_call_rule``)."""
+        from common import surface as surface_mod
+
         text = (SKILL_ROOT / codex_build.SKILL_TEMPLATE).read_text(encoding="utf-8")
+        text = text.replace(codex_build.LONG_CALL_SLOT,
+                            surface_mod.long_call_rule("codex"))
         fresh = host_install.render(
             "codex", base=str(SKILL_ROOT), skill="{SKILL_DIR}", template=text
         )

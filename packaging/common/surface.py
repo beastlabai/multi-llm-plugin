@@ -210,6 +210,40 @@ _DESCRIPTION_NOTE: Dict[str, str] = {
 }
 
 
+#: The codex plugin's ``.mcp.json`` source, which owns the tool-call budget
+#: (``tool_timeout_sec``) that the server enforces and :func:`long_call_rule`
+#: quotes.
+CODEX_MCP_JSON = _REPO_ROOT / "packaging" / "codex" / "mcp.json"
+
+#: The hosts whose model calls this tool from a yielding ``exec`` cell.
+_LONG_CALL_HOSTS = frozenset({"codex"})
+
+
+def codex_tool_budget_s() -> int:
+    """``tool_timeout_sec`` of the codex plugin's one MCP server, in seconds."""
+    servers = json.loads(CODEX_MCP_JSON.read_text(encoding="utf-8"))["mcpServers"]
+    (entry,) = servers.values()
+    budget = entry["tool_timeout_sec"]
+    if not isinstance(budget, int) or isinstance(budget, bool) or budget <= 0:
+        raise ValueError(f"{CODEX_MCP_JSON}: tool_timeout_sec is not a positive int")
+    return budget
+
+
+def long_call_rule(host_id: str) -> Optional[str]:
+    """``modes.TOOL_LONG_CALL_RULE`` filled from the tool budget, or ``None``.
+
+    The cell's ``yield_time_ms`` is the whole budget, so a cell never hands
+    control back before the server answers or hands the run off (fix round 16).
+    """
+    if host_id not in _LONG_CALL_HOSTS:
+        return None
+    budget = codex_tool_budget_s()
+    minutes = f"{budget // 60}" if budget % 60 == 0 else f"{budget / 60:g}"
+    return (mode_table.TOOL_LONG_CALL_RULE
+            .replace("{BUDGET_MIN}", minutes)
+            .replace("{YIELD_MS}", str(budget * 1000)))
+
+
 def _resolve_row(word: str, rows: Sequence[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """The exposed row *word* names, by mode word first and then by alias."""
     for row in rows:
@@ -316,6 +350,10 @@ def _tool_description(host_id: str, rows: Sequence[Dict[str, Any]]) -> str:
         writers = ", ".join(row["name"] for row in rows if row["writes_worktree"])
         lines.append("")
         lines.append(note.replace("{modes}", writers))
+    waiting = long_call_rule(host_id)
+    if waiting:
+        lines.append("")
+        lines.append(waiting)
     lines.append("")
     lines.append("Examples:")
     for example in _worked_examples(rows):
