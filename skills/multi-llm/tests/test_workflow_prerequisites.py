@@ -2239,3 +2239,12 @@ class TestSuggestedNextFollowsThePhasePosition:
         out = capsys.readouterr().out
         assert "suggested next: implement" in out
         assert "suggested next: review-plan" not in out
+
+    def test_a_skip_does_not_move_the_position(self, tmp_path):
+        """A recorded code-review skip marks apply-code-fixes skipped too; that
+        is no sign implement ran, so implement is still the suggestion."""
+        plan = _workflow_plan(tmp_path)
+        _record(plan, completed=("review-plan", "apply-suggestions", "generate-tasks"),
+                skipped=("code-review",))
+        assert _status(plan)["phases"]["apply-code-fixes"]["status"] == "skipped"
+        assert _status(plan)["suggested_next"] == "implement"

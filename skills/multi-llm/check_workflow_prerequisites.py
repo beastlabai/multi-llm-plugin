@@ -900,10 +900,12 @@ def _suggested_next(phases: Dict[str, dict], order: List[str]) -> Optional[str]:
        the suggestion: resuming it comes first, as the next-step builder's
        walk says (``next_phase.next_phase_commands``);
     2. otherwise the first open required phase after the furthest phase on
-       record as completed or skipped, never one before it: starting
-       mid-workflow never sends the user back, and with nothing open after
-       it there is no suggestion. A plan with nothing on record starts at the
-       first required phase.
+       record as completed, never one before it: starting mid-workflow never
+       sends the user back, and with nothing open after it there is no
+       suggestion. A skip does not move the position (a skip marked because a
+       review was skipped or found nothing sits after phases that may not
+       have run), and a plan with nothing completed starts at the first open
+       required phase.
 
     Before this the suggestion was the first open required phase in table
     order, so a plan whose review-plan never ran read "suggested next:
@@ -923,7 +925,8 @@ def _suggested_next(phases: Dict[str, dict], order: List[str]) -> Optional[str]:
         ):
             return phase
     furthest = max(
-        (index for index, phase in enumerate(order) if not is_open(phase)),
+        (index for index, phase in enumerate(order)
+         if phases[phase]["status"] == "completed"),
         default=-1,
     )
     return next(
