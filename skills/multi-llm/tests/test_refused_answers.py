@@ -148,6 +148,24 @@ class TestTheResultLineNamesTheRefusal(_PairRig):
         assert said in error
 
 
+    def test_the_native_leg_s_refusal_is_the_error(self, repo, capsys):
+        import apply_suggestions_orchestrator as orchestrator
+        from utils import cli_common
+
+        plan = self._review_pair(repo)
+        context = self._context()
+        try:
+            assert orchestrator.main([
+                "--plan-file", str(plan), "--yes", "--resume",
+                "--human-task", "apply-batch-0=skip",
+            ]) == 3
+            error = context.error
+        finally:
+            cli_common.deactivate_result()
+        assert "the --exec-subagents leg stopped" in (error or ""), error
+        assert "util batch-done --skipped <id>" in error
+
+
 class TestImplementNamesARefusedAnswer:
 
     def test_an_answer_for_a_task_that_did_not_fail_is_the_error(
