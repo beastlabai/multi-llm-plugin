@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "reviewer",
     "bundle_version": 1,
-    "captured_at": "2026-10-06T17:51:23Z",
+    "captured_at": "2026-10-06T22:35:17Z",
     "cli": "grok",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -58,10 +58,10 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:fix17-reseed",
+    "image": "mllm-e2e:r19",
     "reviewer": "grok",
     "row_id": "chain-grok",
-    "run_bundle": "20261006T172706Z"
+    "run_bundle": "20261006T221233Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -4821,11 +4821,6 @@
       "T002",
       "T003"
     ],
-    "implement_task_reset_at": {
-      "T001": "<timestamp>",
-      "T002": "<timestamp>",
-      "T003": "<timestamp>"
-    },
     "metrics": {
       "apply-code-fixes": [
         {
@@ -4964,7 +4959,6 @@
       "review-tasks": "<timestamp>"
     },
     "phases_skipped": {},
-    "phases_started": {},
     "plan_hash": "<str>",
     "plan_path": "<run-root>/plans/auth-feature.md",
     "plan_preamble": "<text:sha256:81ad69eb8347:476>",
@@ -5052,11 +5046,6 @@
         "<str>"
       ],
       "<list>": 3
-    },
-    "implement_task_reset_at": {
-      "T001": "<str>",
-      "T002": "<str>",
-      "T003": "<str>"
     },
     "metrics": {
       "apply-code-fixes": {
@@ -5220,7 +5209,6 @@
       "review-tasks": "<str>"
     },
     "phases_skipped": {},
-    "phases_started": {},
     "plan_hash": "<str>",
     "plan_path": "<str>",
     "plan_preamble": "<str>",
