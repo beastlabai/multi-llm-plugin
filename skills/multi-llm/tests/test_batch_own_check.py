@@ -329,6 +329,32 @@ class TestAnImplementTaskWhoseOwnTestFails:
         assert "| T002 | applied |" in text
 
 
+    def test_a_stop_prints_the_marker_line_too(self, env):
+        """Fix round 15 (review of round 14): `[BATCH_CHECK_FAILED]` was
+        printed only on a run that finished; a stop after the batch printed
+        `[CHECK_FINDINGS]` (round 14) but not this one."""
+        env.monkeypatch.setenv("MOCK_LLM_EDITS", json.dumps(
+            [{"path": "src/a.py", "mode": "patch", "content": "a = 3\n"}]))
+        env.monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", "Apply batch 0")
+        env.monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001", "T002"]))
+        env.monkeypatch.setenv("MOCK_LLM_WRITE_BATCH_CHECK", json.dumps(
+            {"passed": False, "findings": [FAILING]}))
+        env.monkeypatch.setenv("MOCK_LLM_WRITE_BATCH_CHECK_IF_PROMPT_HAS", "Apply batch 0")
+        env.monkeypatch.setenv("MOCK_LLM_WRITE_FAIL_IF_PROMPT_HAS", "Apply batch 1")
+        result = env.scheduler(
+            [self._task(env, "T001", "src/a.py"),
+             self._task(env, "T002", "src/b.py", deps=["T001"])],
+            kind="implement", state=FakeState(env.tmp_path / "state.json"),
+        ).run()
+
+        assert result.exit_code == 3
+        assert result.stop and result.stop["task_id"] == "T002", result.messages
+        blob = "\n".join(result.messages)
+        assert f"{BATCH_CHECK_MARKER} T001: its edits were applied" in blob, blob
+        # Before the stop's own block, so the ERROR block stays in one piece.
+        assert blob.index(BATCH_CHECK_MARKER) < blob.index("ERROR: implement stopped")
+
+
 # ---------------------------------------------------------------------------
 # No driver.verify_command: one plain line, naming the setting
 # ---------------------------------------------------------------------------
