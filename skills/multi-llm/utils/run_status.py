@@ -2432,6 +2432,14 @@ def _resume_lines(
     ):
         return [f"      {NO_RESUME_BEFORE_DISPATCH}"]
     shape, repair, redispatch, kept = _resume_shape(view)
+    if mode == _IMPLEMENT_PHASE and redispatch:
+        # Fix round 14: the mirror holds only this run's rows, so a resume
+        # that kept T001/T003/T004 from an earlier run (and T002's findings)
+        # read "keeps the 1 already applied". state.json counts every task
+        # of the decomposition on record as done.
+        done = _implement_tasks_done(plan_path, workflow)
+        if done is not None and done > (kept or 0):
+            kept = done
     lines: List[str] = []
     if shape == cli_common.SHAPE_REPAIR:
         lines.append(f"      repair first: {repair}")
@@ -2464,6 +2472,20 @@ def _resume_lines(
                 cost += f" and keeps the {kept} valid result(s) already on disk"
             lines.append(f"      ({cost}; --force is not needed and would re-run the reviewer panel)")
     return lines
+
+
+def _implement_tasks_done(
+    plan_path: Path, workflow: Optional[Dict[str, Any]],
+) -> Optional[int]:
+    """``phases.implement.tasks_done`` from the workflow view, read once if
+    the caller has none; ``None`` when it is not on record or unreadable."""
+    if workflow is None:
+        try:
+            workflow = _workflow_payload(plan_path)
+        except Exception:  # noqa: BLE001 - advisory: the mirror count stands
+            return None
+    done = ((workflow.get("phases") or {}).get(_IMPLEMENT_PHASE) or {}).get("tasks_done")
+    return done if isinstance(done, int) and not isinstance(done, bool) else None
 
 
 def _abort_command(plan_path: Path, view: Dict[str, Any]) -> str:

@@ -17,6 +17,8 @@ routes and on Claude Code's native leg. Each class pins one finding:
   lived only in the log, and the host reported "Applied 10 of 10";
 * ``status --view run`` listed no task of an implement the Claude Code host
   ran itself (the native leg writes no report and no write mirror);
+* the resume cost line counted only this run's rows: a resume that kept
+  four tasks from the run before said "keeps the 1 already applied";
 * a deferred manual task never said how to close it, and the one way —
   ``--human-task <id>=done`` on implement's resume — was ignored under the
   ``--yes`` strategy and, closing nothing, re-stamped implement so the
@@ -386,3 +388,21 @@ def multi_llm_util(argv) -> int:
     import multi_llm
 
     return multi_llm.main(["util", *argv])
+
+
+class TestTheResumeCostCountsEveryKeptTask:
+
+    def test_an_unchanged_resume_keeps_the_four_done_before_it(self, repo, capsys):
+        from utils import status_file
+
+        _first_run(repo, capsys)
+        assert _implement(repo, "--resume") == 3  # nothing changed: 01b
+        # The detached worker's run record, as a tool route's poll reads it.
+        status_file.update_status(str(repo.phase_dir), {"run": {
+            "run_id": "R1B", "state": "failed", "exit_code": 3, "mode": "implement",
+            "error": "implement stopped at T005"}})
+        capsys.readouterr()
+        run_status.main(["--plan-file", str(repo.plan), "--view", "run",
+                         "--run-id", "R1B"])
+        out = capsys.readouterr().out
+        assert "keeps the 4 already applied" in out, out
