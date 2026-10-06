@@ -7710,8 +7710,9 @@ class WriteBatchScheduler:
             each.append({
                 "flags": answer(check_id, "done"),
                 "why": (f"accept {check_id}'s check findings: "
-                        f"{', '.join(waiting)} then run, and the findings stay "
-                        "listed for review-code"
+                        f"{', '.join(waiting)} then run, told that you accepted "
+                        "the findings, and the findings stay listed for "
+                        "review-code"
                         + (f" ({'; '.join(found.get(check_id) or [])[:200]})"
                            if found.get(check_id) else "")),
             })

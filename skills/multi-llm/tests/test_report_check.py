@@ -642,7 +642,10 @@ class TestTheAnswersCommandIsCarriedToo:
         "/multi-llm:multi-llm --implement plans/check-gate.md --resume "
         "--human-task T002=done --human-task T005=skip"
     )
-    ANSWERS_WHY = "or, in one command: accept the findings of T002 (then T007 runs)"
+    ANSWERS_WHY = (
+        "or, in one command: accept the findings of T002 (then T007 runs, "
+        "told that you accepted the findings)"
+    )
 
     def _output(self) -> str:
         return (
