@@ -256,6 +256,7 @@ __all__ = [
     "HumanTaskPlan",
     "WriteBatchScheduler",
     "answered_done_on_record",
+    "answered_done_label",
     "accepted_checks_on_record",
     "accepted_checks_section",
     "accepted_upstream_checks",
@@ -722,6 +723,22 @@ ACCEPTED_WITH_FINDINGS_MARK = "after its check reported problems"
 #: The recorded reason of a manual task answered ``--human-task <id>=done``
 #: (:func:`persist_human_task_plan`; the ``<id>`` is literal).
 COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
+
+
+def answered_done_label(plan: Any, task_id: str) -> str:
+    """How a task answered ``--human-task <id>=done`` reads in an account:
+    "accepted with its check findings" (a check whose findings the user
+    accepted), "accepted after failing" (a failed code task) or "completed by
+    hand" (a manual task). One wording for summary.md's rows and the resume
+    tally (fix round 16)."""
+    accepted = getattr(plan, "accepted", None) or {}
+    if task_id in accepted:
+        return (
+            "accepted with its check findings"
+            if ACCEPTED_WITH_FINDINGS_MARK in str(accepted.get(task_id) or "")
+            else "accepted after failing"
+        )
+    return "completed by hand"
 
 
 def answered_done_on_record(
@@ -2910,7 +2927,15 @@ class WriteBatchScheduler:
                 continue
             seen.add(task_id)
             kept.append(row)
-        if not kept:
+        # Fix round 16 (Codex stop-path accept 02): a task answered
+        # `--human-task <id>=done` is kept too, and the line says how — the
+        # accepted check T002 was missing from "kept 3 … T001, T003, T004".
+        answered_kept = [
+            f"{task_id} ({answered_done_label(result.human_plan, task_id)})"
+            for task_id in sorted(answered)
+            if task_id not in this_run and task_id not in seen
+        ]
+        if not kept and not answered_kept:
             return
         # Dispatched: the tasks a runner was started for. A task refused
         # before dispatch and a check not run again started none (fix round
@@ -2945,9 +2970,15 @@ class WriteBatchScheduler:
 
         kept_ids = [str(row.get("task_id")) for row in kept]
         dispatched_ids = [o.task_id for o in dispatched]
+        kept_named = ", ".join(
+            part for part in (
+                named(kept_ids) + counted(kept_ids, kept) if kept_ids else "",
+                ", ".join(answered_kept),
+            ) if part
+        )
         self.log(
-            f"[write-subagents] resume: kept {len(kept_ids)} task(s) an earlier "
-            f"run finished — {named(kept_ids)}{counted(kept_ids, kept)}; "
+            f"[write-subagents] resume: kept {len(kept_ids) + len(answered_kept)} "
+            f"task(s) an earlier run finished — {kept_named}; "
             f"dispatched {len(dispatched_ids)}{counted(dispatched_ids)}"
             + (
                 f"; refused before dispatch {len(refused)} "
@@ -8691,10 +8722,7 @@ class WriteBatchScheduler:
                 f"{(row.get('reason') or row.get('summary') or '').replace('|', '/')[:160]} |"
             )
         for task_id, reason in sorted(result.human_plan.accepted.items()):
-            label = (
-                "accepted with its check findings"
-                if ACCEPTED_WITH_FINDINGS_MARK in reason else "accepted after failing"
-            )
+            label = answered_done_label(result.human_plan, task_id)
             lines.append(f"| {task_id} | {label} | — | {reason.replace('|', '/')[:160]} |")
         for task_id in sorted(result.human_plan.completed):
             lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
