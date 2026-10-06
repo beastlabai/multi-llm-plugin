@@ -19,7 +19,7 @@ import re
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # Add parent to path for imports
 sys.path.insert(0, str(Path(__file__).parent))
@@ -64,6 +64,7 @@ from check_workflow_prerequisites import (
     build_unmet_message,
     check_apply_suggestions_prerequisite as _shared_apply_suggestions_prerequisite,
     check_apply_task_suggestions_prerequisite,
+    implement_records_predate_task_list,
     record_prerequisite_skip,
     upstream_skip_notices,
 )
@@ -176,6 +177,16 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
         '--resume',
         action='store_true',
         help='Resume from previous session state (skip completed tasks)'
+    )
+
+    parser.add_argument(
+        '--fresh',
+        action='store_true',
+        help='Start over: dispatch every task again, ignoring the tasks an '
+             'earlier run of this implement finished. Without it, a run on an '
+             'implement that started and did not finish continues it as '
+             '--resume; one that finished starts over either way. --resume '
+             'wins over --fresh.'
     )
 
     parser.add_argument(
@@ -1593,6 +1604,35 @@ def _native_withheld(
     return {"held": held, "refused": refused, "not_run": not_run}
 
 
+def _started_and_unfinished(state: StateManager, task_ids: Iterable[str]) -> List[str]:
+    """The tasks a run without ``--resume`` keeps: those an earlier run of an
+    implement that started and did not finish recorded ``completed``.
+
+    Empty — the run starts over, as it always did — when implement finished,
+    when nothing of this decomposition was finished, or when generate-tasks or
+    apply-task-suggestions wrote the task list after implement's last run,
+    whose ids may name other tasks now (nothing clears ``task_status``).
+    """
+    if state.is_phase_completed("implement"):
+        return []
+    statuses = state.implementation_task_statuses()
+    kept = sorted(str(t) for t in task_ids if statuses.get(str(t)) == "completed")
+    if not kept or implement_records_predate_task_list(state):
+        return []
+    return kept
+
+
+def _continued_line(kept: Sequence[str]) -> str:
+    """The one line a continued run prints (fix round 16)."""
+    named = ", ".join(kept[:8]) + (", …" if len(kept) > 8 else "")
+    return (
+        "resume: implement started earlier and did not finish, so this run "
+        f"continues it as --resume: kept {len(kept)} task(s) an earlier run "
+        f"finished ({named}) and runs what is left. To run every task again "
+        "instead, add --fresh."
+    )
+
+
 def _dispatch_line(output_data: Dict[str, Any], decomposed_batches: int) -> str:
     """``Organized into N execution batches: X task(s) to dispatch …``,
     counted from the batches as handed out."""
@@ -1911,6 +1951,23 @@ def main(argv: Optional[List[str]] = None) -> int:
     ):
         state.save()
 
+    # A run without `--resume` on an implement that started and did not
+    # finish continues it (fix round 16): Codex racing 06r re-dispatched the
+    # three tasks an aborted run had finished, which came back `no-op` and
+    # lost their "applied" rows. Starting over is `--fresh`, and a finished
+    # implement still starts over without it; `--task` reruns what it names.
+    # A code task's `--human-task` answer still needs the `--resume` typed:
+    # the commands that carry one always do, and an answer is a decision.
+    resume_typed = bool(args.resume)
+    if not args.resume and not args.task and not getattr(args, "fresh", False):
+        kept = _started_and_unfinished(state, decomposer.tasks)
+        if kept:
+            args.resume = True
+            print(_continued_line(kept))
+            if state.has_plan_changed():
+                print("WARNING: Plan has changed since last session")
+                state.clear_plan_changed_flag()
+
     # Restore previous statuses if resuming
     if args.resume:
         for task_id, status in state.get_all_task_statuses().items():
@@ -1968,7 +2025,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             tid for tid in not_human
             if state.get_task_status(tid) == "failed" or tid in held_by
         }
-        if not_human and not args.resume:
+        if not_human and not resume_typed:
             return unattended_mod.fail_closed(
                 "ERROR: --human-task answers a code task only with --resume, "
                 "after a run recorded it failed or its check reported "

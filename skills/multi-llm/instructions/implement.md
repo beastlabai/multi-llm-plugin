@@ -5,12 +5,13 @@ Executes implementation tasks from a plan by spawning subagents.
 ## Usage
 
 ```bash
-<dispatcher> implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip|retry] [--skip-prerequisites]
+<dispatcher> implement <plan_path> [--resume] [--fresh] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip|retry] [--skip-prerequisites]
 ```
 
 ## Options
 
 - `--resume`: Resume from previous session state (skip completed tasks). A task recorded with `util batch-done` (step 5) is skipped when `completed` and dispatched again when `failed`, and so is a check recorded with findings (`--check findings`) that holds back the tasks depending on it, unless it was answered `--human-task <id>=done` — but only once the files git sees changed since the run that recorded the findings ended (or with `--human-task <id>=retry`): on unchanged files it would report the same, so step 2 prints `[CHECK_NOT_RERUN]`, leaves it and the tasks it holds out of the batches, and names them in `not_rerun_checks` / `held_tasks`; a task the prior-changes log names that no record says finished is refused — exit 3 with a `[RESUME_REFUSED]` block naming the task and the `util batch-done` call that records it — because re-emitting it would run it twice.
+- `--fresh`: Start over: dispatch every task again, ignoring the tasks an earlier run of this implement finished. Without `--resume` or `--fresh`, a run on an implement that started and did not finish continues it as `--resume` (it prints one `resume: implement started earlier and did not finish …` line naming the tasks it kept), unless the task list was regenerated since; an implement that finished starts over either way. `--resume` wins over `--fresh`. A `--human-task` answer for a code task still needs `--resume` typed.
 - `--task T001`: Execute only a specific task
 - `--dry-run`: Show task summary without executing
 - `--yes` / `--no-confirm`: Skip all advisory prompts (e.g., unapplied task suggestions) and proceed silently. `--yes` additionally resolves every gate this mode reaches from flags and config: the plan-review prerequisite becomes exit 3 rather than a question (D6 row 6), the task-suggestion advisory resolves to "skip, recorded" (row 7), and the human-task strategy resolves to `skip-dependents` (row 8).

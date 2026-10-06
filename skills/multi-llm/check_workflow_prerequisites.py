@@ -159,6 +159,32 @@ def _latest_phase_activity(state: StateManager, phase: str) -> Optional[datetime
     return max(stamps) if stamps else None
 
 
+#: The phases whose completion writes the task list implement runs.
+TASK_LIST_PHASES = ("generate-tasks", "apply-task-suggestions")
+
+
+def implement_records_predate_task_list(state: StateManager) -> bool:
+    """Whether implement's recorded task statuses belong to an earlier task list.
+
+    Nothing clears ``task_status`` when generate-tasks or apply-task-suggestions
+    writes a new ``tasks.md``, so an id an earlier implement recorded may name
+    another task now. The records are an earlier list's when implement's
+    latest dated run (:func:`_latest_phase_activity`) is older than the latest
+    completion of either phase. False whenever either time is missing (absence
+    of a date is not staleness), the rule :func:`_apply_batches_predate_review`
+    applies to apply batches.
+    """
+    last_run = _latest_phase_activity(state, "implement")
+    if last_run is None:
+        return False
+    completed = state.state.get("phases_completed") or {}
+    for phase in TASK_LIST_PHASES:
+        produced = _parse_timestamp(completed.get(phase))
+        if produced is not None and produced > last_run:
+            return True
+    return False
+
+
 def _apply_batches_predate_review(
     state: StateManager, phases: Dict[str, dict], phase: str
 ) -> bool:
