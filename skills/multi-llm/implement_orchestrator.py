@@ -2262,10 +2262,40 @@ def main(argv: Optional[List[str]] = None) -> int:
         from utils.write_batch_scheduler import persist_human_task_plan
 
         persist_human_task_plan(state, native_human_plan)
-    state.mark_phase_started("implement")
+    if _closes_a_completed_implement(state, output_data):
+        # Fix round 14: a resume of a completed implement that only records
+        # answers (`--human-task T007=done` closing a deferred manual task)
+        # hands out nothing to run, so it does not reopen the phase: marked
+        # started, the host's closing `--mark-completed` re-stamped it and
+        # review-code and apply-code-fixes read stale for no code change.
+        print(
+            "\nNothing is left to run: implement stays completed. The answers "
+            "above are recorded in state.json; there is no batch to execute and "
+            "no phase to close."
+        )
+    else:
+        state.mark_phase_started("implement")
     state.save()
 
     return 0
+
+
+def _closes_a_completed_implement(state: StateManager, output_data: Dict[str, Any]) -> bool:
+    """Whether this native emit only answers tasks of an implement already done.
+
+    True when ``implement`` is on record completed and the handoff holds no
+    code task left to run — every task it lists is a manual one or already
+    ``completed``/``skipped`` (fix round 14).
+    """
+    if not state.is_phase_completed("implement"):
+        return False
+    for batch in output_data.get("batches") or []:
+        for task in batch.get("tasks") or []:
+            if task.get("executor_role") == "human" or task.get("is_human"):
+                continue
+            if task.get("status") not in ("completed", "skipped"):
+                return False
+    return True
 
 
 if __name__ == "__main__":

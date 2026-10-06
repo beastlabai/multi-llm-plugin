@@ -17,6 +17,10 @@ routes and on Claude Code's native leg. Each class pins one finding:
   lived only in the log, and the host reported "Applied 10 of 10";
 * ``status --view run`` listed no task of an implement the Claude Code host
   ran itself (the native leg writes no report and no write mirror);
+* a deferred manual task never said how to close it, and the one way —
+  ``--human-task <id>=done`` on implement's resume — was ignored under the
+  ``--yes`` strategy and, closing nothing, re-stamped implement so the
+  review read stale;
 """
 
 from __future__ import annotations
@@ -305,3 +309,80 @@ class TestStatusReadsANativeImplementFromState:
         _first_run(repo, capsys)
         out = _status_run(repo, capsys)
         assert "no run record — the host ran these tasks itself" not in out
+
+
+class TestClosingADeferredManualTask:
+    """Codex racing 06/08: T007 was deferred, the workflow completed, and
+    nothing said how to mark it done. `--human-task T007=done` on implement's
+    resume is that way; it now closes the task without reopening the
+    workflow."""
+
+    @pytest.fixture
+    def done_repo(self, tmp_path, monkeypatch):
+        from tests.test_implement_stop_account import _check_passes, make_repo
+        from utils import provider_registry as registry
+
+        obj = make_repo(tmp_path, monkeypatch)
+        _check_passes(obj)
+        yield obj
+        registry._config = None
+        registry._config_key = None
+
+    def _finish_with_review(self, repo, capsys):
+        from utils.state_manager import get_or_create_state
+
+        assert _implement(repo) == 0
+        capsys.readouterr()
+        state = get_or_create_state(repo.plan)
+        assert state.get_task_status("T005") == "skipped"  # deferred manual
+        state.mark_phase_completed("code-review")
+        state.save()
+        return get_or_create_state(repo.plan).state["phases_completed"]["implement"]
+
+    def test_the_executor_leg_closes_it_and_keeps_the_review_fresh(
+        self, done_repo, capsys,
+    ):
+        import multi_llm
+        from utils.state_manager import get_or_create_state
+
+        stamp = self._finish_with_review(done_repo, capsys)
+        done_repo.log.unlink(missing_ok=True)
+        assert multi_llm.main([
+            "implement", str(done_repo.plan), "--yes", "--exec-subagents",
+            "--resume", "--human-task", "T005=done",
+        ]) == 0
+        capsys.readouterr()
+        assert _dispatched_titles(done_repo) == []
+        state = get_or_create_state(done_repo.plan)
+        assert state.get_task_status("T005") == "completed"
+        assert state.state["phases_completed"]["implement"] == stamp
+        assert state.is_phase_completed("code-review")
+        assert state.deferred_implementation_tasks() == []
+
+    def test_the_native_leg_closes_it_without_reopening_implement(
+        self, done_repo, capsys, tmp_path,
+    ):
+        import implement_orchestrator
+        from utils.state_manager import get_or_create_state
+
+        stamp = self._finish_with_review(done_repo, capsys)
+        assert implement_orchestrator.main([
+            "--plan-file", str(done_repo.plan), "--output", str(tmp_path / "h.json"),
+            "--yes", "--resume", "--human-task", "T005=done",
+        ]) == 0
+        assert "Nothing is left to run: implement stays completed" in capsys.readouterr().out
+        state = get_or_create_state(done_repo.plan)
+        assert state.get_task_status("T005") == "completed"
+        assert state.is_phase_completed("implement")
+        assert state.is_phase_completed("code-review")
+        # A host that closes the phase anyway keeps the date.
+        assert multi_llm_util(["finalize-tracking", "--state-file",
+                               str(state.state_file), "--mark-completed"]) == 0
+        assert get_or_create_state(done_repo.plan).state[
+            "phases_completed"]["implement"] == stamp
+
+
+def multi_llm_util(argv) -> int:
+    import multi_llm
+
+    return multi_llm.main(["util", *argv])

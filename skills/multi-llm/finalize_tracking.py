@@ -445,7 +445,7 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
     # Update state
     state["tracked_files"] = tracked_files
     state["updated_at"] = datetime.now().isoformat()
-    if args.mark_completed:
+    if args.mark_completed and not _completion_stands(state):
         mark_phase_completed_in_state(state, "implement")
 
     try:
@@ -455,6 +455,30 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
         return 1
 
     return tracked_files
+
+
+def _completion_stands(state: dict) -> bool:
+    """Whether implement's completion is on record and no run reopened it.
+
+    ``--mark-completed`` closes the run an emit started (``phases_started``);
+    with no start newer than the completion there is no run to close, so the
+    completion keeps its date (fix round 14: a native resume that only
+    recorded ``--human-task T007=done`` for a deferred manual task re-stamped
+    implement, and review-code and apply-code-fixes read stale for no code
+    change). The ``StateManager.is_phase_started`` rule, on the raw dict.
+    """
+    from utils.state_manager import _parse_completion_time
+
+    completed = _parse_completion_time(
+        (state.get("phases_completed") or {}).get("implement")
+    )
+    if completed is None:
+        return False
+    started = _parse_completion_time(
+        (state.get("phases_started") or {}).get("implement")
+        if isinstance(state.get("phases_started"), dict) else None
+    )
+    return started is None or started <= completed
 
 
 def _held_by_a_check(
