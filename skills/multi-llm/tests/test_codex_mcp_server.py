@@ -1622,6 +1622,22 @@ class TestExecuteStateMachine:
         assert envelope["artifacts"] == ["REAL-ARTIFACT"]
         assert envelope["launch_state"] == STATES["ok"]
 
+    def test_argv_names_the_launch_never_the_poll(self, harness):
+        """Codex racing re-run 5: the host told the user the internal
+        ``status … --wait --run-id`` poll was "the dispatcher's final argv",
+        because the result's `argv` — which the needs-human message says to
+        report as what was being run — was the terminal poll's (fix round 14).
+        """
+        stopped = poll_step(CODES["needs_human"], mode="review-plan",
+                            phase="review-plan")
+        for script in ([launch_step(), poll_step(0)], [launch_step(), stopped]):
+            envelope, _, calls, _ = harness.run(REVIEW, script)
+            launched = dispatcher_argv({"argv": envelope["argv"]})
+            assert launched == dispatcher_argv(calls[0])
+            assert launched[0] == "review-plan"
+            assert "--wait" not in envelope["argv"]
+            assert DISPATCHER["run_id_option"] not in envelope["argv"]
+
     def test_poll_loop_exit_map(self, harness):
         envelope, result, calls, _ = harness.run(
             REVIEW, [launch_step(), poll_step(2), poll_step(2), poll_step(0)])

@@ -2336,6 +2336,38 @@ class TestExecuteStateMachine:
         assert result["launch_state"] == "done"
         assert len(calls) >= 2
 
+    def test_argv_names_the_launch_never_the_poll(self, built_package, uv_stub):
+        """Codex racing re-run 5: a host told the user the internal
+        ``status … --wait --run-id`` poll was "the dispatcher's final argv",
+        because the result's ``argv`` — which the needs-human message says to
+        report as what was being run — was the terminal poll's (fix round 14).
+        """
+        launch = {
+            "exit": 0,
+            "stdout": [
+                "run_id: RID-1",
+                "log: /tmp/a.log",
+                'MULTI_LLM_RESULT: {"mode":"review-plan","state":"done","exit":0,'
+                '"artifacts":[],"next":null}',
+            ],
+        }
+        final = {
+            "exit": 0,
+            "stdout": [
+                'MULTI_LLM_RESULT: {"mode":"status","state":"done","exit":0,'
+                '"artifacts":[],"next":null}'
+            ],
+        }
+        result, calls = uv_stub.run(
+            built_package,
+            {"mode": "review-plan", "plan": "p.md", "question": "", "extra_flags": []},
+            [launch, final, final],
+        )
+        assert result["argv"][1:] == calls[0]
+        assert "review-plan" in result["argv"] and "--detach" in result["argv"]
+        assert "--wait" not in result["argv"]
+        assert "--run-id" not in result["argv"]
+
     def test_a_mechanical_next_is_launched_claimed_and_polled_too(
         self, built_package, uv_stub
     ):
