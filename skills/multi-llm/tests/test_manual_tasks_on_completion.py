@@ -692,3 +692,26 @@ class TestTheNativeLegRecordsItsDeferrals:
         assert sorted(handoff["skipped_tasks"]) == ["T002", "T003"]
         _host_runs_t001_and_closes(repo, capsys)
         assert StateManager(repo.plan).deferred_implementation_tasks() == []
+
+
+def test_the_claude_code_host_is_told_to_relay_the_note():
+    """Fix round 15 (round 14's leftover): the close note reached the tool
+    routes' `user_next_step` line and summary-format.md, but the Claude Code
+    shim, where that host learns what a `[WORKFLOW_COMPLETE]` lookup means,
+    and full-workflow.md's `### Next Steps` block named only the manual
+    tasks, never the `[MANUAL_TASK_NOTE]` line saying how to record them
+    done."""
+    skill = " ".join((SKILL_ROOT / "SKILL.md").read_text(encoding="utf-8").split())
+    assert (
+        "A lookup that prints `[WORKFLOW_COMPLETE]` ends the report with "
+        "\"Workflow complete.\", each `[MANUAL_TASK]` line's task (id and "
+        "title) as the user's to do, then the `[MANUAL_TASK_NOTE]` line's "
+        "text verbatim"
+    ) in skill
+    core = " ".join(
+        (SKILL_ROOT / "instructions" / "full-workflow.md").read_text(encoding="utf-8").split()
+    )
+    assert (
+        "with each of its `manual_tasks` listed under it, then its "
+        "`manual_tasks_note` (the `[MANUAL_TASK_NOTE]` line) verbatim"
+    ) in core
