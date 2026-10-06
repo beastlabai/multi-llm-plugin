@@ -8114,9 +8114,13 @@ class WriteBatchScheduler:
             # `implement --resume --human-task T007=done` closing a deferred
             # manual task — changed no code, so its completion keeps its date:
             # re-stamping it made review-code and apply-code-fixes read stale,
-            # and the closing answer cost a review cycle (fix round 14).
-            if not (result.batches_dispatched == []
-                    and self.state.is_phase_completed(self.phase)):
+            # and the closing answer cost a review cycle (fix round 14). Fix
+            # round 15: "dispatched nothing" is read off the outcomes, not
+            # `batches_dispatched`, which a batch of resume skips joins too —
+            # a check whose findings stand, materialized again on every
+            # resume and kept without a dispatch, re-stamped the date.
+            ran = any(not outcome.skipped for outcome in result.outcomes)
+            if not (not ran and self.state.is_phase_completed(self.phase)):
                 self.state.mark_phase_completed(self.phase)
             # F5: re-stamp `plan_hash` to what this run actually left on disk.
             # Every batch's edit is already written by the time `_finalize`
@@ -8150,6 +8154,12 @@ class WriteBatchScheduler:
                 # insertion) — re-stamp once more so it is not left stale too.
                 self.state.refresh_plan_hash()
                 self.state.save()
+        # Fix round 15: a check whose findings stand and hold nothing back
+        # lets the run finish; the run's own later edits (the tasks after it,
+        # the plan's back-reference just above) are not a change the user
+        # made, so its tree is stamped as the run leaves it, as on a stop —
+        # or the next resume ran it again on files nobody touched.
+        self._restamp_check_trees(result)
         result.finalized = True
 
     def _reload_state(self) -> None:
