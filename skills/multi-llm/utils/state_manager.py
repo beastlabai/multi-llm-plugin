@@ -270,6 +270,30 @@ def set_task_check_tree_in_state(
         state.pop(TASK_CHECK_TREES_KEY, None)
 
 
+#: ``task id -> when a run that hands the implement task out again set its
+#: earlier record aside`` (fix round 17): a start-over (``--fresh``, or a
+#: plain run after a finished implement) for every code task, an explicit
+#: ``--task`` rerun for the one it names. The task is ``pending`` again, but
+#: the prior-changes log still holds the line its earlier run wrote, and a
+#: native ``--resume`` refuses a task the log holds and no status records
+#: (``batch_done.unrecorded_logged_batches``): a line no newer than this stamp
+#: is the earlier run's, not one this run left unrecorded.
+TASK_RESET_AT_KEY = "implement_task_reset_at"
+
+
+def mark_tasks_reset_in_state(state: Dict[str, Any], task_ids: Iterable[str]) -> None:
+    """Stamp *task_ids* in :data:`TASK_RESET_AT_KEY` with the current time."""
+    ids = [str(task_id) for task_id in task_ids if str(task_id)]
+    if not ids:
+        return
+    recorded = state.get(TASK_RESET_AT_KEY)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    now = datetime.now().isoformat()
+    for task_id in ids:
+        current[task_id] = now
+    state[TASK_RESET_AT_KEY] = current
+
+
 def mark_item_processed_in_state(
     state: Dict[str, Any],
     phase: str,

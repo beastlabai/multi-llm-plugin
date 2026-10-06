@@ -3693,6 +3693,9 @@ class WriteBatchScheduler:
                     self.state.save()
             return outcome
 
+        # Past the resume skips, the task is this run's to handle.
+        self._mark_implement_started()
+
         # A resumed verification-only task that failed, with nothing in the
         # repository changed since: not dispatched again (racing re-run 3,
         # 2026-10-05 — `--resume` spent 148 s on the same `html-validate`
@@ -8619,6 +8622,36 @@ class WriteBatchScheduler:
             reload()
         except Exception as exc:  # noqa: BLE001 - bookkeeping must not fail a phase
             self.log(f"[write-subagents] warning: state reload failed: {exc}")
+
+    def _mark_implement_started(self) -> None:
+        """Record implement started, once per run, as the native emit does.
+
+        Fix round 17 (review of fix round 16): the executor leg never wrote
+        ``phases_started.implement``, so once an implement had finished, a
+        later run that stopped left that completion standing — ``status``
+        read implement done, and the next plain ``--implement`` started over
+        instead of continuing. Called as a task is handed to this run (past
+        the resume skips), so a resume that dispatches nothing — a
+        ``--human-task <id>=done`` closing a manual task, a check whose
+        findings stand — leaves a completed implement completed, and
+        :meth:`_finalize` completes one that ran. A start-over already
+        stamped it (``implement_orchestrator._start_over``). Best-effort.
+        """
+        if (
+            self.kind != "implement" or self.dry_run or self.state is None
+            or getattr(self, "_implement_started_marked", False)
+        ):
+            return
+        with self._effects_lock:
+            if getattr(self, "_implement_started_marked", False):
+                return
+            self._implement_started_marked = True
+            try:
+                if not self.state.is_phase_started(self.phase):
+                    self.state.mark_phase_started(self.phase)
+                    self.state.save()
+            except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase
+                pass
 
     def _metrics_start(self, result: SchedulerResult) -> None:
         """Stamp the phase's ETA baseline before the first dispatch.
