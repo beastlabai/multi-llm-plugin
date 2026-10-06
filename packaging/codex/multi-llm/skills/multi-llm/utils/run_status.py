@@ -631,6 +631,22 @@ def _workflow_trailer_lines(
                 f"{prefix}check findings for review-code (see "
                 f"implement/summary.md): {named}"
             )
+    # The implement tasks whose own check failed after their edits
+    # (`phases.implement.batch_check_findings`, fix round 15), shown by the
+    # same rule as the check findings above.
+    failing = (phases.get("implement") or {}).get("batch_check_findings")
+    if isinstance(failing, list) and failing and not (implement_done and review_settled):
+        named = "; ".join(
+            f"{entry['id']} ({(entry.get('findings') or [''])[0][:120]}"
+            f"{', …' if len(entry.get('findings') or []) > 1 else ''})"
+            for entry in failing
+            if isinstance(entry, dict) and entry.get("id")
+        )
+        if named:
+            lines.append(
+                f"{prefix}a check its own task ran fails (see "
+                f"implement/summary.md): {named}"
+            )
     return lines
 
 
@@ -1965,6 +1981,8 @@ def state_implement_view(
             if reasons.get(task_id)
         },
         "findings": state.implementation_check_findings(),
+        # A code task whose own check failed after its edits (fix round 15).
+        "batch_checks": state.implementation_batch_check_findings(),
         "answers": dict(answers) if isinstance(answers, dict) else {},
     }
 
@@ -1999,6 +2017,11 @@ def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
         findings = entry.get("findings") or []
         lines.append(
             f"      check findings {entry['id']}: {'; '.join(findings)[:300]}"
+        )
+    for entry in view.get("batch_checks") or []:
+        findings = entry.get("findings") or []
+        lines.append(
+            f"      own check fails {entry['id']}: {'; '.join(findings)[:300]}"
         )
     if view["answers"]:
         lines.append(
@@ -2112,7 +2135,23 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     # failed — never only an `ok` count.
     failing = mirror.get("batch_check_task_ids")
     if isinstance(failing, list) and failing:
-        parts.append(f"own check fails {', '.join(map(str, failing))}")
+        # Fix round 15: a check that could not run is named so (the prefix is
+        # `subagent_executor.BATCH_CHECK_COULD_NOT_RUN`, spelled here so this
+        # sub-second path imports nothing heavy).
+        could_not = {
+            str(row.get("task_id")) for row in (mirror.get("tasks") or [])
+            if isinstance(row, dict)
+            and isinstance(row.get("batch_check_findings"), list)
+            and row["batch_check_findings"]
+            and str(row["batch_check_findings"][0]).startswith(
+                "its check could not run")
+        }
+        fails = [str(t) for t in failing if str(t) not in could_not]
+        if fails:
+            parts.append(f"own check fails {', '.join(fails)}")
+        unrun = [str(t) for t in failing if str(t) in could_not]
+        if unrun:
+            parts.append(f"own check could not run {', '.join(unrun)}")
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
@@ -2334,7 +2373,11 @@ def _failed_batches_moved_nothing(view: Dict[str, Any]) -> bool:
     """Whether every failed row of a write run's mirror records that no file
     moved (``files_touched`` present and empty). A row without the key — an
     older mirror — says nothing, so the answer is ``False`` and the status
-    line keeps its "half-applied" wording."""
+    line keeps its "half-applied" wording.
+
+    ``files_touched`` is the rollback set, so a row also has to name no
+    ``unrestorable`` file (moved, with no rollback point) and must not be a
+    partial application, which moved bytes by definition (fix round 15)."""
     progress = view.get("progress") or {}
     mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
     if not isinstance(mirror, dict):
@@ -2348,6 +2391,8 @@ def _failed_batches_moved_nothing(view: Dict[str, Any]) -> bool:
         return False
     return all(
         isinstance(row.get("files_touched"), list) and not row["files_touched"]
+        and not row.get("unrestorable")
+        and row.get("write_outcome") != "partial-application"
         for row in rows
     )
 

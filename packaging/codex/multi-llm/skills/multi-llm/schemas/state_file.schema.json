@@ -62,6 +62,14 @@
         "items": { "type": "string" }
       }
     },
+    "task_batch_check": {
+      "type": "object",
+      "description": "Per implement task that edits files and whose own check (a test, a build it ran on its edits) failed: the findings from its reply's `check` object. Never a hold: the edits are kept and nothing waits for the task. Present only while some task's own check fails; read by status and review-code's implementation record",
+      "additionalProperties": {
+        "type": "array",
+        "items": { "type": "string" }
+      }
+    },
     "task_check_trees": {
       "type": "object",
       "description": "Native leg only: per check task with findings, a fingerprint of the files git saw when the run that recorded them ended. A --resume hands the check out again only when the files changed since",

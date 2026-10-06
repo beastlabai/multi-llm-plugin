@@ -90,6 +90,63 @@ def mark_phase_completed_in_state(state: Dict[str, Any], phase: str) -> None:
         started.pop(phase, None)
 
 
+#: ``state.json``'s record of the ``--human-task <id>=done|skip`` answers
+#: (``implement_orchestrator`` writes it; ``retry`` is never recorded).
+HUMAN_TASK_DECISIONS_KEY = "human_task_decisions"
+
+#: Twins of ``write_batch_scheduler.ACCEPTED_REASON_PREFIX`` and
+#: ``COMPLETED_MANUAL_REASON``: the reasons a ``done`` answer writes. Restated
+#: here so this low-level module imports nothing from the scheduler.
+_ACCEPTED_REASON_PREFIX = "accepted — "
+_COMPLETED_MANUAL_REASON = "answered --human-task <id>=done"
+
+
+def _answer_produced(action: str, status: str, reason: Optional[str]) -> bool:
+    """Whether *status*/*reason* is what the answer *action* itself writes."""
+    if action == "done":
+        text = str(reason or "")
+        return status == "completed" and (
+            text.startswith(_ACCEPTED_REASON_PREFIX)
+            or text == _COMPLETED_MANUAL_REASON
+        )
+    if action == "skip":
+        return status == "skipped"
+    return False
+
+
+def _consume_answer(
+    state: Dict[str, Any], task_id: str, previous: Optional[str],
+    status: str, reason: Optional[str],
+) -> None:
+    """Drop *task_id*'s recorded ``--human-task`` answer once its task moved on.
+
+    An answer answers one stop (fix round 15, review of round 14): it is
+    applied when the run that recorded it resolves its plan, and the status
+    it writes keeps it (an accepted ``completed``, an answered ``skipped``).
+    Any other status written for the task afterwards — it ran again (a
+    ``--task`` re-run, a ``retry``, a resume that unskipped it) and finished,
+    failed or was handed out again — is a new stop the answer never saw, so
+    the answer is dropped: a recorded ``done`` used to accept a check's NEW
+    findings, and a task's new failure, on a later plain ``--resume`` with no
+    ``[HUMAN_TASK_ANSWERED]`` line, and a recorded ``skip`` skipped a task
+    the user had just run again. ``pending`` on a task that had no status or
+    was already ``pending`` is not an outcome (a seed, a held task's reason),
+    so an answer recorded before its task's first status survives it.
+    """
+    recorded = state.get(HUMAN_TASK_DECISIONS_KEY)
+    if not isinstance(recorded, dict) or task_id not in recorded:
+        return
+    if status == "pending" and previous in (None, "pending"):
+        return
+    if _answer_produced(str(recorded.get(task_id) or ""), status, reason):
+        return
+    kept = {key: value for key, value in recorded.items() if key != task_id}
+    if kept:
+        state[HUMAN_TASK_DECISIONS_KEY] = kept
+    else:
+        state.pop(HUMAN_TASK_DECISIONS_KEY, None)
+
+
 def update_task_status_in_state(
     state: Dict[str, Any], task_id: str, status: str, reason: Optional[str] = None
 ) -> None:
@@ -98,10 +155,14 @@ def update_task_status_in_state(
     Module-level for the same reason :func:`mark_phase_completed_in_state`
     is: the native write leg's per-batch record (``util batch-done``) edits
     ``state.json`` as a file, mid-loop, and must not build a ``StateManager``
-    over a plan the batch just edited.
+    over a plan the batch just edited. Both legs write every task status
+    here, which is what lets it retire a ``--human-task`` answer the task
+    has moved past (:func:`_consume_answer`).
     """
     if "task_status" not in state:
         state["task_status"] = {}
+    previous = state["task_status"].get(task_id)
+    _consume_answer(state, task_id, previous, status, reason)
     state["task_status"][task_id] = status
     if reason is not None:
         if "task_status_reasons" not in state:
@@ -152,6 +213,35 @@ def set_task_check_findings_in_state(
         state[TASK_CHECK_FINDINGS_KEY] = current
     else:
         state.pop(TASK_CHECK_FINDINGS_KEY, None)
+
+
+#: ``state.json``'s map of what the checks an implement task ran on its OWN
+#: edits reported when one failed: ``{task_id: [finding, ...]}``, present only
+#: while some task's own check fails (fix round 15). Never
+#: :data:`TASK_CHECK_FINDINGS_KEY`: a code task whose own test fails keeps its
+#: edits and holds nothing back, where a check task's findings hold its
+#: dependents. Written by both legs (``util batch-done --check findings`` on a
+#: task that declares files, the scheduler from ``TaskOutcome.batch_check``);
+#: ``status`` and review-code's implementation record read it.
+TASK_BATCH_CHECK_KEY = "task_batch_check"
+
+
+def set_task_batch_check_in_state(
+    state: Dict[str, Any], task_id: str, findings: Optional[Iterable[str]],
+) -> None:
+    """Record (or, with no findings, clear) *task_id*'s failing own check;
+    the key is dropped when the map empties."""
+    recorded = state.get(TASK_BATCH_CHECK_KEY)
+    current = dict(recorded) if isinstance(recorded, dict) else {}
+    kept = [str(item) for item in (findings or []) if str(item).strip()]
+    if kept:
+        current[str(task_id)] = kept
+    else:
+        current.pop(str(task_id), None)
+    if current:
+        state[TASK_BATCH_CHECK_KEY] = current
+    else:
+        state.pop(TASK_BATCH_CHECK_KEY, None)
 
 
 #: ``task id -> tree fingerprint`` for each check with findings on the native
@@ -1092,6 +1182,37 @@ class StateManager:
             if not isinstance(findings, list) or not findings:
                 continue
             if statuses.get(task_id) not in ("completed", "skipped"):
+                continue
+            if scope is not None and task_id not in scope:
+                continue
+            out.append({
+                "id": task_id,
+                "title": titles.get(task_id) or None,
+                "findings": [str(item) for item in findings],
+            })
+        return out
+
+    def implementation_batch_check_findings(self) -> List[Dict[str, Any]]:
+        """The implement tasks whose own check failed after their edits.
+
+        ``[{id, title, findings}]`` from :data:`TASK_BATCH_CHECK_KEY`, for
+        tasks recorded ``completed`` (a later record of the task clears its
+        entry) and scoped to the decomposition implement ran last, as
+        :meth:`implementation_check_findings` is (fix round 15).
+        """
+        recorded = self.state.get(TASK_BATCH_CHECK_KEY)
+        if not isinstance(recorded, dict) or not recorded:
+            return []
+        titles = self.state.get("task_titles") or {}
+        current = self.state.get("implement_task_ids")
+        scope = set(current) if isinstance(current, list) else None
+        statuses = self.implementation_task_statuses()
+        out: List[Dict[str, Any]] = []
+        for task_id in sorted(recorded):
+            findings = recorded.get(task_id)
+            if not isinstance(findings, list) or not findings:
+                continue
+            if statuses.get(task_id) != "completed":
                 continue
             if scope is not None and task_id not in scope:
                 continue

@@ -79,6 +79,22 @@ def rerunnable_checks(state: Any) -> List[str]:
     return _rerunnable(state)
 
 
+def _unlanded_on_record(plan_path: Path, state: Any) -> List[str]:
+    """``write_batch_scheduler.unlanded_on_record`` for this plan, each id
+    named on stdout with why it runs again (fix round 15)."""
+    from utils.write_batch_scheduler import unlanded_on_record
+
+    phase_dir = get_phase_dir(plan_path, "implement")
+    unlanded = unlanded_on_record(str(phase_dir), state.state)
+    for task_id in unlanded:
+        print(
+            f"[resume] {task_id} runs again: an earlier run recorded it done, "
+            f"but its result file says its change never landed (the reply "
+            f"said applied and no file changed)."
+        )
+    return unlanded
+
+
 def check_apply_suggestions_prerequisite(state, plan_dir: Path) -> dict:
     """Row 6: whether apply-suggestions still owes work before implement runs.
 
@@ -806,6 +822,8 @@ def _applicable_task_decisions(
     state: StateManager,
     human_task_ids: List[str],
     this_run: Dict[str, str],
+    *,
+    rerun_task: Optional[str] = None,
 ) -> Dict[str, str]:
     """The ``--human-task`` answers the scheduler applies this run.
 
@@ -816,9 +834,18 @@ def _applicable_task_decisions(
     the answer that skipped it is what keeps it skipped on the next resume,
     now that a skipped code task is materialized again (fix round 8). Once
     it ran again or was accepted, a stale answer must not mark it done
-    behind the user's back.
+    behind the user's back — and once its task has a status the answer did
+    not write, it is gone from the record (``state_manager._consume_answer``,
+    fix round 15).
+
+    *rerun_task* is ``--task <id>``: the user asked to run that code task,
+    so an answer an earlier run recorded for it does not apply (a recorded
+    ``skip`` used to leave ``--task`` nothing to hand out, fix round 15);
+    the status its run writes retires the answer.
     """
     recorded = dict(state.get("human_task_decisions") or {})
+    if rerun_task and rerun_task not in human_task_ids and rerun_task not in this_run:
+        recorded.pop(rerun_task, None)
     decisions: Dict[str, str] = {}
     # A check whose findings hold back the tasks after it is answered like a
     # failed task (fix round 11), until the answer is taken.
@@ -1288,6 +1315,13 @@ def _native_check_reruns(
     A check handed out again because the files changed (or with no stamp to
     compare) loses its stamp, so a run that never re-runs it cannot re-stamp
     it as checked. The kept map is ``check id -> its findings``.
+
+    A check whose findings the ``--exec-subagents`` leg recorded has no
+    ``task_check_trees`` stamp: the executor stamps its verdict instead
+    (:func:`_executor_check_stamp`), which is read when the state holds none
+    (fix round 15: an executor stop resumed natively handed the check out
+    again on unchanged files). A check kept on that stamp adopts it, so the
+    native run's closing ``util finalize-tracking`` re-stamps it like its own.
     """
     from utils.state_manager import (
         TASK_CHECK_TREES_KEY,
@@ -1309,6 +1343,12 @@ def _native_check_reruns(
             rerun.append(check_id)
             continue
         recorded = stamps.get(check_id)
+        adopted = False
+        if not recorded and answer != "retry":
+            recorded = _executor_check_stamp(
+                plan_path, check_id, findings_on_record.get(check_id),
+            )
+            adopted = bool(recorded)
         if answer != "retry" and recorded:
             if not measured:
                 current = check_tree_fingerprint(get_phase_dir(plan_path, "implement"))
@@ -1317,10 +1357,46 @@ def _native_check_reruns(
                 kept[check_id] = [
                     str(item) for item in (findings_on_record.get(check_id) or [])
                 ]
+                if adopted:
+                    set_task_check_tree_in_state(state.state, check_id, recorded)
                 continue
         rerun.append(check_id)
         set_task_check_tree_in_state(state.state, check_id, None)
     return rerun, kept
+
+
+def _executor_check_stamp(
+    plan_path: Path, check_id: str, findings: Any,
+) -> Optional[str]:
+    """The tree the ``--exec-subagents`` leg stamped on *check_id*'s verdict.
+
+    ``verdict.tree_fingerprint`` of ``{phase}/implement_batch_<id>.json``
+    (``WriteBatchScheduler._stamp_verdict``, re-stamped with the tree the run
+    left by its ``_restamp_check_trees``), the same digest
+    ``write_prompt.check_tree_fingerprint`` takes. Only a verdict that is an
+    ``ok`` check with findings, and the very findings ``state.json`` holds
+    (*findings*), so a stamp is never read off another run of the check than
+    the one on record. ``None`` otherwise.
+    """
+    from utils.subagent_executor import row_check_findings
+    from utils.subagent_tasks import implement_output_name
+
+    if not isinstance(findings, list) or not findings:
+        return None
+    path = Path(get_phase_dir(plan_path, "implement")) / implement_output_name(check_id)
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    verdict = data.get("verdict") if isinstance(data, dict) else None
+    if not isinstance(verdict, dict) or verdict.get("ok") is not True:
+        return None
+    if not verdict.get("verification_only"):
+        return None
+    if row_check_findings(verdict) != [str(item) for item in findings]:
+        return None
+    stamp = verdict.get("tree_fingerprint")
+    return stamp if isinstance(stamp, str) and stamp else None
 
 
 def _native_withheld(
@@ -1924,6 +2000,12 @@ def main(argv: Optional[List[str]] = None) -> int:
                 state, plan_path, rerun_ids,
                 _applicable_task_decisions(state, human_task_ids, human_task_decisions),
             )
+        if args.resume:
+            # Fix round 15: a task a run before fix round 14 recorded done
+            # although its change never landed is handed out again.
+            unlanded = _unlanded_on_record(plan_path, state)
+            if unlanded:
+                rerun_ids = sorted(set(rerun_ids or []) | set(unlanded))
         # Format for output
         output_batches = format_batches_for_output(
             batches, skip_completed=args.resume, plan_preamble=plan_preamble,
@@ -2013,6 +2095,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     # task's only while it still applies (`_applicable_task_decisions`).
     applicable_decisions = _applicable_task_decisions(
         state, human_task_ids, human_task_decisions,
+        rerun_task=str(args.task) if args.task else None,
     )
     # The native leg resolves the human-task plan here, from the strategy and
     # the answers it already holds, exactly as the executor resolves it before
@@ -2230,21 +2313,50 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "listed above. Do not spawn a subagent."
             )
 
-    print("\nClaude Code should now:")
-    print("  1. Read the output JSON file")
-    print("  2. Execute each batch sequentially (batches have dependencies)")
-    print("  3. Tasks within a batch can run in parallel")
-    print("  4. Update the state file after each task completes")
-    print("  5. After all tasks complete, generate the implementation summary")
-    print(f"     Summary file: {output_data['summary_file']}")
-    if stopped_short:
+    # Fix round 14: a resume of a completed implement that only records
+    # answers (`--human-task T007=done` closing a deferred manual task) hands
+    # out nothing to run, so it does not reopen the phase: marked started, the
+    # host's closing `--mark-completed` re-stamped it and review-code and
+    # apply-code-fixes read stale for no code change. Fix round 15: and it
+    # asks for no summary and no close either — the generic steps below sent
+    # the host on to write a nothing-ran summary.md over the completed run's.
+    closes = not args.task and _closes_a_completed_implement(state, output_data)
+    if closes:
         print(
-            "  6. Close the phase with `util finalize-tracking` without "
-            "--mark-completed (tasks listed above did not run), then end the "
-            "report with the commands `util next-command` prints"
+            "\nNothing is left to run: implement stays completed. The answers "
+            "above are recorded in state.json; there is no batch to execute and "
+            "no phase to close."
         )
+        print("\nClaude Code should now:")
+        print(
+            "  1. Report the answers recorded above; spawn no subagent, write no "
+            "implementation summary (the completed run's summary.md stays as it "
+            "is) and run no `util finalize-tracking`"
+        )
+        print("  2. End the report with the command `util next-command` prints")
     else:
-        print("  6. Close the phase with `util finalize-tracking … --mark-completed`")
+        print("\nClaude Code should now:")
+        print("  1. Read the output JSON file")
+        print("  2. Execute each batch sequentially (batches have dependencies)")
+        print("  3. Tasks within a batch can run in parallel")
+        print("  4. Update the state file after each task completes")
+        print("  5. After all tasks complete, generate the implementation summary")
+        print(f"     Summary file: {output_data['summary_file']}")
+        if stopped_short:
+            print(
+                "  6. Close the phase with `util finalize-tracking` without "
+                "--mark-completed (tasks listed above did not run), then end the "
+                "report with the commands `util next-command` prints"
+            )
+        else:
+            # The emit cannot know how the run ends: a check that records
+            # findings holds tasks back mid-run (fix round 15, stop fixture).
+            print(
+                "  6. Close the phase with `util finalize-tracking … --mark-completed` "
+                "once every task ran; after a [CHECK_BLOCKED] line, a failed task or "
+                "a stop, run it without --mark-completed and end the report with "
+                "the commands `util next-command` prints"
+            )
 
     # The batches are now the host's to run, so the phase is recorded
     # *started*, never completed: completion is the instruction's closing
@@ -2262,18 +2374,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         from utils.write_batch_scheduler import persist_human_task_plan
 
         persist_human_task_plan(state, native_human_plan)
-    if not args.task and _closes_a_completed_implement(state, output_data):
-        # Fix round 14: a resume of a completed implement that only records
-        # answers (`--human-task T007=done` closing a deferred manual task)
-        # hands out nothing to run, so it does not reopen the phase: marked
-        # started, the host's closing `--mark-completed` re-stamped it and
-        # review-code and apply-code-fixes read stale for no code change.
-        print(
-            "\nNothing is left to run: implement stays completed. The answers "
-            "above are recorded in state.json; there is no batch to execute and "
-            "no phase to close."
-        )
-    else:
+    if not closes:
         state.mark_phase_started("implement")
     state.save()
 
