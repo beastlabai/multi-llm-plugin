@@ -178,6 +178,14 @@ class TestThePolicyStop:
         assert "inspect the half-applied state" not in text
         assert "The half-applied state is deliberately left in place" not in text
         assert "Nothing was half-applied: the stopped task never started" in text
+        # Fix round 18 (live run 7, Codex stop 01): said once per stop, by the
+        # block's closing line; the remedy bullet no longer repeats it.
+        assert text.count("half-applied") == 1, text
+        assert "nothing to restore" not in text
+        assert (
+            "  - if the file the details name is meant to be written, allow it "
+            "in driver.write_paths" in text
+        ), text
         assert "driver.write_paths" in text and ".multi-llm/providers.yaml" in text
         assert "--human-task T005=skip" in text
         assert "(T005 and the tasks that depend on it, T006, stay undone)" in text

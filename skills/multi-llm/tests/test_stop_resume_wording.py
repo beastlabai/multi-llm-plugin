@@ -150,7 +150,10 @@ class TestAStopThatMovedNothing:
         assert result.outcomes[0].files_touched == []
         assert "inspect the half-applied state" not in joined
         assert HALF_APPLIED not in joined
-        assert "nothing changed, so there is nothing to restore" in joined
+        # Fix round 18: said once in the block, by its closing line.
+        assert joined.count("Nothing was half-applied: the stopped task changed no file") == 1
+        assert "nothing to restore" not in joined
+        assert "  - fix the cause the details name, then resume this phase" in joined
         assert "Nothing changed, so there is nothing to restore" in result.stop["headline"]
 
     def test_a_partial_application_still_says_it(self, env):
@@ -193,8 +196,15 @@ class TestTheStatusLine:
         return lines[1]
 
     def test_a_failed_batch_that_moved_nothing_is_not_half_applied(self):
+        """Fix round 18 (live run 7): the line names the cost alone. That
+        nothing is half-applied is the stop block's closing line, which this
+        view shows among the run's last lines; it said so a third time."""
         cost = self._cost([])
-        assert "nothing was half-applied, so there is nothing to restore" in cost
+        assert cost == (
+            "      (re-dispatches the 1 failed batch(es) and the ones never "
+            "reached, keeps the 1 already applied)"
+        ), cost
+        assert "half-applied" not in cost
         assert "restore-batch" not in cost
 
     def test_a_failed_batch_that_moved_bytes_keeps_the_restore(self):
