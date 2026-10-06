@@ -360,6 +360,72 @@ class TestClosingADeferredManualTask:
         assert state.is_phase_completed("code-review")
         assert state.deferred_implementation_tasks() == []
 
+    def test_a_check_whose_findings_stand_does_not_restamp_it_either(
+        self, tmp_path, monkeypatch, capsys,
+    ):
+        """Fix round 15 (review of round 14): a check with findings on record
+        holding nothing back is materialized again on every resume and reached
+        `_run_batch` as a kept-findings skip — `batches_dispatched` grew, and
+        `--resume --human-task <manual>=done` re-stamped implement's
+        completion, so review-code read stale. Only a batch something was
+        dispatched in counts."""
+        import multi_llm
+        from tests.test_implement_stop_account import CHECK_GATE, make_repo
+        from utils import provider_registry as registry
+        from utils.state_manager import get_or_create_state
+
+        plan = """# Checked plan
+
+## Overview
+A check nothing depends on, and a manual task.
+
+## Tasks
+
+### T001: Edit: create the module
+Create the module file.
+- Depends on: none
+- Files to modify: src/main.py
+
+### T002: Check the module
+Run the validator on the module. Read-only.
+- Depends on: T001
+- Files to modify: none
+
+### T003: Play through by hand
+**Type**: Manual (user action required)
+Open the page and race.
+- Depends on: T001
+"""
+        repo = make_repo(tmp_path, monkeypatch, plan)
+        try:
+            monkeypatch.setenv("MOCK_LLM_WRITE_CHECK_IF_PROMPT_HAS", CHECK_GATE)
+            assert multi_llm.main([
+                "implement", str(repo.plan), "--yes", "--exec-subagents",
+            ]) == 0
+            capsys.readouterr()
+            state = get_or_create_state(repo.plan)
+            assert state.state.get("task_check_findings", {}).get("T002"), \
+                "the check's findings are on record"
+            assert state.get_task_status("T003") == "skipped"
+            state.mark_phase_completed("code-review")
+            state.save()
+            stamp = get_or_create_state(repo.plan).state["phases_completed"]["implement"]
+            repo.log.unlink(missing_ok=True)
+
+            assert multi_llm.main([
+                "implement", str(repo.plan), "--yes", "--exec-subagents",
+                "--resume", "--human-task", "T003=done",
+            ]) == 0
+            capsys.readouterr()
+        finally:
+            registry._config = None
+            registry._config_key = None
+        assert _dispatched_titles(repo) == []
+        state = get_or_create_state(repo.plan)
+        assert state.get_task_status("T003") == "completed"
+        assert state.state["phases_completed"]["implement"] == stamp
+        assert state.is_phase_completed("code-review")
+
     def test_the_native_leg_closes_it_without_reopening_implement(
         self, done_repo, capsys, tmp_path,
     ):
