@@ -477,11 +477,13 @@ class TestTheNativeLeg:
         assert "## Check findings the user accepted" in prompt
         assert "(`--human-task T002=done`)" in prompt
         assert f'  - "{FINDINGS[0]}"' in prompt
-        # A task the check never held is told nothing.
-        code, prompt, _err = self._util(
+        # T006, skipped with T005, is not handed out, so it has no prompt to
+        # bind (a task the check never held is told nothing:
+        # test_write_prompt.TestAnAcceptedCheckIsNamedOnBothLegs).
+        code, prompt, err = self._util(
             capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T006",
             "--stdout")
-        assert code == 0 and "Title: Edit: print the build stamp" in prompt
+        assert code == 3, (prompt, err)
         assert "Check findings the user accepted" not in prompt
 
     def test_next_command_prints_the_resume_and_one_combined_answers_command(
