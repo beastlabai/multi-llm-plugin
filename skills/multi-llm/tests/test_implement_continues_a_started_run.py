@@ -521,6 +521,67 @@ class TestALaterCycleOnTheNativeLeg:
         assert handed == ["T001"]
 
 
+class TestATaskRerunLeftUnclosed:
+    """Review of fix round 16 (abort #4): a native `--task T001` rerun of a
+    finished implement that the host recorded with `util batch-done` but
+    never closed with `util finalize-tracking --mark-completed` leaves
+    implement started. A plain emit then continues it: every task is done, so
+    it hands out nothing and asks only for the close; `--fresh` starts over."""
+
+    _emit = TestTheNativeEmit._emit
+
+    def _rerun_t001_unclosed(self, repo, capsys):
+        from utils import batch_done
+
+        _finish_once(repo)
+        capsys.readouterr()
+        assert implement_orchestrator.main([
+            "--plan-file", str(repo.plan), "--yes", "--task", "T001"]) == 0
+        assert batch_done.main([
+            "--phase-dir", str(_phase_dir(repo)), "--task-id", "T001",
+            "--status", "completed",
+        ]) == 0
+        capsys.readouterr()
+
+    def test_a_plain_emit_continues_it_and_only_closes_the_phase(self, repo, capsys):
+        from test_stop_results_surface import multi_llm_util
+        from utils.state_manager import get_or_create_state
+
+        self._rerun_t001_unclosed(repo, capsys)
+        code, text, handed = self._emit(repo, capsys)
+        assert code == 0, text
+        assert CONTINUED in text, text
+        assert "kept 3 task(s) an earlier run finished (T001, T002, T003)" in text
+        assert handed == []
+        assert "Nothing to dispatch" in text, text
+        assert "--mark-completed" in text, text
+        state = get_or_create_state(repo.plan)
+        assert state.is_phase_started("implement")
+        assert multi_llm_util([
+            "finalize-tracking", "--state-file", str(state.state_file),
+            "--mark-completed",
+        ]) == 0
+        assert get_or_create_state(repo.plan).is_phase_completed("implement")
+
+    def test_fresh_starts_over_instead(self, repo, capsys):
+        self._rerun_t001_unclosed(repo, capsys)
+        code, text, handed = self._emit(repo, capsys, "--fresh")
+        assert code == 0, text
+        assert CONTINUED not in text
+        assert handed == ["T001", "T002", "T003"]
+
+    def test_an_executor_task_rerun_closes_itself_so_a_plain_run_starts_over(
+        self, repo, capsys
+    ):
+        _finish_once(repo)
+        code, text, log = _second_run(repo, capsys, "--task", "T001")
+        assert code == 0, text
+        code, text, log = _second_run(repo, capsys)
+        assert code == 0, text
+        assert CONTINUED not in text
+        assert _ids_in(log.read_text(encoding="utf-8")) == {"T001", "T002", "T003"}
+
+
 class TestAStartOverClearsTheEarlierPrompts:
     """Review of fix round 16 (noise #4): a start-over left the earlier run's
     `prompts/<id>.prompt.txt` and `<id>.attempt-N.prompt.txt`, so a task the
