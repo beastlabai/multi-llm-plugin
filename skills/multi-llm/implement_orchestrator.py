@@ -961,6 +961,12 @@ def _start_over(
     The prompts kept in ``{phase}/prompts/`` are removed
     (:func:`_remove_kept_prompts`), and implement is recorded started on both
     legs, as the native emit records it.
+
+    A first implement has nothing to set aside, and this writes nothing then
+    (fix round 18, run 7 #9: a plain first run stamped a reset for every code
+    task and recorded implement started, which the executor's completion
+    popped into an empty ``phases_started``): see
+    :func:`_has_earlier_implement_records`.
     """
     from utils.state_manager import (
         set_task_batch_check_in_state, set_task_check_findings_in_state,
@@ -983,6 +989,8 @@ def _start_over(
             f"WARNING: start over: the pre-batch snapshots are left in place: "
             f"{exc.message}", file=sys.stderr,
         )
+    if not _has_earlier_implement_records(state, phase_dir, code_ids, repo_root):
+        return
     set_aside: List[str] = []
     for task_id in code_ids:
         touched = False
@@ -1033,6 +1041,74 @@ def _start_over(
             f"start over: removed {removed} prompt file(s) an earlier run kept "
             f"in {phase_dir}/prompts/."
         )
+
+
+def _has_earlier_implement_records(
+    state: StateManager, phase_dir: Path, code_ids: Sequence[str],
+    repo_root: Optional[str],
+) -> bool:
+    """Whether an earlier implement left anything a start-over sets aside.
+
+    Read-only, and the same records :func:`_start_over` acts on: a status
+    other than ``pending`` without a reason, a check finding, check tree
+    stamp or own-check finding, a result file, a pre-batch snapshot, for any
+    code task in *code_ids*; a line the prior-changes log holds for one of
+    them under implement; a kept prompt. Absent all of these the run is the
+    plan's first implement, and starting it over would only stamp resets and
+    a started record for work that never ran (fix round 18, run 7 #9). A
+    snapshot that cannot be read counts as a record, so the start-over that
+    would warn about it still runs.
+    """
+    from utils import prior_changes as _prior_changes
+    from utils.state_manager import (
+        TASK_BATCH_CHECK_KEY, TASK_CHECK_FINDINGS_KEY, TASK_CHECK_TREES_KEY,
+    )
+    from utils.subagent_tasks import implement_output_name
+    from utils.write_batch_scheduler import DISPATCHED_PROMPTS_SUBDIR
+    from utils.write_safety import TaskSnapshot, WriteSafetyError
+
+    ids = set(code_ids)
+    for task_id in code_ids:
+        status = state.get_task_status(task_id)
+        if status not in (None, TaskStatus.PENDING.value) or (
+            status == TaskStatus.PENDING.value
+            and state.get_task_status_reason(task_id)
+        ):
+            return True
+    for key in (TASK_CHECK_FINDINGS_KEY, TASK_CHECK_TREES_KEY, TASK_BATCH_CHECK_KEY):
+        recorded = state.get(key)
+        if isinstance(recorded, dict) and ids & {str(k) for k in recorded}:
+            return True
+    for task_id in code_ids:
+        result = phase_dir / implement_output_name(task_id)
+        if result.exists() or result.is_symlink():
+            return True
+        if repo_root is not None:
+            try:
+                if TaskSnapshot.load(
+                    str(phase_dir), task_id, expected_root=repo_root,
+                ) is not None:
+                    return True
+            except (WriteSafetyError, OSError):
+                return True
+    try:
+        logged = _prior_changes.entries(str(phase_dir.parent))
+    except Exception:  # noqa: BLE001 - an unreadable log is a record
+        return True
+    implement = _prior_changes.canonical_phase("implement")
+    if any(
+        _prior_changes.canonical_phase(entry.get("phase")) == implement
+        and str(entry.get("id") or "") in ids
+        for entry in logged
+    ):
+        return True
+    prompts = phase_dir / DISPATCHED_PROMPTS_SUBDIR
+    try:
+        return prompts.is_dir() and any(
+            name.endswith(".prompt.txt") for name in os.listdir(prompts)
+        )
+    except OSError:
+        return True
 
 
 def _remove_kept_prompts(phase_dir: Path) -> int:

@@ -1626,7 +1626,8 @@ class TestMarkCompletedIsTheNativeLegsClosingWrite:
             assert main(["--state-file", str(path), "--mark-completed"]) == 0
         saved = json.loads(path.read_text(encoding="utf-8"))
         assert isinstance(saved["phases_completed"]["implement"], str)
-        assert "implement" not in saved["phases_started"]
+        # Fix round 18: the emptied map goes with its last record.
+        assert "phases_started" not in saved
         assert "Phase implement marked completed" in capsys.readouterr().out
 
     def test_the_flag_reads_back_through_the_state_manager(self, temp_dir):

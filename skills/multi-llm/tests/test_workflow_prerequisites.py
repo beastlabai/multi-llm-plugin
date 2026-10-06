@@ -1968,7 +1968,8 @@ class TestStartedPhaseReadsInProgress:
         assert reloaded.phase_started_at("implement")
         reloaded.mark_phase_completed("implement")
         assert not reloaded.is_phase_started("implement")
-        assert "implement" not in reloaded.state["phases_started"]
+        # Fix round 18: the emptied map goes with its last record.
+        assert "phases_started" not in reloaded.state
         assert reloaded.is_phase_completed("implement")
 
     def test_a_skip_clears_it_too(self, tmp_path):

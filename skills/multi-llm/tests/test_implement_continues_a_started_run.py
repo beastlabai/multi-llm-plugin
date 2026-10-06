@@ -640,3 +640,49 @@ class TestAStartOverClearsTheEarlierPrompts:
         code, text, _handed = TestTheNativeEmit._emit(None, repo, capsys, "--fresh")
         assert code == 0, text
         assert victim.read_text(encoding="utf-8") == "not the plugin's"
+
+
+class TestAFirstImplementSetsNothingAside:
+    """Fix round 18 (run 7 #9, the container goldens re-seeded at 8e8f559): a
+    plain FIRST implement ran the start-over step, which set nothing aside
+    yet stamped `implement_task_reset_at` for every code task and recorded
+    implement started; the executor's completion popped that record and left
+    `phases_started: {}`. A first run writes none of it; a start-over with
+    something to set aside still does."""
+
+    def test_a_first_executor_run_leaves_no_reset_stamp_and_no_started_map(
+        self, repo, capsys,
+    ):
+        from utils.state_manager import TASK_RESET_AT_KEY, get_or_create_state
+
+        _finish_once(repo)
+        text = capsys.readouterr()
+        assert "start over:" not in text.out + text.err
+        state = get_or_create_state(repo.plan)
+        assert state.is_phase_completed("implement")
+        assert TASK_RESET_AT_KEY not in state.state, state.state.get(TASK_RESET_AT_KEY)
+        assert "phases_started" not in state.state, state.state.get("phases_started")
+
+    def test_a_first_native_emit_stamps_no_reset(self, repo, capsys):
+        from utils.state_manager import TASK_RESET_AT_KEY, get_or_create_state
+
+        _seed_generate_tasks(repo)
+        code, text, handed = TestTheNativeEmit._emit(None, repo, capsys)
+        assert code == 0, text
+        assert handed == ["T001", "T002", "T003"]
+        state = get_or_create_state(repo.plan)
+        assert TASK_RESET_AT_KEY not in state.state
+        # The emit's own record that the host now holds the batches.
+        assert state.is_phase_started("implement")
+
+    def test_a_start_over_after_a_finished_run_still_resets_every_code_task(
+        self, repo, capsys,
+    ):
+        from utils.state_manager import TASK_RESET_AT_KEY, get_or_create_state
+
+        _finish_once(repo)
+        text = _stop_again_after_t001(repo, capsys, "--fresh")
+        assert "start over:" in text, text
+        state = get_or_create_state(repo.plan)
+        assert sorted(state.state[TASK_RESET_AT_KEY]) == ["T001", "T002", "T003"]
+        assert state.is_phase_started("implement")

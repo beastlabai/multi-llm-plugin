@@ -85,9 +85,21 @@ def mark_phase_completed_in_state(state: Dict[str, Any], phase: str) -> None:
     if "phases_completed" not in state:
         state["phases_completed"] = {}
     state["phases_completed"][phase] = datetime.now().isoformat()
+    _pop_phase_started(state, phase)
+
+
+def _pop_phase_started(state: Dict[str, Any], phase: str) -> None:
+    """Drop *phase*'s started record, and the map once it is empty.
+
+    Fix round 18 (run 7 #9): a run that recorded a phase started and then
+    completed it left ``phases_started: {}`` behind, so a plain first
+    implement on the executor leg wrote a key that says nothing.
+    """
     started = state.get("phases_started")
     if isinstance(started, dict):
         started.pop(phase, None)
+        if not started:
+            del state["phases_started"]
 
 
 #: ``state.json``'s record of the ``--human-task <id>=done|skip`` answers
@@ -1469,9 +1481,7 @@ class StateManager:
         # An explicit skip ends a run the host abandoned: a started record
         # left beside it would keep offering `--resume` for a phase the user
         # chose not to finish.
-        started = self.state.get("phases_started")
-        if isinstance(started, dict):
-            started.pop(phase, None)
+        _pop_phase_started(self.state, phase)
 
     def is_phase_skipped(self, phase: str) -> bool:
         """
