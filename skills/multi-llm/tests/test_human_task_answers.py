@@ -174,7 +174,9 @@ class TestAnAnswerOnTheNativeLeg:
         assert _emit(repo, out_json, "--yes", "--resume", "--human-task", "T002=done") == 0
         handed = _handed(out_json)
         assert "T002" not in [tid for tid, _ in handed], handed
-        assert ("T005", "skipped") in handed
+        # Fix round 14: a skipped task is named in `skipped_tasks`, never
+        # handed out in the batches.
+        assert "T005" not in [tid for tid, _ in handed], handed
         assert _statuses(repo)["T002"] == "completed"
         data = json.loads(out_json.read_text())
         assert list(data["accepted_tasks"]) == ["T002"]
@@ -195,7 +197,7 @@ class TestAnAnswerOnTheNativeLeg:
         assert _emit(repo, out_json, "--yes", "--resume", "--human-task", "T002=skip") == 0
         out = capsys.readouterr().out
         handed = dict(_handed(out_json))
-        assert handed["T002"] == "skipped" and handed["T004"] == "skipped"
+        assert "T002" not in handed and "T004" not in handed, handed
         assert handed["T003"] == "pending"
         data = json.loads(out_json.read_text())
         assert sorted(data["skipped_tasks"]) == ["T002", "T004"]
@@ -214,7 +216,8 @@ class TestAnAnswerOnTheNativeLeg:
         capsys.readouterr()
         assert _emit(repo, out_json, "--yes", "--resume") == 0
         handed = dict(_handed(out_json))
-        assert handed.get("T002") == "skipped" and handed.get("T004") == "skipped"
+        assert "T002" not in handed and "T004" not in handed, handed
+        assert sorted(json.loads(out_json.read_text())["skipped_tasks"]) == ["T002", "T004"]
         statuses = _statuses(repo)
         assert statuses["T002"] == "skipped" and statuses["T004"] == "skipped"
 
@@ -303,7 +306,8 @@ class TestSkipTakesTheDependentsUnderEveryStrategy:
         _fail_the_check(repo)
         capsys.readouterr()
         assert _emit(repo, out_json, "--yes", "--resume", "--human-task", "T002=skip") == 0
-        assert dict(_handed(out_json))["T004"] == "skipped"
+        assert "T004" not in dict(_handed(out_json))
+        assert "T004" in json.loads(out_json.read_text())["skipped_tasks"]
 
 
 # --- the resumed account keeps every skipped task ----------------------------
@@ -505,7 +509,8 @@ class TestAStrategyChangeOnResumeRunsWhatItNoLongerSkips:
         repo = repo_dep
         out_json = tmp_path / "implement_tasks.json"
         assert _emit(repo, out_json, "--yes") == 0
-        assert dict(_handed(out_json))["T006"] == "skipped"
+        assert "T006" not in dict(_handed(out_json))
+        assert "T006" in json.loads(out_json.read_text())["skipped_tasks"]
         _fail_the_check(repo)
         capsys.readouterr()
         assert _emit(

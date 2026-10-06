@@ -571,8 +571,9 @@ class TestTheNativeLegRecordsItsDeferrals:
         # The host reads the skips; it does not re-derive them.
         assert sorted(handoff["skipped_tasks"]) == ["T002", "T003"]
         by_id = {t["id"]: t for b in handoff["batches"] for t in b["tasks"]}
-        assert by_id["T002"]["status"] == by_id["T003"]["status"] == "skipped"
-        assert by_id["T003"]["skip_reason"] == state["task_status_reasons"]["T003"]
+        # Fix round 14: named in `skipped_tasks`, never handed out in the batches.
+        assert "T002" not in by_id and "T003" not in by_id
+        assert handoff["skipped_tasks"]["T003"] == state["task_status_reasons"]["T003"]
         assert by_id["T001"]["status"] == "pending"
         assert "T002 Implement the core: deferred — manual task" in out
 
