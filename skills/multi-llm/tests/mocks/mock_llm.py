@@ -543,12 +543,13 @@ def apply_mock_edits(prompt: str = "") -> List[Dict[str, Any]]:
 REPORT_REASK_MARKER = "You are re-sending the report of a batch of edits."
 
 
-#: A line of the re-ask's "The batch's ids" block: ``- suggestion 1 = `<id>```.
-_LISTED_ID = re.compile(r"^- (?:suggestion|fix) (\d+) = `([^`]+)`$", re.MULTILINE)
+#: A line of the re-ask's "The batch's ids" block: ``- suggestion 1 = `<id>```
+#: (``task 1`` for an implement re-ask, fix round 14).
+_LISTED_ID = re.compile(r"^- (?:suggestion|fix|task) (\d+) = `([^`]+)`$", re.MULTILINE)
 
 #: An item named by its position, the way the batch prompts' own "Return
 #: Format" asks for ("Suggestion 1: …").
-_POSITIONAL_ID = re.compile(r"^\s*(?:suggestion|fix|item)\s*#?\s*(\d+)\s*$", re.I)
+_POSITIONAL_ID = re.compile(r"^\s*(?:suggestion|fix|task|item)\s*#?\s*(\d+)\s*$", re.I)
 _POSITIONAL_LINE = re.compile(
     r"^[\s*#-]*((?:suggestion|fix)\s+\d+)\s*\**\s*:(.*)$", re.I | re.MULTILINE
 )

@@ -729,8 +729,65 @@ class TestReportReAsk:
         assert len(self._calls(log)) == 2, "exactly one re-ask"
         assert result.exit_code == 3
 
-    def test_the_implement_kind_gets_no_re_ask(self, env):
-        assert "implement" not in executor.SCHEMA_REPAIRS_BY_KIND
+    def _implement_task(self, env):
+        return env.apply_task(
+            0, kind="implement", task_id="T013", expected_ids=["T013"],
+            output_name="implement_batch_T013.json",
+            declared_files=[str(env.root / "src" / "a.py")],
+        )
+
+    def test_an_implement_task_gets_the_same_re_ask(self, env):
+        """Fix round 14 (OpenCode racing run 5, T013): the runner edited
+        index.html for 442 s and replied in prose ("No valid JSON found in
+        text"); implement had no report re-ask, so a finished edit stopped the
+        phase as a partial application. It gets the apply kinds' re-ask now,
+        and the byte comparison still decides what was applied."""
+        log = env.enable_call_log()
+        env.edits([_patch_edit(env.root / "src" / "a.py", "# done\n")], prose=True)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps({
+            "status": "applied", "ids": ["T013"], "files_touched": ["src/a.py"],
+            "summary": "reset path unified"}))
+
+        result = env.scheduler(
+            [self._implement_task(env)], kind="implement", finalize=False,
+        ).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_OK, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_APPLIED
+        assert outcome.files_touched == ["src/a.py"]
+        assert result.exit_code == 0, result.messages
+        assert [(a.status, a.repair) for a in outcome.attempts] == [
+            (executor.STATUS_UNPARSEABLE, None),
+            (executor.STATUS_OK, executor.REPAIR_SCHEMA_INVALID),
+        ]
+        first, second = [c["prompt"] for c in self._calls(log)]
+        assert "Apply batch 0" in first
+        assert second.startswith("You are re-sending the report of a batch of edits.")
+        assert "Apply batch 0" not in second, "the task's instructions are never re-sent"
+        assert "- task 1 = `T013`" in second
+        # The edit landed once: the re-ask restated, it did not re-apply.
+        text = (env.root / "src" / "a.py").read_text(encoding="utf-8")
+        assert text.count("# done\n") == 1
+
+    def test_an_implement_re_ask_that_moves_a_file_is_a_partial_application(self, env):
+        """The same guard as the apply kinds': a re-ask told only to restate
+        its report that edits again is an edit nobody verified."""
+        env.edits([_patch_edit(env.root / "src" / "a.py", "# done\n")], prose=True)
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps({
+            "status": "applied", "ids": ["T013"], "files_touched": ["src/a.py"],
+            "summary": "reset path unified"}))
+        env.monkeypatch.setenv("MOCK_LLM_REPAIR_EDITS", "1")
+
+        result = env.scheduler(
+            [self._implement_task(env)], kind="implement", finalize=False,
+        ).run()
+
+        outcome = result.outcomes[0]
+        assert outcome.status == executor.STATUS_PARTIAL, outcome.reason
+        assert outcome.write_outcome == executor.WRITE_PARTIAL
+        assert "report re-ask" in outcome.reason
+        assert result.exit_code == 3
 
     def test_a_dispatch_without_the_file_guard_gets_no_re_ask(self, env, monkeypatch):
         """No `tree_fingerprint` hook, no proof the re-ask moved nothing: rung 6
@@ -1267,8 +1324,8 @@ class TestVerificationOnlyImplementTask:
     ])
     def test_a_near_miss_check_shape_is_read_not_a_schema_failure(self, env, check):
         """Fix round 11 (review T3): each of these was `schema_invalid`, exit
-        3, and implement has no report re-ask, so it stopped for good on a
-        check that had answered."""
+        3, and implement had no report re-ask then, so it stopped for good on
+        a check that had answered."""
         env.edits([], result=self._check_reply(check=check))
         result = env.scheduler(
             [self._task(env)], kind="implement", finalize=False,

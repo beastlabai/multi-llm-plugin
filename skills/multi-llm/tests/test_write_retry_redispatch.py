@@ -306,7 +306,8 @@ class TestEveryRetryableRungAsksFirst:
 
 
 # ===========================================================================
-# implement (no re-ask): the measured r5 shape, end to end
+# implement: the measured r5 shape, end to end (the report re-ask since fix
+# round 14)
 # ===========================================================================
 
 PLAN = """# Two edits
@@ -385,6 +386,9 @@ def repo(tmp_path, monkeypatch):
 
 
 def test_an_implement_batch_that_replied_in_prose_is_not_sent_again(repo, capsys):
+    """The prose reply after the edit gets the report re-ask (fix round 14),
+    never the batch again; a re-ask that attests nothing leaves it a partial
+    application."""
     code = implement_orchestrator.main(
         ["--plan-file", str(repo["plan"]), "--yes", "--exec-subagents"]
     )
@@ -393,7 +397,8 @@ def test_an_implement_batch_that_replied_in_prose_is_not_sent_again(repo, capsys
 
     assert code == 3
     prompts = _prompts(repo["log"])
-    assert len(prompts) == 1, "T001 was dispatched again on top of its own edit"
+    assert len(prompts) == 2, "T001 was dispatched again on top of its own edit"
+    assert "T001" in prompts[0] and prompts[1].startswith(REASK_MARKER)
     main = (repo["root"] / "src" / "main.py").read_text(encoding="utf-8")
     assert main.count("# edited\n") == 1
 
@@ -409,6 +414,32 @@ def test_an_implement_batch_that_replied_in_prose_is_not_sent_again(repo, capsys
     assert "util restore-batch" in text and "--task-id T001" in text
     assert VERDICT_WARNING not in text
     assert get_or_create_state(repo["plan"]).get_task_status("T001") == "failed"
+
+
+def test_an_implement_batch_whose_report_is_restated_is_applied(repo, capsys, monkeypatch):
+    """Fix round 14 (OpenCode racing run 5, T013 and the stop fixture's T003):
+    an implement task that finished its edit and replied in prose stopped the
+    phase as a partial application. The report re-ask restates the report,
+    the byte comparison finds the edit, and the next task runs."""
+    monkeypatch.setenv("MOCK_LLM_REPAIR_RESULT", json.dumps({
+        "status": "applied", "ids": ["T001", "T002"],
+        "files_touched": ["src/main.py"], "summary": "restated the report",
+    }))
+    code = implement_orchestrator.main(
+        ["--plan-file", str(repo["plan"]), "--yes", "--exec-subagents"]
+    )
+    captured = capsys.readouterr()
+
+    assert code == 0, captured.out + captured.err
+    prompts = _prompts(repo["log"])
+    batches = [p for p in prompts if not p.startswith(REASK_MARKER)]
+    reasks = [p for p in prompts if p.startswith(REASK_MARKER)]
+    assert len(batches) == 2 and len(reasks) == 2, "one re-ask per task, no batch twice"
+    main = (repo["root"] / "src" / "main.py").read_text(encoding="utf-8")
+    assert main.count("# edited\n") == 2, "each task's edit landed once"
+    state = get_or_create_state(repo["plan"])
+    assert state.get_task_status("T001") == "completed"
+    assert state.get_task_status("T002") == "completed"
 
 
 # ===========================================================================

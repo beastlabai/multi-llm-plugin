@@ -924,12 +924,14 @@ WRITE_REPORT_REPLY_SHAPE = '''{"status": "applied", "ids": ["<id>"], "files_touc
 '''
 
 #: The write kinds a schema-repair re-ask may restate the report of: the three
-#: apply phases (2026-10-05). ``implement`` is deliberately absent — its grant
-#: would be the same mechanism, but it was not part of the measured failure.
+#: apply phases (2026-10-05) and ``implement`` (fix round 14: OpenCode racing
+#: run 5's T013 finished its edit, replied in prose, and stopped implement as
+#: a partial application).
 WRITE_REPORT_REPAIR_KINDS = (
     "apply_suggestions",
     "apply_task_suggestions",
     "apply_code_fixes",
+    "implement",
 )
 
 #: The reply shape a schema-repair re-ask restates, per kind. A kind absent here
@@ -988,7 +990,14 @@ SCHEMA_REPAIR_EXAMPLES: Dict[str, Dict[str, Any]] = {
             "summary": "Added the \"Countdown\" rule to the Race logic section.",
             "notes": "",
         }
-        for kind in WRITE_REPORT_REPAIR_KINDS
+        for kind in WRITE_REPORT_REPAIR_KINDS if kind != "implement"
+    },
+    "implement": {
+        "status": "applied",
+        "ids": ["T001"],
+        "files_touched": ["index.html"],
+        "summary": "Added the countdown overlay to index.html.",
+        "notes": "",
     },
 }
 
@@ -1131,7 +1140,7 @@ def _batch_ids_block(kind: str, ids: Sequence[str]) -> str:
     (``write_batch_scheduler.with_result_contract``: "suggestion 1 = `<id>`"),
     so a reply that named its items by position maps back by that number.
     """
-    item = "fix" if kind == "apply_code_fixes" else "suggestion"
+    item = {"apply_code_fixes": "fix", "implement": "task"}.get(kind, "suggestion")
     held = f"1 {item}" if len(ids) == 1 else (
         f"{len(ids)} {item}es" if item == "fix" else f"{len(ids)} {item}s"
     )
@@ -1218,6 +1227,14 @@ def build_schema_repair_prompt(
             take = (
                 "Restate that reply's report. Take every value from it; never name "
                 "an id or a\nfile it does not name."
+            )
+        if kind == "implement":
+            # A check task's result rides in `check`, which the verdict reads
+            # (``subagent_executor.check_findings_from``): restated as given,
+            # never re-run and never invented.
+            take += (
+                "\nIf it gave a `check` object (a check task's result), restate "
+                "that object as\nit gave it; do not run the check again."
             )
         return f'''You are re-sending the report of a batch of edits. A previous turn
 already made the edits — they are on disk now — but its closing report could not
