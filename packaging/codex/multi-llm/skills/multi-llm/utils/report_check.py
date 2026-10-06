@@ -13,11 +13,13 @@ prints the next step as a block of marker lines above its result line::
     [NEXT_COMMAND_ANSWERS] <command>
 
 (the answers pair only from ``util next-command`` on a stopped implement,
-fix round 14), or ``[WORKFLOW_COMPLETE]``, followed by one ``[MANUAL_TASK] <id> <title>`` line per
-implement task the run deferred to the user. The model is told to end its report
-with each command in a fenced block, copied character for character, or with
-"Workflow complete." and those tasks listed. This checks the copy, and only the
-copy:
+fix round 14), or ``[WORKFLOW_COMPLETE]``. Either kind is followed by one
+``[MANUAL_TASK] <id> <title>`` line per implement task the run deferred to the
+user, while any is owed, and one ``[MANUAL_TASK_NOTE]`` line saying how to
+record them done (after the commands of a command block since fix round 16).
+The model is told to end its report with each command in a fenced block,
+copied character for character, or with "Workflow complete.", and then those
+tasks listed. This checks the copy, and only the copy:
 
 * It reads the transcript entries since the last **real** user prompt: a user
   entry whose content is a string or carries a text block. A user entry that
@@ -35,8 +37,13 @@ copy:
   fenced code block of the final assistant message. Only the whitespace around
   a line is ignored, so a fence nested in a list item still counts. For
   ``[WORKFLOW_COMPLETE]`` it passes when the message says "Workflow complete."
-  and names each ``[MANUAL_TASK]`` id as a word of its own. A why line is
-  never a command.
+  A block of either kind with ``[MANUAL_TASK]`` lines also needs each of their
+  ids named as a word of its own, anywhere in the message (fix round 17: after
+  a command block too, which SKILL.md and summary-format.md have asked for
+  since fix round 16). Only the ids: a report that lists the tasks as the
+  rule says always names them, while a check of the note's wording would
+  block a report that put its command in backticks. A why line is never a
+  command.
 * The final message is the text of the turn's trailing assistant entries. The
   ``Stop`` hook input's ``last_assistant_message`` is read too, when present,
   and the turn passes when either carries the copy: a stale transcript must
@@ -117,9 +124,13 @@ NEXT_COMMAND_OPTIONAL_WHY = "[NEXT_COMMAND_OPTIONAL_WHY] "
 NEXT_COMMAND_ANSWERS = "[NEXT_COMMAND_ANSWERS] "
 NEXT_COMMAND_ANSWERS_WHY = "[NEXT_COMMAND_ANSWERS_WHY] "
 WORKFLOW_COMPLETE = "[WORKFLOW_COMPLETE]"
-#: One per implement task the run deferred, under ``[WORKFLOW_COMPLETE]``:
-#: ``<id> <title>`` (``next_phase.MANUAL_TASK_MARKER``).
+#: One per implement task the run deferred, under ``[WORKFLOW_COMPLETE]`` or
+#: after a command block's commands: ``<id> <title>``
+#: (``next_phase.MANUAL_TASK_MARKER``).
 MANUAL_TASK = "[MANUAL_TASK] "
+#: After those lines: how the user records them done
+#: (``next_phase.MANUAL_TASK_NOTE_MARKER``). Quoted in a block's reason.
+MANUAL_TASK_NOTE = "[MANUAL_TASK_NOTE] "
 
 #: What the report says when the block is ``[WORKFLOW_COMPLETE]`` (§2.3).
 COMPLETE_SENTENCE = "Workflow complete."
@@ -167,9 +178,11 @@ class Block:
         self.optional: List[tuple] = []
         #: ``(why, command)``: the combined answers line, when printed.
         self.answers: List[tuple] = []
-        #: ``(id, title)`` pairs a ``[WORKFLOW_COMPLETE]`` block names: the
-        #: manual tasks the user still owes (``title`` may be ``""``).
+        #: ``(id, title)`` pairs the block names: the manual tasks the user
+        #: still owes (``title`` may be ``""``), on either kind of block.
         self.manual: List[tuple] = []
+        #: The ``[MANUAL_TASK_NOTE]`` text after them, when printed.
+        self.note: Optional[str] = None
 
     def commands(self) -> List[str]:
         """Every command the report has to carry: the primary one first."""
@@ -220,9 +233,13 @@ def find_blocks(text: str) -> List[Block]:
             if current is not None and not current.complete and command:
                 current.optional.append((pending_why, command))
             pending_why = None
+        elif line.startswith(MANUAL_TASK_NOTE):
+            note = line[len(MANUAL_TASK_NOTE):].strip()
+            if current is not None and current.manual and note:
+                current.note = note
         elif line.startswith(MANUAL_TASK):
             task_id, _, title = line[len(MANUAL_TASK):].strip().partition(" ")
-            if current is not None and current.complete and task_id:
+            if current is not None and task_id:
                 current.manual.append((task_id, title.strip()))
     return blocks
 
@@ -268,24 +285,31 @@ def missing_commands(block: Block, message: str) -> List[str]:
     """The block's commands that *message* does not carry, in block order.
 
     For a ``[WORKFLOW_COMPLETE]`` block the "commands" are the sentence, missing
-    when the message does not contain it, and the id of each manual task the
-    block names, missing when the message does not name it as a word of its
-    own (``T011``, not ``T0110``): a final message that lists them passes, and
-    one that says "Workflow complete." and drops them does not.
+    when the message does not contain it. On either kind of block, the id of
+    each manual task it names follows, missing when the message does not name
+    it as a word of its own (``T011``, not ``T0110``): a final message that
+    lists them passes, and one that drops them does not.
     """
     if block.complete:
         missing = [] if COMPLETE_SENTENCE in message else [COMPLETE_SENTENCE]
-        for task_id, _title in block.manual:
-            named = re.search(rf"(?<![\w]){re.escape(task_id)}(?![\w])", message)
-            if named is None and task_id not in missing:
-                missing.append(task_id)
-        return missing
-    carried = fenced_lines(message)
-    missing: List[str] = []
-    for command in block.commands():
-        if command not in carried and command not in missing:
-            missing.append(command)
+    else:
+        carried = fenced_lines(message)
+        missing = []
+        for command in block.commands():
+            if command not in carried and command not in missing:
+                missing.append(command)
+    for task_id in missing_manual_tasks(block, message):
+        if task_id not in missing:
+            missing.append(task_id)
     return missing
+
+
+def missing_manual_tasks(block: Block, message: str) -> List[str]:
+    """The ids of *block*'s manual tasks that *message* does not name."""
+    return [
+        task_id for task_id, _title in block.manual
+        if re.search(rf"(?<![\w]){re.escape(task_id)}(?![\w])", message) is None
+    ]
 
 
 #: What every block reason asks for (fix round 14, racing run 5 Claude Code
@@ -299,6 +323,23 @@ WHOLE_REPORT = (
     "(what ran, what changed, what was skipped, failed or left out, the files "
     "and the counts), unchanged — and end it with"
 )
+
+
+def _manual_list(block: Block) -> str:
+    """The block's manual tasks as a list, then its note when it printed one."""
+    listed = "\n".join(
+        f"- {task_id} {title}".rstrip() for task_id, title in block.manual
+    )
+    if block.note:
+        listed += (
+            "\n\nThen this note, verbatim (its command is the user's to type, "
+            "never yours to run):\n\n" + block.note
+        )
+    return listed
+
+
+def _tasks_noun(ids: Sequence[str]) -> str:
+    return ("task " if len(ids) == 1 else "tasks ") + ", ".join(ids)
 
 
 def block_reason(block: Block, missing: Sequence[str]) -> str:
@@ -319,24 +360,43 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
             lacks.append(f'does not say "{COMPLETE_SENTENCE}"')
         dropped = [item for item in missing if item != COMPLETE_SENTENCE]
         if dropped:
-            lacks.append(
-                "does not name the manual "
-                + ("task" if len(dropped) == 1 else "tasks")
-                + f" {', '.join(dropped)}"
-            )
-        listed = "\n".join(
-            f"- {task_id} {title}".rstrip() for task_id, title in block.manual
-        )
+            lacks.append(f"does not name the {_tasks_noun(dropped)}")
         return (
             "multi-llm report check: the last phase result in this turn printed "
-            f"{WORKFLOW_COMPLETE} with the manual tasks the run deferred to the "
+            f"{WORKFLOW_COMPLETE} with the tasks implement deferred to the "
             f"user, and your final message {' and '.join(lacks)}. {WHOLE_REPORT} "
             f"its `### Next Steps` section saying "
-            f'"{COMPLETE_SENTENCE}" and then listing each of these manual '
-            "tasks, its id and title, as the user's to do (the plugin will not "
-            "run them), carrying no multi-llm command:\n\n" + listed
+            f'"{COMPLETE_SENTENCE}" and then listing each of these '
+            "tasks, its id and title, as the user's to do, carrying no "
+            + ("other " if block.note else "")
+            + "multi-llm command:\n\n" + _manual_list(block)
         )
-    noun = "command" if len(missing) == 1 else "commands"
+    commands = block.commands()
+    lost = [item for item in missing if item in commands]
+    dropped = [item for item in missing if item not in commands]
+    tasks_after = (
+        "After the commands, list each of these tasks implement deferred to "
+        "the user, its id and title, as the user's to do; never write "
+        f'"{COMPLETE_SENTENCE}" for them: while a command is next, the '
+        "workflow goes on."
+    )
+    if not lost:
+        # Fix round 17: every command is there and the tasks after them are
+        # not. The reply replaces the final message, so it carries the
+        # commands again too.
+        parts = [
+            "multi-llm report check: the last phase result in this turn printed "
+            "the next step and, after it, the tasks implement deferred to the "
+            f"user, and your final message does not name the {_tasks_noun(dropped)}. "
+            f"{WHOLE_REPORT} its `### Next Steps` section, with each command "
+            "below in its own fenced code block, copied character for character "
+            "as before. " + tasks_after,
+        ]
+        for command in commands:
+            parts.append(f"```\n{command}\n```")
+        parts.append(_manual_list(block))
+        return "\n\n".join(parts)
+    noun = "command" if len(lost) == 1 else "commands"
     parts = [
         "multi-llm report check: the last phase result in this turn printed "
         f"the next step, and your final message does not carry the {noun} "
@@ -351,11 +411,11 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         "it is for the user to type.",
         f"Missing {noun}:",
     ]
-    for command in missing:
+    for command in lost:
         parts.append(f"```\n{command}\n```")
     # The reply replaces the final message, so it has to carry the commands
     # the report already had right as well.
-    others = [command for command in block.commands() if command not in missing]
+    others = [command for command in commands if command not in lost]
     if others:
         parts.append(
             "Carry the block's other "
@@ -364,6 +424,9 @@ def block_reason(block: Block, missing: Sequence[str]) -> str:
         )
         for command in others:
             parts.append(f"```\n{command}\n```")
+    if block.manual:
+        parts.append(tasks_after)
+        parts.append(_manual_list(block))
     return "\n\n".join(parts)
 
 

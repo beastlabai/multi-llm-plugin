@@ -4065,17 +4065,20 @@ def home_check_line(provider_name: str, record: Dict[str, Any], *, kept: bool) -
     return line + "; this slot fails closed and its output is discarded"
 
 
-def foreign_trust_line(provider_name: str, record: Dict[str, Any]) -> str:
+def foreign_trust_line(provider_name: str, record: Dict[str, Any]) -> Any:
     """The closing-summary-only note for trust tables added to ``config.toml``
-    in a slot's window for directories inside this repository (I12's entries;
-    never a failure). Another repository's are not this run's and never reach
-    it (run 6, #11a); the wording is the executor lane's,
-    ``landlock_dispatch.own_trust_entries_line``."""
-    from .landlock_dispatch import own_trust_entries_line
+    in a slot's window besides the run's own cwd (I12's entries; never a
+    failure): this run's batch or a concurrent codex session added them. A
+    ``landlock_dispatch.TrustEntriesNote``, rendered by
+    :func:`print_closing_summary` with the executor lane's wording and naming
+    only the tables still there then (fix round 17)."""
+    from .landlock_dispatch import TrustEntriesNote
 
-    return own_trust_entries_line(
-        list(record.get("foreign_trust") or ()),
-        home=record.get("home") or None, provider=provider_name,
+    home = record.get("home") or None
+    return TrustEntriesNote(
+        home=os.path.expanduser(home) if home and home != "$CODEX_HOME" else None,
+        paths=tuple(record.get("foreign_trust") or ()),
+        provider=provider_name,
     )
 
 
@@ -4083,7 +4086,7 @@ def foreign_trust_line(provider_name: str, record: Dict[str, Any]) -> str:
 #: question) directory: every ``[CODEX_HOME_CHECK]`` and ``[JAIL_DENIED]``
 #: line, and the foreign-trust notes that appear only there — the change
 #: outlives the run, so the last thing it prints names it again.
-_CLOSING_LINES: Dict[str, List[str]] = {}
+_CLOSING_LINES: Dict[str, List[Any]] = {}
 _CLOSING_LOCK = threading.Lock()
 
 
@@ -4103,7 +4106,7 @@ def phase_summary_key(plan_path: Union[str, Path], phase_name: str) -> str:
     )
 
 
-def note_for_closing_summary(key: Any, line: str) -> None:
+def note_for_closing_summary(key: Any, line: Any) -> None:
     """Keep ``line`` for the closing summary of the run keyed by ``key``."""
     if not line:
         return
@@ -4116,8 +4119,11 @@ def note_for_closing_summary(key: Any, line: str) -> None:
 def print_closing_summary(key: Any) -> List[str]:
     """Print, once, the lines :func:`note_for_closing_summary` kept for this
     run, under one heading; returns them (``[]`` prints nothing)."""
+    from .landlock_dispatch import render_summary_entries
+
     with _CLOSING_LOCK:
-        lines = _CLOSING_LINES.pop(_closing_key(key), [])
+        entries = _CLOSING_LINES.pop(_closing_key(key), [])
+    lines = render_summary_entries(entries)
     if lines:
         print("\n=== Sandbox and jail checks (repeated from this run) ===")
         for line in lines:

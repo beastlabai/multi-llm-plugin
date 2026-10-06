@@ -101,8 +101,10 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     `complete` is `true` (its `command` is then `null`), write
     "Workflow complete." instead, and when it carries `manual_tasks`, list
     each one under it, its `id` and `title`, as the user's to do: implement
-    deferred them and the plugin will not run them (the `[MANUAL_TASK]` lines
-    below `[WORKFLOW_COMPLETE]` are the same tasks), then its `manual_tasks_note`
+    deferred them to the user, and one with `waits_on` is a task skipped with
+    that manual task, which implement runs once that one is recorded done (the
+    `[MANUAL_TASK]` lines below `[WORKFLOW_COMPLETE]` are the same tasks, and
+    such a line says what it waits on), then its `manual_tasks_note`
     (the `[MANUAL_TASK_NOTE]` line) verbatim: it says how to record them done.
     A `user_next_step` that names a `command` can carry `manual_tasks` and
     `manual_tasks_note` too, while the run's manual tasks are still owed (on

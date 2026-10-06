@@ -50,7 +50,7 @@ import os
 import sys
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from . import (
     cli_common,
@@ -594,8 +594,15 @@ def _workflow_trailer_lines(
     # owed read as done (2026-10-04, OpenCode racing re-run).
     manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
     if isinstance(manual, list) and manual:
+        from .next_phase import ManualTask
+
+        # One rendering with the `[MANUAL_TASK]` line: a task skipped with a
+        # manual one says what it waits on (fix round 17).
         named = "; ".join(
-            f"{entry['id']} {entry['title']}" if entry.get("title") else str(entry["id"])
+            ManualTask(
+                str(entry["id"]), entry.get("title") or None,
+                str(entry["waits_on"]) if entry.get("waits_on") else None,
+            ).line()
             for entry in manual
             if isinstance(entry, dict) and entry.get("id")
         )
@@ -1914,6 +1921,90 @@ _IMPLEMENT_PHASE = "implement"
 _WRITE_REPORT = "write_batch_report.json"
 
 
+def _implement_buckets(
+    state: Any, *, merge: Optional[Mapping[str, str]] = None,
+) -> Tuple[Dict[str, List[str]], Dict[str, str]]:
+    """Every task of implement's decomposition in one bucket of
+    :data:`_TALLY_LABELS`, in decomposition order, and ``{dependent: manual
+    task}`` for the ``deferred_dependents`` bucket: the one classifier
+    :func:`implement_task_tally` and :func:`state_implement_view` share
+    (fix round 17: they kept two copies, and both listed a code task skipped
+    with a manual one as "deferred manual"). *merge* folds a bucket into
+    another (the view's coarser ``accepted``). *state* is a read-only
+    ``StateManager``; the decomposition must be on record.
+    """
+    from .write_batch_scheduler import (
+        ACCEPTED_REASON_PREFIX,
+        ACCEPTED_WITH_FINDINGS_MARK,
+    )
+
+    record = state.state
+    statuses = state.implementation_task_statuses()
+    reasons = record.get("task_status_reasons") or {}
+    human = {str(t) for t in (record.get("implement_human_task_ids") or [])}
+    findings = {entry["id"] for entry in state.implementation_check_findings()}
+    merge = merge or {}
+    buckets: Dict[str, List[str]] = {
+        merge.get(key, key): [] for key, _ in _TALLY_LABELS
+    }
+    waits_on: Dict[str, str] = {}
+    for task_id in [str(t) for t in record.get("implement_task_ids") or []]:
+        status = statuses.get(task_id)
+        reason = str(reasons.get(task_id) or "")
+        if status == "completed":
+            if reason.startswith(ACCEPTED_REASON_PREFIX):
+                key = ("accepted_findings" if ACCEPTED_WITH_FINDINGS_MARK in reason
+                       else "accepted_failed")
+            elif task_id in human and "--human-task" in reason:
+                key = "completed_manual"
+            elif task_id in findings:
+                key = "check_findings"
+            else:
+                key = "completed"
+        elif status == "failed":
+            key = "failed"
+        elif status == "skipped":
+            if reason.startswith((state._USER_DECLINED_REASON, state._ANSWERED_SKIP_PREFIX)):
+                key = "declined"
+            elif not state._deferred_to_user(task_id):
+                key = "declined_dependents"
+            else:
+                root = state.deferral_root(task_id)
+                if root is not None and root != task_id:
+                    key = "deferred_dependents"
+                    waits_on[task_id] = root
+                else:
+                    key = "deferred"
+        else:
+            key = "not_run"
+        buckets[merge.get(key, key)].append(task_id)
+    return buckets, waits_on
+
+
+def _bucket_clauses(
+    buckets: Mapping[str, Sequence[str]], waits_on: Mapping[str, str],
+    labels: Sequence[Tuple[str, str]], *, live: bool = False,
+) -> List[str]:
+    """``<label>: <ids>`` per non-empty bucket, in *labels*' order. The
+    dependents of a deferred manual task read "skipped (depends on manual
+    T005): T006", one clause per manual task (fix round 17)."""
+    parts: List[str] = []
+    for key, label in labels:
+        ids = list(buckets.get(key) or [])
+        if not ids:
+            continue
+        if key == "deferred_dependents":
+            for root in sorted({str(waits_on.get(tid) or "") for tid in ids}):
+                waiting = [tid for tid in ids if str(waits_on.get(tid) or "") == root]
+                named = f"skipped (depends on manual {root})" if root else label
+                parts.append(f"{named}: {', '.join(waiting)}")
+            continue
+        if key == "not_run" and live:
+            label = "pending"
+        parts.append(f"{label}: {', '.join(ids)}")
+    return parts
+
+
 def state_implement_view(
     plan_path: Path, views: Sequence[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
@@ -1959,32 +2050,7 @@ def state_implement_view(
         return None
     reasons = record.get("task_status_reasons") or {}
     titles = record.get("task_titles") or {}
-    human = set(record.get("implement_human_task_ids") or [])
-    buckets: Dict[str, List[str]] = {
-        "completed": [], "accepted": [], "completed_manual": [], "failed": [],
-        "declined": [], "declined_dependents": [], "deferred": [], "not_run": [],
-    }
-    for task_id in [str(t) for t in decomposition]:
-        status = statuses.get(task_id)
-        reason = str(reasons.get(task_id) or "")
-        if status == "completed":
-            if reason.startswith("accepted — "):
-                buckets["accepted"].append(task_id)
-            elif task_id in human and "--human-task" in reason:
-                buckets["completed_manual"].append(task_id)
-            else:
-                buckets["completed"].append(task_id)
-        elif status == "failed":
-            buckets["failed"].append(task_id)
-        elif status == "skipped":
-            if reason.startswith((state._USER_DECLINED_REASON, state._ANSWERED_SKIP_PREFIX)):
-                buckets["declined"].append(task_id)
-            elif not state._deferred_to_user(task_id):
-                buckets["declined_dependents"].append(task_id)
-            else:
-                buckets["deferred"].append(task_id)
-        else:
-            buckets["not_run"].append(task_id)
+    buckets, waits_on = _implement_buckets(state, merge=_VIEW_MERGE)
     answers = record.get("human_task_decisions")
     # The workflow trailer's rule for both kinds of findings (fix round 11):
     # once implement completed, shown until a review-code that judged them
@@ -1997,6 +2063,8 @@ def state_implement_view(
         "tasks": [str(t) for t in decomposition],
         "titles": {str(k): str(v) for k, v in titles.items()},
         "buckets": buckets,
+        # Fix round 17: what each `deferred_dependents` task waits on.
+        "waits_on": waits_on,
         "reasons": {
             task_id: str(reasons[task_id])
             for task_id in buckets["failed"] + buckets["not_run"]
@@ -2020,20 +2088,9 @@ def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
         + ("marked completed" if view.get("completed") else "not marked completed")
         + ")",
     ]
-    parts = [f"{len(done)}/{total} done"]
-    labels = (
-        ("completed", "completed"),
-        ("accepted", "accepted with their check findings or after failing"),
-        ("completed_manual", "completed by hand"),
-        ("failed", "failed"),
-        ("declined", "skipped at your request"),
-        ("declined_dependents", "skipped (depend on a task you skipped)"),
-        ("deferred", "deferred manual"),
-        ("not_run", "not run"),
+    parts = [f"{len(done)}/{total} done"] + _bucket_clauses(
+        buckets, view.get("waits_on") or {}, _VIEW_LABELS,
     )
-    for key, label in labels:
-        if buckets[key]:
-            parts.append(f"{label}: {', '.join(buckets[key])}")
     lines.append(f"      tasks:          {'; '.join(parts)}")
     for task_id, reason in view["reasons"].items():
         lines.append(f"      {task_id}: {reason}")
@@ -2071,7 +2128,9 @@ def _id_list(value: Any) -> List[str]:
 
 
 #: The buckets of :func:`implement_task_tally`, in the order the line names
-#: them, with their words. The first five are done.
+#: them, with their words. The first five are done. A task skipped with a
+#: deferred manual task reads "skipped (depends on manual T005)"
+#: (:func:`_bucket_clauses`, fix round 17).
 _TALLY_LABELS: Tuple[Tuple[str, str], ...] = (
     ("completed", "completed"),
     ("check_findings", "completed, its check reported problems"),
@@ -2082,6 +2141,24 @@ _TALLY_LABELS: Tuple[Tuple[str, str], ...] = (
     ("declined", "skipped at your request"),
     ("declined_dependents", "skipped (depend on a task you skipped)"),
     ("deferred", "deferred manual"),
+    ("deferred_dependents", "skipped (depends on a manual task)"),
+    ("not_run", "not run"),
+)
+#: :func:`state_implement_view`'s coarser buckets, folded from the tally's.
+_VIEW_MERGE: Dict[str, str] = {
+    "check_findings": "completed",
+    "accepted_findings": "accepted",
+    "accepted_failed": "accepted",
+}
+_VIEW_LABELS: Tuple[Tuple[str, str], ...] = (
+    ("completed", "completed"),
+    ("accepted", "accepted with their check findings or after failing"),
+    ("completed_manual", "completed by hand"),
+    ("failed", "failed"),
+    ("declined", "skipped at your request"),
+    ("declined_dependents", "skipped (depend on a task you skipped)"),
+    ("deferred", "deferred manual"),
+    ("deferred_dependents", "skipped (depends on a manual task)"),
     ("not_run", "not run"),
 )
 _TALLY_DONE = (
@@ -2103,53 +2180,20 @@ def implement_task_tally(plan_path: Path) -> Optional[Dict[str, Any]]:
     Read-only.
     """
     from .state_manager import StateManager
-    from .write_batch_scheduler import (
-        ACCEPTED_REASON_PREFIX,
-        ACCEPTED_WITH_FINDINGS_MARK,
-    )
 
     try:
         state = StateManager(plan_path, read_only=True)
     except Exception:  # noqa: BLE001 - advisory: the run view is not
         return None
-    record = state.state
-    decomposition = record.get("implement_task_ids")
+    decomposition = state.state.get("implement_task_ids")
     if not isinstance(decomposition, list) or not decomposition:
         return None
-    statuses = state.implementation_task_statuses()
-    reasons = record.get("task_status_reasons") or {}
-    human = {str(t) for t in (record.get("implement_human_task_ids") or [])}
-    findings = {entry["id"] for entry in state.implementation_check_findings()}
-    buckets: Dict[str, List[str]] = {key: [] for key, _ in _TALLY_LABELS}
-    for task_id in [str(t) for t in decomposition]:
-        status = statuses.get(task_id)
-        reason = str(reasons.get(task_id) or "")
-        if status == "completed":
-            if reason.startswith(ACCEPTED_REASON_PREFIX):
-                key = ("accepted_findings" if ACCEPTED_WITH_FINDINGS_MARK in reason
-                       else "accepted_failed")
-            elif task_id in human and "--human-task" in reason:
-                key = "completed_manual"
-            elif task_id in findings:
-                key = "check_findings"
-            else:
-                key = "completed"
-        elif status == "failed":
-            key = "failed"
-        elif status == "skipped":
-            if reason.startswith((state._USER_DECLINED_REASON, state._ANSWERED_SKIP_PREFIX)):
-                key = "declined"
-            elif not state._deferred_to_user(task_id):
-                key = "declined_dependents"
-            else:
-                key = "deferred"
-        else:
-            key = "not_run"
-        buckets[key].append(task_id)
+    buckets, waits_on = _implement_buckets(state)
     return {
         "total": len(decomposition),
         "done": sum(len(buckets[key]) for key in _TALLY_DONE),
         "buckets": buckets,
+        "waits_on": waits_on,
     }
 
 
@@ -2157,13 +2201,9 @@ def implement_tally_text(tally: Dict[str, Any], *, live: bool = False) -> str:
     """:func:`implement_task_tally` as one clause list: ``5/7 done;
     completed: …; accepted with their check findings: …``. A task not run
     yet reads "pending" while the run is *live*, "not run" once it ended."""
-    parts = [f"{tally['done']}/{tally['total']} done"]
-    for key, label in _TALLY_LABELS:
-        ids = tally["buckets"].get(key) or []
-        if ids:
-            if key == "not_run" and live:
-                label = "pending"
-            parts.append(f"{label}: {', '.join(ids)}")
+    parts = [f"{tally['done']}/{tally['total']} done"] + _bucket_clauses(
+        tally["buckets"], tally.get("waits_on") or {}, _TALLY_LABELS, live=live,
+    )
     return "; ".join(parts)
 
 
@@ -2332,14 +2372,30 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     # request"). A mirror without the keys reads as before.
     declined = _id_list(mirror.get("declined_task_ids"))
     with_them = _id_list(mirror.get("declined_dependent_task_ids"))
+    # Fix round 17: a task skipped with a deferred manual task is named
+    # apart, as the phase tally names it (`deferred_waits_on`; a mirror
+    # without the key reads as before).
+    raw_waits = mirror.get("deferred_waits_on")
+    waits_on = {
+        str(task_id): str(root) for task_id, root in raw_waits.items()
+    } if isinstance(raw_waits, dict) else {}
     deferred = [
         str(task_id) for task_id in skipped_ids
         if str(task_id) not in declined and str(task_id) not in with_them
+        and str(task_id) not in waits_on
     ]
     if deferred:
         strategy = mirror.get("human_task_strategy")
         suffix = f" ({strategy})" if strategy else ""
         parts.append(f"deferred manual: {', '.join(deferred)}{suffix}")
+    waiting = [
+        str(task_id) for task_id in skipped_ids if str(task_id) in waits_on
+    ]
+    if waiting:
+        parts.extend(_bucket_clauses(
+            {"deferred_dependents": waiting}, waits_on,
+            (("deferred_dependents", "skipped (depends on a manual task)"),),
+        ))
     if declined:
         parts.append(f"skipped at your request: {', '.join(declined)}")
     if with_them:

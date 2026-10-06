@@ -383,6 +383,7 @@ __all__ = [
     "sandbox_rung",
     "write_rung_notice",
     "repo_wide_write_refusal",
+    "jail_summary_count",
     "jail_summary_lines",
     "WRITE_SCOPE_BY_KIND",
     "RUNG_SKIPPED_BY_SWITCH",
@@ -2242,10 +2243,12 @@ SANDBOX_DECISION_WRITE_BY_CONSENT = "unsandboxed-by-consent"
 _SANDBOX_NOTICE_PARTS: Dict[str, Tuple[str, str, Optional[str], str, str]] = {}
 
 #: Lines the run's closing summary repeats (F1 item 6 and Limits): every
-#: ``[JAIL_DENIED]`` and ``[CODEX_HOME_CHECK]`` line this process printed.
-#: Per process, like the probe cache; :func:`jail_summary_lines` reads it and
-#: :func:`run_tasks` prints the ones its own batch added.
-_JAIL_SUMMARY_LINES: List[str] = []
+#: ``[JAIL_DENIED]`` and ``[CODEX_HOME_CHECK]`` line this process printed,
+#: plus the trust-entry notes rendered only when the summary prints
+#: (``landlock_dispatch.TrustEntriesNote``). Per process, like the probe
+#: cache; :func:`jail_summary_lines` renders it and :func:`run_tasks` prints
+#: the ones its own batch added (counted by :func:`jail_summary_count`).
+_JAIL_SUMMARY_LINES: List[Any] = []
 _JAIL_SUMMARY_LOCK = threading.Lock()
 
 #: How many jailed codex children of this process are live, and how many have
@@ -2317,14 +2320,25 @@ def sandbox_rung(
     return None
 
 
-def jail_summary_lines() -> List[str]:
-    """Every ``[JAIL_DENIED]`` / ``[CODEX_HOME_CHECK]`` line this process
-    printed, in order, for a run's closing summary (plan F1 item 6, Limits)."""
+def jail_summary_count() -> int:
+    """How many entries the closing summary holds so far: the mark a caller
+    takes before its batch and hands :func:`jail_summary_lines` after it."""
     with _JAIL_SUMMARY_LOCK:
-        return list(_JAIL_SUMMARY_LINES)
+        return len(_JAIL_SUMMARY_LINES)
 
 
-def _record_jail_line(line: str, *, echo: bool = True) -> None:
+def jail_summary_lines(start: int = 0) -> List[str]:
+    """Every ``[JAIL_DENIED]`` / ``[CODEX_HOME_CHECK]`` line this process
+    recorded from entry ``start`` on, in order, for a run's closing summary
+    (plan F1 item 6, Limits). Trust-entry notes are rendered now and merged
+    per home (``landlock_dispatch.render_summary_entries``): a table gone
+    again by now is left out."""
+    with _JAIL_SUMMARY_LOCK:
+        entries = list(_JAIL_SUMMARY_LINES[start:])
+    return landlock_dispatch.render_summary_entries(entries)
+
+
+def _record_jail_line(line: Any, *, echo: bool = True) -> None:
     """Print ``line`` (the run log) and keep it for the closing summary."""
     with _JAIL_SUMMARY_LOCK:
         _JAIL_SUMMARY_LINES.append(line)
@@ -6492,11 +6506,15 @@ def _read_jailed_outcome(
             capture.home_change = change.to_dict()
             _record_jail_line(_home_check_line(spec, jail.rung, change, others))
         if change.foreign_trust:
-            # Trust tables for other directories inside this repository (I12;
-            # another repository's are never this run's, run 6 #11a): named in
-            # the closing summary only, never a warning per dispatch.
+            # Trust tables for directories other than this run's cwds (I12):
+            # this run's batch or a concurrent codex session added them. Named
+            # in the closing summary only, never a warning per dispatch, and
+            # only those still in the config when it prints (fix round 17).
             _record_jail_line(
-                landlock_dispatch.own_trust_entries_line(change.foreign_trust),
+                landlock_dispatch.TrustEntriesNote(
+                    home=context.codex_home,
+                    paths=tuple(change.foreign_trust),
+                ),
                 echo=False,
             )
 
@@ -8701,7 +8719,7 @@ def run_tasks(
     # Plan codex-sandbox-unavailable §6 F1 item 6 / Limits (2026-09-30): the
     # `[JAIL_DENIED]` and `[CODEX_HOME_CHECK]` lines this batch prints are
     # repeated at its close, because a home change outlives the run.
-    jail_lines_before = len(jail_summary_lines())
+    jail_lines_before = jail_summary_count()
     outcomes = _run_sync(_gather(
         _dispatch_order(selected),
         runners=runners,
@@ -8741,7 +8759,7 @@ def run_tasks(
     if write_report:
         report.write()
     _mirror_status(phase_dir, report)
-    for line in jail_summary_lines()[jail_lines_before:]:
+    for line in jail_summary_lines(jail_lines_before):
         print(f"[exec-subagents] closing summary: {line}")
     return report
 

@@ -75,6 +75,11 @@
       "description": "Native leg only: per check task with findings, a fingerprint of the files git saw when the run that recorded them ended. A --resume hands the check out again only when the files changed since",
       "additionalProperties": { "type": "string" }
     },
+    "implement_task_reset_at": {
+      "type": "object",
+      "description": "Per implement task: when a run that hands it out again (a start-over, a --task rerun) set its earlier record aside. A native --resume does not count a prior-changes line no newer than this as one the run left unrecorded",
+      "additionalProperties": { "type": "string", "format": "date-time" }
+    },
     "human_task_strategy": {
       "type": "string",
       "description": "Chosen strategy for handling human tasks during implementation",
