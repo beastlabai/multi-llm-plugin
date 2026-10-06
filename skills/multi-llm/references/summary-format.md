@@ -106,6 +106,8 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     `[MANUAL_TASK]` lines below `[WORKFLOW_COMPLETE]` are the same tasks, and
     such a line says what it waits on), then its `manual_tasks_note`
     (the `[MANUAL_TASK_NOTE]` line) verbatim: it says how to record them done.
+    Give the note as plain text, never inside a fenced block: a fence holds one
+    command alone, and the note is a sentence that carries one.
     A `user_next_step` that names a `command` can carry `manual_tasks` and
     `manual_tasks_note` too, while the run's manual tasks are still owed (on
     Claude Code the same lines follow the `[NEXT_COMMAND]` block): list them
