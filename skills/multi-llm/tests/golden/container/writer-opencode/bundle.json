@@ -42,7 +42,7 @@
   "manifest": {
     "axis": "writer",
     "bundle_version": 1,
-    "captured_at": "2026-10-06T00:46:39Z",
+    "captured_at": "2026-10-06T11:46:27Z",
     "cli": "opencode",
     "host": {
       "host_id": "sha256:e9ce53674803",
@@ -58,10 +58,10 @@
         "verdict": "permitted"
       }
     },
-    "image": "mllm-e2e:fix13-reseed",
+    "image": "mllm-e2e:fix15-reseed",
     "reviewer": "pi",
     "row_id": "chain-writer-opencode",
-    "run_bundle": "20261006T002312Z"
+    "run_bundle": "20261006T112311Z"
   },
   "markers": [
     "[PROGRESS]",
@@ -1149,6 +1149,7 @@
               "write_outcome": "no-op"
             }
           ],
+          "unverified": "<text:sha256:0374c30d8cfc:230>",
           "verification": null,
           "written_at": "<timestamp>"
         },
@@ -3776,6 +3777,7 @@
               "write_outcome": "no-op"
             }
           ],
+          "unverified": "<text:sha256:0374c30d8cfc:230>",
           "verification": null,
           "written_at": "<timestamp>"
         },
@@ -4731,6 +4733,7 @@
       "exit": 0,
       "mode": "full",
       "next": null,
+      "notice": "<text:sha256:0374c30d8cfc:230>",
       "phase": "full",
       "state": "done",
       "user_next_step": {
@@ -5338,7 +5341,8 @@
               ],
               "<list>": 3
             },
-            "total": "<int>"
+            "total": "<int>",
+            "unverified": "<str>"
           }
         },
         "state": "<str>",
@@ -5885,7 +5889,8 @@
               ],
               "<list>": 3
             },
-            "total": "<int>"
+            "total": "<int>",
+            "unverified": "<str>"
           }
         },
         "state": "<str>",
