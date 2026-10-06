@@ -34,7 +34,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Tuple, Union
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple, Union
 
 #: The four line kinds of the block (§2.2(2)). The text after a command
 #: marker and one space is the builder's ``command`` byte for byte; an
@@ -1033,10 +1033,100 @@ def emit_resume(
             raise LookupFailed(str(exc)) from exc
         return None
     modes = _skill_module("modes")
-    cli_common.record_user_resume(
-        {"phase": modes.resolve(mode_word).phase, "command": command}
-    )
+    mode = modes.resolve(mode_word)
+    resume: Dict[str, Any] = {
+        "phase": mode.phase,
+        "command": command,
+        # The flags the command carries after the plan, so a tool route
+        # offers this very command as its first `options` entry (fix round
+        # 14: the first option and `resume_command` must be one command).
+        "flags": [] if mode.phase in RERUN_RESUME_PHASES else [RESUME_FLAG],
+    }
+    try:
+        answers = resume_answers(
+            plan_arg, host_id, route, mode_word, plan_path=plan_path,
+        )
+    except Exception as exc:  # noqa: BLE001 - advisory: the resume still stands
+        print(lookup_failure_line(exc), file=err)
+        answers = []
+    if answers:
+        resume["answers"] = answers
+        resume["answers_text"] = render_resume_answers(answers)
+    cli_common.record_user_resume(resume)
     return command
+
+
+def stop_answers_on_record(
+    plan_path: Union[str, Path], mode_word: str,
+) -> List[Dict[str, Any]]:
+    """The answers the phase's last stop recorded, as data, or ``[]``.
+
+    Read from ``{phase}/.status.json``'s write mirror
+    (``progress.write_subagents.stop.answers``, written by
+    ``write_batch_scheduler._stop_answers``): the run's own record of which
+    ``--human-task`` answers its stop named. Each entry is kept only when it
+    is ``{"flags": [str, …], "why": str}`` with ``--resume`` first.
+    """
+    from .output_handler import phase_dir_path
+    from .status_file import read_status
+
+    modes = _skill_module("modes")
+    mode = modes.resolve(mode_word)
+    if mode is None or not mode.phase:
+        return []
+    source = Path(os.path.abspath(str(plan_path)))
+    status = read_status(str(phase_dir_path(source, mode.phase)))
+    progress = status.get("progress") if isinstance(status, dict) else None
+    mirror = progress.get("write_subagents") if isinstance(progress, dict) else None
+    stop = mirror.get("stop") if isinstance(mirror, dict) else None
+    raw = stop.get("answers") if isinstance(stop, dict) else None
+    answers: List[Dict[str, Any]] = []
+    for entry in raw if isinstance(raw, list) else []:
+        flags = entry.get("flags") if isinstance(entry, dict) else None
+        why = entry.get("why") if isinstance(entry, dict) else None
+        if (isinstance(flags, list) and flags and flags[0] == RESUME_FLAG
+                and all(isinstance(flag, str) and flag for flag in flags)
+                and isinstance(why, str) and why.strip()):
+            answers.append({"flags": list(flags), "why": why.strip()})
+    return answers
+
+
+def resume_answers(
+    plan_arg: str,
+    host_id: str,
+    route: Optional[str],
+    mode_word: str,
+    *,
+    plan_path: Optional[Union[str, Path]] = None,
+) -> List[Dict[str, Any]]:
+    """Each answer the last stop offers, spelled the way this host's user types it.
+
+    ``[{"command", "flags", "why"}]`` from :func:`stop_answers_on_record`,
+    each command built by :func:`phase_command` — the same template and
+    quoting as the resume command beside it. Fix round 14 (live run 5): the
+    tool routes handed the user only the bare ``--resume`` in ``message`` and
+    ``options`` while the answers the stop named sat in ``error``, and hosts
+    relayed them in two of four first stops.
+    """
+    source = plan_arg if plan_path is None else plan_path
+    return [
+        {
+            "command": phase_command(plan_arg, host_id, route, mode_word, *entry["flags"]),
+            "flags": entry["flags"],
+            "why": entry["why"],
+        }
+        for entry in stop_answers_on_record(source, mode_word)
+    ]
+
+
+def render_resume_answers(answers: Sequence[Mapping[str, Any]]) -> str:
+    """The answers as one run of text: `` `<command>` (<why>)`` joined by ``; ``.
+
+    What the tool routes put in their needs-human ``message`` through the
+    surface's ``needs_human_message.answers`` clause, so a host that relays
+    only the message relays every way forward. Python owns the wording.
+    """
+    return "; ".join(f"`{entry['command']}` ({entry['why']})" for entry in answers)
 
 
 # ---------------------------------------------------------------------------
