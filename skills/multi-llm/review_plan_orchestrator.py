@@ -572,6 +572,15 @@ def consolidate_mode(phase_dir: str, plan_path: str, args=None) -> None:
         reaggregate_consolidation_mode(phase_dir, plan_path, prefix, [])
         return
 
+    # The plan as the user typed it (fix round 14).
+    reaggregate_cmd = cli_common.retry_command(
+        "review-plan",
+        cli_common.typed_plan_for(tasks_metadata.get("plan_file") or plan_path),
+        tasks_metadata.get("reaggregate_command") or "--reaggregate-consolidation",
+        flags=cli_common.current_replay_flags(
+            tasks_metadata.get("replay_flags"), mode="review-plan"
+        ),
+    )
     print(f"\nAfter consolidation completes, run:")
     print(f"  {reaggregate_cmd}")
 

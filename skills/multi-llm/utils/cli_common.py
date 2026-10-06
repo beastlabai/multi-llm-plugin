@@ -1092,6 +1092,30 @@ def invocation_plan_arg() -> Optional[str]:
     return flag_value(list(record.get("argv") or []), "--plan-file") or None
 
 
+def typed_plan_for(plan: Union[str, Path]) -> str:
+    """*plan* as this invocation's user typed it, when that spelling names it.
+
+    What a native leg's printed hand-off names the plan with (fix round 14,
+    racing run 5, Claude Code 03): generate-tasks' "then continue with: …
+    generate-tasks /tmp/…/plans/racing-game.md --reaggregate" and its
+    ``MULTI_LLM_RESULT.next`` carried the absolute path although the user
+    typed ``plans/racing-game.md``, and the host ran and quoted it. The typed
+    spelling (:func:`invocation_plan_arg`) is used only when
+    ``next_phase.recorded_plan_spelling`` passes it — it resolves from this
+    cwd to the same existing file and holds no character a shell would act
+    on — else *plan* as given. Session-scoped like every printed command:
+    nothing durable stores it.
+    """
+    typed = invocation_plan_arg()
+    if typed:
+        from .next_phase import recorded_plan_spelling
+
+        spelling = recorded_plan_spelling(typed, str(plan))
+        if spelling is not None:
+            return spelling
+    return str(plan)
+
+
 # ---------------------------------------------------------------------------
 # The replay-argv contract (D2): what a retry carries forward
 # ---------------------------------------------------------------------------

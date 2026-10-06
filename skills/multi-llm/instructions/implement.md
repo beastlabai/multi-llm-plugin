@@ -609,12 +609,12 @@ your host.
    Add a reference to the implementation summary in the original plan. This is the
    same command as step 7 with three more flags — it is deterministic, so it is
    Python's job and not a block of inline code for you to retype. Pass the
-   absolute `plan_file` and the `summary_file_relative` value exactly as the
-   orchestrator printed them; the insertion is idempotent, so re-running it on an
-   already-updated plan is a no-op:
+   task JSON's `plan_arg` (the plan as the user typed it) as `$PLAN_ARG` and the
+   `summary_file_relative` value exactly as the orchestrator printed them; the
+   insertion is idempotent, so re-running it on an already-updated plan is a no-op:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util finalize-tracking \
-     --state-file "$STATE_FILE" --plan-file "$PLAN_FILE" \
+     --state-file "$STATE_FILE" --plan-file "$PLAN_ARG" \
      --summary-file-relative "$SUMMARY_FILE_RELATIVE" --mark-completed
    ```
    `--mark-completed` is the phase's completion record. The orchestrator recorded

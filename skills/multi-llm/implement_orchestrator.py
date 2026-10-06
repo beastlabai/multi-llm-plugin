@@ -46,6 +46,7 @@ from utils.cli_common import (
     record_artifacts,
     record_error,
     record_notice,
+    typed_plan_for,
 )
 from utils.output_handler import get_phase_dir, get_output_dir
 from utils.git_utils import get_project_root
@@ -1959,6 +1960,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             "pending_tasks": pending_count,
             "batches": output_batches
         }
+
+    # The plan as the user typed it, for the closing `util finalize-tracking
+    # --plan-file` (fix round 14: the host copied the absolute `plan_file`).
+    output_data["plan_arg"] = typed_plan_for(plan_path)
 
     # The resolved answers travel with the tasks, so the invoker copies a
     # decision instead of composing one (D5a).

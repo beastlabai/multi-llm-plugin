@@ -4128,6 +4128,10 @@ async def reaggregate_from_existing_files(
                     str(phase_dir), batched_tasks, grouped, str(validation_path)
                 )
             else:
+                # The plan as the user typed it (fix round 14).
+                reaggregate_cmd = resolved_reaggregate_command(
+                    batched_tasks, typed_plan=True,
+                )
                 print("\nAfter validation completes, run:")
                 print(f"  {reaggregate_cmd or ''}")
                 record_next(reaggregate_cmd or None)
@@ -5203,6 +5207,12 @@ async def main(argv: Optional[List[str]] = None) -> int:
                         )
                         validated_groups = validated_groups_for_report
                     else:
+                        # The plan as the user typed it (fix round 14).
+                        reaggregate_cmd = cli_common.retry_command(
+                            'review-code', cli_common.typed_plan_for(plan_path),
+                            '--reaggregate',
+                            flags=cli_common.current_replay_flags(mode='review-code'),
+                        )
                         print("\nAfter validation completes, run:")
                         print(f"  {reaggregate_cmd}")
                         record_next(reaggregate_cmd)
@@ -5396,7 +5406,7 @@ async def main(argv: Optional[List[str]] = None) -> int:
         # Print the reaggregate command for the host to use after salvage.
         # Fully resolved (see above) and still `uv run …`-prefixed.
         salvage_reaggregate_cmd = cli_common.retry_command(
-            'review-code', plan_path, '--reaggregate',
+            'review-code', cli_common.typed_plan_for(plan_path), '--reaggregate',
             flags=cli_common.current_replay_flags(mode='review-code'),
         )
         print("")
