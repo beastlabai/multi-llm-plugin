@@ -549,10 +549,14 @@ NEEDS_HUMAN_WORK_SENTENCE = (
 #: template, not here, so this constant — and the ``SKILL.md`` literal held
 #: to it — keep one wording. Four hand-typed paraphrases of this rule are
 #: exactly how two hosts come to contradict each other on the behaviour an
-#: incident hinges on.
+#: incident hinges on. Fix round 19: it asked for "what was being run", which
+#: on a file route is the dispatcher command with the flags the shim composed
+#: (the needs-human message's `argv`, run-7 #13); it asks for the phase and
+#: the plan.
 NEEDS_HUMAN_RULE = (
     "Run `next` verbatim when it is not `null` on `0` and `2`. On `3` stop: "
-    "report to the user what was being run, the last error line it printed, "
+    "report to the user which phase was running on which plan, the last "
+    "error line it printed, "
     "whole (on a stop it says what stopped, what it reported, what did not "
     "run and whether anything ran the repository's tests), "
     "and the options its output names (`next` included); do not run a "

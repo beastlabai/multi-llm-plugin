@@ -99,8 +99,9 @@ def _words(text: str) -> list:
 
 
 def _argv_reporting_clauses(text: str) -> list:
-    """Each place *text* asks for `argv` to be reported: a reporting word in
-    the eight words of its sentence before `argv` (``report … what was being
+    """Each place *text* asks for `argv` — or "what was being run", which on
+    a file route is the same command line — to be reported: a reporting word
+    in the eight words of its sentence before it (``report … what was being
     run (`argv`)``) or in the three after it (```argv` says what ran``), and
     no negation in the six words before it. Code spans other than `argv`
     itself are not words here, and a line wrap ends nothing."""
@@ -109,7 +110,7 @@ def _argv_reporting_clauses(text: str) -> list:
         lambda span: span.group(0) if span.group(1) == "argv" else " ",
         text).split())
     found = []
-    for match in re.finditer(r"\bargv\b", text):
+    for match in re.finditer(r"\bargv\b|\bwhat was being run\b", text, re.I):
         head = re.split(r"[.;:!?](?:\s|$)", text[:match.start()])[-1]
         tail = re.split(r"[.;:!?](?:\s|$)", text[match.end():])[0]
         before, after = _words(head), _words(tail)
@@ -161,11 +162,17 @@ class TestTheStopNamesThePhaseNotTheToolsArgv:
         for flag in ("--exec-subagents", "--detach"):
             assert flag in text
 
+    def test_the_file_routes_rule_asks_for_the_phase_and_plan_too(self):
+        assert "report to the user which phase was running on which plan" in (
+            modes.NEEDS_HUMAN_RULE)
+
     def test_no_host_facing_text_asks_for_argv(self):
         """Fix round 19: the merge of round 18 kept "Report to the user what
         was being run (`argv`)" as the message's opening beside the later
-        "never quote `argv`", so both tool routes were told both. Any text a
-        host reads that asks for `argv` fails here, wherever it is."""
+        "never quote `argv`", so both tool routes were told both, and the
+        file routes' and Claude Code's needs-human rule asked for "what was
+        being run", the dispatcher command with the flags the shim composed.
+        Any text a host reads that asks for either fails here."""
         offenders = [
             f"{where}: {clause}"
             for where, text in _host_facing_texts()
@@ -177,6 +184,7 @@ class TestTheStopNamesThePhaseNotTheToolsArgv:
         "Report to the user what was being run (`argv`), that line whole",
         "`log` and `argv` say what ran",
         "tell the user the argv it ran",
+        "On `3` stop: report to the user what was being run, the last error line",
     ])
     def test_the_scan_catches_an_argv_report(self, clause):
         assert _argv_reporting_clauses(clause), clause
