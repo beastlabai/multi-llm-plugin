@@ -833,6 +833,7 @@ class TestSchemaRepairPrompt:
         ("apply_suggestions", "write_batch_result.schema.json"),
         ("apply_task_suggestions", "write_batch_result.schema.json"),
         ("apply_code_fixes", "write_batch_result.schema.json"),
+        ("implement", "write_batch_result.schema.json"),
     ])
     def test_the_named_top_level_keys_are_the_schemas_required_ones(self, kind, schema):
         document = json.loads(
@@ -888,6 +889,7 @@ class TestSchemaRepairPrompt:
         ("apply_suggestions", "suggestion"),
         ("apply_task_suggestions", "suggestion"),
         ("apply_code_fixes", "fix"),
+        ("implement", "task"),
     ])
     def test_the_write_form_lists_the_batchs_ids_in_prompt_order(self, kind, item):
         """Fix round 11 (OpenCode racing run 4): the re-ask never named the
@@ -911,6 +913,24 @@ class TestSchemaRepairPrompt:
             < prompt.index("## The batch's ids")
             < prompt.index("## Reply")
         )
+
+    def test_the_implement_form_restates_a_check_and_never_reruns_it(self):
+        """Fix round 14: implement gets the report re-ask; a check task's
+        result rides in `check`, which the verdict reads, so the re-ask asks
+        for it as given — and only implement's re-ask says so."""
+        prompt = subagent_prompts.build_schema_repair_prompt(
+            "implement", "Run node --check on index.html", ["x"],
+            previous_reply="The check ran: index.html parses.",
+            expected_ids=["T014"],
+        )
+        assert "Run node --check" not in prompt
+        assert "- task 1 = `T014`" in prompt
+        assert "restate that object as\nit gave it; do not run the check again" in prompt
+        other = subagent_prompts.build_schema_repair_prompt(
+            "apply_suggestions", "Q", ["x"], previous_reply="done",
+            expected_ids=["a"],
+        )
+        assert "`check` object" not in other
 
     def test_the_write_form_without_ids_lists_none(self):
         prompt = subagent_prompts.build_schema_repair_prompt(

@@ -616,9 +616,9 @@ class TestGeneratedTasksSchemaIsStrictClean:
 
 class TestSchemaRepairIsTaskGenerationOnly:
     """The one schema-repair re-ask (2026-10-05) is granted per kind:
-    `task_generation` and the three apply kinds (whose re-ask restates a report
-    and is pinned in test_write_executor.py) hold a grant; every other kind's
-    rung 6 is exactly as terminal as it was."""
+    `task_generation` and the four write kinds (whose re-ask restates a report
+    and is pinned in test_write_executor.py; `implement` since fix round 14)
+    hold a grant; every other kind's rung 6 is exactly as terminal as it was."""
 
     def test_the_grant_table_is_the_one_kind_it_claims(self):
         from utils.subagent_prompts import SCHEMA_REPAIR_SHAPES
@@ -628,8 +628,8 @@ class TestSchemaRepairIsTaskGenerationOnly:
             "apply_suggestions": 1,
             "apply_task_suggestions": 1,
             "apply_code_fixes": 1,
+            "implement": 1,
         }
-        assert "implement" not in executor.SCHEMA_REPAIRS_BY_KIND
         # A granted kind must have a reply shape to restate.
         assert set(executor.SCHEMA_REPAIRS_BY_KIND) <= set(SCHEMA_REPAIR_SHAPES)
         assert set(executor.SCHEMA_REPAIRS_BY_KIND) <= set(KINDS)

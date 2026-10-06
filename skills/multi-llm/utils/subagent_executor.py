@@ -576,7 +576,12 @@ SCHEMA_PHASE_BY_KIND = {
 #:   original prompt is not re-sent, the runner restates its own previous
 #:   reply without touching a file, and the dispatch fails as a partial
 #:   application if any file moved during it (``tree_fingerprint``).
-#:   ``implement`` keeps rung 6 terminal.
+#: * ``implement`` (fix round 14, OpenCode racing run 5): T013 edited
+#:   ``index.html`` for 442 s, replied in prose ("No valid JSON found in
+#:   text"), and the stop called a finished edit a partial application. The
+#:   same report re-ask, with the same guards: it restates the report and
+#:   edits nothing, a file it moves makes the dispatch a partial application,
+#:   and the byte comparison still decides what was applied.
 #:
 #: Validation and consolidation keep rung 6 terminal: a batch is one of many
 #: and fails alone. A kind listed here must have a shape in
@@ -586,6 +591,7 @@ SCHEMA_REPAIRS_BY_KIND = {
     "apply_suggestions": 1,
     "apply_task_suggestions": 1,
     "apply_code_fixes": 1,
+    "implement": 1,
 }
 
 
@@ -773,8 +779,10 @@ def check_findings_from(result: Any) -> Optional[List[str]]:
     Lenient on shape, strict on meaning (fix round 11). The schema admits
     any ``check``, because a near-miss shape (``passed: "false"``,
     ``findings: "one problem"``, a number as a finding) used to be a
-    ``schema_invalid`` reply, and implement has no report re-ask, so the run
-    stopped for good on a check that had answered. Each shape is read here
+    ``schema_invalid`` reply, and implement had no report re-ask then, so the
+    run stopped for good on a check that had answered (it has one since fix
+    round 14; the lenient reading stays, so a near-miss costs no re-ask).
+    Each shape is read here
     instead, and only a clear pass with nothing listed is a pass: a finding
     beside ``passed: true`` still counts, ``passed: false`` with none listed
     gets :data:`CHECK_FAILED_WITHOUT_FINDINGS`, and a ``check`` that says
@@ -6714,7 +6722,7 @@ def dispatch_task(
             with one ``[JAIL_DENIED]`` line, never retried and never moved to
             another rung.
         tree_fingerprint: The write lane's guard on a report re-ask (the
-            ladder's rule 7 for an apply kind, :data:`SCHEMA_REPAIRS_BY_KIND`).
+            ladder's rule 7 for a write kind, :data:`SCHEMA_REPAIRS_BY_KIND`).
             Called with ``{task, task_id, kind, cwd, outcome}`` just before the
             re-ask and again after it; it returns a comparable value naming the
             current bytes of every file the batch may have moved (a dict keyed
@@ -7151,7 +7159,7 @@ def dispatch_task(
         # timeout, a runner error, a prose reply, a rate limit — is asked first
         # whether it already moved bytes. If it did, the batch is never sent
         # again on top of its own edits: the attempt is a partial application,
-        # or, for an apply kind whose reply could not be read, the one report
+        # or, for a write kind whose reply could not be read, the one report
         # re-ask (rule 7), which restates the report and edits nothing. A re-ask
         # in flight is exempt: its retry re-sends the re-ask, and
         # `repair_baseline` above already fails one that moved a file.
