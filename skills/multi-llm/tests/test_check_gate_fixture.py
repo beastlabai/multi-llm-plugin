@@ -447,6 +447,112 @@ class TestTheNativeLeg:
         assert "Refused before dispatch (recorded failed in state.json" in out
         assert "without --mark-completed" in out
 
+    @staticmethod
+    def _line(out: str, prefix: str) -> str:
+        return next(line for line in out.splitlines() if line.startswith(prefix))
+
+    def test_every_count_of_the_first_emit_agrees(self, repo, capsys):
+        """Fix round 16 (live run 6, Claude Code stop 01, both repos): the
+        first emit said "Organized into 5 execution batches: 5 task(s)"
+        beside "Batches: 3" (the decomposition's five layers, counted before
+        T005 and T006 were taken out), and the host passed `--total-batches
+        5`. Every count is now read off the batches as handed out, the JSON
+        carries the one the host passes, and T007 — in the batches, since
+        T002's verdict is not known yet — is named as waiting on it, with
+        what happens if T002 reports problems."""
+        handoff, out = self._emit_text(repo, capsys)
+        # Six layers decomposed; T005 and T006 taken out leave four.
+        assert [[t["id"] for t in b["tasks"]] for b in handoff["batches"]] == [
+            ["T001"], ["T002", "T003"], ["T004"], ["T007"]]
+        assert self._line(out, "Organized into ") == (
+            "Organized into 4 execution batches: 5 task(s) to dispatch "
+            "(T007 waits on a check's verdict)"
+        )
+        assert self._line(out, "Batches: ") == "Batches: 4"
+        assert self._line(out, "Pending tasks: ") == "Pending tasks: 5"
+        assert handoff["tasks_to_dispatch"] == 5
+        assert self._line(out, "Tasks to dispatch: ") == (
+            "Tasks to dispatch: 5 (pass --total-batches 5 to `util metrics "
+            "start` and `util metrics record`)"
+        )
+        assert handoff["waiting_on_checks"] == {
+            "T007": (
+                "waits on check T002: dispatch it only after T002 is recorded "
+                "with `--check passed`; if T002 reports problems, `util "
+                "batch-done` prints [CHECK_BLOCKED] for it and it is not run"
+            ),
+        }
+        assert (
+            "Waiting on a check's verdict (in the batches after the check they "
+            "depend on; if the check reports problems, do not dispatch them — "
+            "they stay pending and the phase closes without --mark-completed):"
+        ) in out
+        assert "  T007 Edit: write the release note: waits on check T002: " in out
+
+    def test_a_resume_that_hands_the_check_out_again_names_its_waiters(
+        self, repo, capsys,
+    ):
+        """On a resume the batches were already right (run 6, 01b/02); a
+        resume that hands T002 out again, on changed files, still names T007
+        as waiting on it, and its counts agree."""
+        self._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        for task_id in ("T001", "T003", "T004"):
+            self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                       task_id, "--status", "completed")
+        self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
+                   "--status", "completed", "--check", "findings",
+                   "--finding", FINDINGS[0])
+        main = repo.root / "src" / "main.py"
+        main.write_text(main.read_text() + "retries = 3\n", encoding="utf-8")
+
+        handoff, out = self._emit_text(
+            repo, capsys, "--resume", "--human-task", "T005=skip")
+        assert [[t["id"] for t in b["tasks"]] for b in handoff["batches"]] == [
+            ["T002"], ["T007"]]
+        assert self._line(out, "Organized into ") == (
+            "Organized into 2 execution batches: 2 task(s) to dispatch "
+            "(T007 waits on a check's verdict)"
+        )
+        assert self._line(out, "Batches: ") == "Batches: 2"
+        assert handoff["tasks_to_dispatch"] == handoff["pending_tasks"] == 2
+        assert list(handoff["waiting_on_checks"]) == ["T007"]
+
+    def test_the_core_passes_the_emitted_count_and_explains_the_waiters(self):
+        from pathlib import Path
+
+        core = (Path(__file__).parent.parent / "instructions" / "implement.md").read_text(
+            encoding="utf-8")
+        assert "--total-batches {total_tasks}" not in core
+        assert core.count("--total-batches {tasks_to_dispatch}") == 2
+        assert (
+            "take `{tasks_to_dispatch}` from the task JSON's `tasks_to_dispatch` "
+            "(step 2's `Tasks to dispatch:` line; never count it yourself"
+        ) in core
+        assert (
+            "A task named in `waiting_on_checks` (step 2's \"Waiting on a check's "
+            "verdict\" list) is in `batches`, after the check task it depends on"
+        ) in core
+
+    def test_a_resume_with_one_task_left_says_one_batch(self, repo, capsys):
+        self._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        for task_id in ("T001", "T003", "T004"):
+            self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id",
+                       task_id, "--status", "completed")
+        self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T002",
+                   "--status", "completed", "--check", "findings",
+                   "--finding", FINDINGS[0])
+        handoff, out = self._emit_text(
+            repo, capsys, "--resume", "--human-task", "T002=done",
+            "--human-task", "T005=skip",
+        )
+        assert self._line(out, "Organized into ") == (
+            "Organized into 1 execution batch: 1 task(s) to dispatch")
+        assert handoff["tasks_to_dispatch"] == 1
+        assert "waiting_on_checks" not in handoff
+        assert "Waiting on a check's verdict" not in out
+
     def test_write_prompt_still_refuses_a_task_the_policy_denies_later(
         self, repo, capsys,
     ):

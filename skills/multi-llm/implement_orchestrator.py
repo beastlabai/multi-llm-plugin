@@ -1586,6 +1586,18 @@ def _native_withheld(
     output_data["batches"] = kept_batches
     if "pending_tasks" in output_data:
         output_data["pending_tasks"] = sum(len(b["tasks"]) for b in kept_batches)
+    waiting = _waiting_on_checks(kept_batches, graph)
+    if waiting:
+        output_data["waiting_on_checks"] = {
+            task_id: (
+                f"waits on check {', '.join(checks)}: dispatch it only after "
+                f"{' and '.join(checks)} {'is' if len(checks) == 1 else 'are'} "
+                f"recorded with `--check passed`; if "
+                f"{' or '.join(checks)} reports problems, `util batch-done` "
+                f"prints [CHECK_BLOCKED] for it and it is not run"
+            )
+            for task_id, checks in sorted(waiting.items())
+        }
     if kept_checks:
         output_data["not_rerun_checks"] = {
             check_id: (
@@ -1633,16 +1645,74 @@ def _continued_line(kept: Sequence[str]) -> str:
     )
 
 
-def _dispatch_line(output_data: Dict[str, Any], decomposed_batches: int) -> str:
+def _waiting_on_checks(
+    batches: Sequence[Dict[str, Any]], graph: Sequence[Dict[str, Any]],
+) -> Dict[str, List[str]]:
+    """Each handed-out task that depends, directly or through another task,
+    on a check task handed out in the same batches: ``{task id: [check ids]}``.
+
+    Fix round 16 (live run 6, Claude Code stop 01): T007 sat in the first
+    emit's batches beside T004 although it depends on check T002, whose
+    verdict nobody knows until T002 runs — rightly, since a pass releases it,
+    but nothing said so, and the counts read as one more task than ran. Its
+    hold is decided by ``util batch-done --check findings`` (``[CHECK_BLOCKED]``)
+    and ``util write-prompt`` (``[WRITE_PROMPT_BLOCKED]``); this only names it
+    in advance. A manual task waits on nothing (no subagent runs it).
+    """
+    from utils.write_batch_scheduler import is_check_task, transitive_dependents
+
+    entries = [task for batch in batches for task in batch.get("tasks") or []]
+
+    def manual(task: Dict[str, Any]) -> bool:
+        return bool(task.get("is_human")) or task.get("executor_role") == "human"
+
+    present = {str(task.get("id") or ""): task for task in entries}
+    checks = sorted(
+        task_id for task_id, task in present.items()
+        if not manual(task) and is_check_task("implement", task)
+    )
+    waiting: Dict[str, List[str]] = {}
+    for check_id in checks:
+        for dependent in transitive_dependents(graph, check_id):
+            task = present.get(dependent)
+            if task is not None and not manual(task):
+                waiting.setdefault(dependent, []).append(check_id)
+    return waiting
+
+
+def _handoff_counts(output_data: Dict[str, Any]) -> Dict[str, int]:
+    """Every count the emit prints and hands over, read off one source: the
+    batches as handed out (fix round 16, live run 6: "5 execution batches"
+    beside "Batches: 3")."""
+    batches = output_data.get("batches") or []
+    entries = [t for b in batches for t in b.get("tasks") or []]
+    manual = sum(
+        1 for t in entries if t.get("executor_role") == "human" or t.get("is_human")
+    )
+    return {
+        "batches": len(batches),
+        "tasks": len(entries),
+        "manual": manual,
+        "dispatch": len(entries) - manual,
+    }
+
+
+def _dispatch_line(output_data: Dict[str, Any]) -> str:
     """``Organized into N execution batches: X task(s) to dispatch …``,
-    counted from the batches as handed out."""
-    entries = [t for b in output_data.get("batches") or [] for t in b.get("tasks") or []]
-    manual = sum(1 for t in entries if t.get("executor_role") == "human")
-    dispatching = len(entries) - manual
+    counted from the batches as handed out (both legs)."""
+    counts = _handoff_counts(output_data)
+    waiting = sorted(output_data.get("waiting_on_checks") or {})
     return (
-        f"Organized into {decomposed_batches} execution batches: {dispatching} "
+        f"Organized into {counts['batches']} execution "
+        f"{'batch' if counts['batches'] == 1 else 'batches'}: {counts['dispatch']} "
         f"task(s) to dispatch"
-        + (f", {manual} manual task(s) it does not run" if manual else "")
+        + (f", {counts['manual']} manual task(s) it does not run"
+           if counts["manual"] else "")
+        + (
+            f" ({', '.join(waiting)} {'waits' if len(waiting) == 1 else 'wait'} "
+            f"on a check's verdict)"
+            if waiting else ""
+        )
     )
 
 
@@ -2071,7 +2141,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     # A check whose findings stand is handed out again on a native resume only
     # once the files moved (fix round 14); the executor decides at dispatch.
     kept_checks: Dict[str, List[str]] = {}
-    decomposed_batches = 1
 
     # If specific task requested
     if args.task:
@@ -2110,7 +2179,6 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         # Get parallel batches
         batches = decomposer.get_parallel_batches()
-        decomposed_batches = len(batches)
         rerun_ids = rerunnable_checks(state.state) if args.resume else None
         if rerun_ids and not executor_backed:
             rerun_ids, kept_checks = _native_check_reruns(
@@ -2135,8 +2203,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         # batches" read as two more than the run would ever report (2026-10-01).
         # The native leg prints it once it has taken out what the host must not
         # dispatch (`_native_withheld`), so it agrees with "Pending tasks".
+        # Both legs count the batches handed out, never the decomposition's
+        # layers (fix round 16: "5 execution batches" beside "Batches: 3").
         if executor_backed or args.dry_run:
-            print(_dispatch_line({"batches": output_batches}, decomposed_batches))
+            print(_dispatch_line({"batches": output_batches}))
 
         # Count pending tasks
         pending_count = sum(len(b["tasks"]) for b in output_batches)
@@ -2253,8 +2323,9 @@ def main(argv: Optional[List[str]] = None) -> int:
             output_data, state, plan_path,
             kept_checks=kept_checks, tasks_file=implement_tasks_file,
         )
+        output_data["tasks_to_dispatch"] = _handoff_counts(output_data)["dispatch"]
         if not args.task:
-            print(_dispatch_line(output_data, decomposed_batches))
+            print(_dispatch_line(output_data))
         write_native_handoff()
 
     # --- the detach boundary (D4) ---------------------------------------------
@@ -2325,6 +2396,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     print(f"Total tasks: {output_data['total_tasks']}")
     print(f"Pending tasks: {output_data.get('pending_tasks', output_data['total_tasks'])}")
     print(f"Batches: {len(output_data['batches'])}")
+    if "tasks_to_dispatch" in output_data:
+        # The one number the host passes to `util metrics` (fix round 16:
+        # the host counted "5 execution batches" and passed that).
+        dispatch = output_data["tasks_to_dispatch"]
+        print(
+            f"Tasks to dispatch: {dispatch} (pass --total-batches {dispatch} to "
+            f"`util metrics start` and `util metrics record`)"
+        )
 
     if native_human_plan is not None:
         titles = dict(state.get("task_titles") or {})
@@ -2421,6 +2500,15 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "summary as not run):"
             )
             for task_id, reason in sorted(native_withheld["not_run"].items()):
+                print(f"  {_titled(task_id)}: {reason}")
+        if output_data.get("waiting_on_checks"):
+            print(
+                "Waiting on a check's verdict (in the batches after the check "
+                "they depend on; if the check reports problems, do not dispatch "
+                "them — they stay pending and the phase closes without "
+                "--mark-completed):"
+            )
+            for task_id, reason in sorted(output_data["waiting_on_checks"].items()):
                 print(f"  {_titled(task_id)}: {reason}")
         stopped_short = bool(
             kept_checks or any(native_withheld[key] for key in native_withheld)
