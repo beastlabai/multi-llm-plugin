@@ -6056,10 +6056,15 @@ class WriteBatchScheduler:
                         if declined.problems else ""
                     )
                 )
-                if not crashed and claimed != "failed" and len(missing_ids) < len(expected_ids):
+                if (
+                    not crashed and claimed != "failed"
+                    and any(i in expected_ids for i in attested_ids)
+                ):
                     # Fix round 18: a readable report that attests some items
                     # and leaves these out of both lists — the items a
                     # `--human-task <id>=skip` answer records as skipped.
+                    # Fix round 19: at least one item attested applied; a
+                    # report that only declined has nothing applied to keep.
                     outcome.unapplied_ids = list(missing_ids)
             detail = " and ".join(details)
             outcome.status = STATUS_PARTIAL
