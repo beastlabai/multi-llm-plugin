@@ -279,8 +279,10 @@ class TestTheCompleteAnswerNamesThem:
         `user_next_step`, and only the complete answer of 08 carried the
         manual task's closing command — 06r and 07 named T009 from the
         notice without it. A command answer now carries both keys beside
-        its command, and stays a command answer: not complete, and its
-        block is still the one `[NEXT_COMMAND]` line."""
+        its command, and stays a command answer: not complete. Its block
+        lists them after the command, as `[WORKFLOW_COMPLETE]` does (fix
+        round 17: round 16's native package renders them there, and this
+        test still said the block was the command alone)."""
         here = os.getcwd()
         os.chdir(SKILL_ROOT)
         try:
@@ -299,7 +301,11 @@ class TestTheCompleteAnswerNamesThem:
         assert payload["manual_tasks"] == MANUAL
         assert payload["manual_tasks_note"] == close_note(PLUGIN, P, ["T011", "T012"])
         assert np_.render_next_phase_lines(answer) == [
-            f"[NEXT_COMMAND] {payload['command']}"]
+            f"[NEXT_COMMAND] {payload['command']}",
+            f"[MANUAL_TASK] T011 {TITLES['T011']}",
+            f"[MANUAL_TASK] T012 {TITLES['T012']}",
+            "[MANUAL_TASK_NOTE] " + close_note(PLUGIN, P, ["T011", "T012"]),
+        ]
 
     def test_a_command_answer_with_nothing_deferred_keeps_its_shape(self, tmp_path):
         here = os.getcwd()
@@ -502,7 +508,10 @@ class TestImplementRecordsTheTitles:
         """Run 6, Codex racing 06r: implement finished with a manual task
         deferred, and its result's `user_next_step` (what the tool routes
         relay) named review-code and nothing about recording the task done;
-        the command was only in the `notice`. It carries the note now."""
+        the command was only in the `notice`. It carries the note now. The
+        note answers the manual task alone (fix round 17: this test still
+        expected `--human-task T003=done` for the code task skipped with
+        T002, which implement refuses; T003 runs on that resume)."""
         import implement_orchestrator
 
         _seed_generate_tasks(repo)
@@ -530,9 +539,9 @@ class TestImplementRecordsTheTitles:
         assert [task["id"] for task in step["manual_tasks"]] == ["T002", "T003"]
         assert (
             "--implement " in step["manual_tasks_note"]
-            and "--resume --human-task T002=done --human-task T003=done"
-            in step["manual_tasks_note"]
+            and "--resume --human-task T002=done " in step["manual_tasks_note"]
         ), step
+        assert "T003=done" not in step["manual_tasks_note"], step
 
 
 def test_the_tool_routes_are_told_to_list_them():

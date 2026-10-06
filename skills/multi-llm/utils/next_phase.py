@@ -576,7 +576,10 @@ def next_phase_commands(
 
     def command_answer(answer: NextPhase) -> NextPhase:
         # Fix round 16: a command answer names the deferred manual tasks
-        # and how to record them done, as the complete answer does.
+        # and how to record them done, as the complete answer does. The one
+        # place a command answer gets them (fix round 17: `emit_answer` had a
+        # second writer for `--after implement`, and the two packages that
+        # wrote them disagreed on what the answer carries).
         return _with_manual_tasks(answer, phases, template=template, plan_arg=plan_arg)
 
     def command_for(phase: str) -> str:
@@ -999,14 +1002,6 @@ def implement_answers(
 # The emitters' shared step (§2.2)
 # ---------------------------------------------------------------------------
 
-def _after_implement(after_mode: Optional[str]) -> bool:
-    """Whether ``--after`` names implement (its mode word or an alias)."""
-    if not after_mode:
-        return False
-    mode = _skill_module("modes").resolve(after_mode)
-    return mode is not None and mode.phase == "implement"
-
-
 class LookupFailed(Exception):
     """Raised by :func:`emit_answer` under ``strict=True``, after its stderr line."""
 
@@ -1075,11 +1070,6 @@ def emit_answer(
             if not _state_file(os.path.abspath(str(source))).is_file():
                 return None
         route = resolve_route(host_id, stderr=err)
-        manual_wanted = with_answers and _after_implement(after_mode)
-        if manual_wanted and workflow is None:
-            # Read once, for the answer and the manual tasks beside it.
-            source = plan_arg if plan_path is None else plan_path
-            workflow = _workflow_payload(Path(os.path.abspath(str(source))), host_id)
         answer = next_phase_commands(
             plan_arg, host_id, route, finished_mode,
             after_mode=after_mode, plan_path=plan_path, workflow=workflow,
@@ -1099,21 +1089,6 @@ def emit_answer(
             )
             if answers is not None:
                 answer = _replace(answer, answers=answers)
-        if manual_wanted and not answer.complete:
-            # `util next-command --after implement` only: the native leg's
-            # report step, where the tool routes' implement result carries
-            # the deferred manual tasks and how to close them in its notice.
-            # Live run 6 (Claude Code racing 06) said only "T011 … deferred"
-            # until the workflow completed two phases later (fix round 16).
-            from dataclasses import replace as _replace
-
-            manual, note = _manual_tasks(
-                (workflow or {}).get("phases") or {},
-                template=_host_capabilities().next_command_template(host_id, route),
-                plan_arg=plan_arg,
-            )
-            if manual:
-                answer = _replace(answer, manual_tasks=manual, manual_tasks_note=note)
         payload = answer.to_dict()
         out = sys.stdout if stream is None else stream
         for line in render_next_phase_lines(answer):

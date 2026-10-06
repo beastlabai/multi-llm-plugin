@@ -167,15 +167,29 @@ class TestTheReportLookupCarriesIt:
         ]
         assert step["manual_tasks_note"] == note
 
-    def test_after_another_phase_it_adds_nothing(self, repo, capsys):
+    def test_after_another_phase_it_names_them_too(self, repo, capsys):
+        """Fix round 17: the two packages of round 16 disagreed here. Every
+        command answer carries the tasks implement deferred while they are
+        owed (`next_phase_commands`' one writer), which is what the relay
+        rule and the shims describe: not only the `--after implement` one."""
         handoff, _out = _emit(capsys)
         _finish_the_native_run(repo, capsys, handoff)
-        code, out, _err = _util(
+        code, out, err = _util(
             capsys, "next-command", PLAN_ARG, "--after", "generate-tasks",
             "--host", "claude-code")
-        assert code == 0
-        assert "[MANUAL_TASK" not in out
-        assert "manual_tasks" not in cli_common.parse_result_line(out)["user_next_step"]
+        assert code == 0, err
+        note = _close_note(PLAN_ARG, ["T005"])
+        lines = [line for line in out.splitlines() if line.startswith("[")]
+        assert lines[0].startswith("[NEXT_COMMAND] ")
+        assert lines[-3:] == [
+            f"[MANUAL_TASK] T005 {MANUAL_TITLE}",
+            f"[MANUAL_TASK] T006 {DEPENDENT_TITLE}",
+            f"[MANUAL_TASK_NOTE] {note}",
+        ]
+        step = cli_common.parse_result_line(out)["user_next_step"]
+        assert step["complete"] is False
+        assert [task["id"] for task in step["manual_tasks"]] == ["T005", "T006"]
+        assert step["manual_tasks_note"] == note
 
     def test_the_complete_answer_closes_only_the_manual_task(self, repo, capsys):
         """The same rule on `[WORKFLOW_COMPLETE]`, both legs' builder: T006,
