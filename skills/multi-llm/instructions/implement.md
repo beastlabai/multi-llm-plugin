@@ -638,7 +638,7 @@ your host.
    - Number of tasks completed/failed
    - Each check task that reported problems, with its findings (the code review is told about them), and the tasks it held back with the way forward (fix and `--resume`, or `--resume --human-task {id}=done`)
    - Each task whose own check failed after its edits (`[BATCH_CHECK_FAILED]`), with what failed: the phase applied it but is not a clean finish
-   - At a stop after a code task completed, with no `driver.verify_command` configured: step 8's one plain line saying nothing in the plugin ran the repository's tests and naming the setting to add (step 8 itself does not run at a stop)
+   - At a stop after a code task completed, with no `driver.verify_command` configured: the `[TESTS_NOT_RUN]` line the next-step lookup prints, its text verbatim — it says nothing in the plugin ran the repository's tests and names the setting to add (step 8 itself does not run at a stop); never write a line of your own in its place
    - Each manual task step 2 deferred, as the user's to do, with the `[MANUAL_TASK_NOTE]` text verbatim (the next-step lookup prints the tasks as `[MANUAL_TASK]` lines and the note again below its command): it says how to record them done
    - At a stop (step 10 ran without `--mark-completed`) the next-step lookup of `references/summary-format.md` still runs: it prints the resume command (`[NEXT_COMMAND]`) and, when tasks wait for an answer, one command carrying every `--human-task` answer (`[NEXT_COMMAND_ANSWERS]`). End the report with both, each alone in its own fenced block, copied verbatim; never write a resume or `--human-task` command of your own
    - Implementation summary file location

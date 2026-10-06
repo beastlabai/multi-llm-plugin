@@ -46,7 +46,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple, Union
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
     from . import git_utils as _git_utils
@@ -284,6 +284,7 @@ __all__ = [
     "batch_check_summary",
     "quoted_findings",
     "unverified_line",
+    "native_stop_unverified_line",
     "write_result_notice",
     "verification_line",
     "verify_command_candidate",
@@ -1403,6 +1404,87 @@ def unverified_line(repo_root: Optional[str]) -> str:
         f"set. To have every code phase run them, add verify_command {where}, "
         f"set to the command that runs your tests or checks your build."
     )
+
+
+def native_stop_unverified_line(plan_path: Union[str, Path]) -> Optional[str]:
+    """The :func:`unverified_line` a stopped native implement owes, or ``None``.
+
+    Fix round 18 (live run 7, Claude Code stop 01): the native leg's stop
+    printed no "Nothing ran this repository's tests" line at all — the
+    executor leg's stop says it (:meth:`WriteBatchScheduler._note_unverified_on_stop`),
+    and the Claude Code host wrote its own from the instructions. ``util
+    next-command`` prints this one as ``[TESTS_NOT_RUN]`` beside a stopped
+    implement's ``--resume``. The executor's rule, read from ``state.json``
+    as recorded: owed when no ``driver.verify_command`` is set and a code
+    task of the decomposition implement ran last is recorded ``completed`` —
+    not a manual task, and not a check task (an agent task declaring no files,
+    read off the plan's task list). The native leg keeps no audit log, so a
+    completed code task counts as an edit, as the executor's conservative
+    reading counts one with no completion on record. Never fatal: any read
+    that fails answers ``None``.
+    """
+    try:
+        plan = Path(plan_path).resolve()
+        try:
+            from .output_handler import output_dir_path
+        except ImportError:  # pragma: no cover - direct script invocation
+            from utils.output_handler import output_dir_path  # type: ignore
+        state = json.loads((output_dir_path(plan) / "state.json").read_text(encoding="utf-8"))
+        if not isinstance(state, dict):
+            return None
+        if get_verify_command(anchor=str(plan)):
+            return None
+        statuses = state.get("task_status") or {}
+        reasons = state.get("task_status_reasons") or {}
+        scope = state.get("implement_task_ids")
+        human = {str(t) for t in (state.get("implement_human_task_ids") or [])}
+        completed = [
+            str(task_id) for task_id, status in statuses.items()
+            if status == "completed" and _IMPLEMENT_TASK_ID.match(str(task_id))
+            and (not isinstance(scope, list) or task_id in scope)
+            and str(task_id) not in human
+            and str(reasons.get(task_id) or "") != COMPLETED_MANUAL_REASON
+        ]
+        if not completed:
+            return None
+        checks = _check_task_ids_of_plan(plan)
+        if not [task_id for task_id in completed if task_id not in checks]:
+            return None
+        try:
+            root = resolve_repo_root(str(plan))
+        except Exception:  # noqa: BLE001 - the line still stands without a candidate
+            root = None
+        return unverified_line(root)
+    except Exception:  # noqa: BLE001 - advisory: never fails the lookup
+        return None
+
+
+def _check_task_ids_of_plan(plan: Path) -> set:
+    """The ids of the agent tasks in *plan*'s task list that declare no files
+    (check tasks), parsed as implement parses it; empty when it cannot be read,
+    which counts every completed task as code — the conservative reading."""
+    try:
+        try:
+            from .plan_updater import get_tasks_file_path
+            from .task_decomposer import TaskDecomposer
+        except ImportError:  # pragma: no cover - direct script invocation
+            from utils.plan_updater import get_tasks_file_path  # type: ignore
+            from utils.task_decomposer import TaskDecomposer  # type: ignore
+        content = plan.read_text(encoding="utf-8")
+        reference = get_tasks_file_path(content)
+        if reference:
+            tasks_file = plan.parent / reference
+            if not tasks_file.is_file():
+                return set()
+            content = tasks_file.read_text(encoding="utf-8")
+        tasks = TaskDecomposer().parse_plan(content)
+    except Exception:  # noqa: BLE001 - conservative: no check known
+        return set()
+    return {
+        str(task.id) for task in tasks
+        if getattr(task, "executor_role", "") != "human"
+        and not (list(task.files_to_modify or []) or list(task.files_to_create or []))
+    }
 
 
 def verification_line(result: Any) -> str:
