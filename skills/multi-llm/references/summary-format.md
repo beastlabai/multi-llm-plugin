@@ -100,7 +100,8 @@ Every mode ends with this report. Four rules, and a fifth for `ask`:
     "Workflow complete." instead, and when it carries `manual_tasks`, list
     each one under it, its `id` and `title`, as the user's to do: implement
     deferred them and the plugin will not run them (the `[MANUAL_TASK]` lines
-    below `[WORKFLOW_COMPLETE]` are the same tasks). When there is no `user_next_step` at all,
+    below `[WORKFLOW_COMPLETE]` are the same tasks), then its `manual_tasks_note`
+    (the `[MANUAL_TASK_NOTE]` line) verbatim: it says how to record them done. When there is no `user_next_step` at all,
     write neither a command nor "Workflow complete.": an absent key is not a
     completion.
   - *A failed lookup prints no command.* When `util next-command` exits

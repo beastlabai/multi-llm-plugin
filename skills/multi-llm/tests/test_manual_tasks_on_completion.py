@@ -61,6 +61,15 @@ MANUAL = [
 ]
 
 
+def close_note(prefix: str, plan: str, ids) -> str:
+    """The `manual_tasks_note` for *ids*, its command spelled out by hand
+    (fix round 14: how a deferred manual task is recorded done)."""
+    answers = " ".join(f"--human-task {task_id}=done" for task_id in ids)
+    command = f"{prefix}--implement {plan} --resume {answers}"
+    assert np_.manual_close_note(command).count(command) == 1
+    return np_.manual_close_note(command)
+
+
 def _complete_plan(root: Path, *, titles=True, tasks=None) -> Path:
     """Every required phase on record, two implement tasks deferred."""
     here = os.getcwd()
@@ -233,6 +242,7 @@ class TestTheCompleteAnswerNamesThem:
         assert answer.to_dict() == {
             "phase": None, "command": None, "complete": True,
             "manual_tasks": MANUAL,
+            "manual_tasks_note": close_note(PLUGIN, P, ["T011", "T012"]),
         }
 
     def test_the_fallback_walk_names_them_too(self, tmp_path):
@@ -251,6 +261,7 @@ class TestTheCompleteAnswerNamesThem:
             "[WORKFLOW_COMPLETE]",
             f"[MANUAL_TASK] T011 {TITLES['T011']}",
             f"[MANUAL_TASK] T012 {TITLES['T012']}",
+            "[MANUAL_TASK_NOTE] " + close_note(PLUGIN, P, ["T011", "T012"]),
         ]
 
     def test_an_untitled_task_renders_its_id_alone(self):
@@ -308,6 +319,7 @@ class TestTheEmittersCarryThem:
         assert result["user_next_step"] == {
             "phase": None, "command": None, "complete": True,
             "manual_tasks": MANUAL,
+            "manual_tasks_note": close_note(PLUGIN, P, ["T011", "T012"]),
         }
         lines = out.splitlines()
         start = lines.index("[WORKFLOW_COMPLETE]")
@@ -325,6 +337,8 @@ class TestTheEmittersCarryThem:
             f"manual tasks left for you: T011 {TITLES['T011']}; "
             f"T012 {TITLES['T012']}"
         ) in out
+        # Fix round 14: and how to record them done, in the host's spelling.
+        assert close_note(PLUGIN, str(plan), ["T011", "T012"]) in out
 
     def test_a_terminal_run_poll_carries_them_into_its_notice(self, workdir, capsys):
         """The opencode plugin reads only `--view run`: the F7 carry-over."""
@@ -605,6 +619,7 @@ class TestTheNativeLegRecordsItsDeferrals:
         complete = {
             "phase": None, "command": None, "complete": True,
             "manual_tasks": OWED_T002_T003,
+            "manual_tasks_note": close_note(PLUGIN, plan_arg, ["T002", "T003"]),
         }
         block = [
             "[WORKFLOW_COMPLETE]",
