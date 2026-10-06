@@ -2291,28 +2291,50 @@ def main(argv: Optional[List[str]] = None) -> int:
                 "listed above. Do not spawn a subagent."
             )
 
-    print("\nClaude Code should now:")
-    print("  1. Read the output JSON file")
-    print("  2. Execute each batch sequentially (batches have dependencies)")
-    print("  3. Tasks within a batch can run in parallel")
-    print("  4. Update the state file after each task completes")
-    print("  5. After all tasks complete, generate the implementation summary")
-    print(f"     Summary file: {output_data['summary_file']}")
-    if stopped_short:
+    # Fix round 14: a resume of a completed implement that only records
+    # answers (`--human-task T007=done` closing a deferred manual task) hands
+    # out nothing to run, so it does not reopen the phase: marked started, the
+    # host's closing `--mark-completed` re-stamped it and review-code and
+    # apply-code-fixes read stale for no code change. Fix round 15: and it
+    # asks for no summary and no close either — the generic steps below sent
+    # the host on to write a nothing-ran summary.md over the completed run's.
+    closes = not args.task and _closes_a_completed_implement(state, output_data)
+    if closes:
         print(
-            "  6. Close the phase with `util finalize-tracking` without "
-            "--mark-completed (tasks listed above did not run), then end the "
-            "report with the commands `util next-command` prints"
+            "\nNothing is left to run: implement stays completed. The answers "
+            "above are recorded in state.json; there is no batch to execute and "
+            "no phase to close."
         )
+        print("\nClaude Code should now:")
+        print(
+            "  1. Report the answers recorded above; spawn no subagent, write no "
+            "implementation summary (the completed run's summary.md stays as it "
+            "is) and run no `util finalize-tracking`"
+        )
+        print("  2. End the report with the command `util next-command` prints")
     else:
-        # The emit cannot know how the run ends: a check that records
-        # findings holds tasks back mid-run (fix round 15, stop fixture).
-        print(
-            "  6. Close the phase with `util finalize-tracking … --mark-completed` "
-            "once every task ran; after a [CHECK_BLOCKED] line, a failed task or "
-            "a stop, run it without --mark-completed and end the report with "
-            "the commands `util next-command` prints"
-        )
+        print("\nClaude Code should now:")
+        print("  1. Read the output JSON file")
+        print("  2. Execute each batch sequentially (batches have dependencies)")
+        print("  3. Tasks within a batch can run in parallel")
+        print("  4. Update the state file after each task completes")
+        print("  5. After all tasks complete, generate the implementation summary")
+        print(f"     Summary file: {output_data['summary_file']}")
+        if stopped_short:
+            print(
+                "  6. Close the phase with `util finalize-tracking` without "
+                "--mark-completed (tasks listed above did not run), then end the "
+                "report with the commands `util next-command` prints"
+            )
+        else:
+            # The emit cannot know how the run ends: a check that records
+            # findings holds tasks back mid-run (fix round 15, stop fixture).
+            print(
+                "  6. Close the phase with `util finalize-tracking … --mark-completed` "
+                "once every task ran; after a [CHECK_BLOCKED] line, a failed task or "
+                "a stop, run it without --mark-completed and end the report with "
+                "the commands `util next-command` prints"
+            )
 
     # The batches are now the host's to run, so the phase is recorded
     # *started*, never completed: completion is the instruction's closing
@@ -2330,18 +2352,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         from utils.write_batch_scheduler import persist_human_task_plan
 
         persist_human_task_plan(state, native_human_plan)
-    if not args.task and _closes_a_completed_implement(state, output_data):
-        # Fix round 14: a resume of a completed implement that only records
-        # answers (`--human-task T007=done` closing a deferred manual task)
-        # hands out nothing to run, so it does not reopen the phase: marked
-        # started, the host's closing `--mark-completed` re-stamped it and
-        # review-code and apply-code-fixes read stale for no code change.
-        print(
-            "\nNothing is left to run: implement stays completed. The answers "
-            "above are recorded in state.json; there is no batch to execute and "
-            "no phase to close."
-        )
-    else:
+    if not closes:
         state.mark_phase_started("implement")
     state.save()
 
