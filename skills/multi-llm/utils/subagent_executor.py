@@ -6488,12 +6488,11 @@ def _read_jailed_outcome(
             capture.home_change = change.to_dict()
             _record_jail_line(_home_check_line(spec, jail.rung, change, others))
         if change.foreign_trust:
-            # Concurrent runs in other repos add their own trust tables (I12):
-            # named in the closing summary only, never a warning per dispatch.
+            # Trust tables for other directories inside this repository (I12;
+            # another repository's are never this run's, run 6 #11a): named in
+            # the closing summary only, never a warning per dispatch.
             _record_jail_line(
-                f"{CODEX_HOME_CHECK_MARKER} trust entries for other paths "
-                f"appeared in $CODEX_HOME/config.toml during this run: "
-                f"{', '.join(landlock_dispatch.render_home(p) for p in change.foreign_trust)}",
+                landlock_dispatch.own_trust_entries_line(change.foreign_trust),
                 echo=False,
             )
 
