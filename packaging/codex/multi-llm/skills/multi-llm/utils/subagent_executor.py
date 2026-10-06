@@ -165,6 +165,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         STATUS_UNPARSEABLE,
         STOP_BUDGET,
         STOP_DEADLINE,
+        REPAIR_INCOMPLETE_REPORT,
         REPAIR_SCHEMA_INVALID,
         RESEND_NOTHING_CHANGED,
         RetryLadder,
@@ -297,6 +298,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
         STATUS_UNPARSEABLE,
         STOP_BUDGET,
         STOP_DEADLINE,
+        REPAIR_INCOMPLETE_REPORT,
         REPAIR_SCHEMA_INVALID,
         RESEND_NOTHING_CHANGED,
         RetryLadder,
@@ -352,6 +354,10 @@ __all__ = [
     "WRITE_SCHEMA_REJECTED",
     "WRITE_POLICY_VIOLATION",
     "WRITE_STOP_OUTCOMES",
+    "DeclinedItems",
+    "declined_items",
+    "declined_record",
+    "row_declined",
     "RUNG_BY_STATUS",
     "RETRYABLE_STATUSES",
     "FATAL_STATUSES",
@@ -930,6 +936,96 @@ def batch_check_findings(result: Any) -> Optional[List[str]]:
     return findings
 
 
+#: How much of one declined item's reason a row, a stamp or a notice carries.
+DECLINED_REASON_MAX_CHARS = 300
+
+
+@dataclass
+class DeclinedItems:
+    """What a write reply's ``declined`` says, read against its batch (fix round 18).
+
+    ``items`` maps each expected id the batch declined — not also in ``ids``,
+    with a non-empty reason — to that reason, in the batch's own order.
+    ``conflicting`` holds the ids the reply put in both ``ids`` and
+    ``declined``: neither claim stands, so such an id is not attested at all.
+    ``problems`` names every other entry that could not be read as a decline
+    (an id the batch does not hold, an entry without an id or a reason, a
+    value that is not a list of objects), in plain words for the stop.
+    """
+
+    items: Dict[str, str] = field(default_factory=dict)
+    conflicting: List[str] = field(default_factory=list)
+    problems: List[str] = field(default_factory=list)
+
+
+def declined_items(
+    result: Any, expected_ids: Sequence[str],
+) -> DeclinedItems:
+    """Read a write reply's ``declined`` leniently against *expected_ids*.
+
+    Codex racing run 7 (2026-10-06, apply-code-fixes 08): a batch applied
+    one fix and left the other on purpose ("Not applied; T011 records the
+    clamp removal as deliberate"), said so only in ``notes``, and stopped as
+    a partial application on the run and on its resume; the contract had no
+    place for a decline. A reason is what makes a decline: an entry without
+    one is a problem, and its id reads as not having come back, as an id
+    missing from ``ids`` always has. Never read from ``notes``.
+    """
+    out = DeclinedItems()
+    raw = result.get("declined") if isinstance(result, dict) else None
+    if raw is None:
+        return out
+    expected = [str(item) for item in expected_ids]
+    reported = result.get("ids") if isinstance(result, dict) else None
+    applied = {str(item) for item in reported} if isinstance(reported, list) else set()
+    if not isinstance(raw, list):
+        out.problems.append("`declined` is not a list")
+        return out
+    found: Dict[str, str] = {}
+    for index, entry in enumerate(raw, 1):
+        if not isinstance(entry, dict):
+            out.problems.append(f"`declined` entry {index} is not an object")
+            continue
+        item = entry.get("id")
+        item = str(item).strip() if isinstance(item, (str, int)) else ""
+        if not item:
+            out.problems.append(f"`declined` entry {index} names no id")
+            continue
+        if item not in expected:
+            out.problems.append(
+                f"`declined` names {item!r}, which this batch does not hold"
+            )
+            continue
+        if item in applied:
+            if item not in out.conflicting:
+                out.conflicting.append(item)
+                out.problems.append(f"{item} is in both `ids` and `declined`")
+            continue
+        reason = entry.get("reason")
+        reason = " ".join(str(reason).split()) if isinstance(reason, str) else ""
+        if not reason:
+            out.problems.append(f"`declined` gives no reason for {item}")
+            continue
+        found.setdefault(item, reason[:DECLINED_REASON_MAX_CHARS])
+    out.items = {item: found[item] for item in expected if item in found}
+    return out
+
+
+def row_declined(row: Any) -> Dict[str, str]:
+    """A serialized row's (or verdict stamp's) declined items, ``{id: reason}``."""
+    raw = row.get("declined") if isinstance(row, dict) else None
+    out: Dict[str, str] = {}
+    for entry in raw if isinstance(raw, list) else []:
+        if isinstance(entry, dict) and entry.get("id") and entry.get("reason"):
+            out.setdefault(str(entry["id"]), str(entry["reason"]))
+    return out
+
+
+def declined_record(items: Dict[str, str]) -> List[Dict[str, str]]:
+    """The ``declined`` list a row, a verdict stamp and a mirror row carry."""
+    return [{"id": item, "reason": reason} for item, reason in items.items()]
+
+
 def row_batch_check_findings(row: Dict[str, Any]) -> List[str]:
     """A serialized row's own-check findings (its ``batch_check``), else ``[]``."""
     check = row.get("batch_check") if isinstance(row, dict) else None
@@ -1242,6 +1338,21 @@ class TaskOutcome:
     #: runner's ``default_timeout``) after its edits landed: a partial
     #: application whose stop says the edits are kept (fix round 16).
     ran_out_of_time: bool = False
+    #: An apply batch's items it deliberately left unapplied, ``{id: reason}``
+    #: in the batch's order (:func:`declined_items`, fix round 18). Never
+    #: counted as applied, named on every surface, and a batch whose every
+    #: item is applied or declined is complete.
+    declined: Dict[str, str] = field(default_factory=dict)
+    #: A partial application whose readable report attests some items and
+    #: leaves these out of both ``ids`` and ``declined`` (fix round 18): the
+    #: items ``--human-task <id>=skip`` records as skipped at the user's
+    #: request, keeping what the batch applied. Empty for every other outcome,
+    #: and so the stop offers that answer only here.
+    unapplied_ids: List[str] = field(default_factory=list)
+    #: The items a ``--human-task <id>=skip`` answer recorded as skipped at
+    #: the user's request when it kept the batch as it stood, ``{id:
+    #: reason}`` (fix round 18). Never counted as applied.
+    skipped_items: Dict[str, str] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -1331,6 +1442,13 @@ class TaskOutcome:
             if self.unrestorable:
                 # Additive and only here (fix round 15).
                 out["unrestorable"] = list(self.unrestorable)
+            if self.declined:
+                # Additive and only here (fix round 18).
+                out["declined"] = declined_record(self.declined)
+            if self.unapplied_ids:
+                out["unapplied_ids"] = list(self.unapplied_ids)
+            if self.skipped_items:
+                out["skipped_items"] = declined_record(self.skipped_items)
             if self.summary:
                 out["summary"] = self.summary
             if self.snapshot_dir:
@@ -6755,6 +6873,7 @@ def dispatch_task(
     jail_request: Optional[JailRequest] = None,
     tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]] = None,
     nothing_changed: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
+    incomplete_report: Optional[Callable[[Dict[str, Any]], Optional[str]]] = None,
 ) -> TaskOutcome:
     """Dispatch one task and return its :class:`TaskOutcome` (D3k classified).
 
@@ -6858,6 +6977,20 @@ def dispatch_task(
             appended, instead of classifying the attempt; it is recorded
             ``batch_failed`` with that reason and a failure capture. A hook
             that raises is "no re-send": the classification decides.
+        incomplete_report: The write lane's other question before
+            ``after_result`` (an apply kind, fix round 18), with the same
+            context: why this readable report, after edits that moved bytes,
+            leaves some of the batch's items out of both ``ids`` and
+            ``declined``, or ``None``. A reason, while the schema-repair
+            allowance and the deadline admit it (:meth:`RetryLadder.
+            record_report_reask`) and ``tree_fingerprint`` can guard it,
+            sends the report re-ask (``incomplete=True``, the reason as its
+            one problem) instead of classifying: Codex racing run 7's batch
+            left a fix out of its report on purpose and stopped as a partial
+            application on every resume. The restated report is classified
+            like any; a re-ask that cannot restate it (prose, a timeout)
+            leaves the original reply to be classified, and one that moved a
+            file is a partial application. A hook that raises is "no re-ask".
     """
     task_id = str(task.get("task_id", ""))
     kind = str(task.get("kind", ""))
@@ -7047,6 +7180,10 @@ def dispatch_task(
     # A write kind's report re-ask: the files' state when it was granted, which
     # the re-ask must leave exactly as it found it (`tree_fingerprint`).
     repair_baseline: Any = None
+    # Fix round 18: the `after_result` context of a readable report that left
+    # items out, kept while its re-ask runs, so a re-ask that cannot restate
+    # it leaves this one to be classified.
+    reask_fallback: Optional[Dict[str, Any]] = None
     fingerprint_context = {
         "task": task, "task_id": task_id, "kind": kind, "cwd": cwd,
         "outcome": outcome,
@@ -7293,6 +7430,82 @@ def dispatch_task(
                             )
                             continue
                         resend_note = resend.note
+                    reask_why = (
+                        _ask_incomplete_report(incomplete_report, result_context)
+                        if incomplete_report is not None and not resend_why
+                        and attempt_repair is None
+                        and ladder.schema_repairs_left > 0 else None
+                    )
+                    reask = (
+                        _incomplete_report_reask(
+                            kind=kind, prompt=prompt, task=task,
+                            why=reask_why, provider=provider, model=model,
+                            capture=capture, transport=transport,
+                            profile=profile, ladder=ladder,
+                            tree_fingerprint=tree_fingerprint,
+                            fingerprint_context=fingerprint_context,
+                            budget_kwargs=(
+                                {"sandbox_fallback": fallback,
+                                 "jail_request": jail_request}
+                                if wrapping is not None else {}
+                            ),
+                        ) if reask_why else None
+                    )
+                    if reask is not None:
+                        # Rule 7, second form (fix round 18): the report read
+                        # but left items out; the runner restates it once.
+                        reask_prompt, repair_baseline = reask
+                        outcome.attempts.append(Attempt(
+                            index=attempt_index,
+                            status=STATUS_SCHEMA_INVALID,
+                            exit_code=capture.exit_code,
+                            duration_seconds=capture.duration,
+                            error=reask_why,
+                            usage=usage,
+                            capture_path=_write_failure_capture(
+                                phase_dir=phase_dir, task=task,
+                                attempt_index=attempt_index,
+                                argv=capture.argv, prompt=attempt_prompt,
+                                stdout=capture.stdout, stderr=capture.stderr,
+                                exit_code=capture.exit_code,
+                                duration=capture.duration,
+                                status=STATUS_SCHEMA_INVALID, error=reask_why,
+                                repair=attempt_resend,
+                            ),
+                            repair=attempt_resend,
+                        ))
+                        _accumulate_usage(outcome, usage)
+                        _notify_after_attempt(after_attempt, outcome.attempts[-1])
+                        reask_fallback = {
+                            "task": task,
+                            "task_id": task_id,
+                            "kind": kind,
+                            "profile": profile,
+                            "runner": runner,
+                            "cwd": cwd,
+                            "attempt": attempt_index,
+                            "prompt": attempt_prompt,
+                            "result": data,
+                            "exit_code": capture.exit_code,
+                            "stderr_tail": _redact_probe_tail(capture.stderr, 2000),
+                            "usage": usage,
+                            "resent": attempt_resend is not None,
+                            "resend_note": resend_note,
+                            **_jail_hook_context(capture, jail_request, fallback),
+                        }
+                        attempt_prompt = reask_prompt
+                        attempt_repair = REPAIR_INCOMPLETE_REPORT
+                        attempt_resend = None
+                        print(
+                            f"[exec-subagents] {task_id}: the batch's report "
+                            f"leaves some of its items out of both `ids` and "
+                            f"`declined`; asking {runner} once to restate it "
+                            f"without touching any file (report re-ask, "
+                            f"attempt {attempt_index + 1}). What was applied is "
+                            f"still decided by comparing the files with the "
+                            f"pre-batch snapshot."
+                        )
+                        continue
                     outcome.attempts.append(Attempt(
                         index=attempt_index,
                         status=STATUS_OK,
@@ -7572,6 +7785,25 @@ def dispatch_task(
             error = f"{error} ({action.note})"
         break
 
+    if (
+        reask_fallback is not None and after_result is not None
+        and status != STATUS_PARTIAL
+    ):
+        # Fix round 18: the re-ask of a report that left items out could not
+        # restate it (prose, a timeout, a refused runner) and moved nothing,
+        # so the report the batch did send is classified as it stands.
+        outcome.status = STATUS_OK
+        outcome.duration_seconds = elapsed()
+        after_result({
+            **reask_fallback,
+            "duration_seconds": outcome.duration_seconds,
+            "outcome": outcome,
+        })
+        outcome.reason = (
+            f"{outcome.reason or ''} (its report re-ask did not restate the "
+            f"report: {error})"
+        ).strip()
+        return outcome
     if attempt_repair and status in (STATUS_SCHEMA_INVALID, STATUS_UNPARSEABLE):
         error = f"{error} (after the one schema-repair re-ask)"
     outcome.status = status
@@ -7659,6 +7891,74 @@ def _nothing_changed_files(task: Dict[str, Any], cwd: Optional[str]) -> List[str
                 path = relative
         names.append(path.replace(os.sep, "/"))
     return names
+
+
+def _ask_incomplete_report(
+    hook: Optional[Callable[[Dict[str, Any]], Optional[str]]],
+    context: Dict[str, Any],
+) -> Optional[str]:
+    """The ``incomplete_report`` hook's answer: why a readable write report
+    leaves items out, or ``None`` (no hook, no answer, or it raised — a re-ask
+    is never sent on "could not tell")."""
+    if hook is None:
+        return None
+    try:
+        answer = hook(context)
+    except Exception as exc:  # noqa: BLE001 - no re-ask without an answer
+        print(
+            f"[exec-subagents] warning: could not tell whether "
+            f"{context.get('task_id')}'s report accounts for every item "
+            f"({type(exc).__name__}); its reply is classified as it stands.",
+            file=sys.stderr,
+        )
+        return None
+    return str(answer) if answer else None
+
+
+def _incomplete_report_reask(
+    *,
+    kind: str,
+    prompt: str,
+    task: Dict[str, Any],
+    why: str,
+    provider: Any,
+    model: str,
+    capture: Any,
+    transport: str,
+    profile: str,
+    ladder: RetryLadder,
+    tree_fingerprint: Optional[Callable[[Dict[str, Any]], Any]],
+    fingerprint_context: Dict[str, Any],
+    budget_kwargs: Dict[str, Any],
+) -> Optional[Tuple[str, Any]]:
+    """``(re-ask prompt, files' state)`` when the report re-ask for an
+    incomplete report may go out, else ``None`` (fix round 18).
+
+    The same guards as the rule-7 re-ask of an unreadable report: a reply to
+    quote, the hook that proves the re-ask moved nothing, no jail denial on
+    the attempt's stream, a prompt the transport carries — and then the
+    ladder's grant, which spends the schema-repair allowance. Any guard that
+    does not hold leaves the reply to be classified as it stands.
+    """
+    reply_text = _reply_text(provider, capture.stdout)
+    if not _write_report_repairable(capture, reply_text, tree_fingerprint):
+        return None
+    reask_prompt = build_schema_repair_prompt(
+        kind, prompt, [why], previous_reply=reply_text,
+        expected_ids=[str(item) for item in task.get("expected_ids") or []],
+        incomplete=True,
+    )
+    if _prompt_over_budget(
+        provider, model, reask_prompt, transport, profile, **budget_kwargs,
+    ) is not None:
+        return None
+    try:
+        baseline = tree_fingerprint(fingerprint_context)  # type: ignore[misc]
+    except Exception:  # noqa: BLE001 - fail closed: no re-ask
+        return None
+    if not ladder.record_report_reask().retry:
+        return None
+    return reask_prompt, baseline
 
 
 def _write_report_repairable(

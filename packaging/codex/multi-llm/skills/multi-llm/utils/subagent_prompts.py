@@ -65,6 +65,8 @@ __all__ = [
     "SCHEMA_REPAIR_SHAPES",
     "SCHEMA_REPAIR_TOP_KEYS",
     "TASK_GENERATION_REPLY_SHAPE",
+    "APPLY_REPORT_KINDS",
+    "APPLY_REPORT_REPLY_SHAPE",
     "WRITE_REPORT_REPAIR_KINDS",
     "WRITE_REPORT_REPLY_SHAPE",
     "render_reference_section",
@@ -912,7 +914,7 @@ explanation. Do not write any file; whoever invoked you persists your reply.
 # the one schema-repair re-ask
 # ===========================================================================
 
-#: The reply shape the write kinds' re-ask restates: the batch result contract
+#: The reply shape implement's re-ask restates: the batch result contract
 #: (``schemas/write_batch_result.schema.json``) in the spelling the dispatched
 #: prompt already used (``write_batch_scheduler.with_result_contract``).
 WRITE_REPORT_REPLY_SHAPE = '''{"status": "applied", "ids": ["<id>"], "files_touched": ["<repo-relative path>"], "summary": "<one line, at most 200 characters>", "notes": "<optional detail>"}
@@ -925,16 +927,36 @@ WRITE_REPORT_REPLY_SHAPE = '''{"status": "applied", "ids": ["<id>"], "files_touc
 - `summary`: one line, at most 200 characters. Required.
 '''
 
+#: The apply kinds' report shape: the same, plus ``declined`` (fix round 18),
+#: the items the batch deliberately left unapplied, each with its reason.
+APPLY_REPORT_REPLY_SHAPE = '''{"status": "applied", "ids": ["<id>"], "declined": [{"id": "<id>", "reason": "<why it was not applied>"}], "files_touched": ["<repo-relative path>"], "summary": "<one line, at most 200 characters>", "notes": "<optional detail>"}
+
+- `status`: "applied" if the previous turn edited any file, "no-op" if it edited
+  nothing because every change was already present or it declined it, "failed"
+  if it could not apply the batch.
+- `ids`: the ids the previous reply said it applied (or found already applied).
+- `declined`: each id the previous reply said it deliberately did not apply,
+  with the reason it gave; `[]` when it applied every one. An id goes in
+  exactly one of `ids` and `declined`.
+- `files_touched`: the repo-relative paths the previous reply said it edited.
+- `summary`: one line, at most 200 characters. Required.
+'''
+
+#: The write kinds whose items a batch may decline (``declined``, fix round
+#: 18): the three apply phases. Spelled here as well as in
+#: ``subagent_tasks.APPLY_WRITE_KINDS`` because this module imports nothing
+#: of the executor's (a test pins the two together).
+APPLY_REPORT_KINDS = (
+    "apply_suggestions",
+    "apply_task_suggestions",
+    "apply_code_fixes",
+)
+
 #: The write kinds a schema-repair re-ask may restate the report of: the three
 #: apply phases (2026-10-05) and ``implement`` (fix round 14: OpenCode racing
 #: run 5's T013 finished its edit, replied in prose, and stopped implement as
 #: a partial application).
-WRITE_REPORT_REPAIR_KINDS = (
-    "apply_suggestions",
-    "apply_task_suggestions",
-    "apply_code_fixes",
-    "implement",
-)
+WRITE_REPORT_REPAIR_KINDS = APPLY_REPORT_KINDS + ("implement",)
 
 #: The reply shape a schema-repair re-ask restates, per kind. A kind absent here
 #: has no repair prompt — which is also why the executor's grant
@@ -942,7 +964,8 @@ WRITE_REPORT_REPAIR_KINDS = (
 #: here (a test pins it).
 SCHEMA_REPAIR_SHAPES: Dict[str, str] = {
     "task_generation": TASK_GENERATION_REPLY_SHAPE,
-    **{kind: WRITE_REPORT_REPLY_SHAPE for kind in WRITE_REPORT_REPAIR_KINDS},
+    **{kind: APPLY_REPORT_REPLY_SHAPE for kind in APPLY_REPORT_KINDS},
+    "implement": WRITE_REPORT_REPLY_SHAPE,
 }
 
 #: The document's top-level keys, per kind, named in the re-ask as a plain list:
@@ -989,10 +1012,11 @@ SCHEMA_REPAIR_EXAMPLES: Dict[str, Dict[str, Any]] = {
             "status": "applied",
             "ids": ["0123456789abcdef"],
             "files_touched": ["plans/example.md"],
+            "declined": [],
             "summary": "Added the \"Countdown\" rule to the Race logic section.",
             "notes": "",
         }
-        for kind in WRITE_REPORT_REPAIR_KINDS if kind != "implement"
+        for kind in APPLY_REPORT_KINDS
     },
     "implement": {
         "status": "applied",
@@ -1022,7 +1046,8 @@ WRITE_REPORT_QUOTE_MAX_CHARS = 20000
 #: properties; a test pins the two together). An object that opens on one of
 #: them is where a report starts.
 WRITE_REPORT_KEYS = (
-    "status", "ids", "files_touched", "summary", "notes", "usage", "check",
+    "status", "ids", "declined", "files_touched", "summary", "notes", "usage",
+    "check",
 )
 
 
@@ -1149,6 +1174,7 @@ def _batch_ids_block(kind: str, ids: Sequence[str]) -> str:
     lines = "\n".join(
         f"- {item} {index} = `{member}`" for index, member in enumerate(ids, 1)
     )
+    spelled = ", and so must `declined`" if kind in APPLY_REPORT_KINDS else ""
     return f'''
 ## The batch's ids
 
@@ -1156,7 +1182,7 @@ The batch held {held}, numbered in the order its instructions listed them:
 
 {lines}
 
-`ids` must use these spellings. Where the previous reply names an item by its
+`ids` must use these spellings{spelled}. Where the previous reply names an item by its
 number ("{item.capitalize()} 1", "{item} 2", …), write the id listed beside
 that number. Name no id outside this list.
 '''
@@ -1170,6 +1196,7 @@ def build_schema_repair_prompt(
     syntax_error: Optional[str] = None,
     previous_reply: Optional[str] = None,
     expected_ids: Optional[Sequence[str]] = None,
+    incomplete: bool = False,
 ) -> str:
     """The one schema-repair re-ask: why the reply was rejected and what to send.
 
@@ -1198,6 +1225,12 @@ def build_schema_repair_prompt(
     *syntax_error* (``json_extractor.describe_syntax_error``) replaces the
     validator's errors when the reply's document did not parse: those errors
     describe a fragment from inside it, not the reply.
+
+    *incomplete* (an apply kind, fix round 18): the report was read, but it
+    left some of the batch's items out of both ``ids`` and ``declined``
+    (Codex racing run 7: a fix left alone on purpose was mentioned only in
+    ``notes``). The re-ask says so instead of "could not be read"; *errors*
+    name the items.
 
     Raises:
         KeyError: ``kind`` has no entry in :data:`SCHEMA_REPAIR_SHAPES`.
@@ -1230,6 +1263,15 @@ def build_schema_repair_prompt(
                 "Restate that reply's report. Take every value from it; never name "
                 "an id or a\nfile it does not name."
             )
+        if kind in APPLY_REPORT_KINDS:
+            # Fix round 18: an item the reply says it left unapplied on
+            # purpose is `declined`, with the reason the reply gave — never
+            # left out of the report, which reads as a half-done batch.
+            take += (
+                "\nAn item it says it did not apply on purpose goes in "
+                "`declined`, with the\nreason it gave; every item goes in "
+                "exactly one of `ids` and `declined`."
+            )
         if kind == "implement":
             # A check task's result rides in `check`, which the verdict reads
             # (``subagent_executor.check_findings_from``): restated as given,
@@ -1238,9 +1280,12 @@ def build_schema_repair_prompt(
                 "\nIf it gave a `check` object (a check task's result), restate "
                 "that object as\nit gave it; do not run the check again."
             )
+        why = (
+            "does not say what\nhappened to every item of the batch"
+            if incomplete else "could not\nbe read"
+        )
         return f'''You are re-sending the report of a batch of edits. A previous turn
-already made the edits — they are on disk now — but its closing report could not
-be read, so the batch cannot be checked yet.
+already made the edits — they are on disk now — but its closing report {why}, so the batch cannot be checked yet.
 
 Do NOT open, edit, create or delete any file, and do not run any command. Do not
 redo or add to the edits. This turn only re-sends the report; the edits are
