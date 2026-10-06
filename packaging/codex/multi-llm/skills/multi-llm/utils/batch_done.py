@@ -100,6 +100,7 @@ try:
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_batch_scheduler import (
         BATCH_CHECK_MARKER,
+        batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
         blocked_by_check_reason,
@@ -129,6 +130,7 @@ except ImportError:  # pragma: no cover - direct script invocation
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
     from utils.write_batch_scheduler import (  # type: ignore
         BATCH_CHECK_MARKER,
+        batch_check_line,
         BLOCKED_BY_CHECK_PREFIX,
         CODE_WRITE_KINDS,
         blocked_by_check_reason,
@@ -633,9 +635,8 @@ def main(argv: Optional[List[str]] = None) -> int:
     if failing:
         # Fix round 14: the native leg's counterpart of the executor's line.
         print(
-            f"{BATCH_CHECK_MARKER} {written['task_id']}: its edits were applied, "
-            f"but a check it ran on them fails ({len(failing)} problem(s)): "
-            f"{'; '.join(failing)[:600]}. The edits are kept. List it under "
+            f"{batch_check_line(written['task_id'], failing)}. The edits are "
+            f"kept. List it under "
             f"## Check Findings in the phase's summary.md, and say in your "
             f"final report that this check fails: never report the phase as a "
             f"clean success."

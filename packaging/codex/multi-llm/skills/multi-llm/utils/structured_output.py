@@ -474,7 +474,14 @@ def schema_for_dispatch(
     if reason is None:
         return schema, MARKER_NATIVE
     key = (provider.name, phase)
-    if warn and key not in _DECLINED:
+    # An adapter that declares no structured output at all is not warned
+    # about (run 6, #11c: "opencode declares no structured_output_support"
+    # opened every generate-tasks log): nothing was declined, it always takes
+    # the prompt-level path, and the result's `recovered` marker says so. A
+    # schema an adapter that does carry one cannot take is a fact about the
+    # schema someone can change, and keeps its WARN.
+    supported = bool(getattr(provider, "structured_output_support", False))
+    if warn and supported and key not in _DECLINED:
         _DECLINED.add(key)
         print(
             f"[WARN] structured output: {reason}. The {phase} phase falls back "

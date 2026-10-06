@@ -5,12 +5,13 @@ Executes implementation tasks from a plan by spawning subagents.
 ## Usage
 
 ```bash
-<dispatcher> implement <plan_path> [--resume] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip|retry] [--skip-prerequisites]
+<dispatcher> implement <plan_path> [--resume] [--fresh] [--task T001] [--dry-run] [--yes] [--no-confirm] [--force-strategy <strategy>] [--human-task ID=done|skip|retry] [--skip-prerequisites]
 ```
 
 ## Options
 
 - `--resume`: Resume from previous session state (skip completed tasks). A task recorded with `util batch-done` (step 5) is skipped when `completed` and dispatched again when `failed`, and so is a check recorded with findings (`--check findings`) that holds back the tasks depending on it, unless it was answered `--human-task <id>=done` — but only once the files git sees changed since the run that recorded the findings ended (or with `--human-task <id>=retry`): on unchanged files it would report the same, so step 2 prints `[CHECK_NOT_RERUN]`, leaves it and the tasks it holds out of the batches, and names them in `not_rerun_checks` / `held_tasks`; a task the prior-changes log names that no record says finished is refused — exit 3 with a `[RESUME_REFUSED]` block naming the task and the `util batch-done` call that records it — because re-emitting it would run it twice.
+- `--fresh`: Start over: dispatch every task again, ignoring the tasks an earlier run of this implement finished. Without `--resume` or `--fresh`, a run on an implement that started and did not finish continues it as `--resume` (it prints one `resume: implement started earlier and did not finish …` line naming the tasks it kept), unless the task list was regenerated since; an implement that finished starts over either way. `--resume` wins over `--fresh`. A `--human-task` answer for a code task still needs `--resume` typed.
 - `--task T001`: Execute only a specific task
 - `--dry-run`: Show task summary without executing
 - `--yes` / `--no-confirm`: Skip all advisory prompts (e.g., unapplied task suggestions) and proceed silently. `--yes` additionally resolves every gate this mode reaches from flags and config: the plan-review prerequisite becomes exit 3 rather than a question (D6 row 6), the task-suggestion advisory resolves to "skip, recorded" (row 7), and the human-task strategy resolves to `skip-dependents` (row 8).
@@ -317,7 +318,10 @@ dependents undone, whatever the human-task strategy; a `--resume` after that kee
 them skipped). A `--resume` that changes nothing does not run a failed check
 again: when the files git sees have the same sizes and timestamps as when it failed
 (`verdict.tree_fingerprint` on its result file), the stop is repeated with the remedy
-and no dispatch is spent; `--human-task <id>=retry` runs it anyway.
+and no dispatch is spent; `--human-task <id>=retry` runs it anyway. A stop after a
+code task of the phase completed, with no `driver.verify_command` configured, also
+says that nothing ran the repository's tests (its log, `notice` and `summary.md`), as
+a finished run does.
 
 A check that ran and reported problems (`check-findings`, also from a reply that said `failed` but listed findings and not `could_not_run`) is not a stop: the tasks that
 do not depend on it run. The tasks that depend on it, directly or through another task,
@@ -338,13 +342,13 @@ your host.
 
 5. **Execute batches sequentially (batches have dependencies):**
 
-   Before the loop, count the total number of tasks across all batches as `{total_tasks}` and mark the phase start:
+   Before the loop, take `{tasks_to_dispatch}` from the task JSON's `tasks_to_dispatch` (step 2's `Tasks to dispatch:` line; never count it yourself, and never take the `Organized into …` batch count) and mark the phase start:
    ```bash
    uv run {UV_RUN_FLAGS} --project "{SKILL_DIR}" -- python "{SKILL_DIR}/multi_llm.py" util metrics start \
-     --state-file "$STATE_FILE" --phase "implement" --total-batches {total_tasks}
+     --state-file "$STATE_FILE" --phase "implement" --total-batches {tasks_to_dispatch}
    ```
 
-   `batches` holds exactly the tasks you dispatch (and a manual task still waiting for its answer); its count is the `Pending tasks:` line. Step 2 left out, and named in top-level maps with their reasons, every task you must neither dispatch nor record: `skipped_tasks`, `accepted_tasks` and `completed_manual_tasks` (above); `refused_tasks`, a task the write policy (`driver.write_paths`) does not allow, already recorded `failed` as the `--exec-subagents` leg refuses it before dispatch, and `not_run_tasks`, the tasks that depend on one; `not_rerun_checks`, a check whose findings stand because nothing changed since they were recorded (`[CHECK_NOT_RERUN]`), and `held_tasks`, the tasks a check with findings holds back. List them in the summary (refused: `Failed`, refused before dispatch; the others: `Not run`). When `batches` is empty step 2 says `Nothing to dispatch`: spawn nothing and go on to step 7 (this run reopened implement; one that printed `Nothing is left to run` ended at step 3).
+   `batches` holds exactly the tasks you dispatch (and a manual task still waiting for its answer); its count is the `Pending tasks:` line. Step 2 left out, and named in top-level maps with their reasons, every task you must neither dispatch nor record: `skipped_tasks`, `accepted_tasks` and `completed_manual_tasks` (above); `refused_tasks`, a task the write policy (`driver.write_paths`) does not allow, already recorded `failed` as the `--exec-subagents` leg refuses it before dispatch, and `not_run_tasks`, the tasks that depend on one; `not_rerun_checks`, a check whose findings stand because nothing changed since they were recorded (`[CHECK_NOT_RERUN]`), and `held_tasks`, the tasks a check with findings holds back. List them in the summary (refused: `Failed`, refused before dispatch; the others: `Not run`). A task named in `waiting_on_checks` (step 2's "Waiting on a check's verdict" list) is in `batches`, after the check task it depends on, because that check's verdict is not known until it runs: dispatch it once the check is recorded `--check passed`; if the check is recorded with findings, `util batch-done` prints `[CHECK_BLOCKED]` for it, so do not dispatch it — it stays pending, the summary lists it as `Not run`, and step 10 runs without `--mark-completed`. When `batches` is empty step 2 says `Nothing to dispatch`: spawn nothing and go on to step 7 (this run reopened implement; one that printed `Nothing is left to run` ended at step 3).
 
    For each batch in `batches` array:
    - Execute all tasks in the batch (can be parallel if `can_parallelize` is true)
@@ -409,7 +413,7 @@ your host.
      **"Skip all, continue anyway" strategy:**
      - The orchestrator already recorded every human task as "skipped" in state (its `skip_reason` starts "deferred — manual task") and a dependency override for each code task that depends on one. Do not record either yourself.
      - Treat human task dependencies as satisfied — dependent code tasks proceed as normal
-     - After all tasks complete, include a "## Manual Tasks (Deferred)" section in the implementation summary
+     - After all tasks complete, include a "## Manual Tasks (Deferred)" section in the implementation summary, ending with the text of step 2's `[MANUAL_TASK_NOTE]` line (the task JSON's `manual_tasks_note`), verbatim: it says how to record them done
      - Also include a "## Dependency Override Warnings" section listing each code task that ran with overridden human dependencies:
        ```markdown
        ## Dependency Override Warnings
@@ -424,7 +428,7 @@ your host.
 
      **"Skip all, skip dependents too" strategy:**
      - The orchestrator already recorded every human task, and every task that depends on one, as "skipped" in state; the task JSON leaves them out of `batches` and names them in `skipped_tasks`. Do not dispatch them and do not record them yourself.
-     - After remaining tasks complete, include a "## Manual Tasks (Deferred)" section listing each human task and each skipped dependent (step 2 prints them under "Deferred tasks"); a task step 2 printed under "Skipped at your request" (a failed task you answered `--human-task {id}=skip`, and its dependents) goes under a `## Skipped at your request` section instead, and one it printed under "Accepted after failing" is listed as accepted after failing, and one it printed under "Completed by hand" (a manual task answered `--human-task {id}=done`) is listed as completed by hand
+     - After remaining tasks complete, include a "## Manual Tasks (Deferred)" section listing each human task and each skipped dependent (step 2 prints them under "Deferred tasks") and ending with the text of step 2's `[MANUAL_TASK_NOTE]` line (the task JSON's `manual_tasks_note`), verbatim: it says how to record them done; a task step 2 printed under "Skipped at your request" (a failed task you answered `--human-task {id}=skip`, and its dependents) goes under a `## Skipped at your request` section instead, and one it printed under "Accepted after failing" is listed as accepted after failing, and one it printed under "Completed by hand" (a manual task answered `--human-task {id}=done`) is listed as completed by hand
 
      #### Transitive Skip Propagation Algorithm
 
@@ -485,9 +489,9 @@ your host.
        --state-file "$STATE_FILE" --phase "implement" \
        --label "{task_id}: {task_title}" --subagent-type "{executor_role}" \
        --tokens {token_count} --tool-uses {tool_uses} --duration-ms {duration_ms} \
-       --total-batches {total_tasks} --batch-index {N}
+       --total-batches {tasks_to_dispatch} --batch-index {N}
      ```
-     Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based task index across all batches. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
+     Where `token_count`, `tool_uses`, `duration_ms` come from whatever your subagent mechanism reports, and `{N}` is the cumulative 1-based index of the tasks you dispatched, across all batches. Omit any flag it does not report. Never pass `0` for an unknown value; omit the flag — a made-up zero is averaged into the phase totals as a real measurement. The script prints an `[ETA]` line to stderr after each call.
 
    **The last subagent returning is not the end of the phase.** Steps 6 through 11
    still owe work — the finalization that computes which files this phase
@@ -534,8 +538,9 @@ your host.
      both legs reporting the same check.
    - Only if none is configured, detect the target repository's own test runner
      (never this skill's — the suite under test is the one the plan changed):
-     - If `package.json` exists with a `test` script: `npm test 2>&1 | tail -50`
-     - If `pytest.ini`, `pyproject.toml` with `[tool.pytest]`, or `conftest.py` exists: `pytest -v --tb=short 2>&1 | tail -50`
+     - If `package.json` exists with a `test` script: `npm test`
+     - If `pytest.ini`, `pyproject.toml` with `[tool.pytest]`, or `conftest.py` exists: `pytest -v --tb=short`
+   - Run that command bare, exactly as the repository defines it: no `| tail`, `| head` or `| grep`, no `2>&1 |`, nothing chained before or after it. Read its whole output and take pass or fail from its own exit code: a pipe reports the last command's exit code, not the check's, and a trim drops the failures above the cut. A long output is saved to a file: read it to the end.
    - Record pass/fail results for inclusion in the implementation summary, naming
      the command you ran (or `not configured` when nothing was)
    - When no `driver.verify_command` is configured, say so in one plain line of your
@@ -632,6 +637,8 @@ your host.
    - Number of tasks completed/failed
    - Each check task that reported problems, with its findings (the code review is told about them), and the tasks it held back with the way forward (fix and `--resume`, or `--resume --human-task {id}=done`)
    - Each task whose own check failed after its edits (`[BATCH_CHECK_FAILED]`), with what failed: the phase applied it but is not a clean finish
+   - At a stop after a code task completed, with no `driver.verify_command` configured: step 8's one plain line saying nothing in the plugin ran the repository's tests and naming the setting to add (step 8 itself does not run at a stop)
+   - Each manual task step 2 deferred, as the user's to do, with the `[MANUAL_TASK_NOTE]` text verbatim (the next-step lookup prints the tasks as `[MANUAL_TASK]` lines and the note again below its command): it says how to record them done
    - At a stop (step 10 ran without `--mark-completed`) the next-step lookup of `references/summary-format.md` still runs: it prints the resume command (`[NEXT_COMMAND]`) and, when tasks wait for an answer, one command carrying every `--human-task` answer (`[NEXT_COMMAND_ANSWERS]`). End the report with both, each alone in its own fenced block, copied verbatim; never write a resume or `--human-task` command of your own
    - Implementation summary file location
    - State file location

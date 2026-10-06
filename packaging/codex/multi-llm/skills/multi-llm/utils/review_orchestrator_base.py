@@ -4066,13 +4066,16 @@ def home_check_line(provider_name: str, record: Dict[str, Any], *, kept: bool) -
 
 
 def foreign_trust_line(provider_name: str, record: Dict[str, Any]) -> str:
-    """The closing-summary-only note for trust tables another run added to
-    ``config.toml`` in a slot's window (I12's entries; never a failure)."""
-    return (
-        f"{CODEX_HOME_CHECK_MARKER} {provider_name}: trust entries for other "
-        f"paths appeared in {record.get('home') or '$CODEX_HOME'}/config.toml "
-        f"during this run ({', '.join(record.get('foreign_trust') or ())}) — "
-        f"another run's, not a failure of this one"
+    """The closing-summary-only note for trust tables added to ``config.toml``
+    in a slot's window for directories inside this repository (I12's entries;
+    never a failure). Another repository's are not this run's and never reach
+    it (run 6, #11a); the wording is the executor lane's,
+    ``landlock_dispatch.own_trust_entries_line``."""
+    from .landlock_dispatch import own_trust_entries_line
+
+    return own_trust_entries_line(
+        list(record.get("foreign_trust") or ()),
+        home=record.get("home") or None, provider=provider_name,
     )
 
 
