@@ -7496,16 +7496,16 @@ class WriteBatchScheduler:
         ]
         refused = [o for o in failed if o.task_id in self._refused_before_dispatch]
         if refused and not acceptable:
-            names = ", ".join(o.task_id for o in refused)
             policy = any(o.write_outcome == WRITE_POLICY_VIOLATION for o in refused)
+            # Fix round 18 (live run 7): that nothing is half-applied is the
+            # block's closing line, said once; the bullet is the remedy.
             lines.append(
-                f"  - nothing was dispatched for {names}, so there is nothing "
-                f"to restore. "
+                f"  - "
                 + (
-                    "If the file the details name is meant to be written, "
+                    "if the file the details name is meant to be written, "
                     "allow it in driver.write_paths (widen `allow` or narrow "
                     "`deny` in .multi-llm/providers.yaml)"
-                    if policy else "Fix what the details name"
+                    if policy else "fix what the details name"
                 )
                 + ", then resume this phase; it is checked again before it is "
                 "dispatched, and the tasks after it follow:"
@@ -7549,11 +7549,10 @@ class WriteBatchScheduler:
             lines.append(f"        {resume}")
         elif acceptable and all(o.applied_without_changes for o in acceptable):
             lines.append(
-                "  - nothing changed, so there is nothing to restore: resume "
-                "this phase and it is dispatched again, then the tasks after "
-                "it (if its runner again says it made the change without "
-                "making it, run the phase on another model, or make the "
-                "change yourself and answer as below):"
+                "  - resume this phase and it is dispatched again, then the "
+                "tasks after it (if its runner again says it made the change "
+                "without making it, run the phase on another model, or make "
+                "the change yourself and answer as below):"
             )
             lines.append(f"        {resume}")
         elif acceptable:
@@ -7592,11 +7591,12 @@ class WriteBatchScheduler:
             lines.append(f"        {resume}")
         else:
             # Fix round 14: no byte moved (a timeout, a prose reply, a
-            # refused runner), so there is nothing half-applied to inspect.
+            # refused runner), so there is nothing half-applied to inspect —
+            # which the block's closing line says (fix round 18: once).
             lines.append(
-                "  - nothing changed, so there is nothing to restore: fix the "
-                "cause the details name, then resume this phase; the failed "
-                "batch is dispatched again and the ones never reached follow:"
+                "  - fix the cause the details name, then resume this phase; "
+                "the failed batch is dispatched again and the ones never "
+                "reached follow:"
             )
             lines.append(f"        {resume}")
         if self.kind != "implement":

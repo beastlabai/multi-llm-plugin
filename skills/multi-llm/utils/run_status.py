@@ -2949,11 +2949,10 @@ def _resume_lines(
             if _failed_batches_moved_nothing(view):
                 # Fix round 14 (stop fixture 01b): a task refused before
                 # dispatch, a clean failure, a timeout that wrote nothing —
-                # no byte moved, so nothing is half-applied.
-                lines.append(
-                    f"      ({cost}; nothing was half-applied, so there is "
-                    f"nothing to restore)"
-                )
+                # no byte moved, so nothing is half-applied. Fix round 18
+                # (live run 7): the stop's own block says so, and this view
+                # shows its last lines, so the line no longer says it again.
+                lines.append(f"      ({cost})")
             else:
                 lines.append(
                     f"      ({cost}; the half-applied state is left in place — inspect "
