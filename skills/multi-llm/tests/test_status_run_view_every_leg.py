@@ -400,3 +400,83 @@ class TestTheNativeApplyPhases:
         capsys.readouterr()
         assert "on the host" not in _apply_block(capsys, "--phase", "implement")[0]
         assert "on the host" in _apply_block(capsys, "--phase", "apply-suggestions")[0]
+
+
+#: The way on an in-progress native block names (fix round 19).
+_ENDED = ("      if no host session is running it now, its loop ended without "
+          "`util metrics finish`; continue it with: ")
+
+
+def _age_state_file(state_file) -> str:
+    """Stamp *state_file* as last written at a fixed time; that time as the
+    view prints it (local, to the second)."""
+    import os
+    from datetime import datetime
+
+    when = datetime(2026, 10, 6, 10, 5, 12)
+    os.utime(state_file, (when.timestamp(), when.timestamp()))
+    return when.isoformat(timespec="seconds")
+
+
+class TestALoopThatEndedWithoutItsFinishIsNamedWithTheWayOn:
+    """Fix round 19: `in progress on the host (started …)` rests on a `util
+    metrics start` with no `finish`, so a native loop that crashed, or whose
+    session ended, read as running forever, with nothing saying what else it
+    may mean or how to go on."""
+
+    def test_implement_says_when_state_json_last_changed_and_how_to_go_on(
+        self, repo, capsys,
+    ):
+        handoff, _out = _emit(capsys)
+        state_file = handoff["state_file"]
+        _util(capsys, "metrics", "start", "--state-file", state_file,
+              "--phase", "implement", "--total-batches", "4")
+        _util(capsys, "batch-done", "--phase-dir", str(repo.phase_dir),
+              "--task-id", "T001", "--status", "completed")
+        changed = _age_state_file(state_file)
+        lines = _status_text(capsys).splitlines()
+        at = next(i for i, line in enumerate(lines)
+                  if line.startswith("  implement  "))
+        assert lines[at].startswith(
+            "  implement  in progress on the host (started "), lines[at]
+        assert f"; state.json last changed {changed}) — " in lines[at]
+        assert lines[at + 1].startswith("      all tasks:")
+        assert lines[at + 2] == (
+            f"{_ENDED}/multi-llm:multi-llm --implement {PLAN_ARG} --resume")
+
+    def test_one_the_host_finished_names_no_way_on(self, repo, capsys):
+        handoff, _out = _emit(capsys)
+        state_file = handoff["state_file"]
+        _util(capsys, "metrics", "start", "--state-file", state_file,
+              "--phase", "implement", "--total-batches", "4")
+        _util(capsys, "metrics", "finish", "--state-file", state_file,
+              "--phase", "implement")
+        out = _status_text(capsys)
+        assert "not finished on the host" in out, out
+        assert "continue it with:" not in out and "last changed" not in out
+
+    def test_an_apply_phase_too(self, plan, capsys):
+        state_file = _native_apply(plan)
+        assert multi_llm.main(["util", "metrics", "record", "--state-file",
+                               str(state_file), "--phase", "apply-suggestions",
+                               "--label", "Batch 0", "--batch-index", "0",
+                               "--total-batches", "2", "--no-eta"]) == 0
+        changed = _age_state_file(state_file)
+        capsys.readouterr()
+        run_status.main(["--plan-file", TYPED, "--view", "run", "--host",
+                         "claude-code"])
+        lines = capsys.readouterr().out.splitlines()
+        at = next(i for i, line in enumerate(lines)
+                  if line.startswith("  apply-suggestions  "))
+        assert f"; state.json last changed {changed}) — " in lines[at], lines[at]
+        assert lines[at + 1].strip().startswith("batches:")
+        assert lines[at + 2] == (
+            f"{_ENDED}/multi-llm:multi-llm --apply-suggestions {TYPED} --resume")
+
+    def test_json_carries_when_state_json_last_changed(self, plan, capsys):
+        state_file = _native_apply(plan)
+        changed = _age_state_file(state_file)
+        capsys.readouterr()
+        run_status.main(["--plan-file", TYPED, "--view", "run", "--json"])
+        entry = json.loads(capsys.readouterr().out)["apply_phases"][0]
+        assert entry["state_changed_at"] == changed

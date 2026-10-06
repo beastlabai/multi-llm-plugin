@@ -2068,6 +2068,9 @@ def state_implement_view(
         # is between `util metrics start` and `finish`.
         "in_progress_since": None if completed else _host_run_started_at(
             record, _IMPLEMENT_PHASE),
+        # Fix round 19: when state.json last changed, so a loop that ended
+        # without `util metrics finish` can be told from a live one.
+        "state_changed_at": _state_changed_at(state.state_file),
         # The executor routes' `all tasks:` tally, every task in one bucket
         # (fix round 18: the native leg printed a coarser `tasks:` line).
         "tally": {
@@ -2109,8 +2112,22 @@ def _host_run_started_at(record: Mapping[str, Any], phase: str) -> Optional[str]
     return started.strip()[:19]
 
 
+def _state_changed_at(state_file: Path) -> Optional[str]:
+    """When *state_file* was last written, local time to the second, or
+    ``None``. Every record a host's loop makes (``util batch-done``, ``util
+    metrics record``) rewrites it."""
+    try:
+        stamp = os.stat(state_file).st_mtime
+    except OSError:
+        return None
+    from datetime import datetime
+
+    return datetime.fromtimestamp(stamp).isoformat(timespec="seconds")
+
+
 def _native_head(
     dir_name: str, *, completed: bool, since: Optional[str], unit: str,
+    changed: Optional[str] = None,
 ) -> str:
     """A native write phase's head line: what state.json says it is doing.
 
@@ -2122,7 +2139,8 @@ def _native_head(
         verdict = "done on the host (marked completed)"
         tense = "ran"
     elif since:
-        verdict = f"in progress on the host (started {since})"
+        last = f"; state.json last changed {changed}" if changed else ""
+        verdict = f"in progress on the host (started {since}{last})"
         tense = "runs"
     else:
         verdict = "not finished on the host (not marked completed)"
@@ -2133,21 +2151,56 @@ def _native_head(
     )
 
 
-def render_state_implement_lines(view: Dict[str, Any]) -> List[str]:
+def _native_resume_line(resume: Optional[str]) -> List[str]:
+    """What an in-progress head may also mean, and the way on (fix round 19).
+
+    ``util metrics start`` with no ``finish`` is all that says a host's loop
+    is running, so a loop that crashed or whose session ended reads the same
+    forever; nothing on disk tells the two apart.
+    """
+    if not resume:
+        return []
+    return [
+        "      if no host session is running it now, its loop ended without "
+        f"`util metrics finish`; continue it with: {resume}"
+    ]
+
+
+def native_resume_command(
+    mode: str, plan_path: Path, spell: Optional["Speller"] = None,
+) -> str:
+    """``--<mode> <plan> --resume`` in the host's spelling (:func:`user_speller`),
+    else the dispatcher's: the way on for a native phase whose loop ended
+    without its finish."""
+    if spell is not None:
+        spelled = spell(mode, [], [_RESUME_VERB_BY_MODE.get(mode, "--resume")])
+        if spelled:
+            return spelled
+    return cli_common.retry_command(
+        mode, str(plan_path), _RESUME_VERB_BY_MODE.get(mode, "--resume"))
+
+
+def render_state_implement_lines(
+    view: Dict[str, Any], *, resume: Optional[str] = None,
+) -> List[str]:
     """:func:`state_implement_view` as the run view's text: one block.
 
     Fix round 18 (Claude Code racing 06 and stop path): its tally line reads
     ``all tasks:``, in the executor routes' words (:func:`implement_tally_text`),
-    and its head says whether the host's run is in progress.
+    and its head says whether the host's run is in progress. Fix round 19:
+    an in-progress head says when state.json last changed and, with
+    *resume* (:func:`native_resume_command`), what it may also mean.
     """
     since = view.get("in_progress_since")
     lines = [_native_head(
         _IMPLEMENT_PHASE, completed=bool(view.get("completed")), since=since,
-        unit="tasks",
+        unit="tasks", changed=view.get("state_changed_at"),
     )]
     lines.append(
         f"      all tasks:      {implement_tally_text(view['tally'], live=bool(since))}"
     )
+    if since:
+        lines += _native_resume_line(resume)
     for task_id, reason in view["reasons"].items():
         lines.append(f"      {task_id}: {reason}")
     for entry in view["findings"]:
@@ -2220,11 +2273,13 @@ def state_apply_views(
     if not candidates:
         return []
     try:
-        record = StateManager(plan_path, read_only=True).state
+        manager = StateManager(plan_path, read_only=True)
+        record = manager.state
         if workflow is None:
             workflow = _workflow_payload(plan_path, host_id=host_id)
     except Exception:  # noqa: BLE001 - advisory: the run view is not
         return []
+    changed = _state_changed_at(manager.state_file)
     phases = (workflow or {}).get("phases") or {}
     out: List[Dict[str, Any]] = []
     for phase, directory in candidates:
@@ -2240,6 +2295,8 @@ def state_apply_views(
             "in_progress_since": None if completed else since,
             "batches_recorded": None,
             "batches_total": None,
+            # Fix round 19, as on the native implement view.
+            "state_changed_at": changed,
         }
         if entry["in_progress_since"]:
             # This host run's own count: the entries `util metrics record`
@@ -2260,15 +2317,21 @@ def state_apply_views(
     return out
 
 
-def render_state_apply_lines(view: Dict[str, Any]) -> List[str]:
-    """:func:`state_apply_views`' entry as the run view's text: one block."""
+def render_state_apply_lines(
+    view: Dict[str, Any], *, resume: Optional[str] = None,
+) -> List[str]:
+    """:func:`state_apply_views`' entry as the run view's text: one block
+    (*resume* as on :func:`render_state_implement_lines`)."""
+    since = view.get("in_progress_since")
     lines = [_native_head(
         view["phase_dir"], completed=bool(view.get("completed")),
-        since=view.get("in_progress_since"), unit="batches",
+        since=since, unit="batches", changed=view.get("state_changed_at"),
     )]
     recorded, total = view.get("batches_recorded"), view.get("batches_total")
     if isinstance(recorded, int) and isinstance(total, int):
         lines.append(f"      batches:        {recorded}/{total} recorded by this run")
+    if since:
+        lines += _native_resume_line(resume)
     return lines
 
 
@@ -3577,20 +3640,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                 ),
             )
             lines.append("")
+        spell = user_speller(
+            _reader_host(args), _plan_spelling(args, views, plan_path))
         lines += render_run_text(
             views, plan_path=plan_path, workflow=workflow,
             scope=_scope_label(args), resume_workflow=terminal_workflow,
             implement_tally=implement_tally,
             state_block=implement_tasks is not None or bool(apply_tasks),
-            spell=user_speller(
-                _reader_host(args), _plan_spelling(args, views, plan_path)),
+            spell=spell,
         )
         # The phases a native host ran (no run record), in workflow order.
         native: List[Tuple[str, List[str]]] = [
-            (entry["phase"], render_state_apply_lines(entry)) for entry in apply_tasks
+            (entry["phase"], render_state_apply_lines(
+                entry, resume=native_resume_command(entry["phase"], plan_path, spell)))
+            for entry in apply_tasks
         ]
         if implement_tasks is not None:
-            native.append((_IMPLEMENT_PHASE, render_state_implement_lines(implement_tasks)))
+            native.append((_IMPLEMENT_PHASE, render_state_implement_lines(
+                implement_tasks,
+                resume=native_resume_command(_IMPLEMENT_PHASE, plan_path, spell))))
         for _phase, block in sorted(
                 native, key=lambda item: NATIVE_PHASE_ORDER.index(item[0])):
             lines += block
