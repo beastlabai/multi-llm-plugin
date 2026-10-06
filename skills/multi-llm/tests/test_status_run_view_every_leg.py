@@ -163,10 +163,10 @@ class TestTheNativeImplementBlock:
         assert _util(capsys, "batch-done", "--phase-dir", str(repo.phase_dir),
                      "--task-id", "T001", "--status", "completed")[0] == 0
         out = _status_text(capsys)
-        head = next(l for l in out.splitlines() if l.startswith("  implement  "))
+        head = next(line for line in out.splitlines() if line.startswith("  implement  "))
         assert head.startswith("  implement  in progress on the host (started "), out
         assert "the host runs these tasks itself" in head
-        tally = next(l for l in out.splitlines() if "all tasks:" in l)
+        tally = next(line for line in out.splitlines() if "all tasks:" in line)
         assert tally.split("all tasks:", 1)[1].strip().startswith("1/6 done; completed: T001")
         assert "pending: T002" in tally  # a live run's tasks wait, not "not run"
 
@@ -193,7 +193,7 @@ class TestTheNativeImplementBlock:
         tally = run_status.implement_tally_text(
             run_status.implement_task_tally(Path(repo.plan)))
         assert f"      all tasks:      {tally}" in out, out
-        assert not any(l.strip().startswith("tasks:") for l in out.splitlines())
+        assert not any(line.strip().startswith("tasks:") for line in out.splitlines())
 
 
 def _native_apply(plan: Path, *, metrics_start: bool = True) -> Path:
@@ -230,8 +230,8 @@ def _apply_block(capsys, *flags) -> list:
                      "claude-code", *flags])
     out = capsys.readouterr().out
     lines = out.splitlines()
-    at = next((i for i, l in enumerate(lines)
-               if l.startswith("  apply-suggestions  ")), None)
+    at = next((i for i, line in enumerate(lines)
+               if line.startswith("  apply-suggestions  ")), None)
     if at is None:
         return [out]
     return lines[at:at + 2]
