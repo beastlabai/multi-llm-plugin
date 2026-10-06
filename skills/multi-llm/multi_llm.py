@@ -1228,7 +1228,20 @@ def _continued_plan_arg(
 
 
 def _raise_on_sigterm(signum, frame):  # pragma: no cover - exercised in a subprocess
-    """SIGTERM → ``SystemExit(128 + signum)``, so ``main``'s ``finally`` runs."""
+    """SIGTERM → ``SystemExit(128 + signum)``, so ``main``'s ``finally`` runs.
+
+    Once: later SIGTERMs are ignored before raising. A group kill reaches this
+    process twice — directly and as the copy ``uv run`` forwards to its child —
+    and the second ``SystemExit`` would be raised inside that ``finally``,
+    cutting short the config restore and the result line it exists to run.
+    Nothing is printed here: a handler can land inside a buffered write.
+    """
+    import signal
+
+    try:
+        signal.signal(signal.SIGTERM, signal.SIG_IGN)
+    except (ValueError, OSError):
+        pass
     raise SystemExit(128 + signum)
 
 

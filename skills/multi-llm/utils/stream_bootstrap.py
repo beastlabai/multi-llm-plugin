@@ -5,7 +5,66 @@ call :func:`bootstrap_streams` at the start of ``main()`` so all entry points
 get consistent stream behavior for free.
 """
 
+import os
 import sys
+
+
+class _FdWriter:
+    """A text stream straight onto one file descriptor: no buffer, no lock.
+
+    What a signal handler may print through (see :func:`streams_for_a_signal_handler`).
+    Nothing it writes can be interrupted half-way into a state a nested handler
+    would trip over, because there is no shared state to trip over.
+    """
+
+    encoding = "utf-8"
+    errors = "replace"
+
+    def __init__(self, fd: int) -> None:
+        self._fd = fd
+
+    def write(self, text) -> int:
+        data = str(text).encode("utf-8", "replace")
+        view = memoryview(data)
+        while view:
+            try:
+                written = os.write(self._fd, view)
+            except InterruptedError:  # pragma: no cover - PEP 475 retries it
+                continue
+            except OSError:
+                break  # a closed log must never cost the abort its record
+            view = view[written:]
+        return len(text)
+
+    def flush(self) -> None:
+        return None
+
+    def fileno(self) -> int:
+        return self._fd
+
+    def isatty(self) -> bool:
+        return False
+
+    def writable(self) -> bool:
+        return True
+
+
+def streams_for_a_signal_handler() -> None:
+    """Point ``sys.stdout``/``sys.stderr`` at lock-free writers on fds 1 and 2.
+
+    Called first thing by a signal handler that prints and then ends the
+    process. A Python handler runs on the main thread between bytecodes,
+    which includes the inside of ``BufferedWriter``'s flush: it checks for
+    signals after every raw write while it holds the buffer's lock. A handler
+    that prints through that same object then raises ``RuntimeError:
+    reentrant call inside <_io.BufferedWriter name='<stderr>'>`` (Codex racing
+    run 6, 2026-10-06: the second SIGTERM ``uv run`` forwards to its child
+    landed inside the first handler's own ``print``). Whatever the interrupted
+    write left in the old buffer is abandoned with it; the caller ends the
+    process with ``os._exit``, which flushes nothing anyway.
+    """
+    sys.stdout = _FdWriter(1)
+    sys.stderr = _FdWriter(2)
 
 
 def bootstrap_streams() -> None:
