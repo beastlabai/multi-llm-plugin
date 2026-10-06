@@ -571,8 +571,9 @@ def fit_stop_headline(
     ``head [reported]<terminator> Not run: … <body…> <tail>``. What gives way,
     in order: *reported* (the model's own words: cut with ``…``, or left out
     below :data:`STOP_HEADLINE_QUOTE_MIN`), then the not-run list (``Not run:
-    T003, T004 and 9 more.``). *body* (the remedy and the answers) and *tail*
-    (the tests line) stay whole. ``None`` when that is not enough and
+    T003, T004 and 9 more.``, then left out: the summary lists every one).
+    *body* (the remedy and the answers) and *tail* (the tests line) stay
+    whole. ``None`` when that is not enough and
     *last_resort* is false: the caller tries again with shorter task titles.
     Under *last_resort* the head is cut, and when even the bare remedy, the
     answers and the tests line do not fit, everything before *tail* is.
@@ -594,7 +595,7 @@ def fit_stop_headline(
         if shown is None or shown >= len(ids):
             return f"Not run: {', '.join(ids)}."
         if shown <= 0:
-            return f"Not run: {len(ids)} task(s), listed in the summary."
+            return ""
         return f"Not run: {', '.join(ids[:shown])} and {len(ids) - shown} more."
 
     def core(lead: str, said: str, nr: str) -> str:
@@ -4493,8 +4494,9 @@ class WriteBatchScheduler:
         except ImportError:  # pragma: no cover
             from utils import status_file as _status_file
         try:
+            # The phase-level `state` stays the earlier run's: this run
+            # changed nothing a status reader would count.
             _status_file.update_status(self.phase_dir, {
-                "state": "subagents_failed",
                 "progress": {"write_subagents": {
                     **earlier,
                     "in_flight": [],

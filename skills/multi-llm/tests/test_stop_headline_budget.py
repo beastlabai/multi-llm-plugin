@@ -81,6 +81,15 @@ class TestTheRule:
         assert "Not run: T002, " in text and " more." in text
         assert text.endswith(f"{REMEDY} {ANSWER} {TAIL}")
 
+    def test_a_not_run_list_with_no_room_is_left_to_the_summary(self):
+        head = "x stopped at T1: failed"
+        fits = len(f"{head}. {REMEDY} {ANSWER} {TAIL}")
+        text = fit_stop_headline(
+            head, None, ["T-with-a-long-id-" + "9" * 40], [REMEDY, ANSWER],
+            tail=TAIL, budget=fits + 5,
+        )
+        assert text == f"{head}. {REMEDY} {ANSWER} {TAIL}"
+
     def test_a_caller_with_shorter_titles_to_try_gets_none(self):
         assert fit_stop_headline(
             "x stopped at T1 (" + "t" * 300 + "): failed", None, [],
