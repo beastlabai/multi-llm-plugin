@@ -2420,6 +2420,7 @@ class WriteBatchScheduler:
         log: Optional[Callable[[str], None]] = None,
         write_target: Optional[str] = None,
         user_commands: Optional[Dict[str, str]] = None,
+        partial_skips: Optional[Sequence[str]] = None,
     ) -> None:
         if kind not in WRITE_KINDS:
             raise ExecutorError(
@@ -2468,6 +2469,12 @@ class WriteBatchScheduler:
         #: `skip` with `{task_id}` left for the failed task. Absent (a direct
         #: invocation), the stop message names the flags instead.
         self.user_commands: Dict[str, str] = dict(user_commands or {})
+        #: Fix round 18: the apply batches answered ``--human-task <id>=skip``
+        #: on this resume — each stopped as a partial application whose report
+        #: left items out, kept as it stands, those items recorded as skipped
+        #: at the user's request (:meth:`_check_partial_skips`).
+        self.partial_skips: List[str] = [str(t) for t in (partial_skips or [])]
+        self._kept_at_request: Dict[str, Dict[str, Any]] = {}
 
         # Plan step 3 (2026-09-30): the grant a write dispatch on the
         # plugin-landlock rung carries. ONE request for the whole phase — the
@@ -3494,6 +3501,15 @@ class WriteBatchScheduler:
             # run's `write_batch_report.json` / `subagent_batch_report.json`.
             return result
 
+        # Fix round 18: a `--human-task <batch>=skip` answer is checked
+        # against the batch's stopped verdict and the bytes on disk before
+        # anything is dispatched; one that cannot apply stops the run here.
+        refusals = self._check_partial_skips()
+        if refusals:
+            result.exit_code = EXIT_NEEDS_HUMAN
+            result.messages.extend(refusals)
+            return result
+
         # 3. The batches, in order, each verified before the next is dispatched.
         # Mirrored once before the first dispatch so `progress.step` reads
         # `applying` for the whole stretch rather than only from the first
@@ -3988,6 +4004,11 @@ class WriteBatchScheduler:
         task_id = str(task.get("task_id", ""))
         profile = profile_for_kind(self.kind)
 
+        if task_id in self._kept_at_request:
+            # Fix round 18: answered `--human-task <id>=skip` — kept as it
+            # stood, never dispatched again.
+            return self._keep_at_request(task, batch_index, result)
+
         # Resume: a batch counts as done when its result file exists, parses and
         # validates (D3i). Its summary is already in the prior-changes log on
         # disk, so a resumed run replays rather than reconstructs.
@@ -4229,6 +4250,196 @@ class WriteBatchScheduler:
                 self._sweep_overlap.pop(task_id, None)
             self._target_identity_before.pop(task_id, None)
         self._record_batch_effects(task, outcome, batch_index, result)
+        return outcome
+
+    def _check_partial_skips(self) -> List[str]:
+        """Check each ``--human-task <batch>=skip`` answer before any dispatch.
+
+        Fix round 18 (Codex racing run 7, apply-code-fixes 08 and 08b): a
+        batch applied one fix and left the other out of its report; the stop
+        and its resume offered only ``--resume``, which dispatched the batch
+        again and stopped the same way. The answer keeps such a batch as it
+        stands and records the items it left out as skipped at the user's
+        request. It applies only to a batch of this run whose own result
+        carries the stop's verdict — a partial application whose readable
+        report attested some items and left others out (``unapplied_ids``) —
+        for the same items, from the same inputs, with every file it moved
+        still holding the bytes it left. Anything else is refused (exit 3,
+        nothing dispatched), never guessed at: keeping a batch the user since
+        restored, or one that now holds other items, would record edits that
+        are not there. An answer for a batch an earlier answer already kept
+        is taken as done. Returns the refusal lines, or ``[]``.
+        """
+        if not self.partial_skips:
+            return []
+        by_id = {str(task.get("task_id", "")): task for task in self.tasks}
+        problems: List[str] = []
+        for task_id in self.partial_skips:
+            task = by_id.get(task_id)
+            if self.kind not in APPLY_WRITE_KINDS:
+                why = "only an apply phase's batch takes this answer"
+            elif task is None:
+                why = (
+                    f"this run holds no batch {task_id} (its batches: "
+                    f"{', '.join(sorted(by_id)) or 'none'})"
+                )
+            else:
+                why = self._partial_skip_evidence(task)
+            if why:
+                problems.append(f"  - --human-task {task_id}=skip: {why}.")
+        if not problems:
+            return []
+        return [
+            "",
+            f"ERROR: {self.phase} cannot take the answer below, so nothing was "
+            f"dispatched and no file was changed:",
+            *problems,
+            "Resume without it to dispatch the batch again, or restore the "
+            "batch first (util restore-batch) and then resume.",
+        ]
+
+    def _partial_skip_evidence(self, task: Dict[str, Any]) -> Optional[str]:
+        """Why *task* cannot be kept at the user's request, or ``None`` when it
+        can (recorded in ``_kept_at_request``) or already was."""
+        task_id = str(task.get("task_id", ""))
+        try:
+            path = resolve_output_target(task, self.phase_dir)
+        except ResultRejected:
+            path = None
+        if path is None or not path.is_file():
+            return (
+                f"{task_id} has no result on disk, so it did not stop as a "
+                f"partial application this answer could keep"
+            )
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return f"{task_id}'s result ({path.name}) cannot be read"
+        verdict = data.get("verdict") if isinstance(data, dict) else None
+        if not isinstance(verdict, dict):
+            return f"{task_id}'s result ({path.name}) carries no verdict"
+        if verdict.get("ok") is True and verdict.get("skipped_items"):
+            # An earlier answer kept it: the resume reads it as done.
+            return None
+        expected = sorted(str(i) for i in (task.get("expected_ids") or []))
+        if (
+            verdict.get("write_outcome") != WRITE_PARTIAL
+            or not verdict.get("unapplied_ids")
+        ):
+            return (
+                f"{task_id} did not stop as a partial application whose report "
+                f"left items out (its last verdict: "
+                f"{verdict.get('write_outcome') or 'none'}); only such a batch "
+                f"can be kept as it stands"
+            )
+        recorded = verdict.get("expected_ids")
+        if (
+            str(verdict.get("task_id") or "") != task_id
+            or not isinstance(recorded, list)
+            or sorted(str(i) for i in recorded) != expected
+        ):
+            return (
+                f"{task_id} now holds other items than the batch that stopped "
+                f"(the selection changed since)"
+            )
+        fingerprint = str(verdict.get("inputs_fingerprint") or "")
+        if fingerprint and fingerprint != self._task_fingerprint(task):
+            return (
+                f"the plan, the review or the batching {task_id} was made from "
+                f"changed since it stopped"
+            )
+        after = verdict.get("sha256_after")
+        moved = sorted(
+            str(relative) for relative, digest in (
+                after.items() if isinstance(after, dict) else ()
+            )
+            if file_sha256(os.path.join(self.repo_root, str(relative))) != digest
+        )
+        if moved:
+            return (
+                f"{', '.join(moved[:5])}{', …' if len(moved) > 5 else ''} "
+                f"changed since {task_id} stopped (restored, or edited by "
+                f"hand), so what it applied is no longer what is on disk"
+            )
+        self._kept_at_request[task_id] = {
+            "path": str(path), "data": data, "verdict": verdict,
+        }
+        return None
+
+    def _keep_at_request(
+        self, task: Dict[str, Any], batch_index: int, result: SchedulerResult,
+    ) -> TaskOutcome:
+        """Keep a stopped batch as it stands, at the user's request (fix round 18).
+
+        Answered ``--human-task <id>=skip`` and checked by
+        :meth:`_partial_skip_evidence`. Nothing is dispatched: the outcome is
+        the batch's own, ``applied``, with every item its report left out
+        recorded as skipped at the user's request (``skipped_items``, never
+        counted as applied) beside the items it declined. Its verdict is
+        stamped again and the audit gains a completion line, so a later
+        resume and ``util restore-batch`` read it as done (the pre-batch
+        snapshot stays its rollback point); its summary joins the
+        prior-changes log the next batch reads; and the loop goes on.
+        """
+        task_id = str(task.get("task_id", ""))
+        kept = self._kept_at_request.pop(task_id)
+        data, verdict = kept["data"], kept["verdict"]
+        expected = [str(i) for i in (task.get("expected_ids") or [])]
+        unapplied = [
+            str(i) for i in (verdict.get("unapplied_ids") or []) if str(i) in expected
+        ]
+        outcome = TaskOutcome(
+            task_id=task_id, kind=self.kind, runner=self.invoker,
+            status=STATUS_OK, profile=profile_for_kind(self.kind),
+            write_outcome=WRITE_APPLIED,
+            summary=(str(data.get("summary") or "").strip() or None),
+            runner_notes=(verdict.get("runner_notes") or None),
+        )
+        outcome.output_path = kept["path"]
+        outcome.files_touched = [str(p) for p in (verdict.get("files_touched") or [])]
+        outcome.expected_ids = expected
+        outcome.returned_ids = [str(i) for i in (data.get("ids") or [])]
+        outcome.sha256_before = dict(verdict.get("sha256_before") or {})
+        outcome.sha256_after = dict(verdict.get("sha256_after") or {})
+        outcome.declined = row_declined(verdict)
+        outcome.skipped_items = {
+            item: (
+                f"--human-task {task_id}=skip: the batch did not report it "
+                f"applied, and you chose to keep the batch as it stood"
+            )
+            for item in unapplied
+        }
+        if isinstance(verdict.get("batch_check"), dict):
+            outcome.batch_check = row_batch_check_findings(verdict)
+        snapshot = os.path.join(self.safety_dir, "pre_batch", task_id)
+        if os.path.isdir(snapshot):
+            outcome.snapshot_dir = snapshot
+        outcome.reason = (
+            f"KEPT AT YOUR REQUEST (--human-task {task_id}=skip): what it "
+            f"applied stays as it left it"
+            + (f" ({', '.join(outcome.files_touched)})" if outcome.files_touched else "")
+            + f"; not applied, skipped at your request: "
+            f"{self._declined_words(outcome.skipped_items)}"
+            + (
+                f"; declined by the batch: "
+                f"{self._declined_words(outcome.declined)}"
+                if outcome.declined else ""
+            )
+            + ". It was not dispatched again."
+        )
+        recorded = self.audit.completion_for(task_id, expected_ids=expected) or {}
+        self.audit.completed(
+            task_id=task_id, kind=self.kind, attempt=0, runner=self.invoker,
+            profile=outcome.profile, status=STATUS_OK,
+            write_outcome=WRITE_APPLIED, exit_code=None,
+            files_touched=outcome.files_touched,
+            observed=dict(recorded.get("observed") or {}),
+            duration_seconds=0.0, reason=outcome.reason, expected_ids=expected,
+        )
+        self._stamp_verdict(outcome)
+        self._record_batch_effects(
+            task, outcome, batch_index, result, dispatched=False, kept=True,
+        )
         return outcome
 
     def _refuse_before_dispatch(
@@ -6012,6 +6223,26 @@ class WriteBatchScheduler:
         numbered as its result contract numbers them (fix round 18)."""
         return declined_words(self.kind, self._task_ids_in_order(), declined)
 
+    def _unapplied_words(self, items: Sequence[str]) -> str:
+        """``fix 1 (`<id>`)`` for each item a partial application left out."""
+        positions = self._task_ids_in_order()
+        word = item_word(self.kind)
+        return ", ".join(
+            f"{word} {positions[str(i)][1]} (`{i}`)" if str(i) in positions
+            else f"`{i}`"
+            for i in items
+        )
+
+    def _keep_partial_clause(self, outcome: TaskOutcome) -> str:
+        """What ``--human-task <batch>=skip`` does, in one clause."""
+        return (
+            f"keep what {outcome.task_id} applied and go on without "
+            f"{self._unapplied_words(outcome.unapplied_ids)}: "
+            f"{'it is' if len(outcome.unapplied_ids) == 1 else 'they are'} "
+            f"recorded as not applied, skipped at your request, and the "
+            f"batches after it run"
+        )
+
     def _task_ids_in_order(self) -> Dict[str, Tuple[str, int]]:
         """``member id -> (task id, 1-based position)`` over this run's tasks."""
         positions: Dict[str, Tuple[str, int]] = {}
@@ -6654,12 +6885,16 @@ class WriteBatchScheduler:
         result: SchedulerResult,
         *,
         dispatched: bool = True,
+        kept: bool = False,
     ) -> None:
         """Append prior-changes, record metrics, update task status — in that order.
 
         *dispatched* is ``False`` for a task refused before any runner
         started (:meth:`_refuse_before_dispatch`): no metric, and its batch
-        line says it was refused.
+        line says it was refused. *kept* (with ``dispatched=False``) is an
+        apply batch kept as it stood at the user's request
+        (:meth:`_keep_at_request`, fix round 18): its summary is appended, its
+        status is ``completed`` with that reason, and its line says so.
 
         The ordering is not cosmetic: the append must land before batch N+1's
         substitution reads the log, or the injected context lags a batch behind.
@@ -6741,6 +6976,11 @@ class WriteBatchScheduler:
             if self.state is not None:
                 status = "completed" if outcome.ok else "failed"
                 reason = None if outcome.ok else (outcome.reason or outcome.status)
+                if kept:
+                    reason = (
+                        f"kept at your request (--human-task {task_id}=skip): "
+                        f"{len(outcome.skipped_items)} item(s) not applied"
+                    )
                 self.state.update_task_status(task_id, status, reason=reason)
                 if self.kind == "implement" and isinstance(
                     getattr(self.state, "state", None), dict
@@ -6773,6 +7013,13 @@ class WriteBatchScheduler:
             verdict = outcome.outcome_label or outcome.status
             if outcome.not_rerun:
                 verdict = "not run again (nothing changed since it failed)"
+            elif kept:
+                verdict = (
+                    f"kept as it stood at your request, not dispatched again "
+                    f"({outcome.outcome_label or outcome.status}; not applied, "
+                    f"skipped at your request: "
+                    f"{self._declined_words(outcome.skipped_items)[:300]})"
+                )
             elif not dispatched:
                 verdict = "refused before dispatch" + (
                     f" ({outcome.write_outcome})" if outcome.write_outcome else ""
@@ -7850,8 +8097,20 @@ class WriteBatchScheduler:
             )
             lines.append(f"        {resume}")
         if self.kind != "implement":
-            # `--human-task` is implement's flag (fix round 15): an apply
-            # phase's failed batch has no answer to name, only the resume.
+            # `--human-task` is implement's flag (fix round 15), save the one
+            # answer an apply phase's partial application takes when its
+            # report left items out (fix round 18): keep it and go on.
+            for outcome in failed:
+                if self.kind in APPLY_WRITE_KINDS and outcome.unapplied_ids:
+                    skip = cmds.get("skip", "").replace(
+                        "{task_id}", outcome.task_id
+                    ) or (
+                        f"add --human-task {outcome.task_id}=skip to the "
+                        f"resume command"
+                    )
+                    lines.append(
+                        f"  - or {self._keep_partial_clause(outcome)}: {skip}"
+                    )
             return lines
         for outcome in acceptable:
             task_id = outcome.task_id
@@ -8123,6 +8382,13 @@ class WriteBatchScheduler:
         # round 15: what the sweep observed, not what the rollback store holds,
         # so a file with no rollback point counts — and is named.
         result.stop["bytes_moved"] = any(o.bytes_moved for o in failed)
+        if (
+            self.kind in APPLY_WRITE_KINDS and first is not None
+            and first.unapplied_ids
+        ):
+            # Fix round 18: the items its readable report left out of both
+            # `ids` and `declined` — what `--human-task <id>=skip` answers.
+            result.stop["unapplied_ids"] = list(first.unapplied_ids)
         # Fix round 16 (OpenCode racing 06, T006): a batch killed at its time
         # limit after its edits landed. The edits stay; the plain way forward
         # is the resume, which dispatches it again on top of them.
@@ -8164,10 +8430,22 @@ class WriteBatchScheduler:
         ``util next-command --blocked implement`` can hand the tool routes
         each one as a command the user types and an ``options`` entry: on
         live run 5 the answers lived only in the result's ``error`` and the
-        hosts relayed them in two of four first stops. ``implement`` only:
-        ``--human-task`` is its flag.
+        hosts relayed them in two of four first stops. On an apply phase
+        (fix round 18) the one answer is ``--human-task <batch>=skip`` for a
+        partial application whose report left items out (``unapplied_ids``):
+        keep what it applied and go on without them — Codex racing run 7's
+        08b resumed into the same stop with nothing else to offer.
         """
         if self.kind != "implement":
+            first = failed[0] if failed else None
+            if (
+                self.kind in APPLY_WRITE_KINDS and first is not None
+                and first.unapplied_ids
+            ):
+                return [{
+                    "flags": ["--resume", "--human-task", f"{first.task_id}=skip"],
+                    "why": self._keep_partial_clause(first),
+                }]
             return []
         already = set(result.human_plan.skipped)
         manual = {
@@ -8571,6 +8849,15 @@ class WriteBatchScheduler:
             head += (
                 " Nothing changed, so there is nothing to restore. To go on: "
                 "fix the cause, then resume this phase."
+            )
+        if task_id and stop.get("unapplied_ids"):
+            # Fix round 18: the way out of a stop a resume only repeats.
+            head += (
+                f" Or keep what it applied and go on without "
+                f"{self._unapplied_words(stop['unapplied_ids'])}: add "
+                f"--human-task {task_id}=skip to the resume command (recorded "
+                f"as not applied, skipped at your request; the batches after "
+                f"it run)."
             )
         blocked = stop.get("blocked") or {}
         for check_id in stop.get("check_task_ids") or []:

@@ -367,7 +367,11 @@ DECISION_FLAGS: Tuple[FlagSpec, ...] = (
     FlagSpec("--force-strategy", (8,), HUMAN_TASK_STRATEGIES, "one",
              ("implement_orchestrator.py",)),
     FlagSpec("--human-task", (9,), HUMAN_TASK_ACTIONS, "pair",
-             ("implement_orchestrator.py",)),
+             ("implement_orchestrator.py",
+              # Fix round 18: an apply batch's partial application, `=skip`.
+              "apply_suggestions_orchestrator.py",
+              "apply_task_suggestions_orchestrator.py",
+              "apply_code_fixes_orchestrator.py")),
     FlagSpec(AGENT_DECIDE_FLAG, (10,), (), "none",
              ("apply_suggestions_orchestrator.py",
               "apply_task_suggestions_orchestrator.py",

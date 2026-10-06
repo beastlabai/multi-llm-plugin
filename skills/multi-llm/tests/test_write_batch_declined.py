@@ -359,7 +359,9 @@ def _alpha_pair_groups():
     return [group("A1", "Alpha", 1), group("A2", "Alpha", 1), group("B", "Beta", 2)]
 
 
-class TestADeclinedItemIsNamedOnEverySurface(_ApplyRig):
+class _PairRig(_ApplyRig):
+    """The apply-suggestions orchestrator over a review whose first batch
+    holds two items."""
 
     def _review_pair(self, repo):
         from utils.state_manager import get_or_create_state
@@ -376,6 +378,9 @@ class TestADeclinedItemIsNamedOnEverySurface(_ApplyRig):
         state.mark_phase_completed("review-plan")
         state.save()
         return plan
+
+
+class TestADeclinedItemIsNamedOnEverySurface(_PairRig):
 
     def test_summary_md_the_notice_the_mirror_and_status_name_it(self, repo, capsys):
         import multi_llm
@@ -431,3 +436,242 @@ class TestADeclinedItemIsNamedOnEverySurface(_ApplyRig):
         assert (f"not applied, declined by its batch: {declined_id[:8]} in "
                 f"apply-batch-0 ({REASON})") in view
         assert f"note: {expected}" in view
+
+
+# ===========================================================================
+# The way forward from a partial application a resume would only repeat
+# ===========================================================================
+
+CODEX_08_REPLY = {
+    # Codex racing run 7, apply-code-fixes 08: fix 2 applied and attested,
+    # fix 1 left alone on purpose and said so only in `notes`.
+    "status": "applied", "ids": ["s1"], "files_touched": ["plans/p.md"],
+    "summary": "applied suggestion 2; kept the deliberate T011 decision",
+    "notes": "Suggestion 1: Not applied; T011 records it as deliberate. "
+             "Suggestion 2: applied.",
+}
+SKIP_FLAGS = ["--resume", "--human-task", "apply-batch-0=skip"]
+SKIP_WHY = (
+    "keep what apply-batch-0 applied and go on without suggestion 1 (`s0`): "
+    "it is recorded as not applied, skipped at your request, and the batches "
+    "after it run"
+)
+
+
+def _codex_08_respond(env, calls):
+    def respond(task, prompt):
+        calls.append(task["task_id"])
+        env.plan.write_text(env.plan.read_text() + f"{task['task_id']}\n")
+        if task["task_id"] == "apply-batch-0":
+            return dict(CODEX_08_REPLY)
+        return {"status": "applied", "ids": ["s2"],
+                "files_touched": ["plans/p.md"], "summary": "applied s2"}
+    return respond
+
+
+def _codex_08_tasks(env):
+    return [_two_item_task(env), env.apply_task(1, expected_ids=["s2"])]
+
+
+class TestThePartialApplicationOffersAWayForward:
+
+    def test_the_stop_offers_keeping_the_batch_and_skipping_what_it_left_out(self, env):
+        calls = []
+        state = FakeState(env.tmp_path / "state.json")
+        result = env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls), state=state,
+        ).run()
+
+        assert result.exit_code == 3
+        assert calls == ["apply-batch-0"]
+        assert result.stop["unapplied_ids"] == ["s0"]
+        assert result.stop["answers"] == [{"flags": SKIP_FLAGS, "why": SKIP_WHY}]
+        assert ("Or keep what it applied and go on without suggestion 1 (`s0`): "
+                "add --human-task apply-batch-0=skip to the resume command"
+                ) in result.stop["headline"]
+        text = "\n".join(result.messages)
+        assert (f"  - or {SKIP_WHY}: add --human-task apply-batch-0=skip to the "
+                f"resume command") in text
+        # The mirror carries the answer, which `util next-command --blocked`
+        # hands the tool routes as an option (`stop_answers_on_record`).
+        mirror = json.loads((env.phase_dir / ".status.json").read_text())
+        assert mirror["progress"]["write_subagents"]["stop"]["answers"] == [
+            {"flags": SKIP_FLAGS, "why": SKIP_WHY}]
+
+    def test_the_answer_keeps_the_batch_and_the_phase_finishes(self, env):
+        calls = []
+        state = FakeState(env.tmp_path / "state.json")
+        env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls), state=state,
+        ).run()
+        lines = []
+
+        resumed = env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls),
+            state=state, resume=True, partial_skips=["apply-batch-0"],
+            log=lines.append,
+        ).run()
+
+        assert resumed.exit_code == 0, resumed.messages
+        # Kept, never dispatched again; the batch after it ran.
+        assert calls == ["apply-batch-0", "apply-batch-1"]
+        kept = resumed.outcomes[0]
+        assert kept.ok and kept.write_outcome == executor.WRITE_APPLIED
+        assert not kept.skipped
+        assert list(kept.skipped_items) == ["s0"]
+        assert kept.reason.startswith(
+            "KEPT AT YOUR REQUEST (--human-task apply-batch-0=skip)")
+        assert "not applied, skipped at your request: suggestion 1 (`s0`)" in kept.reason
+        assert any(
+            "apply-batch-0 kept as it stood at your request, not dispatched again"
+            in line for line in lines
+        ), lines
+        assert state.get_task_status("apply-batch-0") == "completed"
+        assert state.get_task_status_reason("apply-batch-0").startswith(
+            "kept at your request (--human-task apply-batch-0=skip)")
+        # Its summary is in the prior-changes log the next batch read.
+        log = (env.out_dir / "prior_changes.jsonl").read_text()
+        assert CODEX_08_REPLY["summary"] in log
+        stamped = json.loads((env.phase_dir / "apply_batch_0.json").read_text())
+        assert stamped["verdict"]["ok"] is True
+        assert [e["id"] for e in stamped["verdict"]["skipped_items"]] == ["s0"]
+        rows = {row["task_id"]: row for row in resumed.report_rows()}
+        assert [e["id"] for e in rows["apply-batch-0"]["skipped_items"]] == ["s0"]
+
+        # A later resume reads it as done: nothing is dispatched again.
+        again = env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls),
+            state=state, resume=True,
+        ).run()
+        assert again.exit_code == 0, again.messages
+        assert calls == ["apply-batch-0", "apply-batch-1"]
+        assert list(again.outcomes[0].skipped_items) == ["s0"]
+
+    def test_an_answer_over_changed_files_is_refused_and_nothing_runs(self, env):
+        calls = []
+        state = FakeState(env.tmp_path / "state.json")
+        env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls), state=state,
+        ).run()
+        env.plan.write_text(env.plan.read_text() + "the user's own edit\n")
+
+        resumed = env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls),
+            state=state, resume=True, partial_skips=["apply-batch-0"],
+        ).run()
+
+        assert resumed.exit_code == 3
+        assert calls == ["apply-batch-0"], "nothing is dispatched"
+        text = "\n".join(resumed.messages)
+        assert "--human-task apply-batch-0=skip: plans/p.md changed since apply-batch-0 stopped" in text
+        assert "nothing was dispatched and no file was changed" in text
+
+    @pytest.mark.parametrize("answer,why", [
+        ("apply-batch-1", "apply-batch-1 has no result on disk"),
+        ("apply-batch-7", "this run holds no batch apply-batch-7"),
+    ])
+    def test_an_answer_for_a_batch_that_did_not_stop_so_is_refused(self, env, answer, why):
+        calls = []
+        env.scheduler(_codex_08_tasks(env), respond=_codex_08_respond(env, calls)).run()
+        resumed = env.scheduler(
+            _codex_08_tasks(env), respond=_codex_08_respond(env, calls),
+            resume=True, partial_skips=[answer],
+        ).run()
+        assert resumed.exit_code == 3
+        assert calls == ["apply-batch-0"]
+        assert why in "\n".join(resumed.messages)
+
+    def test_a_batch_that_stopped_otherwise_is_not_offered_the_answer(self, env):
+        """Nothing attested (no `ids`), or the runner said it failed: the
+        bytes it left are not "what it applied", so only the resume and the
+        restore are offered — and an answer for it is refused."""
+        for reply in (
+            {"status": "applied", "ids": [], "files_touched": ["plans/p.md"],
+             "summary": "s"},
+            {"status": "failed", "ids": ["s1"], "files_touched": ["plans/p.md"],
+             "summary": "s"},
+        ):
+            respond = _respond_with(env, reply)
+            result = env.scheduler(
+                [_two_item_task(env)], respond=respond, resume=False,
+            ).run()
+            assert result.exit_code == 3
+            assert result.outcomes[0].write_outcome == executor.WRITE_PARTIAL
+            assert "answers" not in result.stop
+            assert "unapplied_ids" not in result.stop
+            assert "--human-task" not in result.stop["headline"]
+            refused = env.scheduler(
+                [_two_item_task(env)], respond=respond, resume=True,
+                partial_skips=["apply-batch-0"],
+            ).run()
+            assert refused.exit_code == 3
+            assert ("did not stop as a partial application whose report left "
+                    "items out") in "\n".join(refused.messages)
+            env.plan.write_text("# Plan\n\n## Step 1\nbody\n", encoding="utf-8")
+
+
+class TestTheCodex08ShapeThroughTheApplyPhase(_PairRig):
+    """The whole loop on the real orchestrator: the batch leaves an item out
+    of its report, the phase stops needs-human offering the answer (on the
+    record the tool routes read), and the answer finishes the phase."""
+
+    def test_the_stop_names_the_answer_and_the_answer_finishes_the_phase(
+        self, repo, capsys,
+    ):
+        from utils import next_phase
+
+        plan = self._review_pair(repo)
+        ids = self._ids(plan)
+        left_out, applied_id = ids[0]
+        attested = [applied_id] + ids[1]
+
+        assert self._run(repo, plan, attested) == 3
+        answers = next_phase.stop_answers_on_record(plan, "apply-suggestions")
+        assert [a["flags"] for a in answers] == [
+            ["--resume", "--human-task", "apply-batch-0=skip"]]
+        assert f"(`{left_out}`)" in answers[0]["why"]
+        spelled = next_phase.resume_answers(
+            "plans/apply.md", "claude-code", None, "apply-suggestions",
+            plan_path=plan,
+        )
+        assert spelled[0]["command"].endswith(
+            "--apply-suggestions plans/apply.md --resume --human-task apply-batch-0=skip")
+        # Resuming without the answer only repeats the stop (08b).
+        assert self._run(repo, plan, attested, "--resume") == 3
+
+        capsys.readouterr()
+        assert self._run(
+            repo, plan, attested, "--resume", "--human-task", "apply-batch-0=skip",
+        ) == 0
+        summary = self._summary(plan)
+        assert "- Suggestions applied: 2" in summary
+        assert "- Suggestions skipped at your request (not applied): 1" in summary
+        assert "Not applied: skipped at your request — --human-task apply-batch-0=skip" in summary
+        out = capsys.readouterr().out
+        assert f"[{left_out[:8]}] (suggestion 1 of apply-batch-0) not applied: skipped at your request" in out
+
+    @pytest.mark.parametrize("flags,said", [
+        (["--resume", "--human-task", "apply-batch-0=done"],
+         "an apply batch takes only =skip"),
+        (["--human-task", "apply-batch-0=skip"], "it needs --resume"),
+    ])
+    def test_an_answer_the_phase_cannot_take_is_exit_3_before_any_work(
+        self, repo, capsys, flags, said,
+    ):
+        plan = self._review_pair(repo)
+        capsys.readouterr()
+        assert self._run(repo, plan, [], *flags) == 3
+        err = capsys.readouterr().err
+        assert said in err
+        assert not (self._phase_dir(plan) / "write_tasks.json").exists()
+
+    def test_the_native_leg_is_told_to_record_it_itself(self, repo, capsys):
+        import apply_suggestions_orchestrator as orchestrator
+
+        plan = self._review_pair(repo)
+        capsys.readouterr()
+        assert orchestrator.main([
+            "--plan-file", str(plan), "--yes", "--resume",
+            "--human-task", "apply-batch-0=skip",
+        ]) == 3
+        assert "util batch-done --skipped" in capsys.readouterr().err
