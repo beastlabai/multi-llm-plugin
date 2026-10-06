@@ -9539,15 +9539,26 @@ class WriteBatchScheduler:
         one task it dispatched; a check holding T007 left "6/7" the same way.
         The numerator, ``self._tasks_finished``, never counts those tasks.
         """
+        return len(self._eta_task_ids(result))
+
+    def _eta_task_ids(self, result: SchedulerResult) -> List[str]:
+        """The tasks :meth:`_eta_total` counts, in the task file's order.
+
+        Fix round 19 (review of round 18, #1): the run mirror counted its
+        ``total`` over another set — a held task and a manual one in — so one
+        run read "batch 6/6 … ALL BATCHES COMPLETE" in its log and
+        "implement 6/7 batches ok" on ``status`` and the OpenCode poll.
+        :meth:`_mirror_status` counts over this one too.
+        """
         out = (
             set(result.human_plan.skipped) | set(result.human_plan.accepted)
             | set(result.blocked_by_check)
         )
-        return sum(
-            1 for task in self.tasks
+        return [
+            str(task.get("task_id", "")) for task in self.tasks
             if str(task.get("task_id", "")) not in out
             and not task.get("is_human") and task.get("executor_role") != "human"
-        )
+        ]
 
     def _metrics_start(self, result: SchedulerResult) -> None:
         """Stamp the phase's ETA baseline before the first dispatch.
@@ -10104,20 +10115,23 @@ class WriteBatchScheduler:
             # `13/14 batches ok`, a run that did everything it could reading as
             # one short. `result.human_plan.skipped` is resolved before this is
             # ever called (`_run`'s step 1), so it is on hand the same way.
-            skipped_ids = set(result.human_plan.skipped) | set(result.human_plan.accepted)
+            #
+            # Fix round 19 (review of round 18, #1): and over the same tasks
+            # the `[ETA]` line counts (`_eta_task_ids`): not a manual task,
+            # nor one a check with findings holds back — the line names that
+            # one as not run, with the check. Counted over the materialized
+            # tasks: an answered task an earlier run recorded
+            # (`answered_done_on_record`) is in `accepted` without being one
+            # of them.
+            counted_ids = self._eta_task_ids(result)
+            counted = set(counted_ids)
             expected_ids_by_task = {
                 str(task.get("task_id", "")):
                     [str(i) for i in (task.get("expected_ids") or [])]
                 for task in self.tasks
-                if str(task.get("task_id", "")) not in skipped_ids
+                if str(task.get("task_id", "")) in counted
             }
-            # Counted over the materialized tasks: an answered task an
-            # earlier run recorded (`answered_done_on_record`) is in
-            # `accepted` without being one of them.
-            total = sum(
-                1 for task in self.tasks
-                if str(task.get("task_id", "")) not in skipped_ids
-            )
+            total = len(counted_ids)
             items_total = sum(len(ids) for ids in expected_ids_by_task.values())
             items_applied = sum(
                 len([
