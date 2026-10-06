@@ -449,6 +449,72 @@ class TestTheReportCheck:
         assert "decision" in run_check(capsys, path)
 
 
+NEXT = f"{PLUGIN}--review-code plans/foo.md"
+NOTE = close_note(PLUGIN, "plans/foo.md", ["T011", "T012"])
+COMMAND_WITH_MANUAL = (
+    f"[NEXT_COMMAND] {NEXT}\n"
+    f"[MANUAL_TASK] T011 {TITLES['T011']}\n"
+    f"[MANUAL_TASK] T012 {TITLES['T012']}\n"
+    f"[MANUAL_TASK_NOTE] {NOTE}\n"
+    'MULTI_LLM_RESULT: {"mode": "util next-command", "phase": null, "state": "done", '
+    '"exit": 0, "artifacts": [], "next": null}\n'
+)
+
+
+class TestTheReportCheckAfterACommand:
+    """Fix round 17 (review of round 16): since round 16 the same lines
+    follow a `[NEXT_COMMAND]` block while implement's manual tasks are
+    owed, and SKILL.md and summary-format.md ask the report to list them
+    after the commands; the Stop hook still read them under
+    `[WORKFLOW_COMPLETE]` only, so a report that dropped them passed. It
+    checks their ids there too: the same word match, which a report that
+    lists them as asked always passes."""
+
+    def test_the_block_parses_them_and_the_note(self):
+        block = report_check.find_blocks(COMMAND_WITH_MANUAL)[-1]
+        assert block.complete is False and block.command == NEXT
+        assert block.manual == [("T011", TITLES["T011"]), ("T012", TITLES["T012"])]
+        assert block.note == NOTE
+
+    def test_a_message_with_the_command_and_the_tasks_passes(self, tmp_path, capsys):
+        message = (
+            "## Review Done\n\n### Next Steps\n\n```\n" + NEXT + "\n```\n\n"
+            f"Manual tasks still yours:\n- T011 {TITLES['T011']}\n"
+            f"- T012 {TITLES['T012']}\n\n{NOTE}\n"
+        )
+        path = (Transcript().prompt("go").bash(COMMAND_WITH_MANUAL).say(message)
+                .write(tmp_path / "t.jsonl"))
+        assert run_check(capsys, path) == ""
+
+    def test_a_message_that_drops_them_blocks_naming_them(self, tmp_path, capsys):
+        path = (Transcript().prompt("go").bash(COMMAND_WITH_MANUAL)
+                .say("### Next Steps\n\n```\n" + NEXT + "\n```\n")
+                .write(tmp_path / "t.jsonl"))
+        reason = decision_of(run_check(capsys, path))["reason"]
+        assert "does not name the tasks T011, T012" in reason
+        # The reply replaces the message: the command, the tasks, the note.
+        assert f"```\n{NEXT}\n```" in reason
+        assert f"- T011 {TITLES['T011']}" in reason
+        assert f"- T012 {TITLES['T012']}" in reason
+        assert NOTE in reason
+        assert 'never write "Workflow complete."' in reason
+
+    def test_a_message_that_drops_the_command_too_names_both(self, tmp_path, capsys):
+        path = (Transcript().prompt("go").bash(COMMAND_WITH_MANUAL)
+                .say("### Next Steps\n\nRun the review next. T011 is yours.")
+                .write(tmp_path / "t.jsonl"))
+        reason = decision_of(run_check(capsys, path))["reason"]
+        assert f"Missing command:\n\n```\n{NEXT}\n```" in reason
+        assert f"- T012 {TITLES['T012']}" in reason
+
+    def test_a_command_block_with_no_tasks_is_checked_as_before(self, tmp_path, capsys):
+        bare = COMMAND_WITH_MANUAL.split("[MANUAL_TASK]", 1)[0]
+        path = (Transcript().prompt("go").bash(bare)
+                .say("### Next Steps\n\n```\n" + NEXT + "\n```\n")
+                .write(tmp_path / "t.jsonl"))
+        assert run_check(capsys, path) == ""
+
+
 # ---------------------------------------------------------------------------
 # implement records the titles; the report rule says what to write
 # ---------------------------------------------------------------------------
@@ -576,6 +642,19 @@ def test_the_tool_routes_are_told_to_relay_them_on_any_result():
     rule = " ".join(
         (SKILL_ROOT / "references/summary-format.md").read_text(encoding="utf-8").split())
     assert "A `user_next_step` that names a `command` can carry `manual_tasks`" in rule
+
+
+def test_no_doc_says_only_the_complete_block_renders_them():
+    """Fix round 17 (review of round 16): `next_phase.py`'s field comment and
+    AGENTS.md's `user_next_step` sentence said only the complete block
+    renders the manual tasks, while `render_next_phase_lines` lists them
+    after every command block that carries them (pinned above)."""
+    for path in ("utils/next_phase.py", "AGENTS.md", "SKILL.md",
+                 "references/summary-format.md"):
+        text = " ".join((SKILL_ROOT / path).read_text(encoding="utf-8").split()).lower()
+        assert "only the complete block renders them" not in text, path
+    agents = " ".join((SKILL_ROOT / "AGENTS.md").read_text(encoding="utf-8").split())
+    assert "every block renders them, after a command block's commands too" in agents
 
 
 def test_the_tool_routes_say_workflow_complete_only_on_a_complete_result():
