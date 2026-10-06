@@ -742,6 +742,8 @@ def render_run_text(
         )
         if validation_context_line:
             lines.append(f"      {validation_context_line}")
+        for note in _run_notes(view):
+            lines.append(f"      note: {note}")
         # F4: recorded only for a finished code-review run — `high_priority_groups`
         # is written once, at the very end of main(), so a mid-run poll has
         # nothing to render yet, and the key exists on no other phase.
@@ -1579,6 +1581,10 @@ def _progress_lines(view: Dict[str, Any]) -> List[str]:
     just_finished = _just_finished_text(view)
     if just_finished:
         lines.append(f"{JUST_FINISHED_LABEL} {just_finished}")
+    # Fix round 14: a finished run's notes follow its counts, so a host that
+    # relays these lines verbatim relays "1 not applied" beside "10/10 items
+    # applied" (Codex racing re-run 5 reported "Applied 10 of 10").
+    lines.extend(f"note: {note}" for note in _run_notes(view))
     return lines
 
 
@@ -1810,6 +1816,15 @@ def _attach_finished_during_wait(
 #: The close-out's own word for a needs-human exit with no reason recorded
 #: (`detach.RunHandle.finish`): not a "last line" worth relaying.
 GENERIC_NEEDS_HUMAN_ERROR = "needs_human (exit 3)"
+
+
+def _run_notes(view: Dict[str, Any]) -> List[str]:
+    """``progress.notes``: a finished apply phase's lines for the host (fix
+    round 14) — a consistency warning, the items left unapplied and why."""
+    progress = view.get("progress") if isinstance(view.get("progress"), dict) else {}
+    notes = progress.get("notes")
+    return [str(note).strip() for note in notes if str(note).strip()] if isinstance(
+        notes, list) else []
 
 
 def _id_list(value: Any) -> List[str]:
@@ -2826,10 +2841,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         _validation_context_notice(views) if terminal_run else None
     )
     # Fix round 14: a terminal write run's own not-clean parts, first among
-    # the workflow's, since they qualify the run the poll is about.
+    # the workflow's, since they qualify the run the poll is about; then a
+    # finished run's own notes (a consistency warning, the items left
+    # unapplied) — the log was the only place that carried them.
     write_notice = _write_result_notice(views) if terminal_run else None
+    notes_notice = "; ".join(
+        note for view in views for note in _run_notes(view)
+    ) if terminal_run else ""
     combined_notice = "; ".join(
-        part for part in (truncation_notice, write_notice, terminal_notice) if part
+        part for part in (truncation_notice, write_notice, notes_notice, terminal_notice) if part
     )
     if combined_notice:
         record_notice(combined_notice)

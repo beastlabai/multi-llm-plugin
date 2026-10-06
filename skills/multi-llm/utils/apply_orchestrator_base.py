@@ -2031,6 +2031,7 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
                         sys.stderr if as_json else sys.stdout
                     ):
                         self.print_write_outcome_summary()
+                    self._publish_run_notes()
             except Exception as e:  # noqa: BLE001 - summary is non-fatal
                 self.logger.warning("write outcome summary failed: %s", e)
             return scheduled
@@ -2722,6 +2723,64 @@ class ApplyOrchestratorBase(Generic[TItem, TBatch]):
     # ------------------------------------------------------------------
     # The executor leg's own summary report and decisions overlay (F3)
     # ------------------------------------------------------------------
+
+    def run_notes(self) -> List[str]:
+        """The lines a host must relay beside this run's counts (fix round 14).
+
+        Codex racing re-run 5, apply-task-suggestions: the log carried
+        ``[CONSISTENCY_WARNING] T003 depends on T004, listed after it`` and
+        "Skipped: 1" (a suggestion the judge skipped), while the result the
+        host read said "10/10 items applied" and nothing else, so the host
+        reported "Applied 10 of 10". One line per consistency warning, and one
+        naming every item left unapplied with why, its title and group id —
+        the RESULT block's own facts, in plain words.
+        """
+        notes = [
+            f"consistency warning: {warning}" for warning in self.consistency_warnings()
+        ]
+        skipped = list(self.formatted_skipped or [])
+        if skipped:
+            applied = self._write_item_counts(self._phase_rows())["applied"]
+            noun = self.item_noun if len(skipped) == 1 else self.item_noun_plural
+            by_label: Dict[str, List[str]] = {}
+            for item in skipped:
+                gid = str(item.get("group_id") or "")
+                title = str(item.get("title") or "Unknown").strip()
+                by_label.setdefault(judge_status_label(item.get("status")), []).append(
+                    f"{title}{f' [{gid[:8]}]' if gid else ''}"
+                )
+            shown = "; ".join(
+                f"{label}: {', '.join(titles[:5])}"
+                + (f" (+{len(titles) - 5} more)" if len(titles) > 5 else "")
+                for label, titles in by_label.items()
+            )
+            notes.append(
+                f"{len(skipped)} {noun} not applied, beside the {applied} "
+                f"applied — {shown} (reasons in summary.md)"
+            )
+        return notes
+
+    def _publish_run_notes(self) -> None:
+        """Hand :meth:`run_notes` to the result line and to ``status``.
+
+        The run's own ``notice`` (appended, never replacing one) for a
+        foreground caller, and ``progress.notes`` in the phase's
+        ``.status.json``, which a detached run's terminal poll carries into
+        its ``notice`` — the poll is the only result line a tool route reads.
+        """
+        notes = self.run_notes()
+        if not notes:
+            return
+        from . import cli_common as _cli
+
+        try:
+            from . import detach as _detach
+        except ImportError:  # pragma: no cover - direct script runs
+            import detach as _detach  # type: ignore
+        _detach.report_progress(
+            os.path.join(self.out_dir, self.phase_name), notes=notes,
+        )
+        _cli.add_notice("; ".join(notes))
 
     def consistency_warnings(self) -> List[str]:
         """Problems the finished edits left in the file they edited (advisory).
