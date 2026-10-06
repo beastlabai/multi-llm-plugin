@@ -58,6 +58,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from dataclasses import dataclass, field
@@ -65,11 +66,13 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 try:  # pragma: no cover - import shim mirrors the rest of utils/
-    from .git_utils import git_argv, pin_repo_root
+    from .git_utils import pin_repo_root
+    from .process_control import FileMutex
     from .provider_registry import get_write_paths
     from .subagent_tasks import declared_file_set
 except ImportError:  # pragma: no cover - direct-script import shim
-    from utils.git_utils import git_argv, pin_repo_root
+    from utils.git_utils import pin_repo_root
+    from utils.process_control import FileMutex
     from utils.provider_registry import get_write_paths
     from utils.subagent_tasks import declared_file_set
 
@@ -147,14 +150,88 @@ def state_home() -> str:
     return os.path.join(base, "multi-llm")
 
 
+def _phase_key(path: str) -> str:
+    return hashlib.sha256(path.encode("utf-8", "surrogateescape")).hexdigest()[:32]
+
+
+def _phase_binding_path(path: str) -> str:
+    return os.path.join(state_home(), STATE_SUBDIR, "paths", _phase_key(path))
+
+
+def _bound_phase(phase_dir: str) -> str:
+    """Resolve a phase through its trusted, out-of-grant alias binding first.
+
+    Re-resolving a path the batch replaced with a symlink must never select a
+    fresh, unprotected evidence directory. Canonical paths also keep working
+    with evidence created before alias bindings existed.
+    """
+    given = os.path.abspath(str(phase_dir))
+    resolved = os.path.realpath(given)
+    binding = _phase_binding_path(given)
+    try:
+        recorded = Path(binding).read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        # Old releases keyed the directory by the canonical path alone.
+        legacy = Path(state_home()) / STATE_SUBDIR / _phase_key(given)
+        pointer = legacy / STATE_POINTER_NAME
+        try:
+            recorded = pointer.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            return resolved
+        except (OSError, ValueError) as exc:
+            raise WriteSafetyError(f"Cannot read trusted phase identity {pointer}: {exc}") from exc
+    except (OSError, ValueError) as exc:
+        raise WriteSafetyError(f"Cannot read trusted phase identity {binding}: {exc}") from exc
+    if not recorded or not os.path.isabs(recorded) or recorded != resolved:
+        raise WriteSafetyError(
+            f"Refusing rollback evidence for {given}: its trusted phase identity "
+            f"is {recorded or '(missing)'}, but the path now resolves to {resolved}. "
+            "The phase path changed after its evidence was bound; no in-repository "
+            "snapshot or audit copy is trusted. Restore the original phase path first."
+        )
+    return recorded
+
+
 def external_safety_dir(phase_dir: str) -> str:
-    """The out-of-grant directory for ``phase_dir``'s rollback evidence —
-    a function of the phase dir's real path alone, so a reader needs
-    nothing inside the grant to find it."""
-    digest = hashlib.sha256(
-        os.path.realpath(str(phase_dir)).encode("utf-8", "surrogateescape")
-    ).hexdigest()[:32]
-    return os.path.join(state_home(), STATE_SUBDIR, digest)
+    """The trusted external location, preserving already-bound path aliases."""
+    return os.path.join(state_home(), STATE_SUBDIR, _phase_key(_bound_phase(phase_dir)))
+
+
+def _remember_phase_paths(phase_dir: str, canonical: str) -> None:
+    for path in {os.path.abspath(str(phase_dir)), canonical}:
+        binding = _phase_binding_path(path)
+        if os.path.exists(binding):
+            # Never overwrite a binding to another phase.
+            _bound_phase(path)
+            continue
+        # Distinct readers may discover the same alias together. Serialize the
+        # check and atomic publication; never replace another phase's binding.
+        os.makedirs(os.path.dirname(binding), mode=0o700, exist_ok=True)
+        mutex = FileMutex(binding + ".lock")
+        try:
+            if not mutex.acquire():
+                raise WriteSafetyError(f"Cannot lock trusted phase identity for {path}.")
+            if os.path.exists(binding):
+                _bound_phase(path)
+            else:
+                _atomic_write(binding, canonical + "\n")
+        finally:
+            mutex.release()
+
+
+def _validate_external_identity(external: str, phase_dir: str) -> None:
+    try:
+        canonical = Path(external, STATE_POINTER_NAME).read_text(encoding="utf-8").strip()
+    except (OSError, ValueError) as exc:
+        raise WriteSafetyError(f"Cannot read trusted rollback identity in {external}: {exc}") from exc
+    if os.path.islink(external) or canonical != _bound_phase(phase_dir):
+        raise WriteSafetyError(f"Refusing rollback evidence at {external}: its phase identity does not match {phase_dir}.")
+    # A previously unseen legitimate alias becomes bound before any caller
+    # trusts evidence through it; a later replacement cannot select a new key.
+    try:
+        _remember_phase_paths(phase_dir, canonical)
+    except OSError as exc:
+        raise WriteSafetyError(f"Cannot bind trusted rollback identity for {phase_dir}: {exc}") from exc
 
 
 def safety_dir(phase_dir: str) -> str:
@@ -163,7 +240,56 @@ def safety_dir(phase_dir: str) -> str:
     it (:func:`claim_external_safety_dir`), else the phase dir itself — every
     other runner's behaviour, unchanged."""
     external = external_safety_dir(phase_dir)
-    return external if os.path.isdir(external) else str(phase_dir)
+    if os.path.lexists(external):
+        _validate_external_identity(external, phase_dir)
+        return external
+    # A binding outlives the directory it identifies: losing trusted evidence
+    # is a refusal, never permission to trust a writable replacement.
+    if os.path.exists(_phase_binding_path(os.path.abspath(str(phase_dir)))):
+        raise WriteSafetyError(f"Trusted rollback evidence is missing at {external}; refusing the in-repository copy.")
+    return str(phase_dir)
+
+
+def _copy_safety_evidence(phase_dir: str, staging: str, repo_root: str) -> None:
+    """Copy and validate the old evidence before publishing the new location."""
+    for name in (PRE_BATCH_DIRNAME, "rollback_store", AUDIT_FILENAME):
+        source = Path(phase_dir) / name
+        if not os.path.lexists(source):
+            continue
+        paths = [source]
+        if source.is_dir() and not source.is_symlink():
+            paths.extend(source.rglob("*"))
+        for path in paths:
+            mode = path.lstat().st_mode
+            if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode)):
+                raise WriteSafetyError(f"Cannot promote rollback evidence: {path} is not a regular file or directory.")
+        destination = Path(staging) / name
+        if source.is_dir():
+            shutil.copytree(source, destination)
+        else:
+            shutil.copy2(source, destination)
+    for manifest in (Path(staging) / PRE_BATCH_DIRNAME).glob("*/manifest.json"):
+        try:
+            snapshot = TaskSnapshot.load(staging, manifest.parent.name, expected_root=repo_root)
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise WriteSafetyError(f"Cannot promote invalid rollback manifest {manifest}: {exc}") from exc
+        if snapshot is None:
+            raise WriteSafetyError(f"Cannot promote unreadable rollback manifest {manifest}.")
+        for entry in snapshot.entries:
+            _revalidated_target(repo_root, entry.relative, create_parents=False)
+            if entry.existed:
+                payload = Path(snapshot.directory) / PAYLOAD_DIRNAME / (entry.payload or "")
+                if (not entry.payload or Path(entry.payload).name != entry.payload
+                        or not payload.is_file() or file_sha256(str(payload)) != entry.sha256):
+                    raise WriteSafetyError(f"Cannot promote rollback evidence: payload for {entry.relative} does not match its manifest.")
+    audit = Path(staging) / AUDIT_FILENAME
+    if audit.exists():
+        try:
+            records = [json.loads(line) for line in audit.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if any(not isinstance(record, dict) for record in records):
+                raise ValueError("audit entries must be objects")
+        except (OSError, ValueError) as exc:
+            raise WriteSafetyError(f"Cannot promote unreadable rollback audit {audit}: {exc}") from exc
 
 
 def claim_external_safety_dir(phase_dir: str, repo_root: str) -> str:
@@ -179,11 +305,33 @@ def claim_external_safety_dir(phase_dir: str, repo_root: str) -> str:
             f"{state_home()} is inside {repo_root}; set XDG_STATE_HOME to a "
             f"directory outside it. Nothing was dispatched."
         )
-    os.makedirs(external, mode=0o700, exist_ok=True)
-    pointer = os.path.join(external, STATE_POINTER_NAME)
-    if not os.path.exists(pointer):
-        _atomic_write(pointer, os.path.realpath(str(phase_dir)) + "\n")
-    return external
+    safety_dir(phase_dir)  # a missing previously-bound store is never recreated
+    parent = os.path.dirname(external)
+    staging = None
+    mutex = FileMutex(os.path.join(parent, f".{os.path.basename(external)}.lock"))
+    try:
+        os.makedirs(parent, mode=0o700, exist_ok=True)
+        if not mutex.acquire():
+            raise WriteSafetyError(f"Cannot lock rollback evidence promotion for {phase_dir}; nothing was dispatched.")
+        if os.path.lexists(external):
+            _validate_external_identity(external, phase_dir)
+            return external
+        # Do not publish an empty directory: discovery switches at the rename,
+        # after every old snapshot, audit record and retained blob is copied.
+        staging = tempfile.mkdtemp(prefix=".promote-", dir=parent)
+        _copy_safety_evidence(phase_dir, staging, repo_root)
+        canonical = _bound_phase(phase_dir)
+        _atomic_write(os.path.join(staging, STATE_POINTER_NAME), canonical + "\n")
+        os.rename(staging, external)
+        staging = None
+        _remember_phase_paths(phase_dir, canonical)
+        return external
+    except (OSError, ValueError) as exc:
+        raise WriteSafetyError(f"Cannot promote rollback evidence for {phase_dir}: {exc}. Nothing was dispatched.") from exc
+    finally:
+        if staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        mutex.release()
 
 
 class WriteSafetyError(Exception):

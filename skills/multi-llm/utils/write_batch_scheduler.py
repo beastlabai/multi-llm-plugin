@@ -128,6 +128,7 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
     from .subagent_prompts import build_nothing_changed_resend_prompt
     from .write_phase_bridge import WRITE_TASK_FILENAME
     from .write_safety import (
+        PRE_BATCH_DIRNAME,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
         AuditLog,
@@ -224,6 +225,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
     from utils.subagent_prompts import build_nothing_changed_resend_prompt  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME
     from utils.write_safety import (
+        PRE_BATCH_DIRNAME,
         DRY_RUN_FILENAME,
         MAX_SNAPSHOT_BYTES,
         AuditLog,
@@ -1423,6 +1425,14 @@ def resolve_human_task_plan(
     by_id: Dict[str, Dict[str, Any]] = {}
     for task in tasks:
         by_id[str(task.get("task_id", ""))] = task
+    # A selected dependent can answer its omitted upstream check in the
+    # same invocation. Resolve that answer against the recorded graph too;
+    # otherwise the new hold would ignore an explicit acceptance or skip.
+    for task in graph or ():
+        task_id = str(task.get("task_id", ""))
+        if (task_id in decisions and task_id not in by_id
+                and task.get("executor_role") != "human" and not task.get("is_human")):
+            by_id[task_id] = task
     human_ids = [
         task_id for task_id, task in by_id.items()
         if task.get("executor_role") == "human" or task.get("is_human")
@@ -1669,6 +1679,10 @@ class SchedulerResult:
     #: rejected). Each is in ``not_run`` too, with
     #: :func:`blocked_by_check_reason` as its reason.
     blocked_by_check: Dict[str, str] = field(default_factory=dict)
+    #: Findings of recorded checks absent from a selected task's handoff.
+    #: They must still explain a hold, even after switching from the native
+    #: leg, which writes no executor report rows.
+    recorded_check_findings: Dict[str, List[str]] = field(default_factory=dict)
     #: Fix round 14: the line saying nothing ran the repository's tests,
     #: when a code phase finished with no ``driver.verify_command`` set
     #: (:func:`unverified_line`); ``None`` when one ran, or none was owed.
@@ -1691,6 +1705,7 @@ class SchedulerResult:
             findings = row_check_findings(row)
             if row.get("status") == STATUS_OK and findings:
                 found[str(row.get("task_id"))] = findings
+        found.update(self.recorded_check_findings)
         return found
 
     def batch_check_findings(self) -> Dict[str, List[str]]:
@@ -1762,6 +1777,8 @@ class SchedulerResult:
             "accepted_tasks": dict(self.human_plan.accepted),
             "not_run_tasks": dict(self.not_run),
             "blocked_by_check": dict(self.blocked_by_check),
+            **({"recorded_check_findings": self.recorded_check_findings}
+               if self.recorded_check_findings else {}),
             "stop": copy.deepcopy(self.stop) if self.stop else None,
             **({"unverified": self.unverified} if self.unverified else {}),
             "tasks": self.report_rows(),
@@ -2166,8 +2183,10 @@ class WriteBatchScheduler:
         self.policy = WritePolicy.load(self.repo_root, anchor=self.anchor)
         self.jail_request = self._build_jail_request()
         self.audit = AuditLog(self.phase_dir)
-        #: Whether `_decide_rollback_storage` ran for this phase.
+        #: Whether `_decide_rollback_storage` ran for the admitted group.
         self._rollback_storage_decided = False
+        self._rollback_storage_lock = threading.Lock()
+        self._rollback_storage_candidates: Optional[Sequence[Dict[str, Any]]] = None
         self.snapshots: Dict[str, TaskSnapshot] = {}
         #: Task ids whose pre-batch snapshot was REUSED from an earlier
         #: dispatch of this same batch (`_snapshot`/`_reusable_snapshot`),
@@ -2331,43 +2350,57 @@ class WriteBatchScheduler:
         return safety_dir(self.phase_dir)
 
     def _decide_rollback_storage(self, task: Dict[str, Any], profile: str) -> None:
-        """Once per phase, before its first snapshot: a ``repo-wide`` batch
-        that will run on the plugin's Landlock jail keeps its rollback
-        evidence outside the grant (review fixes 2026-10-05).
+        """Choose storage for an admitted group's runners before snapshots start.
 
-        Under the root grant the phase dir is the batch's to write, and the
-        manifest, payloads, rollback blobs and audit log there decided what
-        ``util restore-batch`` wrote and where. The jail restricts writes
-        only, so no key could be kept from the batch; the evidence goes where
-        the jail never grants — ``write_safety.claim_external_safety_dir``,
-        under the state home — and every reader resolves it through
-        ``safety_dir``, which never falls back to the phase dir once the
-        directory exists. The rung is read the way the dispatch reads it,
-        from the executor's recorded decision after this runner's preflight
-        (cached per process there); a preflight that fails is left for the
-        dispatch's own call to report. Every other runner and scope keeps
-        the phase dir, unchanged.
+        The first task can use another runner than a later or co-scheduled
+        jailed task. Resolving the group's runner set under this lock prevents
+        promotion while a sibling is already writing its snapshot or audit.
+        An inconclusive preflight conservatively requires external storage;
+        its actual dispatch still reports its own refusal, and a later
+        successful preflight cannot strand evidence inside a writable grant.
         """
-        if self._rollback_storage_decided or self.dry_run or self.respond is not None:
+        if self.dry_run or self.respond is not None:
             return
-        if self.write_scope != WRITE_SCOPE_REPO_WIDE:
+        with self._rollback_storage_lock:
+            if self._rollback_storage_decided:
+                return
+            if self.write_scope != WRITE_SCOPE_REPO_WIDE:
+                self._rollback_storage_decided = True
+                return
+            needs_external = False
+            seen = set()
+            candidates = self._rollback_storage_candidates
+            for candidate in (candidates if candidates is not None else self.tasks or [task]):
+                if candidate.get("is_human") or candidate.get("executor_role") == "human":
+                    continue
+                if (candidate is not task and self.resume
+                        and not is_check_task(self.kind, candidate)
+                        and self._done_evidence(candidate) is not None):
+                    continue
+                try:
+                    runner = self.forced_runner or resolve_task_runner(candidate, anchor=self.anchor)
+                    candidate_profile = profile_for_kind(str(candidate.get("kind") or self.kind))
+                    key = (runner, candidate_profile)
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    self._preflight(runner, candidate_profile)
+                    needs_external |= self._recorded_rung(runner, candidate_profile) == SANDBOX_RUNG_PLUGIN_LANDLOCK
+                except Exception:  # the task's own dispatch reports the preflight error
+                    needs_external = True
+            if needs_external:
+                external = claim_external_safety_dir(self.phase_dir, self.repo_root)
+                for snapshot in self.snapshots.values():
+                    snapshot.directory = os.path.join(
+                        external, PRE_BATCH_DIRNAME, Path(snapshot.directory).name,
+                    )
+                self.log(
+                    f"[write-subagents] this repo-wide phase may run batches on the "
+                    f"plugin's jail, which grants the phase dir too: pre-batch "
+                    f"snapshots, the rollback store and the audit log live outside "
+                    f"it, at {external} (a copy inside the phase dir is never read)."
+                )
             self._rollback_storage_decided = True
-            return
-        self._rollback_storage_decided = True
-        try:
-            runner = self.forced_runner or resolve_task_runner(task, anchor=self.anchor)
-            self._preflight(runner, profile)
-        except Exception:  # noqa: BLE001 - the dispatch's own preflight reports it
-            return
-        if self._recorded_rung(runner, profile) != SANDBOX_RUNG_PLUGIN_LANDLOCK:
-            return
-        external = claim_external_safety_dir(self.phase_dir, self.repo_root)
-        self.log(
-            f"[write-subagents] repo-wide batches run on the plugin's jail, "
-            f"which grants the phase dir too: pre-batch snapshots, the rollback "
-            f"store and the audit log for this phase live outside it, at "
-            f"{external} (a copy inside the phase dir is never read)."
-        )
 
     @staticmethod
     def _checked_repo_root(raw: str) -> str:
@@ -2721,9 +2754,20 @@ class WriteBatchScheduler:
             result = self._run()
             self._report_resume_tally(result)
             return result
+        except WriteSafetyError as exc:
+            # A batch can replace the phase path after dispatch. Trusted
+            # discovery refuses it; report a human-needed stop without reading
+            # or writing through that replacement to produce more artifacts.
+            return SchedulerResult(
+                kind=self.kind, phase=self.phase, exit_code=EXIT_NEEDS_HUMAN,
+                messages=[f"Rollback safety refusal: {exc.message} The phase was not completed."],
+            )
         finally:
-            self._report_rollback_store_utilization()
-            self._discard_rollback_store()
+            try:
+                self._report_rollback_store_utilization()
+                self._discard_rollback_store()
+            except WriteSafetyError as exc:
+                self.log(f"[write-subagents] rollback evidence retained: {exc.message}")
             self._repeat_jail_lines(jail_lines_before)
 
     def _report_resume_tally(self, result: SchedulerResult) -> None:
@@ -3024,6 +3068,7 @@ class WriteBatchScheduler:
         self._metrics_start(result)
         self._mirror_status(result)
         for batch_index, batch_tasks in ordered:
+            self._hold_on_recorded_checks(batch_tasks, result)
             runnable = [
                 task for task in batch_tasks
                 if not result.human_plan.is_skipped(str(task.get("task_id", "")))
@@ -3214,6 +3259,33 @@ class WriteBatchScheduler:
         )
         return lines
 
+    def _hold_on_recorded_checks(
+        self, tasks: Sequence[Dict[str, Any]], result: SchedulerResult,
+    ) -> None:
+        """Honor upstream findings even when their check is outside this run.
+
+        Read at each dependency level: a check run earlier in this invocation
+        can pass and release its dependents, while an omitted check (notably
+        under ``--task``) cannot silently lose its hold.
+        """
+        if self.kind != "implement" or self.state is None:
+            return
+        held = rerunnable_checks(self.state)
+        graph = decomposition_graph(self.tasks, self.state)
+        recorded = self.state.get("task_check_findings") or {}
+        for task in tasks:
+            task_id = str(task.get("task_id", ""))
+            if (task.get("executor_role") == "human" or task.get("is_human")
+                    or result.human_plan.is_skipped(task_id)
+                    or task_id in result.human_plan.accepted):
+                continue
+            check_id = upstream_held_check(graph, task_id, held)
+            if check_id is not None:
+                result.blocked_by_check[task_id] = check_id
+                result.recorded_check_findings[check_id] = [
+                    str(item) for item in recorded.get(check_id, [])
+                ]
+
     def _block_dependents_of_checks(
         self, outcomes: Sequence[TaskOutcome], result: SchedulerResult,
     ) -> None:
@@ -3299,6 +3371,11 @@ class WriteBatchScheduler:
             return outcome
 
         for group in groups:
+            # Earlier groups have settled; the next group's runnable candidates
+            # alone can select a new storage location. Do this before any of its
+            # threads takes a snapshot. Human/check-held tasks never get probed.
+            self._rollback_storage_candidates = group
+            self._rollback_storage_decided = False
             if len(group) == 1:
                 outcomes.append(dispatch_and_mirror(group[0]))
             else:
@@ -3700,18 +3777,15 @@ class WriteBatchScheduler:
         return outcome
 
     def _tree_fingerprint(self) -> Optional[str]:
-        """``git_utils.worktree_fingerprint`` over the pinned root, the
-        plugin's own trees (the phase dir, the plan's output dir and
-        ``.multi-llm/``) left out."""
-        excluded = []
-        for path in (self.phase_dir, self.output_dir,
-                     os.path.join(self.repo_root, ".multi-llm")):
-            try:
-                relative = os.path.relpath(os.path.abspath(path), self.repo_root)
-            except ValueError:  # pragma: no cover - another drive on Windows
-                continue
-            if relative and not relative.startswith(".."):
-                excluded.append(relative)
+        """Fingerprint source files, including code beside workflow artifacts."""
+        try:
+            from .check_tree import check_tree_exclusions
+        except ImportError:  # pragma: no cover - direct script invocation
+            from utils.check_tree import check_tree_exclusions
+
+        excluded = check_tree_exclusions(
+            Path(self.phase_dir), self.repo_root, output_dir=self.output_dir,
+        )
         try:
             return _git_utils.worktree_fingerprint(
                 self.repo_root, exclude_prefixes=excluded,
@@ -6283,7 +6357,7 @@ class WriteBatchScheduler:
                 f"kept at {moved_to}."
             )
             existing = None
-        if existing is None and expected_ids:
+        if existing is None and expected_ids and self.kind != "implement":
             # The items may have held this id before and been set aside when
             # the id went to others (B deselected, C takes `apply-batch-1`,
             # B re-selected): their own pre-first-dispatch snapshot comes
@@ -8512,11 +8586,8 @@ class WriteBatchScheduler:
             lines.append(f"| {task_id} | completed by hand | — | answered --human-task {task_id}=done |")
         for task_id, reason in sorted(result.not_run.items()):
             lines.append(f"| {task_id} | not run | — | {reason.replace('|', '/')[:160]} |")
-        findings_rows = [
-            row for row in rows
-            if row.get("status") == STATUS_OK and row_check_findings(row)
-        ]
-        if findings_rows:
+        findings_by_task = result.check_findings()
+        if findings_by_task:
             # Racing re-run 4 (2026-10-05): T007's two html-validate problems
             # read VERIFIED here and lived only in the runner's notes. They
             # are listed whole, for the reader and for review-code, which is
@@ -8533,13 +8604,13 @@ class WriteBatchScheduler:
                 + "Review-code is told about them, and apply-code-fixes "
                 "applies the fixes review-code validates.", "",
             ]
-            for row in findings_rows:
-                lines.append(f"### {row['task_id']}")
+            for task_id, findings in findings_by_task.items():
+                lines.append(f"### {task_id}")
                 lines.append("")
-                lines += [f"- {finding}" for finding in row_check_findings(row)]
+                lines += [f"- {finding}" for finding in findings]
                 lines.append("")
             lines.pop()
-        lines += batch_check_section(rows, heading=not findings_rows)
+        lines += batch_check_section(rows, heading=not findings_by_task)
         touched: List[str] = []
         for row in rows:
             for path in row.get("files_touched") or []:

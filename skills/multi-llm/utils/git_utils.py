@@ -1938,7 +1938,8 @@ def worktree_file_stats(
     check guard compares across one check's dispatch (``util write-prompt``
     records it, ``util batch-done`` reads it back; fix round 13), so both
     see the same files the same way. *exclude_prefixes* are repo-relative
-    directories whose files are left out. ``None`` when git cannot answer.
+    files or directories whose contents are left out. ``None`` when git
+    cannot answer.
     """
     try:
         stdout, _, returncode = _run_git(
@@ -1950,13 +1951,14 @@ def worktree_file_stats(
         return None
     if returncode != 0:
         return None
-    excluded = tuple(
-        prefix.strip("/").replace(os.sep, "/") + "/"
+    excluded_paths = {
+        prefix.strip("/").replace(os.sep, "/")
         for prefix in exclude_prefixes if prefix and prefix.strip("/")
-    )
+    }
+    excluded = tuple(path + "/" for path in excluded_paths)
     stats: Dict[str, Tuple[int, int]] = {}
     for path in sorted(p for p in stdout.split("\0") if p):
-        if path.startswith(excluded) or path in stats:
+        if path in excluded_paths or path.startswith(excluded) or path in stats:
             continue
         try:
             info = os.lstat(os.path.join(repo_root, path))
