@@ -1030,7 +1030,7 @@ def run_implement_write_phase(
             or getattr(args, "dry_run_subagents", False)):
         return None
 
-    from utils.write_batch_scheduler import WriteBatchScheduler
+    from utils.write_batch_scheduler import WriteBatchScheduler, write_result_notice
     from utils.write_phase_bridge import (
         materialize_write_tasks,
         write_task_file_for_phase,
@@ -1092,11 +1092,17 @@ def run_implement_write_phase(
         # last line it left", and the detached close-out's `run.error`.
         record_error(stop["headline"])
     found = result.check_findings() if hasattr(result, "check_findings") else {}
-    if found:
+    notice = [check_findings_notice(found)] if found else []
+    # Fix round 14: a task whose own check failed after its edits, and a run
+    # nothing verified, are on the same line.
+    extra = write_result_notice(result) if hasattr(result, "report_rows") else None
+    if extra:
+        notice.append(extra)
+    if notice:
         # Racing re-run 4 (2026-10-05): a check task's problems were on no
         # surface a host reads. The result line's `notice` carries them,
         # beside the `[CHECK_FINDINGS]` lines above.
-        record_notice(check_findings_notice(found))
+        record_notice("; ".join(notice))
     if result.report_path:
         print(f"[write-subagents] report: {result.report_path}")
     if result.summary_file:

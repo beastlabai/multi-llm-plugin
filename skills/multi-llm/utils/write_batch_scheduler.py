@@ -102,9 +102,11 @@ try:  # pragma: no cover - import shim mirrors the rest of utils/
         resolve_output_target,
         resolve_task_runner,
         row_outcome_label,
+        batch_check_findings,
         check_findings_from,
         check_record,
         read_check_reply,
+        row_batch_check_findings,
         row_check_findings,
         validate_result,
     )
@@ -193,9 +195,11 @@ except ImportError:  # pragma: no cover - direct-script import shim
         resolve_output_target,
         resolve_task_runner,
         row_outcome_label,
+        batch_check_findings,
         check_findings_from,
         check_record,
         read_check_reply,
+        row_batch_check_findings,
         row_check_findings,
         validate_result,
     )
@@ -233,6 +237,7 @@ except ImportError:  # pragma: no cover - direct-script import shim
 
 
 __all__ = [
+    "BATCH_CHECK_MARKER",
     "CHECK_FINDINGS_MARKER",
     "STRATEGIES",
     "STRATEGY_PAUSE",
@@ -258,7 +263,12 @@ __all__ = [
     "persist_human_task_plan",
     "resolve_human_task_plan",
     "run_write_phase",
+    "batch_check_section",
+    "batch_check_summary",
+    "unverified_line",
+    "write_result_notice",
     "verification_line",
+    "verify_command_candidate",
     "with_result_contract",
 ]
 
@@ -336,6 +346,75 @@ CODE_WRITE_KINDS = frozenset({"apply_code_fixes", "implement"})
 #: The line an implement run prints per check task that reported problems
 #: (``WriteBatchScheduler._check_findings_lines``, racing re-run 4).
 CHECK_FINDINGS_MARKER = "[CHECK_FINDINGS]"
+
+#: The line a code phase prints per batch whose own check failed after its
+#: edits (``WriteBatchScheduler._batch_check_lines``, ``util batch-done
+#: --check findings`` on a code batch; fix round 14).
+BATCH_CHECK_MARKER = "[BATCH_CHECK_FAILED]"
+
+
+def batch_check_section(
+    rows: Sequence[Dict[str, Any]], *, heading: bool = True,
+) -> List[str]:
+    """The ``## Check Findings`` lines for the code batches whose own check
+    failed after their edits (fix round 14), or ``[]``. Shared by the
+    implementation summary (under the check tasks' section when it has one:
+    *heading* ``False``) and the apply-code-fixes summary."""
+    found = [
+        row for row in rows
+        if isinstance(row, dict) and row.get("status") == STATUS_OK
+        and row_batch_check_findings(row)
+    ]
+    if not found:
+        return []
+    lines = ["", "## Check Findings", ""] if heading else [""]
+    lines += [
+        "These batches applied their edits, then ran a check that failed "
+        "(their own report says so). The edits are kept: look at each failure "
+        "before you go on — fix it by hand, or run review-code and then "
+        "apply-code-fixes.", "",
+    ]
+    for row in found:
+        lines.append(f"### {row['task_id']}: a check it ran fails")
+        lines.append("")
+        lines += [f"- {finding}" for finding in row_batch_check_findings(row)]
+        lines.append("")
+    lines.pop()
+    return lines
+
+
+def write_result_notice(result: Any) -> Optional[str]:
+    """What a code phase's result line's ``notice`` owes beyond its check
+    tasks (fix round 14): the batches whose own check failed after their
+    edits, and the line saying nothing ran the repository's tests. ``None``
+    when there is neither."""
+    parts: List[str] = []
+    try:
+        found = result.batch_check_findings()
+    except Exception:  # noqa: BLE001 - a notice is advisory
+        found = {}
+    if found:
+        parts.append("not a clean finish: " + batch_check_summary(found))
+    unverified = getattr(result, "unverified", None)
+    if unverified:
+        parts.append(str(unverified))
+    return "; ".join(parts)[:1200] or None
+
+
+def batch_check_summary(found: Dict[str, List[str]]) -> str:
+    """One sentence naming the code batches whose own check failed, and the
+    first problem of each (bounded): the result notice and the RESULT block
+    say it the same way (fix round 14)."""
+    parts = []
+    for task_id, findings in found.items():
+        first = " ".join(str(findings[0]).split())[:160] if findings else ""
+        more = f" (+{len(findings) - 1} more)" if len(findings) > 1 else ""
+        parts.append(f"{task_id} ({first}{more})")
+    count = len(found)
+    return (
+        f"{count} batch(es) applied their edits but reported a failing check: "
+        + "; ".join(parts) + "."
+    )[:900]
 
 #: How much of the verification command's output travels in the result payload,
 #: the summary and `.status.json`. A tail rather than the whole capture: a failing
@@ -1081,6 +1160,86 @@ def _accounting_line(account: Dict[str, Any]) -> str:
     )
 
 
+#: npm's own placeholder ``scripts.test``: a test script that runs nothing.
+_NPM_PLACEHOLDER_TEST = "no test specified"
+
+
+def verify_command_candidate(repo_root: Optional[str]) -> Optional[Tuple[str, str]]:
+    """``(command, why)`` for the repository's obvious test command, or ``None``.
+
+    Read from the files that declare one — a ``package.json`` ``scripts.test``
+    (not npm's placeholder; the package manager named by its lockfile), a
+    ``Makefile`` ``test:`` target, a ``Cargo.toml``, a ``go.mod``, a pytest
+    configuration — and never run, never written anywhere: it is what the
+    line saying nothing ran the tests names as the setting to add (fix round
+    14). Each read is bounded and any error is no candidate.
+    """
+    if not repo_root:
+        return None
+    root = Path(repo_root)
+
+    def read(name: str, limit: int = 256 * 1024) -> Optional[str]:
+        path = root / name
+        try:
+            if not path.is_file() or path.is_symlink():
+                return None
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                return handle.read(limit)
+        except OSError:
+            return None
+
+    package = read("package.json")
+    if package is not None:
+        try:
+            scripts = (json.loads(package) or {}).get("scripts") or {}
+        except (ValueError, AttributeError):
+            scripts = {}
+        test = scripts.get("test") if isinstance(scripts, dict) else None
+        if isinstance(test, str) and test.strip() and _NPM_PLACEHOLDER_TEST not in test:
+            runner = (
+                "pnpm" if (root / "pnpm-lock.yaml").is_file()
+                else "yarn" if (root / "yarn.lock").is_file()
+                else "bun" if (root / "bun.lockb").is_file() or (root / "bun.lock").is_file()
+                else "npm"
+            )
+            return f"{runner} test", "package.json defines scripts.test"
+    makefile = read("Makefile")
+    if makefile is not None and re.search(r"(?m)^test\s*:", makefile):
+        return "make test", "the Makefile has a test target"
+    if read("Cargo.toml") is not None:
+        return "cargo test", "the repository has a Cargo.toml"
+    if read("go.mod") is not None:
+        return "go test ./...", "the repository has a go.mod"
+    pyproject = read("pyproject.toml") or ""
+    if (
+        "[tool.pytest" in pyproject or read("pytest.ini") is not None
+        or "[tool:pytest]" in (read("setup.cfg") or "")
+    ):
+        return "python -m pytest", "the repository configures pytest"
+    return None
+
+
+def unverified_line(repo_root: Optional[str]) -> str:
+    """The one plain line a code phase's result carries when no
+    ``driver.verify_command`` is set (fix round 14): nothing ran the
+    repository's tests, and the setting that would, naming an obvious
+    command when the repository declares one."""
+    candidate = verify_command_candidate(repo_root)
+    where = "under driver: in .multi-llm/providers.yaml"
+    if candidate:
+        command, why = candidate
+        return (
+            f"Nothing ran this repository's tests: driver.verify_command is "
+            f"not set. To have every code phase run them, add "
+            f"verify_command: \"{command}\" {where} ({why})."
+        )
+    return (
+        f"Nothing ran this repository's tests: driver.verify_command is not "
+        f"set. To have every code phase run them, add verify_command {where}, "
+        f"set to the command that runs your tests or checks your build."
+    )
+
+
 def verification_line(result: Any) -> str:
     """One line describing what `driver.verify_command` did, for a report (F4).
 
@@ -1092,7 +1251,10 @@ def verification_line(result: Any) -> str:
     """
     record = getattr(result, "verification", None)
     if not isinstance(record, dict):
-        return "not configured (`driver.verify_command` is unset)"
+        unverified = getattr(result, "unverified", None)
+        return "not configured (`driver.verify_command` is unset)" + (
+            f". {unverified}" if unverified else ""
+        )
     verdict = "pass" if record.get("exit_code") == 0 else (
         f"FAIL (exit {record.get('exit_code')})"
     )
@@ -1417,6 +1579,10 @@ class SchedulerResult:
     #: rejected). Each is in ``not_run`` too, with
     #: :func:`blocked_by_check_reason` as its reason.
     blocked_by_check: Dict[str, str] = field(default_factory=dict)
+    #: Fix round 14: the line saying nothing ran the repository's tests,
+    #: when a code phase finished with no ``driver.verify_command`` set
+    #: (:func:`unverified_line`); ``None`` when one ran, or none was owed.
+    unverified: Optional[str] = None
 
     @property
     def ok(self) -> bool:
@@ -1433,6 +1599,17 @@ class SchedulerResult:
         found: Dict[str, List[str]] = {}
         for row in self.report_rows():
             findings = row_check_findings(row)
+            if row.get("status") == STATUS_OK and findings:
+                found[str(row.get("task_id"))] = findings
+        return found
+
+    def batch_check_findings(self) -> Dict[str, List[str]]:
+        """``{task_id: findings}`` for every code batch that finished ``ok``
+        while a check it ran on its own edits failed (fix round 14), this
+        run's and the earlier runs' rows alike, in row order."""
+        found: Dict[str, List[str]] = {}
+        for row in self.report_rows():
+            findings = row_batch_check_findings(row)
             if row.get("status") == STATUS_OK and findings:
                 found[str(row.get("task_id"))] = findings
         return found
@@ -1496,6 +1673,7 @@ class SchedulerResult:
             "not_run_tasks": dict(self.not_run),
             "blocked_by_check": dict(self.blocked_by_check),
             "stop": copy.deepcopy(self.stop) if self.stop else None,
+            **({"unverified": self.unverified} if self.unverified else {}),
             "tasks": self.report_rows(),
         }
 
@@ -1679,7 +1857,37 @@ def with_result_contract(kind: str, task: Dict[str, Any], prompt: str) -> str:
         "when the edits landed, so send it in every case — including when "
         "nothing needed changing.\n"
         + (CHECK_RESULT_CONTRACT if is_check_task(kind, task) else "")
+        + (
+            WRITE_CHECK_CONTRACT
+            if kind in CODE_WRITE_KINDS and not is_check_task(kind, task) else ""
+        )
     )
+
+
+#: Appended to the result contract of a batch that edits code (implement's
+#: tasks that declare files, apply-code-fixes' batches): the checks it ran on
+#: its edits, in the shape a check task reports (fix round 14). Codex racing
+#: run 5 (2026-10-06): an apply-code-fixes batch said in its free-text
+#: `notes` that the bundled test failed, the repository's test failed
+#: afterwards, and the run reported "All 6 valid fixes were applied". Read by
+#: `subagent_executor.batch_check_findings`, never from `notes`.
+WRITE_CHECK_CONTRACT = (
+    "\n## Checks you ran (required when you ran any)\n\n"
+    "If you ran any check on your edits — a test, a build, a type check, a "
+    "linter, a syntax check — add a `check` object to the JSON above:\n\n"
+    "```json\n"
+    '{"check": {"passed": false, "findings": ["<one failing check: the '
+    'command and what it reported>"]}}\n'
+    "```\n\n"
+    "- `passed`: the JSON boolean `true` only when every check you ran "
+    "passed, else `false`.\n"
+    "- `findings`: one string per check that failed; `[]` when `passed` is "
+    "`true`.\n\n"
+    "Report a failing check here even when you think your change did not "
+    "cause it: the batch is then recorded as applied with a failing check, "
+    "and the user is told, instead of the run reporting a clean success. "
+    "Leave `check` out when you ran no check.\n"
+)
 
 
 #: Appended to the result contract of a check task (an ``implement`` task that
@@ -2735,6 +2943,7 @@ class WriteBatchScheduler:
             if self.summary_file:
                 result.summary_file = self._write_summary(result)
             result.messages.extend(self._check_findings_lines(result))
+            result.messages.extend(self._batch_check_lines(result))
             result.messages.extend(self._check_block_message(result))
             if result.summary_file:
                 result.messages.append(
@@ -2748,6 +2957,7 @@ class WriteBatchScheduler:
         if self.finalize:
             self._finalize(result)
         result.messages.extend(self._check_findings_lines(result))
+        result.messages.extend(self._batch_check_lines(result))
         result.report_path = self._write_report(result)
         self._mirror_status(result)
         return result
@@ -2779,6 +2989,29 @@ class WriteBatchScheduler:
             f"reported problems; {went_on}{where}. Review-code is told about "
             f"them, and apply-code-fixes applies the fixes review-code "
             f"validates."
+        )
+        return lines
+
+    def _batch_check_lines(self, result: SchedulerResult) -> List[str]:
+        """One :data:`BATCH_CHECK_MARKER` line per code batch whose own check
+        failed after its edits, and one line saying the run is not a clean
+        finish (fix round 14)."""
+        found = result.batch_check_findings()
+        if not found:
+            return []
+        lines = [
+            f"{BATCH_CHECK_MARKER} {task_id}: its edits were applied, but a "
+            f"check it ran on them fails ({len(findings)} problem(s)): "
+            f"{'; '.join(findings)[:600]}"
+            for task_id, findings in found.items()
+        ]
+        where = (
+            f" They are listed under Check Findings in {result.summary_file}."
+            if result.summary_file else ""
+        )
+        lines.append(
+            f"Not a clean finish: {batch_check_summary(found)} The edits are "
+            f"kept; look at the failure before you go on.{where}"
         )
         return lines
 
@@ -2924,6 +3157,9 @@ class WriteBatchScheduler:
             if outcome.verification_only and isinstance(verdict.get("check"), dict):
                 # The skip keeps the earlier run's `check-findings` label.
                 outcome.check_findings = row_check_findings(verdict)
+            if isinstance(verdict.get("batch_check"), dict):
+                # And a code batch keeps what its own checks reported.
+                outcome.batch_check = row_batch_check_findings(verdict)
             if kept_findings:
                 outcome.reason = (
                     f"NOT RE-RUN: nothing in the repository changed since "
@@ -4301,6 +4537,9 @@ class WriteBatchScheduler:
         # Whatever branch decides it, a file-less implement task's verdict
         # reads VERIFIED or PARTIAL on every surface (`outcome_label`).
         outcome.verification_only = self._verification_only(snapshot)
+        if self.kind in CODE_WRITE_KINDS and not outcome.verification_only:
+            # Fix round 14: the checks a code batch ran on its own edits.
+            outcome.batch_check = batch_check_findings(result)
         outcome.sha256_before = {
             relative: row.get("sha256_before") for relative, row in observed.items()
         }
@@ -5093,6 +5332,9 @@ class WriteBatchScheduler:
                     # run it again (`_unchanged_since_failure`,
                     # `_check_findings_rerun`).
                     data["verdict"]["tree_fingerprint"] = self._tree_fingerprint()
+            if outcome.batch_check is not None:
+                # What the batch's own checks said, for a resume skip to carry.
+                data["verdict"]["batch_check"] = check_record(outcome.batch_check)
             if outcome.runner_notes:
                 data["verdict"]["runner_notes"] = outcome.runner_notes
             # The batch's identity beyond its positional name (2026-10-02):
@@ -5250,6 +5492,11 @@ class WriteBatchScheduler:
                 verdict = (
                     f"{verdict} ({len(outcome.check_findings)} problem(s): "
                     f"{'; '.join(outcome.check_findings)[:300]})"
+                )
+            elif outcome.ok and outcome.batch_check:
+                verdict = (
+                    f"{verdict}, but a check it ran fails "
+                    f"({'; '.join(outcome.batch_check)[:300]})"
                 )
             elif outcome.write_outcome and not outcome.ok:
                 # Plan step 3: a failed batch whose write outcome reads
@@ -6812,6 +7059,11 @@ class WriteBatchScheduler:
                 "against their own snapshots, but nothing checked the "
                 "repository as a whole."
             )
+            # Fix round 14: said on the result too, not only in the log —
+            # codex racing run 5's apply-code-fixes left the repository's own
+            # test failing and every surface a host relays read clean.
+            result.unverified = unverified_line(self.repo_root)
+            result.messages.append(result.unverified)
             return True
         timeout = get_verify_timeout_s(anchor=self.anchor)
         source = get_driver_provenance("verify_command", anchor=self.anchor)
@@ -7399,8 +7651,12 @@ class WriteBatchScheduler:
             task_cell = f"{row['task_id']}" + (
                 " (earlier run)" if row.get("from_earlier_run") else ""
             )
+            outcome_cell = row_outcome_label(row) or row.get("status")
+            if row.get("status") == STATUS_OK and row_batch_check_findings(row):
+                # Fix round 14: never a plain success.
+                outcome_cell = f"{outcome_cell}, its check fails"
             lines.append(
-                f"| {task_cell} | {row_outcome_label(row) or row.get('status')} | "
+                f"| {task_cell} | {outcome_cell} | "
                 f"{', '.join(row.get('files_touched') or []) or '—'} | "
                 f"{(row.get('reason') or row.get('summary') or '').replace('|', '/')[:160]} |"
             )
@@ -7441,6 +7697,7 @@ class WriteBatchScheduler:
                 lines += [f"- {finding}" for finding in row_check_findings(row)]
                 lines.append("")
             lines.pop()
+        lines += batch_check_section(rows, heading=not findings_rows)
         touched: List[str] = []
         for row in rows:
             for path in row.get("files_touched") or []:
@@ -7729,6 +7986,10 @@ class WriteBatchScheduler:
                                 # the row of a check that found something.
                                 **({"check_findings": list(o.check_findings)}
                                    if o.ok and o.check_findings else {}),
+                                # Fix round 14: a code batch whose own check
+                                # failed after its edits.
+                                **({"batch_check_findings": list(o.batch_check)}
+                                   if o.ok and o.batch_check else {}),
                                 "files_touched": list(o.files_touched),
                                 # Plan step 3: the rung, only when there was one.
                                 **({"sandbox_rung": self._dispatch_rungs[o.task_id]}
@@ -7744,6 +8005,14 @@ class WriteBatchScheduler:
                             if o.ok and o.check_findings
                         ]} if any(o.ok and o.check_findings for o in outcomes)
                            else {}),
+                        **({"batch_check_task_ids": [
+                            o.task_id for o in outcomes
+                            if o.ok and o.batch_check
+                        ]} if any(o.ok and o.batch_check for o in outcomes)
+                           else {}),
+                        # Fix round 14: nothing ran the repository's tests.
+                        **({"unverified": result.unverified}
+                           if result.unverified else {}),
                         # Racing re-run 3 (2026-10-05): the tasks a stop left
                         # undispatched, and the failed tasks the user accepted,
                         # so `status` and a terminal poll account for every

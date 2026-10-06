@@ -315,6 +315,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
      --phase-dir "{plan}/apply-fixes" --task-id "{task.task_id}" --status {batch_status}
    ```
    `{batch_status}` is `completed` for a success (a verified no-op included) and `failed` for a clean failure — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task.task_id} {batch_status} (N item(s) recorded)` line and writes the batch's record into `state.json`: the same `task_status` entry the `--exec-subagents` executor writes for this batch, plus every fix in it as processed. That record is what a later `--resume` reads to skip this batch (a `failed` record keeps it eligible for another try) and what makes `status` read the phase `in_progress`. Run it **before** step 7's append: a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-apply. An exit 3 names the problem (no `write_tasks.json`, an unknown task id); treat it as a stop, not a warning.
+   When the batch's reply carries a `check` object — the checks its subagent ran on its own edits (a test, a build, a syntax check) — add `--check passed` when it says `"passed": true` with nothing listed, else `--check findings` and one `--finding "{finding}"` per entry, with `--status completed`. `batch-done` then prints a `[BATCH_CHECK_FAILED]` line: the fixes stay applied and the loop goes on, but the phase is not a clean success — list the batch in the summary's `## Check Findings` (step 8) and say in your report that its check fails.
 
 7. **Append to prior changes (only after verification)** — This step runs **only** after step 4 has confirmed success or clean failure. It must **never** run for partially-applied batches. Pass the summary via stdin:
    ```bash
@@ -387,7 +388,11 @@ guessed `pnpm typecheck` in a repo with no `package.json` reports a failure the 
 not cause.
 
 If no `verify_command` is configured, say so in the summary — "not configured" is the
-honest verification status, and it is not the same as "passed".
+honest verification status, and it is not the same as "passed". Say it in your report
+too, in one plain line: nothing ran the repository's tests, and the setting to add is
+`verify_command` under `driver:` in `.multi-llm/providers.yaml` — name the repository's
+own test command as its value when it has an obvious one (`package.json`'s
+`scripts.test`, a `Makefile` `test` target), without running it or writing the config.
 
 If the command fails:
 - Report which fix may have caused the issue
@@ -446,6 +451,14 @@ same path the *Output Files* tree above lists, and the same one the
 ### Batch 2 (File: apps/web/supabase/migrations/xxx.sql)
 **Subagent**: general-purpose
 ...
+
+## Check Findings
+
+(Only when a batch's own check failed after its edits — a `[BATCH_CHECK_FAILED]` line in
+step 6. Its batch heading above ends "applied, its check fails".)
+
+### apply-fix-batch-1: a check it ran fails
+- node tests/race.test.mjs: AssertionError: …
 
 ## Decided by the judge agent (N)
 

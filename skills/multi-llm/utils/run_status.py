@@ -948,6 +948,38 @@ def _validation_context_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]
     return "; ".join(sentences) or None
 
 
+def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
+    """The write mirror's own notice parts over every view, or ``None``.
+
+    Fix round 14: a code batch whose own check failed after its edits
+    (``write_subagents.tasks[].batch_check_findings``) and the line saying
+    nothing ran the repository's tests (``write_subagents.unverified``) —
+    what the worker recorded on its own result line, which a detached caller
+    never sees. Read from the run's own mirror, so it describes that run.
+    """
+    try:
+        from .write_batch_scheduler import batch_check_summary
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.write_batch_scheduler import batch_check_summary  # type: ignore
+    parts: List[str] = []
+    for view in views:
+        mirror = (view.get("progress") or {}).get("write_subagents")
+        if not isinstance(mirror, dict):
+            continue
+        found = {
+            str(row.get("task_id")): [str(item) for item in row["batch_check_findings"]]
+            for row in mirror.get("tasks") or []
+            if isinstance(row, dict) and isinstance(row.get("batch_check_findings"), list)
+            and row["batch_check_findings"]
+        }
+        if found:
+            parts.append("not a clean finish: " + batch_check_summary(found))
+        unverified = mirror.get("unverified")
+        if isinstance(unverified, str) and unverified and unverified not in parts:
+            parts.append(unverified)
+    return "; ".join(parts)[:1200] or None
+
+
 def _high_priority_text(high_priority: Any) -> Optional[str]:
     """The one line naming a finished code-review's distinct HIGH groups.
 
@@ -1865,6 +1897,11 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
     flagged = mirror.get("check_findings_task_ids")
     if isinstance(flagged, list) and flagged:
         parts.append(f"check findings {', '.join(map(str, flagged))}")
+    # Fix round 14: a code batch applied its edits, then a check it ran
+    # failed — never only an `ok` count.
+    failing = mirror.get("batch_check_task_ids")
+    if isinstance(failing, list) and failing:
+        parts.append(f"own check fails {', '.join(map(str, failing))}")
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
@@ -2735,8 +2772,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     truncation_notice = (
         _validation_context_notice(views) if terminal_run else None
     )
+    # Fix round 14: a terminal write run's own not-clean parts, first among
+    # the workflow's, since they qualify the run the poll is about.
+    write_notice = _write_result_notice(views) if terminal_run else None
     combined_notice = "; ".join(
-        part for part in (truncation_notice, terminal_notice) if part
+        part for part in (truncation_notice, write_notice, terminal_notice) if part
     )
     if combined_notice:
         record_notice(combined_notice)
