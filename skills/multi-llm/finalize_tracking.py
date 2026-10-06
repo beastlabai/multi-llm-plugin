@@ -292,6 +292,12 @@ def main(argv=None) -> int:
     try:
         with state_file_lock(state_path):
             outcome = _record_tracked_files(args, state_path, explicit_scope)
+            if outcome == 3 and args.phase == "implement":
+                # Refused because a check holds tasks: the run still ends
+                # here, so its own edits after the check are stamped as part
+                # of the check's tree, or the next `--resume` reads them as
+                # a change and hands the check out again (fix round 15).
+                _restamp_check_trees(state_path)
     except StateLockTimeout as e:
         print(f"ERROR: {e}", file=sys.stderr)
         return 1
@@ -431,9 +437,10 @@ def _record_tracked_files(args, state_path: Path, explicit_scope: List[str]):
             named = ", ".join(f"{task_id} (waits for {check_id})" for task_id, check_id in held)
             print(
                 f"ERROR: implement is not complete: {named} did not run, "
-                f"because a check it depends on reported problems. Nothing "
-                f"was written. Run this command again without "
-                f"--mark-completed (the phase stays in progress), and report "
+                f"because a check it depends on reported problems, so "
+                f"implement stays in progress and tracked_files was not "
+                f"recorded. Run this command again without "
+                f"--mark-completed, and report "
                 f"the way forward: fix what the check reported and re-run "
                 f"implement with --resume, or accept its findings with "
                 f"--resume --human-task <check id>=done (the held tasks then "
