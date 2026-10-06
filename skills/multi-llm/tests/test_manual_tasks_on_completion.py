@@ -703,7 +703,10 @@ class TestTheNativeLegRecordsItsDeferrals:
         complete = {
             "phase": None, "command": None, "complete": True,
             "manual_tasks": OWED_T002_T003,
-            "manual_tasks_note": close_note(PLUGIN, plan_arg, ["T002", "T003"]),
+            # Fix round 16: T003, skipped with the manual T002, is listed as
+            # owed but never answered `done` (implement refuses a code task
+            # that did not fail); it runs on that resume.
+            "manual_tasks_note": close_note(PLUGIN, plan_arg, ["T002"]),
         }
         block = [
             "[WORKFLOW_COMPLETE]",

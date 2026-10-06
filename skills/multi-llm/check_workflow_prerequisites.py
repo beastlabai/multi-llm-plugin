@@ -1112,6 +1112,9 @@ def get_workflow_status(
     deferred = state.deferred_implementation_tasks()
     if deferred:
         phases["implement"]["manual_tasks"] = deferred
+        # The ones `--human-task <id>=done` answers (fix round 16): not a code
+        # task skipped with a manual one, which the resume then runs.
+        phases["implement"]["manual_close_ids"] = state.manual_tasks_to_close(deferred)
     # The implement check tasks whose check ran and reported problems
     # (`task_check_findings`, written by both write legs from the reply's
     # structured `check`): racing re-run 4 recorded T007 VERIFIED with two

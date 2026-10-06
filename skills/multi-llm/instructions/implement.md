@@ -413,7 +413,7 @@ your host.
      **"Skip all, continue anyway" strategy:**
      - The orchestrator already recorded every human task as "skipped" in state (its `skip_reason` starts "deferred — manual task") and a dependency override for each code task that depends on one. Do not record either yourself.
      - Treat human task dependencies as satisfied — dependent code tasks proceed as normal
-     - After all tasks complete, include a "## Manual Tasks (Deferred)" section in the implementation summary
+     - After all tasks complete, include a "## Manual Tasks (Deferred)" section in the implementation summary, ending with the text of step 2's `[MANUAL_TASK_NOTE]` line (the task JSON's `manual_tasks_note`), verbatim: it says how to record them done
      - Also include a "## Dependency Override Warnings" section listing each code task that ran with overridden human dependencies:
        ```markdown
        ## Dependency Override Warnings
@@ -428,7 +428,7 @@ your host.
 
      **"Skip all, skip dependents too" strategy:**
      - The orchestrator already recorded every human task, and every task that depends on one, as "skipped" in state; the task JSON leaves them out of `batches` and names them in `skipped_tasks`. Do not dispatch them and do not record them yourself.
-     - After remaining tasks complete, include a "## Manual Tasks (Deferred)" section listing each human task and each skipped dependent (step 2 prints them under "Deferred tasks"); a task step 2 printed under "Skipped at your request" (a failed task you answered `--human-task {id}=skip`, and its dependents) goes under a `## Skipped at your request` section instead, and one it printed under "Accepted after failing" is listed as accepted after failing, and one it printed under "Completed by hand" (a manual task answered `--human-task {id}=done`) is listed as completed by hand
+     - After remaining tasks complete, include a "## Manual Tasks (Deferred)" section listing each human task and each skipped dependent (step 2 prints them under "Deferred tasks") and ending with the text of step 2's `[MANUAL_TASK_NOTE]` line (the task JSON's `manual_tasks_note`), verbatim: it says how to record them done; a task step 2 printed under "Skipped at your request" (a failed task you answered `--human-task {id}=skip`, and its dependents) goes under a `## Skipped at your request` section instead, and one it printed under "Accepted after failing" is listed as accepted after failing, and one it printed under "Completed by hand" (a manual task answered `--human-task {id}=done`) is listed as completed by hand
 
      #### Transitive Skip Propagation Algorithm
 
@@ -637,6 +637,7 @@ your host.
    - Each check task that reported problems, with its findings (the code review is told about them), and the tasks it held back with the way forward (fix and `--resume`, or `--resume --human-task {id}=done`)
    - Each task whose own check failed after its edits (`[BATCH_CHECK_FAILED]`), with what failed: the phase applied it but is not a clean finish
    - At a stop after a code task completed, with no `driver.verify_command` configured: step 8's one plain line saying nothing in the plugin ran the repository's tests and naming the setting to add (step 8 itself does not run at a stop)
+   - Each manual task step 2 deferred, as the user's to do, with the `[MANUAL_TASK_NOTE]` text verbatim (the next-step lookup prints the tasks as `[MANUAL_TASK]` lines and the note again below its command): it says how to record them done
    - At a stop (step 10 ran without `--mark-completed`) the next-step lookup of `references/summary-format.md` still runs: it prints the resume command (`[NEXT_COMMAND]`) and, when tasks wait for an answer, one command carrying every `--human-task` answer (`[NEXT_COMMAND_ANSWERS]`). End the report with both, each alone in its own fenced block, copied verbatim; never write a resume or `--human-task` command of your own
    - Implementation summary file location
    - State file location

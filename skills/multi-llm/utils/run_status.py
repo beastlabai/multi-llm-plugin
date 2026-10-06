@@ -529,14 +529,15 @@ def manual_close_note(
     listed T007 and never said how to close it). ``None`` when nothing is
     owed or the host has no command template for this route.
     """
-    manual = (payload.get("phases", {}).get("implement") or {}).get("manual_tasks")
-    ids = [str(entry["id"]) for entry in manual or []
-           if isinstance(entry, dict) and entry.get("id")]
-    if not ids:
-        return None
     import io
 
     from . import next_phase
+
+    # The manual tasks themselves, never a code task skipped with one
+    # (`next_phase.manual_close_ids`, fix round 16).
+    ids = next_phase.manual_close_ids(payload.get("phases", {}).get("implement") or {})
+    if not ids:
+        return None
 
     try:
         host = host_capabilities.resolve_host_id(explicit=host_id)
