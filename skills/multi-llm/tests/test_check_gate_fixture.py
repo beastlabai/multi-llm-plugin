@@ -589,3 +589,40 @@ class TestTheNativeLeg:
         )
         assert '--plan-file "$PLAN_ARG"' in core
         assert "task JSON's `plan_arg` (the plan as the user typed it)" in core
+
+    def test_a_failed_task_run_again_replaces_its_failure_line(self, repo, capsys):
+        """Coordinator note, fix round 14: the native instructions append
+        "(task failed — …)" for a failed task, and `append` used to skip the
+        resumed run's real entry as a repeated (id, phase), so every later
+        prompt kept saying the task failed. The supersede keeps the newest:
+        the next task's prompt reads what the task did when it ran again."""
+        self._emit(repo, capsys)
+        phase = str(repo.phase_dir)
+        out = str(repo.plan.parent / repo.plan.stem)
+
+        def append(task_id, summary):
+            return self._util(capsys, "prior-changes", "append", "--output-dir", out,
+                              "--id", task_id, "--phase", "implement",
+                              "--summary", summary)
+
+        self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T001",
+                   "--status", "completed")
+        append("T001", "Created src/config.json")
+        self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T003",
+                   "--status", "failed", "--reason", "node --check failed")
+        append("T003", "(task failed — node --check failed)")
+
+        handoff = self._emit(repo, capsys, "--resume")
+        assert "T003" in {t["id"] for b in handoff["batches"] for t in b["tasks"]}
+        self._util(capsys, "batch-done", "--phase-dir", phase, "--task-id", "T003",
+                   "--status", "completed")
+        code, _out, err = append("T003", "Created src/app.js with greet(name)")
+        assert code == 0 and "Replaced entry T003/implement" in err
+
+        assert self._util(
+            capsys, "write-prompt", "--phase-dir", phase, "--task-id", "T004")[0] == 0
+        prompt = (repo.phase_dir / "prompts" / "T004.prompt.txt").read_text(
+            encoding="utf-8"
+        )
+        assert "Created src/app.js with greet(name)" in prompt
+        assert "task failed" not in prompt

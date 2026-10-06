@@ -368,6 +368,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
    Do **not** use the batch loop index. The `--phase` is `"apply-suggestions"`.
 
    For **clean failures**, use summary: `(batch failed — {compact reason}, verified no file changes)`
+   When a `--resume` dispatches that batch again, append its new summary under the same `--id`: it replaces the failure line in every later batch's prompt (`Replaced entry …` on stderr).
 
    **Error handling**: If `append` fails, log a warning but do not abort the batch loop.
 
