@@ -119,3 +119,112 @@ class TestStatusCheckFindingLines:
 def test_clip_keeps_the_run_9_budgets():
     """The budgets stay what they were: 120 for one finding or reason."""
     assert len(clip(CODEX_REASON, 120)) <= 120
+
+
+# ===========================================================================
+# Notices, the stop `error`, the batch lines (write_batch_scheduler et al.)
+# ===========================================================================
+
+from utils import known_checks, write_batch_scheduler as wbs  # noqa: E402
+from utils.cli_common import ERROR_MAX_CHARS, ResultContext  # noqa: E402
+
+TESTS_LINE = (
+    "Nothing ran this repository's tests: driver.verify_command is not set. "
+    "To have every code phase run them, add verify_command: \"npm test\" under "
+    "driver: in .multi-llm/providers.yaml (package.json defines scripts.test)."
+)
+
+
+def _quote_in_brackets(headline: str) -> str:
+    return headline[headline.index(" [") + 2:headline.index("]")]
+
+
+class TestNotices:
+    def test_a_batch_check_summary_cuts_each_finding(self):
+        text = wbs.batch_check_summary({"T003": [OPENCODE_REASON]})
+        first = text[text.index('("') + 2:text.index('")')]
+        assert ELLIPSIS in first and len(first) <= 160
+        assert_clean_cut(text, OPENCODE_REASON)
+
+    def test_quoted_findings_close_the_quote_they_cut(self):
+        shown = wbs.quoted_findings(LONG_FINDINGS, 200)
+        assert len(shown) <= 200 and shown.endswith(ELLIPSIS + '"')
+        assert unclosed(shown) == []
+
+    def test_the_batch_check_line(self):
+        could_not = ["its check could not run: " + " ".join(LONG_FINDINGS * 3)]
+        line = wbs.batch_check_line("T003", could_not)
+        assert_clean_cut(line, could_not[0])
+
+    def test_the_write_result_notice(self):
+        class Result:
+            unverified = TESTS_LINE
+
+            @staticmethod
+            def batch_check_findings():
+                return {f"T00{n}": [OPENCODE_REASON] for n in range(1, 9)}
+
+        notice = wbs.write_result_notice(Result())
+        assert len(notice) <= 1200
+        assert_clean_cut(notice, " ".join(LONG_FINDINGS) + " " + TESTS_LINE)
+
+    def test_implement_check_findings_notice(self):
+        import implement_orchestrator
+
+        notice = implement_orchestrator.check_findings_notice(
+            {"T002": [OPENCODE_REASON, T002_FINDING], "T005": [T002_FINDING]})
+        assert f"T005: {T002_FINDING}" in notice  # fits whole: unchanged
+        cut = notice[notice.index("T002: ") + 6:notice.index(" (+1 more)")]
+        assert len(cut) <= 160 and ELLIPSIS in cut
+        assert_clean_cut(cut, OPENCODE_REASON)
+
+    def test_the_known_checks_tally(self):
+        checks = [
+            (f"node scripts/check-{'the-very-long-name-' * 4}{n}.mjs --reporter spec", "T001")
+            for n in range(6)
+        ]
+        state = {"task_status": {"apply-fix-batch-0": "completed"}}
+        tally = known_checks.checks_tally(checks, state, [{"task_id": "apply-fix-batch-0"}])
+        assert len(tally) <= known_checks.TALLY_MAX_CHARS and ELLIPSIS in tally
+        assert unclosed(tally) == [], tally
+        assert tally.split(ELLIPSIS)[0][-1] not in " ,;:"
+
+
+class TestTheStopError:
+    def test_the_models_quote_gives_way_at_a_word(self):
+        reported = " ".join([OPENCODE_REASON] * 4)
+        headline = wbs.fit_stop_headline(
+            "implement stopped at T002 (Release check): its check reported 4 problem(s)",
+            reported, ["T006", "T007"],
+            ["To go on: fix what the check reported and resume, or accept its "
+             "findings with --human-task T002=done."],
+            tail=TESTS_LINE, budget=600,
+        )
+        assert len(headline) <= 600 and headline.endswith(TESTS_LINE)
+        quote = _quote_in_brackets(headline)
+        assert ELLIPSIS in quote
+        assert_clean_cut(quote, reported)
+
+    def test_the_head_cut_as_a_last_resort(self):
+        head = "implement stopped at T002 (" + " ".join([OPENCODE_REASON] * 3) + ")"
+        headline = wbs.fit_stop_headline(
+            head, None, [], ["Resume with --resume."], tail=TESTS_LINE, budget=400,
+        )
+        assert len(headline) <= 400 and headline.endswith(TESTS_LINE)
+        assert_clean_cut(headline.split(" Resume with")[0], head)
+        assert unclosed(headline) == []
+
+    def test_the_whole_line_kept_at_error_max_chars(self):
+        """Round 19's rule holds: the tests line stays whole at 1200."""
+        headline = wbs.fit_stop_headline(
+            "implement stopped at T002", " ".join([OPENCODE_REASON] * 8), [],
+            ["To go on: resume."], tail=TESTS_LINE,
+        )
+        assert len(headline) <= ERROR_MAX_CHARS and headline.endswith(TESTS_LINE)
+
+    def test_the_result_lines_error_is_cut_at_a_word(self):
+        context = ResultContext(mode="implement", phase="implement")
+        text = " ".join([OPENCODE_REASON] * 8)
+        context.set_error(text)
+        assert len(context.error) <= ERROR_MAX_CHARS
+        assert_clean_cut(context.error, text)

@@ -101,9 +101,10 @@ class TestTheRule:
             "x stopped at T1 (" + "t" * 300 + "): failed", None, [],
             [REMEDY, ANSWER], tail=TAIL, budget=200,
         )
-        assert len(text) == 200
+        assert len(text) <= 200
         assert text.startswith("x stopped at T1 (ttt")
-        assert text.endswith(f"t…. {REMEDY} {ANSWER} {TAIL}")
+        # Fix round 22: the cut closes the bracket the head opened.
+        assert text.endswith(f"t…). {REMEDY} {ANSWER} {TAIL}")
 
     def test_only_a_frame_longer_than_the_budget_cuts_into_it(self):
         text = fit_stop_headline(
