@@ -243,9 +243,13 @@ class TestWhatARecordMeansOnAResume:
         (_rec("failed"), "", False, False),
         # A record with no stamp (written before fix round 22) counts as before.
         (_rec(), "aaaa", False, True),
-        # This review's record counts; an earlier review's does not.
+        # This review's record counts; an earlier review's decline or skip
+        # does not, and its applied item still does (never handed out twice).
         (_rec(grouped_sha256="aaaa"), "aaaa", False, True),
+        (_rec("declined", grouped_sha256="aaaa", reason="r"), "aaaa", False, True),
         (_rec("declined", grouped_sha256="aaaa", reason="r"), "bbbb", False, False),
+        (_rec("skipped", grouped_sha256="aaaa", reason="r"), "bbbb", True, False),
+        (_rec(grouped_sha256="aaaa"), "bbbb", False, True),
         # On the executor leg its own record is its result file's business;
         # a native host's record still keeps the item out.
         (_rec(leg=PROCESSED_LEG_EXECUTOR), "", True, False),
@@ -307,5 +311,52 @@ class TestALaterReviewOffersADeclinedItemAgain:
             json.dumps(json.loads(grouped.read_text()), indent=4), encoding="utf-8")
         code, err, later = _emit(plan, capsys, "--resume")
         assert code == 0, err
-        assert declined in {i for t in later for i in t["expected_ids"]}
+        later_items = {i for t in later for i in t["expected_ids"]}
+        assert declined in later_items
         assert _processed(_native_state(plan))[declined]["status"] == "declined"
+        # What the batch applied is still never handed out twice.
+        applied = set(batch["expected_ids"]) - {declined}
+        assert applied and not applied & later_items
+
+
+class TestALaterReviewOffersADeclinedItemAgainOnTheExecutorLeg(_PairRig):
+
+    def test_its_batch_is_dispatched_again_and_it_is_recorded_declined(self, repo):
+        """The executor leg's own behaviour, which the native leg now
+        matches: a later review that reports the declined item again (the
+        applied one fixed, so not reported) makes a batch the earlier run
+        never ran, which is dispatched, and a second decline is recorded as
+        one — never as applied."""
+        from tests.test_write_batch_declined import _alpha_pair_groups
+        from tests.test_write_executor_orchestrators import _validation
+        from utils.state_manager import generate_group_id, get_or_create_state
+
+        plan = self._review_pair(repo)
+        ids = self._ids(plan)
+        declined_id, applied_id = ids[0]
+        repo.monkeypatch.setenv("MOCK_LLM_WRITE_DECLINED", json.dumps(
+            [{"id": declined_id, "reason": REASON}]))
+        assert self._run(repo, plan, [applied_id] + ids[1]) == 0
+
+        # The next review: the declined finding and the other section's.
+        review = plan.parent / plan.stem / "review-plan"
+        groups = [g for g in _alpha_pair_groups() if generate_group_id(g) != applied_id]
+        assert len(groups) == 2
+        (review / "grouped.json").write_text(json.dumps(groups), encoding="utf-8")
+        (review / "validation.json").write_text(
+            json.dumps(_validation(["valid"] * 2)), encoding="utf-8")
+        state = get_or_create_state(plan)
+        state.mark_phase_completed("review-plan")
+        state.save()
+        # The batch that declines everything edits nothing.
+        repo.monkeypatch.setenv("MOCK_LLM_EDITS_IF_PROMPT_HAS", "Do B.")
+        assert self._run(repo, plan, ids[1], "--resume") == 0
+
+        rows = [row for row in self._report(plan) if declined_id in row["expected_ids"]
+                and not row.get("from_earlier_run")]
+        assert len(rows) == 1 and not rows[0].get("skipped"), rows
+        assert rows[0]["expected_ids"] == [declined_id]
+        state_json = json.loads((plan.parent / plan.stem / "state.json").read_text())
+        record = _processed(state_json)[declined_id]
+        assert record["status"] == "declined"
+        assert record["details"]["task_id"] == rows[0]["task_id"]
