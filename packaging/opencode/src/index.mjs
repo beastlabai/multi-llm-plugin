@@ -3148,15 +3148,95 @@ function plainTitleText(value) {
     .trim()
 }
 
-/** `line` cut to the surface's `max_line` characters, ending in its `cut`. */
+/** Characters a cut never ends on before its mark (`text_clip.DANGLING`). */
+const TITLE_DANGLING = new Set(Array.from(" \t,;:.!?/\\|&+=*-\u2013\u2014\u00b7"))
+/** Bracket pairs a cut closes again after its mark, and the marks that toggle. */
+const TITLE_PAIRS = { "(": ")", "[": "]", "{": "}", "\u201c": "\u201d" }
+const TITLE_CLOSING = Object.fromEntries(
+  Object.entries(TITLE_PAIRS).map(([opener, closer]) => [closer, opener]),
+)
+const TITLE_TOGGLES = new Set(['"', "`"])
+const titleSpace = (ch) => /\s/u.test(ch)
+const titleWord = (ch) => /[\p{L}\p{N}]/u.test(ch)
+
+/**
+ * The marks `chars` opens and never closes, outermost first, as
+ * `[index, mark]` (`text_clip.unclosed`): brackets pair by kind, `"` and
+ * backticks toggle, and a `'` counts only where it cannot be an apostrophe.
+ */
+function unclosedMarks(chars) {
+  const stack = []
+  const close = (mark) => {
+    for (let depth = stack.length - 1; depth >= 0; depth--) {
+      if (stack[depth][1] === mark) {
+        stack.length = depth
+        return true
+      }
+    }
+    return false
+  }
+  chars.forEach((ch, index) => {
+    if (Object.hasOwn(TITLE_PAIRS, ch)) stack.push([index, ch])
+    else if (Object.hasOwn(TITLE_CLOSING, ch)) close(TITLE_CLOSING[ch])
+    else if (TITLE_TOGGLES.has(ch)) {
+      if (!close(ch)) stack.push([index, ch])
+    } else if (ch === "'") {
+      const before = index ? chars[index - 1] : " "
+      const after = index + 1 < chars.length ? chars[index + 1] : " "
+      if (stack.some(([, mark]) => mark === "'") && !titleSpace(before) && !titleWord(after)) {
+        close("'")
+      } else if (!titleWord(before) && !titleSpace(after)) {
+        stack.push([index, ch])
+      }
+    }
+  })
+  return stack
+}
+
+/**
+ * `line` cut to the surface's `max_line` characters, ending in its `cut`.
+ *
+ * Fix round 22 (live run 9, #4): the same rule as the dispatcher's
+ * `text_clip.clip`, which cuts every other preview of the model's words: at a
+ * word boundary (a token longer than a third of the room is cut inside), no
+ * separator before the mark, and every bracket or quote the kept part opened
+ * closed again after it. It was a bare cut mid-word.
+ */
 function capTitleLine(line, text) {
   const max = text.max_line
   if (!Number.isInteger(max) || max <= 0) return line
   const chars = Array.from(line)
   if (chars.length <= max) return line
   const cut = typeof text.cut === "string" ? text.cut : ""
-  const keep = Math.max(0, max - Array.from(cut).length)
-  return chars.slice(0, keep).join("").trimEnd() + cut
+  let room = max - Array.from(cut).length
+  while (room > 0) {
+    let kept = chars.slice(0, room)
+    if (!titleSpace(chars[room])) {
+      for (let index = kept.length - 1; index >= 0; index--) {
+        if (titleSpace(kept[index])) {
+          if (3 * index >= 2 * room) kept = kept.slice(0, index)
+          break
+        }
+      }
+    }
+    let stack
+    for (;;) {
+      while (kept.length && TITLE_DANGLING.has(kept[kept.length - 1])) kept.pop()
+      stack = unclosedMarks(kept)
+      if (stack.length && stack[stack.length - 1][0] === kept.length - 1) {
+        kept.pop()
+        continue
+      }
+      break
+    }
+    if (!kept.length) break
+    const closers = stack.slice().reverse().map(([, mark]) => TITLE_PAIRS[mark] ?? mark)
+    const clipped = kept.join("") + cut + closers.join("")
+    const length = Array.from(clipped).length
+    if (length <= max) return clipped
+    room -= length - max
+  }
+  return Array.from(cut).slice(0, max).join("")
 }
 
 /** `tool.execute.after`: title this tool's stop, leave every other call alone. */
@@ -3433,6 +3513,7 @@ const __testing = {
   SKILL_DIR,
   composeDispatcherArgv,
   composeSpawnArgv,
+  capTitleLine,
   expandHome,
   findUv,
   handBackTyped,
