@@ -323,3 +323,52 @@ class TestTemplatesNameNoParticularModel:
         assert ">Let the agent decide</option>" in text
         assert "Let Claude decide" not in text
         assert "'Claude'" not in text
+
+
+class TestNoDecisionsLeavesTheReportAlone:
+    """Live run 8 (Claude Code racing 05 and 08): the native apply runbook's
+    step that badges the review report ran on phases that decided nothing by
+    hand or by judge, re-rendered `report.html` and printed "0 of 0 human
+    decision(s) matched", which the host relayed. The executor leg's twin
+    returns before rendering when there is no decision; the CLI now does too,
+    and says so plainly."""
+
+    def test_the_report_is_untouched_and_no_zero_count_is_printed(self, capsys):
+        with tempfile.TemporaryDirectory() as d:
+            phase_dir = Path(d) / "review-tasks"
+            phase_dir.mkdir()
+            TestRegenerateReport._sidecar(TestRegenerateReport(), phase_dir)
+            report = phase_dir / "report.html"
+            report.write_text("<html>the review's own report</html>", encoding="utf-8")
+            sf = Path(d) / "state.json"
+            sf.write_text(json.dumps({}), encoding="utf-8")
+            rc = html_report_main([
+                "regenerate-decisions",
+                "--phase-dir", str(phase_dir),
+                "--state-file", str(sf),
+                "--apply-phase", "apply-task-suggestions",
+            ])
+            out = capsys.readouterr().out
+            assert rc == 0
+            assert "0 of 0" not in out
+            assert (
+                "No human or judge decisions are recorded for "
+                "apply-task-suggestions"
+            ) in out
+            assert str(report) in out
+            assert report.read_text(encoding="utf-8") == (
+                "<html>the review's own report</html>"
+            )
+
+
+@pytest.mark.parametrize("name", [
+    "apply-suggestions.md", "apply-task-suggestions.md", "apply-code-fixes.md",
+])
+def test_the_native_runbooks_say_a_phase_with_no_decision_leaves_the_report(name):
+    text = " ".join(
+        (Path(__file__).resolve().parent.parent / "instructions" / name)
+        .read_text(encoding="utf-8").split()
+    )
+    assert ("The same holds when the phase recorded no human or judge decision: "
+            "the report stays as the review wrote it") in text
+    assert "never edit the report yourself" in text
