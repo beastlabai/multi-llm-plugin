@@ -308,7 +308,12 @@ class TestTheExecutorEtaEndsAtTheTasksDispatched:
         text = text.out + text.err
         assert _dispatched_titles(repo) == ["Edit: write the release note"]
         assert _etas(text) == [(1, 1)], text
-        assert "ALL TASKS COMPLETE" in text
+        # Fix round 24: every dispatched task is complete, and the line
+        # names the two the user's answer left undone.
+        assert (
+            "ALL DISPATCHED TASKS COMPLETE · T005 skipped at your request; "
+            "T006 skipped with a skipped task"
+        ) in text, text
 
     def test_a_task_a_check_holds_leaves_the_total(self, repo, capsys):
         _policy(repo, ALLOW)
@@ -477,7 +482,10 @@ class TestTheFirstRunEtaCountsWhatItDispatches:
         code, text = _run(repo, capsys, "--resume", "--human-task", "T005=skip")
         assert code == 0, text
         assert _etas(text) == [(1, 2), (2, 2)], text
-        assert "ALL TASKS COMPLETE" in text
+        assert (
+            "ALL DISPATCHED TASKS COMPLETE · T005 skipped at your request; "
+            "T006 skipped with a skipped task"
+        ) in text, text
 
 
 def _run(repo, capsys, *flags) -> tuple:

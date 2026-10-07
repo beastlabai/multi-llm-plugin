@@ -546,6 +546,79 @@ def left_out_tail(left_out: Mapping[str, str], *, unit: str = "task") -> str:
     )
 
 
+#: ``state.json``'s ``metrics_set_aside.{phase}``: ``{task id: how}`` for the
+#: tasks the human-task plan set aside, which no runner runs: a manual task
+#: left for the user, a task skipped with one, a task skipped at the user's
+#: request and one skipped with it (fix round 24, Claude Code racing #6:
+#: "task 10/10 done … ALL TASKS COMPLETE" while the manual T011 and T012
+#: were left). The native emit writes it, each emit replaces it and
+#: ``finish`` removes it; the line that reaches N/N names them
+#: (:func:`set_aside_tail`), on the executor from its own plan.
+SET_ASIDE_KEY = "metrics_set_aside"
+SET_ASIDE_MANUAL = "manual"
+SET_ASIDE_WITH_MANUAL = "with-manual"
+SET_ASIDE_SKIPPED = "skipped"
+SET_ASIDE_WITH_SKIPPED = "with-skipped"
+#: Each way a task is set aside, in the order the line names them, with its
+#: words (the summary's accounting line's).
+_SET_ASIDE_WORDS = (
+    (SET_ASIDE_MANUAL, "left for you (manual)"),
+    (SET_ASIDE_WITH_MANUAL, "skipped with a manual task"),
+    (SET_ASIDE_SKIPPED, "skipped at your request"),
+    (SET_ASIDE_WITH_SKIPPED, "skipped with a skipped task"),
+)
+#: What the N/N line says once the plan set tasks aside: every task the run
+#: dispatched is complete, and the line names the others.
+ALL_DISPATCHED_COMPLETE = "ALL DISPATCHED TASKS COMPLETE"
+
+
+def set_set_aside_in_state(
+    state: dict, phase: str, aside: Mapping[str, str],
+) -> None:
+    """Replace *phase*'s set-aside tasks (:data:`SET_ASIDE_KEY`); an empty
+    mapping removes them."""
+    stash = state.get(SET_ASIDE_KEY)
+    stash = dict(stash) if isinstance(stash, dict) else {}
+    if aside:
+        stash[phase] = {str(k): str(v or "") for k, v in sorted(aside.items())}
+    else:
+        stash.pop(phase, None)
+    if stash:
+        state[SET_ASIDE_KEY] = stash
+    else:
+        state.pop(SET_ASIDE_KEY, None)
+
+
+def set_aside_in_state(state: dict, phase: str) -> Dict[str, str]:
+    """*phase*'s set-aside tasks on record, ``{}`` when none."""
+    stash = state.get(SET_ASIDE_KEY)
+    entry = stash.get(phase) if isinstance(stash, dict) else None
+    if not isinstance(entry, dict):
+        return {}
+    return {str(k): str(v or "") for k, v in entry.items()}
+
+
+def set_aside_tail(aside: Mapping[str, str]) -> str:
+    """The tasks a complete run did not dispatch, for its N/N line:
+    ``T011, T012 left for you (manual); T013 skipped with a manual task``.
+    One clause per way, at most :data:`LEFT_OUT_IDS_SHOWN` ids each; ``""``
+    when nothing was set aside."""
+    groups: Dict[str, List[str]] = {}
+    for task_id, how in aside.items():
+        groups.setdefault(str(how or ""), []).append(str(task_id))
+    clauses = []
+    for how, words in _SET_ASIDE_WORDS:
+        ids = sorted(groups.get(how) or [], key=_id_key)
+        if not ids:
+            continue
+        shown = ids[:LEFT_OUT_IDS_SHOWN]
+        named = ", ".join(shown) + (
+            f" and {len(ids) - len(shown)} more" if len(ids) > len(shown) else ""
+        )
+        clauses.append(f"{named} {words}")
+    return "; ".join(clauses)
+
+
 def eta_unit(phase: str) -> str:
     """What the ``[ETA]`` lines of *phase* count (fix round 22, live run 9):
     implement counts one record per task it dispatches, so its lines say
@@ -633,9 +706,11 @@ def finish_phase_in_state(
         # handed out nothing ran no `util metrics start`, and its `finish`
         # printed nothing; every ending closes its run's lines, this one too.
         set_left_out_in_state(state, phase, {})
+        set_set_aside_in_state(state, phase, {})
         return None, closing_line(
             phase, done=0, total=0, tail=left_out_tail(left, unit=eta_unit(phase)))
     set_left_out_in_state(state, phase, {})
+    set_set_aside_in_state(state, phase, {})
 
     elapsed_ms: Optional[int] = None
     started_at_raw = entry.get("started_at")
@@ -754,6 +829,7 @@ def _compute_eta(
     failure: Optional[str] = None,
     half_applied: bool = False,
     dropped: str = "",
+    set_aside: str = "",
 ) -> dict:
     """Compute ETA from two independent remaining-time estimates.
 
@@ -783,6 +859,8 @@ def _compute_eta(
         half_applied: the failed task changed files before it failed.
         dropped: why the total dropped since the run's last line
             (``T007 not run: check T002 reported problems``), or ``""``.
+        set_aside: the tasks the plan set aside (:func:`set_aside_tail`),
+            named on the N/N line of a run that completes, or ``""``.
 
     Returns:
         Dict with keys: ``per_item_ms``, ``wall_clock_ms``, ``eta_ms``,
@@ -861,8 +939,15 @@ def _compute_eta(
             # on this line and "run stopped" on the next. "N/N done" is all
             # that is true of it; its closing line says what it left.
             if not ends_short:
-                everything = "ALL TASKS COMPLETE" if unit == "task" else "ALL BATCHES COMPLETE"
-                parts.append(_colorize(everything, "1;32", colorize))
+                if unit != "task":
+                    parts.append(_colorize("ALL BATCHES COMPLETE", "1;32", colorize))
+                elif set_aside:
+                    # Fix round 24 (Claude Code racing #6): manual tasks
+                    # left for the user are not complete.
+                    parts.append(_colorize(ALL_DISPATCHED_COMPLETE, "1;32", colorize))
+                    parts.append(set_aside)
+                else:
+                    parts.append(_colorize("ALL TASKS COMPLETE", "1;32", colorize))
         elif eta_ms is not None:
             parts.append(_colorize(f"~{format_duration(eta_ms)} remaining", "1;36", colorize))
 
@@ -1059,6 +1144,7 @@ def record_metric_in_state(
     failure: str = "",
     half_applied: bool = False,
     dropped: Optional[str] = None,
+    set_aside: Optional[str] = None,
 ) -> Optional[str]:
     """``record_metric``'s mutation, applied to an in-memory state dict.
 
@@ -1076,8 +1162,9 @@ def record_metric_in_state(
     off the state, where ``util batch-done`` recorded it, for *task_id* or
     the id the label starts with (:func:`native_failure`). *dropped* is why
     the total dropped since the last line, ``None`` reading it off the
-    tasks a record took out (:func:`_newly_withdrawn_tail`). The executor
-    passes both.
+    tasks a record took out (:func:`_newly_withdrawn_tail`); *set_aside* the
+    tasks the N/N line names as not dispatched, ``None`` reading the native
+    emit's record (:func:`set_aside_in_state`). The executor passes all four.
 
     **A second record of the same event collapses; nothing else does.** An
     event is ``(phase, run_id, label, batch_index)``, where ``run_id`` is the
@@ -1200,6 +1287,8 @@ def record_metric_in_state(
             _newly_withdrawn_tail(state, phase, progress)
             if isinstance(progress, dict) else ""
         )
+    if set_aside is None:
+        set_aside = set_aside_tail(set_aside_in_state(state, phase))
     result = _compute_eta(
         entries=entries,
         progress=progress,
@@ -1216,6 +1305,7 @@ def record_metric_in_state(
         failure=(failure if failed else None),
         half_applied=bool(failed and half_applied),
         dropped=dropped,
+        set_aside=set_aside,
     )
     return result["line"]
 
