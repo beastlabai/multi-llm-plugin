@@ -13,8 +13,10 @@ prints the next step as a block of marker lines above its result line::
     [NEXT_COMMAND_ANSWERS] <command>
 
 (the answers pairs only from ``util next-command`` on a stopped implement,
-fix round 14: the combined answer first, then each answer alone since fix
-round 20), or ``[WORKFLOW_COMPLETE]``. Either kind is followed by one
+fix round 14: the combined answer first when more than one task waits, then
+each answer alone since fix round 20; the check holds the report to the
+commands printed, in any order, so one waiting task means no combined
+command to carry), or ``[WORKFLOW_COMPLETE]``. Either kind is followed by one
 ``[MANUAL_TASK] <id> <title>`` line per implement task the run deferred to the
 user, while any is owed, and one ``[MANUAL_TASK_NOTE]`` line saying how to
 record them done (after the commands of a command block since fix round 16).
