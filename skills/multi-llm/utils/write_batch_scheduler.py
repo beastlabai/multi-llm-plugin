@@ -11851,6 +11851,67 @@ class WriteBatchScheduler:
         return manual_close_note(template.replace(
             "{answers}", " ".join(f"--human-task {task_id}=done" for task_id in manual)))
 
+    def _dispatched_sentence(self, result: SchedulerResult) -> str:
+        """summary.md's count of what this run dispatched: the tasks a
+        runner was started for and the batches they ran in, then the ones
+        it handled without a runner (fix round 24, live run 10 #7: the stop
+        fixture's summary said "5 batch task(s) dispatched across 4
+        batch(es)" beside "Organized into 3 execution batches" and "task
+        4/4", counting T005, refused before dispatch, and its batch). An
+        apply phase's task is its batch."""
+        ran = [o for o in result.outcomes if self._started_a_runner(o)]
+
+        def unit_ids(outcomes: Sequence[TaskOutcome]) -> str:
+            return ", ".join(sorted({o.task_id for o in outcomes}, key=_metrics._id_key))
+
+        if not ran:
+            sentence = "Nothing was dispatched in this run."
+        elif self.kind == "implement":
+            batches = {
+                int((self._task_by_id(o.task_id) or {}).get("batch_index", 0))
+                for o in ran
+            }
+            sentence = (
+                f"{len(ran)} task(s) dispatched across {len(batches)} batch(es), "
+                f"in order; each was checked against its pre-batch snapshot "
+                f"before the next was dispatched."
+            )
+        else:
+            sentence = (
+                f"{len(ran)} batch(es) dispatched, in order; each was checked "
+                f"against its pre-batch snapshot before the next was dispatched."
+            )
+        refused = [
+            o for o in result.outcomes
+            if not o.skipped and o.task_id in self._refused_before_dispatch
+        ]
+        not_rerun = [o for o in result.outcomes if not o.skipped and o.not_rerun]
+        kept = [
+            o for o in result.outcomes
+            if not o.skipped and o.skipped_items
+            and o.task_id not in self._refused_before_dispatch
+        ]
+        if refused:
+            sentence += f" Refused before dispatch (no runner started): {unit_ids(refused)}."
+        if not_rerun:
+            sentence += (
+                f" Not run again (nothing in the repository changed since it "
+                f"failed): {unit_ids(not_rerun)}."
+            )
+        if kept:
+            sentence += f" Kept as it stood at your request: {unit_ids(kept)}."
+        return sentence
+
+    def _started_a_runner(self, outcome: TaskOutcome) -> bool:
+        """Whether this run started a runner for *outcome*'s task: not a
+        resume skip, a task refused before dispatch, a check not run again
+        or a batch kept as it stood at the user's request (its left-out
+        items are ``skipped_items``, :meth:`_keep_at_request`)."""
+        return not (
+            outcome.skipped or outcome.not_rerun or outcome.skipped_items
+            or outcome.task_id in self._refused_before_dispatch
+        )
+
     def _write_summary(self, result: SchedulerResult) -> str:
         """The implementation summary, with the three conditional sections (D3n)."""
         plan_name = Path(self.plan_file).name if self.plan_file else "(plan)"
@@ -11875,10 +11936,7 @@ class WriteBatchScheduler:
             "",
             "## Summary",
             "",
-            f"{len(result.outcomes)} batch task(s) dispatched across "
-            f"{len(result.batches_dispatched)} batch(es) in ascending batch_index "
-            f"order, each verified by a pre-batch snapshot comparison before the "
-            f"next was dispatched."
+            self._dispatched_sentence(result)
             + (
                 f" The table below also carries {len(earlier)} task(s) "
                 f"recorded by earlier run(s) of this phase (marked), which this "
