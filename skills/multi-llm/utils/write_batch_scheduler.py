@@ -349,7 +349,10 @@ _ID_KEYED_WRITE_KINDS = frozenset({"implement"})
 #: ``StateManager._IMPLEMENT_TASK_ID_PATTERN`` for a state object without
 #: ``implementation_task_statuses`` (the test fakes), so "which of the flat
 #: ``task_status`` map's ids belong to THIS phase" has one answer here too.
-_IMPLEMENT_TASK_ID = re.compile(r"^T[0-9]{3}$")
+#: ``\Z``, never ``$``: ``$`` also matches before a trailing newline, and an
+#: id read back from ``state.json`` (which a repo-wide batch can write) must
+#: be the whole string (fix round 23).
+_IMPLEMENT_TASK_ID = re.compile(r"^T[0-9]{3}\Z")
 
 #: The D2g inputs binding for the results already on disk, kept beside them.
 #: A **leading dot** on purpose: reaggregation globs ``{phase_dir}/*.json`` and
@@ -1100,9 +1103,13 @@ def rerunnable_checks(state: Any) -> List[str]:
         return []
     if not isinstance(recorded, dict):
         return []
+    # Fix round 23 (review of round 22, relay #3): only a task id. The ids
+    # end up in the stop's whys and commands, and state.json sits in the
+    # output folder a repo-wide batch can write.
     return sorted(
         str(task_id) for task_id, findings in recorded.items()
-        if isinstance(findings, list) and findings
+        if _IMPLEMENT_TASK_ID.match(str(task_id))
+        and isinstance(findings, list) and findings
         and statuses.get(task_id) == "completed"
         and not str(reasons.get(task_id) or "").startswith(ACCEPTED_REASON_PREFIX)
     )
@@ -1180,11 +1187,15 @@ def decomposition_graph(
     have = {str(task.get("task_id", "")) for task in nodes}
     for task_id in sorted(str(key) for key in recorded):
         deps = recorded.get(task_id)
-        if not task_id or task_id in have or not isinstance(deps, list):
+        # Fix round 23: the record is read back from state.json, so only a
+        # task id joins the graph, with task ids as its edges.
+        if (not _IMPLEMENT_TASK_ID.match(task_id) or task_id in have
+                or not isinstance(deps, list)):
             continue
         node: Dict[str, Any] = {
             "task_id": task_id,
-            "depends_on": [str(dep) for dep in deps if dep],
+            "depends_on": [
+                str(dep) for dep in deps if _IMPLEMENT_TASK_ID.match(str(dep))],
             "on_record_only": True,
         }
         if task_id in human:
@@ -1222,7 +1233,7 @@ def held_back_by_checks(
     out: List[Tuple[str, str]] = []
     for task in graph:
         task_id = str(task.get("task_id", ""))
-        if not task_id or task_id in held:
+        if not _IMPLEMENT_TASK_ID.match(task_id) or task_id in held:
             continue
         if isinstance(scope, list) and task_id not in scope:
             continue
