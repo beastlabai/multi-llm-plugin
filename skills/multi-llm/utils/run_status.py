@@ -108,6 +108,7 @@ from .output_handler import (
     slugify_question,
 )
 from .stream_bootstrap import bootstrap_streams
+from .text_clip import clip
 from .validation_context import (
     pick_worst,
     validation_context_notice,
@@ -633,7 +634,7 @@ def _workflow_trailer_lines(
     if isinstance(findings, list) and findings and not (implement_done and review_settled):
         named = "; ".join(
             f"{entry['id']} ({len(entry.get('findings') or [])} problem(s): "
-            f"{(entry.get('findings') or [''])[0][:120]}"
+            f"{clip((entry.get('findings') or [''])[0], 120)}"
             f"{', …' if len(entry.get('findings') or []) > 1 else ''})"
             for entry in findings
             if isinstance(entry, dict) and entry.get("id")
@@ -650,7 +651,7 @@ def _workflow_trailer_lines(
     if isinstance(failing, list) and failing and not (implement_done and review_settled):
         # Fix round 16: the task's own report, quoted (Codex racing 06r).
         named = "; ".join(
-            f"{entry['id']} (\"{(entry.get('findings') or [''])[0][:120]}\""
+            f"{entry['id']} (\"{clip((entry.get('findings') or [''])[0], 120)}\""
             f"{', …' if len(entry.get('findings') or []) > 1 else ''})"
             for entry in failing
             if isinstance(entry, dict) and entry.get("id")
@@ -1085,7 +1086,7 @@ def _write_result_notice(views: Sequence[Dict[str, Any]]) -> Optional[str]:
         unverified = mirror.get("unverified")
         if isinstance(unverified, str) and unverified and unverified not in parts:
             parts.append(unverified)
-    return "; ".join(parts)[:1200] or None
+    return clip("; ".join(parts), 1200) or None
 
 
 def _high_priority_text(high_priority: Any) -> Optional[str]:
@@ -2274,12 +2275,12 @@ def render_state_implement_lines(
     for entry in view["findings"]:
         findings = entry.get("findings") or []
         lines.append(
-            f"      check findings {entry['id']}: {'; '.join(findings)[:300]}"
+            f"      check findings {entry['id']}: {clip('; '.join(findings), 300)}"
         )
     for entry in view.get("batch_checks") or []:
         findings = entry.get("findings") or []
         lines.append(
-            f"      own check fails {entry['id']}: {'; '.join(findings)[:300]}"
+            f"      own check fails {entry['id']}: {clip('; '.join(findings), 300)}"
         )
     if view["answers"]:
         lines.append(
@@ -2427,7 +2428,7 @@ def render_state_apply_lines(
     for entry in view.get("batch_checks") or []:
         findings = entry.get("findings") or []
         lines.append(
-            f"      own check fails {entry['id']}: {'; '.join(findings)[:300]}"
+            f"      own check fails {entry['id']}: {clip('; '.join(findings), 300)}"
         )
     if since:
         lines += _native_resume_line(resume)
@@ -2731,7 +2732,7 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
         if entries:
             parts.append(f"{words}: " + "; ".join(
                 f"{str(entry['id'])[:8]} in {entry.get('task_id')} "
-                f"({' '.join(str(entry.get('reason') or '').split())[:120]})"
+                f"({clip(entry.get('reason') or '', 120)})"
                 for entry in entries[:5]
             ) + (f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""))
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
