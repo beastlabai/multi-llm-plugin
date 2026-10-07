@@ -228,23 +228,21 @@ class TestPerKindSchema:
         task["inputs"]["plan_sha257"] = "x"
         assert any("plan_sha257" in e for e in validate_subagent_task(task))
 
-    @pytest.mark.parametrize(
-        "kind", ["consolidation", "salvage", "human_decision_judge", "task_generation"]
-    )
+    @pytest.mark.parametrize("kind", ["salvage", "human_decision_judge"])
     @pytest.mark.parametrize("key,value", [("prompt_path", "/phase/x.prompt.txt"),
                                            ("prompt_lines", 12)])
-    def test_prompt_path_is_refused_on_kinds_without_a_shared_context(
+    def test_prompt_path_is_refused_on_kinds_whose_producer_writes_none(
         self, kind, key, value
     ):
-        """The sidecar is a validation-shaped remedy, so only those kinds get it.
+        """Only the kinds whose producer writes the sidecar accept the key.
 
-        What makes a validation prompt worth writing to disk is the one shared
-        context excerpt every batch re-embeds: ~65 KB a host would otherwise
-        have to re-emit through its own context, per batch. No other kind is
-        shaped that way — consolidation is a single filled template under a
-        12 000-char budget, salvage carries one `raw_output`, a
-        human_decision_judge task carries one item, task_generation reads the
-        workspace — so a sidecar for them would be a file nothing reads.
+        Validation and revalidation from the start (a ~65 KB shared context
+        per batch). Consolidation and task generation since live run 8: their
+        prompts were judged too small to need one (one filled template under a
+        12 000-char budget; one plan), and the Claude Code host wrote each
+        consolidation prompt to `/tmp/consol_prompt_N.txt` by hand and pasted
+        the 21 KB task-generation prompt whole into its subagent call. Salvage
+        and the human-decision judge still write none.
 
         Refusing the key rather than ignoring it is what keeps a producer that
         half-adopts it (copying a `prompt_path=` line into the wrong
@@ -258,9 +256,11 @@ class TestPerKindSchema:
             f"{kind} must not accept {key}: no sidecar is ever written for it"
         )
 
-    @pytest.mark.parametrize("kind", ["validation", "revalidation"])
+    @pytest.mark.parametrize(
+        "kind", ["validation", "revalidation", "consolidation", "task_generation"]
+    )
     def test_the_batched_kinds_accept_both_sidecar_keys(self, kind):
-        """The converse: the two kinds whose producer writes the sidecar."""
+        """The converse: the kinds whose producer writes the sidecar."""
         task = make_minimal(
             kind,
             prompt_path="/phase/validation_batch_0.prompt.txt",

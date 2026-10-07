@@ -107,6 +107,13 @@ TASK_ID = "task_generation"
 TASK_FILE_NAME = "task_generation_tasks.json"
 RESULT_NAME = "task_generation_result.json"
 
+#: Beside the task file, exactly the bytes of its one ``prompt``
+#: (``validation.PROMPT_SIDECAR_TEMPLATE``'s rule), for a native host to hand
+#: its subagent as a file. Live run 8, Claude Code racing 03: with none, the
+#: host read the 21 KB prompt into its own context and pasted it whole into
+#: the subagent call.
+PROMPT_FILE_NAME = "task_generation.prompt.txt"
+
 #: Printed when a native-subagent host must run the prompt itself. Informational
 #: under ``--exec-subagents`` (the run continues in-process past it, D3b).
 PENDING_MARKER = "[TASK_GENERATION_PENDING]"
@@ -229,15 +236,18 @@ def materialize_task_file(
     plan_text = plan_path.read_text(encoding="utf-8")
     root = repo_root or _resolve_repo_root(plan_path)
     inputs = build_inputs(plan_file=str(plan_path))
+    prompt = build_task_generation_prompt(
+        plan_text=plan_text, repo_root=root, plan_name=plan_path.name
+    )
     task = make_task(
         kind=TASK_KIND,
         task_id=TASK_ID,
-        prompt=build_task_generation_prompt(
-            plan_text=plan_text, repo_root=root, plan_name=plan_path.name
-        ),
+        prompt=prompt,
         output_name=RESULT_NAME,
         inputs=inputs,
         phase_dir=phase_dir,
+        prompt_path=os.path.join(os.path.abspath(phase_dir), PROMPT_FILE_NAME),
+        prompt_lines=prompt.count("\n") + 1,
         # The one kind that must see the repository, so the one materialized as
         # workspace-read (D2c). Both halves of the requirement — the capability
         # and the read-only profile — are checked before dispatch.
@@ -246,6 +256,11 @@ def materialize_task_file(
         executor_role="agent",
         extra={"phase": PHASE_NAME, "repo_root": root, "plan_file": str(plan_path)},
     )
+    from utils.validation import write_prompt_sidecars
+
+    # All or none, as for validation: on a write failure the key is dropped
+    # and the host runs `prompt` itself.
+    write_prompt_sidecars([task], phase_dir, stale_glob=PROMPT_FILE_NAME)
     document = make_task_file(kind=TASK_KIND, tasks=[task], inputs=inputs)
     task_file = os.path.join(phase_dir, TASK_FILE_NAME)
     write_task_file(task_file, document)
@@ -769,7 +784,14 @@ def run_generate_tasks(
         MODE_NAME, cli_common.typed_plan_for(plan_path), "--reaggregate",
         flags=cli_common.current_replay_flags(mode=MODE_NAME),
     )
-    print(f"\nRun the prompt in {task_file}, write the reply to {result_path},")
+    prompt_file = task.get("prompt_path")
+    if prompt_file:
+        print(
+            f"\nRun the prompt in {prompt_file} (the task's `prompt` in "
+            f"{task_file}, byte for byte), write the reply to {result_path},"
+        )
+    else:
+        print(f"\nRun the prompt in {task_file}, write the reply to {result_path},")
     print("then continue with:")
     print(f"  {follow_up}")
     record_next(follow_up)

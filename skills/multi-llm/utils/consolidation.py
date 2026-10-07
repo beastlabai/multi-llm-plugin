@@ -89,6 +89,13 @@ CONSOLIDATION_SUBAGENT_TIMEOUT = 90
 # [CONSOLIDATION_RECOMMENDED]. Configurable via --consolidation-threshold.
 CONSOLIDATION_RECOMMENDED_THRESHOLD = 15
 
+#: Beside ``consolidation_batch_{N}.json``, exactly the bytes of that batch's
+#: ``prompt`` (``validation.PROMPT_SIDECAR_TEMPLATE``'s rule; ``.txt``, so the
+#: ``*.json`` reaggregation globs never read it). Live run 8, Claude Code
+#: racing 01: with no ``prompt_path`` on the batches the host wrote each prompt
+#: to ``/tmp/consol_prompt_N.txt`` itself to hand its subagents a file.
+CONSOLIDATION_PROMPT_TEMPLATE = "consolidation_batch_{index}.prompt.txt"
+
 # Character budget for combined suggestion content per batch (themes +
 # descriptions). Batches exceeding this limit are split further.
 CONSOLIDATION_CHAR_BUDGET = 12000
@@ -572,6 +579,10 @@ def prepare_consolidation_tasks(
                 output_name=output_name,
                 inputs=inputs,
                 output_path=str(output_path),
+                prompt_path=str(
+                    phase_path / CONSOLIDATION_PROMPT_TEMPLATE.format(index=batch_counter)
+                ),
+                prompt_lines=prompt.count("\n") + 1,
                 extra={
                     "batch_index": batch_counter,
                     "section_key": section_key,
@@ -583,6 +594,17 @@ def prepare_consolidation_tasks(
                 },
             ))
             batch_counter += 1
+
+    # The prompt files a native host hands its subagents, written beside the
+    # batches (validation's sidecar rule: all or none, `prompt` stays the source).
+    try:
+        from .validation import write_prompt_sidecars
+    except ImportError:  # pragma: no cover - direct script runs
+        from utils.validation import write_prompt_sidecars  # type: ignore
+    write_prompt_sidecars(
+        batches, str(phase_path),
+        stale_glob=CONSOLIDATION_PROMPT_TEMPLATE.format(index="*"),
+    )
 
     # Build the tasks metadata
     tasks_metadata: Dict[str, Any] = make_task_file(
