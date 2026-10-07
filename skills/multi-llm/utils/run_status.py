@@ -2322,7 +2322,9 @@ def state_apply_views(
     (*workflow*: ``get_workflow_status``, which already sets an earlier
     cycle's batches aside) shows it ``completed`` or ``in_progress``, or the
     host's loop is going. ``{phase, phase_dir, completed,
-    in_progress_since, batches_recorded, batches_total}`` in workflow order;
+    in_progress_since, batches_recorded, batches_total}`` (plus
+    ``declined_items`` / ``skipped_items`` when a batch's record names one,
+    fix round 22) in workflow order;
     *only* limits it to one phase (``--phase``). Read-only.
     """
     from .metrics import _current_run_id
@@ -2391,7 +2393,89 @@ def state_apply_views(
             checks = _native_apply_batch_checks(record, directory)
             if checks:
                 entry["batch_checks"] = checks
+        # Fix round 22: the items a batch declined or the user skipped.
+        entry.update(_native_apply_not_applied(record, directory))
         out.append(entry)
+    return out
+
+
+#: The not-applied items a write mirror (and a native apply view) names, in
+#: the order and words the progress line prints them (fix round 18).
+_NOT_APPLIED_ITEM_WORDS: Tuple[Tuple[str, str], ...] = (
+    ("declined_items", "not applied, declined by its batch"),
+    ("skipped_items", "not applied, skipped at your request"),
+)
+
+
+def not_applied_item_clauses(source: Mapping[str, Any]) -> List[str]:
+    """``not applied, declined by its batch: <id8> in <batch> (<reason>)``
+    and its skipped twin, one clause per kind *source* carries
+    (``declined_items`` / ``skipped_items``: ``[{task_id, id, reason}]``, a
+    write mirror's keys). The executor's progress line joins them into its
+    line; the native apply view prints each on its own (fix round 22), so
+    the two legs name a declined item in the same words."""
+    clauses: List[str] = []
+    for key, words in _NOT_APPLIED_ITEM_WORDS:
+        raw = source.get(key)
+        entries = [
+            entry for entry in raw
+            if isinstance(entry, dict) and entry.get("id")
+        ] if isinstance(raw, list) else []
+        if entries:
+            clauses.append(f"{words}: " + "; ".join(
+                f"{str(entry['id'])[:8]} in {entry.get('task_id')} "
+                f"({clip(entry.get('reason') or '', 120)})"
+                for entry in entries[:5]
+            ) + (f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""))
+    return clauses
+
+
+def _native_apply_not_applied(
+    record: Dict[str, Any], directory: Path,
+) -> Dict[str, List[Dict[str, str]]]:
+    """``{declined_items, skipped_items}`` for a native apply phase, in the
+    write mirror's shape (fix round 22, live run 9: the decline the host
+    recorded with ``util batch-done --declined`` was on no ``status``
+    surface). Read from ``processed_<phase dir>``: a record of the review
+    the phase's ``write_tasks.json`` applies (its ``grouped_sha256``), or,
+    for a record or a task without that stamp, one whose item a current
+    batch holds. ``{}`` when nothing applies or either cannot be read."""
+    try:
+        document = json.loads((directory / _WRITE_TASKS).read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001 - advisory
+        return {}
+    processed = record.get(f"processed_{directory.name}")
+    tasks = document.get("batches") or document.get("tasks") if isinstance(
+        document, dict) else None
+    if not isinstance(processed, dict) or not isinstance(tasks, list):
+        return {}
+    holder: Dict[str, str] = {}
+    stamp = ""
+    for task in tasks:
+        if not isinstance(task, dict):
+            continue
+        inputs = task.get("inputs") if isinstance(task.get("inputs"), dict) else {}
+        stamp = stamp or str(inputs.get("grouped_sha256") or "")
+        for item in task.get("expected_ids") or []:
+            holder.setdefault(str(item), str(task.get("task_id") or ""))
+    out: Dict[str, List[Dict[str, str]]] = {}
+    for item, entry in processed.items():
+        key = {"declined": "declined_items", "skipped": "skipped_items"}.get(
+            entry.get("status") if isinstance(entry, dict) else None)
+        if key is None:
+            continue
+        details = entry.get("details") if isinstance(entry.get("details"), dict) else {}
+        recorded = str(details.get("grouped_sha256") or "")
+        if stamp and recorded:
+            if recorded != stamp:
+                continue
+        elif str(item) not in holder:
+            continue
+        out.setdefault(key, []).append({
+            "task_id": str(details.get("task_id") or holder.get(str(item)) or ""),
+            "id": str(item),
+            "reason": str(details.get("reason") or ""),
+        })
     return out
 
 
@@ -2430,6 +2514,8 @@ def render_state_apply_lines(
         lines.append(
             f"      own check fails {entry['id']}: {clip('; '.join(findings), 300)}"
         )
+    # Fix round 22: in the executor's progress-line words.
+    lines += [f"      {clause}" for clause in not_applied_item_clauses(view)]
     if since:
         lines += _native_resume_line(resume)
     elif not view.get("completed"):
@@ -2721,20 +2807,7 @@ def _mirror_text(key: str, mirror: Any) -> List[str]:
             parts.append(f"own check could not run {', '.join(unrun)}")
     # Fix round 18: an item a finished batch declined (or one skipped at the
     # user's request) is named, never only left out of `items applied`.
-    for key, words in (
-        ("declined_items", "not applied, declined by its batch"),
-        ("skipped_items", "not applied, skipped at your request"),
-    ):
-        entries = [
-            entry for entry in (mirror.get(key) or [])
-            if isinstance(entry, dict) and entry.get("id")
-        ] if isinstance(mirror.get(key), list) else []
-        if entries:
-            parts.append(f"{words}: " + "; ".join(
-                f"{str(entry['id'])[:8]} in {entry.get('task_id')} "
-                f"({clip(entry.get('reason') or '', 120)})"
-                for entry in entries[:5]
-            ) + (f" (+{len(entries) - 5} more)" if len(entries) > 5 else ""))
+    parts += not_applied_item_clauses(mirror)
     # Racing re-run 3 (2026-10-05): the tasks a stop left undispatched were
     # on no surface at all; a failed task the user accepted is named too.
     not_run = mirror.get("not_run_task_ids") if isinstance(mirror.get("not_run_task_ids"), list) else []
