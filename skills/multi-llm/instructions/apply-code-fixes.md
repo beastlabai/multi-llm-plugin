@@ -317,7 +317,7 @@ For each batch (index N, starting at 1) returned by the orchestrator, you MUST:
      --phase-dir "{plan}/apply-fixes" --task-id "{task.task_id}" --status {batch_status}
    ```
    `{batch_status}` is `completed` for a success (a verified no-op included) and `failed` for a clean failure — add `--reason "{compact reason}"` to a `failed` one. It prints one `[BATCH_DONE] {task.task_id} {batch_status} (N item(s) recorded)` line and writes the batch's record into `state.json`: the same `task_status` entry the `--exec-subagents` executor writes for this batch, plus every fix in it as processed. That record is what a later `--resume` reads to skip this batch (a `failed` record keeps it eligible for another try) and what makes `status` read the phase `in_progress`. Run it **before** step 7's append: a run that dies between the two leaves a record `--resume` honours, never a log entry `--resume` would re-apply. An exit 3 names the problem (no `write_tasks.json`, an unknown task id); treat it as a stop, not a warning.
-   When the reply's `declined` lists fixes (each `{"id", "reason"}`), add `--declined "{id}={reason}"` for each, with `--status completed`: each prints a `[BATCH_DECLINED]` line — list that fix in the summary as not applied, with its reason, and name it in your report; it is never counted as applied. `--skipped {id}` records a fix the user chose to skip (above) the same way, as `[BATCH_SKIPPED]`.
+   When the reply's `declined` lists fixes (each `{"id", "reason"}`), add `--declined "{id}={reason}"` for each, with `--status completed`: each prints a `[BATCH_DECLINED]` line — list that fix in the summary under `## Declined by their batch (not applied)`, with its id and reason (never under `## Applied Fixes`, not even marked "Not applied"), and name it in your report; it is never counted as applied. `--skipped {id}` records a fix the user chose to skip (above) the same way, as `[BATCH_SKIPPED]`, listed under `## Skipped at your request (not applied)`.
    When the batch's reply carries a `check` object — the checks its subagent ran on its own edits (a test, a build, a syntax check) — add `--own-check passed` when it says `"passed": true` (what it lists beside a pass, such as `npm test: 12 passed`, is not a failing check), else `--own-check findings` and one `--finding "{finding}"` per entry, with `--status completed`; never `--check`, which records only an implement check task's verdict (`batch-done` refuses it here). `batch-done` then prints a `[BATCH_CHECK_FAILED]` line: the fixes stay applied and the loop goes on, but the phase is not a clean success — list the batch in the summary's `## Check Findings` (step 8) and say in your report that its check fails.
    When that `check` also carries `listed` (the repository's known checks the prompt asked it to run, each mapped to `passed`, `failed` or `not run`), add `--listed-check "{command}={outcome}"` for each entry, the command exactly as the reply wrote it: the next batch's prompt and the tests line in step 7 read it. A command it lists as `failed` is a failing check like a `--finding`.
 
@@ -429,7 +429,8 @@ same path the *Output Files* tree above lists, and the same one the
 ## Summary
 - Batches processed: N
 - Fixes applied: N
-- Fixes declined by their batch (not applied): N — only when a batch declined any; each one's line in its batch below reads `**[Title]** - Not applied: the batch declined it — {reason}` (and `- Not applied: skipped at your request` for one recorded `--skipped`)
+- Fixes declined by their batch (not applied): N — only when a batch declined any; each one is listed under `## Declined by their batch (not applied)` below, never under `## Applied Fixes`
+- Fixes skipped at your request (not applied): N — only when you recorded one `--skipped`; each one is listed under `## Skipped at your request (not applied)` below, never under `## Applied Fixes`
 - Fixes skipped: N
 - Human decisions made: N
 - Decided by the judge agent: N (A approved, V salvaged, S skipped) — includes `--agent-decide`, the batch "Let the agent decide" option, and per-item "Let the agent decide" selections
@@ -460,6 +461,18 @@ same path the *Output Files* tree above lists, and the same one the
 ### Batch 2 (File: apps/web/supabase/migrations/xxx.sql)
 **Subagent**: general-purpose
 ...
+
+## Declined by their batch (not applied)
+
+(Only when a batch declined a fix — a `[BATCH_DECLINED]` line from `util batch-done`. Never list it under `## Applied Fixes`, not even marked "Not applied": its batch's block above says `**Not applied**: 1 declined by the batch (listed under "Declined by their batch (not applied)" below)` instead.)
+
+- **[Fix Title]** (`{id}`, apply-fix-batch-0) — {the reason the batch gave}
+
+## Skipped at your request (not applied)
+
+(Only for a fix recorded `--skipped` — a `[BATCH_SKIPPED]` line; never under `## Applied Fixes` either.)
+
+- **[Fix Title]** (`{id}`, apply-fix-batch-0) — skipped at your request
 
 ## Check Findings
 

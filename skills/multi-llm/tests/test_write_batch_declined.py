@@ -460,10 +460,11 @@ class TestADeclinedItemIsNamedOnEverySurface(_PairRig):
         assert "- Suggestions declined by their batch (not applied): 1" in summary
         titles = {"A1": "suggestion A1", "A2": "suggestion A2"}
         lines = [line for line in summary.splitlines() if "**suggestion A" in line]
+        # Fix round 22: in its own section, never under "Applied Changes".
         declined_title = next(
             title for title in titles.values()
-            if any(f"**{title}** - Not applied: the batch declined it — {REASON}"
-                   in line for line in lines)
+            if any(f"- **{title}** (`{declined_id}`, apply-batch-0) — {REASON}"
+                   == line for line in lines)
         )
         assert any(line.endswith("- Applied") for line in lines), lines
         # The RESULT block and the result line's notice say it in plain words.
@@ -703,7 +704,8 @@ class TestTheCodex08ShapeThroughTheApplyPhase(_PairRig):
         summary = self._summary(plan)
         assert "- Suggestions applied: 2" in summary
         assert "- Suggestions skipped at your request (not applied): 1" in summary
-        assert "Not applied: skipped at your request — --human-task apply-batch-0=skip" in summary
+        assert (f"(`{left_out}`, apply-batch-0) — --human-task apply-batch-0=skip"
+                in summary)
         out = capsys.readouterr().out
         assert f"[{left_out[:8]}] (suggestion 1 of apply-batch-0) not applied: skipped at your request" in out
 

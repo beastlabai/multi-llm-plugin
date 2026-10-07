@@ -110,7 +110,10 @@ try:
         update_task_status_in_state,
     )
     from .stream_bootstrap import bootstrap_streams
-    from .subagent_executor import check_findings_from, declined_reason
+    from .subagent_executor import (
+        DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
+        declined_reason,
+    )
     from .text_clip import clip
     from .subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set
     from .write_phase_bridge import WRITE_TASK_FILENAME
@@ -149,7 +152,10 @@ except ImportError:  # pragma: no cover - direct script invocation
         update_task_status_in_state,
     )
     from utils.stream_bootstrap import bootstrap_streams  # type: ignore
-    from utils.subagent_executor import check_findings_from, declined_reason  # type: ignore
+    from utils.subagent_executor import (  # type: ignore
+        DECLINED_SECTION_HEADING, SKIPPED_SECTION_HEADING, check_findings_from,
+        declined_reason,
+    )
     from utils.text_clip import clip  # type: ignore
     from utils.subagent_tasks import APPLY_WRITE_KINDS, PHASE_BY_WRITE_KIND, snapshot_file_set  # type: ignore
     from utils.write_phase_bridge import WRITE_TASK_FILENAME  # type: ignore
@@ -1097,18 +1103,21 @@ def main(argv: Optional[List[str]] = None) -> int:
             file=sys.stderr,
         )
     for item, why in (written.get("declined") or {}).items():
-        # Fix round 18: never applied, and never silent.
+        # Fix round 18: never applied, and never silent. Fix round 22: in its
+        # own summary.md section, never under an applied heading.
         print(
             f"{BATCH_DECLINED_MARKER} {written['task_id']} {item}: not applied, "
             f"the batch declined it — {why}. List it in the phase's summary.md "
-            f"as not applied, with this reason, and name it in your report; "
+            f"under \"## {DECLINED_SECTION_HEADING}\", with its id and this "
+            f"reason, never under the applied ones, and name it in your report; "
             f"never count it as applied."
         )
     for item, why in (written.get("skipped") or {}).items():
         print(
             f"{BATCH_SKIPPED_MARKER} {written['task_id']} {item}: not applied, "
-            f"{why}. List it in the phase's summary.md as not applied, skipped "
-            f"at the user's request, and name it in your report."
+            f"{why}. List it in the phase's summary.md under \"## "
+            f"{SKIPPED_SECTION_HEADING}\", with its id, never under the applied "
+            f"ones, and name it in your report."
         )
     blocked = written.get("blocked") or []
     if blocked:
