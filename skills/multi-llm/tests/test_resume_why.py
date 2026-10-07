@@ -272,6 +272,31 @@ class TestTheCheckClaimHoldsOnlyWhenTheResumeKeepsIt:
         capsys.readouterr()
         assert "Check the module" in _dispatched_titles(repo)
 
+    def test_a_check_stamped_on_another_tree_runs_again(
+        self, repo, capsys, monkeypatch,
+    ):
+        """The resume compares the stamp with the tree as it finds it, so a
+        stamp the run's own later edits moved past (here: T003 and T004 edit
+        after T002 ran, and nothing re-stamps it at the stop) does not keep
+        the check, and the why says it runs again."""
+        from tests.test_implement_stop_account import _dispatched_titles, _implement
+        from utils.write_batch_scheduler import WriteBatchScheduler
+
+        restamp = WriteBatchScheduler._restamp_check_trees
+        monkeypatch.setattr(
+            WriteBatchScheduler, "_restamp_check_trees", lambda self, result: None)
+        _first_run(repo, capsys)
+        why = json.loads(
+            (repo.phase_dir / "write_batch_report.json").read_text()
+        )["stop"]["resume_why"]
+        assert why.startswith(
+            "runs the tasks that can run; T002's check runs again (T007 waits "
+            "on it)"), why
+        monkeypatch.setattr(WriteBatchScheduler, "_restamp_check_trees", restamp)
+        _implement(repo, "--resume")
+        capsys.readouterr()
+        assert "Check the module" in _dispatched_titles(repo)
+
     @pytest.mark.parametrize("tree", [True, False], ids=["tree", "no-tree"])
     def test_a_failed_check_is_kept_only_on_its_tree(
         self, repo, capsys, monkeypatch, tree,

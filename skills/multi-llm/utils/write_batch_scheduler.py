@@ -10214,6 +10214,15 @@ class WriteBatchScheduler:
             o.files_touched or o.unrestorable or o.write_outcome == WRITE_PARTIAL
             for o in failed_rows
         )
+        tree: List[Optional[str]] = []
+
+        def kept_on(task_id: str, *, failed_check: bool) -> bool:
+            # The tree as the stop leaves it, taken once and only when a
+            # check needs judging: what the next resume compares against.
+            if not tree:
+                tree.append(self._tree_fingerprint())
+            return self._verdict_holds_tree(task_id, tree[0], failed=failed_check)
+
         return compose_resume_why(
             refused=[o.task_id for o in refused],
             policy={
@@ -10230,14 +10239,15 @@ class WriteBatchScheduler:
                     task_id=o.task_id, not_rerun=bool(o.not_rerun),
                     check=self.kind == "implement" and not declared_file_set(
                         self._task_by_id(o.task_id) or {})
-                    and (bool(o.not_rerun) or self._verdict_carries_tree(o.task_id)),
+                    and (bool(o.not_rerun)
+                         or kept_on(o.task_id, failed_check=True)),
                 )
                 for o in failed if o not in refused
             ],
             checks=checks,
             rerun_checks={
                 check_id for check_id in checks
-                if not self._verdict_carries_tree(check_id)
+                if not kept_on(check_id, failed_check=False)
             },
             blocked=blocked,
             undone_with=undone_with,
@@ -10246,12 +10256,18 @@ class WriteBatchScheduler:
             half_applied=half_applied,
         )
 
-    def _verdict_carries_tree(self, task_id: str) -> bool:
-        """Whether *task_id*'s result file holds a check's verdict stamped
-        with the tree it ran on (``verdict.tree_fingerprint``), which is what
+    def _verdict_holds_tree(
+        self, task_id: str, tree: Optional[str], *, failed: bool,
+    ) -> bool:
+        """Whether a resume on *tree* keeps *task_id*'s check from running:
+        its result file holds a check's verdict (a failed one under
+        *failed*, as :meth:`_unchanged_since_failure` reads it) stamped with
+        that very tree (``verdict.tree_fingerprint``), the comparison
         :meth:`_unchanged_since_failure` and :meth:`_check_findings_rerun`
-        compare a resume's tree against. No file, no stamp, no check: the
-        resume dispatches it again (fix round 23)."""
+        make. No file, no stamp, another tree or a tree git cannot measure:
+        the resume dispatches it again (fix round 23)."""
+        if tree is None:
+            return False
         task = self._task_by_id(task_id)
         if task is None:
             return False
@@ -10268,7 +10284,8 @@ class WriteBatchScheduler:
         verdict = data.get("verdict") if isinstance(data, dict) else None
         return (
             isinstance(verdict, dict) and bool(verdict.get("verification_only"))
-            and bool(verdict.get("tree_fingerprint"))
+            and (not failed or not verdict.get("ok"))
+            and verdict.get("tree_fingerprint") == tree
         )
 
     def _record_not_run_in_state(self, result: SchedulerResult) -> None:
