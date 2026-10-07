@@ -505,7 +505,11 @@ class TestACodePhaseWithNoVerifyCommand:
         ).run()
 
         assert result.exit_code == 0, result.messages
-        assert result.unverified == unverified_line(str(env.root))
+        # Fix round 20: the batch was told to run `npm test` and said nothing
+        # about it, which the line says too.
+        assert result.unverified == unverified_line(str(env.root)) + (
+            " The batches were asked to run the repository's known checks after "
+            "their edits: `npm test`: not reported by any batch.")
         assert '"npm test"' in result.unverified
         assert result.unverified in result.messages
         report = json.loads((env.phase_dir / "write_batch_report.json").read_text())

@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 try:
+    from . import known_checks as _known_checks
     from . import prior_changes as _prior_changes
     from . import prompt_files as _prompt_files
     from .git_utils import (
@@ -87,6 +88,7 @@ try:
         PolicyViolation, WritePolicy, policy_allow_clause, relative_to_root,
     )
 except ImportError:  # pragma: no cover - direct script invocation
+    from utils import known_checks as _known_checks  # type: ignore
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils import prompt_files as _prompt_files  # type: ignore
     from utils.git_utils import (  # type: ignore
@@ -239,7 +241,10 @@ def render_write_prompt(
         )
     except ResultRejected as exc:
         raise WritePromptError(str(getattr(exc, "message", exc))) from exc
-    text = with_result_contract(kind, task, bound)
+    text = with_result_contract(
+        kind, task, bound,
+        checks_section=_known_checks_section(phase_dir, document, task_id),
+    )
     scoped = _prior_changes.canonical_phase(phase)
     entries = [
         entry for entry in _prior_changes.entries(output_dir)
@@ -273,6 +278,30 @@ def _accepted_checks(
     return accepted_upstream_checks(
         document.get("batches") or document.get("tasks") or [], task_id, state,
     )
+
+
+def _known_checks_section(
+    phase_dir: Path, document: Dict[str, Any], task_id: str,
+) -> str:
+    """An apply-code-fixes batch's list of the repository's known check
+    commands and the earlier batches whose own check failed
+    (:func:`known_checks.known_checks_section`), from the plan dir's
+    ``state.json`` as it is now — what the executor leg binds at dispatch
+    (fix round 20). ``""`` for every other kind; advisory, never a refusal."""
+    if str(document.get("kind") or "") != "apply_code_fixes":
+        return ""
+    try:
+        state = _known_checks.read_state(phase_dir.parent)
+        checks = _known_checks.known_check_commands(
+            phase_dir.parent, plan_file=str(document.get("plan_file") or "") or None,
+            state=state,
+        )
+        earlier = _known_checks.earlier_batch_check_failures(
+            state, document.get("batches") or document.get("tasks") or [], task_id,
+        )
+        return _known_checks.known_checks_section(checks, earlier)
+    except Exception:  # noqa: BLE001 - advisory: the prompt is still written
+        return ""
 
 
 #: The warning a prompt bound out of order prints (stderr; never a refusal).

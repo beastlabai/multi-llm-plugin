@@ -91,6 +91,7 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 try:
+    from . import known_checks as _known_checks
     from . import prior_changes as _prior_changes
     from .metrics import (
         _read_state, _write_state, restore_to_progress_in_state,
@@ -126,6 +127,7 @@ try:
         discard_check_tree, load_write_task,
     )
 except ImportError:  # pragma: no cover - direct script invocation
+    from utils import known_checks as _known_checks  # type: ignore
     from utils import prior_changes as _prior_changes  # type: ignore
     from utils.metrics import (  # type: ignore
         _read_state, _write_state, restore_to_progress_in_state,
@@ -283,9 +285,18 @@ def record_batch(
     own_check: Optional[str] = None,
     declined: Optional[List[str]] = None,
     skipped: Optional[List[str]] = None,
+    listed: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Record *task_id*'s outcome; the ``{task_id, status, items, state_file,
     check_findings}`` written.
+
+    *listed* (``<command>=passed|failed|not run`` each; fix round 20) is an
+    apply-code-fixes batch's reply's ``check.listed``: what it says each
+    known check its prompt listed did. Recorded with its own check in
+    ``state.json``'s ``apply_fix_batch_checks`` (the next batch's prompt and
+    the tests-not-run line read it); a command it lists as failed is a
+    failing check like a ``--finding``. An entry that cannot be read is left
+    out and named (``listed_ignored``), never a refusal.
 
     *declined* (``<id>=<reason>`` each) and *skipped* (ids) are an apply
     batch's items it did not apply (fix round 18): the items its reply
@@ -425,6 +436,15 @@ def record_batch(
         batch_check = check_findings_from({
             "check": {"passed": own_check == "passed", "findings": list(findings or [])}
         }) or []
+    listed_outcomes, listed_ignored = _listed_checks(listed)
+    if listed_outcomes and kind != "apply_code_fixes":
+        # Only an apply-code-fixes batch is told the known checks.
+        listed_ignored += [f"{c}={w}" for c, w in listed_outcomes.items()]
+        listed_outcomes = {}
+    if listed_outcomes and status == "completed":
+        # Fix round 20: a known check the reply lists as failed is a failing
+        # check on every surface, as the executor reads it.
+        batch_check = _known_checks.with_listed_failures(batch_check, listed_outcomes)
     # The tree a check with findings leaves (fix round 14): a native
     # `--resume` hands the check out again only once the files moved since,
     # as the executor does from its verdict's stamp. `util finalize-tracking`
@@ -458,6 +478,17 @@ def record_batch(
                 state, document, task_id, held=bool(check_findings),
             )
             _settle_eta_total(state, document, task_id, status, reason, blocked)
+        if kind == "apply_code_fixes":
+            # Fix round 20: what the batch's own checks reported, for the next
+            # batch's prompt and the tests-not-run line; any other record of
+            # the batch clears an earlier one.
+            completed = status == "completed"
+            _known_checks.set_batch_check_report_in_state(
+                state, task_id,
+                prior_changes_id=str(task.get("prior_changes_id") or ""),
+                findings=batch_check if completed else None,
+                listed=listed_outcomes if completed else None,
+            )
         tracked = _tracked_after_batch(state, target, kind)
         if tracked is not None:
             state["tracked_files"] = tracked
@@ -504,7 +535,29 @@ def record_batch(
             item: why for item, (word, why) in not_applied.items()
             if word == "skipped"
         },
+        "listed": listed_outcomes,
+        "listed_ignored": listed_ignored,
     }
+
+
+def _listed_checks(values: Optional[List[str]]) -> Tuple[Dict[str, str], List[str]]:
+    """``({command: outcome}, ignored)`` from ``--listed-check`` values
+    (``<command>=<outcome>``, split at the last ``=`` since a command may hold
+    one); an entry with no ``=`` or an outcome that cannot be read is
+    ignored, never guessed."""
+    raw: Dict[str, Any] = {}
+    ignored: List[str] = []
+    for value in values or []:
+        command, sep, word = str(value).rpartition("=")
+        if not sep or not command.strip():
+            ignored.append(str(value))
+            continue
+        raw[command] = word
+    outcomes = _known_checks.listed_check_outcomes(raw)
+    for command, word in raw.items():
+        if _known_checks.normalized(command) not in outcomes:
+            ignored.append(f"{command}={word}")
+    return outcomes, ignored
 
 
 def _not_a_check_task_message(
@@ -946,6 +999,13 @@ def _build_parser() -> argparse.ArgumentParser:
              "applied, never as applied.",
     )
     parser.add_argument(
+        "--listed-check", action="append", default=None, dest="listed_check",
+        metavar="COMMAND=OUTCOME",
+        help="For an apply-code-fixes batch: one entry of its reply's "
+             "check.listed, the command as the reply wrote it and what it "
+             "says that check did — passed, failed or not run (repeatable).",
+    )
+    parser.add_argument(
         "--skipped", action="append", default=None, metavar="ID",
         help="An apply batch's item its reply left out of both ids and "
              "declined, which the user chose to skip, keeping the batch as it "
@@ -969,6 +1029,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             own_check=args.own_check,
             declined=args.declined,
             skipped=args.skipped,
+            listed=args.listed_check,
         )
     except WritePromptError as exc:
         print(f"ERROR: {exc}", file=sys.stderr)
@@ -991,6 +1052,14 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"## Check Findings in the phase's summary.md, and say in your "
             f"final report that this check fails: never report the phase as a "
             f"clean success."
+        )
+    ignored = written.get("listed_ignored") or []
+    if ignored:
+        print(
+            f"[batch-done] --listed-check not recorded (expected "
+            f"<command>=passed|failed|not run, on an apply-code-fixes batch): "
+            f"{'; '.join(ignored)[:400]}",
+            file=sys.stderr,
         )
     for item, why in (written.get("declined") or {}).items():
         # Fix round 18: never applied, and never silent.

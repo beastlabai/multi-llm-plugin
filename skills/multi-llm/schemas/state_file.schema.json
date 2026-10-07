@@ -70,6 +70,18 @@
         "items": { "type": "string" }
       }
     },
+    "apply_fix_batch_checks": {
+      "type": "object",
+      "description": "Per apply-code-fixes batch whose reply reported its own checks: its prior_changes_id (the record belongs to that batch's fixes), its failing checks and, per known check command its prompt listed, what it says that check did (passed, failed, not run). Never a hold; read by the next batch's prompt, status and the line saying nothing ran the tests",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "prior_changes_id": { "type": "string" },
+          "findings": { "type": "array", "items": { "type": "string" } },
+          "listed": { "type": "object", "additionalProperties": { "type": "string" } }
+        }
+      }
+    },
     "task_check_trees": {
       "type": "object",
       "description": "Native leg only: per check task with findings, a fingerprint of the files git saw when the run that recorded them ended. A --resume hands the check out again only when the files changed since",
