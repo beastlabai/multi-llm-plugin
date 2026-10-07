@@ -910,6 +910,36 @@ def _deferred_split(plan: "HumanTaskPlan") -> Dict[str, Dict[str, str]]:
     return {"deferred_waits_on": dict(sorted(waits.items()))} if waits else {}
 
 
+def set_aside_by_plan(
+    plan: Optional["HumanTaskPlan"], manual_ids: Iterable[str],
+) -> Dict[str, str]:
+    """``{task id: how}`` for the tasks *plan* set aside, in
+    ``metrics.set_aside_tail``'s words (fix round 24, Claude Code racing
+    #6: "task 10/10 done … ALL TASKS COMPLETE" while the manual T011 and
+    T012 were left): a deferred manual task (*manual_ids*), a task skipped
+    with one, a task the user skipped (:meth:`HumanTaskPlan.declined`'s
+    seeds) and a task skipped with that one. Both implement legs hand it to
+    the line that reaches N/N, which names them instead of claiming every
+    task is complete."""
+    if plan is None:
+        return {}
+    manual = {str(task_id) for task_id in manual_ids}
+    declined = plan.declined()
+    aside: Dict[str, str] = {}
+    for task_id, reason in plan.skipped.items():
+        if task_id in declined:
+            seed = str(reason).startswith((USER_DECLINED_REASON, ANSWERED_SKIP_PREFIX))
+            aside[str(task_id)] = (
+                _metrics.SET_ASIDE_SKIPPED if seed else _metrics.SET_ASIDE_WITH_SKIPPED
+            )
+        else:
+            aside[str(task_id)] = (
+                _metrics.SET_ASIDE_MANUAL if str(task_id) in manual
+                else _metrics.SET_ASIDE_WITH_MANUAL
+            )
+    return aside
+
+
 #: The recorded reason of a human task the user declined at pause-and-ask.
 #: ``StateManager._USER_DECLINED_REASON`` spells the same words, so the
 #: workflow's manual-task list reads a declined task as not owed.
@@ -8813,10 +8843,16 @@ class WriteBatchScheduler:
             run_batch_index >= total_batches and self._eta_ends_short(result)
         )
         # Fix round 24 (live run 10): a failed task's line says what
-        # happened (#5), and the line whose total dropped says why (#7).
+        # happened (#5), the line whose total dropped says why (#7), and a
+        # complete run's N/N line names the tasks the plan set aside
+        # (Claude Code racing #6).
         failed = not outcome.ok
         failure, half_applied = self._eta_failure(outcome) if failed else ("", False)
         dropped = self._eta_dropped(result)
+        set_aside = ""
+        if self.kind == "implement" and not failed and run_batch_index >= total_batches:
+            set_aside = _metrics.set_aside_tail(set_aside_by_plan(
+                result.human_plan, self._manual_task_ids()))
         live = getattr(self.state, "state", None)
         progress = (
             (live.get("metrics_progress") or {}).get(self.phase)
@@ -8848,6 +8884,7 @@ class WriteBatchScheduler:
                 failure=failure,
                 half_applied=half_applied,
                 dropped=dropped,
+                set_aside=set_aside,
             )
         except Exception as exc:  # noqa: BLE001 - metrics must not fail a phase
             self.log(f"[write-subagents] warning: metrics record failed: {exc}")
@@ -11460,6 +11497,13 @@ class WriteBatchScheduler:
         }
         return _metrics.left_out_tail(how, unit=_metrics.eta_unit(self.phase))
 
+    def _manual_task_ids(self) -> List[str]:
+        """This run's manual tasks: no runner ever runs one."""
+        return [
+            str(task.get("task_id", "")) for task in self.tasks
+            if task.get("is_human") or task.get("executor_role") == "human"
+        ]
+
     def _eta_closing_line(
         self, result: Optional[SchedulerResult], *, verb: str = "stopped",
         why: str = "",
@@ -11565,8 +11609,10 @@ class WriteBatchScheduler:
             live = getattr(self.state, "state", None)
             if isinstance(live, dict):
                 # A native emit's left-out tasks are that leg's (fix round
-                # 22): this run closes its own lines.
+                # 22): this run closes its own lines. Its set-aside tasks
+                # too (fix round 24): this run names its own.
                 _metrics.set_left_out_in_state(live, self.phase, {})
+                _metrics.set_set_aside_in_state(live, self.phase, {})
             self._eta_started = True
             self.state.save()
         except Exception:  # noqa: BLE001 - bookkeeping must not fail a phase

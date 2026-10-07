@@ -14,6 +14,9 @@ Fix round 24, from live run 10 (2026-10-07):
   task(s) to dispatch", then "task 1/5" and "task 2/4" with nothing saying
   why the total dropped, and summary.md said "5 batch task(s) dispatched
   across 4 batch(es)". The line that drops the total says why.
+* Claude Code racing #6: "task 10/10 done … ALL TASKS COMPLETE" while the
+  manual T011 and T012 were left for the user. The line says what is true:
+  every dispatched task is complete, and it names what is left.
 """
 
 from __future__ import annotations
@@ -63,6 +66,39 @@ Finish it.
 - Files to modify: src/main.py
 """
 
+#: Two edits, a manual task, and a code task that depends on the manual one.
+WITH_MANUAL = """# With a manual task
+
+## Overview
+Two edits and a play-through.
+
+## Tasks
+
+### T001: Edit: create the module
+Create it.
+- Depends on: none
+- Files to modify: src/main.py
+
+### T002: Edit: extend the module
+Extend it.
+- Depends on: T001
+- Files to modify: src/main.py
+
+### T003: Play through by hand
+**Type**: Manual (user action required)
+Open the page and race.
+- Depends on: T002
+
+### T004: Edit: tune after the play-through
+Tune it.
+- Depends on: T003
+- Files to modify: src/main.py
+"""
+
+#: What the manual plan leaves the user, on both legs.
+LEFT_FOR_YOU = "T003 left for you (manual); T004 skipped with a manual task"
+
+
 def _eta_lines(text: str) -> list:
     return [line for line in text.splitlines() if line.startswith("[ETA] implement:")]
 
@@ -77,6 +113,15 @@ def _run(repo_obj, capsys, *flags) -> tuple:
 def three_edits(tmp_path, monkeypatch):
     obj = make_repo(tmp_path, monkeypatch, THREE_EDITS)
     monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001", "T002", "T003"]))
+    yield obj
+    registry._config = None
+    registry._config_key = None
+
+
+@pytest.fixture
+def with_manual(tmp_path, monkeypatch):
+    obj = make_repo(tmp_path, monkeypatch, WITH_MANUAL)
+    monkeypatch.setenv("MOCK_LLM_WRITE_IDS", json.dumps(["T001", "T002", "T004"]))
     yield obj
     registry._config = None
     registry._config_key = None
@@ -345,3 +390,58 @@ class TestTheLineThatDropsTheTotalSaysWhy:
             lines[1],
         ), lines
         assert not any("total now" in line for line in lines[2:]), lines
+
+
+class TestManualTasksAreNotComplete:
+
+    def test_the_executor_names_what_is_left_for_you(self, with_manual, capsys):
+        code, text = _run(with_manual, capsys)
+        assert code == 0, text
+        lines = _eta_lines(text)
+        assert re.fullmatch(
+            r"\[ETA\] implement: task 2/2 done in [^·]+ · ALL DISPATCHED TASKS "
+            r"COMPLETE · " + re.escape(LEFT_FOR_YOU),
+            lines[-2],
+        ), lines
+        assert "ALL TASKS COMPLETE" not in text, text
+        # The phase's own closing line keeps its meaning.
+        assert lines[-1].startswith("[ETA] implement: phase complete in "), lines
+
+    def test_the_native_leg_names_the_same_tasks(self, with_manual, capsys):
+        handoff, _out = _emit(with_manual, capsys)
+        state_file = handoff["state_file"]
+        total = str(handoff["tasks_to_dispatch"])
+        assert total == "2", handoff
+        assert _util(capsys, "metrics", "start", "--state-file", state_file,
+                     "--phase", "implement", "--total-batches", total)[0] == 0
+        err = ""
+        for index, task_id in enumerate(("T001", "T002"), 1):
+            code, _o, e = _util(
+                capsys, "batch-done", "--phase-dir", str(with_manual.phase_dir),
+                "--task-id", task_id, "--status", "completed")
+            assert code == 0, e
+            code, _o, e = _util(
+                capsys, "metrics", "record", "--state-file", state_file,
+                "--phase", "implement", "--label", f"{task_id}: task",
+                "--duration-ms", "1000",
+                "--total-batches", total, "--batch-index", str(index))
+            assert code == 0, e
+            err += e
+        last = _eta_lines(err)[-1]
+        assert re.fullmatch(
+            r"\[ETA\] implement: task 2/2 done in [^·]+ · ALL DISPATCHED TASKS "
+            r"COMPLETE · " + re.escape(LEFT_FOR_YOU),
+            last,
+        ), last
+        code, _o, e = _util(capsys, "metrics", "finish", "--state-file", state_file,
+                            "--phase", "implement")
+        assert code == 0, e
+        assert _eta_lines(e)[0].startswith("[ETA] implement: phase complete in "), e
+
+    def test_a_run_with_nothing_set_aside_still_says_all_tasks_complete(self):
+        state = {"metrics": {}}
+        metrics.start_phase_in_state(state, "implement", 1)
+        line = metrics.record_metric_in_state(
+            state, "implement", "T001: t", duration_ms=10,
+            total_batches=1, batch_index=1)
+        assert line.endswith("· ALL TASKS COMPLETE"), line

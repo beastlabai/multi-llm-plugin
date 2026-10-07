@@ -2722,6 +2722,16 @@ def main(argv: Optional[List[str]] = None) -> int:
             output_data, state, plan_path,
             kept_checks=kept_checks, tasks_file=implement_tasks_file,
         )
+        # Fix round 24 (Claude Code racing #6: "task 10/10 done … ALL TASKS
+        # COMPLETE" beside the manual T011 and T012): the tasks the plan set
+        # aside, which the host's N/N `[ETA]` line names, as the executor's
+        # does. Replaced by every native emit.
+        from utils.write_batch_scheduler import set_aside_by_plan
+
+        metrics_mod.set_set_aside_in_state(
+            state.state, "implement",
+            set_aside_by_plan(native_human_plan, human_task_ids),
+        )
         output_data["tasks_to_dispatch"] = _handoff_counts(output_data)["dispatch"]
         if not args.task:
             print(_dispatch_line(output_data))
